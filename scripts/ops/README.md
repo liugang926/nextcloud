@@ -69,6 +69,38 @@ one-time token never reached WeKnora, the CLI closes the Nextcloud-only
 pending intent with administrator `DELETE /admin/bindings/{id}/source-pairing`.
 An active pair cannot be aborted. A replacement uses a new operation UUID.
 
+### Isolated pending-abort smoke
+
+`local-source-pairing-abort-smoke.py` exercises a lost one-time key, a pending
+WeKnora source abort, wrong-operation rejection, idempotent abort, and an
+active Nextcloud pairing's abort rejection. Run it only against **two
+disposable Compose projects**, with explicit loopback origins and the
+isolated Nextcloud `.env` file. It rejects the shared development project
+names. The WeKnora app must be attached to the isolated Nextcloud network,
+where the Nextcloud service has the `nextcloud` alias. Before starting that
+WeKnora app, set `WEKNORA_NEXTCLOUD_DEV_HTTP=1` and approve its exact
+`http://127.0.0.1:18089` relay origin in
+`WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS`. The relay uses a preinstalled
+`python:3.12-alpine` image and runs in the app container's network namespace;
+it listens only on loopback, rejects one commit for the script's unique
+binding and UUID, then forwards requests to `nextcloud`. It prints no token.
+
+```sh
+python3 scripts/ops/test-local-source-pairing-relay.py
+python3 scripts/ops/local-source-pairing-abort-smoke.py \
+  --nextcloud-origin http://127.0.0.1:YOUR_ISOLATED_NC_PORT \
+  --weknora-origin http://127.0.0.1:YOUR_ISOLATED_WK_PORT \
+  --nextcloud-env-file /path/to/isolated-nextcloud/.env \
+  --nextcloud-compose-project YOUR_ISOLATED_NC_PROJECT \
+  --weknora-compose-project YOUR_ISOLATED_WK_PROJECT \
+  --relay-port 18089
+```
+
+The smoke creates a unique folder, binding, and empty KB. On normal exit it
+removes its relay and only those owned fixtures. If abort cannot be confirmed,
+it retains the binding and KB for recovery and prints their IDs and operation
+UUIDs without secrets. No existing binding or KB is selected for deletion.
+
 ### Rotate an active source credential
 
 Save the original pair UUID, then run:
