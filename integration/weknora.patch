@@ -1,9 +1,9 @@
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..a9767d58
+index 00000000..702d0670
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,181 @@
 +# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
@@ -114,12 +114,19 @@ index 00000000..a9767d58
 +`retry` with `sync_not_successful` and may retry on its normal backoff.
 +
 +Each event dispatch currently requests a true full scan, including content
-+downloads. The connector accumulates fetched content in memory before applying
-+it, so the current implementation cannot safely meet the 10,000-file / 100 GB
-+performance target. The dispatcher polls every 30 seconds, so it also cannot
-+meet the PRD's event-to-durable-job P95 target of 10 seconds. Neither target
-+has been accepted. ETag is a change hint, not a content hash, so skipping an
-+unchanged ETag is not proof of content equivalence.
++downloads. The connector validates and buffers the complete metadata manifest,
++then emits one downloaded file at a time to the importer; it no longer retains
++all fetched file bodies in a single item slice. The current file is still held
++in memory as a byte slice (up to the 64 MiB download limit), and the manifest,
++old inventory, and new inventory are proportional to file count. To preserve
++the two-complete-scan deletion rule, the source cursor advances only after the
++whole scan and every emitted item have been processed successfully. An interrupted
++scan therefore repeats its downloads. The 10,000-file / 100 GB pilot target
++remains unaccepted: every event still downloads all selected content, sync tasks
++have a two-hour timeout, and there is no resumable mid-scan checkpoint. The
++dispatcher polls every 30 seconds, so it also cannot meet the PRD's
++event-to-durable-job P95 target of 10 seconds. ETag is a change hint, not a
++content hash, so skipping an unchanged ETag is not proof of content equivalence.
 +
 +## Request contract
 +
@@ -3959,7 +3966,7 @@ index 00000000..8414c898
 +	}
 +}
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241..203dc86d 100644
+index c0b24241..07177239 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -14,6 +14,7 @@ import (
@@ -4349,7 +4356,176 @@ index c0b24241..203dc86d 100644
  		// Perform real KB deletion, scoped to items owned by this data source
  		// so identical external IDs from different data sources cannot collide.
  		repo := s.knowledgeService.GetRepository()
-@@ -1179,8 +1358,13 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -993,11 +1172,65 @@ func streamStartCursor(ds *types.DataSource, forceFull bool, attempt int) (*type
+ // Emit ingests each item as it arrives (bounding memory) and Checkpoint persists
+ // the connector cursor plus live progress counts at page boundaries.
+ type streamSyncHandler struct {
+-	svc     *DataSourceService
+-	ds      *types.DataSource
+-	tagIDs  []string
+-	result  *types.SyncResult
+-	syncLog *types.SyncLog
++	svc                   *DataSourceService
++	ds                    *types.DataSource
++	tagIDs                []string
++	result                *types.SyncResult
++	syncLog               *types.SyncLog
++	payload               types.DataSourceSyncPayload
++	nextcloudInstanceID   string
++	nextcloudBindingID    string
++	nextcloudObserved     bool
++	nextcloudGuardStopped bool
++}
++
++var errNextcloudStreamCanceled = errors.New("Nextcloud stream canceled")
++
++// ObserveNextcloudIdentity is called by the Nextcloud connector after its
++// signed capabilities and live binding checks, before it emits any item.
++func (h *streamSyncHandler) ObserveNextcloudIdentity(ctx context.Context, instanceID, bindingID string) error {
++	if h.ds.Type != types.ConnectorTypeNextcloud || instanceID == "" || bindingID == "" {
++		return fmt.Errorf("invalid Nextcloud stream identity")
++	}
++	if h.nextcloudObserved && (h.nextcloudInstanceID != instanceID || h.nextcloudBindingID != bindingID) {
++		return fmt.Errorf("Nextcloud stream identity changed")
++	}
++	h.nextcloudInstanceID = instanceID
++	h.nextcloudBindingID = bindingID
++	h.nextcloudObserved = true
++	return h.checkNextcloudActive(ctx)
++}
++
++func (h *streamSyncHandler) checkNextcloudActive(ctx context.Context) error {
++	if h.ds.Type != types.ConnectorTypeNextcloud {
++		return nil
++	}
++	if !h.nextcloudObserved || h.nextcloudInstanceID == "" || h.nextcloudBindingID == "" {
++		return fmt.Errorf("Nextcloud stream source identity was not observed")
++	}
++	cancelled, err := h.svc.checkNextcloudSyncActive(ctx, h.payload, h.nextcloudInstanceID)
++	if cancelled || err != nil {
++		// A revoked event task may have been marked canceled by the guard.
++		// Do not let the normal fetch-error path overwrite that terminal log.
++		h.nextcloudGuardStopped = true
++		if err != nil {
++			return err
++		}
++		return errNextcloudStreamCanceled
++	}
++	return nil
++}
++
++func (h *streamSyncHandler) validateNextcloudCursor(cursor *types.SyncCursor) error {
++	if !h.nextcloudObserved || cursor == nil || cursor.ConnectorCursor == nil {
++		return fmt.Errorf("Nextcloud stream did not return a complete cursor")
++	}
++	instanceID, _ := cursor.ConnectorCursor["instance_id"].(string)
++	files, ok := cursor.ConnectorCursor["files"].(map[string]interface{})
++	if !ok || instanceID != h.nextcloudInstanceID || files[h.nextcloudBindingID] == nil {
++		return fmt.Errorf("Nextcloud stream cursor identity or inventory differs from observed source")
++	}
++	return nil
+ }
+ 
+ // Emit ingests one streamed item. A canceled context aborts the stream so the
+@@ -1008,8 +1241,24 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+ 	if err := ctx.Err(); err != nil {
+ 		return err
+ 	}
++	if h.ds.Type == types.ConnectorTypeNextcloud {
++		fileID := item.Metadata["nextcloud_file_id"]
++		if fileID == "" || item.Metadata["nextcloud_instance_id"] != h.nextcloudInstanceID ||
++			item.Metadata["nextcloud_binding_id"] != h.nextcloudBindingID ||
++			item.SourceResourceID != h.nextcloudBindingID ||
++			item.ExternalID != "nextcloud:"+h.nextcloudInstanceID+":"+fileID {
++			return fmt.Errorf("Nextcloud streamed item identity differs from observed source")
++		}
++		if err := h.checkNextcloudActive(ctx); err != nil {
++			return err
++		}
++	}
++	beforeFailed := h.result.Failed
+ 	h.result.Total++
+ 	h.svc.applyFetchedItem(withKBActivitySuppressed(ctx), h.ds, &item, h.tagIDs, h.result)
++	if h.ds.Type == types.ConnectorTypeNextcloud && h.result.Failed > beforeFailed {
++		return fmt.Errorf("Nextcloud item %s could not be processed", item.ExternalID)
++	}
+ 	return nil
+ }
+ 
+@@ -1017,6 +1266,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+ // running counts into the sync log so progress survives a crash and the UI can
+ // reflect a long sync mid-flight instead of jumping from 0 to done.
+ func (h *streamSyncHandler) Checkpoint(ctx context.Context, cursor *types.SyncCursor) error {
++	if h.ds.Type == types.ConnectorTypeNextcloud {
++		if err := h.checkNextcloudActive(ctx); err != nil {
++			return err
++		}
++		return fmt.Errorf("Nextcloud stream has no resumable partial cursor")
++	}
+ 	if cursor == nil {
+ 		return nil
+ 	}
+@@ -1095,7 +1350,8 @@ func (s *DataSourceService) processSyncStreaming(
+ 	}
+ 
+ 	result := &types.SyncResult{}
+-	handler := &streamSyncHandler{svc: s, ds: ds, tagIDs: autoTagIDs, result: result, syncLog: syncLog}
++	handler := &streamSyncHandler{svc: s, ds: ds, tagIDs: autoTagIDs, result: result,
++		syncLog: syncLog, payload: payload}
+ 
+ 	fullBaseline := startCursor
+ 	if forceFull {
+@@ -1112,6 +1368,12 @@ func (s *DataSourceService) processSyncStreaming(
+ 	}
+ 
+ 	nextCursor, fetchErr := streamingFetch(ctx, sc, config, forceFull, startCursor, fullBaseline, handler)
++	if handler.nextcloudGuardStopped {
++		if errors.Is(fetchErr, errNextcloudStreamCanceled) {
++			return nil
++		}
++		return fetchErr
++	}
+ 	if fetchErr != nil {
+ 		// Progress so far is already checkpointed onto ds.LastSyncCursor; leave
+ 		// it in place so the Asynq retry resumes from there. Persist counts.
+@@ -1121,6 +1383,25 @@ func (s *DataSourceService) processSyncStreaming(
+ 			types.SyncLogStatusFailed, fmt.Sprintf("Fetch failed: %v", fetchErr), wasPaused)
+ 		return fetchErr
+ 	}
++	if ds.Type == types.ConnectorTypeNextcloud {
++		if err := handler.validateNextcloudCursor(nextCursor); err != nil {
++			s.updateSyncRunResult(ctx, ds, syncLog, result, nil, types.SyncLogStatusFailed, err.Error(), wasPaused)
++			return err
++		}
++		if err := handler.checkNextcloudActive(ctx); err != nil {
++			if errors.Is(err, errNextcloudStreamCanceled) {
++				return nil
++			}
++			return err
++		}
++		if result.Failed > 0 {
++			err := fmt.Errorf("%d Nextcloud item(s) failed; source cursor retained", result.Failed)
++			resultJSON, _ := result.ToJSON()
++			s.updateSyncRunResult(ctx, ds, syncLog, result, resultJSON,
++				types.SyncLogStatusPartial, err.Error(), wasPaused)
++			return nil
++		}
++	}
+ 
+ 	resultJSON, _ := result.ToJSON()
+ 	if err := allFetchedItemsFailedError(result); err != nil {
+@@ -1133,6 +1414,10 @@ func (s *DataSourceService) processSyncStreaming(
+ 	if nextCursor != nil {
+ 		if cursorJSON, cerr := nextCursor.ToJSON(); cerr == nil {
+ 			ds.LastSyncCursor = cursorJSON
++		} else if ds.Type == types.ConnectorTypeNextcloud {
++			s.updateSyncRunResult(ctx, ds, syncLog, result, resultJSON,
++				types.SyncLogStatusFailed, fmt.Sprintf("Invalid Nextcloud cursor: %v", cerr), wasPaused)
++			return cerr
+ 		}
+ 	}
+ 	ds.LastSyncAt = timePtr(time.Now().UTC())
+@@ -1179,8 +1464,13 @@ func (s *DataSourceService) updateSyncRunResult(
  	syncLog.FinishedAt = timePtr(time.Now().UTC())
  	syncLog.ErrorMessage = errorMessage
  	syncLog.Result = resultJSON
@@ -4365,7 +4541,7 @@ index c0b24241..203dc86d 100644
  	}
  
  	if status == types.SyncLogStatusFailed {
-@@ -1196,6 +1380,16 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1196,6 +1486,16 @@ func (s *DataSourceService) updateSyncRunResult(
  	ds.LastSyncResult = resultJSON
  	if err := s.dsRepo.UpdateSyncState(ctx, ds); err != nil {
  		logger.Errorf(ctx, "failed to update data source: %v", err)
@@ -4382,7 +4558,7 @@ index c0b24241..203dc86d 100644
  	}
  	action := types.AuditActionDataSourceSyncCompleted
  	outcome := types.AuditOutcomeSuccess
-@@ -1285,7 +1479,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1285,7 +1585,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	// "unknown" for the raw ds.Type "feishu_drive"). Fall back to ds.Type so
  	// connectors that don't set metadata.channel still get a meaningful label.
  	channel := ds.Type // e.g. "feishu", "notion"
@@ -4394,7 +4570,7 @@ index c0b24241..203dc86d 100644
  		if mc, ok := item.Metadata["channel"]; ok && mc != "" {
  			channel = mc
  		}
-@@ -1308,6 +1505,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1308,6 +1611,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	for k, v := range item.Metadata {
  		metadata[k] = v
  	}
@@ -4408,7 +4584,7 @@ index c0b24241..203dc86d 100644
  
  	// Check if a knowledge item with this external_id already exists → delete it first (update)
  	isUpdate := false
-@@ -1318,14 +1522,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1318,14 +1628,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  		// other during updates.
  		existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
  		if err != nil {
@@ -4432,7 +4608,7 @@ index c0b24241..203dc86d 100644
  					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
  				}
  				isUpdate = true
-@@ -1407,6 +1620,68 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1407,6 +1726,68 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	return isUpdate, fmt.Errorf("item has neither content nor URL")
  }
  
@@ -4872,6 +5048,224 @@ index bc90b995..df32b1d5 100644
 +	}, nil)
 +	require.NoError(t, err)
 +	assert.Equal(t, types.ConnectorTypeNextcloud, knowledge.channel)
++}
+diff --git a/internal/application/service/datasource_stream_test.go b/internal/application/service/datasource_stream_test.go
+index 925d4bff..7ba1f7a8 100644
+--- a/internal/application/service/datasource_stream_test.go
++++ b/internal/application/service/datasource_stream_test.go
+@@ -3,10 +3,12 @@ package service
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
+ 	"testing"
+ 
+ 	"github.com/Tencent/WeKnora/internal/datasource"
+ 	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/hibiken/asynq"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -203,3 +205,200 @@ func TestStreamingFetchUsesFullStreamBaseline(t *testing.T) {
+ 		t.Fatal("plain streaming connector must keep FetchStream on force-full")
+ 	}
+ }
++
++func nextcloudStreamDeletion() types.FetchedItem {
++	return types.FetchedItem{
++		ExternalID: "nextcloud:instance-1:41", SourceResourceID: "binding-1", IsDeleted: true,
++		Metadata: map[string]string{
++			"nextcloud_instance_id": "instance-1", "nextcloud_binding_id": "binding-1",
++			"nextcloud_file_id": "41",
++		},
++	}
++}
++
++func nextcloudStreamCursor(t *testing.T, marker string) *types.SyncCursor {
++	t.Helper()
++	return &types.SyncCursor{ConnectorCursor: map[string]interface{}{
++		"instance_id": "instance-1", "files": map[string]interface{}{"binding-1": map[string]interface{}{}},
++		"marker": marker,
++	}}
++}
++
++func TestNextcloudStreamHandlerRejectsFailedItemAndPartialCheckpoint(t *testing.T) {
++	repo := &keyedDeletionRepo{tombstoneErr: errors.New("tombstone failed")}
++	dsRepo := &recordingDSRepo{}
++	log := &types.SyncLog{ID: "log-1", Status: types.SyncLogStatusRunning}
++	svc := &DataSourceService{dsRepo: dsRepo, knowledgeService: &sweepFakeKS{repo: repo},
++		syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}}
++	ds := &types.DataSource{ID: "ds-1", TenantID: 1, KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud}
++	h := &streamSyncHandler{svc: svc, ds: ds, result: &types.SyncResult{}, syncLog: log,
++		payload: types.DataSourceSyncPayload{SyncLogID: log.ID}}
++	require.NoError(t, h.ObserveNextcloudIdentity(context.Background(), "instance-1", "binding-1"))
++	require.ErrorContains(t, h.Emit(context.Background(), nextcloudStreamDeletion()), "could not be processed")
++	require.Equal(t, 1, h.result.Failed)
++	require.ErrorContains(t, h.Checkpoint(context.Background(), nextcloudStreamCursor(t, "new")),
++		"no resumable partial cursor")
++	require.Empty(t, dsRepo.updated)
++}
++
++func TestNextcloudStreamHandlerRechecksRunningLogBeforeItem(t *testing.T) {
++	repo := &keyedDeletionRepo{}
++	log := &types.SyncLog{ID: "log-1", Status: types.SyncLogStatusRunning}
++	svc := &DataSourceService{knowledgeService: &sweepFakeKS{repo: repo},
++		syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}}
++	ds := &types.DataSource{ID: "ds-1", TenantID: 1, KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud}
++	h := &streamSyncHandler{svc: svc, ds: ds, result: &types.SyncResult{}, syncLog: log,
++		payload: types.DataSourceSyncPayload{SyncLogID: log.ID}}
++	require.NoError(t, h.ObserveNextcloudIdentity(context.Background(), "instance-1", "binding-1"))
++	log.Status = types.SyncLogStatusCanceled
++	require.ErrorIs(t, h.Emit(context.Background(), nextcloudStreamDeletion()), asynq.SkipRetry)
++	require.True(t, h.nextcloudGuardStopped)
++	require.Zero(t, h.result.Total)
++}
++
++func TestNextcloudStreamHandlerStagesVersionBeforeAcceptingItem(t *testing.T) {
++	for _, failStage := range []bool{false, true} {
++		t.Run(map[bool]string{false: "staged", true: "stage failed"}[failStage], func(t *testing.T) {
++			repo := &deletionLookupKnowledgeRepo{}
++			if failStage {
++				repo.stageErr = errors.New("stage unavailable")
++			}
++			log := &types.SyncLog{ID: "log-1", Status: types.SyncLogStatusRunning}
++			svc := &DataSourceService{knowledgeService: &sweepFakeKS{repo: repo},
++				syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}}
++			ds := &types.DataSource{ID: "ds-1", TenantID: 1, KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud}
++			h := &streamSyncHandler{svc: svc, ds: ds, result: &types.SyncResult{}, syncLog: log,
++				payload: types.DataSourceSyncPayload{SyncLogID: log.ID}}
++			require.NoError(t, h.ObserveNextcloudIdentity(context.Background(), "instance-1", "binding-1"))
++			item := types.FetchedItem{ExternalID: "nextcloud:instance-1:41", SourceResourceID: "binding-1",
++				FileName: "Notes.md", Content: []byte("hello"), Metadata: map[string]string{
++					"nextcloud_instance_id": "instance-1", "nextcloud_binding_id": "binding-1",
++					"nextcloud_file_id": "41", "nextcloud_etag": "etag-1",
++				}}
++			err := h.Emit(context.Background(), item)
++			require.Equal(t, 1, repo.stageCalls)
++			if failStage {
++				require.ErrorContains(t, err, "could not be processed")
++				require.Equal(t, 1, h.result.Failed)
++			} else {
++				require.NoError(t, err)
++				require.Equal(t, 1, h.result.Created)
++			}
++		})
++	}
++}
++
++type nextcloudStreamingTestConnector struct {
++	recordingStreamConnector
++	emit         bool
++	afterObserve func()
++	cursor       *types.SyncCursor
++}
++
++func (c *nextcloudStreamingTestConnector) FetchStream(
++	ctx context.Context, _ *types.DataSourceConfig, _ *types.SyncCursor, h datasource.StreamHandler,
++) (*types.SyncCursor, error) {
++	observer := h.(interface {
++		ObserveNextcloudIdentity(context.Context, string, string) error
++	})
++	if err := observer.ObserveNextcloudIdentity(ctx, "instance-1", "binding-1"); err != nil {
++		return nil, err
++	}
++	if c.afterObserve != nil {
++		c.afterObserve()
++	}
++	if c.emit {
++		if err := h.Emit(ctx, nextcloudStreamDeletion()); err != nil {
++			return nil, err
++		}
++	}
++	return c.cursor, nil
++}
++
++func TestProcessSyncStreamingNextcloudCursorOnlyAfterSuccessfulItems(t *testing.T) {
++	for _, failure := range []bool{false, true} {
++		name := "success"
++		if failure {
++			name = "failed deletion"
++		}
++		t.Run(name, func(t *testing.T) {
++			oldJSON, err := nextcloudStreamCursor(t, "old").ToJSON()
++			require.NoError(t, err)
++			repo := &keyedDeletionRepo{}
++			if failure {
++				repo.tombstoneErr = errors.New("tombstone failed")
++			}
++			ds := &types.DataSource{ID: "ds-1", TenantID: 1, KnowledgeBaseID: "kb-1",
++				Type: types.ConnectorTypeNextcloud, LastSyncCursor: oldJSON}
++			log := &types.SyncLog{ID: "log-1", Status: types.SyncLogStatusRunning}
++			dsRepo := &recordingDSRepo{}
++			svc := &DataSourceService{dsRepo: dsRepo, knowledgeService: &sweepFakeKS{repo: repo},
++				syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}},
++				tenantRepo:  &processSyncTenantRepo{tenant: &types.Tenant{ID: 1}},
++				tagService:  &processSyncTagService{}}
++			connector := &nextcloudStreamingTestConnector{emit: true, cursor: nextcloudStreamCursor(t, "new")}
++			err = svc.processSyncStreaming(context.Background(), connector, ds, log,
++				&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud, ResourceIDs: []string{"binding-1"}},
++				types.DataSourceSyncPayload{SyncLogID: log.ID}, false)
++			if failure {
++				require.ErrorContains(t, err, "could not be processed")
++				require.Equal(t, types.SyncLogStatusFailed, log.Status)
++			} else {
++				require.NoError(t, err)
++				require.Equal(t, types.SyncLogStatusSuccess, log.Status)
++			}
++			stored, err := ds.ParseSyncCursor()
++			require.NoError(t, err)
++			if failure {
++				require.Equal(t, "old", stored.ConnectorCursor["marker"])
++			} else {
++				require.Equal(t, "new", stored.ConnectorCursor["marker"])
++			}
++		})
++	}
++}
++
++func TestProcessSyncStreamingNextcloudRechecksEmptyScanBeforeCursor(t *testing.T) {
++	oldJSON, err := nextcloudStreamCursor(t, "old").ToJSON()
++	require.NoError(t, err)
++	ds := &types.DataSource{ID: "ds-1", TenantID: 1, KnowledgeBaseID: "kb-1",
++		Type: types.ConnectorTypeNextcloud, LastSyncCursor: oldJSON}
++	log := &types.SyncLog{ID: "log-1", Status: types.SyncLogStatusRunning}
++	svc := &DataSourceService{dsRepo: &recordingDSRepo{},
++		syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}},
++		tenantRepo:  &processSyncTenantRepo{tenant: &types.Tenant{ID: 1}},
++		tagService:  &processSyncTagService{}}
++	connector := &nextcloudStreamingTestConnector{cursor: nextcloudStreamCursor(t, "new"),
++		afterObserve: func() { log.Status = types.SyncLogStatusCanceled }}
++	err = svc.processSyncStreaming(context.Background(), connector, ds, log,
++		&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud, ResourceIDs: []string{"binding-1"}},
++		types.DataSourceSyncPayload{SyncLogID: log.ID}, false)
++	require.ErrorIs(t, err, asynq.SkipRetry)
++	require.Equal(t, types.SyncLogStatusCanceled, log.Status)
++	stored, err := ds.ParseSyncCursor()
++	require.NoError(t, err)
++	require.Equal(t, "old", stored.ConnectorCursor["marker"])
++}
++
++func TestProcessSyncStreamingNextcloudRejectsDifferentCursorInstance(t *testing.T) {
++	oldJSON, err := nextcloudStreamCursor(t, "old").ToJSON()
++	require.NoError(t, err)
++	ds := &types.DataSource{ID: "ds-1", TenantID: 1, KnowledgeBaseID: "kb-1",
++		Type: types.ConnectorTypeNextcloud, LastSyncCursor: oldJSON}
++	log := &types.SyncLog{ID: "log-1", Status: types.SyncLogStatusRunning}
++	svc := &DataSourceService{dsRepo: &recordingDSRepo{},
++		syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}},
++		tenantRepo:  &processSyncTenantRepo{tenant: &types.Tenant{ID: 1}},
++		tagService:  &processSyncTagService{}}
++	bad := nextcloudStreamCursor(t, "new")
++	bad.ConnectorCursor["instance_id"] = "cloned-instance"
++	connector := &nextcloudStreamingTestConnector{cursor: bad}
++	err = svc.processSyncStreaming(context.Background(), connector, ds, log,
++		&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud, ResourceIDs: []string{"binding-1"}},
++		types.DataSourceSyncPayload{SyncLogID: log.ID}, false)
++	require.ErrorContains(t, err, "cursor identity or inventory differs")
++	require.Equal(t, types.SyncLogStatusFailed, log.Status)
++	stored, err := ds.ParseSyncCursor()
++	require.NoError(t, err)
++	require.Equal(t, "old", stored.ConnectorCursor["marker"])
 +}
 diff --git a/internal/application/service/datasource_sweep_wiring_test.go b/internal/application/service/datasource_sweep_wiring_test.go
 index e9ce5bc0..68608361 100644
@@ -8523,10 +8917,10 @@ index 00000000..c6eeac75
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
 new file mode 100644
-index 00000000..674b3ed9
+index 00000000..8e7807c4
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector.go
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,483 @@
 +// Package nextcloud imports files exposed by the integration_weknora Nextcloud app.
 +package nextcloud
 +
@@ -8545,6 +8939,16 @@ index 00000000..674b3ed9
 +
 +var _ datasource.Connector = (*Connector)(nil)
 +var _ datasource.FullSyncWithCursor = (*Connector)(nil)
++var _ datasource.StreamingConnector = (*Connector)(nil)
++var _ datasource.FullStreamingConnector = (*Connector)(nil)
++
++// A Nextcloud stream must report its live source identity before any item can
++// be written. The service uses it to fence revoked event tasks and cloned
++// instances. The ordinary batch Connector methods do not need this callback.
++type identityStreamHandler interface {
++	datasource.StreamHandler
++	ObserveNextcloudIdentity(context.Context, string, string) error
++}
 +
 +type Connector struct{}
 +
@@ -8641,7 +9045,7 @@ index 00000000..674b3ed9
 +	if len(resourceIDs) == 0 && ds != nil {
 +		resourceIDs = ds.ResourceIDs
 +	}
-+	items, _, err := c.walk(ctx, ds, resourceIDs, nil, true, false)
++	items, _, err := c.walk(ctx, ds, resourceIDs, nil, true, false, nil)
 +	return items, err
 +}
 +
@@ -8650,7 +9054,7 @@ index 00000000..674b3ed9
 +func (c *Connector) FetchAllFromCursor(
 +	ctx context.Context, ds *types.DataSourceConfig, resourceIDs []string, old *types.SyncCursor,
 +) ([]types.FetchedItem, *types.SyncCursor, error) {
-+	return c.walk(ctx, ds, resourceIDs, old, true, true)
++	return c.walk(ctx, ds, resourceIDs, old, true, true, nil)
 +}
 +
 +func (c *Connector) FetchIncremental(
@@ -8659,7 +9063,40 @@ index 00000000..674b3ed9
 +	if ds == nil {
 +		return nil, nil, datasource.ErrInvalidConfig
 +	}
-+	return c.walk(ctx, ds, ds.ResourceIDs, old, false, true)
++	return c.walk(ctx, ds, ds.ResourceIDs, old, false, true, nil)
++}
++
++// FetchStream bounds retained content to one fetched file. It deliberately
++// makes no mid-scan checkpoint: the existing cursor describes only a completed
++// inventory, and a partial inventory would corrupt two-scan deletion evidence.
++func (c *Connector) FetchStream(
++	ctx context.Context, ds *types.DataSourceConfig, old *types.SyncCursor, h datasource.StreamHandler,
++) (*types.SyncCursor, error) {
++	identity, ok := h.(identityStreamHandler)
++	if !ok {
++		return nil, fmt.Errorf("Nextcloud stream requires source identity observer")
++	}
++	if ds == nil {
++		return nil, datasource.ErrInvalidConfig
++	}
++	_, next, err := c.walk(ctx, ds, ds.ResourceIDs, old, false, true, identity)
++	return next, err
++}
++
++// FetchFullStream re-fetches content while retaining the old cursor as the
++// deletion baseline, including on event-triggered forced full scans.
++func (c *Connector) FetchFullStream(
++	ctx context.Context, ds *types.DataSourceConfig, old *types.SyncCursor, h datasource.StreamHandler,
++) (*types.SyncCursor, error) {
++	identity, ok := h.(identityStreamHandler)
++	if !ok {
++		return nil, fmt.Errorf("Nextcloud stream requires source identity observer")
++	}
++	if ds == nil {
++		return nil, datasource.ErrInvalidConfig
++	}
++	_, next, err := c.walk(ctx, ds, ds.ResourceIDs, old, true, true, identity)
++	return next, err
 +}
 +
 +func selectedBindings(resourceIDs []string) ([]string, error) {
@@ -8685,7 +9122,7 @@ index 00000000..674b3ed9
 +
 +func (c *Connector) walk(
 +	ctx context.Context, ds *types.DataSourceConfig, resourceIDs []string,
-+	old *types.SyncCursor, full bool, reconcile bool,
++	old *types.SyncCursor, full bool, reconcile bool, h identityStreamHandler,
 +) ([]types.FetchedItem, *types.SyncCursor, error) {
 +	cfg, err := parseConfig(ds)
 +	if err != nil {
@@ -8715,6 +9152,27 @@ index 00000000..674b3ed9
 +			if previous.Files[bindingID] == nil {
 +				return nil, nil, fmt.Errorf("Nextcloud cursor inventory is incomplete; manual repair required")
 +			}
++		}
++	}
++	if h != nil {
++		// A selected binding that has been withdrawn must stop the stream
++		// before it stages any source version or deletion.
++		bindings, err := cli.bindings(ctx)
++		if err != nil {
++			return nil, nil, err
++		}
++		found := false
++		for _, binding := range bindings {
++			if binding.ID == selected[0] {
++				found = true
++				break
++			}
++		}
++		if !found {
++			return nil, nil, fmt.Errorf("%w: selected Nextcloud binding is unavailable", datasource.ErrInvalidConfig)
++		}
++		if err := h.ObserveNextcloudIdentity(ctx, cap.InstanceID, selected[0]); err != nil {
++			return nil, nil, err
 +		}
 +	}
 +	policy := fmt.Sprintf("v1:multimodal=%t", ds.MultimodalEnabled)
@@ -8784,6 +9242,13 @@ index 00000000..674b3ed9
 +		Tombstones:      make(map[string]map[string]fileState),
 +	}
 +	var out []types.FetchedItem
++	emit := func(item types.FetchedItem) error {
++		if h != nil {
++			return h.Emit(ctx, item)
++		}
++		out = append(out, item)
++		return nil
++	}
 +	importableFiles := make(map[int64]bool)
 +	for _, bindingID := range selected {
 +		current := make(map[string]fileState)
@@ -8807,7 +9272,9 @@ index 00000000..674b3ed9
 +			if err != nil {
 +				return nil, nil, err
 +			}
-+			out = append(out, fetchedItem(cap.InstanceID, bindingID, generations[bindingID], file, content, contentType))
++			if err := emit(fetchedItem(cap.InstanceID, bindingID, generations[bindingID], file, content, contentType)); err != nil {
++				return nil, nil, err
++			}
 +			current[id] = state
 +		}
 +	}
@@ -8838,7 +9305,9 @@ index 00000000..674b3ed9
 +			}
 +			if previous.Missing[bindingID][id] {
 +				rememberTombstone(&next, bindingID, id, state)
-+				out = append(out, deletedItem(cap.InstanceID, bindingID, id, state))
++				if err := emit(deletedItem(cap.InstanceID, bindingID, id, state)); err != nil {
++					return nil, nil, err
++				}
 +			} else {
 +				current[id] = state
 +				if next.Missing[bindingID] == nil {
@@ -8857,7 +9326,9 @@ index 00000000..674b3ed9
 +				continue
 +			}
 +			rememberTombstone(&next, bindingID, id, state)
-+			out = append(out, deletedItem(cap.InstanceID, bindingID, id, state))
++			if err := emit(deletedItem(cap.InstanceID, bindingID, id, state)); err != nil {
++				return nil, nil, err
++			}
 +		}
 +	}
 +	cursor, err := encodeSyncCursor(next)
@@ -8899,6 +9370,12 @@ index 00000000..674b3ed9
 +		Title:            state.Name,
 +		FileName:         state.Name,
 +		IsDeleted:        true,
++		Metadata: map[string]string{
++			"channel":               types.ConnectorTypeNextcloud,
++			"nextcloud_instance_id": instanceID,
++			"nextcloud_binding_id":  bindingID,
++			"nextcloud_file_id":     id,
++		},
 +	}
 +}
 +
