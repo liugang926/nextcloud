@@ -83,6 +83,8 @@ final class BindingAdminController extends Controller {
                 : $this->json(['removed' => true, 'revoked_keys' => $revokedKeys]);
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'invalid_binding'], 400);
+        } catch (\DomainException $exception) {
+            return $this->json(['error' => 'paired_binding_decommission_required'], 409);
         } catch (\Throwable $exception) {
             return $this->json(['error' => 'binding_registry_unavailable'], 503);
         }

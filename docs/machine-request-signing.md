@@ -87,12 +87,15 @@ against committed database rows on each machine request, so a revoked key is
 rejected without restarting Web workers. Protect the one-time response as a
 secret; do not put it in logs or issue bodies.
 
-An administrator can remove a binding with a CSRF-protected `DELETE` to
-`/api/v1/admin/bindings/{bindingId}`. Its keys are deleted in the same database
-transaction. Issuance and binding deletion share a registry lock, so they
-cannot leave a live key behind under concurrent requests. The binding ID is
-permanently retired and cannot be reused: outbox, publication and snapshot
-rows use that ID and would otherwise leak old state into a new publication.
+An administrator can remove an unpaired binding with a CSRF-protected `DELETE`
+to `/api/v1/admin/bindings/{bindingId}`. Its keys are deleted in the same
+database transaction. A binding with any source-pairing record returns HTTP
+`409 paired_binding_decommission_required`; its keys remain available while
+remote cleanup has not been acknowledged. Issuance and binding deletion share
+a registry lock, so they cannot leave a live key behind under concurrent
+requests. A removed binding ID is permanently retired and cannot be reused:
+outbox, publication and snapshot rows use that ID and would otherwise leak
+old state into a new publication.
 The binding registry also rejects an operator's direct appconfig edit that
 points an existing ID at a different owner or root.
 

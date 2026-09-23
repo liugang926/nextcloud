@@ -783,7 +783,7 @@ paths:
   /admin/bindings/{bindingId}:
     delete:
       operationId: removeAdminBinding
-      description: Remove a binding and all of its machine keys atomically. The binding ID is permanently retired and cannot be reused.
+      description: Remove an unpaired binding and all of its machine keys atomically. A binding with any source-pairing history returns 409 and retains its credentials pending a durable remote decommission protocol. A removed binding ID is permanently retired and cannot be reused.
       security:
         - nextcloudSession: []
           csrfToken: []
@@ -797,6 +797,7 @@ paths:
         '400': {description: Invalid binding ID}
         '403': {description: Administrator privileges required}
         '404': {description: Binding not found}
+        '409': {description: Paired binding requires remote decommission; credentials retained}
   /admin/bindings/{bindingId}/keys:
     get:
       operationId: listBindingMachineKeys

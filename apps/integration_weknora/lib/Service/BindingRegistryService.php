@@ -351,7 +351,7 @@ final class BindingRegistryService {
         }
     }
 
-    /** Remove a binding and all of its machine and event credentials atomically. */
+    /** Remove an unpaired binding and all of its machine and event credentials atomically. */
     public function remove(string $id): ?int {
         if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $id)) {
             throw new \InvalidArgumentException('Invalid binding ID');
@@ -377,6 +377,22 @@ final class BindingRegistryService {
             if (count($remaining) === count($bindings)) {
                 $this->db->commit();
                 return null;
+            }
+            // The binding is the only source of the signing credential that
+            // WeKnora can use to close a paired source. Even an aborted local
+            // intent may still have a paused remote source awaiting its
+            // idempotent abort ACK. Keep the binding and all credentials until
+            // a durable, exact remote decommission protocol exists.
+            $pairQuery = $this->db->getQueryBuilder();
+            $pairResult = $pairQuery->select('id')->from('weknora_src_pair')
+                ->where($pairQuery->expr()->eq('binding_id', $pairQuery->createNamedParameter($id)))
+                ->setMaxResults(1)->executeQuery();
+            try {
+                if ($pairResult->fetchOne() !== false) {
+                    throw new \DomainException('Paired binding requires remote decommission');
+                }
+            } finally {
+                $pairResult->closeCursor();
             }
             $retire = $this->db->getQueryBuilder();
             $retired = $retire->update('weknora_binding_id')

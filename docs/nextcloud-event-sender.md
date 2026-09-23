@@ -61,8 +61,9 @@ The app replaces its old key and resumes a paused sender while preserving the
 durable receipt ID. A different connection ID requires `DELETE` of the old
 local configuration and a new pair. Local `DELETE` stops sending and erases
 the local ciphertext; revoke the connection in WeKnora separately. Deleting
-the Nextcloud binding removes its sender configuration in the binding's
-transaction, and the binding ID cannot be reused.
+an unpaired Nextcloud binding removes its sender configuration in the binding's
+transaction, and the binding ID cannot be reused. A paired binding cannot be
+removed until a remote decommission protocol is available.
 WeKnora currently invalidates the old key immediately on rotation. Requests
 between WeKnora Rotate and the local `POST` may receive `401` and pause the
 sender; install the new one-time secret promptly. A short two-key grace window

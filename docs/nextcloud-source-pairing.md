@@ -47,8 +47,11 @@ uncommitted epoch) returns HTTP 409 with `last_error_code:
 remote_commit_conflict` in the nonsecret pairing status. It leaves the source
 paused and pending until an administrator retries or aborts the same operation.
 Status and retry never reissue the token. Direct revocation of a pending or
-active pairing key is rejected; binding removal retires the pair and its keys
-together.
+active pairing key is rejected. Administrator binding deletion returns HTTP
+`409 paired_binding_decommission_required` whenever the binding has a pairing
+record, including an aborted pending intent. The source credential and an
+abort-only retry verifier remain available. A stopped binding is subject to
+the same deletion guard.
 
 ## Abort an initial pending pair
 
@@ -133,3 +136,24 @@ Source pairing uses PostgreSQL `000116`/`000117` and SQLite `000035`/`000036`;
 rotation uses PostgreSQL `000118` and SQLite `000037`; initial abort uses
 PostgreSQL `000120` and SQLite `000039`. The intervening numbers are used by
 independent evaluation-run and garbage-collection changes.
+
+## Paired-binding decommission boundary
+
+There is no active-pair decommission endpoint yet. Stop closes new source
+reads but retains the WeKnora source and its indexed copies. Do not remove a
+paired binding by editing app configuration, deleting database rows, or
+revoking the machine credential. The deletion guard is a temporary safety
+boundary, not evidence that remote files or indexes were reclaimed.
+
+A complete decommission needs a durable operation ID tied to the exact pair
+operation, instance, binding, tenant, knowledge base and data source. Nextcloud
+must first stop publication and keep credentials. WeKnora must then pause its
+source, reject new event/sync/parse writes, withdraw all source versions,
+inventory every retained source file and derived object, and acknowledge that
+state with a signed, idempotent response. Nextcloud may retire the binding and
+credentials only after that acknowledgement is durable. The acknowledgement
+must describe logical withdrawal and a complete cleanup inventory; physical
+reclamation remains a separate, retryable GC status. In particular, the
+current GC scan does not prove a complete per-source inventory when a knowledge
+row has no matching source-version row, and derived indexes are not yet
+deleted.

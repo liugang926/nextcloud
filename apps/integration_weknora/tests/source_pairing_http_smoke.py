@@ -21,14 +21,18 @@ def decoded(body):
     return json.loads(body.decode())
 
 
-def purge_retired_test_pair(binding_id):
-    # Binding removal retains tombstones by design. This test has a unique
-    # synthetic ID and removes only its retired/aborted pairing history.
+def purge_synthetic_test_pair(binding_id, tenant_id, knowledge_base_id):
+    # This source-side test never creates a WeKnora data source. Remove only
+    # its synthetic pairing fixture before exercising ordinary binding cleanup.
     assert binding_id.startswith("source-pair-smoke-") and binding_id.replace("-", "").isalnum()
+    assert tenant_id == "18446744073709551615"
+    assert str(uuid.UUID(knowledge_base_id)) == knowledge_base_id
     statement = ("DELETE FROM oc_weknora_src_pair_rot "
-                 f"WHERE binding_id='{binding_id}' AND state IN ('finalized','aborted','retired'); "
+                 f"WHERE binding_id='{binding_id}' AND tenant_id='{tenant_id}' "
+                 f"AND knowledge_base_id='{knowledge_base_id}'; "
                  "DELETE FROM oc_weknora_src_pair "
-                 f"WHERE binding_id='{binding_id}' AND state IN ('retired','aborted')")
+                 f"WHERE binding_id='{binding_id}' AND tenant_id='{tenant_id}' "
+                 f"AND knowledge_base_id='{knowledge_base_id}'")
     subprocess.run(["docker", "compose", "exec", "-T", "db", "psql", "-U", "nextcloud",
                     "-d", "nextcloud", "-v", "ON_ERROR_STOP=1", "-c", statement],
                    cwd=PROJECT, check=True, stdout=subprocess.DEVNULL)
@@ -60,6 +64,8 @@ def main():
     created_binding = False
     created_second_folder = False
     created_second_binding = False
+    target = {"tenant_id": "18446744073709551615",
+              "knowledge_base_id": str(uuid.uuid4())}
 
     def admin_json(method, url, payload=None, headers=admin_headers):
         return request(admin, url, method, headers,
@@ -128,8 +134,6 @@ def main():
         check(status, 201, "create second temporary binding")
         created_second_binding = True
 
-        target = {"tenant_id": "18446744073709551615",
-                  "knowledge_base_id": str(uuid.uuid4())}
         op1 = str(uuid.uuid4())
         status, _ = admin_json("POST", pairing_url,
                                {"operation_id": op1, **target}, headers={"Content-Type": "application/json"})
@@ -146,6 +150,9 @@ def main():
         assert pair1["data_source_id"] is None and pair1["key_id"] == "pair_" + op1.replace("-", "")
         status, _ = admin_json("DELETE", f"{binding_url}/keys/{pair1['key_id']}")
         check(status, 409, "pending pairing key cannot be revoked independently")
+        status, body = admin_json("DELETE", binding_url)
+        check(status, 409, "pending paired binding cannot be removed")
+        assert decoded(body)["error"] == "paired_binding_decommission_required"
         status, body = request(admin, pairing_url, headers=admin_headers)
         check(status, 200, "read pending pairing")
         assert "token" not in decoded(body) and decoded(body)["pairing"] == pair1
@@ -204,6 +211,11 @@ def main():
         status, body = admin_json("DELETE", pairing_url, {"operation_id": op1})
         check(status, 200, "idempotent abort")
         assert decoded(body)["revoked_key"] is False
+        status, body = admin_json("DELETE", binding_url)
+        check(status, 409, "aborted pair retains its retry verifier")
+        assert decoded(body)["error"] == "paired_binding_decommission_required"
+        status, body = signed_abort(pair1, token1)
+        check(status, 200, "aborted pair remains retryable after removal denial")
         status, _ = signed_commit(pair1, token1, data_source)
         check(status, 401, "aborted key is revoked")
 
@@ -240,6 +252,9 @@ def main():
         check(status, 409, "active pairing cannot be machine-aborted")
         status, _ = admin_json("POST", binding_url + "/stop", {})
         check(status, 200, "stop established pairing")
+        status, body = admin_json("DELETE", binding_url)
+        check(status, 409, "stopped paired binding cannot be removed")
+        assert decoded(body)["error"] == "paired_binding_decommission_required"
         status, _ = signed_commit(pair2, token2, data_source)
         check(status, 423, "stopped pairing cannot commit")
         status, _ = admin_json("POST", binding_url + "/resume", {})
@@ -332,6 +347,13 @@ def main():
                                        rotation["new_key_id"], data_source)
         check(status, 200, "idempotent source rotation finalize")
         assert decoded(body)["changed"] is False
+        status, body = admin_json("DELETE", binding_url)
+        check(status, 409, "active paired binding cannot be removed")
+        assert decoded(body)["error"] == "paired_binding_decommission_required"
+        status, _ = request(machine, f"{api}/capabilities",
+                            headers={"Authorization": "Bearer " + new_token,
+                                     "X-WeKnora-Key-Id": rotation["new_key_id"]})
+        check(status, 200, "removal denial preserves source credentials")
         print("source pairing HTTP smoke passed")
     finally:
         if created_second_binding:
@@ -339,8 +361,9 @@ def main():
         if created_second_folder:
             request(machine, second_folder_url, "DELETE", dav_headers)
         if created_binding:
+            purge_synthetic_test_pair(binding_id, target["tenant_id"],
+                                      target["knowledge_base_id"])
             remove_binding(admin, api, binding_id, csrf)
-            purge_retired_test_pair(binding_id)
         if created_folder:
             request(machine, moved_url if moved else folder_url, "DELETE", dav_headers)
 
