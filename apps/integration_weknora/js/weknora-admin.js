@@ -21,6 +21,10 @@
         const refreshBindings = document.getElementById('weknora-refresh-bindings');
         const bindingMessage = document.getElementById('weknora-binding-message');
         const bindingRows = document.getElementById('weknora-bindings-list');
+        const pairingBinding = document.getElementById('weknora-pairing-binding');
+        const refreshPairing = document.getElementById('weknora-refresh-pairing');
+        const pairingMessage = document.getElementById('weknora-pairing-message');
+        const pairingDetails = document.getElementById('weknora-pairing-details');
         const connectionBinding = document.getElementById('weknora-connection-binding');
         const refreshConnection = document.getElementById('weknora-refresh-connection');
         const connectionMessage = document.getElementById('weknora-connection-message');
@@ -47,6 +51,7 @@
         let connectionBusy = false;
         let connectionConfigured = false;
         let connectionRequestEpoch = 0;
+        let pairingRequestEpoch = 0;
         let revokeArmed = false;
 
         function message(element, value, kind) {
@@ -128,6 +133,8 @@
                     return 'The event connection conflicts with an existing connection or pruned change history. Revoke the old local connection before pairing a new ID; pruned history needs operator reconciliation.';
                 case 'binding_unavailable':
                     return 'The selected binding or its publication root is unavailable. Check the current folder, owner and overlap before resuming.';
+                case 'pairing_unavailable':
+                    return 'The local source pairing state is unavailable. Check the server logs and retry.';
                 case 'connection_unavailable':
                     return 'The event connection service is unavailable. Check the server logs and retry.';
                 default:
@@ -162,10 +169,12 @@
 
         function renderBindings(preferredId) {
             const selected = preferredId || publicationBinding.value;
+            const selectedPairing = preferredId || pairingBinding.value;
             const selectedConnection = preferredId || connectionBinding.value;
             connectionCredential.value = '';
             bindingRows.replaceChildren();
             publicationBinding.replaceChildren(new Option('Choose a binding', ''));
+            pairingBinding.replaceChildren(new Option('Choose a binding', ''));
             connectionBinding.replaceChildren(new Option('Choose a binding', ''));
 
             if (bindings.length === 0) {
@@ -231,15 +240,20 @@
                 });
                 actions.append(toggle);
                 publicationBinding.add(new Option(`${binding.name} (${binding.id})`, binding.id));
+                pairingBinding.add(new Option(`${binding.name} (${binding.id})`, binding.id));
                 connectionBinding.add(new Option(`${binding.name} (${binding.id})`, binding.id));
             });
 
             if (bindings.some((binding) => binding.id === selected)) {
                 publicationBinding.value = selected;
             }
+            pairingBinding.value = bindings.some((binding) => binding.id === selectedPairing)
+                ? selectedPairing : (bindings[0] ? bindings[0].id : '');
             connectionBinding.value = bindings.some((binding) => binding.id === selectedConnection)
                 ? selectedConnection : (bindings[0] ? bindings[0].id : '');
             clearPublicationState();
+            pairingDetails.hidden = true;
+            refreshPairing.disabled = !pairingBinding.value;
             connectionConfigured = false;
             connectionDetails.hidden = true;
             resetRevoke();
@@ -263,6 +277,7 @@
                 bindings = data.bindings;
                 renderBindings(preferredId);
                 message(bindingMessage, `${bindings.length} binding(s) loaded.`, 'success');
+                loadPairingStatus();
                 loadConnectionStatus();
                 return true;
             } catch (error) {
@@ -278,6 +293,74 @@
                 throw new Error('Choose a configured binding.');
             }
             return `${bindingsUrl}/${encodeURIComponent(binding)}/event-connection`;
+        }
+
+        async function loadPairingStatus() {
+            const binding = pairingBinding.value;
+            const epoch = ++pairingRequestEpoch;
+            pairingDetails.hidden = true;
+            refreshPairing.disabled = !binding;
+            if (!binding) {
+                message(pairingMessage, 'Create or choose a binding to inspect source pairing.', '');
+                return;
+            }
+            refreshPairing.disabled = true;
+            message(pairingMessage, 'Loading local source pairing…', '');
+            try {
+                const data = await request('GET',
+                    `${bindingsUrl}/${encodeURIComponent(binding)}/source-pairing`);
+                if (epoch !== pairingRequestEpoch || binding !== pairingBinding.value) {
+                    return;
+                }
+                const pairing = data.pairing;
+                if (!pairing || pairing.binding_id !== binding ||
+                    !['pending', 'active', 'aborted'].includes(pairing.state) ||
+                    typeof pairing.operation_id !== 'string' ||
+                    typeof pairing.instance_id !== 'string' ||
+                    typeof pairing.tenant_id !== 'string' ||
+                    typeof pairing.knowledge_base_id !== 'string' ||
+                    !(pairing.data_source_id === null || typeof pairing.data_source_id === 'string') ||
+                    typeof pairing.key_id !== 'string' ||
+                    !Number.isSafeInteger(pairing.publication_epoch) ||
+                    pairing.publication_epoch < 0 || 'token' in data) {
+                    throw new Error('The server returned invalid source pairing state.');
+                }
+                const values = {
+                    state: pairing.state,
+                    operation: pairing.operation_id,
+                    instance: pairing.instance_id,
+                    tenant: pairing.tenant_id,
+                    kb: pairing.knowledge_base_id,
+                    source: pairing.data_source_id || 'None yet',
+                    key: pairing.key_id,
+                    epoch: String(pairing.publication_epoch),
+                };
+                Object.entries(values).forEach(([field, value]) => {
+                    document.getElementById(`weknora-pairing-${field}`).textContent = value;
+                });
+                pairingDetails.hidden = false;
+                message(pairingMessage,
+                    pairing.state === 'active'
+                        ? 'Nextcloud committed this source. Confirm the same active operation in WeKnora; this does not confirm indexing.'
+                        : pairing.state === 'pending'
+                            ? 'Nextcloud is waiting for the matching WeKnora commit. Retry or abort this operation through the operator workflow.'
+                            : 'The last local pairing was aborted. Start a new operation through the operator workflow.',
+                    pairing.state === 'active' ? 'success' : 'warning');
+            } catch (error) {
+                if (epoch !== pairingRequestEpoch || binding !== pairingBinding.value) {
+                    return;
+                }
+                pairingDetails.hidden = true;
+                if (error.status === 404 && error.code === 'pairing_not_found') {
+                    message(pairingMessage, 'No source pairing has been prepared for this binding.', '');
+                } else {
+                    message(pairingMessage, errorText(error), 'error');
+                }
+            } finally {
+                if (epoch === pairingRequestEpoch) {
+                    refreshPairing.disabled = false;
+                }
+            }
         }
 
         function resetRevoke() {
@@ -455,6 +538,8 @@
             connectionOrigin.value = '';
             loadConnectionStatus();
         });
+        pairingBinding.addEventListener('change', loadPairingStatus);
+        refreshPairing.addEventListener('click', loadPairingStatus);
         refreshConnection.addEventListener('click', loadConnectionStatus);
         connectionForm.addEventListener('submit', async (event) => {
             event.preventDefault();

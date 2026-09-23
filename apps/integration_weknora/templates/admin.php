@@ -13,7 +13,7 @@ style('integration_weknora', 'weknora-admin');
         <h3>Automatic publication scope</h3>
         <p>A binding covers readable files recursively inside the selected child folder, including new and updated files. Withdrawing a file ID excludes it from this app's manifest and content API until an administrator explicitly republishes it. A folder binding does not itself make content searchable in WeKnora.</p>
         <p>Stop publication closes the binding's source read and authorization gates without deleting its files, binding ID, machine keys, or file exclusions. Resume checks the current root and asks the connector to reconcile again. Existing WeKnora copies require its retrieval guard and later cleanup; this page cannot verify that cleanup.</p>
-        <p>Current limits: bindings must share one owner account and their roots cannot overlap. This settings page can configure and inspect local event delivery, but it does not configure WeKnora knowledge base mapping or show WeKnora synchronization, parsing, indexing, or cleanup progress. End-to-end audience and ACL enforcement and in-Nextcloud AI chat are not complete. Withdrawal immediately blocks this app's read API; removal of an already indexed WeKnora copy still requires connector reconciliation and WeKnora retrieval controls. Use a verified dedicated publication folder for pilot data only.</p>
+        <p>Current limits: bindings must share one owner account and their roots cannot overlap. Source pairing uses an operator workflow; this page shows its local state and can configure local event delivery, but it does not show WeKnora synchronization, parsing, indexing, or cleanup progress. End-to-end audience and ACL enforcement and in-Nextcloud AI chat are not complete. Withdrawal immediately blocks this app's read API; removal of an already indexed WeKnora copy still requires connector reconciliation and WeKnora retrieval controls. Use a verified dedicated publication folder for pilot data only.</p>
     </div>
 
     <div class="weknora-admin__panel">
@@ -54,6 +54,28 @@ style('integration_weknora', 'weknora-admin');
                 <tbody id="weknora-bindings-list"><tr><td colspan="6">Loading bindings…</td></tr></tbody>
             </table>
         </div>
+    </div>
+
+    <div class="weknora-admin__panel">
+        <div class="weknora-admin__panel-heading">
+            <h3>Source pairing</h3>
+            <button type="button" class="button" id="weknora-refresh-pairing">Refresh status</button>
+        </div>
+        <p>A dedicated WeKnora knowledge base is paired to one binding through the operator workflow. This is the latest state stored in Nextcloud; confirm the matching operation and data source in WeKnora before starting synchronization.</p>
+        <div class="weknora-admin__fields">
+            <label>Binding <select id="weknora-pairing-binding"><option value="">Choose a binding</option></select></label>
+        </div>
+        <p id="weknora-pairing-message" class="weknora-admin__message" role="status" aria-live="polite"></p>
+        <dl id="weknora-pairing-details" class="weknora-admin__details" hidden>
+            <dt>Local state</dt><dd id="weknora-pairing-state"></dd>
+            <dt>Operation ID</dt><dd id="weknora-pairing-operation"></dd>
+            <dt>Nextcloud instance</dt><dd id="weknora-pairing-instance"></dd>
+            <dt>WeKnora tenant ID</dt><dd id="weknora-pairing-tenant"></dd>
+            <dt>Knowledge base ID</dt><dd id="weknora-pairing-kb"></dd>
+            <dt>Data source ID</dt><dd id="weknora-pairing-source"></dd>
+            <dt>Machine key ID</dt><dd id="weknora-pairing-key"></dd>
+            <dt>Publication epoch at prepare</dt><dd id="weknora-pairing-epoch"></dd>
+        </dl>
     </div>
 
     <div class="weknora-admin__panel">

@@ -59,7 +59,10 @@ def main():
     guest_created = False
     guest_mapped = False
     share_id = None
+    group_created = False
+    group_share_id = None
     guest_id = f"weknora_auth_{secrets.token_hex(5)}"
+    group_id = f"weknora_auth_group_{secrets.token_hex(5)}"
     guest_password = secrets.token_urlsafe(24)
     guest_identity = {
         "directory_id": owner_identity["directory_id"],
@@ -156,6 +159,38 @@ def main():
         check(status, 200, "revoked folder access")
         assert as_json(body)["allow"] is False, body
 
+        # A live group mount must grant access only while the mapped user is
+        # still a member. This exercises Nextcloud's actual user mount view.
+        run_occ("group:add", group_id)
+        group_created = True
+        run_occ("group:adduser", group_id, guest_id)
+        group_form = urllib.parse.urlencode({"path": args.share_path, "shareType": 1,
+                                              "shareWith": group_id, "permissions": 1}).encode()
+        status, body = request(admin, shares, "POST", share_headers, group_form)
+        check(status, 200, "read-only group folder share")
+        group_share = as_json(body)
+        assert group_share["ocs"]["meta"]["statuscode"] == 200, group_share
+        group_share_id = group_share["ocs"]["data"]["id"]
+        status, body = decision(guest_identity)
+        check(status, 200, "group member source authorization")
+        assert as_json(body)["allow"] is True, body
+
+        run_occ("group:removeuser", group_id, guest_id)
+        status, body = decision(guest_identity)
+        check(status, 200, "removed group member authorization")
+        assert as_json(body)["allow"] is False, body
+        run_occ("group:adduser", group_id, guest_id)
+        status, body = decision(guest_identity)
+        check(status, 200, "restored group member authorization")
+        assert as_json(body)["allow"] is True, body
+
+        status, _ = request(admin, f"{shares}/{group_share_id}", "DELETE", share_headers)
+        check(status, 200, "group share revocation")
+        group_share_id = None
+        status, body = decision(guest_identity)
+        check(status, 200, "revoked group folder access")
+        assert as_json(body)["allow"] is False, body
+
         status, body = request(admin, f"{publication}/publication", headers=admin_headers)
         check(status, 200, "publication state")
         original_state = as_json(body)["state"]
@@ -181,6 +216,9 @@ def main():
         if share_id is not None:
             request(admin, f"{base}/ocs/v2.php/apps/files_sharing/api/v1/shares/{share_id}",
                     "DELETE", {**admin_headers, "OCS-APIREQUEST": "true"})
+        if group_share_id is not None:
+            request(admin, f"{base}/ocs/v2.php/apps/files_sharing/api/v1/shares/{group_share_id}",
+                    "DELETE", {**admin_headers, "OCS-APIREQUEST": "true"})
         if original_state is not None:
             action = "withdraw" if original_state == "withdrawn" else "republish"
             request(admin, f"{publication}/{action}", "POST", admin_headers, b"")
@@ -188,6 +226,8 @@ def main():
             post_json(admin, f"{identities}/revoke", guest_identity, admin_headers)
         if guest_created:
             run_occ("user:delete", guest_id)
+        if group_created:
+            run_occ("group:delete", group_id)
         if owner_created:
             post_json(admin, f"{identities}/revoke", owner_identity, admin_headers)
 
