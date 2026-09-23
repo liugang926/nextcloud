@@ -1,12 +1,14 @@
 diff --git a/docs/nextcloud-source-provenance.md b/docs/nextcloud-source-provenance.md
 new file mode 100644
-index 00000000..56fbce7d
+index 00000000..eedc64e0
 --- /dev/null
 +++ b/docs/nextcloud-source-provenance.md
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,9 @@
 +# Nextcloud source provenance
 +
 +The `knowledge_bases.ever_had_nextcloud_source` flag records that a knowledge base has contained a Nextcloud source. It is set in the same database transaction that creates or changes a data source to `nextcloud`, and application code never clears it. Deleting the data source and its knowledge rows therefore does not make previously generated Wiki pages or shared agents appear independent of the source.
++
++Data-source creation and updates serialize on the owning knowledge-base row. A Nextcloud source requires a dedicated knowledge base with no other source or knowledge row, including soft-deleted rows. Once Nextcloud provenance is set, ordinary sources cannot be added to that knowledge base. A Nextcloud source cannot change its tenant, knowledge base, or connector type through the update path.
 +
 +Migration `000111` for PostgreSQL and `000030` for SQLite backfill the flag from current and soft-deleted data sources and knowledge rows. **A source and all of its knowledge rows that were hard-deleted before this migration leave no reliable provenance to backfill.** Operators should inspect such older knowledge bases and remove or quarantine their derived Wiki pages and shares before enabling access. Subsequent Nextcloud source creation is covered by the transaction-backed flag.
 +
@@ -1000,7 +1002,7 @@ index 00000000..345e4807
 +	}
 +}
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
-index c3b2f58e..bc1ede8d 100644
+index c3b2f58e..6cd4148f 100644
 --- a/internal/application/repository/datasource_repo.go
 +++ b/internal/application/repository/datasource_repo.go
 @@ -3,6 +3,7 @@ package repository
@@ -1015,31 +1017,70 @@ index c3b2f58e..bc1ede8d 100644
  	// the HTTP 201 body) match the database.
  	syncDeletions := ds.SyncDeletions
  	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-+		if err := markNextcloudKnowledgeBase(tx, ds); err != nil {
++		if err := admitDataSourceKnowledgeBase(tx, ds, false); err != nil {
 +			return err
 +		}
  		if err := tx.Create(ds).Error; err != nil {
  			return err
  		}
-@@ -43,6 +47,25 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
+@@ -43,6 +47,64 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
  	return err
  }
  
-+func markNextcloudKnowledgeBase(tx *gorm.DB, ds *types.DataSource) error {
-+	if ds.Type != types.ConnectorTypeNextcloud {
-+		return nil
-+	}
++// Every data-source create and update writes the owning KB row before checking
++// its sources. PostgreSQL serializes concurrent writers on that row; SQLite
++// serializes the write transaction. This prevents a concurrent ordinary source
++// from racing a Nextcloud source into the same dedicated KB.
++func admitDataSourceKnowledgeBase(tx *gorm.DB, ds *types.DataSource, update bool) error {
 +	if ds.TenantID == 0 || ds.KnowledgeBaseID == "" {
-+		return errors.New("Nextcloud data source has no knowledge-base owner")
++		return errors.New("data source has no knowledge-base owner")
 +	}
-+	result := tx.Model(&types.KnowledgeBase{}).
-+		Where("id = ? AND tenant_id = ?", ds.KnowledgeBaseID, ds.TenantID).
-+		UpdateColumn("ever_had_nextcloud_source", true)
++	result := tx.Exec(`UPDATE knowledge_bases
++		SET ever_had_nextcloud_source = ever_had_nextcloud_source
++		WHERE id = ? AND tenant_id = ?`, ds.KnowledgeBaseID, ds.TenantID)
 +	if result.Error != nil {
-+		return fmt.Errorf("mark Nextcloud knowledge-base provenance: %w", result.Error)
++		return fmt.Errorf("lock data-source knowledge base: %w", result.Error)
 +	}
 +	if result.RowsAffected != 1 {
-+		return errors.New("Nextcloud knowledge-base provenance owner not found")
++		return errors.New("data-source knowledge-base owner not found")
++	}
++	var marked bool
++	if err := tx.Raw(`SELECT ever_had_nextcloud_source FROM knowledge_bases
++		WHERE id = ? AND tenant_id = ?`, ds.KnowledgeBaseID, ds.TenantID).
++		Scan(&marked).Error; err != nil {
++		return fmt.Errorf("read knowledge-base provenance: %w", err)
++	}
++	if ds.Type != types.ConnectorTypeNextcloud {
++		if marked {
++			return errors.New("knowledge base has Nextcloud source provenance")
++		}
++		return nil
++	}
++	var otherSources int64
++	if err := tx.Unscoped().Model(&types.DataSource{}).
++		Where("knowledge_base_id = ? AND tenant_id = ?",
++			ds.KnowledgeBaseID, ds.TenantID).
++		Where("id <> ?", ds.ID).Count(&otherSources).Error; err != nil {
++		return fmt.Errorf("check dedicated Nextcloud knowledge base: %w", err)
++	}
++	if otherSources != 0 {
++		return errors.New("Nextcloud requires a dedicated knowledge base without other data sources")
++	}
++	if !update {
++		var existingDocuments int64
++		if err := tx.Table("knowledges").
++			Where("knowledge_base_id = ? AND tenant_id = ?",
++				ds.KnowledgeBaseID, ds.TenantID).
++			Count(&existingDocuments).Error; err != nil {
++			return fmt.Errorf("check existing knowledge before Nextcloud pairing: %w", err)
++		}
++		if existingDocuments != 0 {
++			return errors.New("Nextcloud requires a knowledge base without existing documents")
++		}
++	}
++	if err := tx.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = TRUE
++		WHERE id = ? AND tenant_id = ?`, ds.KnowledgeBaseID, ds.TenantID).Error; err != nil {
++		return fmt.Errorf("mark Nextcloud knowledge-base provenance: %w", err)
 +	}
 +	return nil
 +}
@@ -1047,7 +1088,7 @@ index c3b2f58e..bc1ede8d 100644
  // FindByID retrieves a data source by ID
  func (r *DataSourceRepository) FindByID(ctx context.Context, id string) (*types.DataSource, error) {
  	if id == "" {
-@@ -77,6 +100,36 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
+@@ -77,6 +139,36 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
  	return dataSources, nil
  }
  
@@ -1084,16 +1125,43 @@ index c3b2f58e..bc1ede8d 100644
  // Update updates an existing data source
  func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource) error {
  	if ds == nil {
-@@ -86,6 +139,9 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -86,6 +178,20 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  		return errors.New("data source id is empty")
  	}
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-+		if err := markNextcloudKnowledgeBase(tx, ds); err != nil {
++		var previous types.DataSource
++		if err := tx.Where("id = ? AND deleted_at IS NULL", ds.ID).First(&previous).Error; err != nil {
++			return fmt.Errorf("load data source before update: %w", err)
++		}
++		if previous.TenantID != ds.TenantID || previous.KnowledgeBaseID != ds.KnowledgeBaseID {
++			return errors.New("data source owner cannot change")
++		}
++		if previous.Type != ds.Type &&
++			(previous.Type == types.ConnectorTypeNextcloud || ds.Type == types.ConnectorTypeNextcloud) {
++			return errors.New("Nextcloud data source type cannot change")
++		}
++		if err := admitDataSourceKnowledgeBase(tx, ds, true); err != nil {
 +			return err
 +		}
  		if err := tx.Model(ds).Updates(ds).Error; err != nil {
  			return err
  		}
+diff --git a/internal/application/repository/datasource_repo_test.go b/internal/application/repository/datasource_repo_test.go
+index 77ed065c..9cf4d886 100644
+--- a/internal/application/repository/datasource_repo_test.go
++++ b/internal/application/repository/datasource_repo_test.go
+@@ -17,6 +17,11 @@ func setupDataSourceRepoTestDB(t *testing.T) *gorm.DB {
+ 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+ 	require.NoError(t, err)
+ 	require.NoError(t, db.AutoMigrate(&types.DataSource{}, &types.SyncLog{}))
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases (
++		id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
++		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT 0
++	)`).Error)
++	require.NoError(t, db.Exec("INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-1', 1)").Error)
+ 	return db
+ }
+ 
 diff --git a/internal/application/repository/knowledgebase.go b/internal/application/repository/knowledgebase.go
 index e560e686..c2f3bd79 100644
 --- a/internal/application/repository/knowledgebase.go
@@ -1109,12 +1177,24 @@ index e560e686..c2f3bd79 100644
  }
  
  // UpdateKnowledgeBaseGeneratedProfile writes the generated_profile column
+diff --git a/internal/application/repository/knowledgebase_sqlite_test.go b/internal/application/repository/knowledgebase_sqlite_test.go
+index 0a35e402..4bf221f5 100644
+--- a/internal/application/repository/knowledgebase_sqlite_test.go
++++ b/internal/application/repository/knowledgebase_sqlite_test.go
+@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
+     pinned_at DATETIME NULL,
+     asr_config TEXT,
+     vector_store_id VARCHAR(36),
++    ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT 0,
+     storage_backend_id VARCHAR(36),
+     wiki_config TEXT,
+     indexing_strategy TEXT,
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
-index 00000000..0f846c7a
+index 00000000..2893499c
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_kb_provenance_test.go
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,111 @@
 +package repository
 +
 +import (
@@ -1138,26 +1218,40 @@ index 00000000..0f846c7a
 +		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT 0,
 +		deleted_at DATETIME
 +	)`).Error)
++	require.NoError(t, db.Exec(`CREATE TABLE knowledges (
++		id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
++		knowledge_base_id TEXT NOT NULL, deleted_at DATETIME
++	)`).Error)
 +	require.NoError(t, db.AutoMigrate(&types.DataSource{}))
 +	return db
 +}
 +
 +func TestNextcloudSourceCreationMarksKBAtomically(t *testing.T) {
 +	db := provenanceTestDB(t)
-+	require.NoError(t, db.Exec("INSERT INTO knowledge_bases (id, tenant_id) VALUES (?, ?), (?, ?)", "kb", 7, "kb-update", 7).Error)
++	require.NoError(t, db.Exec("INSERT INTO knowledge_bases (id, tenant_id) VALUES (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?)",
++		"kb", 7, "kb-ordinary", 7, "kb-update", 7, "kb-documents", 7,
++		"kb-past-source", 7, "kb-past-documents", 7).Error)
 +	repo := NewDataSourceRepository(db)
 +	ctx := context.Background()
-+	ordinary := &types.DataSource{ID: "ordinary", TenantID: 7, KnowledgeBaseID: "kb", Type: types.ConnectorTypeFeishu}
++	ordinary := &types.DataSource{ID: "ordinary", TenantID: 7, KnowledgeBaseID: "kb-ordinary", Type: types.ConnectorTypeFeishu}
 +	require.NoError(t, repo.Create(ctx, ordinary))
 +	var marked bool
-+	require.NoError(t, db.Raw("SELECT ever_had_nextcloud_source FROM knowledge_bases WHERE id = ?", "kb").Scan(&marked).Error)
++	require.NoError(t, db.Raw("SELECT ever_had_nextcloud_source FROM knowledge_bases WHERE id = ?", "kb-ordinary").Scan(&marked).Error)
 +	require.False(t, marked)
 +
 +	nextcloud := &types.DataSource{ID: "nextcloud", TenantID: 7, KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud}
 +	require.NoError(t, repo.Create(ctx, nextcloud))
++	require.Error(t, repo.Create(ctx, &types.DataSource{ID: "second-nextcloud", TenantID: 7,
++		KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud}))
++	require.Error(t, repo.Create(ctx, &types.DataSource{ID: "mixed-ordinary", TenantID: 7,
++		KnowledgeBaseID: "kb", Type: types.ConnectorTypeFeishu}))
++	require.Error(t, repo.Create(ctx, &types.DataSource{ID: "mixed-nextcloud", TenantID: 7,
++		KnowledgeBaseID: "kb-ordinary", Type: types.ConnectorTypeNextcloud}))
 +	require.NoError(t, db.Unscoped().Delete(&types.DataSource{}, "id = ?", nextcloud.ID).Error)
 +	require.NoError(t, db.Raw("SELECT ever_had_nextcloud_source FROM knowledge_bases WHERE id = ?", "kb").Scan(&marked).Error)
 +	require.True(t, marked, "hard-deleting the source must not erase provenance")
++	require.Error(t, repo.Create(ctx, &types.DataSource{ID: "ordinary-after-delete", TenantID: 7,
++		KnowledgeBaseID: "kb", Type: types.ConnectorTypeFeishu}))
 +
 +	missing := &types.DataSource{ID: "invalid", TenantID: 7, KnowledgeBaseID: "missing", Type: types.ConnectorTypeNextcloud}
 +	require.Error(t, repo.Create(ctx, missing))
@@ -1168,9 +1262,24 @@ index 00000000..0f846c7a
 +	transition := &types.DataSource{ID: "transition", TenantID: 7, KnowledgeBaseID: "kb-update", Type: types.ConnectorTypeFeishu}
 +	require.NoError(t, repo.Create(ctx, transition))
 +	transition.Type = types.ConnectorTypeNextcloud
-+	require.NoError(t, repo.Update(ctx, transition))
++	require.Error(t, repo.Update(ctx, transition))
 +	require.NoError(t, db.Raw("SELECT ever_had_nextcloud_source FROM knowledge_bases WHERE id = ?", "kb-update").Scan(&marked).Error)
-+	require.True(t, marked, "changing a source to Nextcloud must mark its KB")
++	require.False(t, marked, "rejected type change must not mark the KB")
++
++	require.NoError(t, db.Exec("INSERT INTO knowledges (id, tenant_id, knowledge_base_id) VALUES ('doc', 7, 'kb-documents')").Error)
++	require.Error(t, repo.Create(ctx, &types.DataSource{ID: "with-document", TenantID: 7,
++		KnowledgeBaseID: "kb-documents", Type: types.ConnectorTypeNextcloud}))
++
++	pastSource := &types.DataSource{ID: "past-source", TenantID: 7,
++		KnowledgeBaseID: "kb-past-source", Type: types.ConnectorTypeFeishu}
++	require.NoError(t, repo.Create(ctx, pastSource))
++	require.NoError(t, repo.Delete(ctx, pastSource.ID))
++	require.Error(t, repo.Create(ctx, &types.DataSource{ID: "after-past-source", TenantID: 7,
++		KnowledgeBaseID: "kb-past-source", Type: types.ConnectorTypeNextcloud}))
++	require.NoError(t, db.Exec(`INSERT INTO knowledges (id, tenant_id, knowledge_base_id, deleted_at)
++		VALUES ('past-document', 7, 'kb-past-documents', CURRENT_TIMESTAMP)`).Error)
++	require.Error(t, repo.Create(ctx, &types.DataSource{ID: "after-past-document", TenantID: 7,
++		KnowledgeBaseID: "kb-past-documents", Type: types.ConnectorTypeNextcloud}))
 +}
 +
 +func TestSQLiteNextcloudKBProvenanceMigrationBackfillsDeletedSources(t *testing.T) {
