@@ -106,7 +106,10 @@ authentication has no fallback to legacy appconfig credentials. The local
 `dev-published` binding on a fresh install. Migration 0011 pins migrated keys
 to their configured binding source; an unresolved source leaves the key
 unusable. Migration 0012 registers existing binding identities and creates
-permanent deletion tombstones.
+permanent deletion tombstones. Migration 0013 also retires IDs found in
+historical outbox, publication, cursor, and manifest rows even if their
+bindings were removed before the upgrade or current appconfig is invalid.
+It covers installations that already applied migration 0012.
 
 Binding keys bound the connector's access to source folders. The current
 authorization request body still contains a directory ID and object GUID

@@ -1,4 +1,22 @@
-# Isolated backup and restore drill
+# Local operations probes
+
+## Local event connection probe
+
+After building and starting the patched local WeKnora app, set
+`WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the synthetic
+local administrator credentials and run:
+
+```sh
+python3 scripts/ops/local-event-connection-smoke.py --data-source-id YOUR_SYNTHETIC_NEXTCLOUD_DATASOURCE_UUID
+```
+
+The probe pairs only that source, sends synthetic reconcile hints, tests
+durable receipt, nonce replay, idempotent retry, rotation and revocation, and
+revokes the created connection on exit. It refuses to replace an already active
+connection. HTTP 202 is a receipt, not an applied or published event. Use a
+synthetic data source only.
+
+## Isolated backup and restore drill
 
 Run `./scripts/ops/isolated-restore-drill.sh` from this repository to rehearse a **synthetic data-level** backup and restore. The script creates new, uniquely named Docker volumes and two PostgreSQL containers on Docker's `none` network. It never accepts a Compose project, existing volume name, database address, or production credentials. It verifies labels before removing only the volumes and containers it created. Backup files and comparison results remain in a new private temporary directory printed at the end. Pass a path that does not exist to choose the output directory.
 

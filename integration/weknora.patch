@@ -1,10 +1,10 @@
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..7fc3c630
+index 00000000..4193a42d
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,78 @@
-+# Nextcloud event receiver (phase 1)
+@@ -0,0 +1,112 @@
++# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
 +The route is independently authenticated before user and API key middleware.
@@ -16,15 +16,49 @@ index 00000000..7fc3c630
 +Only an `active` connection row may receive events. The row fixes one
 +Nextcloud instance and binding to one tenant, knowledge base, and Nextcloud
 +data source. The data source must still select exactly that binding. Pairing
-+and key provisioning are separate work; installing this receiver alone does
-+not create an active connection. Connection secrets must be generated with
-+high entropy and stored as `enc:v1:` ciphertext using `SYSTEM_AES_KEY`.
++and key provisioning use the administrator endpoints below. Installing the
++receiver alone does not create an active connection. Connection secrets are
++random and stored only as `enc:v1:` ciphertext using `SYSTEM_AES_KEY`.
 +The connection also pins the normalized complete Nextcloud base URL and the
 +SHA-256 fingerprint of the data source's **committed, encrypted** configuration
 +bytes. An endpoint edit, credential clear/rotation/reprovision, or other
 +configuration edit invalidates the old connection and requires re-pairing.
 +The receiver checks this identity inside the same locked transaction as the
 +inbox write; it does not hash or log a plaintext machine token.
++
++## Administrator connection lifecycle
++
++The following routes require the current tenant's Admin or Owner role and
++edit access to the target knowledge base. Tenant API keys do not issue or
++recover event secrets. The target must be a committed, dedicated Nextcloud
++data source whose sole selected binding still exists in signed live
++capabilities/bindings responses. Pairing checks the persisted tenant, KB,
++source, base URL, encrypted config fingerprint, and dedicated KB marker again
++under the database lock before committing the connection.
++
++| Method | Route | Result |
++| --- | --- | --- |
++| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection` | Create one active connection; `201` once, then `409` on repeat. |
++| `GET` | `/api/v1/datasource/:id/nextcloud-event-connection` | Read connection status and decimal received watermark; never returns a secret. |
++| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Replace the only accepted key immediately; `200` returns the new secret once. |
++| `DELETE` | `/api/v1/datasource/:id/nextcloud-event-connection` | Revoke the active connection immediately; `204`. |
++
++A successful pair or rotation returns `connection_id`, `key_id`, a one-time
++`secret`, `nextcloud_instance_id`, `binding_id`, `status`, and `receiver_url`.
++The receiver URL is the fixed absolute path
++`/api/v1/integrations/nextcloud/events`; configure it under the public
++WeKnora origin reachable from the Nextcloud server. Store the returned
++connection ID, key ID, secret, instance ID, and binding ID in the Nextcloud
++sender configuration. No management read can retrieve the secret again. If
++the one-time response is lost, inspect status and rotate the key; repeating
++Pair will not reveal an existing key. Rotation clears any previous-key grace
++period, so the old key is rejected at commit. A changed source is reported
++as `source_changed` by GET; revoke and then pair again after resolving the
++source. Revocation does not require a live Nextcloud call, so it remains
++possible after credentials are cleared or the endpoint changes.
++
++Connection provisioning does not advance an applied checkpoint. The only
++watermark exposed here is `received_through_event_id` for durable receipt.
 +
 +## Request contract
 +
@@ -1566,6 +1600,297 @@ index 00000000..b8ccb615
 +	require.NoError(t, err)
 +	require.Empty(t, parsed.Credentials)
 +	require.NotContains(t, strings.ToLower(string(stored.Config)), "new-token")
++}
+diff --git a/internal/application/repository/nextcloud_event_connections.go b/internal/application/repository/nextcloud_event_connections.go
+new file mode 100644
+index 00000000..00a3de34
+--- /dev/null
++++ b/internal/application/repository/nextcloud_event_connections.go
+@@ -0,0 +1,285 @@
++package repository
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"strconv"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++var ErrNextcloudEventConnectionExists = errors.New("Nextcloud event connection already exists")
++var ErrNextcloudEventConnectionMissing = errors.New("Nextcloud event connection is not active")
++
++// NextcloudEventPairingIdentity is populated from a signed, live Nextcloud
++// capabilities/bindings read and the corresponding committed data source.
++type NextcloudEventPairingIdentity struct {
++	TenantID            uint64
++	KnowledgeBaseID     string
++	DatasourceID        string
++	NextcloudInstanceID string
++	BindingID           string
++	DatasourceBaseURL   string
++	DatasourceConfigSHA string
++}
++
++// NextcloudEventConnectionCredential is returned only by a successful pair
++// or rotation. The secret is never recoverable from a management read API.
++type NextcloudEventConnectionCredential struct {
++	ConnectionID        string `json:"connection_id"`
++	NextcloudInstanceID string `json:"nextcloud_instance_id"`
++	BindingID           string `json:"binding_id"`
++	KeyID               string `json:"key_id"`
++	Secret              string `json:"secret"`
++}
++
++// NextcloudEventConnectionStatus deliberately omits the signing secret.
++// The received watermark is a decimal string, matching the event protocol.
++type NextcloudEventConnectionStatus struct {
++	ConnectionID           string `json:"connection_id"`
++	NextcloudInstanceID    string `json:"nextcloud_instance_id"`
++	BindingID              string `json:"binding_id"`
++	KeyID                  string `json:"key_id"`
++	Status                 string `json:"status"`
++	ReceivedThroughEventID string `json:"received_through_event_id"`
++	DatasourceBaseURL      string `json:"-"`
++	DatasourceConfigSHA    string `json:"-"`
++}
++
++func (r *NextcloudEventInboxRepository) ConnectionStatus(ctx context.Context, tenantID uint64, datasourceID string) (NextcloudEventConnectionStatus, error) {
++	if tenantID == 0 || datasourceID == "" {
++		return NextcloudEventConnectionStatus{}, ErrNextcloudEventScope
++	}
++	var connection nextcloudEventConnection
++	err := r.db.WithContext(ctx).Table("nextcloud_event_connections").
++		Where("tenant_id = ? AND datasource_id = ?", tenantID, datasourceID).
++		Order("created_at DESC").Take(&connection).Error
++	if err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return NextcloudEventConnectionStatus{}, ErrNextcloudEventConnectionMissing
++		}
++		return NextcloudEventConnectionStatus{}, fmt.Errorf("read Nextcloud event connection status: %w", err)
++	}
++	var checkpoint nextcloudEventCheckpoint
++	if err := r.db.WithContext(ctx).Table("nextcloud_event_checkpoint").
++		Where("connection_id = ?", connection.ConnectionID).Take(&checkpoint).Error; err != nil {
++		return NextcloudEventConnectionStatus{}, fmt.Errorf("read Nextcloud event checkpoint: %w", err)
++	}
++	return NextcloudEventConnectionStatus{
++		ConnectionID: connection.ConnectionID, NextcloudInstanceID: connection.NextcloudInstanceID,
++		BindingID: connection.BindingID, KeyID: connection.CurrentKeyID,
++		Status: connection.Status, ReceivedThroughEventID: strconv.FormatInt(checkpoint.ReceivedID, 10),
++		DatasourceBaseURL:   connection.DatasourceBaseURL,
++		DatasourceConfigSHA: connection.DatasourceConfigSHA256,
++	}, nil
++}
++
++func newNextcloudEventCredential() (string, string, string, error) {
++	keyBytes := make([]byte, 16)
++	secretBytes := make([]byte, 32)
++	if _, err := rand.Read(keyBytes); err != nil {
++		return "", "", "", fmt.Errorf("generate Nextcloud event key ID: %w", err)
++	}
++	if _, err := rand.Read(secretBytes); err != nil {
++		return "", "", "", fmt.Errorf("generate Nextcloud event secret: %w", err)
++	}
++	secret := base64.RawURLEncoding.EncodeToString(secretBytes)
++	key := utils.GetAESKey()
++	if len(key) != 32 {
++		return "", "", "", errors.New("Nextcloud event encryption key unavailable")
++	}
++	ciphertext, err := utils.EncryptAESGCM(secret, key)
++	if err != nil || ciphertext == secret {
++		return "", "", "", errors.New("Nextcloud event encryption key unavailable")
++	}
++	return "evt_" + hex.EncodeToString(keyBytes), secret, ciphertext, nil
++}
++
++// Pair creates a new connection only after the live-validated source identity
++// still matches the committed row. It never reissues an existing secret.
++func (r *NextcloudEventInboxRepository) Pair(ctx context.Context, identity NextcloudEventPairingIdentity) (NextcloudEventConnectionCredential, error) {
++	keyID, secret, ciphertext, err := newNextcloudEventCredential()
++	if err != nil {
++		return NextcloudEventConnectionCredential{}, err
++	}
++	connectionID := uuid.NewString()
++	result := NextcloudEventConnectionCredential{
++		ConnectionID: connectionID, NextcloudInstanceID: identity.NextcloudInstanceID,
++		BindingID: identity.BindingID, KeyID: keyID, Secret: secret,
++	}
++	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if err := checkNextcloudPairingSource(tx, identity); err != nil {
++			return err
++		}
++		row := map[string]any{
++			"connection_id": connectionID, "tenant_id": identity.TenantID,
++			"knowledge_base_id": identity.KnowledgeBaseID, "datasource_id": identity.DatasourceID,
++			"nextcloud_instance_id": identity.NextcloudInstanceID, "binding_id": identity.BindingID,
++			"datasource_base_url":      identity.DatasourceBaseURL,
++			"datasource_config_sha256": identity.DatasourceConfigSHA,
++			"status":                   "active", "current_key_id": keyID,
++			"current_secret_ciphertext": ciphertext,
++			"created_at":                time.Now().UTC(), "updated_at": time.Now().UTC(),
++		}
++		insert := tx.Table("nextcloud_event_connections").Clauses(clause.OnConflict{DoNothing: true}).Create(row)
++		if insert.Error != nil {
++			return fmt.Errorf("create Nextcloud event connection: %w", insert.Error)
++		}
++		if insert.RowsAffected != 1 {
++			return ErrNextcloudEventConnectionExists
++		}
++		checkpoint := map[string]any{"connection_id": connectionID, "received_id": int64(0)}
++		if err := tx.Table("nextcloud_event_checkpoint").Create(checkpoint).Error; err != nil {
++			return fmt.Errorf("initialize Nextcloud event checkpoint: %w", err)
++		}
++		return nil
++	})
++	if err != nil {
++		return NextcloudEventConnectionCredential{}, err
++	}
++	return result, nil
++}
++
++// Rotate replaces the sole accepted key atomically. Previous-key grace is
++// deliberately disabled for an administrator-initiated emergency rotation.
++func (r *NextcloudEventInboxRepository) Rotate(ctx context.Context, identity NextcloudEventPairingIdentity) (NextcloudEventConnectionCredential, error) {
++	keyID, secret, ciphertext, err := newNextcloudEventCredential()
++	if err != nil {
++		return NextcloudEventConnectionCredential{}, err
++	}
++	var result NextcloudEventConnectionCredential
++	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if tx.Dialector.Name() == "sqlite" {
++			lock := tx.Exec(`UPDATE nextcloud_event_connections SET status = status
++				WHERE tenant_id = ? AND datasource_id = ? AND status = 'active'`, identity.TenantID, identity.DatasourceID)
++			if lock.Error != nil {
++				return fmt.Errorf("lock Nextcloud event connection: %w", lock.Error)
++			}
++			if lock.RowsAffected != 1 {
++				return ErrNextcloudEventConnectionMissing
++			}
++		}
++		var connection nextcloudEventConnection
++		if err := tx.Table("nextcloud_event_connections").
++			Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("tenant_id = ? AND datasource_id = ? AND status = 'active'", identity.TenantID, identity.DatasourceID).
++			Take(&connection).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNextcloudEventConnectionMissing
++			}
++			return fmt.Errorf("read Nextcloud event connection: %w", err)
++		}
++		// Receive takes the connection lock before checking the KB/source.
++		// Keep that order to avoid a PostgreSQL deadlock with event ingestion.
++		if err := checkNextcloudPairingSource(tx, identity); err != nil {
++			return err
++		}
++		if connection.KnowledgeBaseID != identity.KnowledgeBaseID ||
++			connection.NextcloudInstanceID != identity.NextcloudInstanceID ||
++			connection.BindingID != identity.BindingID ||
++			connection.DatasourceBaseURL != identity.DatasourceBaseURL ||
++			connection.DatasourceConfigSHA256 != identity.DatasourceConfigSHA {
++			return ErrNextcloudEventScope
++		}
++		updates := map[string]any{
++			"current_key_id": keyID, "current_secret_ciphertext": ciphertext,
++			"previous_key_id": nil, "previous_secret_ciphertext": nil,
++			"previous_valid_until": nil, "updated_at": time.Now().UTC(),
++		}
++		if err := tx.Table("nextcloud_event_connections").
++			Where("connection_id = ? AND status = 'active'", connection.ConnectionID).
++			Updates(updates).Error; err != nil {
++			return fmt.Errorf("rotate Nextcloud event connection: %w", err)
++		}
++		result = NextcloudEventConnectionCredential{
++			ConnectionID:        connection.ConnectionID,
++			NextcloudInstanceID: connection.NextcloudInstanceID,
++			BindingID:           connection.BindingID, KeyID: keyID, Secret: secret,
++		}
++		return nil
++	})
++	if err != nil {
++		return NextcloudEventConnectionCredential{}, err
++	}
++	return result, nil
++}
++
++// Revoke remains possible after credentials or endpoint drift so a tenant
++// administrator can terminate a stale connection without contacting source.
++func (r *NextcloudEventInboxRepository) Revoke(ctx context.Context, tenantID uint64, datasourceID string) error {
++	if tenantID == 0 || datasourceID == "" {
++		return ErrNextcloudEventScope
++	}
++	result := r.db.WithContext(ctx).Table("nextcloud_event_connections").
++		Where("tenant_id = ? AND datasource_id = ? AND status = 'active'", tenantID, datasourceID).
++		Updates(map[string]any{
++			"status": "revoked", "previous_key_id": nil,
++			"previous_secret_ciphertext": nil, "previous_valid_until": nil,
++			"updated_at": time.Now().UTC(),
++		})
++	if result.Error != nil {
++		return fmt.Errorf("revoke Nextcloud event connection: %w", result.Error)
++	}
++	if result.RowsAffected != 1 {
++		return ErrNextcloudEventConnectionMissing
++	}
++	return nil
++}
++
++func checkNextcloudPairingSource(tx *gorm.DB, identity NextcloudEventPairingIdentity) error {
++	if identity.TenantID == 0 || identity.KnowledgeBaseID == "" || identity.DatasourceID == "" ||
++		identity.NextcloudInstanceID == "" || identity.BindingID == "" ||
++		identity.DatasourceBaseURL == "" || len(identity.DatasourceConfigSHA) != 64 {
++		return ErrNextcloudEventScope
++	}
++	// Source writers already use this KB row as the serialization point.
++	// SQLite needs an actual write before any reads; PostgreSQL uses the same
++	// no-op UPDATE as the writer to serialize with config edits/deletes.
++	lock := tx.Exec(`UPDATE knowledge_bases
++		SET ever_had_nextcloud_source = ever_had_nextcloud_source
++		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, identity.KnowledgeBaseID, identity.TenantID)
++	if lock.Error != nil {
++		return fmt.Errorf("lock Nextcloud pairing knowledge base: %w", lock.Error)
++	}
++	if lock.RowsAffected != 1 {
++		return ErrNextcloudEventScope
++	}
++	var kb types.KnowledgeBase
++	if err := tx.Where("id = ? AND tenant_id = ?", identity.KnowledgeBaseID, identity.TenantID).Take(&kb).Error; err != nil {
++		return ErrNextcloudEventScope
++	}
++	if !kb.EverHadNextcloudSource {
++		return ErrNextcloudEventScope
++	}
++	var ds types.DataSource
++	if err := tx.Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND type = ?",
++		identity.DatasourceID, identity.TenantID, identity.KnowledgeBaseID, types.ConnectorTypeNextcloud).
++		Take(&ds).Error; err != nil {
++		return ErrNextcloudEventScope
++	}
++	var otherSources int64
++	if err := tx.Unscoped().Model(&types.DataSource{}).
++		Where("knowledge_base_id = ? AND tenant_id = ? AND id <> ?",
++			identity.KnowledgeBaseID, identity.TenantID, identity.DatasourceID).
++		Count(&otherSources).Error; err != nil {
++		return fmt.Errorf("check dedicated Nextcloud pairing source: %w", err)
++	}
++	if otherSources != 0 {
++		return ErrNextcloudEventScope
++	}
++	baseURL, configSHA, bindingID, err := NextcloudEventDataSourceIdentity(ds.Config)
++	if err != nil || baseURL != identity.DatasourceBaseURL ||
++		configSHA != identity.DatasourceConfigSHA || bindingID != identity.BindingID {
++		return ErrNextcloudEventScope
++	}
++	return nil
 +}
 diff --git a/internal/application/repository/nextcloud_event_inbox.go b/internal/application/repository/nextcloud_event_inbox.go
 new file mode 100644
@@ -5499,7 +5824,7 @@ index 83fb0990..af50dbf7 100644
  }
  
 diff --git a/internal/container/container.go b/internal/container/container.go
-index c27d12d1..a36daedc 100644
+index c27d12d1..4f40a29b 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -34,6 +34,7 @@ import (
@@ -5532,15 +5857,16 @@ index c27d12d1..a36daedc 100644
  	must(container.Provide(repository.NewSyncLogRepository))
  	must(container.Provide(repository.NewWikiPageRepository))
  	must(container.Provide(repository.NewMemoryRepository))
-@@ -582,6 +591,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -582,6 +591,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Provide(handler.NewModelCredentialsHandler))
  	must(container.Provide(handler.NewWebSearchProviderCredentialsHandler))
  	must(container.Provide(handler.NewDataSourceCredentialsHandler))
 +	must(container.Provide(handler.NewNextcloudEventHandler))
++	must(container.Provide(handler.NewNextcloudEventConnectionHandler))
  	must(container.Invoke(handler.ConfigureDataSourceCredentialsGroupAccess))
  	must(container.Provide(handler.NewWebSearchHandler))
  	must(container.Provide(handler.NewWebSearchProviderHandler))
-@@ -1137,12 +1147,15 @@ func syncSequences(db *gorm.DB) {
+@@ -1137,12 +1148,15 @@ func syncSequences(db *gorm.DB) {
  // Returns:
  //   - Configured file service implementation
  //   - Error if initialization fails
@@ -5558,7 +5884,7 @@ index c27d12d1..a36daedc 100644
  }
  
  func initRawFileService(_ *config.Config) (interfaces.FileService, error) {
-@@ -1879,6 +1892,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
+@@ -1879,6 +1893,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
  	if err := registry.Register(gitlabConnector.NewConnector()); err != nil {
  		errs = errors.Join(errs, fmt.Errorf("register gitlab connector: %w", err))
  	}
@@ -6587,10 +6913,10 @@ index 00000000..c6eeac75
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
 new file mode 100644
-index 00000000..645395a4
+index 00000000..88aa8f67
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector.go
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,390 @@
 +// Package nextcloud imports files exposed by the integration_weknora Nextcloud app.
 +package nextcloud
 +
@@ -6616,29 +6942,56 @@ index 00000000..645395a4
 +
 +func (*Connector) Type() string { return types.ConnectorTypeNextcloud }
 +
-+func (*Connector) Validate(ctx context.Context, ds *types.DataSourceConfig) error {
++// PairingIdentity is the live Nextcloud identity behind a configured source.
++// It contains no machine credential and can be pinned to a committed data
++// source when provisioning an inbound event connection.
++type PairingIdentity struct {
++	InstanceID string
++	BindingID  string
++	BaseURL    string
++}
++
++// InspectPairing validates the selected binding against signed Nextcloud
++// capabilities and binding registry responses. Callers must separately check
++// the committed data source's tenant, knowledge base and config fingerprint.
++func InspectPairing(ctx context.Context, ds *types.DataSourceConfig) (PairingIdentity, error) {
++	if ds == nil || ds.Type != types.ConnectorTypeNextcloud {
++		return PairingIdentity{}, datasource.ErrInvalidConfig
++	}
 +	cfg, err := parseConfig(ds)
 +	if err != nil {
-+		return err
++		return PairingIdentity{}, err
 +	}
 +	selected, err := selectedBindings(ds.ResourceIDs)
 +	if err != nil {
-+		return err
++		return PairingIdentity{}, err
 +	}
 +	cli := newClient(cfg)
-+	if _, err := cli.capabilities(ctx); err != nil {
-+		return err
++	cap, err := cli.capabilities(ctx)
++	if err != nil {
++		return PairingIdentity{}, err
 +	}
 +	bindings, err := cli.bindings(ctx)
 +	if err != nil {
-+		return err
++		return PairingIdentity{}, err
 +	}
 +	for _, binding := range bindings {
 +		if binding.ID == selected[0] {
-+			return nil
++			baseURL := *cfg.baseURL
++			baseURL.Host = strings.ToLower(baseURL.Host)
++			return PairingIdentity{
++				InstanceID: cap.InstanceID,
++				BindingID:  binding.ID,
++				BaseURL:    baseURL.String(),
++			}, nil
 +		}
 +	}
-+	return fmt.Errorf("%w: selected Nextcloud binding is unavailable", datasource.ErrInvalidConfig)
++	return PairingIdentity{}, fmt.Errorf("%w: selected Nextcloud binding is unavailable", datasource.ErrInvalidConfig)
++}
++
++func (*Connector) Validate(ctx context.Context, ds *types.DataSourceConfig) error {
++	_, err := InspectPairing(ctx, ds)
++	return err
 +}
 +
 +func (*Connector) ListResources(ctx context.Context, ds *types.DataSourceConfig, parentID string) ([]types.Resource, error) {
@@ -6956,10 +7309,10 @@ index 00000000..645395a4
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
 new file mode 100644
-index 00000000..e3b21a48
+index 00000000..464c7e46
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_test.go
-@@ -0,0 +1,642 @@
+@@ -0,0 +1,692 @@
 +package nextcloud
 +
 +import (
@@ -7124,6 +7477,56 @@ index 00000000..e3b21a48
 +	cfg.ResourceIDs = []string{"other"}
 +	if err := connector.Validate(context.Background(), cfg); err == nil {
 +		t.Fatal("Validate accepted a binding absent from the source registry")
++	}
++}
++
++func TestInspectPairingReturnsLiveIdentity(t *testing.T) {
++	requests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests++
++		if r.Header.Get("Authorization") != "Bearer test-token" ||
++			r.Header.Get("X-WeKnora-Key-Id") != "default" ||
++			r.Header.Get("X-WeKnora-Nonce") == "" ||
++			r.Header.Get("X-WeKnora-Signature") == "" {
++			t.Error("pairing inspection did not sign the machine request")
++			http.Error(w, "unauthorized", http.StatusUnauthorized)
++			return
++		}
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-live"})
++		case apiPath + "/bindings":
++			writeJSON(w, map[string]interface{}{"bindings": []map[string]interface{}{{
++				"id": "dev-published", "name": "Published", "root_file_id": 7,
++			}}})
++		default:
++			t.Errorf("unexpected pairing inspection endpoint %q", r.URL.Path)
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	cfg := testConfig(t, server.URL)
++	cfg.Settings["base_url"] = server.URL + "/"
++	identity, err := InspectPairing(context.Background(), cfg)
++	if err != nil {
++		t.Fatalf("InspectPairing: %v", err)
++	}
++	if identity != (PairingIdentity{InstanceID: "instance-live", BindingID: "dev-published", BaseURL: server.URL}) {
++		t.Fatalf("InspectPairing identity = %+v", identity)
++	}
++	if requests != 2 {
++		t.Fatalf("pairing inspection sent %d requests, want 2", requests)
++	}
++
++	cfg.ResourceIDs = []string{"unpublished"}
++	if _, err := InspectPairing(context.Background(), cfg); err == nil {
++		t.Fatal("InspectPairing accepted a binding absent from the live registry")
++	}
++	requests = 0
++	cfg.Type = types.ConnectorTypeRSS
++	if _, err := InspectPairing(context.Background(), cfg); err == nil || requests != 0 {
++		t.Fatal("InspectPairing accepted a non-Nextcloud source")
 +	}
 +}
 +
@@ -8655,6 +9058,510 @@ index 991bcbc5..c09f455a 100644
  		return
  	}
  
+diff --git a/internal/handler/nextcloud_event_connections.go b/internal/handler/nextcloud_event_connections.go
+new file mode 100644
+index 00000000..a4e9b1fc
+--- /dev/null
++++ b/internal/handler/nextcloud_event_connections.go
+@@ -0,0 +1,200 @@
++package handler
++
++import (
++	"context"
++	"errors"
++	"net/http"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++)
++
++// NextcloudEventConnectionHandler is the administrator-facing provisioning
++// boundary. The unauthenticated event receiver only accepts connections that
++// have been committed through this boundary.
++type NextcloudEventConnectionHandler struct {
++	inbox      *repository.NextcloudEventInboxRepository
++	dataSource *DataSourceHandler
++	inspect    func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error)
++}
++
++func NewNextcloudEventConnectionHandler(
++	inbox *repository.NextcloudEventInboxRepository,
++	dataSource *DataSourceHandler,
++) *NextcloudEventConnectionHandler {
++	return &NextcloudEventConnectionHandler{
++		inbox: inbox, dataSource: dataSource, inspect: nextcloud.InspectPairing,
++	}
++}
++
++func (h *NextcloudEventConnectionHandler) authorize(c *gin.Context) (*types.DataSource, bool) {
++	c.Header("Cache-Control", "no-store")
++	if _, isAPIKey := types.TenantAPIKeyScopeFromContext(c.Request.Context()); isAPIKey {
++		c.JSON(http.StatusForbidden, gin.H{"error": "admin_session_required"})
++		return nil, false
++	}
++	// The rollout RBAC guard may be permissive on older tenants. Issuing an
++	// HMAC secret must still require an authenticated Admin+ context.
++	if !types.TenantRoleFromContext(c.Request.Context()).HasPermission(types.TenantRoleAdmin) {
++		c.JSON(http.StatusForbidden, gin.H{"error": "admin_required"})
++		return nil, false
++	}
++	tenantID := h.dataSource.getTenantID(c)
++	if tenantID == 0 {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		return nil, false
++	}
++	ds, status, message := h.dataSource.getOwnedDataSource(
++		c.Request.Context(), tenantID, c.Param("id"), types.ResourceActionEdit)
++	if status != http.StatusOK || ds == nil {
++		c.JSON(status, gin.H{"error": message})
++		return nil, false
++	}
++	if ds.Type != types.ConnectorTypeNextcloud {
++		c.JSON(http.StatusConflict, gin.H{"error": "nextcloud_source_required"})
++		return nil, false
++	}
++	return ds, true
++}
++
++func (h *NextcloudEventConnectionHandler) inspectCommitted(
++	c *gin.Context, ds *types.DataSource,
++) (repository.NextcloudEventPairingIdentity, bool) {
++	baseURL, hash, bindingID, err := repository.NextcloudEventDataSourceIdentity(ds.Config)
++	if err != nil {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_configuration_unavailable"})
++		return repository.NextcloudEventPairingIdentity{}, false
++	}
++	config, err := ds.ParseConfig()
++	if err != nil || config == nil {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_configuration_unavailable"})
++		return repository.NextcloudEventPairingIdentity{}, false
++	}
++	inspected, err := h.inspect(c.Request.Context(), config)
++	if err != nil {
++		c.JSON(http.StatusConflict, gin.H{"error": "nextcloud_binding_unavailable"})
++		return repository.NextcloudEventPairingIdentity{}, false
++	}
++	if inspected.BindingID != bindingID || inspected.BaseURL != baseURL ||
++		!validNextcloudOpaqueID(inspected.InstanceID, 1, 128) {
++		c.JSON(http.StatusConflict, gin.H{"error": "nextcloud_binding_mismatch"})
++		return repository.NextcloudEventPairingIdentity{}, false
++	}
++	return repository.NextcloudEventPairingIdentity{
++		TenantID: ds.TenantID, KnowledgeBaseID: ds.KnowledgeBaseID,
++		DatasourceID: ds.ID, NextcloudInstanceID: inspected.InstanceID,
++		BindingID: bindingID, DatasourceBaseURL: baseURL,
++		DatasourceConfigSHA: hash,
++	}, true
++}
++
++// Status lets an administrator recover from a lost one-time response: the
++// secret cannot be read back, so a lost secret must be rotated.
++func (h *NextcloudEventConnectionHandler) Status(c *gin.Context) {
++	ds, ok := h.authorize(c)
++	if !ok {
++		return
++	}
++	status, err := h.inbox.ConnectionStatus(c.Request.Context(), ds.TenantID, ds.ID)
++	if err != nil {
++		nextcloudConnectionError(c, err)
++		return
++	}
++	// An active row may have become unusable after an endpoint or credential
++	// edit. Surface that state without revealing or reissuing its secret.
++	if status.Status == "active" {
++		baseURL, configSHA, bindingID, identityErr := repository.NextcloudEventDataSourceIdentity(ds.Config)
++		if identityErr != nil || bindingID != status.BindingID ||
++			baseURL != status.DatasourceBaseURL || configSHA != status.DatasourceConfigSHA {
++			status.Status = "source_changed"
++		}
++	}
++	c.JSON(http.StatusOK, gin.H{
++		"connection_id":             status.ConnectionID,
++		"nextcloud_instance_id":     status.NextcloudInstanceID,
++		"binding_id":                status.BindingID,
++		"key_id":                    status.KeyID,
++		"status":                    status.Status,
++		"received_through_event_id": status.ReceivedThroughEventID,
++		"receiver_url":              nextcloudEventPath,
++	})
++}
++
++func nextcloudConnectionError(c *gin.Context, err error) {
++	switch {
++	case errors.Is(err, repository.ErrNextcloudEventConnectionExists):
++		c.JSON(http.StatusConflict, gin.H{"error": "connection_already_active"})
++	case errors.Is(err, repository.ErrNextcloudEventConnectionMissing):
++		c.JSON(http.StatusNotFound, gin.H{"error": "connection_not_active"})
++	case errors.Is(err, repository.ErrNextcloudEventScope):
++		c.JSON(http.StatusConflict, gin.H{"error": "source_changed_repair_required"})
++	default:
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "connection_unavailable"})
++	}
++}
++
++func nextcloudConnectionIssued(c *gin.Context, status int, credential repository.NextcloudEventConnectionCredential) {
++	c.JSON(status, gin.H{
++		"connection_id":         credential.ConnectionID,
++		"nextcloud_instance_id": credential.NextcloudInstanceID,
++		"binding_id":            credential.BindingID,
++		"key_id":                credential.KeyID,
++		"secret":                credential.Secret,
++		// An absolute path is stable behind the deployment's reverse proxy.
++		// The Nextcloud administrator resolves it against WeKnora's public
++		// origin; an untrusted Host/X-Forwarded-Host is never reflected here.
++		"receiver_url": nextcloudEventPath,
++		"status":       "active",
++	})
++}
++
++// Pair issues a one-time random secret for the verified live binding.
++func (h *NextcloudEventConnectionHandler) Pair(c *gin.Context) {
++	ds, ok := h.authorize(c)
++	if !ok {
++		return
++	}
++	identity, ok := h.inspectCommitted(c, ds)
++	if !ok {
++		return
++	}
++	credential, err := h.inbox.Pair(c.Request.Context(), identity)
++	if err != nil {
++		nextcloudConnectionError(c, err)
++		return
++	}
++	nextcloudConnectionIssued(c, http.StatusCreated, credential)
++}
++
++// Rotate invalidates the old signing key at transaction commit.
++func (h *NextcloudEventConnectionHandler) Rotate(c *gin.Context) {
++	ds, ok := h.authorize(c)
++	if !ok {
++		return
++	}
++	identity, ok := h.inspectCommitted(c, ds)
++	if !ok {
++		return
++	}
++	credential, err := h.inbox.Rotate(c.Request.Context(), identity)
++	if err != nil {
++		nextcloudConnectionError(c, err)
++		return
++	}
++	nextcloudConnectionIssued(c, http.StatusOK, credential)
++}
++
++// Revoke requires no live Nextcloud read, so it works after credential drift.
++func (h *NextcloudEventConnectionHandler) Revoke(c *gin.Context) {
++	ds, ok := h.authorize(c)
++	if !ok {
++		return
++	}
++	if err := h.inbox.Revoke(c.Request.Context(), ds.TenantID, ds.ID); err != nil {
++		nextcloudConnectionError(c, err)
++		return
++	}
++	c.Status(http.StatusNoContent)
++}
+diff --git a/internal/handler/nextcloud_event_connections_test.go b/internal/handler/nextcloud_event_connections_test.go
+new file mode 100644
+index 00000000..6353c948
+--- /dev/null
++++ b/internal/handler/nextcloud_event_connections_test.go
+@@ -0,0 +1,292 @@
++package handler
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++	"gorm.io/gorm/logger"
++)
++
++const testManagedEventPath = "/api/v1/datasource/ds-synthetic/nextcloud-event-connection"
++
++func setupManagedNextcloudConnection(t *testing.T) (*gorm.DB, *gin.Engine, *NextcloudEventConnectionHandler) {
++	t.Helper()
++	db, router, _ := setupNextcloudEventHTTPTest(t)
++	h := prepareManagedNextcloudConnection(t, db, router)
++	return db, router, h
++}
++
++func prepareManagedNextcloudConnection(t *testing.T, db *gorm.DB, router *gin.Engine) *NextcloudEventConnectionHandler {
++	t.Helper()
++	require.NoError(t, db.Exec(`ALTER TABLE knowledge_bases ADD COLUMN ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT FALSE`).Error)
++	require.NoError(t, db.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = TRUE`).Error)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_connections SET status = 'revoked'`).Error)
++	service := &stubDataSourceService{getDataSource: func(_ context.Context, id string) (*types.DataSource, error) {
++		var ds types.DataSource
++		if err := db.Where("id = ?", id).Take(&ds).Error; err != nil {
++			return nil, err
++		}
++		return &ds, nil
++	}}
++	kbService := &stubKBServiceForDS{getByID: func(_ context.Context, id string) (*types.KnowledgeBase, error) {
++		var kb types.KnowledgeBase
++		if err := db.Where("id = ?", id).Take(&kb).Error; err != nil {
++			return nil, err
++		}
++		return &kb, nil
++	}}
++	h := NewNextcloudEventConnectionHandler(repository.NewNextcloudEventInboxRepository(db), NewDataSourceHandler(service, kbService))
++	h.inspect = func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error) {
++		return nextcloud.PairingIdentity{InstanceID: testEventInstance, BindingID: testEventBinding, BaseURL: "https://nextcloud.example.test"}, nil
++	}
++	router.Use(func(c *gin.Context) {
++		if tenantID, ok := c.Request.Context().Value(types.TenantIDContextKey).(uint64); ok {
++			c.Set(types.TenantIDContextKey.String(), tenantID)
++		}
++		c.Next()
++	})
++	router.POST("/api/v1/datasource/:id/nextcloud-event-connection", h.Pair)
++	router.GET("/api/v1/datasource/:id/nextcloud-event-connection", h.Status)
++	router.POST("/api/v1/datasource/:id/nextcloud-event-connection/rotate", h.Rotate)
++	router.DELETE("/api/v1/datasource/:id/nextcloud-event-connection", h.Revoke)
++	return h
++}
++
++func managedConnectionRequest(router *gin.Engine, method, path string, tenantID uint64, role types.TenantRole) *httptest.ResponseRecorder {
++	req := httptest.NewRequest(method, path, nil)
++	ctx := context.WithValue(req.Context(), types.TenantIDContextKey, tenantID)
++	ctx = context.WithValue(ctx, types.TenantRoleContextKey, role)
++	req = req.WithContext(ctx)
++	response := httptest.NewRecorder()
++	router.ServeHTTP(response, req)
++	return response
++}
++
++func issuedEventCredential(t *testing.T, response *httptest.ResponseRecorder) repository.NextcloudEventConnectionCredential {
++	t.Helper()
++	var payload struct {
++		repository.NextcloudEventConnectionCredential
++		ReceiverURL string `json:"receiver_url"`
++	}
++	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &payload))
++	require.Equal(t, nextcloudEventPath, payload.ReceiverURL)
++	require.Equal(t, testEventInstance, payload.NextcloudInstanceID)
++	require.Equal(t, testEventBinding, payload.BindingID)
++	require.Len(t, payload.Secret, 43)
++	return payload.NextcloudEventConnectionCredential
++}
++
++func TestNextcloudEventConnectionPairRotateRevoke(t *testing.T) {
++	db, router, _ := setupManagedNextcloudConnection(t)
++	denied := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleViewer)
++	require.Equal(t, http.StatusForbidden, denied.Code, denied.Body.String())
++	denied = managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 8, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusForbidden, denied.Code, denied.Body.String())
++	apiKeyRequest := httptest.NewRequest(http.MethodPost, testManagedEventPath, nil)
++	apiKeyContext := context.WithValue(apiKeyRequest.Context(), types.TenantIDContextKey, uint64(7))
++	apiKeyContext = context.WithValue(apiKeyContext, types.TenantRoleContextKey, types.TenantRoleOwner)
++	apiKeyContext = types.WithTenantAPIKeyScope(apiKeyContext, types.TenantAPIKeyScope{FullAccess: true})
++	denied = postNextcloudEvent(router, apiKeyRequest.WithContext(apiKeyContext))
++	require.Equal(t, http.StatusForbidden, denied.Code, denied.Body.String())
++	var count int64
++	require.NoError(t, db.Table("nextcloud_event_connections").Where("status = 'active'").Count(&count).Error)
++	require.Zero(t, count)
++
++	paired := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusCreated, paired.Code, paired.Body.String())
++	first := issuedEventCredential(t, paired)
++	for _, operation := range []struct{ method, path string }{
++		{http.MethodGet, testManagedEventPath},
++		{http.MethodPost, testManagedEventPath + "/rotate"},
++		{http.MethodDelete, testManagedEventPath},
++	} {
++		viewer := managedConnectionRequest(router, operation.method, operation.path, 7, types.TenantRoleViewer)
++		require.Equal(t, http.StatusForbidden, viewer.Code, viewer.Body.String())
++	}
++	require.NotContains(t, paired.Body.String(), "enc:v1:")
++	var ciphertext string
++	require.NoError(t, db.Raw(`SELECT current_secret_ciphertext FROM nextcloud_event_connections WHERE connection_id = ?`, first.ConnectionID).Scan(&ciphertext).Error)
++	require.True(t, strings.HasPrefix(ciphertext, utils.EncPrefix))
++	require.NotContains(t, ciphertext, first.Secret)
++	plaintext, err := utils.DecryptStoredSecret(ciphertext)
++	require.NoError(t, err)
++	require.Equal(t, first.Secret, plaintext)
++	status := managedConnectionRequest(router, http.MethodGet, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, status.Code, status.Body.String())
++	require.Contains(t, status.Body.String(), `"received_through_event_id":"0"`)
++	require.NotContains(t, status.Body.String(), `"secret"`)
++	require.NotContains(t, status.Body.String(), first.Secret)
++	repeat := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusConflict, repeat.Code, repeat.Body.String())
++	require.NotContains(t, repeat.Body.String(), first.Secret)
++
++	batch := sampleNextcloudEventBatch("0", "1")
++	batch.ConnectionID = first.ConnectionID
++	response := postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, strings.Repeat("a", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++	rotated := managedConnectionRequest(router, http.MethodPost, testManagedEventPath+"/rotate", 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
++	second := issuedEventCredential(t, rotated)
++	require.Equal(t, first.ConnectionID, second.ConnectionID)
++	require.NotEqual(t, first.KeyID, second.KeyID)
++	require.NotEqual(t, first.Secret, second.Secret)
++	batch = sampleNextcloudEventBatch("1", "2")
++	batch.ConnectionID = first.ConnectionID
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, strings.Repeat("b", 32)))
++	require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("c", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++
++	revoked := managedConnectionRequest(router, http.MethodDelete, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusNoContent, revoked.Code, revoked.Body.String())
++	batch = sampleNextcloudEventBatch("2", "3")
++	batch.ConnectionID = first.ConnectionID
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("d", 32)))
++	require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
++	newPair := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusCreated, newPair.Code, newPair.Body.String())
++	require.NotEqual(t, first.ConnectionID, issuedEventCredential(t, newPair).ConnectionID)
++}
++
++func TestNextcloudEventConnectionRejectsWrongBindingAndChangedSource(t *testing.T) {
++	t.Run("wrong live binding", func(t *testing.T) {
++		db, router, h := setupManagedNextcloudConnection(t)
++		h.inspect = func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error) {
++			return nextcloud.PairingIdentity{InstanceID: testEventInstance, BindingID: "different-binding", BaseURL: "https://nextcloud.example.test"}, nil
++		}
++		response := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++		require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
++		var count int64
++		require.NoError(t, db.Table("nextcloud_event_connections").Where("status = 'active'").Count(&count).Error)
++		require.Zero(t, count)
++	})
++	for _, change := range []struct {
++		name string
++		url  string
++		cred bool
++	}{
++		{"endpoint edit", "https://changed.example.test", true},
++		{"credential clear", "https://nextcloud.example.test", false},
++		{"credential reprovision", "https://nextcloud.example.test", true},
++	} {
++		t.Run(change.name, func(t *testing.T) {
++			db, router, h := setupManagedNextcloudConnection(t)
++			h.inspect = func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error) {
++				config := syntheticNextcloudEventDataSourceConfig(t, change.url, change.cred)
++				require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`, string(config), "ds-synthetic").Error)
++				return nextcloud.PairingIdentity{InstanceID: testEventInstance, BindingID: testEventBinding, BaseURL: "https://nextcloud.example.test"}, nil
++			}
++			response := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++			require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
++			var count int64
++			require.NoError(t, db.Table("nextcloud_event_connections").Where("status = 'active'").Count(&count).Error)
++			require.Zero(t, count)
++		})
++	}
++	for _, invalid := range []string{"marker", "other source"} {
++		t.Run(invalid, func(t *testing.T) {
++			db, router, _ := setupManagedNextcloudConnection(t)
++			if invalid == "marker" {
++				require.NoError(t, db.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = FALSE`).Error)
++			} else {
++				require.NoError(t, db.Exec(`INSERT INTO data_sources
++					(id, tenant_id, knowledge_base_id, type, config, deleted_at)
++					VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, "other-source", 7, "kb-synthetic", "rss", "{}").Error)
++			}
++			response := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++			require.Equal(t, http.StatusConflict, response.Code, fmt.Sprintf("%s: %s", invalid, response.Body.String()))
++		})
++	}
++}
++
++func TestNextcloudEventConnectionRevocationSurvivesCredentialDrift(t *testing.T) {
++	db, router, _ := setupManagedNextcloudConnection(t)
++	paired := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusCreated, paired.Code, paired.Body.String())
++	credential := issuedEventCredential(t, paired)
++	reprovisioned := syntheticNextcloudEventDataSourceConfig(t, "https://nextcloud.example.test", true)
++	require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`, string(reprovisioned), "ds-synthetic").Error)
++	rotation := managedConnectionRequest(router, http.MethodPost, testManagedEventPath+"/rotate", 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusConflict, rotation.Code, rotation.Body.String())
++	config := syntheticNextcloudEventDataSourceConfig(t, "https://changed.example.test", false)
++	require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`, string(config), "ds-synthetic").Error)
++	status := managedConnectionRequest(router, http.MethodGet, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, status.Code, status.Body.String())
++	require.Contains(t, status.Body.String(), `"status":"source_changed"`)
++	require.NotContains(t, status.Body.String(), credential.Secret)
++	rotation = managedConnectionRequest(router, http.MethodPost, testManagedEventPath+"/rotate", 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusConflict, rotation.Code, rotation.Body.String())
++	revoked := managedConnectionRequest(router, http.MethodDelete, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusNoContent, revoked.Code, revoked.Body.String())
++	batch := sampleNextcloudEventBatch("0", "1")
++	batch.ConnectionID = credential.ConnectionID
++	response := postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, credential.Secret, credential.KeyID, batch, strings.Repeat("e", 32)))
++	require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
++}
++
++func TestNextcloudEventConnectionPostgresLifecycle(t *testing.T) {
++	dsn := os.Getenv("NEXTCLOUD_EVENT_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set NEXTCLOUD_EVENT_TEST_POSTGRES_DSN for isolated PostgreSQL connection lifecycle test")
++	}
++	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++	if err != nil {
++		t.Fatal("connect isolated PostgreSQL event test database failed")
++	}
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	random := make([]byte, 6)
++	_, err = rand.Read(random)
++	require.NoError(t, err)
++	schema := "nextcloud_event_pair_test_" + hex.EncodeToString(random)
++	require.NoError(t, db.Exec("CREATE SCHEMA "+schema).Error)
++	t.Cleanup(func() { _ = db.Exec("DROP SCHEMA " + schema + " CASCADE").Error })
++	require.NoError(t, db.Exec("SET search_path TO "+schema).Error)
++	db, router, _ := prepareNextcloudEventHTTPTest(t, db,
++		"../../migrations/versioned/000113_nextcloud_event_inbox.up.sql")
++	prepareManagedNextcloudConnection(t, db, router)
++
++	paired := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusCreated, paired.Code, paired.Body.String())
++	first := issuedEventCredential(t, paired)
++	repeat := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusConflict, repeat.Code, repeat.Body.String())
++	rotated := managedConnectionRequest(router, http.MethodPost, testManagedEventPath+"/rotate", 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
++	second := issuedEventCredential(t, rotated)
++	require.Equal(t, first.ConnectionID, second.ConnectionID)
++	require.NotEqual(t, first.KeyID, second.KeyID)
++	batch := sampleNextcloudEventBatch("0", "101")
++	batch.ConnectionID = second.ConnectionID
++	require.Equal(t, http.StatusUnauthorized, postNextcloudEvent(router,
++		signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, strings.Repeat("1", 32))).Code)
++	require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
++		signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("2", 32))).Code)
++	status := managedConnectionRequest(router, http.MethodGet, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, status.Code, status.Body.String())
++	require.Contains(t, status.Body.String(), `"received_through_event_id":"101"`)
++	require.NotContains(t, status.Body.String(), second.Secret)
++	revoked := managedConnectionRequest(router, http.MethodDelete, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusNoContent, revoked.Code, revoked.Body.String())
++	newPair := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusCreated, newPair.Code, newPair.Body.String())
++	require.NotEqual(t, first.ConnectionID, issuedEventCredential(t, newPair).ConnectionID)
++}
 diff --git a/internal/handler/nextcloud_events.go b/internal/handler/nextcloud_events.go
 new file mode 100644
 index 00000000..f2df39a6
@@ -10651,7 +11558,7 @@ index bd4744b6..878ac2a4 100644
  			backendID, provider := parseStorageTarget(filePath)
  			fileSvc, resolvedProvider, err := resolveFileService(ctx, tenant, backendID, provider, absDir, storageResolver)
 diff --git a/internal/router/router.go b/internal/router/router.go
-index b5c85dfc..3115872c 100644
+index b5c85dfc..2d18ba4a 100644
 --- a/internal/router/router.go
 +++ b/internal/router/router.go
 @@ -13,6 +13,7 @@ import (
@@ -10662,23 +11569,148 @@ index b5c85dfc..3115872c 100644
  	"github.com/Tencent/WeKnora/internal/config"
  	"github.com/Tencent/WeKnora/internal/handler"
  	"github.com/Tencent/WeKnora/internal/handler/session"
-@@ -48,6 +49,7 @@ type RouterParams struct {
- 	TenantAPIKeyService          interfaces.TenantAPIKeyService
- 	TenantMemberService          interfaces.TenantMemberService
- 	GroupAccessService           interfaces.GroupAccessService
-+	NextcloudPublicationGuard    *access.NextcloudPublicationGuard
- 	TenantMemberHandler          *handler.TenantMemberHandler
- 	TenantInvitationHandler      *handler.TenantInvitationHandler
- 	AuditLogHandler              *handler.AuditLogHandler
-@@ -92,6 +94,7 @@ type RouterParams struct {
- 	RedisClient                  *redis.Client
- 	DataSourceHandler            *handler.DataSourceHandler
- 	DataSourceCredentialsHandler *handler.DataSourceCredentialsHandler
-+	NextcloudEventHandler        *handler.NextcloudEventHandler
- 	WeKnoraCloudHandler          *handler.WeKnoraCloudHandler
- 	WikiPageHandler              *handler.WikiPageHandler
- 	MemoryHandler                *handler.MemoryHandler
-@@ -101,6 +104,8 @@ type RouterParams struct {
+@@ -29,78 +30,83 @@ import (
+ type RouterParams struct {
+ 	dig.In
+ 
+-	Config                       *config.Config
+-	FileService                  interfaces.FileService
+-	UserService                  interfaces.UserService
+-	KBService                    interfaces.KnowledgeBaseService
+-	KnowledgeService             interfaces.KnowledgeService
+-	ChunkService                 interfaces.ChunkService
+-	SessionService               interfaces.SessionService
+-	MessageService               interfaces.MessageService
+-	ModelService                 interfaces.ModelService
+-	EvaluationService            interfaces.EvaluationService
+-	KBShareService               interfaces.KBShareService
+-	AgentShareService            interfaces.AgentShareService
+-	KBHandler                    *handler.KnowledgeBaseHandler
+-	KnowledgeHandler             *handler.KnowledgeHandler
+-	TenantHandler                *handler.TenantHandler
+-	TenantService                interfaces.TenantService
+-	TenantAPIKeyService          interfaces.TenantAPIKeyService
+-	TenantMemberService          interfaces.TenantMemberService
+-	GroupAccessService           interfaces.GroupAccessService
+-	TenantMemberHandler          *handler.TenantMemberHandler
+-	TenantInvitationHandler      *handler.TenantInvitationHandler
+-	AuditLogHandler              *handler.AuditLogHandler
+-	AuditLogService              interfaces.AuditLogService
+-	ChunkHandler                 *handler.ChunkHandler
+-	SessionHandler               *session.Handler
+-	MessageHandler               *handler.MessageHandler
+-	MessageSuggestionHandler     *handler.MessageSuggestionHandler
+-	ModelHandler                 *handler.ModelHandler
+-	ModelCredentialsHandler      *handler.ModelCredentialsHandler
+-	SandboxConfigHandler         *handler.SandboxConfigHandler
+-	SandboxSkillHandler          *handler.SandboxSkillHandler
+-	MeEnvVarHandler              *handler.MeEnvVarHandler
+-	EvaluationHandler            *handler.EvaluationHandler
+-	AuthHandler                  *handler.AuthHandler
+-	DirectoryHandler             *handler.DirectoryHandler
+-	GroupAccessHandler           *handler.GroupAccessHandler
+-	InitializationHandler        *handler.InitializationHandler
+-	SystemHandler                *handler.SystemHandler
+-	MCPServiceHandler            *handler.MCPServiceHandler
+-	MCPCredentialsHandler        *handler.MCPCredentialsHandler
+-	MCPOAuthHandler              *handler.MCPOAuthHandler
+-	WebSearchHandler             *handler.WebSearchHandler
+-	WebSearchProviderHandler     *handler.WebSearchProviderHandler
+-	WebSearchCredentialsHandler  *handler.WebSearchProviderCredentialsHandler
+-	VectorStoreHandler           *handler.VectorStoreHandler
+-	StorageBackendHandler        *handler.StorageBackendHandler
+-	StorageBackendResolver       interfaces.StorageBackendResolver
+-	ResourceCatalog              interfaces.ResourceCatalog
+-	FAQHandler                   *handler.FAQHandler
+-	TagHandler                   *handler.TagHandler
+-	CustomAgentHandler           *handler.CustomAgentHandler
+-	UserFavoriteHandler          *handler.UserResourceFavoriteHandler
+-	SkillHandler                 *handler.SkillHandler
+-	OrganizationHandler          *handler.OrganizationHandler
+-	IMHandler                    *handler.IMHandler
+-	EmbedChannelHandler          *handler.EmbedChannelHandler
+-	EmbedChannelService          interfaces.EmbedChannelService
+-	MCPEndpointHandler           *handler.MCPEndpointHandler
+-	MCPEndpointService           interfaces.MCPEndpointService
+-	MCPServer                    *mcpserver.Server
+-	RedisClient                  *redis.Client
+-	DataSourceHandler            *handler.DataSourceHandler
+-	DataSourceCredentialsHandler *handler.DataSourceCredentialsHandler
+-	WeKnoraCloudHandler          *handler.WeKnoraCloudHandler
+-	WikiPageHandler              *handler.WikiPageHandler
+-	MemoryHandler                *handler.MemoryHandler
++	Config                          *config.Config
++	FileService                     interfaces.FileService
++	UserService                     interfaces.UserService
++	KBService                       interfaces.KnowledgeBaseService
++	KnowledgeService                interfaces.KnowledgeService
++	ChunkService                    interfaces.ChunkService
++	SessionService                  interfaces.SessionService
++	MessageService                  interfaces.MessageService
++	ModelService                    interfaces.ModelService
++	EvaluationService               interfaces.EvaluationService
++	KBShareService                  interfaces.KBShareService
++	AgentShareService               interfaces.AgentShareService
++	KBHandler                       *handler.KnowledgeBaseHandler
++	KnowledgeHandler                *handler.KnowledgeHandler
++	TenantHandler                   *handler.TenantHandler
++	TenantService                   interfaces.TenantService
++	TenantAPIKeyService             interfaces.TenantAPIKeyService
++	TenantMemberService             interfaces.TenantMemberService
++	GroupAccessService              interfaces.GroupAccessService
++	NextcloudPublicationGuard       *access.NextcloudPublicationGuard
++	TenantMemberHandler             *handler.TenantMemberHandler
++	TenantInvitationHandler         *handler.TenantInvitationHandler
++	AuditLogHandler                 *handler.AuditLogHandler
++	AuditLogService                 interfaces.AuditLogService
++	ChunkHandler                    *handler.ChunkHandler
++	SessionHandler                  *session.Handler
++	MessageHandler                  *handler.MessageHandler
++	MessageSuggestionHandler        *handler.MessageSuggestionHandler
++	ModelHandler                    *handler.ModelHandler
++	ModelCredentialsHandler         *handler.ModelCredentialsHandler
++	SandboxConfigHandler            *handler.SandboxConfigHandler
++	SandboxSkillHandler             *handler.SandboxSkillHandler
++	MeEnvVarHandler                 *handler.MeEnvVarHandler
++	EvaluationHandler               *handler.EvaluationHandler
++	AuthHandler                     *handler.AuthHandler
++	DirectoryHandler                *handler.DirectoryHandler
++	GroupAccessHandler              *handler.GroupAccessHandler
++	InitializationHandler           *handler.InitializationHandler
++	SystemHandler                   *handler.SystemHandler
++	MCPServiceHandler               *handler.MCPServiceHandler
++	MCPCredentialsHandler           *handler.MCPCredentialsHandler
++	MCPOAuthHandler                 *handler.MCPOAuthHandler
++	WebSearchHandler                *handler.WebSearchHandler
++	WebSearchProviderHandler        *handler.WebSearchProviderHandler
++	WebSearchCredentialsHandler     *handler.WebSearchProviderCredentialsHandler
++	VectorStoreHandler              *handler.VectorStoreHandler
++	StorageBackendHandler           *handler.StorageBackendHandler
++	StorageBackendResolver          interfaces.StorageBackendResolver
++	ResourceCatalog                 interfaces.ResourceCatalog
++	FAQHandler                      *handler.FAQHandler
++	TagHandler                      *handler.TagHandler
++	CustomAgentHandler              *handler.CustomAgentHandler
++	UserFavoriteHandler             *handler.UserResourceFavoriteHandler
++	SkillHandler                    *handler.SkillHandler
++	OrganizationHandler             *handler.OrganizationHandler
++	IMHandler                       *handler.IMHandler
++	EmbedChannelHandler             *handler.EmbedChannelHandler
++	EmbedChannelService             interfaces.EmbedChannelService
++	MCPEndpointHandler              *handler.MCPEndpointHandler
++	MCPEndpointService              interfaces.MCPEndpointService
++	MCPServer                       *mcpserver.Server
++	RedisClient                     *redis.Client
++	DataSourceHandler               *handler.DataSourceHandler
++	DataSourceCredentialsHandler    *handler.DataSourceCredentialsHandler
++	NextcloudEventHandler           *handler.NextcloudEventHandler
++	NextcloudEventConnectionHandler *handler.NextcloudEventConnectionHandler
++	WeKnoraCloudHandler             *handler.WeKnoraCloudHandler
++	WikiPageHandler                 *handler.WikiPageHandler
++	MemoryHandler                   *handler.MemoryHandler
+ }
+ 
+ // NewRouter 创建新的路由
  func NewRouter(params RouterParams) *gin.Engine {
  	r := gin.New()
  	r.ContextWithFallback = true
@@ -10687,7 +11719,7 @@ index b5c85dfc..3115872c 100644
  
  	// Trusted proxies: gin defaults to trusting ALL proxies, which makes
  	// c.ClientIP() honor a client-supplied X-Forwarded-For. Public, unauthed
-@@ -172,6 +177,11 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -172,6 +178,11 @@ func NewRouter(params RouterParams) *gin.Engine {
  
  	// IM 回调路由（在认证中间件之前注册，使用各平台自身的签名验证）
  	RegisterIMRoutes(r, params.IMHandler)
@@ -10699,7 +11731,7 @@ index b5c85dfc..3115872c 100644
  
  	// Web embed 公开路由（使用 publish token 鉴权，不走全局 Auth）
  	RegisterEmbedPublicRoutes(
-@@ -184,6 +194,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -184,6 +195,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.GroupAccessService,
  		params.ChunkService,
@@ -10707,7 +11739,7 @@ index b5c85dfc..3115872c 100644
  		params.ResourceCatalog,
  	)
  
-@@ -200,6 +211,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -200,6 +212,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.FileService,
  		params.StorageBackendResolver,
  		params.GroupAccessService,
@@ -10715,7 +11747,7 @@ index b5c85dfc..3115872c 100644
  	)
  
  	// Sandbox terminal WebSocket (self-authenticated via a short-lived
-@@ -216,7 +228,8 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -216,7 +229,8 @@ func NewRouter(params RouterParams) *gin.Engine {
  	r.Use(middleware.Auth(params.TenantService, params.UserService, params.TenantMemberService, params.TenantAPIKeyService, params.Config, params.GroupAccessService))
  
  	// 文件服务：统一代理本地/MinIO/COS/TOS存储后端（需要认证）
@@ -10725,7 +11757,7 @@ index b5c85dfc..3115872c 100644
  
  	// Presigned file access: no auth required, signature-verified.
  	servePresignedFiles(
-@@ -225,10 +238,12 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -225,10 +239,12 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.ResourceCatalog,
  		params.GroupAccessService,
@@ -10739,7 +11771,7 @@ index b5c85dfc..3115872c 100644
  
  	// Langfuse observability — only active when LANGFUSE_* env vars are set.
  	// The middleware is registered unconditionally; when disabled it's a no-op.
-@@ -292,13 +307,14 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -292,13 +308,14 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// KB-scoped image proxy: lets tenants render images embedded in
  		// org-shared / agent-visible KB content, which the tenant-scoped
  		// /files route cannot serve because it enforces same-tenant paths.
@@ -10755,7 +11787,7 @@ index b5c85dfc..3115872c 100644
  		)
  		// Message-scoped image proxy: shared-agent replies belong to the
  		// caller's session but may reference resources stored in the agent's
-@@ -306,7 +322,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -306,7 +323,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// never from a client-provided workspace ID. Replies produced by the
  		// caller's own agent over an org-shared KB fall back to the KB share
  		// relation instead (#3022).
@@ -10764,7 +11796,7 @@ index b5c85dfc..3115872c 100644
  			v1,
  			rbacGuards,
  			params.MessageService,
-@@ -319,6 +335,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -319,6 +336,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  			params.KBService,
  			params.KnowledgeService,
  			params.GroupAccessService,
@@ -10772,6 +11804,55 @@ index b5c85dfc..3115872c 100644
  		)
  		RegisterKnowledgeTagRoutes(v1, params.TagHandler, rbacGuards)
  		RegisterKnowledgeRoutes(v1, params.KnowledgeHandler, rbacGuards)
+@@ -355,6 +373,9 @@ func NewRouter(params RouterParams) *gin.Engine {
+ 		RegisterEmbedChannelRoutes(v1, params.EmbedChannelHandler, rbacGuards)
+ 		RegisterMCPEndpointRoutes(v1, params.MCPEndpointHandler, rbacGuards)
+ 		RegisterDataSourceRoutes(v1, params.DataSourceHandler, params.DataSourceCredentialsHandler, rbacGuards)
++		if params.NextcloudEventConnectionHandler != nil {
++			RegisterNextcloudEventConnectionRoutes(v1, params.NextcloudEventConnectionHandler, rbacGuards)
++		}
+ 		RegisterWeKnoraCloudRoutes(v1, params.WeKnoraCloudHandler, rbacGuards)
+ 		RegisterWikiPageRoutes(v1, params.WikiPageHandler, rbacGuards)
+ 		RegisterMemoryRoutes(v1, params.MemoryHandler, rbacGuards)
+diff --git a/internal/router/router_api_key_capabilities_test.go b/internal/router/router_api_key_capabilities_test.go
+index 713a0b5d..7d96e1da 100644
+--- a/internal/router/router_api_key_capabilities_test.go
++++ b/internal/router/router_api_key_capabilities_test.go
+@@ -391,6 +391,34 @@ func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
+ 	}
+ }
+ 
++func TestNextcloudEventConnectionRoutesRequireHumanAdminSession(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	r := gin.New()
++	g := &rbacGuards{apiKeyAuthorizer: middleware.NewAPIKeyRouteAuthorizer()}
++	RegisterNextcloudEventConnectionRoutes(r.Group("/api/v1"), &handler.NextcloudEventConnectionHandler{}, g)
++	g.assertAPIKeyPoliciesMatchRoutes(r)
++	for _, item := range []struct{ method, path string }{
++		{http.MethodGet, "/api/v1/datasource/:id/nextcloud-event-connection"},
++		{http.MethodPost, "/api/v1/datasource/:id/nextcloud-event-connection"},
++		{http.MethodPost, "/api/v1/datasource/:id/nextcloud-event-connection/rotate"},
++		{http.MethodDelete, "/api/v1/datasource/:id/nextcloud-event-connection"},
++	} {
++		if _, ok := g.apiKeyAuthorizer.Lookup(item.method, item.path); ok {
++			t.Fatalf("API key policy unexpectedly grants %s %s", item.method, item.path)
++		}
++		found := false
++		for _, route := range r.Routes() {
++			if route.Method == item.method && route.Path == item.path {
++				found = true
++				break
++			}
++		}
++		if !found {
++			t.Fatalf("missing route %s %s", item.method, item.path)
++		}
++	}
++}
++
+ func TestSandboxConfigRoutesRequireFullAccessOnly(t *testing.T) {
+ 	gin.SetMode(gin.TestMode)
+ 	g := &rbacGuards{}
 diff --git a/internal/router/router_files_nextcloud_test.go b/internal/router/router_files_nextcloud_test.go
 new file mode 100644
 index 00000000..2311e414
@@ -11075,6 +12156,32 @@ index 6ea042b1..5dd1097c 100644
  		))
  	}
  }
+diff --git a/internal/router/routes_infra.go b/internal/router/routes_infra.go
+index 4fb5c4b9..35c22648 100644
+--- a/internal/router/routes_infra.go
++++ b/internal/router/routes_infra.go
+@@ -335,6 +335,21 @@ func RegisterDataSourceRoutes(
+ 	}
+ }
+ 
++// Event connection secrets are tenant infrastructure credentials. These
++// administrator-only routes do not declare API-key access; the global API-key
++// gate denies them, and the handler enforces Admin+ during RBAC rollout.
++func RegisterNextcloudEventConnectionRoutes(
++	r *gin.RouterGroup,
++	h *handler.NextcloudEventConnectionHandler,
++	g *rbacGuards,
++) {
++	ds := r.Group("/datasource")
++	ds.GET("/:id/nextcloud-event-connection", g.Admin(), h.Status)
++	ds.POST("/:id/nextcloud-event-connection", g.Admin(), h.Pair)
++	ds.POST("/:id/nextcloud-event-connection/rotate", g.Admin(), h.Rotate)
++	ds.DELETE("/:id/nextcloud-event-connection", g.Admin(), h.Revoke)
++}
++
+ // RegisterWeKnoraCloudRoutes 注册 WeKnoraCloud 初始化路由
+ // RegisterWeKnoraCloudRoutes registers the WeKnoraCloud credential
+ // management endpoints. SaveCredentials persists external SaaS keys
 diff --git a/internal/types/datasource.go b/internal/types/datasource.go
 index 5130b931..22c25356 100644
 --- a/internal/types/datasource.go
