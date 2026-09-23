@@ -89,7 +89,11 @@ start_database() {
   created_containers+=("$name")
   local attempt
   for attempt in {1..60}; do
-    if docker exec "$name" pg_isready -U drill -d postgres >/dev/null 2>&1; then
+    # The official image starts a temporary server while initializing a fresh
+    # volume, then stops it before starting the final server. pg_isready alone
+    # can observe that temporary server and let createdb race the shutdown.
+    if docker logs "$name" 2>&1 | grep -Fq 'PostgreSQL init process complete' &&
+       docker exec "$name" psql -U drill -d postgres -Atqc 'SELECT 1' 2>/dev/null | grep -Fxq 1; then
       return 0
     fi
     sleep 1
