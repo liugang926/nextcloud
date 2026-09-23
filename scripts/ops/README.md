@@ -106,7 +106,9 @@ document is indexed or satisfy the AD acceptance gate.
 With both local stacks healthy, Nextcloud app 0.4.15 installed, and a new
 synthetic data source actively source-paired as above, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
-WeKnora administrator credentials and run:
+WeKnora administrator credentials. The probe requires that neither side has
+an active event connection. For the default `dev-published` binding and local
+ports, run:
 
 ```sh
 python3 scripts/ops/local-event-pipeline-smoke.py --data-source-id YOUR_SYNTHETIC_NEXTCLOUD_DATASOURCE_UUID
@@ -133,10 +135,33 @@ denied by the patched WeKnora event receiver and cannot run this probe.
 With `--expect-dispatch`, the probe polls the WeKnora connection status for up
 to 120 seconds before cleaning up its temporary connection. It requires the
 `dispatched_through_event_id` checkpoint to include the temporary file event,
-which advances only after queue acceptance, and requires
-`applied_through_event_id` to remain `0`. A timeout reports the received and
+which advances only after queue acceptance. A timeout reports the received and
 dispatched IDs, dispatch state, and last error code. Queue acceptance still
 does **not** prove that the source sync, parsing, or indexing succeeded.
+
+For an isolated binding and a WeKnora stack published on another loopback
+port, point the script at the existing binding root and container receiver:
+
+```sh
+python3 scripts/ops/local-event-pipeline-smoke.py \
+  --data-source-id YOUR_PAIRED_DATASOURCE_UUID \
+  --binding YOUR_SYNTHETIC_BINDING_ID \
+  --dav-folder-url http://127.0.0.1:18082/remote.php/dav/files/devadmin/YOUR_SYNTHETIC_BINDING_ID \
+  --weknora-base-url http://127.0.0.1:18086 \
+  --receiver-origin http://wkprobe-app:8080 \
+  --expect-applied
+```
+
+The Nextcloud development stack must allow the exact receiver origin in
+`WEKNORA_EVENT_ALLOWED_ORIGINS` and enable `WEKNORA_EVENT_DEV_HTTP=1`.
+`--expect-applied` waits for both WeKnora's applied watermark and Nextcloud's
+separately verified signed applied watermark to reach at least the probe event
+ID. It also delivers the temporary file's cleanup delete and waits for both
+applied watermarks to cover that delete before revoking only the connections it
+created. It does not assume either watermark begins at zero. A timeout reports
+checkpoint IDs and Nextcloud's bounded applied error code. `--compose-directory`
+and `--env-file` may point at the running Nextcloud checkout when the script
+runs from a separate worktree.
 
 ## Local event connection probe
 
