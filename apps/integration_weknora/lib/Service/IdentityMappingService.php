@@ -139,8 +139,9 @@ final class IdentityMappingService {
     }
 
     private function lockRegistry(): void {
-        // Reuse the app's seeded singleton lock. It serializes identity writes
-        // without relying on DB-specific upsert or aborted-transaction behavior.
+        // Fresh installs can omit migration seed hooks, so create the lock
+        // row on first use. It then serializes identity writes.
+        $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
         $query = $this->db->getQueryBuilder();
         $query->select('id')->from('weknora_bind_lock')
             ->where($query->expr()->eq('id', $query->createNamedParameter(1)))

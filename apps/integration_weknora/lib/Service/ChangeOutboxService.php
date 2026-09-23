@@ -49,6 +49,7 @@ final class ChangeOutboxService {
 
         $this->db->beginTransaction();
         try {
+            $this->db->insertIgnoreConflict('weknora_outbox_lock', ['id' => 1]);
             $lock = $this->db->getQueryBuilder();
             $lock->select('id')->from('weknora_outbox_lock')
                 ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))

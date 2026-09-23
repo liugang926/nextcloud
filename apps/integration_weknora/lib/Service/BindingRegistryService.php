@@ -27,6 +27,37 @@ final class BindingRegistryService {
         return $this->decodeBindings($this->config->getAppValue(self::APP_ID, 'bindings', '[]'));
     }
 
+    /**
+     * Resolve a binding against today's mount view and reject roots that have
+     * become overlapping since they were configured. File moves can change
+     * ancestry without passing through save(), so every source read must use
+     * this check before treating a binding as a publication boundary.
+     */
+    public function requireActiveRoot(string $bindingId): Folder {
+        $selected = null;
+        $resolved = [];
+        foreach ($this->listBindings() as $binding) {
+            try {
+                $root = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+            } catch (\InvalidArgumentException $exception) {
+                throw new \UnexpectedValueException('A binding root is no longer available', 0, $exception);
+            }
+            foreach ($resolved as $other) {
+                if ($this->overlaps($root, $other)) {
+                    throw new \UnexpectedValueException('Binding roots now overlap');
+                }
+            }
+            $resolved[] = $root;
+            if ($binding['id'] === $bindingId) {
+                $selected = $root;
+            }
+        }
+        if ($selected === null) {
+            throw new \UnexpectedValueException('Binding is no longer configured');
+        }
+        return $selected;
+    }
+
     /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */
     private function decodeBindings(string $raw): array {
         try {
@@ -69,6 +100,9 @@ final class BindingRegistryService {
         $root = $this->resolveRoot($ownerUid, $rootFileId);
         $this->db->beginTransaction();
         try {
+            // Fresh app installs can create the lock table without running
+            // postSchemaChange's seed hook. Make the first write safe as well.
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
             // A single row lock serializes API writers. Read appconfig directly
             // while holding it so a stale per-request config cache cannot
             // overwrite a concurrent administrator's binding.
@@ -151,7 +185,8 @@ final class BindingRegistryService {
     }
 
     private function resolveRoot(string $ownerUid, int $rootFileId): Folder {
-        if ($this->userManager->get($ownerUid) === null) {
+        $owner = $this->userManager->get($ownerUid);
+        if ($owner === null || !$owner->isEnabled()) {
             throw new \InvalidArgumentException('Unknown binding owner');
         }
         $userFolder = $this->rootFolder->getUserFolder($ownerUid);

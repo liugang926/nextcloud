@@ -46,6 +46,24 @@ final class SourceAuthorizationService {
             return $this->deny('publication_withdrawn');
         }
 
+        // A user's share alone cannot authorize a source the configured
+        // publisher can no longer read. The owner-side check also excludes
+        // files hidden by a more restrictive ACL within an otherwise readable
+        // binding root.
+        $ownerRoot = $this->bindings->requireActiveRoot($bindingId);
+        $ownerCanPublish = false;
+        foreach ($ownerRoot->getById($fileId) as $ownerFile) {
+            if ($ownerFile instanceof File && $ownerFile->getId() === $fileId &&
+                $ownerRoot->isSubNode($ownerFile) &&
+                $this->readablePermissionChain($ownerFile, $ownerRoot) !== null) {
+                $ownerCanPublish = true;
+                break;
+            }
+        }
+        if (!$ownerCanPublish) {
+            return $this->deny('source_not_published');
+        }
+
         // getUserFolder(uid) builds that user's mount view. Never resolve the
         // node through the binding owner's view or the connector's account.
         $userFolder = $this->rootFolder->getUserFolder($identity['uid']);

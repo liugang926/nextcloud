@@ -44,6 +44,7 @@ final class ManifestSnapshotService {
             'root_etag' => $query->createNamedParameter($rootEtag),
             'publication_revision' => $query->createNamedParameter($publicationRevision),
             'items_json' => $query->createNamedParameter($json),
+            'format_version' => $query->createNamedParameter(2),
             'created_at' => $query->createNamedParameter(time()),
         ]);
         $query->executeStatement();
@@ -56,7 +57,7 @@ final class ManifestSnapshotService {
             return null;
         }
         $query = $this->db->getQueryBuilder();
-        $query->select('generation', 'root_etag', 'publication_revision', 'items_json', 'created_at')
+        $query->select('generation', 'root_etag', 'publication_revision', 'items_json', 'format_version', 'created_at')
             ->from('weknora_manifest_snap')
             ->where($query->expr()->eq('snapshot_id', $query->createNamedParameter($id)))
             ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)));
@@ -66,7 +67,8 @@ final class ManifestSnapshotService {
         } finally {
             $result->closeCursor();
         }
-        if ($row === false || (int)$row['created_at'] < time() - self::TTL_SECONDS) {
+        if ($row === false || (int)$row['format_version'] !== 2 ||
+            (int)$row['created_at'] < time() - self::TTL_SECONDS) {
             return null;
         }
         $items = json_decode((string)$row['items_json'], true, 512, JSON_THROW_ON_ERROR);

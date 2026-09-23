@@ -18,6 +18,7 @@ use OCP\IRequest;
 use OCP\IURLGenerator;
 use OCA\IntegrationWeknora\Service\FilePublicationStateService;
 use OCA\IntegrationWeknora\Service\ManifestSnapshotService;
+use OCA\IntegrationWeknora\Service\BindingRegistryService;
 use OCP\Lock\ILockingProvider;
 
 final class ApiController extends Controller {
@@ -32,6 +33,7 @@ final class ApiController extends Controller {
         private IURLGenerator $urlGenerator,
         private FilePublicationStateService $publicationState,
         private ManifestSnapshotService $manifestSnapshots,
+        private BindingRegistryService $bindingRegistry,
     ) {
         parent::__construct(self::APP_ID, $request);
     }
@@ -83,6 +85,7 @@ final class ApiController extends Controller {
             if ($binding === null) {
                 return $this->notFound();
             }
+            $this->bindingRegistry->requireActiveRoot($id);
             [$userFolder, $bindingRoot] = $this->resolveRoot($binding);
             if ($bindingRoot === null) {
                 return $this->notFound();
@@ -104,8 +107,9 @@ final class ApiController extends Controller {
                 $generation = hash('sha256', json_encode([
                     $binding['id'], $binding['root_file_id'], $snapshot,
                 ], JSON_THROW_ON_ERROR));
-                [, $freshRoot] = $this->resolveRoot($binding);
-                if ($freshRoot === null || $freshRoot->getEtag() !== $rootEtag ||
+                $freshRoot = $this->bindingRegistry->requireActiveRoot($id);
+                if ($freshRoot->getPath() !== $bindingRoot->getPath() ||
+                    $freshRoot->getEtag() !== $rootEtag ||
                     $this->manifestSnapshots->publicationRevision($id) !== $publicationRevision) {
                     return $this->json(['error' => 'manifest_changed'], 409);
                 }
@@ -163,6 +167,7 @@ final class ApiController extends Controller {
             if ($binding === null) {
                 return $this->notFound();
             }
+            $this->bindingRegistry->requireActiveRoot($id);
             [$userFolder, $bindingRoot] = $this->resolveRoot($binding);
             if ($bindingRoot === null) {
                 return $this->notFound();

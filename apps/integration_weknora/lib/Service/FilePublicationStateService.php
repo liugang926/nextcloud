@@ -101,6 +101,25 @@ final class FilePublicationStateService {
         $timestamp = time();
         $this->db->beginTransaction();
         try {
+            // Fresh app installs do not reliably run postSchemaChange seed
+            // hooks. Seed in the writer transaction before locking the row.
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
+            // Audit IDs are used as manifest publication revisions. Serialize
+            // writers before allocating an audit ID so a later ID can never
+            // commit before an earlier withdrawal on another file.
+            $lock = $this->db->getQueryBuilder();
+            $lock->select('id')->from('weknora_bind_lock')
+                ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))
+                ->forUpdate();
+            $lockResult = $lock->executeQuery();
+            try {
+                if ($lockResult->fetchOne() === false) {
+                    throw new \UnexpectedValueException('Publication ordering lock is missing');
+                }
+            } finally {
+                $lockResult->closeCursor();
+            }
+
             // PostgreSQL aborts a transaction after a uniqueness error, so
             // insert-if-absent before the update instead of setValues().
             $this->db->insertIgnoreConflict('weknora_pub_state', [
