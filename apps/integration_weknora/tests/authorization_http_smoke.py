@@ -93,6 +93,7 @@ def main():
         check(status, 200, "owner source authorization")
         allowed = as_json(body)
         assert allowed["allow"] is True and len(allowed["policy_revision"]) == 64, allowed
+        assert isinstance(allowed["source_etag"], str) and allowed["source_etag"], allowed
 
         unknown = {**owner_identity, "object_guid": str(uuid.uuid4())}
         status, body = decision(unknown)
@@ -137,6 +138,7 @@ def main():
         status, body = decision(guest_identity)
         check(status, 200, "shared user's source authorization")
         assert as_json(body)["allow"] is True, body
+        assert as_json(body)["source_etag"] == allowed["source_etag"], body
 
         run_occ("user:disable", guest_id)
         status, body = decision(guest_identity)
@@ -162,6 +164,7 @@ def main():
         status, body = decision(owner_identity)
         check(status, 200, "withdrawn source authorization")
         assert as_json(body)["allow"] is False
+        assert as_json(body)["source_etag"] is None
 
         status, _ = post_json(admin, f"{identities}/revoke",
                               {**guest_identity, "nextcloud_uid": owner}, admin_headers)

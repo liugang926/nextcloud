@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Nextcloud WeKnora development API
-  version: 0.4.2
+  version: 0.4.3
   description: Local integration contract. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API is available; WeKnora retrieval enforcement across every entry point remains incomplete.
 servers:
   - url: /index.php/apps/integration_weknora/api/v1
@@ -177,11 +177,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [allow, reason, policy_revision, checked_at]
+                required: [allow, reason, policy_revision, source_etag, checked_at]
                 properties:
                   allow: {type: boolean}
                   reason: {type: string}
                   policy_revision: {type: string, nullable: true}
+                  source_etag:
+                    type: string
+                    nullable: true
+                    description: Live opaque file ETag; readers must compare it with the indexed Nextcloud ETag before serving the knowledge version.
                   checked_at: {type: integer}
         '400': {description: Invalid identity or file ID}
         '401': {description: Invalid service token}

@@ -18,7 +18,7 @@ final class SourceAuthorizationService {
     ) {
     }
 
-    /** @return array{allow: bool, reason: string, policy_revision: ?string, checked_at: int} */
+    /** @return array{allow: bool, reason: string, policy_revision: ?string, source_etag: ?string, checked_at: int} */
     public function authorize(string $bindingId, string $directoryId, string $objectGuid, int $fileId): array {
         if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $bindingId) || $fileId < 1) {
             throw new \InvalidArgumentException('Invalid source identity');
@@ -95,6 +95,11 @@ final class SourceAuthorizationService {
                     'allow' => true,
                     'reason' => 'authorized',
                     'policy_revision' => $revision,
+                    // The reader must compare this live source version with
+                    // the version indexed in WeKnora. A changed file cannot
+                    // keep serving its previous answer while a new build is
+                    // pending or has failed.
+                    'source_etag' => $file->getEtag(),
                     'checked_at' => time(),
                 ];
             }
@@ -132,8 +137,9 @@ final class SourceAuthorizationService {
         return null;
     }
 
-    /** @return array{allow: bool, reason: string, policy_revision: null, checked_at: int} */
+    /** @return array{allow: bool, reason: string, policy_revision: null, source_etag: null, checked_at: int} */
     private function deny(string $reason): array {
-        return ['allow' => false, 'reason' => $reason, 'policy_revision' => null, 'checked_at' => time()];
+        return ['allow' => false, 'reason' => $reason, 'policy_revision' => null,
+            'source_etag' => null, 'checked_at' => time()];
     }
 }
