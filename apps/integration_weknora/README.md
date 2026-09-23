@@ -116,3 +116,37 @@ The test covers machine authentication, administrator and CSRF controls,
 mapping conflicts, sharing and share revocation, disabled accounts, and
 publication withdrawal. It removes the temporary account and share and
 restores the sample publication state.
+
+## Employee Files sidebar
+
+Version 0.4.5 adds a WeKnora tab to Nextcloud 34's Files sidebar. The tab
+calls `GET /files/{fileId}/status` with the current Nextcloud browser session.
+It returns 404 for a file the current user cannot read. It only names a binding
+after verifying that the user can read its root and this file inside it. The
+source-side states are `in_scope`, `withdrawn`, and `outside_scope`.
+
+`in_scope` means only that the connector is allowed to read the current source
+through this app; it is **not** evidence that WeKnora has synchronized,
+parsed, or made that version available for questions. The endpoint therefore
+reports `knowledge_state: unverified`, `knowledge_ready_at: null`,
+`published_source_etag: null`, and `qa_available: false`. The sidebar presents
+these limits instead of showing a false “ready” status. Verified knowledge
+status and failure details need a separate authenticated WeKnora-to-Nextcloud
+status contract and version comparison.
+
+An administrator may configure an ordinary WeKnora web login URL, for example
+`php occ config:app:set integration_weknora weknora_web_url --value=https://weknora.example/login`.
+The sidebar then offers “Log in to WeKnora with your personal identity” for
+an in-scope file. The link contains no file ID, source contents, or service
+token. Only HTTPS URLs are accepted, except HTTP loopback URLs for local
+development. This is a login handoff, not a grant of knowledge access; WeKnora
+must enforce the user's own permissions after login. Leaving the setting empty
+removes the link. The app does not proxy AI questions through a shared account.
+
+Build the Files tab after changing its source with `cd apps/integration_weknora
+&& npm ci && npm run build`; the generated `js/weknora-sidebar.js` is included
+in the app package. In the local Compose environment, run
+`python3 apps/integration_weknora/tests/employee_file_status_http_smoke.py --file-id 77`.
+The test checks anonymous access, service-token isolation, file sharing and
+revocation, publication withdrawal, and URL filtering, then restores its
+temporary user, share, publication state, and URL setting.

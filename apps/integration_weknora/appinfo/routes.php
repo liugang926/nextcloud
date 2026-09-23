@@ -34,6 +34,12 @@ return [
         ['name' => 'identity_admin#create', 'url' => '/api/v1/admin/identities', 'verb' => 'POST'],
         ['name' => 'identity_admin#revoke', 'url' => '/api/v1/admin/identities/revoke', 'verb' => 'POST'],
         [
+            'name' => 'employee_file_status#show',
+            'url' => '/api/v1/files/{fileId}/status',
+            'verb' => 'GET',
+            'requirements' => ['fileId' => '[1-9][0-9]*'],
+        ],
+        [
             'name' => 'publication#state',
             'url' => '/api/v1/admin/bindings/{id}/files/{fileId}/publication',
             'verb' => 'GET',

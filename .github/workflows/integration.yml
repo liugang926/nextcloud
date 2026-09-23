@@ -14,10 +14,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/integration_weknora/package-lock.json
+
       - name: Static checks
         run: |
           bash -n scripts/*.sh
+          npm ci --prefix apps/integration_weknora
+          npm run build --prefix apps/integration_weknora
+          git diff --exit-code -- apps/integration_weknora/js/weknora-sidebar.js
           node --check apps/integration_weknora/js/weknora-admin.js
+          node --check apps/integration_weknora/js/weknora-sidebar.js
           python3 -m compileall -q apps/integration_weknora/tests scripts
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
@@ -39,6 +49,7 @@ jobs:
           python3 apps/integration_weknora/tests/root_events_http_smoke.py
           python3 apps/integration_weknora/tests/runtime_binding_scope_http_smoke.py --simulate-missing-bind-lock
           python3 apps/integration_weknora/tests/outbox_retention_http_smoke.py
+          python3 apps/integration_weknora/tests/employee_file_status_http_smoke.py --file-id 77
 
   weknora-patch:
     runs-on: ubuntu-latest

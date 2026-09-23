@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace OCA\IntegrationWeknora\AppInfo;
 
 use OCA\IntegrationWeknora\Listener\FileChangeListener;
+use OCA\IntegrationWeknora\Listener\LoadEmployeeSidebarListener;
+use OCA\Files\Event\LoadSidebar;
 use OCP\AppFramework\App;
 use OCP\AppFramework\Bootstrap\IBootContext;
 use OCP\AppFramework\Bootstrap\IBootstrap;
@@ -25,6 +27,7 @@ final class Application extends App implements IBootstrap {
     }
 
     public function register(IRegistrationContext $context): void {
+        $context->registerEventListener(LoadSidebar::class, LoadEmployeeSidebarListener::class);
         // Only successful post-operation events can produce deletion hints.
         foreach ([
             BeforeNodeRenamedEvent::class,
