@@ -1,0 +1,39 @@
+name: Nextcloud integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  local-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Static checks
+        run: |
+          bash -n scripts/*.sh
+          node --check apps/integration_weknora/js/weknora-admin.js
+          python3 -m compileall -q apps/integration_weknora/tests scripts
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            sh -c 'find apps/integration_weknora -name "*.php" -exec php -l "{}" ";"'
+
+      - name: Start isolated Docker stack
+        run: ./scripts/dev-up.sh
+
+      - name: Install app and sample binding
+        run: ./scripts/bootstrap.sh
+
+      - name: API and event smoke
+        run: |
+          ./scripts/smoke.sh
+          ./scripts/smoke-manifest.py
+          python3 apps/integration_weknora/tests/publication_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/authorization_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/changes_http_smoke.py
+          python3 apps/integration_weknora/tests/root_events_http_smoke.py

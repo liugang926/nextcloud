@@ -5,10 +5,10 @@ This repository currently supplies a local development slice of the PRD, not a V
 | PRD area | Local implementation | Remaining work before V1 |
 | --- | --- | --- |
 | V0 Docker and app | Pinned Nextcloud 34.0.4, PostgreSQL 16, Redis 7 images; separate volumes; installable app; sample binding and smoke scripts | Verify upgrade/rollback and backup/restore on a clean host; lock all adjacent WeKnora runtime images |
-| Binding API | Bearer-protected capabilities, bindings, paginated manifest and conditional content; bound folder checks | Admin connection UI, binding policy validation, pairing, HMAC with replay protection and key rotation; scalable snapshot pagination |
-| Publication decisions | Persistent administrator withdrawal exclusion and audit | Immediate WeKnora retrieval block, file event outbox, published revision state and publication comparison/swap |
-| WeKnora connector | Fixed-baseline patch with full/incremental scanning, ETag-checked downloads and two complete scans before a tombstone | Durable inbox/checkpoints, event-driven wakeups, safe version swap, GC, full reconciliation under concurrent changes |
-| Permissions | Local administrator-only withdrawal API | AD objectGUID identity mapping; per-user Nextcloud authorization; fail-closed checks across **all** retrieval and file access routes |
+| Binding API | Bearer-protected capabilities, bindings, short-lived paginated manifest and conditional content; bounded folder checks; administrator settings page | Binding policy and knowledge-base validation, pairing, HMAC with replay protection and key rotation; scale and fault tests beyond the 207-file smoke |
+| Publication decisions | Persistent administrator withdrawal exclusion and audit; file-event hint outbox | Immediate WeKnora retrieval block, outbox consumer and retention, published revision state and publication comparison/swap |
+| WeKnora connector | Fixed-baseline patch with full/incremental scanning, ETag-checked downloads and two complete scans before a tombstone; failed Nextcloud replacement checks stop creation | Durable inbox/checkpoints, event-driven wakeups, safe version swap, GC, full reconciliation under concurrent changes |
+| Permissions | Administrator-attested AD objectGUID to Nextcloud UID mapping and a fresh per-user source authorization endpoint | WeKnora caller integration and fail-closed checks across **all** retrieval and file access routes; verified AD backend semantics and permission matrix |
 | Operations | Local smoke and connector tests | Load/fault tests, monitoring, backup rehearsal and pilot acceptance |
 
 ## Authorization blocker
@@ -21,4 +21,4 @@ Until those controls pass, use only synthetic local fixtures and keep Nextcloud-
 
 ## Scale and consistency limit
 
-The current manifest is recomputed from the whole directory on every page request. For 10,000 files and 200 items per page, a complete pull traverses roughly 50 whole trees. It can time out and is not a transactional snapshot if files move during traversal. The connector rejects a generation change between pages and confirms absence twice, but V1 still needs a durable generation or equivalent snapshot protocol plus load and fault tests before relying on this manifest for deletion at pilot scale.
+The first manifest page scans the whole bound tree once and stores a sorted list for ten minutes. Later pages read that list and reject a changed root ETag or publication audit revision. A 207-file local smoke covered paging, an intervening write and conditional content reads. This is still not a transactional source snapshot: changes during traversal can invalidate a page, and a large list is deserialized on each page. The connector rejects a changed generation and confirms absence twice, but V1 still needs load and fault tests, verified root ETag propagation, and a reconciliation protocol before relying on this manifest for deletion at pilot scale.

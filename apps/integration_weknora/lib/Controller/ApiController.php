@@ -17,6 +17,7 @@ use OCP\IConfig;
 use OCP\IRequest;
 use OCP\IURLGenerator;
 use OCA\IntegrationWeknora\Service\FilePublicationStateService;
+use OCA\IntegrationWeknora\Service\ManifestSnapshotService;
 use OCP\Lock\ILockingProvider;
 
 final class ApiController extends Controller {
@@ -30,6 +31,7 @@ final class ApiController extends Controller {
         private IRootFolder $rootFolder,
         private IURLGenerator $urlGenerator,
         private FilePublicationStateService $publicationState,
+        private ManifestSnapshotService $manifestSnapshots,
     ) {
         parent::__construct(self::APP_ID, $request);
     }
@@ -86,27 +88,42 @@ final class ApiController extends Controller {
                 return $this->notFound();
             }
 
-            $items = $this->collectFiles($binding, $userFolder, $bindingRoot);
-            usort($items, static fn (array $a, array $b): int =>
-                ($a['file_id'] <=> $b['file_id']));
-            $snapshot = array_map(static fn (array $item): array => [
-                $item['file_id'],
-                $item['etag'],
-                $item['path'],
-                $item['mime_type'],
-                $item['size'],
-                $item['mtime'],
-            ], $items);
-            $generation = hash('sha256', json_encode([
-                $binding['id'],
-                $binding['root_file_id'],
-                $snapshot,
-            ], JSON_THROW_ON_ERROR));
-
             $cursor = $this->request->getParam('cursor', '');
-            $offset = $this->decodeManifestCursor($cursor, $generation);
-            if ($offset === null) {
-                return $this->json(['error' => 'manifest_changed'], 409);
+            if ($cursor === '') {
+                // The first page scans once and persists an immutable list.
+                // All later pages read it from the database rather than
+                // traversing a 10,000-file tree again for every page.
+                $rootEtag = $bindingRoot->getEtag();
+                $publicationRevision = $this->manifestSnapshots->publicationRevision($id);
+                $items = $this->collectFiles($binding, $userFolder, $bindingRoot);
+                usort($items, static fn (array $a, array $b): int => $a['file_id'] <=> $b['file_id']);
+                $snapshot = array_map(static fn (array $item): array => [
+                    $item['file_id'], $item['etag'], $item['path'],
+                    $item['mime_type'], $item['size'], $item['mtime'],
+                ], $items);
+                $generation = hash('sha256', json_encode([
+                    $binding['id'], $binding['root_file_id'], $snapshot,
+                ], JSON_THROW_ON_ERROR));
+                [, $freshRoot] = $this->resolveRoot($binding);
+                if ($freshRoot === null || $freshRoot->getEtag() !== $rootEtag ||
+                    $this->manifestSnapshots->publicationRevision($id) !== $publicationRevision) {
+                    return $this->json(['error' => 'manifest_changed'], 409);
+                }
+                $snapshotId = $this->manifestSnapshots->save($id, $generation, $rootEtag, $publicationRevision, $items);
+                $offset = 0;
+            } else {
+                $decoded = $this->decodeManifestCursor($cursor);
+                if ($decoded === null) {
+                    return $this->json(['error' => 'invalid_cursor'], 400);
+                }
+                [$snapshotId, $offset] = $decoded;
+                $stored = $this->manifestSnapshots->load($id, $snapshotId);
+                if ($stored === null || $stored['root_etag'] !== $bindingRoot->getEtag() ||
+                    $stored['publication_revision'] !== $this->manifestSnapshots->publicationRevision($id)) {
+                    return $this->json(['error' => 'manifest_changed'], 409);
+                }
+                $items = $stored['items'];
+                $generation = $stored['generation'];
             }
             if ($offset > count($items)) {
                 return $this->json(['error' => 'invalid_cursor'], 400);
@@ -119,8 +136,10 @@ final class ApiController extends Controller {
                 'generation' => $generation,
                 'items' => $page,
                 'complete' => $complete,
-                'next_cursor' => $complete ? null : $this->encodeManifestCursor($nextOffset, $generation),
+                'next_cursor' => $complete ? null : $this->encodeManifestCursor($snapshotId, $nextOffset),
             ]);
+        } catch (\LengthException $exception) {
+            return $this->json(['error' => 'manifest_too_large'], 503);
         } catch (\UnexpectedValueException $exception) {
             return $this->configurationError();
         } catch (\Throwable $exception) {
@@ -344,15 +363,12 @@ final class ApiController extends Controller {
         return $items;
     }
 
-    private function encodeManifestCursor(int $offset, string $generation): string {
-        return rtrim(strtr(base64_encode(json_encode([$offset, $generation], JSON_THROW_ON_ERROR)), '+/', '-_'), '=');
+    private function encodeManifestCursor(string $snapshotId, int $offset): string {
+        return rtrim(strtr(base64_encode(json_encode([$snapshotId, $offset], JSON_THROW_ON_ERROR)), '+/', '-_'), '=');
     }
 
-    /** A changed generation invalidates the entire traversal; the connector must restart. */
-    private function decodeManifestCursor(mixed $raw, string $generation): ?int {
-        if ($raw === '') {
-            return 0;
-        }
+    /** @return array{string, int}|null */
+    private function decodeManifestCursor(mixed $raw): ?array {
         if (!is_string($raw) || strlen($raw) > 256 || !preg_match('/\A[A-Za-z0-9_-]+\z/D', $raw)) {
             return null;
         }
@@ -365,11 +381,12 @@ final class ApiController extends Controller {
         } catch (\JsonException $exception) {
             return null;
         }
-        if (!is_array($value) || count($value) !== 2 || !is_int($value[0]) || $value[0] < 0 ||
-            !is_string($value[1]) || !hash_equals($generation, $value[1])) {
+        if (!is_array($value) || !array_is_list($value) || count($value) !== 2 ||
+            !is_string($value[0]) || !preg_match('/\A[a-f0-9]{48}\z/D', $value[0]) ||
+            !is_int($value[1]) || $value[1] < 1 || $value[1] % self::MANIFEST_PAGE_SIZE !== 0) {
             return null;
         }
-        return $value[0];
+        return [$value[0], $value[1]];
     }
 
     private function json(array $data, int $status = 200, array $headers = []): JSONResponse {

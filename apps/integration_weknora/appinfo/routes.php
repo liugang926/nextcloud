@@ -19,6 +19,21 @@ return [
             'requirements' => ['id' => '[A-Za-z0-9_-]+', 'fileId' => '[1-9][0-9]*'],
         ],
         [
+            'name' => 'changes#index',
+            'url' => '/api/v1/bindings/{id}/changes',
+            'verb' => 'GET',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'authorization#authorize',
+            'url' => '/api/v1/bindings/{id}/authorize',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        ['name' => 'identity_admin#index', 'url' => '/api/v1/admin/identities', 'verb' => 'GET'],
+        ['name' => 'identity_admin#create', 'url' => '/api/v1/admin/identities', 'verb' => 'POST'],
+        ['name' => 'identity_admin#revoke', 'url' => '/api/v1/admin/identities/revoke', 'verb' => 'POST'],
+        [
             'name' => 'publication#state',
             'url' => '/api/v1/admin/bindings/{id}/files/{fileId}/publication',
             'verb' => 'GET',

@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: Nextcloud WeKnora development API
-  version: 0.1.0
-  description: Local integration contract. A complete manifest means traversal succeeded; it is not a transactional snapshot. Enterprise user authorization remains unimplemented.
+  version: 0.4.0
+  description: Local integration contract. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API is available; WeKnora retrieval enforcement across every entry point remains incomplete.
 servers:
   - url: /index.php/apps/integration_weknora/api/v1
 security:
@@ -96,11 +96,11 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: Opaque cursor returned by the preceding page. Restart from page one on a changed generation.
+          description: Opaque cursor into a ten-minute stored list. Restart from page one if it expires or the source changes.
           schema: {type: string}
       responses:
         '200':
-          description: Full traversal of the bound folder
+          description: One page from a short-lived stored traversal of the bound folder
           content:
             application/json:
               schema:
@@ -116,6 +116,76 @@ paths:
         '401': {description: Invalid service token}
         '404': {description: Binding not found}
         '409': {description: The manifest changed during pagination; discard all prior pages and retry}
+        '503': {description: Manifest unavailable or over the configured snapshot size limit}
+  /bindings/{bindingId}/changes:
+    get:
+      operationId: getChangeHints
+      description: Durable, ordered file-change hints. A complete manifest remains the authority for deletion and missed events.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque signed cursor from the preceding page; omit to start at the beginning.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Hint page, possibly empty
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [binding_id, items, next_cursor, has_more, hint_only, rescan_required]
+                properties:
+                  binding_id: {type: string}
+                  items: {type: array, items: {type: object}}
+                  next_cursor: {type: string}
+                  has_more: {type: boolean}
+                  hint_only: {type: boolean, enum: [true]}
+                  rescan_required: {type: boolean, enum: [false]}
+        '400': {description: Invalid cursor}
+        '401': {description: Invalid service token}
+        '404': {description: Binding not found}
+        '409': {description: Cursor expired; complete a full rescan before adopting the returned signed next_cursor checkpoint}
+  /bindings/{bindingId}/authorize:
+    post:
+      operationId: authorizeSourceFile
+      description: Verify a currently mapped, enabled Nextcloud user's ability to read an eligible file through their own mount view. The caller must independently authenticate the WeKnora principal and resolve its stable directory identity.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [directory_id, object_guid, file_id]
+              properties:
+                directory_id: {type: string}
+                object_guid: {type: string, format: uuid}
+                file_id: {type: integer}
+      responses:
+        '200':
+          description: Current allow or deny decision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [allow, reason, policy_revision, checked_at]
+                properties:
+                  allow: {type: boolean}
+                  reason: {type: string}
+                  policy_revision: {type: string, nullable: true}
+                  checked_at: {type: integer}
+        '400': {description: Invalid identity or file ID}
+        '401': {description: Invalid service token}
+        '503': {description: Source authorization unavailable; deny access}
   /bindings/{bindingId}/files/{fileId}/content:
     get:
       operationId: getFileContent
@@ -196,6 +266,60 @@ paths:
         '400': {description: Invalid binding or root folder}
         '403': {description: Administrator privileges required}
         '409': {description: Binding source conflict or overlapping roots}
+  /admin/identities:
+    get:
+      operationId: listIdentityMappings
+      description: List administrator-attested links between stable directory identities and Nextcloud UIDs.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200': {description: Current mappings}
+        '403': {description: Administrator privileges required}
+    post:
+      operationId: createIdentityMapping
+      description: Create an explicit one-to-one stable identity link; duplicate UID or principal conflicts are rejected.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [directory_id, object_guid, nextcloud_uid]
+              properties:
+                directory_id: {type: string}
+                object_guid: {type: string, format: uuid}
+                nextcloud_uid: {type: string}
+      responses:
+        '200': {description: Identical mapping already present}
+        '201': {description: New mapping created}
+        '400': {description: Invalid identity or Nextcloud account}
+        '403': {description: Administrator privileges required}
+        '409': {description: Conflicting identity link}
+  /admin/identities/revoke:
+    post:
+      operationId: revokeIdentityMapping
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [directory_id, object_guid, nextcloud_uid]
+              properties:
+                directory_id: {type: string}
+                object_guid: {type: string, format: uuid}
+                nextcloud_uid: {type: string}
+      responses:
+        '200': {description: Revocation applied, or mapping already absent}
+        '400': {description: Invalid identity}
+        '403': {description: Administrator privileges required}
+        '409': {description: Mapping belongs to a different Nextcloud UID}
   /admin/bindings/{bindingId}/files/{fileId}/withdraw:
     post:
       operationId: withdrawPublication

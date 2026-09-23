@@ -1,5 +1,5 @@
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241..510bde51 100644
+index c0b24241..49f4870b 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -768,8 +768,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
@@ -17,8 +17,32 @@ index c0b24241..510bde51 100644
  		cursorJSON, _ := nextCursor.ToJSON()
  		ds.LastSyncCursor = cursorJSON
  	}
+@@ -1318,14 +1322,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+ 		// other during updates.
+ 		existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
+ 		if err != nil {
++			if ds.Type == types.ConnectorTypeNextcloud {
++				return false, fmt.Errorf("check existing Nextcloud knowledge for external_id=%s: %w", item.ExternalID, err)
++			}
+ 			logger.Warnf(ctx, "failed to check existing knowledge for external_id=%s: %v", item.ExternalID, err)
+ 			// Non-fatal: proceed with creation (may produce duplicate)
+ 		} else if existing != nil {
+ 			logger.Infof(ctx, "found existing knowledge %s for external_id=%s, deleting for update", existing.ID, item.ExternalID)
+ 			if err := s.knowledgeService.DeleteKnowledge(ctx, existing.ID); err != nil {
++				if ds.Type == types.ConnectorTypeNextcloud {
++					return false, fmt.Errorf("delete replaced Nextcloud knowledge %s: %w", existing.ID, err)
++				}
+ 				logger.Warnf(ctx, "failed to delete existing knowledge %s: %v", existing.ID, err)
+ 			} else {
+ 				if herr := repo.HardDeleteKnowledge(ctx, ds.TenantID, existing.ID); herr != nil {
++					if ds.Type == types.ConnectorTypeNextcloud {
++						return false, fmt.Errorf("hard-delete replaced Nextcloud knowledge %s: %w", existing.ID, herr)
++					}
+ 					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
+ 				}
+ 				isUpdate = true
 diff --git a/internal/application/service/datasource_service_test.go b/internal/application/service/datasource_service_test.go
-index bc90b995..b4046a43 100644
+index bc90b995..91b5235b 100644
 --- a/internal/application/service/datasource_service_test.go
 +++ b/internal/application/service/datasource_service_test.go
 @@ -687,6 +687,71 @@ func (mixedSyncConnector) FetchIncremental(
@@ -69,13 +93,13 @@ index bc90b995..b4046a43 100644
 +			registry := datasource.NewConnectorRegistry()
 +			require.NoError(t, registry.Register(nextcloudCursorMixedConnector{}))
 +			svc := &DataSourceService{
-+				dsRepo: newKBDeleteDSRepo(ds.KnowledgeBaseID, ds),
-+				syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{syncLog.ID: syncLog}},
-+				knowledgeService: &sweepFakeKS{repo: repo},
-+				kbService: &processSyncKBService{kb: &types.KnowledgeBase{ID: ds.KnowledgeBaseID, TenantID: ds.TenantID}},
++				dsRepo:            newKBDeleteDSRepo(ds.KnowledgeBaseID, ds),
++				syncLogRepo:       &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{syncLog.ID: syncLog}},
++				knowledgeService:  &sweepFakeKS{repo: repo},
++				kbService:         &processSyncKBService{kb: &types.KnowledgeBase{ID: ds.KnowledgeBaseID, TenantID: ds.TenantID}},
 +				connectorRegistry: registry,
-+				tenantRepo: &processSyncTenantRepo{tenant: &types.Tenant{ID: ds.TenantID}},
-+				tagService: &processSyncTagService{},
++				tenantRepo:        &processSyncTenantRepo{tenant: &types.Tenant{ID: ds.TenantID}},
++				tagService:        &processSyncTagService{},
 +			}
 +			payload, err := json.Marshal(types.DataSourceSyncPayload{
 +				DataSourceID: ds.ID, TenantID: ds.TenantID, SyncLogID: syncLog.ID,
@@ -93,6 +117,42 @@ index bc90b995..b4046a43 100644
  func TestProcessSync_SyncDeletionsPartialWhenMixedResults(t *testing.T) {
  	configJSON, err := (&types.DataSourceConfig{Type: "test-sync-mixed"}).ToJSON()
  	require.NoError(t, err)
+@@ -748,3 +813,35 @@ func TestIngestItem_URLCreationMetadataAttachFailure(t *testing.T) {
+ 	require.Error(t, err)
+ 	assert.Contains(t, err.Error(), "attach datasource metadata")
+ }
++
++func TestIngestItem_NextcloudReplacementFailureDoesNotCreateAnotherVersion(t *testing.T) {
++	for _, tc := range []struct {
++		name      string
++		lookupErr error
++		deleteErr error
++		hardErr   error
++	}{
++		{name: "lookup", lookupErr: errors.New("lookup unavailable")},
++		{name: "delete", deleteErr: errors.New("delete unavailable")},
++		{name: "hard delete", hardErr: errors.New("hard delete unavailable")},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			repo := &deletionLookupKnowledgeRepo{
++				knowledge:     &types.Knowledge{ID: "old-version"},
++				lookupErr:     tc.lookupErr,
++				hardDeleteErr: tc.hardErr,
++			}
++			ks := &sweepFakeKS{repo: repo, deleteErr: tc.deleteErr}
++			svc := &DataSourceService{knowledgeService: ks}
++			ds := &types.DataSource{
++				ID: "ds-nextcloud", TenantID: 1, KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud,
++			}
++			updated, err := svc.ingestItem(context.Background(), ds, &types.FetchedItem{
++				ExternalID: "file:77", FileName: "document.txt", Content: []byte("new bytes"),
++			}, nil)
++			require.Error(t, err)
++			assert.False(t, updated)
++			assert.NotContains(t, ks.events, "create:document.txt")
++		})
++	}
++}
 diff --git a/internal/container/container.go b/internal/container/container.go
 index c27d12d1..b601c878 100644
 --- a/internal/container/container.go
@@ -134,18 +194,6 @@ index 67568c4c..28cae25c 100644
  }
  
  // ListAvailableConnectors returns all available connector metadata
-diff --git a/internal/types/datasource.go b/internal/types/datasource.go
-index 5130b931..22c25356 100644
---- a/internal/types/datasource.go
-+++ b/internal/types/datasource.go
-@@ -38,6 +38,7 @@ const (
- 	ConnectorTypeRSS         = "rss"
- 	ConnectorTypeGitLab      = "gitlab"
- 	ConnectorTypeIMA         = "ima"
-+	ConnectorTypeNextcloud   = "nextcloud"
- 
- 	// Sync modes
- 	SyncModeIncremental = "incremental"
 diff --git a/internal/datasource/connector/nextcloud/client.go b/internal/datasource/connector/nextcloud/client.go
 new file mode 100644
 index 00000000..76079fa0
@@ -1441,3 +1489,15 @@ index 00000000..79c2ca5f
 +	}
 +	return true
 +}
+diff --git a/internal/types/datasource.go b/internal/types/datasource.go
+index 5130b931..22c25356 100644
+--- a/internal/types/datasource.go
++++ b/internal/types/datasource.go
+@@ -38,6 +38,7 @@ const (
+ 	ConnectorTypeRSS         = "rss"
+ 	ConnectorTypeGitLab      = "gitlab"
+ 	ConnectorTypeIMA         = "ima"
++	ConnectorTypeNextcloud   = "nextcloud"
+ 
+ 	// Sync modes
+ 	SyncModeIncremental = "incremental"
