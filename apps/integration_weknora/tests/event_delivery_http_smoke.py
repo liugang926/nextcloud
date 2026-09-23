@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import secrets
 import subprocess
@@ -24,7 +25,8 @@ from outbox_retention_http_smoke import prune, sql
 from publication_http_smoke import PROJECT, load_env, login, request
 
 
-MOCK_NAME = "event-receiver-smoke"
+COMPOSE_NAME = os.environ.get("COMPOSE_PROJECT_NAME", "nextcloud-weknora-dev")
+MOCK_NAME = COMPOSE_NAME + "-event-receiver-smoke"
 MOCK_URL = "http://event-receiver-smoke:8080/api/v1/integrations/nextcloud/events"
 JOB_CLASS = "OCA\\IntegrationWeknora\\BackgroundJob\\EventDeliveryJob"
 
@@ -129,6 +131,22 @@ def force_due(binding_id):
         f"WHERE binding_id = '{binding_id}'")
 
 
+def force_status_due(binding_id):
+    sql("UPDATE oc_weknora_event_conn SET applied_checked_at = 0 "
+        f"WHERE binding_id = '{binding_id}'")
+
+
+def poll_status(binding_id):
+    php = ("require '/var/www/html/lib/base.php'; "
+           "echo \\OC::$server->get(\\OCA\\IntegrationWeknora\\Service\\EventAppliedStatusService::class)"
+           f"->poll('{binding_id}') ? '1' : '0';")
+    return compose("exec", "-T", "-u", "www-data", "nextcloud", "php", "-r", php) == "1"
+
+
+def update_mock_credential(state_dir, credential):
+    (state_dir / "config.json").write_text(json.dumps(credential))
+
+
 def main():
     approve_private_https_policy()
     if subprocess.run(["docker", "container", "inspect", MOCK_NAME],
@@ -153,11 +171,14 @@ def main():
     with tempfile.TemporaryDirectory(prefix="weknora-event-smoke-") as tmp:
         state_dir = Path(tmp)
         (state_dir / "mode").write_text("503")
+        (state_dir / "received").write_text("0")
+        (state_dir / "applied").write_text("0")
         try:
             image = "python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111"
             result = subprocess.run([
                 "docker", "run", "--detach", "--rm", "--name", MOCK_NAME,
-                "--network", "nextcloud-weknora-dev_default",
+                "--network", COMPOSE_NAME + "_default",
+                "--network-alias", "event-receiver-smoke",
                 "--volume", f"{mock_script}:/srv/mock.py:ro",
                 "--volume", f"{state_dir}:/state:rw",
                 image, "python", "/srv/mock.py",
@@ -211,6 +232,7 @@ def main():
             assert code == 400, f"wrong instance HTTP {code}"
             code, body = post_json(admin, connection_url, credential, csrf)
             assert code == 201, f"configure sender HTTP {code}"
+            update_mock_credential(state_dir, credential)
             connection_created = True
             assert secret.encode() not in body
             assert status(admin, connection_url, csrf)["received_through_event_id"] == "0"
@@ -263,12 +285,50 @@ def main():
             credential.update(secret=secret, key_id="evt_" + secrets.token_hex(16))
             code, body = post_json(admin, connection_url, credential, csrf)
             assert code == 200 and secret.encode() not in body
+            update_mock_credential(state_dir, credential)
             (state_dir / "mode").write_text("accept")
             run_job(identifier)
             received = status(admin, connection_url, csrf)
             assert received["status"] == "active" and int(received["received_through_event_id"]) > 0
             payload = verify_signature(requests_seen(state_dir)[-1], secret)
             assert received["received_through_event_id"] == payload["events"][-1]["event_id"]
+
+            # A durable 202 receipt cannot expire even an aged prefix. The
+            # separate signed status must attest its applied watermark.
+            aged = int(time.time()) - 31 * 86400
+            sql("UPDATE oc_weknora_outbox SET created_at = " + str(aged) +
+                f" WHERE binding_id = '{binding_id}'")
+            assert prune(binding_id) == 0
+            assert received["applied_through_event_id"] == "0"
+            (state_dir / "applied").write_text(str(int(
+                received["received_through_event_id"]) + 1))
+            force_status_due(binding_id)
+            assert not poll_status(binding_id)
+            assert prune(binding_id) == 0, "ahead applied status released outbox"
+            (state_dir / "applied").write_text(received["received_through_event_id"])
+            (state_dir / "status_binding_override").write_text("wrong-binding")
+            force_status_due(binding_id)
+            assert not poll_status(binding_id)
+            assert status(admin, connection_url, csrf)["applied_error_code"] == "status_invalid"
+            assert prune(binding_id) == 0, "wrong-scope status released outbox"
+            (state_dir / "status_binding_override").unlink()
+            force_status_due(binding_id)
+            assert poll_status(binding_id), "signed applied status was rejected"
+            acknowledged = status(admin, connection_url, csrf)
+            assert acknowledged["applied_through_event_id"] == received["received_through_event_id"]
+            assert acknowledged["applied_error_code"] == ""
+            (state_dir / "applied").write_text("0")
+            force_status_due(binding_id)
+            assert not poll_status(binding_id)
+            assert prune(binding_id) == 0, "regressing applied status released outbox"
+            (state_dir / "applied").write_text(received["received_through_event_id"])
+            force_status_due(binding_id)
+            assert poll_status(binding_id)
+            assert prune(binding_id) > 0
+            assert sql("SELECT COUNT(*) FROM oc_weknora_outbox "
+                       f"WHERE binding_id = '{binding_id}' AND id <= "
+                       f"{received['received_through_event_id']}") == "0"
+            assert (state_dir / "status_requests.jsonl").exists()
 
             code, _ = dav_request(root_url + "/second.txt", "PUT", dav_headers, b"second event")
             assert code in (201, 204)
@@ -294,6 +354,7 @@ def main():
             credential.update(secret=secret, key_id="evt_" + secrets.token_hex(16))
             code, _ = post_json(admin, connection_url, credential, csrf)
             assert code == 200
+            update_mock_credential(state_dir, credential)
             (state_dir / "mode").write_text("401")
             run_job(identifier)
             unauthorized = status(admin, connection_url, csrf)
@@ -304,6 +365,7 @@ def main():
             credential.update(secret=secret, key_id="evt_" + secrets.token_hex(16))
             code, _ = post_json(admin, connection_url, credential, csrf)
             assert code == 200
+            update_mock_credential(state_dir, credential)
             (state_dir / "mode").write_text("accept")
             run_job(identifier)
             final = status(admin, connection_url, csrf)

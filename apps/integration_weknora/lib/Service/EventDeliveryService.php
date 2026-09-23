@@ -25,6 +25,7 @@ final class EventDeliveryService {
         private ICrypto $crypto,
         private IClientService $clientService,
         private IConfig $config,
+        private EventAppliedStatusService $appliedStatus,
     ) {
     }
 
@@ -48,6 +49,7 @@ final class EventDeliveryService {
         $sent = 0;
         $deadline = time() + 45;
         foreach ($bindingIds as $bindingId) {
+            $this->appliedStatus->poll((string)$bindingId);
             $completed = 0;
             for ($batch = 0; $batch < self::MAX_BATCHES_PER_BINDING && time() < $deadline; $batch++) {
                 if (!$this->deliverOne((string)$bindingId)) {

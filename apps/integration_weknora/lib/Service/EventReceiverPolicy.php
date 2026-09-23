@@ -7,6 +7,7 @@ namespace OCA\IntegrationWeknora\Service;
 /** Egress is disabled until an operator approves exact origins in the runtime. */
 final class EventReceiverPolicy {
     public const PATH = '/api/v1/integrations/nextcloud/events';
+    public const STATUS_PATH = '/api/v1/integrations/nextcloud/events/status';
 
     /** @return array{origin: string, allow_local: bool} */
     public function requireApproved(string $url): array {

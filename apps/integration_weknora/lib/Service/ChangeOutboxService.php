@@ -162,17 +162,18 @@ final class ChangeOutboxService {
         $this->db->beginTransaction();
         try {
             $this->lockOutbox();
-            // Durable receipt is only a delivery checkpoint, not an applied
-            // acknowledgement. Nevertheless an active/paused sender must
-            // retain every unsent hint. Pairing takes the same outbox lock
+            // Only the separately verified consumer-applied watermark allows
+            // a connected binding's hints to expire. A durable 202 receipt
+            // never establishes publication. Pairing takes the same outbox lock
             // when it checks the floor, avoiding a first-pairing prune race.
             $senderQuery = $this->db->getQueryBuilder();
-            $senderQuery->select('received_id')->from('weknora_event_conn')
+            $senderQuery->select('received_id', 'applied_id', 'applied_error_code')
+                ->from('weknora_event_conn')
                 ->where($senderQuery->expr()->eq('binding_id',
                     $senderQuery->createNamedParameter($bindingId)));
             $senderResult = $senderQuery->executeQuery();
             try {
-                $senderReceivedId = $senderResult->fetchOne();
+                $sender = $senderResult->fetchAssociative();
             } finally {
                 $senderResult->closeCursor();
             }
@@ -191,7 +192,10 @@ final class ChangeOutboxService {
             $lastId = 0;
             foreach ($rows as $row) {
                 if ((int)$row['created_at'] >= $cutoff ||
-                    ($senderReceivedId !== false && (int)$row['id'] > (int)$senderReceivedId)) {
+                    ($sender !== false &&
+                        ((string)$sender['applied_error_code'] !== '' ||
+                         (int)$row['id'] > min((int)$sender['received_id'],
+                            (int)$sender['applied_id'])))) {
                     break;
                 }
                 $lastId = (int)$row['id'];

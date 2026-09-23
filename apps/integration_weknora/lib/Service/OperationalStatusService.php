@@ -59,6 +59,20 @@ final class OperationalStatusService {
             throw new \UnexpectedValueException('Publication state unavailable');
         }
 
+        $ackQuery = $this->db->getQueryBuilder();
+        $ackQuery->select('binding_id')->from('weknora_event_conn')
+            ->where($ackQuery->expr()->eq('status', $ackQuery->createNamedParameter('active')))
+            ->andWhere($ackQuery->expr()->gt('applied_checked_at', $ackQuery->createNamedParameter(0)))
+            ->andWhere($ackQuery->expr()->eq('applied_error_code',
+                $ackQuery->createNamedParameter('')))
+            ->setMaxResults(1);
+        $ackResult = $ackQuery->executeQuery();
+        try {
+            $ackAvailable = $ackResult->fetchOne() !== false;
+        } finally {
+            $ackResult->closeCursor();
+        }
+
         $oldest = $events['oldest_at'] === null ? null : (int)$events['oldest_at'];
         return [
             'checked_at' => $now,
@@ -69,7 +83,7 @@ final class OperationalStatusService {
             'newest_change_hint_at' => $events['newest_at'] === null ? null : (int)$events['newest_at'],
             'newest_change_hint_id' => $events['newest_id'] === null ? null : (int)$events['newest_id'],
             'explicit_withdrawal_count' => (int)$withdrawn,
-            'consumer_acknowledgement_available' => false,
+            'consumer_acknowledgement_available' => $ackAvailable,
         ];
     }
 }

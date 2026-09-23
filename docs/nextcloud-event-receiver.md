@@ -6,8 +6,8 @@ An HTTP `202` means the entire batch and its receipt watermark committed to the
 database. It does **not** mean that WeKnora reconciled the source, parsed a
 document, published a version, or applied a deletion. A background dispatcher
 submits source reconciliation jobs from committed inbox rows. The applied
-watermark remains at zero until a later complete publication proof is
-implemented; HTTP `202` is never an application acknowledgement.
+watermark advances only after WeKnora proves a complete publication run;
+HTTP `202` is never an application acknowledgement.
 
 Only an `active` connection row may receive events. The row fixes one
 Nextcloud instance and binding to one tenant, knowledge base, and Nextcloud
@@ -80,7 +80,7 @@ The administrator GET returns decimal-string watermarks with distinct meanings:
 | --- | --- |
 | `received_through_event_id` | Highest event ID committed in the inbox; the value returned by HTTP `202`. |
 | `dispatched_through_event_id` | Highest receipt watermark for which the sync queue accepted a job. This does not prove that the job ran or succeeded. |
-| `applied_through_event_id` | Highest event ID proven published or deleted. It remains `"0"` in this increment because the asynchronous parser and publication path has no reliable complete-run proof. |
+| `applied_through_event_id` | Highest event ID covered by WeKnora's complete publication proof. It can remain `"0"` while work is pending or proof is unavailable. |
 | `backlog_count` | Inbox rows above the applied watermark, including rows already dispatched. |
 | `undispatched_count` | Inbox rows above the dispatched watermark. |
 | `dispatch_state` | `idle`, `leased`, `queued`, `retry`, or `blocked`. |
@@ -172,3 +172,38 @@ Hints remain non-authoritative. The dispatcher re-reads the current Nextcloud
 manifest, authorization state, and file version before publication or deletion.
 Outbox retention must not treat `202` or `dispatched_through_event_id` as an
 applied checkpoint.
+
+## Signed applied status and Nextcloud retention
+
+Nextcloud queries `GET /api/v1/integrations/nextcloud/events/status?connection_id=ID`
+with an empty body. The raw query has exactly the `connection_id` key and the
+connection's canonical ID; extra parameters, encoding changes, and redirects
+are rejected. It uses the same connection ID, key ID, timestamp, nonce, and
+signature headers as event delivery. The HMAC message has nine lines joined
+by `\n`, without a final newline:
+
+1. `nextcloud-event-status-hmac-sha256-v1`
+2. `GET`
+3. `/api/v1/integrations/nextcloud/events/status`
+4. the exact raw query string
+5. lowercase SHA-256 of the empty body
+6. timestamp
+7. nonce
+8. connection ID
+9. key ID
+
+The signed status route checks the current key, live paired source, and replay
+nonce before returning its connection, instance, binding, receipt, dispatch,
+and applied watermarks. Nextcloud accepts the applied watermark only if the
+connection, instance, and binding match its stored sender, the status is
+active, the reported receipt covers its local receipt, and the applied ID is
+monotonic and no greater than either receipt. A status failure or mismatch
+blocks connected outbox pruning. The local sender status exposes its last
+verified applied ID, check time, and status error without exposing the key.
+
+The retention job still waits at least 30 days. For a connected binding, it
+only removes a prefix through the verified applied ID after a valid status
+check. A `202` receipt alone leaves the hints in the outbox. A missing or
+failed status endpoint preserves them until the status is repaired; a later
+full manifest reconciliation remains necessary after any already-expired
+cursor or cross-system restore.

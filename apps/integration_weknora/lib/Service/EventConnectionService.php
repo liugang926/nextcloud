@@ -121,6 +121,9 @@ final class EventConnectionService {
                     'secret_ciphertext' => $insert->createNamedParameter($ciphertext),
                     'receiver_url' => $insert->createNamedParameter($receiverUrl),
                     'received_id' => $insert->createNamedParameter(0),
+                    'applied_id' => $insert->createNamedParameter(0),
+                    'applied_checked_at' => $insert->createNamedParameter(0),
+                    'applied_error_code' => $insert->createNamedParameter('status_unverified'),
                     'status' => $insert->createNamedParameter('active'),
                     'attempt_count' => $insert->createNamedParameter(0),
                     'next_attempt_at' => $insert->createNamedParameter(0),
@@ -144,6 +147,8 @@ final class EventConnectionService {
                     ->set('attempt_count', $update->createNamedParameter(0))
                     ->set('next_attempt_at', $update->createNamedParameter(0))
                     ->set('last_error_code', $update->createNamedParameter(''))
+                    ->set('applied_checked_at', $update->createNamedParameter(0))
+                    ->set('applied_error_code', $update->createNamedParameter('status_unverified'))
                     ->set('updated_at', $update->createNamedParameter($now))
                     ->where($update->expr()->eq('binding_id', $update->createNamedParameter($bindingId)))
                     ->executeStatement();
@@ -232,6 +237,9 @@ final class EventConnectionService {
             'receiver_url' => (string)$row['receiver_url'],
             'status' => (string)$row['status'],
             'received_through_event_id' => (string)$row['received_id'],
+            'applied_through_event_id' => (string)$row['applied_id'],
+            'applied_checked_at' => (int)$row['applied_checked_at'],
+            'applied_error_code' => (string)$row['applied_error_code'],
             'attempt_count' => (int)$row['attempt_count'],
             'next_attempt_at' => (int)$row['next_attempt_at'],
             'last_error_code' => (string)$row['last_error_code'],

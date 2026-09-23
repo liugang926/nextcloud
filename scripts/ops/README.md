@@ -2,7 +2,7 @@
 
 ## Local Nextcloud source pairing
 
-Install Nextcloud app 0.4.14 and deploy the WeKnora patch before this probe.
+Install Nextcloud app 0.4.15 and deploy the WeKnora patch before this probe.
 Keep the selected Nextcloud binding active with its original root. As a
 WeKnora administrator, create an **empty, dedicated** knowledge base in the
 same tenant; record its ID and the canonical positive decimal tenant ID. A
@@ -97,12 +97,13 @@ connection pinned to the old source config.
 Source pairing is separate from the event-delivery connection. It establishes
 the intended binding, tenant, and dedicated knowledge base, but does not prove
 that events were applied, documents indexed, employees mapped to AD identities,
-or retrieval authorized. There is no trusted applied-event acknowledgement or
-AD acceptance gate yet.
+or retrieval authorized. The event sender now verifies a separate applied
+watermark before pruning connected hints; this still does not prove each
+document is indexed or satisfy the AD acceptance gate.
 
 ## Local Nextcloud to WeKnora delivery probe
 
-With both local stacks healthy, Nextcloud app 0.4.14 installed, and a new
+With both local stacks healthy, Nextcloud app 0.4.15 installed, and a new
 synthetic data source actively source-paired as above, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
 WeKnora administrator credentials and run:
