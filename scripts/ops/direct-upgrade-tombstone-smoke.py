@@ -220,6 +220,8 @@ VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                 raise AssertionError("upgrade app is not version 0.4.13")
             occ("upgrade")
 
+            if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_src_pair';") != "1":
+                raise AssertionError("source pairing migration was not applied")
             if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_event_conn';") != "1":
                 raise AssertionError("direct upgrade did not create the event sender table")
             if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_bind_pub_audit';") != "1":

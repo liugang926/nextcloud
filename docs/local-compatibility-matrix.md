@@ -20,13 +20,14 @@ volumes; the application is mounted read-only from this repository.
 
 `docker compose ps` reported the Nextcloud, PostgreSQL, Redis and mock
 embedding services healthy. The installed and enabled
-`integration_weknora` application reported version `0.4.12` after local migration; its `info.xml`
+`integration_weknora` application reported version `0.4.13` after local migration; its `info.xml`
 declares Nextcloud major version 34 as its local compatibility range. The
 instance's `occ status` reported `maintenance: false` and
 `needsDbUpgrade: false`.
-The runtime-only `dist/integration_weknora-0.4.12.tar.gz` archive was built
+The runtime-only `dist/integration_weknora-0.4.13.tar.gz` archive was built
 twice with the same SHA-256 checksum
-`cbf9fa1ea8a08437be62b87eeb35de4c836ff69ce61f6a0c76079a977646a194`.
+`3840b1ec2914ccd171424cb3426993a063cc770bef9708f908e20e999a2716ed`
+and contains 58 verified runtime files.
 
 ## Build inputs and paired WeKnora runtime
 
