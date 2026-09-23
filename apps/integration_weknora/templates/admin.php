@@ -5,7 +5,7 @@ declare(strict_types=1);
 script('integration_weknora', 'weknora-admin');
 style('integration_weknora', 'weknora-admin');
 ?>
-<section id="weknora-admin" class="section weknora-admin" data-bindings-url="<?php p($_['bindingsUrl']); ?>">
+<section id="weknora-admin" class="section weknora-admin" data-bindings-url="<?php p($_['bindingsUrl']); ?>" data-diagnostics-url="<?php p($_['diagnosticsUrl']); ?>">
     <h2>WeKnora publication</h2>
     <p>Choose a dedicated Nextcloud folder as the source of files eligible for WeKnora indexing.</p>
 
@@ -13,6 +13,22 @@ style('integration_weknora', 'weknora-admin');
         <h3>Automatic publication scope</h3>
         <p>A binding covers readable files recursively inside the selected child folder, including new and updated files. Withdrawing a file ID excludes it from this app's manifest and content API until an administrator explicitly republishes it. A folder binding does not itself make content searchable in WeKnora.</p>
         <p>Current limits: bindings must share one owner account and their roots cannot overlap. This settings page does not configure connector synchronization or knowledge base mapping, and it does not show sync progress, retries, or cleanup status. End-to-end audience and ACL enforcement and in-Nextcloud AI chat are not complete. Withdrawal immediately blocks this app's read API; removal of an already indexed WeKnora copy still requires connector reconciliation and WeKnora retrieval controls. Use a verified dedicated publication folder for pilot data only.</p>
+    </div>
+
+    <div class="weknora-admin__panel">
+        <div class="weknora-admin__panel-heading">
+            <h3>Source diagnostics</h3>
+            <button type="button" class="button" id="weknora-refresh-diagnostics">Refresh</button>
+        </div>
+        <p id="weknora-diagnostics-message" class="weknora-admin__message" role="status" aria-live="polite">Loading source diagnostics…</p>
+        <div id="weknora-diagnostics-values" hidden>
+            <p>Binding roots: <strong id="weknora-diagnostics-roots"></strong></p>
+            <p>Retained change hints: <strong id="weknora-diagnostics-hints"></strong></p>
+            <p>Oldest retained hint age: <strong id="weknora-diagnostics-oldest"></strong></p>
+            <p>Latest change hint: <strong id="weknora-diagnostics-newest"></strong></p>
+            <p>Explicit file withdrawals: <strong id="weknora-diagnostics-withdrawals"></strong></p>
+        </div>
+        <p>Retained hints are historical records, not unacknowledged delivery backlog. WeKnora synchronization, parsing, indexing, and storage health are not yet reported here.</p>
     </div>
 
     <div class="weknora-admin__panel">

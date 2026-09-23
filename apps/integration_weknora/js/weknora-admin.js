@@ -8,6 +8,10 @@
         }
 
         const bindingsUrl = root.dataset.bindingsUrl;
+        const diagnosticsUrl = root.dataset.diagnosticsUrl;
+        const refreshDiagnostics = document.getElementById('weknora-refresh-diagnostics');
+        const diagnosticsMessage = document.getElementById('weknora-diagnostics-message');
+        const diagnosticsValues = document.getElementById('weknora-diagnostics-values');
         const bindingForm = document.getElementById('weknora-binding-form');
         const bindingId = document.getElementById('weknora-binding-id');
         const bindingName = document.getElementById('weknora-binding-name');
@@ -99,6 +103,7 @@
                     return 'The stored binding configuration is invalid. Check the app configuration.';
                 case 'binding_registry_unavailable':
                 case 'publication_state_unavailable':
+                case 'diagnostics_unavailable':
                     return 'The publication service is unavailable. Try again after checking the server logs.';
                 case 'not_found':
                     return 'The binding or file ID was not found in the allowed scope.';
@@ -190,6 +195,54 @@
             }
         }
 
+        function formatAge(seconds) {
+            if (!Number.isSafeInteger(seconds) || seconds < 0) {
+                return 'None retained';
+            }
+            if (seconds < 3600) {
+                return `${Math.floor(seconds / 60)} minute(s)`;
+            }
+            if (seconds < 86400) {
+                return `${Math.floor(seconds / 3600)} hour(s)`;
+            }
+            return `${Math.floor(seconds / 86400)} day(s)`;
+        }
+
+        async function loadDiagnostics() {
+            refreshDiagnostics.disabled = true;
+            message(diagnosticsMessage, 'Loading source diagnostics…', '');
+            try {
+                const data = await request('GET', diagnosticsUrl);
+                if (!Number.isSafeInteger(data.binding_count) || data.binding_count < 0 ||
+                    typeof data.binding_roots_available !== 'boolean' ||
+                    !Number.isSafeInteger(data.retained_change_hints) || data.retained_change_hints < 0 ||
+                    !Number.isSafeInteger(data.explicit_withdrawal_count) || data.explicit_withdrawal_count < 0 ||
+                    data.consumer_acknowledgement_available !== false) {
+                    throw new Error('The server returned invalid source diagnostics.');
+                }
+                document.getElementById('weknora-diagnostics-roots').textContent =
+                    data.binding_roots_available ? `${data.binding_count} configured, available` :
+                        `${data.binding_count} configured, one or more unavailable`;
+                document.getElementById('weknora-diagnostics-hints').textContent =
+                    String(data.retained_change_hints);
+                document.getElementById('weknora-diagnostics-oldest').textContent =
+                    formatAge(data.oldest_retained_hint_age_seconds);
+                document.getElementById('weknora-diagnostics-newest').textContent =
+                    Number.isSafeInteger(data.newest_change_hint_at) && data.newest_change_hint_at > 0
+                        ? new Date(data.newest_change_hint_at * 1000).toLocaleString()
+                        : 'None recorded';
+                document.getElementById('weknora-diagnostics-withdrawals').textContent =
+                    String(data.explicit_withdrawal_count);
+                diagnosticsValues.hidden = false;
+                message(diagnosticsMessage, 'Source diagnostics refreshed.', 'success');
+            } catch (error) {
+                diagnosticsValues.hidden = true;
+                message(diagnosticsMessage, errorText(error), 'error');
+            } finally {
+                refreshDiagnostics.disabled = false;
+            }
+        }
+
         bindingForm.addEventListener('submit', async (event) => {
             event.preventDefault();
             if (!bindingForm.reportValidity()) {
@@ -229,6 +282,7 @@
         });
 
         refreshBindings.addEventListener('click', () => loadBindings());
+        refreshDiagnostics.addEventListener('click', loadDiagnostics);
         publicationBinding.addEventListener('change', clearPublicationState);
         publicationFileId.addEventListener('input', clearPublicationState);
 
@@ -304,6 +358,7 @@
 
         setPublicationButtons();
         loadBindings();
+        loadDiagnostics();
     }
 
     if (document.readyState === 'loading') {

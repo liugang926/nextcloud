@@ -16,6 +16,7 @@ final class Admin implements ISettings {
     public function getForm(): TemplateResponse {
         return new TemplateResponse('integration_weknora', 'admin', [
             'bindingsUrl' => $this->urlGenerator->linkToRoute('integration_weknora.binding_admin.index'),
+            'diagnosticsUrl' => $this->urlGenerator->linkToRoute('integration_weknora.diagnostics.index'),
         ], '');
     }
 

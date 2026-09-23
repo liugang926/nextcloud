@@ -1002,18 +1002,35 @@ index 00000000..345e4807
 +	}
 +}
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
-index c3b2f58e..6cd4148f 100644
+index c3b2f58e..4d203ea9 100644
 --- a/internal/application/repository/datasource_repo.go
 +++ b/internal/application/repository/datasource_repo.go
-@@ -3,6 +3,7 @@ package repository
+@@ -3,6 +3,8 @@ package repository
  import (
  	"context"
  	"errors"
 +	"fmt"
++	"reflect"
  	"time"
  
  	"github.com/Tencent/WeKnora/internal/types"
-@@ -32,6 +33,9 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
+@@ -15,6 +17,15 @@ type DataSourceRepository struct {
+ 	db *gorm.DB
+ }
+ 
++type nextcloudCredentialWriteKey struct{}
++
++// WithNextcloudCredentialWrite marks the dedicated credential subresource's
++// repository update. Ordinary data-source edits and sync state writes retain
++// the database's currently committed Nextcloud machine credentials.
++func WithNextcloudCredentialWrite(ctx context.Context) context.Context {
++	return context.WithValue(ctx, nextcloudCredentialWriteKey{}, true)
++}
++
+ // NewDataSourceRepository creates a new data source repository
+ func NewDataSourceRepository(db *gorm.DB) interfaces.DataSourceRepository {
+ 	return &DataSourceRepository{db: db}
+@@ -32,6 +43,9 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
  	// the HTTP 201 body) match the database.
  	syncDeletions := ds.SyncDeletions
  	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -1023,7 +1040,7 @@ index c3b2f58e..6cd4148f 100644
  		if err := tx.Create(ds).Error; err != nil {
  			return err
  		}
-@@ -43,6 +47,64 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
+@@ -43,6 +57,64 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
  	return err
  }
  
@@ -1088,7 +1105,7 @@ index c3b2f58e..6cd4148f 100644
  // FindByID retrieves a data source by ID
  func (r *DataSourceRepository) FindByID(ctx context.Context, id string) (*types.DataSource, error) {
  	if id == "" {
-@@ -77,6 +139,36 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
+@@ -77,6 +149,36 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
  	return dataSources, nil
  }
  
@@ -1125,10 +1142,16 @@ index c3b2f58e..6cd4148f 100644
  // Update updates an existing data source
  func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource) error {
  	if ds == nil {
-@@ -86,6 +178,20 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -86,6 +188,31 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  		return errors.New("data source id is empty")
  	}
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		// Lock the owning KB before reading the source. Credential replacement
++		// and endpoint edits must observe the same committed predecessor, even
++		// when two Web workers update a source concurrently.
++		if err := admitDataSourceKnowledgeBase(tx, ds, true); err != nil {
++			return err
++		}
 +		var previous types.DataSource
 +		if err := tx.Where("id = ? AND deleted_at IS NULL", ds.ID).First(&previous).Error; err != nil {
 +			return fmt.Errorf("load data source before update: %w", err)
@@ -1140,12 +1163,84 @@ index c3b2f58e..6cd4148f 100644
 +			(previous.Type == types.ConnectorTypeNextcloud || ds.Type == types.ConnectorTypeNextcloud) {
 +			return errors.New("Nextcloud data source type cannot change")
 +		}
-+		if err := admitDataSourceKnowledgeBase(tx, ds, true); err != nil {
-+			return err
++		if previous.Type == types.ConnectorTypeNextcloud {
++			if err := requireStableNextcloudCredentialEndpoint(&previous, ds); err != nil {
++				return err
++			}
++			if err := preserveCommittedNextcloudCredentials(ctx, &previous, ds); err != nil {
++				return err
++			}
 +		}
  		if err := tx.Model(ds).Updates(ds).Error; err != nil {
  			return err
  		}
+@@ -97,6 +224,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+ 	})
+ }
+ 
++func preserveCommittedNextcloudCredentials(ctx context.Context, previous, next *types.DataSource) error {
++	if len(next.Config) == 0 {
++		return nil // The Config column is not modified by this update.
++	}
++	oldConfig, oldErr := previous.ParseConfig()
++	newConfig, newErr := next.ParseConfig()
++	if oldErr != nil || newErr != nil {
++		return errors.New("invalid Nextcloud data source configuration")
++	}
++	if oldConfig == nil {
++		oldConfig = &types.DataSourceConfig{}
++	}
++	if newConfig == nil {
++		newConfig = &types.DataSourceConfig{}
++	}
++	if !reflect.DeepEqual(oldConfig.Credentials, newConfig.Credentials) &&
++		ctx.Value(nextcloudCredentialWriteKey{}) != true {
++		// A normal PUT or old sync worker may carry a credential snapshot from
++		// before a rotation or revocation. Merge the current value while the
++		// KB row is locked, then write the requested non-secret changes.
++		newConfig.Credentials = oldConfig.Credentials
++		encoded, err := newConfig.ToJSON()
++		if err != nil {
++			return errors.New("cannot preserve current Nextcloud credentials")
++		}
++		next.Config = encoded
++	}
++	return nil
++}
++
++// This check must run under the KB write lock used by every data-source
++// update. The service checks before network validation to prevent an immediate
++// leak; this second check prevents a concurrent endpoint/credential update
++// from committing a token paired with a different endpoint.
++func requireStableNextcloudCredentialEndpoint(previous, next *types.DataSource) error {
++	if len(next.Config) == 0 {
++		return nil // GORM leaves a zero-value Config column unchanged.
++	}
++	oldConfig, oldErr := previous.ParseConfig()
++	newConfig, newErr := next.ParseConfig()
++	if oldErr != nil || newErr != nil {
++		return errors.New("invalid Nextcloud data source configuration")
++	}
++	if oldConfig == nil {
++		oldConfig = &types.DataSourceConfig{}
++	}
++	if newConfig == nil {
++		newConfig = &types.DataSourceConfig{}
++	}
++	if oldConfig.HasConfiguredCredentials(types.ConnectorTypeNextcloud) ||
++		newConfig.HasConfiguredCredentials(types.ConnectorTypeNextcloud) {
++		oldBase, _ := oldConfig.Settings["base_url"].(string)
++		newBase, _ := newConfig.Settings["base_url"].(string)
++		if oldBase != newBase {
++			return errors.New("Nextcloud base URL cannot change while credentials are configured")
++		}
++	}
++	return nil
++}
++
+ // UpdateSyncState updates only fields managed by sync execution. GORM's
+ // Updates(struct) skips zero values, so use a map here to persist cleared error
+ // messages without broadening the generic Update method.
 diff --git a/internal/application/repository/datasource_repo_test.go b/internal/application/repository/datasource_repo_test.go
 index 77ed065c..9cf4d886 100644
 --- a/internal/application/repository/datasource_repo_test.go
@@ -1162,6 +1257,122 @@ index 77ed065c..9cf4d886 100644
  	return db
  }
  
+diff --git a/internal/application/repository/knowledge.go b/internal/application/repository/knowledge.go
+index 4b29c552..41dcd91c 100644
+--- a/internal/application/repository/knowledge.go
++++ b/internal/application/repository/knowledge.go
+@@ -337,8 +337,22 @@ func (r *knowledgeRepository) UpdateKnowledge(ctx context.Context, knowledge *ty
+ 	if knowledge.CustomMetadata == nil {
+ 		omit = append(append([]string{}, omitFieldsOnUpdate...), "custom_metadata")
+ 	}
+-	err := r.db.WithContext(ctx).Omit(omit...).Save(knowledge).Error
+-	return err
++	if knowledge.Channel != types.ConnectorTypeNextcloud {
++		return r.db.WithContext(ctx).Omit(omit...).Save(knowledge).Error
++	}
++	if err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if err := tx.Omit(omit...).Save(knowledge).Error; err != nil {
++			return err
++		}
++		return r.enforceNextcloudVersionMetadata(tx, knowledge)
++	}); err != nil {
++		return err
++	}
++	if knowledge.ParseStatus == types.ParseStatusCompleted {
++		_, err := r.PublishNextcloudVersion(ctx, knowledge.ID)
++		return err
++	}
++	return nil
+ }
+ 
+ // UpdateKnowledgeBatch updates knowledge items in batch
+@@ -351,6 +365,20 @@ func (r *knowledgeRepository) UpdateKnowledgeBatch(ctx context.Context, knowledg
+ 			knowledge.ErrorMessage = common.CleanInvalidUTF8(knowledge.ErrorMessage)
+ 		}
+ 	}
++	for _, knowledge := range knowledgeList {
++		if knowledge != nil && knowledge.Channel == types.ConnectorTypeNextcloud {
++			// Keep version enforcement on the single-row path. A bulk Save could
++			// otherwise restore an old ETag after a newer version was staged.
++			for _, item := range knowledgeList {
++				if item != nil {
++					if err := r.UpdateKnowledge(ctx, item); err != nil {
++						return err
++					}
++				}
++			}
++			return nil
++		}
++	}
+ 	return r.db.Debug().WithContext(ctx).Omit(omitFieldsOnUpdate...).Save(knowledgeList).Error
+ }
+ 
+@@ -563,8 +591,7 @@ func (r *knowledgeRepository) UpdateKnowledgeColumn(
+ 			value = common.CleanInvalidUTF8(string(v))
+ 		}
+ 	}
+-	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Update(column, value).Error
+-	return err
++	return r.UpdateKnowledgeColumns(ctx, id, map[string]interface{}{column: value})
+ }
+ 
+ // UpdateKnowledgeColumns writes multiple columns in a single UPDATE so callers
+@@ -587,7 +614,29 @@ func (r *knowledgeRepository) UpdateKnowledgeColumns(
+ 			values["error_message"] = common.CleanInvalidUTF8(string(v))
+ 		}
+ 	}
+-	return r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Updates(values).Error
++	_, hasMetadata := values["metadata"]
++	_, hasParseStatus := values["parse_status"]
++	_, hasEnableStatus := values["enable_status"]
++	if !hasMetadata && !hasParseStatus && !hasEnableStatus {
++		return r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Updates(values).Error
++	}
++	var knowledge types.Knowledge
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if err := tx.Model(&types.Knowledge{}).Where("id = ?", id).Updates(values).Error; err != nil {
++			return err
++		}
++		if err := tx.Where("id = ?", id).Take(&knowledge).Error; err != nil {
++			return err
++		}
++		return r.enforceNextcloudVersionMetadata(tx, &knowledge)
++	})
++	if err != nil {
++		return err
++	}
++	if knowledge.Channel == types.ConnectorTypeNextcloud && knowledge.ParseStatus == types.ParseStatusCompleted {
++		_, err = r.PublishNextcloudVersion(ctx, id)
++	}
++	return err
+ }
+ 
+ // UpdateActiveDeletingKnowledgeColumns only touches rows that are still visible
+@@ -674,6 +723,9 @@ func (r *knowledgeRepository) FinalizeSubtask(
+ 		return 0, false, promoteRes.Error
+ 	}
+ 	promoted := promoteRes.RowsAffected > 0
++	if err := r.maybePublishNextcloudVersion(ctx, id); err != nil {
++		return 0, promoted, err
++	}
+ 
+ 	// 3) Best-effort re-read of the new count for diagnostics/return value
+ 	//    only. This read may be replica-stale and is intentionally NOT used
+@@ -735,7 +787,13 @@ func (r *knowledgeRepository) CompleteProcessingWithoutSubtasks(ctx context.Cont
+ 			"processed_at":           now,
+ 			"updated_at":             now,
+ 		})
+-	return res.RowsAffected > 0, res.Error
++	if res.Error != nil {
++		return false, res.Error
++	}
++	if err := r.maybePublishNextcloudVersion(ctx, id); err != nil {
++		return res.RowsAffected > 0, err
++	}
++	return res.RowsAffected > 0, nil
+ }
+ 
+ // CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base
 diff --git a/internal/application/repository/knowledgebase.go b/internal/application/repository/knowledgebase.go
 index e560e686..c2f3bd79 100644
 --- a/internal/application/repository/knowledgebase.go
@@ -1189,6 +1400,89 @@ index 0a35e402..4bf221f5 100644
      storage_backend_id VARCHAR(36),
      wiki_config TEXT,
      indexing_strategy TEXT,
+diff --git a/internal/application/repository/nextcloud_credential_endpoint_test.go b/internal/application/repository/nextcloud_credential_endpoint_test.go
+new file mode 100644
+index 00000000..b8ccb615
+--- /dev/null
++++ b/internal/application/repository/nextcloud_credential_endpoint_test.go
+@@ -0,0 +1,77 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func nextcloudEndpointTestConfig(t *testing.T, baseURL, token string) types.JSON {
++	t.Helper()
++	config := map[string]interface{}{
++		"type":         types.ConnectorTypeNextcloud,
++		"settings":     map[string]interface{}{"base_url": baseURL},
++		"resource_ids": []string{"dev-published"},
++		"credentials":  map[string]interface{}{},
++	}
++	if token != "" {
++		config["credentials"] = map[string]interface{}{"token": token}
++	}
++	encoded, err := json.Marshal(config)
++	require.NoError(t, err)
++	return types.JSON(encoded)
++}
++
++func TestNextcloudCredentialAndEndpointUpdatesCannotCombineAcrossStaleWriters(t *testing.T) {
++	db := provenanceTestDB(t)
++	require.NoError(t, db.Exec("INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb', 7)").Error)
++	repo := NewDataSourceRepository(db)
++	ctx := context.Background()
++	base := "https://trusted.example"
++	old := &types.DataSource{ID: "paired", TenantID: 7, KnowledgeBaseID: "kb",
++		Type: types.ConnectorTypeNextcloud, Config: nextcloudEndpointTestConfig(t, base, "private-token")}
++	require.NoError(t, repo.Create(ctx, old))
++
++	update := func(updateCtx context.Context, url, token string) error {
++		return repo.Update(updateCtx, &types.DataSource{ID: old.ID, TenantID: old.TenantID,
++			KnowledgeBaseID: old.KnowledgeBaseID, Type: old.Type,
++			Config: nextcloudEndpointTestConfig(t, url, token)})
++	}
++	storedURL := func() string {
++		t.Helper()
++		stored, err := repo.FindByID(ctx, old.ID)
++		require.NoError(t, err)
++		parsed, err := stored.ParseConfig()
++		require.NoError(t, err)
++		value, _ := parsed.Settings["base_url"].(string)
++		return value
++	}
++
++	require.ErrorContains(t, update(ctx, "https://attacker.example", "private-token"), "base URL")
++	require.ErrorContains(t, update(ctx, "https://attacker.example", ""), "base URL")
++	require.Equal(t, base, storedURL())
++
++	// Clearing first permits a legitimate endpoint edit. A credential writer
++	// that read the old URL before this edit must then fail under the KB lock.
++	require.NoError(t, update(WithNextcloudCredentialWrite(ctx), base, ""))
++	require.NoError(t, update(ctx, base, "private-token"),
++		"a stale ordinary update should preserve the committed revocation")
++	staleResult, err := repo.FindByID(ctx, old.ID)
++	require.NoError(t, err)
++	staleConfig, err := staleResult.ParseConfig()
++	require.NoError(t, err)
++	require.Empty(t, staleConfig.Credentials, "stale ordinary PUT or sync status must not revive a token")
++	require.NoError(t, update(ctx, "https://attacker.example", ""))
++	require.ErrorContains(t, update(WithNextcloudCredentialWrite(ctx), base, "new-token"), "base URL")
++	require.Equal(t, "https://attacker.example", storedURL())
++	stored, err := repo.FindByID(ctx, old.ID)
++	require.NoError(t, err)
++	parsed, err := stored.ParseConfig()
++	require.NoError(t, err)
++	require.Empty(t, parsed.Credentials)
++	require.NotContains(t, strings.ToLower(string(stored.Config)), "new-token")
++}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
 index 00000000..2893499c
@@ -1305,6 +1599,446 @@ index 00000000..2893499c
 +		require.Equal(t, want, got, id)
 +	}
 +	require.Error(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source = 0 WHERE id = 'source'").Error)
++}
+diff --git a/internal/application/repository/nextcloud_versions.go b/internal/application/repository/nextcloud_versions.go
+new file mode 100644
+index 00000000..a6e3c9d2
+--- /dev/null
++++ b/internal/application/repository/nextcloud_versions.go
+@@ -0,0 +1,275 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++// nextcloudSourceVersion is the durable publication intent for one source file.
++// Its key deliberately includes the data source: external IDs are not global.
++type nextcloudSourceVersion struct {
++	TenantID             uint64 `gorm:"primaryKey"`
++	KnowledgeBaseID      string `gorm:"primaryKey"`
++	DataSourceID         string `gorm:"column:datasource_id;primaryKey"`
++	ExternalID           string `gorm:"primaryKey"`
++	DesiredETag          string `gorm:"column:desired_etag"`
++	CandidateKnowledgeID string
++	State                string
++	UpdatedAt            time.Time
++}
++
++func (nextcloudSourceVersion) TableName() string { return "nextcloud_source_versions" }
++
++func nextcloudMetadata(k *types.Knowledge) (map[string]any, error) {
++	var metadata map[string]any
++	if err := json.Unmarshal(k.Metadata, &metadata); err != nil {
++		return nil, fmt.Errorf("invalid Nextcloud knowledge metadata: %w", err)
++	}
++	if metadata == nil {
++		return nil, errors.New("missing Nextcloud knowledge metadata")
++	}
++	return metadata, nil
++}
++
++func nextcloudMetadataString(metadata map[string]any, key string) string {
++	value, _ := metadata[key].(string)
++	return value
++}
++
++func writeNextcloudETag(tx *gorm.DB, k *types.Knowledge, etag string) error {
++	metadata, err := nextcloudMetadata(k)
++	if err != nil {
++		return err
++	}
++	metadata["nextcloud_etag"] = etag
++	encoded, err := json.Marshal(metadata)
++	if err != nil {
++		return err
++	}
++	if err := tx.Unscoped().Model(&types.Knowledge{}).
++		Where("tenant_id = ? AND id = ?", k.TenantID, k.ID).
++		Update("metadata", types.JSON(encoded)).Error; err != nil {
++		return err
++	}
++	k.Metadata = types.JSON(encoded)
++	return nil
++}
++
++func nextcloudVersionQuery(tx *gorm.DB, tenantID uint64, kbID, dsID, externalID string) *gorm.DB {
++	return tx.Model(&nextcloudSourceVersion{}).
++		Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND external_id = ?",
++			tenantID, kbID, dsID, externalID)
++}
++
++func (r *knowledgeRepository) nextcloudRowsForSource(
++	tx *gorm.DB, tenantID uint64, kbID, dsID, externalID string,
++) ([]types.Knowledge, error) {
++	var rows []types.Knowledge
++	err := tx.Unscoped().Model(&types.Knowledge{}).
++		Where("tenant_id = ? AND knowledge_base_id = ? AND channel = ?", tenantID, kbID, types.ConnectorTypeNextcloud).
++		Where("metadata->>'datasource_id' = ? AND metadata->>'external_id' = ?", dsID, externalID).
++		Find(&rows).Error
++	return rows, err
++}
++
++func (r *knowledgeRepository) hideNextcloudSourceRows(
++	tx *gorm.DB, tenantID uint64, kbID, dsID, externalID string,
++) error {
++	rows, err := r.nextcloudRowsForSource(tx, tenantID, kbID, dsID, externalID)
++	if err != nil {
++		return err
++	}
++	for i := range rows {
++		if err := writeNextcloudETag(tx, &rows[i], ""); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// StageNextcloudVersion records the newest fetched candidate and clears the
++// publication ETag on every older row in one transaction. A candidate is
++// created with an empty publication ETag before this call, so a failed stage
++// leaves it hidden and leaves the previous knowledge and file intact.
++func (r *knowledgeRepository) StageNextcloudVersion(
++	ctx context.Context, tenantID uint64, kbID, dsID, externalID, etag, candidateID string,
++) error {
++	if tenantID == 0 || kbID == "" || dsID == "" || externalID == "" ||
++		strings.TrimSpace(etag) == "" || candidateID == "" {
++		return errors.New("incomplete Nextcloud source version")
++	}
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var candidate types.Knowledge
++		if err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND id = ? AND channel = ?",
++			tenantID, kbID, candidateID, types.ConnectorTypeNextcloud).Take(&candidate).Error; err != nil {
++			return err
++		}
++		metadata, err := nextcloudMetadata(&candidate)
++		if err != nil {
++			return err
++		}
++		if nextcloudMetadataString(metadata, "datasource_id") != dsID ||
++			nextcloudMetadataString(metadata, "external_id") != externalID {
++			return errors.New("Nextcloud candidate source identity mismatch")
++		}
++		version := nextcloudSourceVersion{
++			TenantID: tenantID, KnowledgeBaseID: kbID, DataSourceID: dsID,
++			ExternalID: externalID, DesiredETag: etag,
++			CandidateKnowledgeID: candidateID, State: "staging", UpdatedAt: time.Now().UTC(),
++		}
++		if err := tx.Clauses(clause.OnConflict{
++			Columns: []clause.Column{{Name: "tenant_id"}, {Name: "knowledge_base_id"},
++				{Name: "datasource_id"}, {Name: "external_id"}},
++			DoUpdates: clause.AssignmentColumns([]string{"desired_etag", "candidate_knowledge_id", "state", "updated_at"}),
++		}).Create(&version).Error; err != nil {
++			return err
++		}
++		return r.hideNextcloudSourceRows(tx, tenantID, kbID, dsID, externalID)
++	})
++}
++
++// PublishNextcloudVersion publishes only the currently desired candidate after
++// processing has completed. Older workers cannot publish over a newer stage.
++func (r *knowledgeRepository) PublishNextcloudVersion(ctx context.Context, candidateID string) (bool, error) {
++	if candidateID == "" {
++		return false, nil
++	}
++	published := false
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var version nextcloudSourceVersion
++		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("candidate_knowledge_id = ? AND state IN ?", candidateID, []string{"staging", "published"}).
++			Take(&version).Error
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil
++		}
++		if err != nil {
++			return err
++		}
++		var candidate types.Knowledge
++		if err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND id = ? AND channel = ?",
++			version.TenantID, version.KnowledgeBaseID, candidateID, types.ConnectorTypeNextcloud).
++			Take(&candidate).Error; err != nil {
++			return err
++		}
++		if candidate.ParseStatus != types.ParseStatusCompleted || candidate.EnableStatus != "enabled" {
++			return nil
++		}
++		metadata, err := nextcloudMetadata(&candidate)
++		if err != nil {
++			return err
++		}
++		if nextcloudMetadataString(metadata, "datasource_id") != version.DataSourceID ||
++			nextcloudMetadataString(metadata, "external_id") != version.ExternalID {
++			return errors.New("Nextcloud candidate source identity mismatch")
++		}
++		if err := r.hideNextcloudSourceRows(tx, version.TenantID, version.KnowledgeBaseID,
++			version.DataSourceID, version.ExternalID); err != nil {
++			return err
++		}
++		// hideNextcloudSourceRows changed this row too. Reload to preserve other
++		// metadata fields written by parsing since the original read.
++		if err := tx.Where("id = ?", candidateID).Take(&candidate).Error; err != nil {
++			return err
++		}
++		if err := writeNextcloudETag(tx, &candidate, version.DesiredETag); err != nil {
++			return err
++		}
++		if err := nextcloudVersionQuery(tx, version.TenantID, version.KnowledgeBaseID,
++			version.DataSourceID, version.ExternalID).
++			Updates(map[string]any{"state": "published", "updated_at": time.Now().UTC()}).Error; err != nil {
++			return err
++		}
++		published = true
++		return nil
++	})
++	return published, err
++}
++
++// TombstoneNextcloudVersion hides and soft-deletes all retained versions before
++// the sync cursor can pass a source deletion. Physical rows/files remain for
++// later recovery policy and GC.
++func (r *knowledgeRepository) TombstoneNextcloudVersion(
++	ctx context.Context, tenantID uint64, kbID, dsID, externalID string,
++) error {
++	if tenantID == 0 || kbID == "" || dsID == "" || externalID == "" {
++		return errors.New("incomplete Nextcloud tombstone identity")
++	}
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		version := nextcloudSourceVersion{
++			TenantID: tenantID, KnowledgeBaseID: kbID, DataSourceID: dsID,
++			ExternalID: externalID, State: "tombstone", UpdatedAt: time.Now().UTC(),
++		}
++		if err := tx.Clauses(clause.OnConflict{
++			Columns: []clause.Column{{Name: "tenant_id"}, {Name: "knowledge_base_id"},
++				{Name: "datasource_id"}, {Name: "external_id"}},
++			DoUpdates: clause.AssignmentColumns([]string{"desired_etag", "candidate_knowledge_id", "state", "updated_at"}),
++		}).Create(&version).Error; err != nil {
++			return err
++		}
++		if err := r.hideNextcloudSourceRows(tx, tenantID, kbID, dsID, externalID); err != nil {
++			return err
++		}
++		return tx.Where("tenant_id = ? AND knowledge_base_id = ? AND channel = ?",
++			tenantID, kbID, types.ConnectorTypeNextcloud).
++			Where("metadata->>'datasource_id' = ? AND metadata->>'external_id' = ?", dsID, externalID).
++			Delete(&types.Knowledge{}).Error
++	})
++}
++
++// enforceNextcloudVersionMetadata runs after generic knowledge saves, inside
++// the same transaction. Late processing writes cannot restore the ETag of an
++// older candidate after a newer stage or tombstone has committed.
++func (r *knowledgeRepository) enforceNextcloudVersionMetadata(tx *gorm.DB, k *types.Knowledge) error {
++	if k.Channel != types.ConnectorTypeNextcloud {
++		return nil
++	}
++	metadata, err := nextcloudMetadata(k)
++	if err != nil {
++		return err
++	}
++	dsID := nextcloudMetadataString(metadata, "datasource_id")
++	externalID := nextcloudMetadataString(metadata, "external_id")
++	if dsID == "" || externalID == "" {
++		return nil // publication guard rejects incomplete identities
++	}
++	var version nextcloudSourceVersion
++	err = nextcloudVersionQuery(tx, k.TenantID, k.KnowledgeBaseID, dsID, externalID).Take(&version).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil // pre-migration legacy document, not yet staged
++	}
++	if err != nil {
++		return err
++	}
++	etag := ""
++	if version.State == "published" && version.CandidateKnowledgeID == k.ID {
++		etag = version.DesiredETag
++	}
++	if nextcloudMetadataString(metadata, "nextcloud_etag") != etag {
++		return writeNextcloudETag(tx, k, etag)
++	}
++	return nil
++}
++
++func (r *knowledgeRepository) maybePublishNextcloudVersion(ctx context.Context, id string) error {
++	var knowledge types.Knowledge
++	if err := r.db.WithContext(ctx).Select("id", "channel").Where("id = ?", id).Take(&knowledge).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil
++		}
++		return err
++	}
++	if knowledge.Channel != types.ConnectorTypeNextcloud {
++		return nil
++	}
++	_, err := r.PublishNextcloudVersion(ctx, id)
++	return err
++}
+diff --git a/internal/application/repository/nextcloud_versions_test.go b/internal/application/repository/nextcloud_versions_test.go
+new file mode 100644
+index 00000000..9fd0f044
+--- /dev/null
++++ b/internal/application/repository/nextcloud_versions_test.go
+@@ -0,0 +1,153 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func newNextcloudVersionTestRepo(t *testing.T) (*knowledgeRepository, *gorm.DB) {
++	t.Helper()
++	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &nextcloudSourceVersion{}))
++	return &knowledgeRepository{db: db}, db
++}
++
++func insertNextcloudVersionTestKnowledge(t *testing.T, db *gorm.DB, id, etag, status, enabled string) *types.Knowledge {
++	t.Helper()
++	metadata, err := json.Marshal(map[string]string{
++		"datasource_id": "ds", "external_id": "nextcloud:instance:77",
++		"nextcloud_instance_id": "instance", "nextcloud_binding_id": "binding",
++		"nextcloud_file_id": "77", "nextcloud_etag": etag,
++	})
++	require.NoError(t, err)
++	k := &types.Knowledge{
++		ID: id, TenantID: 7, KnowledgeBaseID: "kb", Channel: types.ConnectorTypeNextcloud,
++		Type: "file", ParseStatus: status, EnableStatus: enabled, Metadata: types.JSON(metadata),
++	}
++	require.NoError(t, db.Create(k).Error)
++	return k
++}
++
++func reloadedNextcloudETag(t *testing.T, db *gorm.DB, id string) string {
++	t.Helper()
++	var k types.Knowledge
++	require.NoError(t, db.Unscoped().Where("id = ?", id).Take(&k).Error)
++	return k.GetMetadata()["nextcloud_etag"]
++}
++
++func TestNextcloudVersionPublishesOnlyCompletedDesiredCandidate(t *testing.T) {
++	ctx := context.Background()
++	repo, db := newNextcloudVersionTestRepo(t)
++	old := insertNextcloudVersionTestKnowledge(t, db, "old", "old-etag", types.ParseStatusCompleted, "enabled")
++	newer := insertNextcloudVersionTestKnowledge(t, db, "new", "", types.ParseStatusPending, "disabled")
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds", "nextcloud:instance:77", "new-etag", newer.ID))
++	require.Empty(t, reloadedNextcloudETag(t, db, old.ID), "old row is retained but no longer published")
++	require.Empty(t, reloadedNextcloudETag(t, db, newer.ID))
++	published, err := repo.PublishNextcloudVersion(ctx, newer.ID)
++	require.NoError(t, err)
++	require.False(t, published, "pending candidate must remain hidden")
++
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", newer.ID).
++		Updates(map[string]any{"parse_status": types.ParseStatusCompleted, "enable_status": "enabled"}).Error)
++	published, err = repo.PublishNextcloudVersion(ctx, newer.ID)
++	require.NoError(t, err)
++	require.True(t, published)
++	require.Equal(t, "new-etag", reloadedNextcloudETag(t, db, newer.ID))
++	require.Empty(t, reloadedNextcloudETag(t, db, old.ID))
++}
++
++func TestNextcloudFailedParseLeavesOldBytesRetainedAndBothVersionsHidden(t *testing.T) {
++	ctx := context.Background()
++	repo, db := newNextcloudVersionTestRepo(t)
++	old := insertNextcloudVersionTestKnowledge(t, db, "old", "old-etag", types.ParseStatusCompleted, "enabled")
++	newer := insertNextcloudVersionTestKnowledge(t, db, "new", "", types.ParseStatusPending, "disabled")
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds", "nextcloud:instance:77", "new-etag", newer.ID))
++	require.NoError(t, repo.UpdateKnowledgeColumns(ctx, newer.ID,
++		map[string]interface{}{"parse_status": types.ParseStatusFailed, "error_message": "parse failed"}))
++	published, err := repo.PublishNextcloudVersion(ctx, newer.ID)
++	require.NoError(t, err)
++	require.False(t, published)
++	require.Empty(t, reloadedNextcloudETag(t, db, newer.ID))
++	require.Empty(t, reloadedNextcloudETag(t, db, old.ID))
++	var count int64
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id IN ?", []string{old.ID, newer.ID}).Count(&count).Error)
++	require.Equal(t, int64(2), count, "failed parse must not destroy either recoverable version")
++}
++
++func TestNextcloudLateOldSaveCannotRestorePublication(t *testing.T) {
++	ctx := context.Background()
++	repo, db := newNextcloudVersionTestRepo(t)
++	old := insertNextcloudVersionTestKnowledge(t, db, "old", "old-etag", types.ParseStatusCompleted, "enabled")
++	newer := insertNextcloudVersionTestKnowledge(t, db, "new", "", types.ParseStatusPending, "disabled")
++	stale := *old // worker snapshot taken before the new version was staged
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds", "nextcloud:instance:77", "new-etag", newer.ID))
++	require.NoError(t, repo.UpdateKnowledge(ctx, &stale))
++	require.Empty(t, reloadedNextcloudETag(t, db, old.ID))
++	published, err := repo.PublishNextcloudVersion(ctx, old.ID)
++	require.NoError(t, err)
++	require.False(t, published)
++	require.NoError(t, repo.UpdateKnowledgeColumns(ctx, newer.ID,
++		map[string]interface{}{"parse_status": types.ParseStatusCompleted, "enable_status": "enabled"}))
++	require.Equal(t, "new-etag", reloadedNextcloudETag(t, db, newer.ID))
++}
++
++func TestNextcloudTombstonePersistsAndBlocksLateCompletion(t *testing.T) {
++	ctx := context.Background()
++	repo, db := newNextcloudVersionTestRepo(t)
++	k := insertNextcloudVersionTestKnowledge(t, db, "old", "old-etag", types.ParseStatusCompleted, "enabled")
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds", "nextcloud:instance:77", "old-etag", k.ID))
++	_, err := repo.PublishNextcloudVersion(ctx, k.ID)
++	require.NoError(t, err)
++	stale := *k
++	require.NoError(t, repo.TombstoneNextcloudVersion(ctx, 7, "kb", "ds", "nextcloud:instance:77"))
++	require.Empty(t, reloadedNextcloudETag(t, db, k.ID))
++	require.NoError(t, repo.UpdateKnowledge(ctx, &stale))
++	require.Empty(t, reloadedNextcloudETag(t, db, k.ID))
++	published, err := repo.PublishNextcloudVersion(ctx, k.ID)
++	require.NoError(t, err)
++	require.False(t, published)
++	var version nextcloudSourceVersion
++	require.NoError(t, db.First(&version).Error)
++	require.Equal(t, "tombstone", version.State)
++	var count int64
++	require.NoError(t, db.Unscoped().Model(&types.Knowledge{}).Where("id = ?", k.ID).Count(&count).Error)
++	require.Equal(t, int64(1), count, "tombstone must not destroy the recoverable row")
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", k.ID).Count(&count).Error)
++	require.Zero(t, count, "tombstoned row must disappear from ordinary listings")
++}
++
++func TestSQLiteNextcloudVersionMigrationCreatesDurableUniqueCandidate(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
++	require.NoError(t, err)
++	script, err := os.ReadFile("../../../migrations/sqlite/000031_nextcloud_source_versions.up.sql")
++	require.NoError(t, err)
++	for _, statement := range strings.Split(string(script), ";\n\n") {
++		statement = strings.TrimSpace(statement)
++		if statement != "" {
++			require.NoError(t, db.Exec(statement).Error)
++		}
++	}
++	first := nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb", DataSourceID: "ds",
++		ExternalID: "one", DesiredETag: "v1", CandidateKnowledgeID: "candidate", State: "staging"}
++	require.NoError(t, db.Create(&first).Error)
++	second := first
++	second.ExternalID = "two"
++	require.Error(t, db.Create(&second).Error, "one knowledge row cannot be desired by two source files")
++	second.CandidateKnowledgeID = ""
++	second.State = "tombstone"
++	require.NoError(t, db.Create(&second).Error)
 +}
 diff --git a/internal/application/repository/resource.go b/internal/application/repository/resource.go
 index b3d724b7..e0398d55 100644
@@ -1697,10 +2431,77 @@ index 00000000..8414c898
 +	}
 +}
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241..deee1a9f 100644
+index c0b24241..39567dfc 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
-@@ -768,8 +768,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -14,6 +14,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/Tencent/WeKnora/internal/application/access"
++	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/datasource"
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
+@@ -155,6 +156,31 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// Reject a Nextcloud type transition before validating any proposed
++	// connector. The repository also rejects it, but validation makes an
++	// outbound request with the preserved credential before that DB check.
++	if (existing.Type == types.ConnectorTypeNextcloud || ds.Type == types.ConnectorTypeNextcloud) &&
++		ds.Type != existing.Type {
++		return nil, errors.New("Nextcloud data source type cannot change")
++	}
++	if existing.Type == types.ConnectorTypeNextcloud && len(ds.Config) > 0 {
++		stored, storedErr := existing.ParseConfig()
++		proposed, proposedErr := ds.ParseConfig()
++		if storedErr != nil || proposedErr != nil || stored == nil || proposed == nil {
++			return nil, datasource.ErrInvalidConfig
++		}
++		// PUT /datasource retains the stored secret. Never probe a newly
++		// supplied address with that secret, even when the eventual repository
++		// write would reject the update. Exact URL equality is deliberate: a
++		// seemingly equivalent spelling may resolve to a different endpoint.
++		if stored.HasConfiguredCredentials(existing.Type) {
++			storedURL, storedOK := stored.Settings["base_url"].(string)
++			proposedURL, proposedOK := proposed.Settings["base_url"].(string)
++			if !storedOK || !proposedOK || storedURL != proposedURL {
++				return nil, errors.New("Nextcloud base URL cannot change while credentials are configured")
++			}
++		}
++	}
+ 
+ 	if ds.KnowledgeBaseID == "" {
+ 		ds.KnowledgeBaseID = existing.KnowledgeBaseID
+@@ -268,7 +294,7 @@ func (s *DataSourceService) UpdateDataSourceCredentials(
+ 	if err := s.validateDataSourceConfig(ctx, existing); err != nil {
+ 		return nil, err
+ 	}
+-	if err := s.dsRepo.Update(ctx, existing); err != nil {
++	if err := s.dsRepo.Update(apprepo.WithNextcloudCredentialWrite(ctx), existing); err != nil {
+ 		return nil, err
+ 	}
+ 	logger.Infof(ctx, "DataSource credentials updated: id=%s", secutils.SanitizeForLog(id))
+@@ -302,7 +328,7 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
+ 			return err
+ 		}
+ 		existing.Config = blob
+-		return s.dsRepo.Update(ctx, existing)
++		return s.dsRepo.Update(apprepo.WithNextcloudCredentialWrite(ctx), existing)
+ 	}
+ 	parsed.Credentials = nil
+ 	blob, err := parsed.ToJSON()
+@@ -310,7 +336,7 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
+ 		return err
+ 	}
+ 	existing.Config = blob
+-	if err := s.dsRepo.Update(ctx, existing); err != nil {
++	if err := s.dsRepo.Update(apprepo.WithNextcloudCredentialWrite(ctx), existing); err != nil {
+ 		return err
+ 	}
+ 	logger.Infof(ctx, "DataSource credentials cleared by user: id=%s", secutils.SanitizeForLog(id))
+@@ -768,8 +794,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  		return err
  	}
  
@@ -1715,7 +2516,44 @@ index c0b24241..deee1a9f 100644
  		cursorJSON, _ := nextCursor.ToJSON()
  		ds.LastSyncCursor = cursorJSON
  	}
-@@ -1285,7 +1289,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -866,8 +896,9 @@ func (s *DataSourceService) applyFetchedItem(
+ 	tagIDs []string, result *types.SyncResult,
+ ) {
+ 	if item.IsDeleted {
+-		if !ds.SyncDeletions {
+-			// Sync deletion disabled: neither count nor delete.
++		if !ds.SyncDeletions && ds.Type != types.ConnectorTypeNextcloud {
++			// Other connectors may disable sync deletion. Nextcloud must
++			// withdraw a confirmed deletion regardless of that option.
+ 			return
+ 		}
+ 		if item.ExternalID == "" {
+@@ -875,6 +906,24 @@ func (s *DataSourceService) applyFetchedItem(
+ 			result.Skipped++
+ 			return
+ 		}
++		if ds.Type == types.ConnectorTypeNextcloud {
++			versions, ok := s.knowledgeService.GetRepository().(nextcloudVersionStore)
++			if !ok {
++				result.Failed++
++				result.DeletionFailed++
++				recordSyncError(result, types.SyncItemError{Title: item.Title, Code: "deletion_failed", Message: "Nextcloud version store unavailable"})
++				return
++			}
++			if err := versions.TombstoneNextcloudVersion(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID); err != nil {
++				result.Failed++
++				result.DeletionFailed++
++				logger.Errorf(ctx, "failed to tombstone Nextcloud item %s: %v", item.ExternalID, err)
++				recordSyncError(result, types.SyncItemError{Title: item.Title, Code: "deletion_failed", Message: "Nextcloud tombstone failed; see server logs"})
++				return
++			}
++			result.Deleted++
++			return
++		}
+ 		// Perform real KB deletion, scoped to items owned by this data source
+ 		// so identical external IDs from different data sources cannot collide.
+ 		repo := s.knowledgeService.GetRepository()
+@@ -1285,7 +1334,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	// "unknown" for the raw ds.Type "feishu_drive"). Fall back to ds.Type so
  	// connectors that don't set metadata.channel still get a meaningful label.
  	channel := ds.Type // e.g. "feishu", "notion"
@@ -1727,7 +2565,21 @@ index c0b24241..deee1a9f 100644
  		if mc, ok := item.Metadata["channel"]; ok && mc != "" {
  			channel = mc
  		}
-@@ -1318,14 +1325,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1308,6 +1360,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+ 	for k, v := range item.Metadata {
+ 		metadata[k] = v
+ 	}
++	if ds.Type == types.ConnectorTypeNextcloud {
++		// Connector metadata may not override the trusted data-source identity.
++		metadata["datasource_id"] = ds.ID
++		metadata["external_id"] = item.ExternalID
++		metadata["source_resource_id"] = item.SourceResourceID
++		return s.ingestNextcloudItem(ctx, ds, item, metadata, tagIDs)
++	}
+ 
+ 	// Check if a knowledge item with this external_id already exists → delete it first (update)
+ 	isUpdate := false
+@@ -1318,14 +1377,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  		// other during updates.
  		existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
  		if err != nil {
@@ -1751,8 +2603,77 @@ index c0b24241..deee1a9f 100644
  					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
  				}
  				isUpdate = true
+@@ -1407,6 +1475,68 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+ 	return isUpdate, fmt.Errorf("item has neither content nor URL")
+ }
+ 
++// nextcloudVersionStore is implemented by the SQL knowledge repository. It is
++// narrow so other connectors and existing KnowledgeRepository users do not
++// need a version workflow.
++type nextcloudVersionStore interface {
++	StageNextcloudVersion(context.Context, uint64, string, string, string, string, string) error
++	PublishNextcloudVersion(context.Context, string) (bool, error)
++	TombstoneNextcloudVersion(context.Context, uint64, string, string, string) error
++}
++
++func (s *DataSourceService) ingestNextcloudItem(
++	ctx context.Context, ds *types.DataSource, item *types.FetchedItem,
++	metadata map[string]string, tagIDs []string,
++) (bool, error) {
++	versions, ok := s.knowledgeService.GetRepository().(nextcloudVersionStore)
++	if !ok {
++		return false, errors.New("Nextcloud version store unavailable")
++	}
++	etag := metadata["nextcloud_etag"]
++	if ds.TenantID == 0 || ds.ID == "" || ds.KnowledgeBaseID == "" ||
++		item.ExternalID == "" || strings.TrimSpace(etag) == "" || len(item.Content) == 0 {
++		return false, errors.New("incomplete Nextcloud file version")
++	}
++	repo := s.knowledgeService.GetRepository()
++	existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
++	if err != nil {
++		return false, fmt.Errorf("check existing Nextcloud knowledge: %w", err)
++	}
++	isUpdate := existing != nil
++	// The source guard rejects empty ETags. Keep a newly created row hidden
++	// throughout parsing, including the interval before Stage commits.
++	metadata["nextcloud_target_etag"] = etag
++	metadata["nextcloud_etag"] = ""
++	fh, err := bytesToFileHeader(item.Content, item.FileName)
++	if err != nil {
++		return isUpdate, fmt.Errorf("build Nextcloud file header: %w", err)
++	}
++	candidate, createErr := s.knowledgeService.CreateKnowledgeFromFile(
++		ctx, ds.KnowledgeBaseID, fh, metadata, nil, item.FileName,
++		tagIDs, types.ConnectorTypeNextcloud, nil,
++	)
++	if createErr != nil {
++		var duplicate *types.DuplicateKnowledgeError
++		if !errors.As(createErr, &duplicate) || !dupIsSameNode(duplicate, item) {
++			return isUpdate, createErr
++		}
++		candidate = duplicate.Knowledge
++	}
++	if candidate == nil || candidate.ID == "" || candidate.ParseStatus == types.ParseStatusFailed {
++		return isUpdate, errors.New("Nextcloud candidate could not be queued for parsing")
++	}
++	if err := versions.StageNextcloudVersion(ctx, ds.TenantID, ds.KnowledgeBaseID,
++		ds.ID, item.ExternalID, etag, candidate.ID); err != nil {
++		return isUpdate, fmt.Errorf("stage Nextcloud version: %w", err)
++	}
++	// A duplicate with identical bytes may already be fully parsed. The
++	// repository also invokes this after asynchronous completion.
++	if _, err := versions.PublishNextcloudVersion(ctx, candidate.ID); err != nil {
++		return isUpdate, fmt.Errorf("publish completed Nextcloud version: %w", err)
++	}
++	return isUpdate, nil
++}
++
+ // dupIsSameNode reports whether a duplicate-content error means the parent still
+ // exists in the KB *under this item's own external_id* — i.e. a content-dedup hit
+ // against this same node, so reconciling its subtree is safe. File deduplication
 diff --git a/internal/application/service/datasource_service_test.go b/internal/application/service/datasource_service_test.go
-index bc90b995..770c2f9d 100644
+index bc90b995..1117b5b1 100644
 --- a/internal/application/service/datasource_service_test.go
 +++ b/internal/application/service/datasource_service_test.go
 @@ -4,6 +4,7 @@ import (
@@ -1763,7 +2684,52 @@ index bc90b995..770c2f9d 100644
  	"strings"
  	"testing"
  	"time"
-@@ -687,6 +688,71 @@ func (mixedSyncConnector) FetchIncremental(
+@@ -278,6 +279,24 @@ type deletionLookupKnowledgeRepo struct {
+ 	knowledgeBaseID   string
+ 	dataSourceID      string
+ 	externalID        string
++	stageErr          error
++	stageCalls        int
++	tombstoneErr      error
++	tombstoneCalls    int
++}
++
++func (r *deletionLookupKnowledgeRepo) StageNextcloudVersion(context.Context, uint64, string, string, string, string, string) error {
++	r.stageCalls++
++	return r.stageErr
++}
++
++func (r *deletionLookupKnowledgeRepo) PublishNextcloudVersion(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *deletionLookupKnowledgeRepo) TombstoneNextcloudVersion(context.Context, uint64, string, string, string) error {
++	r.tombstoneCalls++
++	return r.tombstoneErr
+ }
+ 
+ func (r *deletionLookupKnowledgeRepo) UpdateKnowledge(_ context.Context, knowledge *types.Knowledge) error {
+@@ -356,6 +375,19 @@ type keyedDeletionRepo struct {
+ 	items         map[string]*types.Knowledge
+ 	hardDeleted   []string
+ 	hardDeleteErr error
++	tombstoneErr  error
++}
++
++func (r *keyedDeletionRepo) StageNextcloudVersion(context.Context, uint64, string, string, string, string, string) error {
++	return nil
++}
++
++func (r *keyedDeletionRepo) PublishNextcloudVersion(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *keyedDeletionRepo) TombstoneNextcloudVersion(context.Context, uint64, string, string, string) error {
++	return r.tombstoneErr
+ }
+ 
+ func (r *keyedDeletionRepo) FindByDataSourceExternalID(
+@@ -687,6 +719,72 @@ func (mixedSyncConnector) FetchIncremental(
  	return items, nil, err
  }
  
@@ -1775,6 +2741,7 @@ index bc90b995..770c2f9d 100644
 +	ctx context.Context, config *types.DataSourceConfig, old *types.SyncCursor,
 +) ([]types.FetchedItem, *types.SyncCursor, error) {
 +	items, err := (mixedSyncConnector{}).FetchAll(ctx, config, nil)
++	items[1].Metadata = map[string]string{"nextcloud_etag": "etag-new"}
 +	return items, &types.SyncCursor{ConnectorCursor: map[string]interface{}{"marker": "new"}}, err
 +}
 +
@@ -1806,7 +2773,7 @@ index bc90b995..770c2f9d 100644
 +				"file:gone": {ID: "knowledge-gone"},
 +			}}
 +			if test.deleteFail {
-+				repo.hardDeleteErr = errors.New("hard delete failed")
++				repo.tombstoneErr = errors.New("tombstone failed")
 +			}
 +			registry := datasource.NewConnectorRegistry()
 +			require.NoError(t, registry.Register(nextcloudCursorMixedConnector{}))
@@ -1835,39 +2802,52 @@ index bc90b995..770c2f9d 100644
  func TestProcessSync_SyncDeletionsPartialWhenMixedResults(t *testing.T) {
  	configJSON, err := (&types.DataSourceConfig{Type: "test-sync-mixed"}).ToJSON()
  	require.NoError(t, err)
-@@ -748,3 +814,65 @@ func TestIngestItem_URLCreationMetadataAttachFailure(t *testing.T) {
+@@ -748,3 +846,78 @@ func TestIngestItem_URLCreationMetadataAttachFailure(t *testing.T) {
  	require.Error(t, err)
  	assert.Contains(t, err.Error(), "attach datasource metadata")
  }
 +
-+func TestIngestItem_NextcloudReplacementFailureDoesNotCreateAnotherVersion(t *testing.T) {
++func TestIngestItem_NextcloudFailureRetainsOldKnowledge(t *testing.T) {
 +	for _, tc := range []struct {
-+		name      string
-+		lookupErr error
-+		deleteErr error
-+		hardErr   error
++		name            string
++		lookupErr       error
++		createErr       error
++		stageErr        error
++		failedCandidate bool
 +	}{
 +		{name: "lookup", lookupErr: errors.New("lookup unavailable")},
-+		{name: "delete", deleteErr: errors.New("delete unavailable")},
-+		{name: "hard delete", hardErr: errors.New("hard delete unavailable")},
++		{name: "create", createErr: errors.New("storage unavailable")},
++		{name: "enqueue failure", failedCandidate: true},
++		{name: "stage", stageErr: errors.New("database unavailable")},
 +	} {
 +		t.Run(tc.name, func(t *testing.T) {
 +			repo := &deletionLookupKnowledgeRepo{
-+				knowledge:     &types.Knowledge{ID: "old-version"},
-+				lookupErr:     tc.lookupErr,
-+				hardDeleteErr: tc.hardErr,
++				knowledge: &types.Knowledge{ID: "old-version"},
++				lookupErr: tc.lookupErr,
++				stageErr:  tc.stageErr,
 +			}
-+			ks := &sweepFakeKS{repo: repo, deleteErr: tc.deleteErr}
++			ks := &sweepFakeKS{repo: repo, createErr: tc.createErr}
++			if tc.failedCandidate {
++				ks.createdKnowledge = &types.Knowledge{ID: "new-knowledge", ParseStatus: types.ParseStatusFailed}
++			}
 +			svc := &DataSourceService{knowledgeService: ks}
 +			ds := &types.DataSource{
 +				ID: "ds-nextcloud", TenantID: 1, KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud,
 +			}
 +			updated, err := svc.ingestItem(context.Background(), ds, &types.FetchedItem{
-+				ExternalID: "file:77", FileName: "document.txt", Content: []byte("new bytes"),
++				ExternalID: "nextcloud:instance:77", FileName: "document.txt", Content: []byte("new bytes"),
++				Metadata: map[string]string{"nextcloud_etag": "new-etag"},
 +			}, nil)
 +			require.Error(t, err)
-+			assert.False(t, updated)
-+			assert.NotContains(t, ks.events, "create:document.txt")
++			assert.Equal(t, tc.lookupErr == nil, updated)
++			assert.Empty(t, ks.deleted)
++			assert.Empty(t, repo.hardDeleted)
++			if tc.failedCandidate {
++				assert.Zero(t, repo.stageCalls, "failed enqueue must not become a desired version")
++			}
++			if tc.lookupErr != nil {
++				assert.NotContains(t, ks.events, "create:document.txt")
++			}
 +		})
 +	}
 +}
@@ -1896,11 +2876,52 @@ index bc90b995..770c2f9d 100644
 +		Type: types.ConnectorTypeNextcloud,
 +	}, &types.FetchedItem{
 +		ExternalID: "nextcloud:instance:77", FileName: "document.txt",
-+		Content: []byte("current bytes"), Metadata: map[string]string{"channel": "local"},
++		Content: []byte("current bytes"), Metadata: map[string]string{"channel": "local", "nextcloud_etag": "etag-1"},
 +	}, nil)
 +	require.NoError(t, err)
 +	assert.Equal(t, types.ConnectorTypeNextcloud, knowledge.channel)
 +}
+diff --git a/internal/application/service/datasource_sweep_wiring_test.go b/internal/application/service/datasource_sweep_wiring_test.go
+index e9ce5bc0..68608361 100644
+--- a/internal/application/service/datasource_sweep_wiring_test.go
++++ b/internal/application/service/datasource_sweep_wiring_test.go
+@@ -20,6 +20,18 @@ type sweepFakeRepo struct {
+ 	prefixReturn []*types.Knowledge // children to return from FindByMetadataKeyPrefix
+ }
+ 
++func (r *sweepFakeRepo) StageNextcloudVersion(context.Context, uint64, string, string, string, string, string) error {
++	return nil
++}
++
++func (r *sweepFakeRepo) PublishNextcloudVersion(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *sweepFakeRepo) TombstoneNextcloudVersion(context.Context, uint64, string, string, string) error {
++	return nil
++}
++
+ func (r *sweepFakeRepo) FindByMetadataKey(ctx context.Context, tenantID uint64, kbID, key, value string) (*types.Knowledge, error) {
+ 	return nil, nil // no existing main item → skip the case-1 update delete
+ }
+@@ -49,6 +61,7 @@ type sweepFakeKS struct {
+ 	events             []string // ordered log of "delete:<id>" and "create:<fname>"
+ 	deleted            []string
+ 	createErr          error            // if set, CreateKnowledgeFromFile returns it after logging
++	createdKnowledge   *types.Knowledge // optional candidate status for Nextcloud ingest tests
+ 	deleteErr          error            // if set, DeleteKnowledge returns it after logging
+ 	createURLKnowledge *types.Knowledge // if set, CreateKnowledgeFromURL returns it
+ }
+@@ -87,6 +100,9 @@ func (k *sweepFakeKS) CreateKnowledgeFromFile(
+ 	if k.createErr != nil {
+ 		return nil, k.createErr
+ 	}
++	if k.createdKnowledge != nil {
++		return k.createdKnowledge, nil
++	}
+ 	return &types.Knowledge{ID: "new-knowledge"}, nil
+ }
+ 
 diff --git a/internal/application/service/embed_channel.go b/internal/application/service/embed_channel.go
 index df9986d4..f7a955b1 100644
 --- a/internal/application/service/embed_channel.go
@@ -2625,7 +3646,7 @@ index fb431424..07c879f2 100644
  		return err
  	}
 diff --git a/internal/application/service/knowledge_create.go b/internal/application/service/knowledge_create.go
-index 1b19f5a6..0f0715bf 100644
+index 1b19f5a6..6b30bdd9 100644
 --- a/internal/application/service/knowledge_create.go
 +++ b/internal/application/service/knowledge_create.go
 @@ -189,7 +189,15 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
@@ -2645,6 +3666,15 @@ index 1b19f5a6..0f0715bf 100644
  	if err != nil {
  		logger.Errorf(ctx, "Failed to save file, knowledge ID: %s, error: %v", knowledge.ID, err)
  		return nil, err
+@@ -1163,7 +1171,7 @@ func (s *knowledgeService) markKnowledgeEnqueueFailed(ctx context.Context, knowl
+ 
+ func usesSourceIdentityDuplicateCheck(channel string) bool {
+ 	switch channel {
+-	case types.ConnectorTypeGitLab, types.ChannelConfluence:
++	case types.ConnectorTypeGitLab, types.ChannelConfluence, types.ConnectorTypeNextcloud:
+ 		return true
+ 	default:
+ 		return false
 diff --git a/internal/application/service/knowledge_replace.go b/internal/application/service/knowledge_replace.go
 index ca20ef9f..a89dda10 100644
 --- a/internal/application/service/knowledge_replace.go
@@ -3473,6 +4503,79 @@ index 00000000..b9c041c1
 +	_, err := f.svc.planKnowledgeClone(f.ctx, f.kbs.values["kb"], f.kbs.values["other"])
 +	require.ErrorIs(t, err, ErrNextcloudDerivedContent)
 +}
+diff --git a/internal/application/service/nextcloud_endpoint_guard_test.go b/internal/application/service/nextcloud_endpoint_guard_test.go
+new file mode 100644
+index 00000000..eabdc6ed
+--- /dev/null
++++ b/internal/application/service/nextcloud_endpoint_guard_test.go
+@@ -0,0 +1,67 @@
++package service
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/datasource"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// The data-source PUT handler permits a KB editor and intentionally preserves
++// stored credentials. A changed endpoint must be denied before the connector
++// receives those credentials for its live validation request.
++func TestKBEditorCannotRepointPairedNextcloudAndLeakBearer(t *testing.T) {
++	var requests atomic.Int32
++	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests.Add(1)
++		if r.Header.Get("Authorization") != "" {
++			t.Errorf("Bearer sent to untrusted host")
++		}
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer attacker.Close()
++	// Approve the destination here so the endpoint guard itself, rather than
++	// the independent server allowlist, must stop a stored-token redirect.
++	t.Setenv("WEKNORA_NEXTCLOUD_DEV_HTTP", "1")
++	t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", attacker.URL)
++	storedConfig, err := (&types.DataSourceConfig{
++		Type:        types.ConnectorTypeNextcloud,
++		Settings:    map[string]interface{}{"base_url": "https://trusted.example"},
++		Credentials: map[string]interface{}{"token": "private-machine-token"},
++		ResourceIDs: []string{"dev-published"},
++	}).ToJSON()
++	require.NoError(t, err)
++	stored := &types.DataSource{ID: "paired", TenantID: 7, KnowledgeBaseID: "kb",
++		Type: types.ConnectorTypeNextcloud, Config: storedConfig}
++	proposedConfig, err := (&types.DataSourceConfig{
++		Type:        types.ConnectorTypeNextcloud,
++		Settings:    map[string]interface{}{"base_url": attacker.URL},
++		ResourceIDs: []string{"dev-published"},
++	}).ToJSON()
++	require.NoError(t, err)
++	registry := datasource.NewConnectorRegistry()
++	require.NoError(t, registry.Register(nextcloud.NewConnector()))
++	svc := &DataSourceService{
++		dsRepo:            newKBDeleteDSRepo(stored.KnowledgeBaseID, stored),
++		connectorRegistry: registry,
++	}
++	_, err = svc.UpdateDataSource(context.Background(), &types.DataSource{
++		ID: stored.ID, TenantID: stored.TenantID, KnowledgeBaseID: stored.KnowledgeBaseID,
++		Type: stored.Type, Config: proposedConfig,
++	})
++	require.ErrorContains(t, err, "base URL cannot change")
++	require.Zero(t, requests.Load(), "validation disclosed the preserved Bearer")
++
++	_, err = svc.UpdateDataSource(context.Background(), &types.DataSource{
++		ID: stored.ID, TenantID: stored.TenantID, KnowledgeBaseID: stored.KnowledgeBaseID,
++		Type: types.ConnectorTypeRSS, Config: proposedConfig,
++	})
++	require.ErrorContains(t, err, "type cannot change")
++	require.Zero(t, requests.Load(), "type transition disclosed the preserved Bearer")
++}
 diff --git a/internal/application/service/resource.go b/internal/application/service/resource.go
 index b376fa91..95052a3d 100644
 --- a/internal/application/service/resource.go
@@ -4028,10 +5131,10 @@ index 67568c4c..28cae25c 100644
  // ListAvailableConnectors returns all available connector metadata
 diff --git a/internal/datasource/connector/nextcloud/authorization.go b/internal/datasource/connector/nextcloud/authorization.go
 new file mode 100644
-index 00000000..b16cd880
+index 00000000..3c187e5f
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/authorization.go
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,143 @@
 +package nextcloud
 +
 +import (
@@ -4126,9 +5229,11 @@ index 00000000..b16cd880
 +	if err != nil {
 +		return AuthorizationDecision{}, err
 +	}
-+	req.Header.Set("Authorization", "Bearer "+cfg.token)
 +	req.Header.Set("Content-Type", "application/json")
 +	req.Header.Set("Accept", "application/json")
++	if err := signMachineRequest(req, cfg, body); err != nil {
++		return AuthorizationDecision{}, err
++	}
 +	resp, err := cli.http.Do(req)
 +	if err != nil {
 +		return AuthorizationDecision{}, fmt.Errorf("Nextcloud authorization request: %w", err)
@@ -4175,16 +5280,19 @@ index 00000000..b16cd880
 +}
 diff --git a/internal/datasource/connector/nextcloud/authorization_test.go b/internal/datasource/connector/nextcloud/authorization_test.go
 new file mode 100644
-index 00000000..9f67f7ef
+index 00000000..4e4bdcf6
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/authorization_test.go
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,139 @@
 +package nextcloud
 +
 +import (
 +	"context"
++	"crypto/hmac"
++	"crypto/sha256"
 +	"encoding/json"
 +	"fmt"
++	"io"
 +	"net/http"
 +	"net/http/httptest"
 +	"testing"
@@ -4192,7 +5300,8 @@ index 00000000..9f67f7ef
 +	"github.com/Tencent/WeKnora/internal/types"
 +)
 +
-+func authorizationConfig(baseURL string) *types.DataSourceConfig {
++func authorizationConfig(t *testing.T, baseURL string) *types.DataSourceConfig {
++	allowHTTPTestOrigin(t, baseURL)
 +	return &types.DataSourceConfig{
 +		Type:        types.ConnectorTypeNextcloud,
 +		Settings:    map[string]interface{}{"base_url": baseURL},
@@ -4208,6 +5317,10 @@ index 00000000..9f67f7ef
 +		if r.Header.Get("Authorization") != "Bearer paired-secret" {
 +			t.Errorf("missing source authorization header")
 +		}
++		if r.Header.Get("X-WeKnora-Key-Id") != "default" ||
++			r.Header.Get("X-WeKnora-Nonce") == "" || r.Header.Get("X-WeKnora-Signature") == "" {
++			t.Errorf("missing machine request signature")
++		}
 +		switch r.URL.Path {
 +		case apiPath + "/capabilities":
 +			if r.Method != http.MethodGet {
@@ -4218,9 +5331,24 @@ index 00000000..9f67f7ef
 +			if r.Method != http.MethodPost {
 +				t.Errorf("authorize used %s", r.Method)
 +			}
++			raw, err := io.ReadAll(r.Body)
++			if err != nil {
++				t.Errorf("read request body: %v", err)
++			}
 +			var payload map[string]any
-+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
++			if err := json.Unmarshal(raw, &payload); err != nil {
 +				t.Errorf("decode request: %v", err)
++			}
++			canonical, err := machineCanonicalRequest(r.Method, r.URL.EscapedPath(), r.URL.RawQuery,
++				raw, r.Header.Get("X-WeKnora-Timestamp"), r.Header.Get("X-WeKnora-Nonce"), "default")
++			if err != nil {
++				t.Errorf("canonicalize request: %v", err)
++			}
++			key := sha256.Sum256([]byte("paired-secret"))
++			mac := hmac.New(sha256.New, key[:])
++			_, _ = mac.Write([]byte(canonical))
++			if !hmac.Equal(mac.Sum(nil), mustDecodeHex(t, r.Header.Get("X-WeKnora-Signature"))) {
++				t.Error("authorization POST signature did not bind the raw body")
 +			}
 +			if payload["directory_id"] != "ad-1" || payload["object_guid"] != guid || payload["file_id"] != float64(42) {
 +				t.Errorf("unexpected payload: %#v", payload)
@@ -4231,7 +5359,7 @@ index 00000000..9f67f7ef
 +		}
 +	}))
 +	defer server.Close()
-+	decision, err := AuthorizeCurrentFile(context.Background(), authorizationConfig(server.URL),
++	decision, err := AuthorizeCurrentFile(context.Background(), authorizationConfig(t, server.URL),
 +		"instance-1", "binding-1", "ad-1", guid, 42)
 +	if err != nil || !decision.Allow || decision.PolicyRevision != "rev-1" || decision.SourceETag != "etag-42" || requests != 2 {
 +		t.Fatalf("decision=%+v err=%v requests=%d", decision, err, requests)
@@ -4271,7 +5399,7 @@ index 00000000..9f67f7ef
 +				fmt.Fprint(w, tc.response)
 +			}))
 +			defer server.Close()
-+			decision, err := AuthorizeCurrentFile(context.Background(), authorizationConfig(server.URL),
++			decision, err := AuthorizeCurrentFile(context.Background(), authorizationConfig(t, server.URL),
 +				"instance-1", "binding-1", "ad-1", guid, 42)
 +			if err == nil || decision.Allow {
 +				t.Fatalf("source error allowed access: decision=%+v err=%v", decision, err)
@@ -4289,7 +5417,7 @@ index 00000000..9f67f7ef
 +		fmt.Fprint(w, `{"allow":false,"reason":"publication_withdrawn","policy_revision":null,"checked_at":1780000000}`)
 +	}))
 +	defer server.Close()
-+	decision, err := AuthorizeCurrentFile(context.Background(), authorizationConfig(server.URL),
++	decision, err := AuthorizeCurrentFile(context.Background(), authorizationConfig(t, server.URL),
 +		"instance-1", "binding-1", "ad-1", "00112233-4455-6677-8899-aabbccddeeff", 42)
 +	if err != nil || decision.Allow || decision.Reason != "publication_withdrawn" {
 +		t.Fatalf("decision=%+v err=%v", decision, err)
@@ -4297,7 +5425,7 @@ index 00000000..9f67f7ef
 +}
 diff --git a/internal/datasource/connector/nextcloud/changes_test.go b/internal/datasource/connector/nextcloud/changes_test.go
 new file mode 100644
-index 00000000..a2feab89
+index 00000000..854496cd
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/changes_test.go
 @@ -0,0 +1,291 @@
@@ -4355,7 +5483,7 @@ index 00000000..a2feab89
 +	defer server.Close()
 +
 +	connector := NewConnector()
-+	config := testConfig(server.URL)
++	config := testConfig(t, server.URL)
 +	ctx := context.Background()
 +	items, cursor, err := connector.FetchIncremental(ctx, config, nil)
 +	if err != nil || len(items) != 1 || cursor == nil || manifestCalls != 1 || contentCalls != 1 {
@@ -4421,7 +5549,7 @@ index 00000000..a2feab89
 +	}))
 +	defer server.Close()
 +	connector := NewConnector()
-+	config := testConfig(server.URL)
++	config := testConfig(t, server.URL)
 +	ctx := context.Background()
 +	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
 +	if err != nil {
@@ -4495,7 +5623,7 @@ index 00000000..a2feab89
 +	}))
 +	defer server.Close()
 +	connector := NewConnector()
-+	config := testConfig(server.URL)
++	config := testConfig(t, server.URL)
 +	ctx := context.Background()
 +	_, old, err := connector.FetchIncremental(ctx, config, nil)
 +	if err != nil {
@@ -4552,7 +5680,7 @@ index 00000000..a2feab89
 +		}
 +	}))
 +	defer server.Close()
-+	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, server.URL), nil)
 +	if err != nil || len(items) != 1 || cursor == nil || changesCalls != maxChangePages || manifestCalls != 1 {
 +		t.Fatalf("bounded scan = %+v, %+v, %v; changes=%d manifest=%d", items, cursor, err, changesCalls, manifestCalls)
 +	}
@@ -4572,14 +5700,14 @@ index 00000000..a2feab89
 +		}
 +	}))
 +	defer server.Close()
-+	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, server.URL), nil)
 +	if err == nil || len(items) != 0 || cursor != nil {
 +		t.Fatalf("malformed feed = %+v, %+v, %v", items, cursor, err)
 +	}
 +}
 +
 +func TestFullReconcileIntervalIsBounded(t *testing.T) {
-+	config := testConfig("http://nextcloud")
++	config := testConfig(t, "http://nextcloud")
 +	for _, value := range []interface{}{299, 604801, "bad", 600.5} {
 +		config.Settings["full_reconcile_interval_seconds"] = value
 +		if _, err := parseConfig(config); err == nil {
@@ -4594,10 +5722,10 @@ index 00000000..a2feab89
 +}
 diff --git a/internal/datasource/connector/nextcloud/client.go b/internal/datasource/connector/nextcloud/client.go
 new file mode 100644
-index 00000000..25e375cf
+index 00000000..c6eeac75
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/client.go
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,368 @@
 +package nextcloud
 +
 +import (
@@ -4669,10 +5797,12 @@ index 00000000..25e375cf
 +	if err != nil {
 +		return nil, err
 +	}
-+	req.Header.Set("Authorization", "Bearer "+c.cfg.token)
 +	req.Header.Set("Accept", "application/json")
 +	if len(ifMatch) != 0 {
 +		req.Header.Set("If-Match", `"`+normalizedETag(ifMatch[0])+`"`)
++	}
++	if err := signMachineRequest(req, c.cfg, nil); err != nil {
++		return nil, err
 +	}
 +	resp, err := c.http.Do(req)
 +	if err != nil {
@@ -5335,10 +6465,10 @@ index 00000000..645395a4
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
 new file mode 100644
-index 00000000..e836f050
+index 00000000..e3b21a48
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_test.go
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,642 @@
 +package nextcloud
 +
 +import (
@@ -5353,7 +6483,18 @@ index 00000000..e836f050
 +	"github.com/Tencent/WeKnora/internal/types"
 +)
 +
-+func testConfig(base string) *types.DataSourceConfig {
++func allowHTTPTestOrigin(t *testing.T, base string) {
++	t.Helper()
++	if strings.HasPrefix(base, "http://") {
++		t.Setenv("WEKNORA_NEXTCLOUD_DEV_HTTP", "1")
++		if strings.HasPrefix(base, "http://127.0.0.1:") {
++			t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", base)
++		}
++	}
++}
++
++func testConfig(t *testing.T, base string) *types.DataSourceConfig {
++	allowHTTPTestOrigin(t, base)
 +	return &types.DataSourceConfig{
 +		Type:        types.ConnectorTypeNextcloud,
 +		Settings:    map[string]interface{}{"base_url": base},
@@ -5388,6 +6529,10 @@ index 00000000..e836f050
 +			http.Error(w, "unauthorized", http.StatusUnauthorized)
 +			return
 +		}
++		if r.Header.Get("X-WeKnora-Key-Id") != "default" ||
++			r.Header.Get("X-WeKnora-Nonce") == "" || r.Header.Get("X-WeKnora-Signature") == "" {
++			t.Errorf("missing signed machine headers on %s", r.URL.Path)
++		}
 +		switch r.URL.Path {
 +		case apiPath + "/capabilities":
 +			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
@@ -5416,7 +6561,7 @@ index 00000000..e836f050
 +	defer server.Close()
 +
 +	ctx := context.Background()
-+	ds := testConfig(server.URL)
++	ds := testConfig(t, server.URL)
 +	connector := NewConnector()
 +	if got := connector.Type(); got != types.ConnectorTypeNextcloud {
 +		t.Fatalf("Type() = %q", got)
@@ -5475,7 +6620,7 @@ index 00000000..e836f050
 +	defer server.Close()
 +	connector := NewConnector()
 +	for _, selection := range [][]string{nil, {"dev-published", "another"}, {"unsafe/id"}} {
-+		cfg := testConfig(server.URL)
++		cfg := testConfig(t, server.URL)
 +		cfg.ResourceIDs = selection
 +		if err := connector.Validate(context.Background(), cfg); err == nil {
 +			t.Fatalf("Validate accepted selection %q", selection)
@@ -5484,7 +6629,7 @@ index 00000000..e836f050
 +	if requests != 0 {
 +		t.Fatalf("invalid selections triggered %d source requests", requests)
 +	}
-+	cfg := testConfig(server.URL)
++	cfg := testConfig(t, server.URL)
 +	cfg.ResourceIDs = []string{"other"}
 +	if err := connector.Validate(context.Background(), cfg); err == nil {
 +		t.Fatal("Validate accepted a binding absent from the source registry")
@@ -5515,7 +6660,7 @@ index 00000000..e836f050
 +			"99": map[string]interface{}{"etag": "old", "name": "Old.md", "path": "/Old.md"},
 +		}},
 +	}}
-+	items, next, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), old)
++	items, next, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, server.URL), old)
 +	if err == nil || next != nil || len(items) != 0 || contentRequests != 0 {
 +		t.Fatalf("incomplete manifest = %+v, %+v, %v; downloads=%d", items, next, err, contentRequests)
 +	}
@@ -5548,7 +6693,7 @@ index 00000000..e836f050
 +	defer server.Close()
 +
 +	connector := NewConnector()
-+	config := testConfig(server.URL)
++	config := testConfig(t, server.URL)
 +	ctx := context.Background()
 +	items, cursor, err := connector.FetchIncremental(ctx, config, nil)
 +	if err != nil || len(items) != 1 || items[0].IsDeleted || cursor == nil {
@@ -5630,7 +6775,7 @@ index 00000000..e836f050
 +	defer server.Close()
 +
 +	connector := NewConnector()
-+	config := testConfig(server.URL)
++	config := testConfig(t, server.URL)
 +	ctx := context.Background()
 +	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
 +	if err != nil || cursor == nil {
@@ -5685,7 +6830,7 @@ index 00000000..e836f050
 +	defer server.Close()
 +
 +	connector := NewConnector()
-+	config := testConfig(server.URL)
++	config := testConfig(t, server.URL)
 +	ctx := context.Background()
 +	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
 +	if err != nil {
@@ -5736,7 +6881,7 @@ index 00000000..e836f050
 +	defer server.Close()
 +
 +	connector := NewConnector()
-+	config := testConfig(server.URL)
++	config := testConfig(t, server.URL)
 +	ctx := context.Background()
 +	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
 +	if err != nil {
@@ -5779,7 +6924,7 @@ index 00000000..e836f050
 +			"42": map[string]interface{}{"etag": "etag-2", "name": "Old.md"},
 +		}},
 +	}}
-+	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), old)
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, server.URL), old)
 +	if err != nil || cursor == nil || len(items) != 0 {
 +		t.Fatalf("new instance = %+v, %+v, %v", items, cursor, err)
 +	}
@@ -5816,7 +6961,7 @@ index 00000000..e836f050
 +		}
 +	}))
 +	defer server.Close()
-+	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, server.URL), nil)
 +	if err != nil || len(items) != 1 || cursor == nil || pages != 2 || downloads != 1 {
 +		t.Fatalf("paged sync = %+v, %+v, %v; pages=%d downloads=%d", items, cursor, err, pages, downloads)
 +	}
@@ -5837,7 +6982,7 @@ index 00000000..e836f050
 +		}
 +	}))
 +	defer server.Close()
-+	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, server.URL), nil)
 +	if err == nil || !strings.Contains(err.Error(), "ETag changed") || len(items) != 0 || cursor != nil {
 +		t.Fatalf("ETag race = %+v, %+v, %v", items, cursor, err)
 +	}
@@ -5868,7 +7013,7 @@ index 00000000..e836f050
 +		}
 +	}))
 +	defer server.Close()
-+	_, _, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	_, _, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, server.URL), nil)
 +	if err == nil || redirected != 0 {
 +		t.Fatalf("redirect followed or accepted: err=%v target calls=%d", err, redirected)
 +	}
@@ -5890,38 +7035,390 @@ index 00000000..e836f050
 +		}
 +	}))
 +	defer large.Close()
-+	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(large.URL), nil)
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(t, large.URL), nil)
 +	if err == nil || !strings.Contains(err.Error(), "download limit") || len(items) != 0 || cursor != nil {
 +		t.Fatalf("oversize = %+v, %+v, %v", items, cursor, err)
 +	}
 +}
 +
 +func TestBaseURLValidationAllowsExplicitPrivateHost(t *testing.T) {
++	t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", "")
 +	for _, raw := range []string{
 +		"http://user:secret@nextcloud:80", "http://nextcloud/#fragment",
 +		"http://nextcloud/?q=x", "file:///tmp/nextcloud", "http://nextcloud/%2e%2e",
 +		"http://nextcloud/a%2fb", "http://nextcloud//other",
 +	} {
-+		if _, err := parseConfig(testConfig(raw)); err == nil {
++		if _, err := parseConfig(testConfig(t, raw)); err == nil {
 +			t.Errorf("unsafe URL accepted: %q", raw)
 +		}
 +	}
-+	if _, err := parseConfig(testConfig("http://nextcloud:80")); err != nil {
++	if _, err := parseConfig(testConfig(t, "http://nextcloud:80")); err != nil {
 +		t.Errorf("explicit Docker private URL rejected: %v", err)
++	}
++}
++
++func TestNextcloudOriginRequiresOperatorApprovalBeforeBearerRequest(t *testing.T) {
++	t.Setenv("WEKNORA_NEXTCLOUD_DEV_HTTP", "")
++	t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", "")
++	requests := 0
++	attacker := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		requests++
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer attacker.Close()
++	source := &types.DataSourceConfig{
++		Type:        types.ConnectorTypeNextcloud,
++		Settings:    map[string]interface{}{"base_url": attacker.URL},
++		Credentials: map[string]interface{}{"token": "hidden-machine-token"},
++		ResourceIDs: []string{"dev-published"},
++	}
++	if err := NewConnector().Validate(context.Background(), source); err == nil {
++		t.Fatal("unapproved HTTPS origin accepted")
++	}
++	if requests != 0 {
++		t.Fatalf("sent Bearer to unapproved HTTPS origin: %d requests", requests)
++	}
++	for _, allowed := range []string{"https://different.example", attacker.URL + ".evil"} {
++		t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", allowed)
++		if _, err := parseConfig(source); err == nil {
++			t.Fatalf("origin %q matched different approval %q", attacker.URL, allowed)
++		}
++	}
++	t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", attacker.URL)
++	if _, err := parseConfig(source); err != nil {
++		t.Fatalf("exact approved HTTPS origin rejected: %v", err)
++	}
++}
++
++func TestNextcloudHTTPOnlyForExplicitDevEndpoint(t *testing.T) {
++	t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", "")
++	t.Setenv("WEKNORA_NEXTCLOUD_DEV_HTTP", "")
++	plain := &types.DataSourceConfig{
++		Settings:    map[string]interface{}{"base_url": "http://nextcloud"},
++		Credentials: map[string]interface{}{"token": "test-token"},
++	}
++	if _, err := parseConfig(plain); err == nil {
++		t.Fatal("development HTTP accepted without explicit flag")
++	}
++	t.Setenv("WEKNORA_NEXTCLOUD_DEV_HTTP", "1")
++	if _, err := parseConfig(plain); err != nil {
++		t.Fatalf("exact Docker test endpoint rejected: %v", err)
++	}
++	for _, raw := range []string{"http://nextcloud:8080", "http://nextcloud/other", "http://evil.example"} {
++		plain.Settings["base_url"] = raw
++		if _, err := parseConfig(plain); err == nil {
++			t.Fatalf("unapproved development HTTP target accepted: %s", raw)
++		}
++	}
++}
+diff --git a/internal/datasource/connector/nextcloud/signature.go b/internal/datasource/connector/nextcloud/signature.go
+new file mode 100644
+index 00000000..d132181c
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/signature.go
+@@ -0,0 +1,119 @@
++package nextcloud
++
++import (
++	"crypto/hmac"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++	"net/http"
++	"net/url"
++	"regexp"
++	"sort"
++	"strconv"
++	"strings"
++	"time"
++)
++
++const machineSignatureVersion = "weknora-hmac-sha256-v1"
++
++var machineKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
++var machineQueryKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
++
++func validMachineKeyID(id string) bool { return machineKeyIDPattern.MatchString(id) }
++
++// canonicalMachineQuery uses form decoding, RFC 3986 encoding and bytewise
++// sorting by encoded key then value. Repeated pairs are retained.
++func canonicalMachineQuery(raw string) (string, error) {
++	if raw == "" {
++		return "", nil
++	}
++	if strings.Contains(raw, ";") {
++		return "", fmt.Errorf("ambiguous machine query separator")
++	}
++	type pair struct{ key, value string }
++	pairs := make([]pair, 0)
++	seenKeys := make(map[string]bool)
++	for _, part := range strings.Split(raw, "&") {
++		if part == "" {
++			continue
++		}
++		key, value, _ := strings.Cut(part, "=")
++		decodedKey, err := url.QueryUnescape(key)
++		if err != nil {
++			return "", err
++		}
++		if !machineQueryKeyPattern.MatchString(decodedKey) {
++			return "", fmt.Errorf("invalid machine query key")
++		}
++		if seenKeys[decodedKey] {
++			return "", fmt.Errorf("duplicate machine query key")
++		}
++		seenKeys[decodedKey] = true
++		decodedValue, err := url.QueryUnescape(value)
++		if err != nil {
++			return "", err
++		}
++		encode := func(input string) string {
++			return strings.ReplaceAll(url.QueryEscape(input), "+", "%20")
++		}
++		pairs = append(pairs, pair{encode(decodedKey), encode(decodedValue)})
++	}
++	sort.Slice(pairs, func(i, j int) bool {
++		if pairs[i].key != pairs[j].key {
++			return pairs[i].key < pairs[j].key
++		}
++		return pairs[i].value < pairs[j].value
++	})
++	parts := make([]string, 0, len(pairs))
++	for _, pair := range pairs {
++		parts = append(parts, pair.key+"="+pair.value)
++	}
++	return strings.Join(parts, "&"), nil
++}
++
++func machineCanonicalRequest(method, rawPath, rawQuery string, body []byte,
++	timestamp, nonce, keyID string,
++) (string, error) {
++	query, err := canonicalMachineQuery(rawQuery)
++	if err != nil {
++		return "", err
++	}
++	bodyHash := sha256.Sum256(body)
++	return strings.Join([]string{
++		machineSignatureVersion,
++		strings.ToUpper(method),
++		rawPath,
++		query,
++		hex.EncodeToString(bodyHash[:]),
++		timestamp,
++		nonce,
++		keyID,
++	}, "\n"), nil
++}
++
++func signMachineRequest(req *http.Request, cfg config, body []byte) error {
++	if !validMachineKeyID(cfg.keyID) {
++		return fmt.Errorf("invalid Nextcloud machine key ID")
++	}
++	var random [16]byte
++	if _, err := rand.Read(random[:]); err != nil {
++		return fmt.Errorf("generate Nextcloud request nonce: %w", err)
++	}
++	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
++	nonce := hex.EncodeToString(random[:])
++	canonical, err := machineCanonicalRequest(req.Method, req.URL.EscapedPath(), req.URL.RawQuery,
++		body, timestamp, nonce, cfg.keyID)
++	if err != nil {
++		return fmt.Errorf("canonicalize Nextcloud request: %w", err)
++	}
++	key := sha256.Sum256([]byte(cfg.token))
++	mac := hmac.New(sha256.New, key[:])
++	_, _ = mac.Write([]byte(canonical))
++	req.Header.Set("Authorization", "Bearer "+cfg.token)
++	req.Header.Set("X-WeKnora-Key-Id", cfg.keyID)
++	req.Header.Set("X-WeKnora-Timestamp", timestamp)
++	req.Header.Set("X-WeKnora-Nonce", nonce)
++	req.Header.Set("X-WeKnora-Signature", hex.EncodeToString(mac.Sum(nil)))
++	return nil
++}
+diff --git a/internal/datasource/connector/nextcloud/signature_live_test.go b/internal/datasource/connector/nextcloud/signature_live_test.go
+new file mode 100644
+index 00000000..fc950cdb
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/signature_live_test.go
+@@ -0,0 +1,39 @@
++package nextcloud
++
++import (
++	"context"
++	"os"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// Run with NEXTCLOUD_LIVE_BASE_URL and NEXTCLOUD_LIVE_TOKEN against the local
++// Compose stack. It proves the Go-signed GET and POST cross the PHP verifier.
++func TestLiveSignedNextcloudMachineRequests(t *testing.T) {
++	base := os.Getenv("NEXTCLOUD_LIVE_BASE_URL")
++	token := os.Getenv("NEXTCLOUD_LIVE_TOKEN")
++	if base == "" || token == "" {
++		t.Skip("local Nextcloud Compose stack not configured")
++	}
++	allowHTTPTestOrigin(t, base)
++	source := &types.DataSourceConfig{
++		Type:        types.ConnectorTypeNextcloud,
++		Settings:    map[string]interface{}{"base_url": base},
++		Credentials: map[string]interface{}{"token": token},
++	}
++	cfg, err := parseConfig(source)
++	if err != nil {
++		t.Fatal(err)
++	}
++	capabilities, err := newClient(cfg).capabilities(context.Background())
++	if err != nil || capabilities.InstanceID == "" {
++		t.Fatalf("signed capability request failed: %+v, %v", capabilities, err)
++	}
++	decision, err := AuthorizeCurrentFile(context.Background(), source,
++		capabilities.InstanceID, "dev-published", "unmapped-live-test",
++		"00112233-4455-6677-8899-aabbccddeeff", 77)
++	if err != nil || decision.Allow || decision.Reason != "identity_unmapped_or_disabled" {
++		t.Fatalf("signed authorization POST failed: %+v, %v", decision, err)
++	}
++}
+diff --git a/internal/datasource/connector/nextcloud/signature_test.go b/internal/datasource/connector/nextcloud/signature_test.go
+new file mode 100644
+index 00000000..bedc6ea5
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/signature_test.go
+@@ -0,0 +1,118 @@
++package nextcloud
++
++import (
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"net/http"
++	"regexp"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++func TestMachineCanonicalVector(t *testing.T) {
++	canonical, err := machineCanonicalRequest(
++		"post",
++		"/index.php/apps/integration_weknora/api/v1/bindings/dev-published/authorize",
++		"b=two+words&a=1&empty",
++		[]byte(`{"file_id":42}`), "1780000000", "00112233445566778899aabbccddeeff", "default",
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	expected := strings.Join([]string{
++		"weknora-hmac-sha256-v1", "POST",
++		"/index.php/apps/integration_weknora/api/v1/bindings/dev-published/authorize",
++		"a=1&b=two%20words&empty=",
++		"f4581e98d2ce1acdc3da81a39c21b618110a7e120535e15d1a3410bebf684b71",
++		"1780000000", "00112233445566778899aabbccddeeff", "default",
++	}, "\n")
++	if canonical != expected {
++		t.Fatalf("canonical = %q, want %q", canonical, expected)
++	}
++	key := sha256.Sum256([]byte("paired-secret"))
++	mac := hmac.New(sha256.New, key[:])
++	_, _ = mac.Write([]byte(canonical))
++	if got := hex.EncodeToString(mac.Sum(nil)); got != "204a5da882a867f96220bab1e17d1ed2df2503c288a290fa8c17b3262bb7cc01" {
++		t.Fatalf("signature = %s", got)
++	}
++}
++
++func TestMachineCanonicalQueryRejectsAmbiguousKeys(t *testing.T) {
++	for _, query := range []string{"x=1&x=2", "x=1&%78=2", "x=%broken", "a.b=1", "x=1;y=2"} {
++		if _, err := canonicalMachineQuery(query); err == nil {
++			t.Fatalf("accepted ambiguous query %q", query)
++		}
++	}
++}
++
++func TestMachineSignRequestBindsBodyPathAndFreshNonce(t *testing.T) {
++	cfg := config{token: "paired-secret", keyID: "default"}
++	request, err := http.NewRequest(http.MethodPost,
++		"https://files.example/index.php/apps/integration_weknora/api/v1/bindings/a/authorize?z=2&a=1",
++		strings.NewReader(`{"file_id":42}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	body := []byte(`{"file_id":42}`)
++	if err := signMachineRequest(request, cfg, body); err != nil {
++		t.Fatal(err)
++	}
++	if request.Header.Get("Authorization") != "Bearer paired-secret" ||
++		request.Header.Get("X-WeKnora-Key-Id") != "default" ||
++		!regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(request.Header.Get("X-WeKnora-Nonce")) {
++		t.Fatal("missing or malformed machine authentication headers")
++	}
++	timestamp := request.Header.Get("X-WeKnora-Timestamp")
++	parsed, err := strconv.ParseInt(timestamp, 10, 64)
++	if err != nil || time.Now().Unix()-parsed > 5 || parsed-time.Now().Unix() > 5 {
++		t.Fatalf("timestamp = %s: %v", timestamp, err)
++	}
++	canonical, err := machineCanonicalRequest(request.Method, request.URL.EscapedPath(),
++		request.URL.RawQuery, body, timestamp, request.Header.Get("X-WeKnora-Nonce"), "default")
++	if err != nil {
++		t.Fatal(err)
++	}
++	key := sha256.Sum256([]byte(cfg.token))
++	mac := hmac.New(sha256.New, key[:])
++	_, _ = mac.Write([]byte(canonical))
++	if !hmac.Equal(mac.Sum(nil), mustDecodeHex(t, request.Header.Get("X-WeKnora-Signature"))) {
++		t.Fatal("signed header does not match method, URL and body")
++	}
++	first := request.Header.Get("X-WeKnora-Nonce")
++	if err := signMachineRequest(request, cfg, body); err != nil {
++		t.Fatal(err)
++	}
++	if request.Header.Get("X-WeKnora-Nonce") == first {
++		t.Fatal("reused nonce")
++	}
++}
++
++func mustDecodeHex(t *testing.T, value string) []byte {
++	t.Helper()
++	decoded, err := hex.DecodeString(value)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return decoded
++}
++
++func TestMachineKeyIDConfiguration(t *testing.T) {
++	t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", "https://files.example")
++	source := &types.DataSourceConfig{
++		Settings:    map[string]interface{}{"base_url": "https://files.example"},
++		Credentials: map[string]interface{}{"token": "paired-secret", "key_id": "new-key.2"},
++	}
++	cfg, err := parseConfig(source)
++	if err != nil || cfg.keyID != "new-key.2" {
++		t.Fatalf("key ID = %q, err = %v", cfg.keyID, err)
++	}
++	source.Credentials["key_id"] = "unsafe/key"
++	if _, err := parseConfig(source); err == nil {
++		t.Fatal("accepted malformed key ID")
 +	}
 +}
 diff --git a/internal/datasource/connector/nextcloud/types.go b/internal/datasource/connector/nextcloud/types.go
 new file mode 100644
-index 00000000..eb917b6a
+index 00000000..d29ebd14
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/types.go
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,310 @@
 +package nextcloud
 +
 +import (
 +	"encoding/json"
 +	"fmt"
++	"net"
 +	"net/url"
++	"os"
 +	"path"
 +	"regexp"
 +	"strconv"
@@ -5939,6 +7436,7 @@ index 00000000..eb917b6a
 +type config struct {
 +	baseURL           *url.URL
 +	token             string
++	keyID             string
 +	reconcileInterval time.Duration
 +}
 +
@@ -5948,10 +7446,17 @@ index 00000000..eb917b6a
 +	}
 +	base, _ := ds.Settings["base_url"].(string)
 +	token, _ := ds.Credentials["token"].(string)
++	keyID, _ := ds.Credentials["key_id"].(string)
 +	base = strings.TrimSpace(base)
 +	token = strings.TrimSpace(token)
++	if keyID == "" {
++		keyID = "default"
++	}
 +	if base == "" || token == "" {
 +		return config{}, fmt.Errorf("%w: settings.base_url and credentials.token are required", datasource.ErrInvalidCredentials)
++	}
++	if !validMachineKeyID(keyID) {
++		return config{}, fmt.Errorf("%w: credentials.key_id is invalid", datasource.ErrInvalidCredentials)
 +	}
 +	parsed, err := url.Parse(base)
 +	if err != nil || parsed == nil || parsed.Hostname() == "" || parsed.Opaque != "" ||
@@ -5970,6 +7475,9 @@ index 00000000..eb917b6a
 +	}
 +	if strings.Contains(parsed.Path, "//") {
 +		return config{}, fmt.Errorf("%w: unsafe base_url path", datasource.ErrInvalidConfig)
++	}
++	if !approvedNextcloudOrigin(parsed) {
++		return config{}, fmt.Errorf("%w: Nextcloud origin is not approved", datasource.ErrInvalidConfig)
 +	}
 +	parsed.Path = strings.TrimRight(parsed.Path, "/")
 +	parsed.RawPath = ""
@@ -5999,7 +7507,75 @@ index 00000000..eb917b6a
 +		}
 +		interval = time.Duration(seconds) * time.Second
 +	}
-+	return config{baseURL: parsed, token: token, reconcileInterval: interval}, nil
++	return config{baseURL: parsed, token: token, keyID: keyID, reconcileInterval: interval}, nil
++}
++
++// Only a server operator may approve a production destination. A KB editor
++// can configure a data source but must not be able to direct its Bearer token
++// to an arbitrary host. HTTP is limited to the explicit local Docker test
++// endpoint (or an explicitly listed loopback test server) behind a dev flag.
++func approvedNextcloudOrigin(target *url.URL) bool {
++	if target == nil {
++		return false
++	}
++	if target.Scheme == "http" && os.Getenv("WEKNORA_NEXTCLOUD_DEV_HTTP") != "1" {
++		return false
++	}
++	if target.Scheme == "http" && strings.EqualFold(target.Hostname(), "nextcloud") &&
++		(target.Port() == "" || target.Port() == "80") &&
++		(target.EscapedPath() == "" || target.EscapedPath() == "/") {
++		return true
++	}
++	targetOrigin, ok := nextcloudOrigin(target)
++	if !ok {
++		return false
++	}
++	matched := false
++	for _, raw := range strings.Split(os.Getenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS"), ",") {
++		raw = strings.TrimSpace(raw)
++		if raw == "" {
++			continue
++		}
++		allowed, err := url.Parse(raw)
++		if err != nil || allowed == nil || allowed.User != nil || allowed.Opaque != "" ||
++			allowed.RawQuery != "" || allowed.ForceQuery || allowed.Fragment != "" ||
++			allowed.RawFragment != "" || allowed.Path != "" || allowed.RawPath != "" ||
++			(allowed.Scheme != "https" && allowed.Scheme != "http") {
++			return false
++		}
++		allowedOrigin, valid := nextcloudOrigin(allowed)
++		if !valid || (allowed.Scheme == "http" && !isLoopbackHost(allowed.Hostname())) {
++			return false
++		}
++		if allowedOrigin == targetOrigin {
++			matched = true
++		}
++	}
++	return matched
++}
++
++func nextcloudOrigin(u *url.URL) (string, bool) {
++	if u == nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" {
++		return "", false
++	}
++	port := u.Port()
++	if port == "" {
++		if u.Scheme == "https" {
++			port = "443"
++		} else {
++			port = "80"
++		}
++	}
++	parsedPort, err := strconv.Atoi(port)
++	if err != nil || parsedPort < 1 || parsedPort > 65535 {
++		return "", false
++	}
++	return u.Scheme + "://" + strings.ToLower(u.Hostname()) + ":" + strconv.Itoa(parsedPort), true
++}
++
++func isLoopbackHost(host string) bool {
++	ip := net.ParseIP(host)
++	return ip != nil && ip.IsLoopback()
 +}
 +
 +func validBindingID(id string) bool {
@@ -8651,6 +10227,34 @@ index 00000000..1e12d852
 +BEGIN
 +    SELECT RAISE(ABORT, 'Nextcloud knowledge-base provenance cannot be cleared');
 +END;
+diff --git a/migrations/sqlite/000031_nextcloud_source_versions.down.sql b/migrations/sqlite/000031_nextcloud_source_versions.down.sql
+new file mode 100644
+index 00000000..d5a6800f
+--- /dev/null
++++ b/migrations/sqlite/000031_nextcloud_source_versions.down.sql
+@@ -0,0 +1 @@
++DROP TABLE IF EXISTS nextcloud_source_versions;
+diff --git a/migrations/sqlite/000031_nextcloud_source_versions.up.sql b/migrations/sqlite/000031_nextcloud_source_versions.up.sql
+new file mode 100644
+index 00000000..85433dbd
+--- /dev/null
++++ b/migrations/sqlite/000031_nextcloud_source_versions.up.sql
+@@ -0,0 +1,15 @@
++CREATE TABLE nextcloud_source_versions (
++    tenant_id INTEGER NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL,
++    external_id TEXT NOT NULL,
++    desired_etag TEXT NOT NULL DEFAULT '',
++    candidate_knowledge_id TEXT NOT NULL DEFAULT '',
++    state TEXT NOT NULL CHECK (state IN ('staging', 'published', 'tombstone')),
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (tenant_id, knowledge_base_id, datasource_id, external_id)
++);
++
++CREATE UNIQUE INDEX idx_nextcloud_source_versions_candidate
++    ON nextcloud_source_versions (candidate_knowledge_id)
++    WHERE candidate_knowledge_id <> '';
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -8741,3 +10345,31 @@ index 00000000..8aee7e73
 +CREATE TRIGGER trg_preserve_kb_nextcloud_provenance
 +    BEFORE UPDATE OF ever_had_nextcloud_source ON knowledge_bases
 +    FOR EACH ROW EXECUTE FUNCTION preserve_kb_nextcloud_provenance();
+diff --git a/migrations/versioned/000112_nextcloud_source_versions.down.sql b/migrations/versioned/000112_nextcloud_source_versions.down.sql
+new file mode 100644
+index 00000000..d5a6800f
+--- /dev/null
++++ b/migrations/versioned/000112_nextcloud_source_versions.down.sql
+@@ -0,0 +1 @@
++DROP TABLE IF EXISTS nextcloud_source_versions;
+diff --git a/migrations/versioned/000112_nextcloud_source_versions.up.sql b/migrations/versioned/000112_nextcloud_source_versions.up.sql
+new file mode 100644
+index 00000000..89d75bea
+--- /dev/null
++++ b/migrations/versioned/000112_nextcloud_source_versions.up.sql
+@@ -0,0 +1,15 @@
++CREATE TABLE nextcloud_source_versions (
++    tenant_id BIGINT NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL,
++    external_id TEXT NOT NULL,
++    desired_etag TEXT NOT NULL DEFAULT '',
++    candidate_knowledge_id TEXT NOT NULL DEFAULT '',
++    state TEXT NOT NULL CHECK (state IN ('staging', 'published', 'tombstone')),
++    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (tenant_id, knowledge_base_id, datasource_id, external_id)
++);
++
++CREATE UNIQUE INDEX idx_nextcloud_source_versions_candidate
++    ON nextcloud_source_versions (candidate_knowledge_id)
++    WHERE candidate_knowledge_id <> '';

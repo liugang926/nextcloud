@@ -31,6 +31,7 @@ return [
             'requirements' => ['id' => '[A-Za-z0-9_-]+'],
         ],
         ['name' => 'identity_admin#index', 'url' => '/api/v1/admin/identities', 'verb' => 'GET'],
+        ['name' => 'diagnostics#index', 'url' => '/api/v1/admin/diagnostics', 'verb' => 'GET'],
         ['name' => 'identity_admin#create', 'url' => '/api/v1/admin/identities', 'verb' => 'POST'],
         ['name' => 'identity_admin#revoke', 'url' => '/api/v1/admin/identities/revoke', 'verb' => 'POST'],
         [

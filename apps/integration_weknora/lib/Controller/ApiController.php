@@ -19,6 +19,7 @@ use OCP\IURLGenerator;
 use OCA\IntegrationWeknora\Service\FilePublicationStateService;
 use OCA\IntegrationWeknora\Service\ManifestSnapshotService;
 use OCA\IntegrationWeknora\Service\BindingRegistryService;
+use OCA\IntegrationWeknora\Service\PairedServiceToken;
 use OCP\Lock\ILockingProvider;
 
 final class ApiController extends Controller {
@@ -34,6 +35,7 @@ final class ApiController extends Controller {
         private FilePublicationStateService $publicationState,
         private ManifestSnapshotService $manifestSnapshots,
         private BindingRegistryService $bindingRegistry,
+        private PairedServiceToken $serviceToken,
     ) {
         parent::__construct(self::APP_ID, $request);
     }
@@ -237,17 +239,7 @@ final class ApiController extends Controller {
     }
 
     private function isAuthorized(): bool {
-        $expectedHash = $this->config->getAppValue(self::APP_ID, 'service_token_sha256', '');
-        if (!is_string($expectedHash) || !preg_match('/\A[a-fA-F0-9]{64}\z/D', $expectedHash)) {
-            return false;
-        }
-
-        $authorization = $this->request->getHeader('Authorization');
-        if (!preg_match('/\ABearer[ \t]+([^\s]+)\z/iD', $authorization, $matches)) {
-            return false;
-        }
-
-        return hash_equals(strtolower($expectedHash), hash('sha256', $matches[1]));
+        return $this->serviceToken->verify($this->request);
     }
 
     /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */

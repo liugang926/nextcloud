@@ -23,12 +23,14 @@ jobs:
       - name: Static checks
         run: |
           bash -n scripts/*.sh
+          bash -n scripts/ops/*.sh
           npm ci --prefix apps/integration_weknora
           npm run build --prefix apps/integration_weknora
           git diff --exit-code -- apps/integration_weknora/js/weknora-sidebar.js
           node --check apps/integration_weknora/js/weknora-admin.js
           node --check apps/integration_weknora/js/weknora-sidebar.js
           python3 -m compileall -q apps/integration_weknora/tests scripts
+          python3 scripts/package-nextcloud-app.py
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             sh -c 'find apps/integration_weknora -name "*.php" -exec php -l "{}" ";"'
@@ -41,6 +43,8 @@ jobs:
 
       - name: API and event smoke
         run: |
+          python3 apps/integration_weknora/tests/machine_signature_http_smoke.py
+          python3 apps/integration_weknora/tests/machine_rotation_http_smoke.py
           ./scripts/smoke.sh
           ./scripts/smoke-manifest.py
           python3 apps/integration_weknora/tests/publication_http_smoke.py --file-id 77
@@ -50,6 +54,35 @@ jobs:
           python3 apps/integration_weknora/tests/runtime_binding_scope_http_smoke.py --simulate-missing-bind-lock
           python3 apps/integration_weknora/tests/outbox_retention_http_smoke.py
           python3 apps/integration_weknora/tests/employee_file_status_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/diagnostics_http_smoke.py
+          ./scripts/ops/isolated-restore-drill.sh
+
+      - name: Check out the fixed WeKnora baseline for live signature verification
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          path: weknora
+          persist-credentials: false
+
+      - name: Set up Go for live signature verification
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora/go.mod
+          cache-dependency-path: weknora/go.sum
+
+      - name: Verify Go-signed GET and POST against the running PHP app
+        run: |
+          git -C weknora apply --check ../integration/weknora.patch
+          git -C weknora apply ../integration/weknora.patch
+          set -a
+          source .env
+          set +a
+          cd weknora
+          NEXTCLOUD_LIVE_BASE_URL="http://127.0.0.1:${NEXTCLOUD_HTTP_PORT:-18082}" \
+            NEXTCLOUD_LIVE_TOKEN="$WEKNORA_SERVICE_TOKEN" \
+            go test -p 2 ./internal/datasource/connector/nextcloud \
+              -run TestLiveSignedNextcloudMachineRequests -count=1
 
   weknora-patch:
     runs-on: ubuntu-latest
@@ -82,7 +115,7 @@ jobs:
       - name: Compile and test Nextcloud integration paths
         working-directory: weknora
         run: |
-          go test -p 2 -run 'Nextcloud|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile' \
+          go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile' \
             ./internal/application/access \
             ./internal/application/repository \
             ./internal/application/service \

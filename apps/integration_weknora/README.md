@@ -1,18 +1,19 @@
 # WeKnora Integration for Nextcloud 34
 
-This app exposes service read APIs and administrator publication operations under `/index.php/apps/integration_weknora/api/v1`. The read APIs require `Authorization: Bearer <service token>`. Administrator operations require a logged-in Nextcloud system administrator and a valid CSRF request token; the service token cannot call them.
+This app exposes service read APIs and administrator publication operations under `/index.php/apps/integration_weknora/api/v1`. Every machine API request requires `Authorization: Bearer <service token>` plus the versioned HMAC headers described in [the request-signing contract](../../docs/machine-request-signing.md). A nonce is consumed once in the Nextcloud database; a Bearer-only request is rejected. Administrator operations require a logged-in Nextcloud system administrator and a valid CSRF request token; the service token cannot call them.
 
-The service token is stored only as a SHA-256 hash. Configure it and a JSON array of bindings as the Nextcloud web user, for example:
+The service token is stored only as a SHA-256 hash, and that hash's 32 raw bytes are the HMAC key. Configure it and a JSON array of bindings as the Nextcloud web user, for example:
 
 ```sh
 TOKEN='replace-with-a-long-random-token'
 HASH=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
 php occ config:app:set integration_weknora service_token_sha256 --value="$HASH"
+php occ config:app:set integration_weknora service_key_id --value=default
 php occ config:app:set integration_weknora bindings --value='[{"id":"dev-published","name":"Published","owner_uid":"devadmin","root_file_id":123}]'
 php occ app:enable integration_weknora
 ```
 
-`root_file_id` must identify a child folder in the `owner_uid` user's files; binding the user's entire files root is refused. The binding ID uses letters, digits, `_`, and `-`. A missing token hash rejects all requests. Invalid binding configuration returns HTTP 503.
+`root_file_id` must identify a child folder in the `owner_uid` user's files; binding the user's entire files root is refused. The binding ID uses letters, digits, `_`, and `-`. A missing token hash or invalid signature rejects all machine requests. Invalid binding configuration returns HTTP 503. The WeKnora data source uses `credentials.token` and optional `credentials.key_id` (default `default`); both must match this app's current or previous key configuration.
 
 Service read endpoints:
 
@@ -65,8 +66,8 @@ After bootstrapping the local Compose stack, run `python3 apps/integration_wekno
 
 ## V1 source authorization and identity mapping
 
-The paired connector calls `POST /bindings/{id}/authorize` with its existing
-`Authorization: Bearer <service token>` header and a JSON body containing
+The paired connector calls `POST /bindings/{id}/authorize` with the signed
+machine headers and a JSON body containing
 `directory_id`, canonical UUID-form `object_guid`, and integer `file_id`.
 The caller must derive the directory identity from its own verified user
 session, never from browser-submitted identity fields. A successful check
@@ -104,9 +105,10 @@ enterprise team-folder advanced ACL behavior. These must be verified against
 the target AD and Nextcloud permission setup before production use. The
 connector's service token remains a high-trust credential: the holder can
 submit any mapped directory identity and access any configured binding.
-The current single app-wide token has no per-binding scope or overlapping-key
-rotation; use TLS and implement scoped credential rotation before enterprise
-deployment. The paired WeKnora patch enforces this API's live decision on its
+The current token is app-wide and has no per-binding scope. A current and
+previous key may overlap briefly during rotation, with removal taking effect
+on the next request without a Web restart. Use TLS and implement scoped
+credentials before enterprise deployment. The paired WeKnora patch enforces this API's live decision on its
 tested read paths. An enterprise entry-point and permission-matrix audit is
 still required before production use.
 
@@ -150,3 +152,14 @@ in the app package. In the local Compose environment, run
 The test checks anonymous access, service-token isolation, file sharing and
 revocation, publication withdrawal, and URL filtering, then restores its
 temporary user, share, publication state, and URL setting.
+
+## Source-side diagnostics
+
+`GET /api/v1/admin/diagnostics` requires a Nextcloud administrator session.
+It reports whether all configured binding roots remain resolvable, the number
+and age of retained change hints, the latest hint, and the count of explicit
+file withdrawals. Hint retention is **not** a delivery backlog: there is no
+consumer acknowledgement yet. This endpoint does not report WeKnora parsing,
+index health, queue age, or storage capacity. Run
+`python3 apps/integration_weknora/tests/diagnostics_http_smoke.py` in the
+bootstrapped local stack to check administrator and non-administrator access.

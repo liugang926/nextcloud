@@ -14,6 +14,8 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+from machine_auth import signed_headers
+
 
 PROJECT = Path(__file__).resolve().parents[3]
 
@@ -28,7 +30,9 @@ def load_env():
 
 
 def request(url, method="GET", headers=None, body=None):
-    req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+    req = urllib.request.Request(url, data=body,
+                                 headers=signed_headers(method, url, headers or {}, body),
+                                 method=method)
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
             return response.status, response.read()

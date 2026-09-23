@@ -4,9 +4,14 @@
 import base64
 import json
 from pathlib import Path
+import sys
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent /
+                       "apps/integration_weknora/tests"))
+from machine_auth import signed_headers
 
 
 def env_values():
@@ -26,7 +31,8 @@ basic = base64.b64encode(f"{env['NEXTCLOUD_ADMIN_USER']}:{env['NEXTCLOUD_ADMIN_P
 
 
 def request(method, url, auth, data=None, headers=None):
-    req = Request(url, data=data, method=method, headers={"Authorization": auth, **(headers or {})})
+    all_headers = signed_headers(method, url, {"Authorization": auth, **(headers or {})}, data)
+    req = Request(url, data=data, method=method, headers=all_headers)
     try:
         with urlopen(req, timeout=20) as response:
             return response.status, response.read()

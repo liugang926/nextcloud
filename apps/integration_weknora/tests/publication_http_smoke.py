@@ -17,6 +17,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from machine_auth import signed_headers
+
 
 PROJECT = Path(__file__).resolve().parents[3]
 
@@ -32,7 +34,9 @@ def load_env():
 
 
 def request(opener, url, method="GET", headers=None, data=None):
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    req = urllib.request.Request(url, data=data,
+                                 headers=signed_headers(method, url, headers or {}, data),
+                                 method=method)
     try:
         with opener.open(req, timeout=15) as response:
             return response.status, response.read()
