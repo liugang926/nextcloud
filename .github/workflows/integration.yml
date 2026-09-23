@@ -137,6 +137,7 @@ jobs:
             ./internal/application/service/file \
             ./internal/agent/tools \
             ./internal/handler \
+            ./internal/handler/dto \
             ./internal/handler/session \
             ./internal/router \
             ./internal/mcpserver \
@@ -151,7 +152,7 @@ jobs:
           NEXTCLOUD_EVENT_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
         run: |
           go test -p 2 ./internal/handler -run '^TestNextcloudEvent' -count=1
-          go test -p 2 ./internal/database -run '^TestSQLiteMigrations' -count=1
+          go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
 
   direct-upgrade:
     runs-on: ubuntu-latest

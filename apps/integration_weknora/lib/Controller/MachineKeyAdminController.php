@@ -69,6 +69,8 @@ final class MachineKeyAdminController extends Controller {
                 : $this->json(['error' => 'key_not_found'], 404);
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'binding_not_found'], 404);
+        } catch (\DomainException $exception) {
+            return $this->json(['error' => 'pairing_key_in_use'], 409);
         } catch (\Throwable $exception) {
             return $this->json(['error' => 'key_registry_unavailable'], 503);
         }

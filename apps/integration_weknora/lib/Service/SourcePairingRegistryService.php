@@ -126,6 +126,19 @@ final class SourcePairingRegistryService {
                 !hash_equals($row['key_id'], $keyId)) {
                 throw new \DomainException('Pairing operation or key does not match');
             }
+            $keyQuery = $this->db->getQueryBuilder();
+            $keyResult = $keyQuery->select('source_hash')->from('weknora_machine_key')
+                ->where($keyQuery->expr()->eq('key_id', $keyQuery->createNamedParameter($keyId)))
+                ->andWhere($keyQuery->expr()->eq('binding_id', $keyQuery->createNamedParameter($bindingId)))
+                ->executeQuery();
+            try {
+                $key = $keyResult->fetchAssociative();
+            } finally {
+                $keyResult->closeCursor();
+            }
+            if ($key === false || !hash_equals($row['source_hash'], (string)$key['source_hash'])) {
+                throw new \DomainException('Pairing machine key was revoked or changed');
+            }
             [$binding, $root] = $this->requireActiveBinding($bindingId);
             if ($row['state'] !== 'pending' && $row['state'] !== 'active') {
                 throw new \DomainException('Pairing operation is closed');

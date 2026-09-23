@@ -110,15 +110,52 @@ final class MachineKeyRegistryService {
     }
 
     public function revoke(string $bindingId, string $keyId): bool {
-        $this->requireConfiguredBinding($bindingId);
         if (!self::validKeyId($keyId)) {
             throw new \InvalidArgumentException('Invalid machine key ID');
         }
-        $query = $this->db->getQueryBuilder();
-        return $query->delete('weknora_machine_key')
-            ->where($query->expr()->eq('key_id', $query->createNamedParameter($keyId)))
-            ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
-            ->executeStatement() === 1;
+        $this->db->beginTransaction();
+        try {
+            // Source commit, pairing abort and binding removal share this lock.
+            // An active/pending pairing key must follow its pairing lifecycle.
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
+            $lock = $this->db->getQueryBuilder();
+            $result = $lock->select('id')->from('weknora_bind_lock')
+                ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))
+                ->forUpdate()->executeQuery();
+            try {
+                if ($result->fetchOne() === false) {
+                    throw new \UnexpectedValueException('Binding registry lock unavailable');
+                }
+            } finally {
+                $result->closeCursor();
+            }
+            $this->requireConfiguredBinding($bindingId);
+            $pairQuery = $this->db->getQueryBuilder();
+            $pairResult = $pairQuery->select('operation_id')->from('weknora_src_pair')
+                ->where($pairQuery->expr()->eq('binding_id', $pairQuery->createNamedParameter($bindingId)))
+                ->andWhere($pairQuery->expr()->eq('key_id', $pairQuery->createNamedParameter($keyId)))
+                ->andWhere($pairQuery->expr()->orX(
+                    $pairQuery->expr()->eq('state', $pairQuery->createNamedParameter('pending')),
+                    $pairQuery->expr()->eq('state', $pairQuery->createNamedParameter('active')),
+                ))->executeQuery();
+            try {
+                if ($pairResult->fetchOne() !== false) {
+                    throw new \DomainException('Pairing machine key cannot be revoked directly');
+                }
+            } finally {
+                $pairResult->closeCursor();
+            }
+            $query = $this->db->getQueryBuilder();
+            $revoked = $query->delete('weknora_machine_key')
+                ->where($query->expr()->eq('key_id', $query->createNamedParameter($keyId)))
+                ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+                ->executeStatement() === 1;
+            $this->db->commit();
+            return $revoked;
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
     }
 
     public function bindingExists(string $bindingId): bool {

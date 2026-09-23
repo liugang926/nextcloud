@@ -26,7 +26,7 @@ instance's `occ status` reported `maintenance: false` and
 `needsDbUpgrade: false`.
 The runtime-only `dist/integration_weknora-0.4.13.tar.gz` archive was built
 twice with the same SHA-256 checksum
-`3840b1ec2914ccd171424cb3426993a063cc770bef9708f908e20e999a2716ed`
+`2b033cb2eb932c1f0d050c78e1f83366766839e47ce2d91aa2af219070fbecfc`
 and contains 58 verified runtime files.
 
 ## Build inputs and paired WeKnora runtime
@@ -36,7 +36,7 @@ and contains 58 verified runtime files.
 | Nextcloud app frontend | Host `node` and `npm`; CI requests Node major 24 in `.github/workflows/integration.yml` | Node `v24.14.0`; npm `11.9.0`; `package-lock.json` is used by `npm ci` |
 | WeKnora Go build and test | Local `weknora-go-test:1.26-sqlite` image | Go `1.26.8 linux/arm64`; local image ID `sha256:5a74e8b5137496d3e22c72c01d862c4cbb1fe6ce476ddf5616fd9a807d6ae9ac` |
 | WeKnora runtime base | Local `weknora-ldap-app:final` image | Local image ID `sha256:36667b698350db76c044e797d3c92e98f8acb146750e30401a2dd6a61a6b6c79` |
-| Patched WeKnora runtime | Local `weknora-ldap-app:nextcloud-integration` image | Running container and local tag used image ID `sha256:2f1b4e28585f557ea9958bb61adf7b612610877c23b06f31cc36b8ff6425694d` after the event-dispatch build |
+| Patched WeKnora runtime | Local `weknora-ldap-app:nextcloud-integration` image | Running container and local tag used image ID `sha256:c5609c0ec1fb4d0bd93ceede545b1fcf950fe75b17b69dcdfe55d4ba22c11db8` after the source-pairing, migration, streaming and guard build |
 
 The WeKnora source baseline is the fixed commit
 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` from

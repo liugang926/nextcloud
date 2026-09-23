@@ -113,6 +113,8 @@ def main():
         token1 = first["token"]
         assert pair1["state"] == "pending" and pair1["tenant_id"] == target["tenant_id"]
         assert pair1["data_source_id"] is None and pair1["key_id"] == "pair_" + op1.replace("-", "")
+        status, _ = admin_json("DELETE", f"{binding_url}/keys/{pair1['key_id']}")
+        check(status, 409, "pending pairing key cannot be revoked independently")
         status, body = request(admin, pairing_url, headers=admin_headers)
         check(status, 200, "read pending pairing")
         assert "token" not in decoded(body) and decoded(body)["pairing"] == pair1
@@ -185,6 +187,8 @@ def main():
         active = decoded(body)
         assert active["changed"] is True and active["pairing"]["state"] == "active"
         assert active["pairing"]["data_source_id"] == data_source
+        status, _ = admin_json("DELETE", f"{binding_url}/keys/{pair2['key_id']}")
+        check(status, 409, "active pairing key cannot be revoked independently")
         status, body = signed_commit(pair2, token2, data_source)
         check(status, 200, "idempotent commit")
         assert decoded(body)["changed"] is False
