@@ -49,6 +49,30 @@ return [
         ['name' => 'binding_admin#index', 'url' => '/api/v1/admin/bindings', 'verb' => 'GET'],
         ['name' => 'binding_admin#save', 'url' => '/api/v1/admin/bindings', 'verb' => 'POST'],
         [
+            'name' => 'source_pairing#show',
+            'url' => '/api/v1/admin/bindings/{id}/source-pairing',
+            'verb' => 'GET',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#prepare',
+            'url' => '/api/v1/admin/bindings/{id}/source-pairing',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#abort',
+            'url' => '/api/v1/admin/bindings/{id}/source-pairing',
+            'verb' => 'DELETE',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#commit',
+            'url' => '/api/v1/bindings/{id}/source-pairing/commit',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
             'name' => 'binding_admin#stop',
             'url' => '/api/v1/admin/bindings/{id}/stop',
             'verb' => 'POST',

@@ -216,8 +216,8 @@ VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
             source = ROOT / "apps/integration_weknora"
             for name in ("appinfo", "lib", "css", "js", "templates"):
                 shutil.copytree(source / name, app_dir / name, dirs_exist_ok=True)
-            if "<version>0.4.12</version>" not in (app_dir / "appinfo/info.xml").read_text():
-                raise AssertionError("upgrade app is not version 0.4.12")
+            if "<version>0.4.13</version>" not in (app_dir / "appinfo/info.xml").read_text():
+                raise AssertionError("upgrade app is not version 0.4.13")
             occ("upgrade")
 
             if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_event_conn';") != "1":
@@ -282,7 +282,7 @@ WHERE k.key_id = 'default' AND k.binding_id = 'upgrade-current'
                              "FROM oc_weknora_binding_id WHERE binding_id = 'upgrade-fresh';")
             if fresh_gate != "active|0":
                 raise AssertionError(f"new binding gate was not active|0: {fresh_gate}")
-            print(f"{case}: direct 0.4.6→0.4.12 upgrade tombstone smoke passed")
+            print(f"{case}: direct 0.4.6→0.4.13 upgrade tombstone smoke passed")
         finally:
             # The project name is random and every volume belongs to this
             # disposable Compose instance; existing development volumes stay.

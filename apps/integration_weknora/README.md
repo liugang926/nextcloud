@@ -62,9 +62,35 @@ Administrator endpoints (browser session and CSRF protected):
 - `GET /admin/bindings/{id}/keys`: list key IDs and creation metadata, never token values or hashes.
 - `POST /admin/bindings/{id}/keys`: issue a unique key ID for this binding and return its token exactly once.
 - `DELETE /admin/bindings/{id}/keys/{keyId}`: revoke a key immediately. A second key ID can overlap on the same binding during rotation.
+- `POST /admin/bindings/{id}/source-pairing`: prepare an intent with JSON `operation_id` (UUID), `tenant_id` (canonical decimal string), and `knowledge_base_id`. The first HTTP 201 returns `{pairing, token}`. The `key_id` in `pairing` is derived from the operation ID. An exact retry returns HTTP 200 and never repeats the token.
+- `GET /admin/bindings/{id}/source-pairing`: return the latest source-pairing status without a token.
+- `DELETE /admin/bindings/{id}/source-pairing`: abort a pending operation with JSON `operation_id` and atomically revoke its prepared key. An active pair cannot be aborted this way.
 - `GET /admin/bindings/{id}/files/{fileId}/publication`: current `eligible` or `withdrawn` state.
 - `POST /admin/bindings/{id}/files/{fileId}/withdraw`: persist exclusion from the manifest and content API.
 - `POST /admin/bindings/{id}/files/{fileId}/republish`: explicitly clear the exclusion.
+
+The WeKnora source-pairing coordinator calls signed machine endpoint
+`POST /bindings/{id}/source-pairing/commit` with JSON `operation_id`,
+`instance_id`, `tenant_id` (canonical decimal string), `knowledge_base_id`,
+and `data_source_id`. The HMAC key must be the key created by that pending
+operation. The response is HTTP 200 with `{pairing, changed}`; an exact retry
+returns `changed: false`. Different source or target identities return HTTP 409.
+The operation records the binding root and publication epoch at prepare time;
+a stopped binding returns HTTP 423 and a pending operation cannot commit after
+stop/resume or a root move. An already active pair survives stop/resume, and
+its source reads continue to obey the publication gate. A moved root of an
+active pair fails closed. Pair status remains visible after an error so an
+operator can retry or abort the pending operation. Binding removal retires its
+pairing record and revokes its machine key; it does not delete WeKnora data.
+Source pairing is separate from the event-delivery connection below.
+
+The Nextcloud side records the expected tenant and knowledge-base IDs; the
+WeKnora administrator pairing API must validate their actual ownership and
+dedicated, empty state before committing. This source-side protocol does not
+establish employee AD identity or prove access to indexed knowledge. Run
+`python3 apps/integration_weknora/tests/source_pairing_http_smoke.py` after
+installing/upgrading the app to exercise the Nextcloud half with a temporary
+binding and synthetic target IDs.
 
 Publication state and an action audit are stored in the Nextcloud database through app migrations. Withdrawal records a denial for a file ID scoped to an existing binding even if that file has already been moved or deleted; it can also reserve a file ID for exclusion before it enters the binding. Republish requires the file to be currently readable under the bound root. Withdrawal blocks this app's read APIs immediately. Removing an already indexed copy from WeKnora still depends on connector reconciliation and WeKnora's retrieval controls.
 

@@ -214,6 +214,22 @@ final class BindingRegistryService {
         if ($selected === null) {
             throw new \UnexpectedValueException('Binding is no longer configured');
         }
+        // Once paired, a moved folder must not silently change the source
+        // boundary behind the same stable binding and knowledge-base IDs.
+        $query = $this->db->getQueryBuilder();
+        $result = $query->select('root_hash')->from('weknora_src_pair')
+            ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+            ->andWhere($query->expr()->eq('state', $query->createNamedParameter('active')))
+            ->setMaxResults(1)->executeQuery();
+        try {
+            $pairedRootHash = $result->fetchOne();
+        } finally {
+            $result->closeCursor();
+        }
+        if ($pairedRootHash !== false &&
+            !hash_equals((string)$pairedRootHash, SourcePairingRegistryService::rootHash($selected))) {
+            throw new \UnexpectedValueException('Paired binding root has moved');
+        }
         return $selected;
     }
 
@@ -379,6 +395,15 @@ final class BindingRegistryService {
             $eventDelete->delete('weknora_event_conn')
                 ->where($eventDelete->expr()->eq('binding_id', $eventDelete->createNamedParameter($id)))
                 ->executeStatement();
+            $retirePair = $this->db->getQueryBuilder();
+            $retirePair->update('weknora_src_pair')
+                ->set('state', $retirePair->createNamedParameter('retired'))
+                ->set('updated_at', $retirePair->createNamedParameter(time()))
+                ->where($retirePair->expr()->eq('binding_id', $retirePair->createNamedParameter($id)))
+                ->andWhere($retirePair->expr()->orX(
+                    $retirePair->expr()->eq('state', $retirePair->createNamedParameter('pending')),
+                    $retirePair->expr()->eq('state', $retirePair->createNamedParameter('active')),
+                ))->executeStatement();
             $storedRemaining = array_map(static fn (array $binding): array => [
                 'id' => $binding['id'],
                 'name' => $binding['name'],
