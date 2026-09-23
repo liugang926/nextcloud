@@ -10,7 +10,9 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nextcloud -d nextcloud"]
+      # initdb runs a temporary Unix-socket-only server. TCP readiness starts
+      # only after the final server can accept Nextcloud connections.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U nextcloud -d nextcloud"]
       interval: 5s
       timeout: 5s
       retries: 30
