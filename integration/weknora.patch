@@ -1,6 +1,6 @@
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..702d0670
+index 0000000..702d067
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
 @@ -0,0 +1,181 @@
@@ -187,10 +187,10 @@ index 00000000..702d0670
 +applied checkpoint.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
-index 00000000..cb1b5856
+index 0000000..6e20933
 --- /dev/null
 +++ b/docs/nextcloud-source-pairing.md
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,111 @@
 +# Nextcloud source pairing
 +
 +The source pairing is separate from the optional event-inbox connection. A
@@ -242,9 +242,52 @@ index 00000000..cb1b5856
 +tombstone for its KB. Status and retry never reissue the token. An operator
 +must inspect both sides, abort the pending Nextcloud operation when possible,
 +and use a new dedicated KB for a fresh operation. There is no automated
-+WeKnora pending-abort cleanup in this slice. Rotation/recovery of an active
-+source key is also not implemented. Direct revocation of a pending or active
-+pairing key is rejected; binding removal retires the pair and its key together.
++WeKnora pending-pair abort in this slice. Direct revocation of a pending or
++active pairing key is rejected; binding removal retires the pair and its keys
++together.
++
++## Active source-key rotation
++
++For an established pair, a Nextcloud administrator prepares a distinct UUID
++with `POST /api/v1/admin/bindings/{id}/source-pairing/rotation` and JSON
++`{"operation_id":"<rotation UUID>"}`. The response returns a `rot_` key ID
++and machine token only on HTTP 201. Identical repeats and GET status return
++nonsecret metadata. WeKnora's tenant administrator, with KB edit permission,
++passes that one-time credential to
++`POST /api/v1/datasource/nextcloud-source-pairings/{pair_operation_id}/rotations`:
++
++```json
++{"operation_id":"<rotation UUID>","new_key_id":"rot_<32 lowercase hex>","token":"<one-time token>"}
++```
++
++WeKnora verifies the same live instance and binding with the new key, stores
++the credential encrypted in a pending rotation, and signs the exact tenant,
++KB, source, instance, pair operation, and rotation operation tuple to
++Nextcloud's `/bindings/{id}/source-pairing/rotation/commit`. Nextcloud then
++accepts both keys. The old key has a maximum 24-hour grace interval from
++commit. WeKnora atomically switches its data-source config and pinned hash,
++then signs `/rotation/finalize` with the new key. The final ACK immediately
++removes the old key. A lost commit ACK leaves WeKnora pending; a lost finalize
++ACK leaves it switched. `GET` status and `POST .../{rotation_id}/retry`
++resume either state using the encrypted local credential. The same signed
++remote operation is idempotent.
++
++Before remote commit, the WeKnora administrator may `POST
++.../{rotation_id}/abort`. WeKnora signs `/rotation/abort` with the old key.
++Nextcloud revokes only the pending new key; an identical abort can be retried
++after a lost ACK. WeKnora then marks the local operation aborted and erases
++its stored config copies. An administrator can also abort a Nextcloud-only
++pending rotation with `DELETE` on its admin rotation route and the operation
++UUID. A committed rotation cannot be aborted: use retry to finish the switch
++and finalization. If the old key's grace time expires during an outage,
++ordinary reads with the old key stop; retry uses the encrypted new key to
++complete recovery. A lost one-time token before WeKnora stores it requires
++aborting that pending Nextcloud operation and creating a fresh UUID.
++
++Source-key rotation changes the exact source config hash. An optional
++WeKnora event-inbox connection pinned to the former hash must be re-paired
++after rotation; it does not silently gain the new source credential. The
++operator CLI is `scripts/ops/local-source-rotation.py`.
 +
 +Nextcloud Stop blocks source reads. Resume does not change the paired tenant,
 +KB, binding, source ID, or credentials. A pending commit whose publication
@@ -261,7 +304,7 @@ index 00000000..cb1b5856
 +numbers are intentionally reserved for independent evaluation-run changes.
 diff --git a/docs/nextcloud-source-provenance.md b/docs/nextcloud-source-provenance.md
 new file mode 100644
-index 00000000..eedc64e0
+index 0000000..eedc64e
 --- /dev/null
 +++ b/docs/nextcloud-source-provenance.md
 @@ -0,0 +1,9 @@
@@ -275,7 +318,7 @@ index 00000000..eedc64e0
 +
 +Knowledge bases with this flag are conservatively ineligible for cross-knowledge-base copies, organization KB shares, shared agents, and Wiki reads/generation. Ordinary knowledge bases retain these features.
 diff --git a/internal/agent/tools/list_documents.go b/internal/agent/tools/list_documents.go
-index 24b2bede..f8e906fa 100644
+index 24b2bed..f8e906f 100644
 --- a/internal/agent/tools/list_documents.go
 +++ b/internal/agent/tools/list_documents.go
 @@ -111,11 +111,31 @@ func (t *ListDocumentsTool) Execute(ctx context.Context, args json.RawMessage) (
@@ -322,7 +365,7 @@ index 24b2bede..f8e906fa 100644
  	}
  	output := b.String()
 diff --git a/internal/agent/tools/list_documents_test.go b/internal/agent/tools/list_documents_test.go
-index 55d45ae8..2648c86f 100644
+index 55d45ae..2648c86 100644
 --- a/internal/agent/tools/list_documents_test.go
 +++ b/internal/agent/tools/list_documents_test.go
 @@ -70,6 +70,21 @@ func TestListDocumentsRendersRowsForModelAndUI(t *testing.T) {
@@ -348,7 +391,7 @@ index 55d45ae8..2648c86f 100644
  	tool := newListDocumentsFixture()
  	res, err := tool.Execute(context.Background(), json.RawMessage(`{"knowledge_base_id":"kb-1","keyword":"alpha"}`))
 diff --git a/internal/agent/tools/read_document.go b/internal/agent/tools/read_document.go
-index 8b9f9af8..8277b631 100644
+index 8b9f9af..8277b63 100644
 --- a/internal/agent/tools/read_document.go
 +++ b/internal/agent/tools/read_document.go
 @@ -211,14 +211,15 @@ func (t *ReadDocumentTool) resolveTarget(ctx context.Context, id string) (*types
@@ -375,7 +418,7 @@ index 8b9f9af8..8277b631 100644
  
  func (t *ReadDocumentTool) tenantFor(knowledge *types.Knowledge) uint64 {
 diff --git a/internal/agent/tools/read_document_test.go b/internal/agent/tools/read_document_test.go
-index 42c7872f..12c53f29 100644
+index 42c7872..12c53f2 100644
 --- a/internal/agent/tools/read_document_test.go
 +++ b/internal/agent/tools/read_document_test.go
 @@ -223,6 +223,25 @@ func TestReadDocumentRequiresID(t *testing.T) {
@@ -405,7 +448,7 @@ index 42c7872f..12c53f29 100644
  	tool, repo := newReadDocumentFixture(12)
  	res, err := tool.Execute(context.Background(), json.RawMessage(`{"id":"doc-1","offset":5,"limit":4}`))
 diff --git a/internal/agent/tools/scope_authorization.go b/internal/agent/tools/scope_authorization.go
-index 9b4124b8..4a9210b5 100644
+index 9b4124b..4a9210b 100644
 --- a/internal/agent/tools/scope_authorization.go
 +++ b/internal/agent/tools/scope_authorization.go
 @@ -5,6 +5,7 @@ import (
@@ -465,7 +508,7 @@ index 9b4124b8..4a9210b5 100644
  }
  
 diff --git a/internal/agent/tools/scope_authorization_test.go b/internal/agent/tools/scope_authorization_test.go
-index fdf28241..981439aa 100644
+index fdf2824..981439a 100644
 --- a/internal/agent/tools/scope_authorization_test.go
 +++ b/internal/agent/tools/scope_authorization_test.go
 @@ -90,6 +90,28 @@ func TestAuthorizeKnowledgeInSearchTargetsAllowsBoundDocument(t *testing.T) {
@@ -499,7 +542,7 @@ index fdf28241..981439aa 100644
  		ID: "faq-1", KnowledgeID: "faq-document", KnowledgeBaseID: "kb-1",
 diff --git a/internal/application/access/nextcloud_history.go b/internal/application/access/nextcloud_history.go
 new file mode 100644
-index 00000000..92d4b240
+index 0000000..92d4b24
 --- /dev/null
 +++ b/internal/application/access/nextcloud_history.go
 @@ -0,0 +1,175 @@
@@ -680,7 +723,7 @@ index 00000000..92d4b240
 +}
 diff --git a/internal/application/access/nextcloud_history_test.go b/internal/application/access/nextcloud_history_test.go
 new file mode 100644
-index 00000000..fee41ef6
+index 0000000..fee41ef
 --- /dev/null
 +++ b/internal/application/access/nextcloud_history_test.go
 @@ -0,0 +1,140 @@
@@ -826,7 +869,7 @@ index 00000000..fee41ef6
 +}
 diff --git a/internal/application/access/nextcloud_publication.go b/internal/application/access/nextcloud_publication.go
 new file mode 100644
-index 00000000..e6959522
+index 0000000..e695952
 --- /dev/null
 +++ b/internal/application/access/nextcloud_publication.go
 @@ -0,0 +1,208 @@
@@ -1040,7 +1083,7 @@ index 00000000..e6959522
 +}
 diff --git a/internal/application/access/nextcloud_publication_test.go b/internal/application/access/nextcloud_publication_test.go
 new file mode 100644
-index 00000000..345e4807
+index 0000000..345e480
 --- /dev/null
 +++ b/internal/application/access/nextcloud_publication_test.go
 @@ -0,0 +1,218 @@
@@ -1263,7 +1306,7 @@ index 00000000..345e4807
 +	}
 +}
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
-index c3b2f58e..f37542fc 100644
+index c3b2f58..f37542f 100644
 --- a/internal/application/repository/datasource_repo.go
 +++ b/internal/application/repository/datasource_repo.go
 @@ -3,8 +3,12 @@ package repository
@@ -1540,7 +1583,7 @@ index c3b2f58e..f37542fc 100644
  	}
  	return nil
 diff --git a/internal/application/repository/datasource_repo_test.go b/internal/application/repository/datasource_repo_test.go
-index 77ed065c..9cf4d886 100644
+index 77ed065..9cf4d88 100644
 --- a/internal/application/repository/datasource_repo_test.go
 +++ b/internal/application/repository/datasource_repo_test.go
 @@ -17,6 +17,11 @@ func setupDataSourceRepoTestDB(t *testing.T) *gorm.DB {
@@ -1556,7 +1599,7 @@ index 77ed065c..9cf4d886 100644
  }
  
 diff --git a/internal/application/repository/knowledge.go b/internal/application/repository/knowledge.go
-index 4b29c552..41dcd91c 100644
+index 4b29c55..41dcd91 100644
 --- a/internal/application/repository/knowledge.go
 +++ b/internal/application/repository/knowledge.go
 @@ -337,8 +337,22 @@ func (r *knowledgeRepository) UpdateKnowledge(ctx context.Context, knowledge *ty
@@ -1672,7 +1715,7 @@ index 4b29c552..41dcd91c 100644
  
  // CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base
 diff --git a/internal/application/repository/knowledgebase.go b/internal/application/repository/knowledgebase.go
-index e560e686..c2f3bd79 100644
+index e560e68..c2f3bd7 100644
 --- a/internal/application/repository/knowledgebase.go
 +++ b/internal/application/repository/knowledgebase.go
 @@ -169,7 +169,9 @@ func (r *knowledgeBaseRepository) ListUserKBPinIDs(
@@ -1687,7 +1730,7 @@ index e560e686..c2f3bd79 100644
  
  // UpdateKnowledgeBaseGeneratedProfile writes the generated_profile column
 diff --git a/internal/application/repository/knowledgebase_sqlite_test.go b/internal/application/repository/knowledgebase_sqlite_test.go
-index 0a35e402..4bf221f5 100644
+index 0a35e40..4bf221f 100644
 --- a/internal/application/repository/knowledgebase_sqlite_test.go
 +++ b/internal/application/repository/knowledgebase_sqlite_test.go
 @@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
@@ -1700,7 +1743,7 @@ index 0a35e402..4bf221f5 100644
      indexing_strategy TEXT,
 diff --git a/internal/application/repository/nextcloud_credential_endpoint_test.go b/internal/application/repository/nextcloud_credential_endpoint_test.go
 new file mode 100644
-index 00000000..b8ccb615
+index 0000000..b8ccb61
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_credential_endpoint_test.go
 @@ -0,0 +1,77 @@
@@ -1783,7 +1826,7 @@ index 00000000..b8ccb615
 +}
 diff --git a/internal/application/repository/nextcloud_event_connections.go b/internal/application/repository/nextcloud_event_connections.go
 new file mode 100644
-index 00000000..a188f30e
+index 0000000..a188f30
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_connections.go
 @@ -0,0 +1,355 @@
@@ -2144,7 +2187,7 @@ index 00000000..a188f30e
 +}
 diff --git a/internal/application/repository/nextcloud_event_dispatch.go b/internal/application/repository/nextcloud_event_dispatch.go
 new file mode 100644
-index 00000000..8e30dafa
+index 0000000..8e30daf
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_dispatch.go
 @@ -0,0 +1,613 @@
@@ -2763,7 +2806,7 @@ index 00000000..8e30dafa
 +}
 diff --git a/internal/application/repository/nextcloud_event_inbox.go b/internal/application/repository/nextcloud_event_inbox.go
 new file mode 100644
-index 00000000..11d20cfa
+index 0000000..11d20cf
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_inbox.go
 @@ -0,0 +1,361 @@
@@ -3130,7 +3173,7 @@ index 00000000..11d20cfa
 +}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
-index 00000000..dfd5ffae
+index 0000000..dfd5ffa
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_kb_provenance_test.go
 @@ -0,0 +1,112 @@
@@ -3248,7 +3291,7 @@ index 00000000..dfd5ffae
 +}
 diff --git a/internal/application/repository/nextcloud_source_pairing.go b/internal/application/repository/nextcloud_source_pairing.go
 new file mode 100644
-index 00000000..c3f1a477
+index 0000000..c3f1a47
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_source_pairing.go
 @@ -0,0 +1,289 @@
@@ -3543,7 +3586,7 @@ index 00000000..c3f1a477
 +}
 diff --git a/internal/application/repository/nextcloud_source_pairing_test.go b/internal/application/repository/nextcloud_source_pairing_test.go
 new file mode 100644
-index 00000000..c56d0ff3
+index 0000000..c56d0ff
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_source_pairing_test.go
 @@ -0,0 +1,65 @@
@@ -3612,9 +3655,494 @@ index 00000000..c56d0ff3
 +	require.ErrorIs(t, NewDataSourceRepository(db).Update(ctx, &changed), ErrNextcloudSourcePairingConflict)
 +	require.ErrorIs(t, NewDataSourceRepository(db).Delete(ctx, stored.ID), ErrNextcloudSourcePairingConflict)
 +}
+diff --git a/internal/application/repository/nextcloud_source_rotation.go b/internal/application/repository/nextcloud_source_rotation.go
+new file mode 100644
+index 0000000..813d102
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_rotation.go
+@@ -0,0 +1,309 @@
++package repository
++
++import (
++	"context"
++	"crypto/subtle"
++	"errors"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"gorm.io/gorm"
++)
++
++// The new credential remains encrypted in new_config until the remote commit
++// has been acknowledged. Status responses never include this field.
++type NextcloudSourceRotation struct {
++	OperationID     string     `json:"operation_id" gorm:"column:operation_id;primaryKey"`
++	PairOperationID string     `json:"pair_operation_id" gorm:"column:pair_operation_id"`
++	TenantID        uint64     `json:"-" gorm:"column:tenant_id"`
++	KnowledgeBaseID string     `json:"knowledge_base_id" gorm:"column:knowledge_base_id"`
++	DataSourceID    string     `json:"data_source_id" gorm:"column:datasource_id"`
++	InstanceID      string     `json:"instance_id" gorm:"column:nextcloud_instance_id"`
++	BindingID       string     `json:"binding_id" gorm:"column:binding_id"`
++	OldKeyID        string     `json:"old_key_id" gorm:"column:old_key_id"`
++	NewKeyID        string     `json:"new_key_id" gorm:"column:new_key_id"`
++	OldConfigSHA    string     `json:"-" gorm:"column:old_config_sha256"`
++	NewConfigSHA    string     `json:"-" gorm:"column:new_config_sha256"`
++	OldConfig       types.JSON `json:"-" gorm:"column:old_config;type:jsonb"`
++	NewConfig       types.JSON `json:"-" gorm:"column:new_config;type:jsonb"`
++	State           string     `json:"state" gorm:"column:state"`
++	LastErrorCode   string     `json:"last_error_code,omitempty" gorm:"column:last_error_code"`
++	CreatedAt       time.Time  `json:"created_at" gorm:"column:created_at"`
++	UpdatedAt       time.Time  `json:"updated_at" gorm:"column:updated_at"`
++}
++
++func (NextcloudSourceRotation) TableName() string { return "nextcloud_source_rotations" }
++
++func (r *NextcloudSourcePairingRepository) PrepareSourceRotation(ctx context.Context,
++	proposed NextcloudSourceRotation, token string) (NextcloudSourceRotation, bool, error) {
++	if proposed.OperationID == "" || proposed.PairOperationID == "" || proposed.TenantID == 0 ||
++		proposed.NewKeyID == "" || token == "" || len(utils.GetAESKey()) != 32 {
++		return NextcloudSourceRotation{}, false, ErrNextcloudSourcePairingConflict
++	}
++	var result NextcloudSourceRotation
++	created := false
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		lock := tx.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = ever_had_nextcloud_source
++			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, proposed.KnowledgeBaseID, proposed.TenantID)
++		if lock.Error != nil {
++			return lock.Error
++		}
++		if lock.RowsAffected != 1 {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var pair NextcloudSourcePairing
++		if err := tx.Where("operation_id = ? AND tenant_id = ? AND state = 'active'",
++			proposed.PairOperationID, proposed.TenantID).Take(&pair).Error; err != nil {
++			return ErrNextcloudSourcePairingConflict
++		}
++		if pair.KnowledgeBaseID != proposed.KnowledgeBaseID || pair.DataSourceID != proposed.DataSourceID ||
++			pair.InstanceID != proposed.InstanceID || pair.BindingID != proposed.BindingID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var current NextcloudSourceRotation
++		err := tx.Where("operation_id = ?", proposed.OperationID).Take(&current).Error
++		if err == nil {
++			if current.PairOperationID != pair.OperationID || current.TenantID != pair.TenantID ||
++				current.KnowledgeBaseID != pair.KnowledgeBaseID || current.DataSourceID != pair.DataSourceID ||
++				current.InstanceID != pair.InstanceID || current.BindingID != pair.BindingID ||
++				current.NewKeyID != proposed.NewKeyID || current.State == "aborted" {
++				return ErrNextcloudSourcePairingConflict
++			}
++			cfg, err := SourceRotationConfig(current)
++			if err != nil {
++				return ErrNextcloudSourcePairingConflict
++			}
++			stored, _ := cfg.Credentials["token"].(string)
++			if subtle.ConstantTimeCompare([]byte(stored), []byte(token)) != 1 {
++				return ErrNextcloudSourcePairingConflict
++			}
++			result = current
++			return nil
++		}
++		if !errors.Is(err, gorm.ErrRecordNotFound) {
++			return err
++		}
++		if err := tx.Where("pair_operation_id = ? AND state IN ?", pair.OperationID,
++			[]string{"pending", "committed", "switched"}).Take(&current).Error; err == nil {
++			return ErrNextcloudSourcePairingConflict
++		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
++			return err
++		}
++		var ds types.DataSource
++		if err := tx.Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", pair.DataSourceID, pair.TenantID).
++			Take(&ds).Error; err != nil || ds.Status != types.DataSourceStatusActive {
++			return ErrNextcloudSourcePairingConflict
++		}
++		base, hash, binding, err := NextcloudEventDataSourceIdentity(ds.Config)
++		if err != nil || base != pair.BaseURL || binding != pair.BindingID ||
++			hash != pair.ConfigSHA || pair.KeyID == proposed.NewKeyID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		oldCfg, err := ds.ParseConfig()
++		if err != nil || oldCfg == nil || oldCfg.Credentials["key_id"] != pair.KeyID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		newCfg := &types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++			Credentials: map[string]interface{}{"token": token, "key_id": proposed.NewKeyID},
++			ResourceIDs: []string{pair.BindingID},
++			Settings:    map[string]interface{}{"base_url": pair.BaseURL}}
++		newBlob, err := newCfg.ToJSON()
++		if err != nil {
++			return err
++		}
++		newBase, newHash, newBinding, err := NextcloudEventDataSourceIdentity(newBlob)
++		if err != nil || newBase != pair.BaseURL || newBinding != pair.BindingID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		proposed.OldKeyID = pair.KeyID
++		proposed.OldConfigSHA = pair.ConfigSHA
++		proposed.NewConfigSHA = newHash
++		proposed.OldConfig = ds.Config
++		proposed.NewConfig = newBlob
++		proposed.State = "pending"
++		proposed.CreatedAt = time.Now().UTC()
++		proposed.UpdatedAt = proposed.CreatedAt
++		if err := tx.Create(&proposed).Error; err != nil {
++			return err
++		}
++		// PostgreSQL jsonb may normalize key order on storage. Pin the
++		// fingerprint to the bytes that a later source read will return.
++		var stored NextcloudSourceRotation
++		if err := tx.Where("operation_id = ?", proposed.OperationID).Take(&stored).Error; err != nil {
++			return err
++		}
++		_, persistedHash, _, err := NextcloudEventDataSourceIdentity(stored.NewConfig)
++		if err != nil {
++			return ErrNextcloudSourcePairingConflict
++		}
++		if persistedHash != newHash {
++			if err := tx.Model(&stored).Update("new_config_sha256", persistedHash).Error; err != nil {
++				return err
++			}
++			stored.NewConfigSHA = persistedHash
++		}
++		result = stored
++		created = true
++		return nil
++	})
++	if err != nil {
++		return NextcloudSourceRotation{}, false, err
++	}
++	return result, created, nil
++}
++
++func SourceRotationConfig(rotation NextcloudSourceRotation) (*types.DataSourceConfig, error) {
++	ds := &types.DataSource{Config: rotation.NewConfig}
++	return ds.ParseConfig()
++}
++
++func (r *NextcloudSourcePairingRepository) SourceRotation(ctx context.Context,
++	tenantID uint64, operationID string) (NextcloudSourceRotation, error) {
++	var rotation NextcloudSourceRotation
++	err := r.db.WithContext(ctx).Where("operation_id = ? AND tenant_id = ?", operationID, tenantID).
++		Take(&rotation).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return rotation, ErrNextcloudSourcePairingMissing
++	}
++	return rotation, err
++}
++
++// Called only after Nextcloud commits the new key. The source config, pinned
++// fingerprint, and rotation state switch atomically under the owning KB lock.
++func (r *NextcloudSourcePairingRepository) SwitchSourceRotation(ctx context.Context,
++	rotation NextcloudSourceRotation) error {
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		lock := tx.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = ever_had_nextcloud_source
++			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, rotation.KnowledgeBaseID, rotation.TenantID)
++		if lock.Error != nil {
++			return lock.Error
++		}
++		if lock.RowsAffected != 1 {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var current NextcloudSourceRotation
++		if err := tx.Where("operation_id = ? AND tenant_id = ?", rotation.OperationID, rotation.TenantID).
++			Take(&current).Error; err != nil {
++			return err
++		}
++		var pair NextcloudSourcePairing
++		if err := tx.Where("operation_id = ? AND tenant_id = ? AND state = 'active'",
++			current.PairOperationID, current.TenantID).Take(&pair).Error; err != nil {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var ds types.DataSource
++		if err := tx.Where("id = ? AND tenant_id = ? AND deleted_at IS NULL",
++			current.DataSourceID, current.TenantID).Take(&ds).Error; err != nil ||
++			ds.Status != types.DataSourceStatusActive || ds.KnowledgeBaseID != current.KnowledgeBaseID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		_, hash, _, err := NextcloudEventDataSourceIdentity(ds.Config)
++		if err != nil {
++			return ErrNextcloudSourcePairingConflict
++		}
++		if current.State == "switched" || current.State == "finalized" {
++			if pair.KeyID == current.NewKeyID && pair.ConfigSHA == current.NewConfigSHA &&
++				hash == current.NewConfigSHA {
++				return nil
++			}
++			return ErrNextcloudSourcePairingConflict
++		}
++		if current.State != "pending" || pair.KeyID != current.OldKeyID ||
++			pair.ConfigSHA != current.OldConfigSHA || hash != current.OldConfigSHA ||
++			pair.KnowledgeBaseID != current.KnowledgeBaseID || pair.InstanceID != current.InstanceID ||
++			pair.BindingID != current.BindingID || pair.DataSourceID != current.DataSourceID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		if err := tx.Model(&current).Update("state", "committed").Error; err != nil {
++			return err
++		}
++		if err := tx.Model(&ds).Update("config", current.NewConfig).Error; err != nil {
++			return err
++		}
++		if err := tx.Model(&pair).Updates(map[string]interface{}{
++			"key_id": current.NewKeyID, "datasource_config_sha256": current.NewConfigSHA,
++			"updated_at": time.Now().UTC(),
++		}).Error; err != nil {
++			return err
++		}
++		return tx.Model(&current).Updates(map[string]interface{}{
++			"state": "switched", "last_error_code": "", "updated_at": time.Now().UTC(),
++		}).Error
++	})
++}
++
++func (r *NextcloudSourcePairingRepository) FinalizeSourceRotation(ctx context.Context,
++	rotation NextcloudSourceRotation) error {
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var current NextcloudSourceRotation
++		if err := tx.Where("operation_id = ? AND tenant_id = ?", rotation.OperationID, rotation.TenantID).
++			Take(&current).Error; err != nil {
++			return err
++		}
++		if current.State == "finalized" {
++			return nil
++		}
++		if current.State != "switched" {
++			return ErrNextcloudSourcePairingConflict
++		}
++		return tx.Model(&current).Updates(map[string]interface{}{
++			"state": "finalized", "last_error_code": "", "updated_at": time.Now().UTC(),
++		}).Error
++	})
++}
++
++// Abort is safe only after Nextcloud's signed abort ACK. A committed remote
++// operation cannot be discarded, even if the local switch has not run yet.
++func (r *NextcloudSourcePairingRepository) AbortSourceRotation(ctx context.Context,
++	rotation NextcloudSourceRotation) error {
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		lock := tx.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = ever_had_nextcloud_source
++			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, rotation.KnowledgeBaseID, rotation.TenantID)
++		if lock.Error != nil {
++			return lock.Error
++		}
++		if lock.RowsAffected != 1 {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var current NextcloudSourceRotation
++		if err := tx.Where("operation_id = ? AND tenant_id = ?", rotation.OperationID, rotation.TenantID).
++			Take(&current).Error; err != nil {
++			return err
++		}
++		if current.State == "aborted" {
++			return nil
++		}
++		if current.State != "pending" {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var pair NextcloudSourcePairing
++		if err := tx.Where("operation_id = ? AND tenant_id = ? AND state = 'active'",
++			current.PairOperationID, current.TenantID).Take(&pair).Error; err != nil ||
++			pair.KeyID != current.OldKeyID || pair.ConfigSHA != current.OldConfigSHA ||
++			pair.DataSourceID != current.DataSourceID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var ds types.DataSource
++		if err := tx.Where("id = ? AND tenant_id = ? AND deleted_at IS NULL",
++			current.DataSourceID, current.TenantID).Take(&ds).Error; err != nil ||
++			string(ds.Config) != string(current.OldConfig) {
++			return ErrNextcloudSourcePairingConflict
++		}
++		return tx.Model(&current).Updates(map[string]interface{}{
++			"state": "aborted", "old_config": types.JSON(`{}`), "new_config": types.JSON(`{}`),
++			"last_error_code": "", "updated_at": time.Now().UTC(),
++		}).Error
++	})
++}
++
++func (r *NextcloudSourcePairingRepository) RecordSourceRotationFailure(ctx context.Context,
++	rotation NextcloudSourceRotation, code string) error {
++	if code == "" {
++		return nil
++	}
++	return r.db.WithContext(ctx).Model(&NextcloudSourceRotation{}).
++		Where("operation_id = ? AND tenant_id = ? AND state IN ?", rotation.OperationID,
++			rotation.TenantID, []string{"pending", "switched"}).
++		Updates(map[string]interface{}{"last_error_code": code, "updated_at": time.Now().UTC()}).Error
++}
+diff --git a/internal/application/repository/nextcloud_source_rotation_pg_test.go b/internal/application/repository/nextcloud_source_rotation_pg_test.go
+new file mode 100644
+index 0000000..09a6956
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_rotation_pg_test.go
+@@ -0,0 +1,80 @@
++package repository
++
++import (
++	"context"
++	"os"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++// JSONB may reorder keys on write. A prepared hash must describe the bytes
++// read back from PostgreSQL, or the active-source guard will reject rotation.
++func TestPostgresNextcloudSourceRotationUsesPersistedJSONBHash(t *testing.T) {
++	dsn := os.Getenv("WEKNORA_PAIRING_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set WEKNORA_PAIRING_TEST_POSTGRES_DSN for disposable PostgreSQL")
++	}
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	defer sqlDB.Close()
++	schema := "pair_rotation_" + uuid.NewString()[:8]
++	require.NoError(t, db.Exec(`CREATE SCHEMA "`+schema+`"`).Error)
++	defer db.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
++	require.NoError(t, db.Exec(`SET search_path TO "`+schema+`"`).Error)
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases (id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL,
++		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT FALSE, deleted_at TIMESTAMPTZ)`).Error)
++	require.NoError(t, db.Exec(`CREATE TABLE knowledges (id TEXT PRIMARY KEY, tenant_id BIGINT,
++		knowledge_base_id TEXT, deleted_at TIMESTAMPTZ)`).Error)
++	require.NoError(t, db.AutoMigrate(&types.DataSource{}, &NextcloudSourcePairing{},
++		&NextcloudSourceRotation{}))
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-paired', 7)`).Error)
++	oldConfig := &types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		Credentials: map[string]interface{}{"token": "old-secret", "key_id": "pair_old"},
++		ResourceIDs: []string{"dev-published"},
++		Settings:    map[string]interface{}{"base_url": "https://nextcloud.example.test"}}
++	oldBlob, err := oldConfig.ToJSON()
++	require.NoError(t, err)
++	ds := &types.DataSource{ID: uuid.NewString(), TenantID: 7, KnowledgeBaseID: "kb-paired",
++		Type: types.ConnectorTypeNextcloud, Config: oldBlob, Status: types.DataSourceStatusActive}
++	require.NoError(t, db.Create(ds).Error)
++	require.NoError(t, db.Where("id = ?", ds.ID).Take(ds).Error)
++	_, oldHash, _, err := NextcloudEventDataSourceIdentity(ds.Config)
++	require.NoError(t, err)
++	pair := &NextcloudSourcePairing{OperationID: uuid.NewString(), TenantID: 7,
++		KnowledgeBaseID: "kb-paired", DataSourceID: ds.ID, InstanceID: "instance-1",
++		BindingID: "dev-published", BaseURL: "https://nextcloud.example.test",
++		ConfigSHA: oldHash, PublicationEpoch: 0, KeyID: "pair_old", State: "active"}
++	require.NoError(t, db.Create(pair).Error)
++	repo := NewNextcloudSourcePairingRepository(db)
++	ctx := context.Background()
++	rotation := NextcloudSourceRotation{OperationID: uuid.NewString(),
++		PairOperationID: pair.OperationID, TenantID: 7, KnowledgeBaseID: pair.KnowledgeBaseID,
++		DataSourceID: ds.ID, InstanceID: pair.InstanceID, BindingID: pair.BindingID,
++		NewKeyID: "rot_" + uuid.NewString()[:8]}
++	prepared, created, err := repo.PrepareSourceRotation(ctx, rotation, "new-secret")
++	require.NoError(t, err)
++	require.True(t, created)
++	_, persistedHash, _, err := NextcloudEventDataSourceIdentity(prepared.NewConfig)
++	require.NoError(t, err)
++	require.Equal(t, persistedHash, prepared.NewConfigSHA)
++	require.NoError(t, repo.SwitchSourceRotation(ctx, prepared))
++	require.NoError(t, db.Where("id = ?", ds.ID).Take(ds).Error)
++	var after NextcloudSourcePairing
++	require.NoError(t, db.Where("operation_id = ?", pair.OperationID).Take(&after).Error)
++	_, afterHash, _, hashErr := NextcloudEventDataSourceIdentity(ds.Config)
++	require.NoError(t, hashErr)
++	require.Equal(t, prepared.NewConfigSHA, afterHash)
++	require.Equal(t, prepared.NewConfigSHA, after.ConfigSHA)
++	active, err := repo.HasActiveSourcePairing(ctx, ds)
++	require.NoError(t, err)
++	require.True(t, active)
++}
+diff --git a/internal/application/repository/nextcloud_source_rotation_test.go b/internal/application/repository/nextcloud_source_rotation_test.go
+new file mode 100644
+index 0000000..092c0ab
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_rotation_test.go
+@@ -0,0 +1,78 @@
++package repository
++
++import (
++	"context"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestNextcloudSourceRotationPersistsSecretAndSwitchesExactSource(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	db := provenanceTestDB(t)
++	require.NoError(t, db.AutoMigrate(&NextcloudSourceRotation{}))
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-rotating', 7)`).Error)
++	repo := NewNextcloudSourcePairingRepository(db)
++	ctx := context.Background()
++	pair, _, err := repo.PrepareSourcePairing(ctx, NextcloudSourcePairing{
++		OperationID: "82d62225-1eb6-47ad-9264-2759e33dfa03", TenantID: 7,
++		KnowledgeBaseID: "kb-rotating", InstanceID: "instance-1",
++		BindingID: "dev-published", BaseURL: "https://nextcloud.example.test",
++		PublicationEpoch: 0, KeyID: "pair_82d622251eb647ad92642759e33dfa03",
++	}, "original-secret")
++	require.NoError(t, err)
++	require.NoError(t, repo.ActivateSourcePairing(ctx, pair))
++	rotation := NextcloudSourceRotation{
++		OperationID:     "6e359042-69aa-489e-bd9b-8754bf5beee1",
++		PairOperationID: pair.OperationID, TenantID: 7,
++		KnowledgeBaseID: pair.KnowledgeBaseID, DataSourceID: pair.DataSourceID,
++		InstanceID: pair.InstanceID, BindingID: pair.BindingID,
++		NewKeyID: "rot_6e35904269aa489ebd9b8754bf5beee1",
++	}
++	first, created, err := repo.PrepareSourceRotation(ctx, rotation, "replacement-secret")
++	require.NoError(t, err)
++	require.True(t, created)
++	require.Equal(t, "pending", first.State)
++	require.NotContains(t, string(first.NewConfig), "replacement-secret")
++	require.Contains(t, string(first.NewConfig), "enc:v1:")
++	var ds types.DataSource
++	require.NoError(t, db.Where("id = ?", pair.DataSourceID).Take(&ds).Error)
++	original := string(ds.Config)
++	require.NoError(t, db.Exec(`UPDATE data_sources SET name = name WHERE id = ?`, ds.ID).Error)
++	require.Equal(t, original, string(ds.Config))
++	second, created, err := repo.PrepareSourceRotation(ctx, rotation, "replacement-secret")
++	require.NoError(t, err)
++	require.False(t, created)
++	require.Equal(t, first.NewConfigSHA, second.NewConfigSHA)
++	_, _, err = repo.PrepareSourceRotation(ctx, rotation, "wrong-secret")
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++	other := rotation
++	other.OperationID = "07ab85f6-2f7e-43ca-b68b-733152469abd"
++	other.NewKeyID = "rot_07ab85f62f7e43cab68b733152469abd"
++	_, _, err = repo.PrepareSourceRotation(ctx, other, "other-secret")
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++
++	require.NoError(t, repo.SwitchSourceRotation(ctx, first))
++	require.NoError(t, repo.SwitchSourceRotation(ctx, first))
++	require.NoError(t, db.Where("id = ?", pair.DataSourceID).Take(&ds).Error)
++	require.NotEqual(t, original, string(ds.Config))
++	cfg, err := ds.ParseConfig()
++	require.NoError(t, err)
++	require.Equal(t, "replacement-secret", cfg.Credentials["token"])
++	require.Equal(t, rotation.NewKeyID, cfg.Credentials["key_id"])
++	var current NextcloudSourcePairing
++	require.NoError(t, db.Where("operation_id = ?", pair.OperationID).Take(&current).Error)
++	require.Equal(t, rotation.NewKeyID, current.KeyID)
++	require.Equal(t, first.NewConfigSHA, current.ConfigSHA)
++	active, err := repo.HasActiveSourcePairing(ctx, &ds)
++	require.NoError(t, err)
++	require.True(t, active)
++	require.NoError(t, repo.FinalizeSourceRotation(ctx, first))
++	require.NoError(t, repo.FinalizeSourceRotation(ctx, first))
++	require.NoError(t, db.Where("operation_id = ?", rotation.OperationID).Take(&first).Error)
++	require.Equal(t, "finalized", first.State)
++	_, created, err = repo.PrepareSourceRotation(ctx, other, "other-secret")
++	require.NoError(t, err)
++	require.True(t, created, "a completed rotation permits the next one")
++}
 diff --git a/internal/application/repository/nextcloud_versions.go b/internal/application/repository/nextcloud_versions.go
 new file mode 100644
-index 00000000..a6e3c9d2
+index 0000000..a6e3c9d
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions.go
 @@ -0,0 +1,275 @@
@@ -3895,7 +4423,7 @@ index 00000000..a6e3c9d2
 +}
 diff --git a/internal/application/repository/nextcloud_versions_test.go b/internal/application/repository/nextcloud_versions_test.go
 new file mode 100644
-index 00000000..9fd0f044
+index 0000000..9fd0f04
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions_test.go
 @@ -0,0 +1,153 @@
@@ -4053,7 +4581,7 @@ index 00000000..9fd0f044
 +	require.NoError(t, db.Create(&second).Error)
 +}
 diff --git a/internal/application/repository/resource.go b/internal/application/repository/resource.go
-index b3d724b7..e0398d55 100644
+index b3d724b..e0398d5 100644
 --- a/internal/application/repository/resource.go
 +++ b/internal/application/repository/resource.go
 @@ -67,6 +67,31 @@ func (r *resourceRepository) MarkDeleted(ctx context.Context, id string) error {
@@ -4089,7 +4617,7 @@ index b3d724b7..e0398d55 100644
  	return r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(binding).Error
  }
 diff --git a/internal/application/repository/resource_references.go b/internal/application/repository/resource_references.go
-index 8276ba00..800aad73 100644
+index 8276ba0..800aad7 100644
 --- a/internal/application/repository/resource_references.go
 +++ b/internal/application/repository/resource_references.go
 @@ -7,6 +7,44 @@ import (
@@ -4138,7 +4666,7 @@ index 8276ba00..800aad73 100644
  // registered resource. A textual mention of a path/handle never counts.
  func (r *resourceRepository) ListKnowledgeBaseIDsByResource(
 diff --git a/internal/application/service/agent_service.go b/internal/application/service/agent_service.go
-index a1dc8aae..7a569657 100644
+index a1dc8aa..7a56965 100644
 --- a/internal/application/service/agent_service.go
 +++ b/internal/application/service/agent_service.go
 @@ -1231,6 +1231,16 @@ func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string
@@ -4159,7 +4687,7 @@ index a1dc8aae..7a569657 100644
  		// Document/FAQ listing below is tenant-scoped, so a directly shared KB
  		// must be queried under its source tenant — the request context belongs
 diff --git a/internal/application/service/agent_share.go b/internal/application/service/agent_share.go
-index bc9c7b86..7096ebe1 100644
+index bc9c7b8..7096ebe 100644
 --- a/internal/application/service/agent_share.go
 +++ b/internal/application/service/agent_share.go
 @@ -113,6 +113,9 @@ type agentShareService struct {
@@ -4293,7 +4821,7 @@ index bc9c7b86..7096ebe1 100644
  	_ = callerTenantRole
  	return agent, nil
 diff --git a/internal/application/service/chat_pipeline/into_chat_message.go b/internal/application/service/chat_pipeline/into_chat_message.go
-index e8f923ce..bce7635a 100644
+index e8f923c..bce7635 100644
 --- a/internal/application/service/chat_pipeline/into_chat_message.go
 +++ b/internal/application/service/chat_pipeline/into_chat_message.go
 @@ -6,6 +6,7 @@ import (
@@ -4403,7 +4931,7 @@ index e8f923ce..bce7635a 100644
  // retrieval context in history.
 diff --git a/internal/application/service/chat_pipeline/nextcloud_publication_test.go b/internal/application/service/chat_pipeline/nextcloud_publication_test.go
 new file mode 100644
-index 00000000..8414c898
+index 0000000..8414c89
 --- /dev/null
 +++ b/internal/application/service/chat_pipeline/nextcloud_publication_test.go
 @@ -0,0 +1,56 @@
@@ -4464,7 +4992,7 @@ index 00000000..8414c898
 +	}
 +}
 diff --git a/internal/application/service/datasource_delete_sqlite_test.go b/internal/application/service/datasource_delete_sqlite_test.go
-index b4087b96..60ad2a04 100644
+index b4087b9..60ad2a0 100644
 --- a/internal/application/service/datasource_delete_sqlite_test.go
 +++ b/internal/application/service/datasource_delete_sqlite_test.go
 @@ -30,6 +30,12 @@ func newSQLiteDataSourceDeleteFixture(t *testing.T) *sqliteDataSourceDeleteFixtu
@@ -4490,7 +5018,7 @@ index b4087b96..60ad2a04 100644
  		ID:           "log-pending",
  		DataSourceID: ds.ID,
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241..56f44637 100644
+index c0b2424..56f4463 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -14,6 +14,7 @@ import (
@@ -5274,7 +5802,7 @@ index c0b24241..56f44637 100644
  // exists in the KB *under this item's own external_id* — i.e. a content-dedup hit
  // against this same node, so reconciling its subtree is safe. File deduplication
 diff --git a/internal/application/service/datasource_service_test.go b/internal/application/service/datasource_service_test.go
-index bc90b995..9ea7fc8e 100644
+index bc90b99..9ea7fc8 100644
 --- a/internal/application/service/datasource_service_test.go
 +++ b/internal/application/service/datasource_service_test.go
 @@ -4,19 +4,43 @@ import (
@@ -5666,7 +6194,7 @@ index bc90b995..9ea7fc8e 100644
 +	assert.Equal(t, types.ConnectorTypeNextcloud, knowledge.channel)
 +}
 diff --git a/internal/application/service/datasource_stream_test.go b/internal/application/service/datasource_stream_test.go
-index 925d4bff..7ba1f7a8 100644
+index 925d4bf..7ba1f7a 100644
 --- a/internal/application/service/datasource_stream_test.go
 +++ b/internal/application/service/datasource_stream_test.go
 @@ -3,10 +3,12 @@ package service
@@ -5884,7 +6412,7 @@ index 925d4bff..7ba1f7a8 100644
 +	require.Equal(t, "old", stored.ConnectorCursor["marker"])
 +}
 diff --git a/internal/application/service/datasource_sweep_wiring_test.go b/internal/application/service/datasource_sweep_wiring_test.go
-index e9ce5bc0..68608361 100644
+index e9ce5bc..6860836 100644
 --- a/internal/application/service/datasource_sweep_wiring_test.go
 +++ b/internal/application/service/datasource_sweep_wiring_test.go
 @@ -20,6 +20,18 @@ type sweepFakeRepo struct {
@@ -5925,7 +6453,7 @@ index e9ce5bc0..68608361 100644
  }
  
 diff --git a/internal/application/service/embed_channel.go b/internal/application/service/embed_channel.go
-index df9986d4..f7a955b1 100644
+index df9986d..f7a955b 100644
 --- a/internal/application/service/embed_channel.go
 +++ b/internal/application/service/embed_channel.go
 @@ -9,6 +9,7 @@ import (
@@ -6000,7 +6528,7 @@ index df9986d4..f7a955b1 100644
  }
  
 diff --git a/internal/application/service/embed_channel_chunk_test.go b/internal/application/service/embed_channel_chunk_test.go
-index 764a0b6a..cb3d8e4f 100644
+index 764a0b6..cb3d8e4 100644
 --- a/internal/application/service/embed_channel_chunk_test.go
 +++ b/internal/application/service/embed_channel_chunk_test.go
 @@ -14,6 +14,15 @@ type stubChunkForEmbed struct {
@@ -6080,7 +6608,7 @@ index 764a0b6a..cb3d8e4f 100644
 +	}
 +}
 diff --git a/internal/application/service/file/resource_catalog.go b/internal/application/service/file/resource_catalog.go
-index 34a376d4..4e28972c 100644
+index 34a376d..4e28972 100644
 --- a/internal/application/service/file/resource_catalog.go
 +++ b/internal/application/service/file/resource_catalog.go
 @@ -13,16 +13,19 @@ import (
@@ -6224,7 +6752,7 @@ index 34a376d4..4e28972c 100644
  	if err != nil {
  		return "", err
 diff --git a/internal/application/service/file/resource_catalog_test.go b/internal/application/service/file/resource_catalog_test.go
-index 735ca948..8cd81d63 100644
+index 735ca94..8cd81d6 100644
 --- a/internal/application/service/file/resource_catalog_test.go
 +++ b/internal/application/service/file/resource_catalog_test.go
 @@ -8,14 +8,17 @@ import (
@@ -6336,7 +6864,7 @@ index 735ca948..8cd81d63 100644
 +	require.False(t, catalog.grantCalled)
 +}
 diff --git a/internal/application/service/kbshare.go b/internal/application/service/kbshare.go
-index 05b7b390..be4d50b0 100644
+index 05b7b39..be4d50b 100644
 --- a/internal/application/service/kbshare.go
 +++ b/internal/application/service/kbshare.go
 @@ -39,6 +39,7 @@ type kbShareService struct {
@@ -6438,7 +6966,7 @@ index 05b7b390..be4d50b0 100644
  	var highest types.OrgMemberRole
  	isShared := false
 diff --git a/internal/application/service/knowledge.go b/internal/application/service/knowledge.go
-index 320c0a14..316a66d3 100644
+index 320c0a1..316a66d 100644
 --- a/internal/application/service/knowledge.go
 +++ b/internal/application/service/knowledge.go
 @@ -12,6 +12,7 @@ import (
@@ -6581,7 +7109,7 @@ index 320c0a14..316a66d3 100644
  // service was constructed without one (test harness, lite mode w/o repo).
  // All pipeline call sites go through this so they never need a nil check.
 diff --git a/internal/application/service/knowledge_clone_move.go b/internal/application/service/knowledge_clone_move.go
-index fb431424..07c879f2 100644
+index fb43142..07c879f 100644
 --- a/internal/application/service/knowledge_clone_move.go
 +++ b/internal/application/service/knowledge_clone_move.go
 @@ -202,6 +202,25 @@ func cleanupCopiedObjects(ctx context.Context, svc interfaces.FileService, paths
@@ -6648,7 +7176,7 @@ index fb431424..07c879f2 100644
  		return err
  	}
 diff --git a/internal/application/service/knowledge_create.go b/internal/application/service/knowledge_create.go
-index 1b19f5a6..6b30bdd9 100644
+index 1b19f5a..6b30bdd 100644
 --- a/internal/application/service/knowledge_create.go
 +++ b/internal/application/service/knowledge_create.go
 @@ -189,7 +189,15 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
@@ -6678,7 +7206,7 @@ index 1b19f5a6..6b30bdd9 100644
  	default:
  		return false
 diff --git a/internal/application/service/knowledge_replace.go b/internal/application/service/knowledge_replace.go
-index ca20ef9f..a89dda10 100644
+index ca20ef9..a89dda1 100644
 --- a/internal/application/service/knowledge_replace.go
 +++ b/internal/application/service/knowledge_replace.go
 @@ -122,7 +122,17 @@ func (s *knowledgeService) ReplaceKnowledgeFile(ctx context.Context,
@@ -6701,7 +7229,7 @@ index ca20ef9f..a89dda10 100644
  		logger.Errorf(ctx, "Failed to save replacement file for knowledge %s: %v", existing.ID, err)
  		return nil, err
 diff --git a/internal/application/service/knowledge_transfer.go b/internal/application/service/knowledge_transfer.go
-index 415d3b43..ca765005 100644
+index 415d3b4..ca76500 100644
 --- a/internal/application/service/knowledge_transfer.go
 +++ b/internal/application/service/knowledge_transfer.go
 @@ -156,6 +156,9 @@ func (s *knowledgeService) planKnowledgeMove(
@@ -6732,7 +7260,7 @@ index 415d3b43..ca765005 100644
  	if err != nil {
  		return nil, err
 diff --git a/internal/application/service/knowledgebase.go b/internal/application/service/knowledgebase.go
-index a7f1f625..201a1513 100644
+index a7f1f62..201a151 100644
 --- a/internal/application/service/knowledgebase.go
 +++ b/internal/application/service/knowledgebase.go
 @@ -31,27 +31,28 @@ const kbTaskCleanupTimeout = 5 * time.Second
@@ -6861,7 +7389,7 @@ index a7f1f625..201a1513 100644
  	// Step 1: Delete the knowledge base record first (mark as deleted)
  	logger.Infof(ctx, "Deleting knowledge base from database")
 diff --git a/internal/application/service/knowledgebase_delete_datasource_test.go b/internal/application/service/knowledgebase_delete_datasource_test.go
-index 551a1316..97906ddd 100644
+index 551a131..97906dd 100644
 --- a/internal/application/service/knowledgebase_delete_datasource_test.go
 +++ b/internal/application/service/knowledgebase_delete_datasource_test.go
 @@ -179,6 +179,24 @@ func TestDeleteKnowledgeBaseCleansUpDataSources(t *testing.T) {
@@ -6891,7 +7419,7 @@ index 551a1316..97906ddd 100644
  	dsRepo := &deleteErrDSRepo{
 diff --git a/internal/application/service/knowledgebase_nextcloud_derived_policy.go b/internal/application/service/knowledgebase_nextcloud_derived_policy.go
 new file mode 100644
-index 00000000..5ca5cfb3
+index 0000000..5ca5cfb
 --- /dev/null
 +++ b/internal/application/service/knowledgebase_nextcloud_derived_policy.go
 @@ -0,0 +1,22 @@
@@ -6919,7 +7447,7 @@ index 00000000..5ca5cfb3
 +}
 diff --git a/internal/application/service/knowledgebase_nextcloud_publication_test.go b/internal/application/service/knowledgebase_nextcloud_publication_test.go
 new file mode 100644
-index 00000000..f831b5aa
+index 0000000..f831b5a
 --- /dev/null
 +++ b/internal/application/service/knowledgebase_nextcloud_publication_test.go
 @@ -0,0 +1,55 @@
@@ -6979,7 +7507,7 @@ index 00000000..f831b5aa
 +	}
 +}
 diff --git a/internal/application/service/knowledgebase_profile.go b/internal/application/service/knowledgebase_profile.go
-index 538687bb..23f91c11 100644
+index 538687b..23f91c1 100644
 --- a/internal/application/service/knowledgebase_profile.go
 +++ b/internal/application/service/knowledgebase_profile.go
 @@ -83,7 +83,8 @@ func NewKnowledgeBaseProfileService(
@@ -6993,7 +7521,7 @@ index 538687bb..23f91c11 100644
  
  // requestKnowledgeBaseProfileRefresh enqueues a debounced rebuild. It is a
 diff --git a/internal/application/service/knowledgebase_search_shared.go b/internal/application/service/knowledgebase_search_shared.go
-index a47bbb12..287c38df 100644
+index a47bbb1..287c38d 100644
 --- a/internal/application/service/knowledgebase_search_shared.go
 +++ b/internal/application/service/knowledgebase_search_shared.go
 @@ -49,9 +49,18 @@ func (s *knowledgeBaseService) fetchKnowledgeDataWithShared(ctx context.Context,
@@ -7018,7 +7546,7 @@ index a47bbb12..287c38df 100644
  	for _, k := range rows {
  		appendAllowed(k)
 diff --git a/internal/application/service/message.go b/internal/application/service/message.go
-index 04e1b0ea..27ed6922 100644
+index 04e1b0e..27ed692 100644
 --- a/internal/application/service/message.go
 +++ b/internal/application/service/message.go
 @@ -9,6 +9,7 @@ import (
@@ -7183,7 +7711,7 @@ index 04e1b0ea..27ed6922 100644
  	ctx context.Context, tenantID uint64, ownerID string, items []*types.MessageSearchResultItem,
 diff --git a/internal/application/service/message_nextcloud_history_test.go b/internal/application/service/message_nextcloud_history_test.go
 new file mode 100644
-index 00000000..704b094f
+index 0000000..704b094
 --- /dev/null
 +++ b/internal/application/service/message_nextcloud_history_test.go
 @@ -0,0 +1,63 @@
@@ -7252,7 +7780,7 @@ index 00000000..704b094f
 +}
 diff --git a/internal/application/service/nextcloud_derived_policy.go b/internal/application/service/nextcloud_derived_policy.go
 new file mode 100644
-index 00000000..941b3661
+index 0000000..941b366
 --- /dev/null
 +++ b/internal/application/service/nextcloud_derived_policy.go
 @@ -0,0 +1,90 @@
@@ -7348,7 +7876,7 @@ index 00000000..941b3661
 +}
 diff --git a/internal/application/service/nextcloud_derived_policy_test.go b/internal/application/service/nextcloud_derived_policy_test.go
 new file mode 100644
-index 00000000..b9c041c1
+index 0000000..b9c041c
 --- /dev/null
 +++ b/internal/application/service/nextcloud_derived_policy_test.go
 @@ -0,0 +1,218 @@
@@ -7572,7 +8100,7 @@ index 00000000..b9c041c1
 +}
 diff --git a/internal/application/service/nextcloud_endpoint_guard_test.go b/internal/application/service/nextcloud_endpoint_guard_test.go
 new file mode 100644
-index 00000000..eabdc6ed
+index 0000000..eabdc6e
 --- /dev/null
 +++ b/internal/application/service/nextcloud_endpoint_guard_test.go
 @@ -0,0 +1,67 @@
@@ -7645,7 +8173,7 @@ index 00000000..eabdc6ed
 +}
 diff --git a/internal/application/service/nextcloud_event_dispatcher.go b/internal/application/service/nextcloud_event_dispatcher.go
 new file mode 100644
-index 00000000..8064b4c2
+index 0000000..8064b4c
 --- /dev/null
 +++ b/internal/application/service/nextcloud_event_dispatcher.go
 @@ -0,0 +1,158 @@
@@ -7809,7 +8337,7 @@ index 00000000..8064b4c2
 +}
 diff --git a/internal/application/service/nextcloud_metadata_guard_test.go b/internal/application/service/nextcloud_metadata_guard_test.go
 new file mode 100644
-index 00000000..088d064b
+index 0000000..088d064
 --- /dev/null
 +++ b/internal/application/service/nextcloud_metadata_guard_test.go
 @@ -0,0 +1,42 @@
@@ -7856,7 +8384,7 @@ index 00000000..088d064b
 +	require.False(t, knowledge.listed, "fallback must not read raw Nextcloud titles")
 +}
 diff --git a/internal/application/service/resource.go b/internal/application/service/resource.go
-index b376fa91..95052a3d 100644
+index b376fa9..95052a3 100644
 --- a/internal/application/service/resource.go
 +++ b/internal/application/service/resource.go
 @@ -61,6 +61,9 @@ func (s *resourceCatalog) Register(
@@ -8008,7 +8536,7 @@ index b376fa91..95052a3d 100644
  //
  // Unbinding and counting are deliberately not a single transaction. A racing
 diff --git a/internal/application/service/resource_references_test.go b/internal/application/service/resource_references_test.go
-index fefffa4c..57850519 100644
+index fefffa4..5785051 100644
 --- a/internal/application/service/resource_references_test.go
 +++ b/internal/application/service/resource_references_test.go
 @@ -69,3 +69,98 @@ func TestKBFileLegacyTextReferencesDoNotAuthorizeFiles(t *testing.T) {
@@ -8111,7 +8639,7 @@ index fefffa4c..57850519 100644
 +	require.Equal(t, types.ResourceProvenanceNextcloud, provenance)
 +}
 diff --git a/internal/application/service/resource_test.go b/internal/application/service/resource_test.go
-index ebfe6542..ea7fc6ae 100644
+index ebfe654..ea7fc6a 100644
 --- a/internal/application/service/resource_test.go
 +++ b/internal/application/service/resource_test.go
 @@ -17,7 +17,10 @@ func newResourceCatalogForTest(t *testing.T) (interfaces.ResourceCatalog, *gorm.
@@ -8127,7 +8655,7 @@ index ebfe6542..ea7fc6ae 100644
  }
  
 diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
-index 04a5c8d0..6bd8ec72 100644
+index 04a5c8d..6bd8ec7 100644
 --- a/internal/application/service/session_knowledge_qa.go
 +++ b/internal/application/service/session_knowledge_qa.go
 @@ -1194,6 +1194,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
@@ -8143,7 +8671,7 @@ index 04a5c8d0..6bd8ec72 100644
  		if err != nil {
  			logger.Warnf(ctx, "buildKBDocumentListing: failed to list knowledge for KB %s: %v", kbID, err)
 diff --git a/internal/application/service/storagebackend.go b/internal/application/service/storagebackend.go
-index 08cce460..d0afe9ec 100644
+index 08cce46..d0afe9e 100644
 --- a/internal/application/service/storagebackend.go
 +++ b/internal/application/service/storagebackend.go
 @@ -8,6 +8,7 @@ import (
@@ -8200,7 +8728,7 @@ index 08cce460..d0afe9ec 100644
  
  func validateStorageBackendEndpoint(backend *types.StorageBackend) error {
 diff --git a/internal/application/service/vectorstore_test.go b/internal/application/service/vectorstore_test.go
-index 86f43962..95924456 100644
+index 86f4396..9592445 100644
 --- a/internal/application/service/vectorstore_test.go
 +++ b/internal/application/service/vectorstore_test.go
 @@ -846,6 +846,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
@@ -8212,7 +8740,7 @@ index 86f43962..95924456 100644
      wiki_config TEXT,
      indexing_strategy TEXT,
 diff --git a/internal/application/service/wiki_ingest.go b/internal/application/service/wiki_ingest.go
-index 1e2ea5f8..8d711813 100644
+index 1e2ea5f..8d71181 100644
 --- a/internal/application/service/wiki_ingest.go
 +++ b/internal/application/service/wiki_ingest.go
 @@ -365,6 +365,7 @@ type wikiIngestService struct {
@@ -8240,7 +8768,7 @@ index 1e2ea5f8..8d711813 100644
  		modelService:   modelService,
  		task:           task,
 diff --git a/internal/application/service/wiki_ingest_batch.go b/internal/application/service/wiki_ingest_batch.go
-index 03baf4b4..f298a1a8 100644
+index 03baf4b..f298a1a 100644
 --- a/internal/application/service/wiki_ingest_batch.go
 +++ b/internal/application/service/wiki_ingest_batch.go
 @@ -294,6 +294,12 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
@@ -8273,7 +8801,7 @@ index 03baf4b4..f298a1a8 100644
  	// Per-KB finalize lock, separate from the ingest active lock so finalize
  	// and ingest batches never block each other. Coalescing via asynq.TaskID
 diff --git a/internal/application/service/wiki_page.go b/internal/application/service/wiki_page.go
-index 83fb0990..af50dbf7 100644
+index 83fb099..af50dbf 100644
 --- a/internal/application/service/wiki_page.go
 +++ b/internal/application/service/wiki_page.go
 @@ -40,6 +40,18 @@ func stripWikiPageInlineChunkCitations(page *types.WikiPage) {
@@ -8357,7 +8885,7 @@ index 83fb0990..af50dbf7 100644
  }
  
 diff --git a/internal/container/container.go b/internal/container/container.go
-index c27d12d1..41db1e1e 100644
+index c27d12d..41db1e1 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -34,6 +34,7 @@ import (
@@ -8462,7 +8990,7 @@ index c27d12d1..41db1e1e 100644
  // is always registered so local/OIDC deployments keep a stable dependency
  // graph; with directory.enabled=false its loop remains dormant.
 diff --git a/internal/container/reset_pending_tasks.go b/internal/container/reset_pending_tasks.go
-index 349f9e49..de900846 100644
+index 349f9e4..de90084 100644
 --- a/internal/container/reset_pending_tasks.go
 +++ b/internal/container/reset_pending_tasks.go
 @@ -161,7 +161,14 @@ func stuckKnowledgeSummaryQuery(db *gorm.DB) *gorm.DB {
@@ -8482,7 +9010,7 @@ index 349f9e49..de900846 100644
  		q = q.Where("started_at < ?", staleCutoff)
  	}
 diff --git a/internal/container/reset_pending_tasks_test.go b/internal/container/reset_pending_tasks_test.go
-index 47d4c024..ed4dc245 100644
+index 47d4c02..ed4dc24 100644
 --- a/internal/container/reset_pending_tasks_test.go
 +++ b/internal/container/reset_pending_tasks_test.go
 @@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS sync_logs (
@@ -8538,7 +9066,7 @@ index 47d4c024..ed4dc245 100644
  	db := setupResetPendingDB(t)
  	stale := time.Now().Add(-2 * time.Hour)
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e515..6a14e940 100644
+index 9cc4e51..1274a82 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -8550,7 +9078,7 @@ index 9cc4e515..6a14e940 100644
  var versionedSQLiteTables = []string{
  	"memory_extraction_sessions",
  	"task_pending_ops",
-@@ -39,6 +39,12 @@ var versionedSQLiteTables = []string{
+@@ -39,6 +39,13 @@ var versionedSQLiteTables = []string{
  	"resource_access_policies",
  	"resource_group_grants",
  	"directory_permission_versions",
@@ -8560,15 +9088,16 @@ index 9cc4e515..6a14e940 100644
 +	"nextcloud_event_checkpoint",
 +	"nextcloud_event_dispatch",
 +	"nextcloud_source_pairings",
++	"nextcloud_source_rotations",
  }
  
  // versionedSQLiteColumns maps each existing table to the columns that the
-@@ -63,7 +69,42 @@ var versionedSQLiteColumns = map[string][]string{
+@@ -63,7 +70,67 @@ var versionedSQLiteColumns = map[string][]string{
  	"directories":        {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 36
++const expectedSQLiteMigrationVersion = 37
 +
 +func TestSQLiteNextcloudPairingGuardsPendingAndActiveKnowledgeBase(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -8603,11 +9132,36 @@ index 9cc4e515..6a14e940 100644
 +	require.NoError(t, err)
 +	_, err = db.Exec(`UPDATE knowledge_bases SET deleted_at = CURRENT_TIMESTAMP WHERE id = 'kb-paired'`)
 +	require.ErrorContains(t, err, "nextcloud_paired_kb_delete_forbidden")
++	_, err = db.Exec(`INSERT INTO nextcloud_source_rotations
++		(operation_id, pair_operation_id, tenant_id, knowledge_base_id, datasource_id,
++		 nextcloud_instance_id, binding_id, old_key_id, new_key_id,
++		 old_config_sha256, new_config_sha256, old_config, new_config, state)
++		VALUES ('rotation', 'op', 7, 'kb-paired', 'ds-paired', 'instance', 'binding',
++		        'pair_key', 'rot_key', 'hash', 'newhash', '{}', '{"credential":"new"}', 'pending')`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE data_sources SET config = '{"credential":"new"}' WHERE id = 'ds-paired'`)
++	require.ErrorContains(t, err, "nextcloud_paired_source_immutable")
++	_, err = db.Exec(`UPDATE nextcloud_source_pairings SET key_id = 'rot_key',
++		datasource_config_sha256 = 'newhash' WHERE operation_id = 'op'`)
++	require.ErrorContains(t, err, "nextcloud_source_pairing_immutable")
++	_, err = db.Exec(`UPDATE nextcloud_source_rotations SET state = 'committed' WHERE operation_id = 'rotation'`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE data_sources SET config = '{"credential":"other"}' WHERE id = 'ds-paired'`)
++	require.ErrorContains(t, err, "nextcloud_paired_source_immutable")
++	_, err = db.Exec(`UPDATE data_sources SET config = '{"credential":"new"}' WHERE id = 'ds-paired'`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE nextcloud_source_pairings SET key_id = 'rot_key',
++		datasource_config_sha256 = 'newhash' WHERE operation_id = 'op'`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE nextcloud_source_rotations SET state = 'switched' WHERE operation_id = 'rotation'`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE data_sources SET config = '{}' WHERE id = 'ds-paired'`)
++	require.ErrorContains(t, err, "nextcloud_paired_source_immutable")
 +}
  
  func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
  	repoRoot := sqliteRepoRoot(t)
-@@ -200,6 +241,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
+@@ -200,6 +267,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
  	require.True(t, sqliteColumnExists(t, db, "messages", "sandbox_checkpoint"))
  }
  
@@ -8673,7 +9227,7 @@ index 9cc4e515..6a14e940 100644
  	t.Helper()
  	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 diff --git a/internal/datasource/connector.go b/internal/datasource/connector.go
-index 67568c4c..28cae25c 100644
+index 67568c4..28cae25 100644
 --- a/internal/datasource/connector.go
 +++ b/internal/datasource/connector.go
 @@ -310,6 +310,14 @@ var ConnectorMetadataRegistry = map[string]ConnectorMetadata{
@@ -8693,7 +9247,7 @@ index 67568c4c..28cae25c 100644
  // ListAvailableConnectors returns all available connector metadata
 diff --git a/internal/datasource/connector/nextcloud/authorization.go b/internal/datasource/connector/nextcloud/authorization.go
 new file mode 100644
-index 00000000..3c187e5f
+index 0000000..3c187e5
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/authorization.go
 @@ -0,0 +1,143 @@
@@ -8842,7 +9396,7 @@ index 00000000..3c187e5f
 +}
 diff --git a/internal/datasource/connector/nextcloud/authorization_test.go b/internal/datasource/connector/nextcloud/authorization_test.go
 new file mode 100644
-index 00000000..4e4bdcf6
+index 0000000..4e4bdcf
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/authorization_test.go
 @@ -0,0 +1,139 @@
@@ -8987,7 +9541,7 @@ index 00000000..4e4bdcf6
 +}
 diff --git a/internal/datasource/connector/nextcloud/changes_test.go b/internal/datasource/connector/nextcloud/changes_test.go
 new file mode 100644
-index 00000000..ab2464d6
+index 0000000..ab2464d
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/changes_test.go
 @@ -0,0 +1,345 @@
@@ -9338,7 +9892,7 @@ index 00000000..ab2464d6
 +}
 diff --git a/internal/datasource/connector/nextcloud/client.go b/internal/datasource/connector/nextcloud/client.go
 new file mode 100644
-index 00000000..c6eeac75
+index 0000000..c6eeac7
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/client.go
 @@ -0,0 +1,368 @@
@@ -9712,7 +10266,7 @@ index 00000000..c6eeac75
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
 new file mode 100644
-index 00000000..73b4f4b2
+index 0000000..73b4f4b
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector.go
 @@ -0,0 +1,487 @@
@@ -10205,7 +10759,7 @@ index 00000000..73b4f4b2
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_stream_test.go b/internal/datasource/connector/nextcloud/connector_stream_test.go
 new file mode 100644
-index 00000000..3a71f667
+index 0000000..3a71f66
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_stream_test.go
 @@ -0,0 +1,251 @@
@@ -10462,7 +11016,7 @@ index 00000000..3a71f667
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
 new file mode 100644
-index 00000000..0eacd94f
+index 0000000..0eacd94
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_test.go
 @@ -0,0 +1,708 @@
@@ -11176,7 +11730,7 @@ index 00000000..0eacd94f
 +}
 diff --git a/internal/datasource/connector/nextcloud/signature.go b/internal/datasource/connector/nextcloud/signature.go
 new file mode 100644
-index 00000000..d132181c
+index 0000000..d132181
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/signature.go
 @@ -0,0 +1,119 @@
@@ -11301,7 +11855,7 @@ index 00000000..d132181c
 +}
 diff --git a/internal/datasource/connector/nextcloud/signature_live_test.go b/internal/datasource/connector/nextcloud/signature_live_test.go
 new file mode 100644
-index 00000000..fc950cdb
+index 0000000..fc950cd
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/signature_live_test.go
 @@ -0,0 +1,39 @@
@@ -11346,7 +11900,7 @@ index 00000000..fc950cdb
 +}
 diff --git a/internal/datasource/connector/nextcloud/signature_test.go b/internal/datasource/connector/nextcloud/signature_test.go
 new file mode 100644
-index 00000000..bedc6ea5
+index 0000000..bedc6ea
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/signature_test.go
 @@ -0,0 +1,118 @@
@@ -11470,7 +12024,7 @@ index 00000000..bedc6ea5
 +}
 diff --git a/internal/datasource/connector/nextcloud/source_pairing.go b/internal/datasource/connector/nextcloud/source_pairing.go
 new file mode 100644
-index 00000000..c91fbd95
+index 0000000..c91fbd9
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/source_pairing.go
 @@ -0,0 +1,105 @@
@@ -11581,7 +12135,7 @@ index 00000000..c91fbd95
 +}
 diff --git a/internal/datasource/connector/nextcloud/source_pairing_test.go b/internal/datasource/connector/nextcloud/source_pairing_test.go
 new file mode 100644
-index 00000000..4cfdb11a
+index 0000000..4cfdb11
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/source_pairing_test.go
 @@ -0,0 +1,48 @@
@@ -11633,9 +12187,215 @@ index 00000000..4cfdb11a
 +	wrongAck = true
 +	require.ErrorContains(t, CommitSourcePairing(context.Background(), config, pair), "tuple mismatch")
 +}
+diff --git a/internal/datasource/connector/nextcloud/source_rotation.go b/internal/datasource/connector/nextcloud/source_rotation.go
+new file mode 100644
+index 0000000..a7fed5a
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/source_rotation.go
+@@ -0,0 +1,128 @@
++package nextcloud
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"strconv"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// SourceRotation pins the same source tuple as the initial pairing. Only the
++// dedicated new key may commit or finalize this operation in Nextcloud.
++type SourceRotation struct {
++	OperationID     string
++	PairOperationID string
++	InstanceID      string
++	BindingID       string
++	TenantID        uint64
++	KnowledgeBaseID string
++	DataSourceID    string
++}
++
++func CommitSourceRotation(ctx context.Context, source *types.DataSourceConfig, rotation SourceRotation) error {
++	return sourceRotationRequest(ctx, source, rotation, "commit", "committed")
++}
++
++func FinalizeSourceRotation(ctx context.Context, source *types.DataSourceConfig, rotation SourceRotation) error {
++	return sourceRotationRequest(ctx, source, rotation, "finalize", "finalized")
++}
++
++func AbortSourceRotation(ctx context.Context, oldSource *types.DataSourceConfig, rotation SourceRotation) error {
++	return sourceRotationRequest(ctx, oldSource, rotation, "abort", "aborted")
++}
++
++func sourceRotationRequest(ctx context.Context, source *types.DataSourceConfig, rotation SourceRotation,
++	action, expectedState string) error {
++	if rotation.OperationID == "" || rotation.PairOperationID == "" || rotation.InstanceID == "" ||
++		!validBindingID(rotation.BindingID) || rotation.TenantID == 0 ||
++		rotation.KnowledgeBaseID == "" || rotation.DataSourceID == "" {
++		return fmt.Errorf("incomplete Nextcloud source rotation tuple")
++	}
++	cfg, err := parseConfig(source)
++	if err != nil {
++		return err
++	}
++	selected, err := selectedBindings(source.ResourceIDs)
++	if err != nil || selected[0] != rotation.BindingID {
++		return fmt.Errorf("Nextcloud source rotation binding mismatch")
++	}
++	payload := struct {
++		OperationID     string `json:"operation_id"`
++		PairOperationID string `json:"pair_operation_id"`
++		InstanceID      string `json:"instance_id"`
++		TenantID        string `json:"tenant_id"`
++		KnowledgeBaseID string `json:"knowledge_base_id"`
++		DataSourceID    string `json:"data_source_id"`
++	}{rotation.OperationID, rotation.PairOperationID, rotation.InstanceID,
++		strconv.FormatUint(rotation.TenantID, 10), rotation.KnowledgeBaseID, rotation.DataSourceID}
++	body, err := json.Marshal(payload)
++	if err != nil {
++		return err
++	}
++	endpoint := "/bindings/" + rotation.BindingID + "/source-pairing/rotation/" + action
++	cli := newClient(cfg)
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cli.endpointURL(endpoint, nil), bytes.NewReader(body))
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Accept", "application/json")
++	if err := signMachineRequest(req, cfg, body); err != nil {
++		return err
++	}
++	resp, err := cli.http.Do(req)
++	if err != nil {
++		return fmt.Errorf("Nextcloud source rotation outcome uncertain: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return &SourcePairingRemoteError{StatusCode: resp.StatusCode}
++	}
++	if resp.ContentLength > 1<<20 {
++		return fmt.Errorf("Nextcloud source rotation response too large")
++	}
++	data, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
++	if err != nil || len(data) > 1<<20 {
++		return fmt.Errorf("invalid Nextcloud source rotation response")
++	}
++	var answer struct {
++		Rotation struct {
++			OperationID     string `json:"operation_id"`
++			PairOperationID string `json:"pair_operation_id"`
++			BindingID       string `json:"binding_id"`
++			InstanceID      string `json:"instance_id"`
++			TenantID        string `json:"tenant_id"`
++			KnowledgeBaseID string `json:"knowledge_base_id"`
++			DataSourceID    string `json:"data_source_id"`
++			OldKeyID        string `json:"old_key_id"`
++			NewKeyID        string `json:"new_key_id"`
++			State           string `json:"state"`
++		} `json:"rotation"`
++	}
++	keyID, _ := source.Credentials["key_id"].(string)
++	if err := json.Unmarshal(data, &answer); err != nil {
++		return fmt.Errorf("invalid Nextcloud source rotation response: %w", err)
++	}
++	expectedKey := answer.Rotation.NewKeyID
++	if action == "abort" {
++		expectedKey = answer.Rotation.OldKeyID
++	}
++	if answer.Rotation.OperationID != rotation.OperationID ||
++		answer.Rotation.PairOperationID != rotation.PairOperationID ||
++		answer.Rotation.BindingID != rotation.BindingID ||
++		answer.Rotation.InstanceID != rotation.InstanceID ||
++		answer.Rotation.TenantID != payload.TenantID ||
++		answer.Rotation.KnowledgeBaseID != rotation.KnowledgeBaseID ||
++		answer.Rotation.DataSourceID != rotation.DataSourceID ||
++		expectedKey != keyID ||
++		(answer.Rotation.State != expectedState &&
++			!(action == "commit" && answer.Rotation.State == "finalized")) {
++		return fmt.Errorf("Nextcloud source rotation response tuple mismatch")
++	}
++	return nil
++}
+diff --git a/internal/datasource/connector/nextcloud/source_rotation_test.go b/internal/datasource/connector/nextcloud/source_rotation_test.go
+new file mode 100644
+index 0000000..1666bd1
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/source_rotation_test.go
+@@ -0,0 +1,66 @@
++package nextcloud
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestSourceRotationSignsNewCommitAndOldAbortWithExactAck(t *testing.T) {
++	wrongAck := false
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		action := strings.TrimPrefix(r.URL.Path,
++			apiPath+"/bindings/dev-published/source-pairing/rotation/")
++		require.Contains(t, []string{"commit", "finalize", "abort"}, action)
++		require.Equal(t, http.MethodPost, r.Method)
++		require.NotEmpty(t, r.Header.Get("X-WeKnora-Signature"))
++		key := "rot_6e35904269aa489ebd9b8754bf5beee1"
++		bearer := "Bearer new-secret"
++		state := "committed"
++		if action == "abort" {
++			key, bearer, state = "pair_old", "Bearer old-secret", "aborted"
++		} else if action == "finalize" {
++			state = "finalized"
++		}
++		require.Equal(t, key, r.Header.Get("X-WeKnora-Key-Id"))
++		require.Equal(t, bearer, r.Header.Get("Authorization"))
++		var body map[string]string
++		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
++		require.Equal(t, "7", body["tenant_id"])
++		require.Equal(t, "pair-op", body["pair_operation_id"])
++		if wrongAck {
++			key = "wrong-key"
++		}
++		writeJSON(w, map[string]any{"rotation": map[string]any{
++			"operation_id": body["operation_id"], "pair_operation_id": body["pair_operation_id"],
++			"binding_id": "dev-published", "instance_id": body["instance_id"],
++			"tenant_id": body["tenant_id"], "knowledge_base_id": body["knowledge_base_id"],
++			"data_source_id": body["data_source_id"], "old_key_id": "pair_old",
++			"new_key_id": key, "state": state}, "changed": true})
++	}))
++	defer server.Close()
++	allowHTTPTestOrigin(t, server.URL)
++	newCfg := &types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		Settings: map[string]interface{}{"base_url": server.URL},
++		Credentials: map[string]interface{}{"token": "new-secret",
++			"key_id": "rot_6e35904269aa489ebd9b8754bf5beee1"},
++		ResourceIDs: []string{"dev-published"}}
++	oldCfg := &types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		Settings:    map[string]interface{}{"base_url": server.URL},
++		Credentials: map[string]interface{}{"token": "old-secret", "key_id": "pair_old"},
++		ResourceIDs: []string{"dev-published"}}
++	rotation := SourceRotation{OperationID: "6e359042-69aa-489e-bd9b-8754bf5beee1",
++		PairOperationID: "pair-op", InstanceID: "instance-1", BindingID: "dev-published",
++		TenantID: 7, KnowledgeBaseID: "kb-1", DataSourceID: "source-1"}
++	require.NoError(t, CommitSourceRotation(context.Background(), newCfg, rotation))
++	require.NoError(t, FinalizeSourceRotation(context.Background(), newCfg, rotation))
++	require.NoError(t, AbortSourceRotation(context.Background(), oldCfg, rotation))
++	wrongAck = true
++	require.ErrorContains(t, CommitSourceRotation(context.Background(), newCfg, rotation), "tuple mismatch")
++}
 diff --git a/internal/datasource/connector/nextcloud/types.go b/internal/datasource/connector/nextcloud/types.go
 new file mode 100644
-index 00000000..6f3388a8
+index 0000000..6f3388a
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/types.go
 @@ -0,0 +1,312 @@
@@ -11952,7 +12712,7 @@ index 00000000..6f3388a8
 +	return true
 +}
 diff --git a/internal/datasource/errors.go b/internal/datasource/errors.go
-index 426c71ec..38384b3c 100644
+index 426c71e..38384b3 100644
 --- a/internal/datasource/errors.go
 +++ b/internal/datasource/errors.go
 @@ -23,10 +23,12 @@ var (
@@ -11973,7 +12733,7 @@ index 426c71ec..38384b3c 100644
  	// Knowledge base errors
  	ErrKnowledgeBaseNotFound = errors.New("knowledge base not found")
 diff --git a/internal/datasource/scheduler.go b/internal/datasource/scheduler.go
-index 196327fe..1a416608 100644
+index 196327f..1a41660 100644
 --- a/internal/datasource/scheduler.go
 +++ b/internal/datasource/scheduler.go
 @@ -3,6 +3,7 @@ package datasource
@@ -12010,7 +12770,7 @@ index 196327fe..1a416608 100644
  		now := time.Now().UTC()
  		syncLog.FinishedAt = &now
 diff --git a/internal/datasource/scheduler_test.go b/internal/datasource/scheduler_test.go
-index dbd35b46..d5de0de8 100644
+index dbd35b4..d5de0de 100644
 --- a/internal/datasource/scheduler_test.go
 +++ b/internal/datasource/scheduler_test.go
 @@ -2,6 +2,7 @@ package datasource
@@ -12079,7 +12839,7 @@ index dbd35b46..d5de0de8 100644
  // Fake implementations for testing
  // ──────────────────────────────────────────────────────────────────────
 diff --git a/internal/handler/chunk.go b/internal/handler/chunk.go
-index 162bc952..4b55535b 100644
+index 162bc95..4b55535 100644
 --- a/internal/handler/chunk.go
 +++ b/internal/handler/chunk.go
 @@ -4,6 +4,7 @@ import (
@@ -12166,7 +12926,7 @@ index 162bc952..4b55535b 100644
  	if err != nil {
  		c.Error(errors.NewInternalServerError(err.Error()))
 diff --git a/internal/handler/datasource.go b/internal/handler/datasource.go
-index 1cd51dcb..e15757f6 100644
+index 1cd51dc..e15757f 100644
 --- a/internal/handler/datasource.go
 +++ b/internal/handler/datasource.go
 @@ -2,6 +2,7 @@ package handler
@@ -12239,7 +12999,7 @@ index 1cd51dcb..e15757f6 100644
  }
  
 diff --git a/internal/handler/datasource_test.go b/internal/handler/datasource_test.go
-index 03949410..023f078a 100644
+index 0394941..023f078 100644
 --- a/internal/handler/datasource_test.go
 +++ b/internal/handler/datasource_test.go
 @@ -5,8 +5,10 @@ import (
@@ -12311,7 +13071,7 @@ index 03949410..023f078a 100644
  	interfaces.KnowledgeBaseService
  	getByID func(ctx context.Context, id string) (*types.KnowledgeBase, error)
 diff --git a/internal/handler/dto/datasource.go b/internal/handler/dto/datasource.go
-index a3e4f520..acd05721 100644
+index a3e4f52..acd0572 100644
 --- a/internal/handler/dto/datasource.go
 +++ b/internal/handler/dto/datasource.go
 @@ -69,7 +69,7 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
@@ -12360,7 +13120,7 @@ index a3e4f520..acd05721 100644
  
  // enrichRSSFeedURLsInSettings copies feed_urls from credentials into settings
 diff --git a/internal/handler/dto/datasource_test.go b/internal/handler/dto/datasource_test.go
-index 7456ef1e..66b23c60 100644
+index 7456ef1..66b23c6 100644
 --- a/internal/handler/dto/datasource_test.go
 +++ b/internal/handler/dto/datasource_test.go
 @@ -53,6 +53,30 @@ func TestDataSourceResponse_NilSafe(t *testing.T) {
@@ -12395,7 +13155,7 @@ index 7456ef1e..66b23c60 100644
  	cfg := types.DataSourceConfig{
  		Type: types.ConnectorTypeRSS,
 diff --git a/internal/handler/knowledge.go b/internal/handler/knowledge.go
-index 8c05828c..66fdf6c8 100644
+index 8c05828..66fdf6c 100644
 --- a/internal/handler/knowledge.go
 +++ b/internal/handler/knowledge.go
 @@ -34,6 +34,7 @@ type KnowledgeHandler struct {
@@ -12574,7 +13334,7 @@ index 8c05828c..66fdf6c8 100644
  	c.JSON(http.StatusOK, gin.H{
  		"success":  true,
 diff --git a/internal/handler/knowledge_download.go b/internal/handler/knowledge_download.go
-index cf9ad0cd..b9b04579 100644
+index cf9ad0c..b9b0457 100644
 --- a/internal/handler/knowledge_download.go
 +++ b/internal/handler/knowledge_download.go
 @@ -99,6 +99,10 @@ func (h *KnowledgeHandler) BatchDownloadKnowledge(c *gin.Context) {
@@ -12589,7 +13349,7 @@ index cf9ad0cd..b9b04579 100644
  			continue
  		}
 diff --git a/internal/handler/knowledge_folder_test.go b/internal/handler/knowledge_folder_test.go
-index 1510f89a..531de8df 100644
+index 1510f89..531de8d 100644
 --- a/internal/handler/knowledge_folder_test.go
 +++ b/internal/handler/knowledge_folder_test.go
 @@ -6,6 +6,7 @@ import (
@@ -12646,7 +13406,7 @@ index 1510f89a..531de8df 100644
 +	}
 +}
 diff --git a/internal/handler/knowledgebase.go b/internal/handler/knowledgebase.go
-index 585ca963..dbe3d506 100644
+index 585ca96..dbe3d50 100644
 --- a/internal/handler/knowledgebase.go
 +++ b/internal/handler/knowledgebase.go
 @@ -11,6 +11,7 @@ import (
@@ -12695,7 +13455,7 @@ index 585ca963..dbe3d506 100644
  	if taskID == "" {
  		taskID = utils.GenerateTaskID("kb_clone", caller.TenantID, req.SourceID)
 diff --git a/internal/handler/message.go b/internal/handler/message.go
-index 991bcbc5..c09f455a 100644
+index 991bcbc..c09f455 100644
 --- a/internal/handler/message.go
 +++ b/internal/handler/message.go
 @@ -10,6 +10,7 @@ import (
@@ -12752,7 +13512,7 @@ index 991bcbc5..c09f455a 100644
  
 diff --git a/internal/handler/nextcloud_event_connections.go b/internal/handler/nextcloud_event_connections.go
 new file mode 100644
-index 00000000..a542d13e
+index 0000000..a542d13
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_connections.go
 @@ -0,0 +1,207 @@
@@ -12965,7 +13725,7 @@ index 00000000..a542d13e
 +}
 diff --git a/internal/handler/nextcloud_event_connections_test.go b/internal/handler/nextcloud_event_connections_test.go
 new file mode 100644
-index 00000000..18674663
+index 0000000..1867466
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_connections_test.go
 @@ -0,0 +1,350 @@
@@ -13321,7 +14081,7 @@ index 00000000..18674663
 +}
 diff --git a/internal/handler/nextcloud_event_dispatch_test.go b/internal/handler/nextcloud_event_dispatch_test.go
 new file mode 100644
-index 00000000..d018ae92
+index 0000000..d018ae9
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_dispatch_test.go
 @@ -0,0 +1,626 @@
@@ -13953,7 +14713,7 @@ index 00000000..d018ae92
 +}
 diff --git a/internal/handler/nextcloud_events.go b/internal/handler/nextcloud_events.go
 new file mode 100644
-index 00000000..f2df39a6
+index 0000000..f2df39a
 --- /dev/null
 +++ b/internal/handler/nextcloud_events.go
 @@ -0,0 +1,246 @@
@@ -14205,7 +14965,7 @@ index 00000000..f2df39a6
 +}
 diff --git a/internal/handler/nextcloud_events_test.go b/internal/handler/nextcloud_events_test.go
 new file mode 100644
-index 00000000..d76a46d4
+index 0000000..d76a46d
 --- /dev/null
 +++ b/internal/handler/nextcloud_events_test.go
 @@ -0,0 +1,345 @@
@@ -14556,7 +15316,7 @@ index 00000000..d76a46d4
 +}
 diff --git a/internal/handler/nextcloud_publication.go b/internal/handler/nextcloud_publication.go
 new file mode 100644
-index 00000000..21b9ecad
+index 0000000..21b9eca
 --- /dev/null
 +++ b/internal/handler/nextcloud_publication.go
 @@ -0,0 +1,27 @@
@@ -14589,7 +15349,7 @@ index 00000000..21b9ecad
 +}
 diff --git a/internal/handler/nextcloud_publication_test.go b/internal/handler/nextcloud_publication_test.go
 new file mode 100644
-index 00000000..0ec87e3b
+index 0000000..0ec87e3
 --- /dev/null
 +++ b/internal/handler/nextcloud_publication_test.go
 @@ -0,0 +1,180 @@
@@ -14775,10 +15535,10 @@ index 00000000..0ec87e3b
 +}
 diff --git a/internal/handler/nextcloud_source_pairing.go b/internal/handler/nextcloud_source_pairing.go
 new file mode 100644
-index 00000000..61c4edd1
+index 0000000..84156a3
 --- /dev/null
 +++ b/internal/handler/nextcloud_source_pairing.go
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,222 @@
 +package handler
 +
 +import (
@@ -14797,18 +15557,24 @@ index 00000000..61c4edd1
 +)
 +
 +var sourcePairKeyPattern = regexp.MustCompile(`^pair_[0-9a-f]{32}$`)
++var sourceRotationKeyPattern = regexp.MustCompile(`^rot_[0-9a-f]{32}$`)
 +
 +type NextcloudSourcePairingHandler struct {
-+	repo       *repository.NextcloudSourcePairingRepository
-+	dataSource *DataSourceHandler
-+	inspect    func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error)
-+	commit     func(context.Context, *types.DataSourceConfig, nextcloud.SourcePairingCommit) error
++	repo           *repository.NextcloudSourcePairingRepository
++	dataSource     *DataSourceHandler
++	inspect        func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error)
++	commit         func(context.Context, *types.DataSourceConfig, nextcloud.SourcePairingCommit) error
++	rotateCommit   func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
++	rotateFinalize func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
++	rotateAbort    func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
 +}
 +
 +func NewNextcloudSourcePairingHandler(repo *repository.NextcloudSourcePairingRepository,
 +	dataSource *DataSourceHandler) *NextcloudSourcePairingHandler {
 +	return &NextcloudSourcePairingHandler{repo: repo, dataSource: dataSource,
-+		inspect: nextcloud.InspectPairing, commit: nextcloud.CommitSourcePairing}
++		inspect: nextcloud.InspectPairing, commit: nextcloud.CommitSourcePairing,
++		rotateCommit: nextcloud.CommitSourceRotation, rotateFinalize: nextcloud.FinalizeSourceRotation,
++		rotateAbort: nextcloud.AbortSourceRotation}
 +}
 +
 +func (h *NextcloudSourcePairingHandler) admin(c *gin.Context) (uint64, bool) {
@@ -14997,7 +15763,7 @@ index 00000000..61c4edd1
 +}
 diff --git a/internal/handler/nextcloud_source_pairing_test.go b/internal/handler/nextcloud_source_pairing_test.go
 new file mode 100644
-index 00000000..2dc11569
+index 0000000..2dc1156
 --- /dev/null
 +++ b/internal/handler/nextcloud_source_pairing_test.go
 @@ -0,0 +1,121 @@
@@ -15122,8 +15888,411 @@ index 00000000..2dc11569
 +	require.Equal(t, 3, commitAttempts)
 +	require.False(t, strings.Contains(active.Body.String(), "one-time-pairing-token"))
 +}
+diff --git a/internal/handler/nextcloud_source_rotation.go b/internal/handler/nextcloud_source_rotation.go
+new file mode 100644
+index 0000000..0ebf521
+--- /dev/null
++++ b/internal/handler/nextcloud_source_rotation.go
+@@ -0,0 +1,235 @@
++package handler
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++)
++
++type sourceRotationRequest struct {
++	OperationID string `json:"operation_id" binding:"required"`
++	NewKeyID    string `json:"new_key_id" binding:"required"`
++	Token       string `json:"token" binding:"required"`
++}
++
++// Rotate accepts the one-time key from a Nextcloud administrator, then keeps
++// it encrypted until the signed remote commit and local switch both complete.
++func (h *NextcloudSourcePairingHandler) Rotate(c *gin.Context) {
++	pair, _, ok := h.authorizedPair(c)
++	if !ok {
++		return
++	}
++	if pair.State != "active" {
++		c.JSON(http.StatusConflict, gin.H{"error": "active_source_pairing_required"})
++		return
++	}
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
++	var req sourceRotationRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_source_rotation_request"})
++		return
++	}
++	parsed, err := uuid.Parse(req.OperationID)
++	if err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_source_rotation_request"})
++		return
++	}
++	req.OperationID = parsed.String()
++	if !sourceRotationKeyPattern.MatchString(req.NewKeyID) ||
++		req.NewKeyID != "rot_"+strings.ReplaceAll(req.OperationID, "-", "") {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_source_rotation_request"})
++		return
++	}
++	config := &types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		Credentials: map[string]interface{}{"token": req.Token, "key_id": req.NewKeyID},
++		ResourceIDs: []string{pair.BindingID},
++		Settings:    map[string]interface{}{"base_url": pair.BaseURL}}
++	identity, err := h.inspect(c.Request.Context(), config)
++	if err != nil || identity.InstanceID != pair.InstanceID ||
++		identity.BindingID != pair.BindingID || identity.BaseURL != pair.BaseURL ||
++		identity.PublicationState != "active" {
++		c.JSON(http.StatusConflict, gin.H{"error": "nextcloud_paired_binding_unavailable"})
++		return
++	}
++	rotation, created, err := h.repo.PrepareSourceRotation(c.Request.Context(),
++		repository.NextcloudSourceRotation{OperationID: req.OperationID,
++			PairOperationID: pair.OperationID, TenantID: pair.TenantID,
++			KnowledgeBaseID: pair.KnowledgeBaseID, DataSourceID: pair.DataSourceID,
++			InstanceID: pair.InstanceID, BindingID: pair.BindingID,
++			NewKeyID: req.NewKeyID}, req.Token)
++	if err != nil {
++		sourcePairingError(c, err)
++		return
++	}
++	h.continueRotation(c, rotation, config, created)
++}
++
++func (h *NextcloudSourcePairingHandler) authorizedRotation(c *gin.Context) (repository.NextcloudSourceRotation, bool) {
++	pair, _, ok := h.authorizedPair(c)
++	if !ok {
++		return repository.NextcloudSourceRotation{}, false
++	}
++	rotation, err := h.repo.SourceRotation(c.Request.Context(), pair.TenantID, c.Param("rotation_id"))
++	if err != nil {
++		sourcePairingError(c, err)
++		return rotation, false
++	}
++	if rotation.PairOperationID != pair.OperationID || rotation.KnowledgeBaseID != pair.KnowledgeBaseID ||
++		rotation.DataSourceID != pair.DataSourceID || rotation.InstanceID != pair.InstanceID ||
++		rotation.BindingID != pair.BindingID {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_rotation_conflict"})
++		return rotation, false
++	}
++	return rotation, true
++}
++
++func (h *NextcloudSourcePairingHandler) RotationStatus(c *gin.Context) {
++	rotation, ok := h.authorizedRotation(c)
++	if !ok {
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"rotation": rotation})
++}
++
++func (h *NextcloudSourcePairingHandler) RetryRotation(c *gin.Context) {
++	rotation, ok := h.authorizedRotation(c)
++	if !ok {
++		return
++	}
++	if rotation.State == "finalized" {
++		c.JSON(http.StatusOK, gin.H{"rotation": rotation})
++		return
++	}
++	config, err := repository.SourceRotationConfig(rotation)
++	if err != nil || config == nil {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_rotation_credential_unavailable"})
++		return
++	}
++	identity, err := h.inspect(c.Request.Context(), config)
++	if err != nil || identity.InstanceID != rotation.InstanceID ||
++		identity.BindingID != rotation.BindingID || identity.PublicationState != "active" {
++		c.JSON(http.StatusConflict, gin.H{"error": "nextcloud_paired_binding_unavailable"})
++		return
++	}
++	h.continueRotation(c, rotation, config, false)
++}
++
++// Abort is a signed remote compare-and-swap: only an uncommitted rotation can
++// be discarded. The old source credential signs the request and stays active.
++func (h *NextcloudSourcePairingHandler) AbortRotation(c *gin.Context) {
++	rotation, ok := h.authorizedRotation(c)
++	if !ok {
++		return
++	}
++	if rotation.State == "aborted" {
++		c.JSON(http.StatusOK, gin.H{"rotation": rotation})
++		return
++	}
++	if rotation.State != "pending" {
++		c.JSON(http.StatusConflict, gin.H{"error": "committed_rotation_cannot_be_aborted"})
++		return
++	}
++	_, ds, err := h.repo.SourcePairing(c.Request.Context(), rotation.TenantID, rotation.PairOperationID)
++	if err != nil || ds == nil {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_rotation_conflict"})
++		return
++	}
++	oldConfig, err := ds.ParseConfig()
++	if err != nil || oldConfig == nil || oldConfig.Credentials["key_id"] != rotation.OldKeyID {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_rotation_credential_unavailable"})
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
++	defer cancel()
++	tuple := nextcloud.SourceRotation{OperationID: rotation.OperationID,
++		PairOperationID: rotation.PairOperationID, InstanceID: rotation.InstanceID,
++		BindingID: rotation.BindingID, TenantID: rotation.TenantID,
++		KnowledgeBaseID: rotation.KnowledgeBaseID, DataSourceID: rotation.DataSourceID}
++	if err := h.rotateAbort(ctx, oldConfig, tuple); err != nil {
++		h.rotationFailure(c, rotation, err, "remote_abort")
++		return
++	}
++	if err := h.repo.AbortSourceRotation(c.Request.Context(), rotation); err != nil {
++		_ = h.repo.RecordSourceRotationFailure(c.Request.Context(), rotation, "local_abort_pending")
++		rotation.LastErrorCode = "local_abort_pending"
++		c.JSON(http.StatusAccepted, gin.H{"rotation": rotation, "error": "local_abort_pending"})
++		return
++	}
++	rotation.State = "aborted"
++	rotation.LastErrorCode = ""
++	c.JSON(http.StatusOK, gin.H{"rotation": rotation})
++}
++
++func (h *NextcloudSourcePairingHandler) continueRotation(c *gin.Context,
++	rotation repository.NextcloudSourceRotation, config *types.DataSourceConfig, created bool) {
++	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
++	defer cancel()
++	tuple := nextcloud.SourceRotation{OperationID: rotation.OperationID,
++		PairOperationID: rotation.PairOperationID, InstanceID: rotation.InstanceID,
++		BindingID: rotation.BindingID, TenantID: rotation.TenantID,
++		KnowledgeBaseID: rotation.KnowledgeBaseID, DataSourceID: rotation.DataSourceID}
++	if rotation.State == "pending" {
++		if err := h.rotateCommit(ctx, config, tuple); err != nil {
++			h.rotationFailure(c, rotation, err, "remote_commit")
++			return
++		}
++		if err := h.repo.SwitchSourceRotation(c.Request.Context(), rotation); err != nil {
++			_ = h.repo.RecordSourceRotationFailure(c.Request.Context(), rotation, "local_switch_pending")
++			rotation.LastErrorCode = "local_switch_pending"
++			c.JSON(http.StatusAccepted, gin.H{"rotation": rotation, "error": "local_switch_pending"})
++			return
++		}
++		rotation.State = "switched"
++	}
++	if rotation.State != "switched" {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_rotation_conflict"})
++		return
++	}
++	if err := h.rotateFinalize(ctx, config, tuple); err != nil {
++		h.rotationFailure(c, rotation, err, "remote_finalize")
++		return
++	}
++	if err := h.repo.FinalizeSourceRotation(c.Request.Context(), rotation); err != nil {
++		_ = h.repo.RecordSourceRotationFailure(c.Request.Context(), rotation, "local_finalize_pending")
++		rotation.LastErrorCode = "local_finalize_pending"
++		c.JSON(http.StatusAccepted, gin.H{"rotation": rotation, "error": "local_finalize_pending"})
++		return
++	}
++	rotation.State = "finalized"
++	rotation.LastErrorCode = ""
++	if created {
++		c.JSON(http.StatusCreated, gin.H{"rotation": rotation})
++	} else {
++		c.JSON(http.StatusOK, gin.H{"rotation": rotation})
++	}
++}
++
++func (h *NextcloudSourcePairingHandler) rotationFailure(c *gin.Context,
++	rotation repository.NextcloudSourceRotation, err error, stage string) {
++	code := stage + "_outcome_uncertain"
++	status := http.StatusAccepted
++	var remote *nextcloud.SourcePairingRemoteError
++	if errors.As(err, &remote) {
++		if remote.StatusCode == http.StatusUnauthorized || remote.StatusCode == http.StatusForbidden ||
++			remote.StatusCode == http.StatusConflict {
++			code = stage + "_conflict"
++			status = http.StatusConflict
++		} else if remote.StatusCode == http.StatusLocked {
++			code = "publication_stopped"
++		}
++	}
++	if recordErr := h.repo.RecordSourceRotationFailure(c.Request.Context(), rotation, code); recordErr != nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source_rotation_status_unavailable"})
++		return
++	}
++	rotation.LastErrorCode = code
++	c.JSON(status, gin.H{"rotation": rotation, "error": code})
++}
+diff --git a/internal/handler/nextcloud_source_rotation_test.go b/internal/handler/nextcloud_source_rotation_test.go
+new file mode 100644
+index 0000000..60c65b6
+--- /dev/null
++++ b/internal/handler/nextcloud_source_rotation_test.go
+@@ -0,0 +1,156 @@
++package handler
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func TestNextcloudSourceRotationRecoversUncertainCommitAndFinalize(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases (id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
++		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT 0, deleted_at DATETIME)`).Error)
++	require.NoError(t, db.Exec(`CREATE TABLE knowledges (id TEXT PRIMARY KEY, tenant_id INTEGER,
++		knowledge_base_id TEXT, deleted_at DATETIME)`).Error)
++	require.NoError(t, db.AutoMigrate(&types.DataSource{}, &repository.NextcloudSourcePairing{},
++		&repository.NextcloudSourceRotation{}))
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-paired', 7)`).Error)
++	repo := repository.NewNextcloudSourcePairingRepository(db)
++	pair, _, err := repo.PrepareSourcePairing(context.Background(), repository.NextcloudSourcePairing{
++		OperationID: "82d62225-1eb6-47ad-9264-2759e33dfa03", TenantID: 7,
++		KnowledgeBaseID: "kb-paired", InstanceID: "instance-1", BindingID: "dev-published",
++		BaseURL: "https://nextcloud.example.test", PublicationEpoch: 0,
++		KeyID: "pair_82d622251eb647ad92642759e33dfa03",
++	}, "old-secret")
++	require.NoError(t, err)
++	require.NoError(t, repo.ActivateSourcePairing(context.Background(), pair))
++	dsService := &stubDataSourceService{getDataSource: func(ctx context.Context, id string) (*types.DataSource, error) {
++		var ds types.DataSource
++		err := db.WithContext(ctx).Where("id = ?", id).Take(&ds).Error
++		return &ds, err
++	}}
++	kbService := &stubKBServiceForDS{getByID: func(_ context.Context, id string) (*types.KnowledgeBase, error) {
++		if id != "kb-paired" {
++			return nil, errors.New("missing")
++		}
++		return &types.KnowledgeBase{ID: id, TenantID: 7}, nil
++	}}
++	h := NewNextcloudSourcePairingHandler(repo, NewDataSourceHandler(dsService, kbService))
++	h.inspect = func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error) {
++		return nextcloud.PairingIdentity{InstanceID: pair.InstanceID, BindingID: pair.BindingID,
++			BaseURL: pair.BaseURL, PublicationState: "active"}, nil
++	}
++	commits, finalizes := 0, 0
++	h.rotateCommit = func(_ context.Context, cfg *types.DataSourceConfig, tuple nextcloud.SourceRotation) error {
++		commits++
++		require.Equal(t, pair.OperationID, tuple.PairOperationID)
++		require.Equal(t, pair.DataSourceID, tuple.DataSourceID)
++		require.Equal(t, "new-secret", cfg.Credentials["token"])
++		if commits == 1 {
++			return errors.New("commit ACK lost")
++		}
++		return nil
++	}
++	h.rotateFinalize = func(_ context.Context, cfg *types.DataSourceConfig, tuple nextcloud.SourceRotation) error {
++		finalizes++
++		require.Equal(t, pair.DataSourceID, tuple.DataSourceID)
++		if finalizes == 1 {
++			return errors.New("finalize ACK lost")
++		}
++		return nil
++	}
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(func(c *gin.Context) {
++		if tenant, ok := c.Request.Context().Value(types.TenantIDContextKey).(uint64); ok {
++			c.Set(types.TenantIDContextKey.String(), tenant)
++		}
++		c.Next()
++	})
++	base := "/api/v1/datasource/nextcloud-source-pairings/" + pair.OperationID + "/rotations"
++	router.POST("/api/v1/datasource/nextcloud-source-pairings/:operation_id/rotations", h.Rotate)
++	router.GET("/api/v1/datasource/nextcloud-source-pairings/:operation_id/rotations/:rotation_id", h.RotationStatus)
++	router.POST("/api/v1/datasource/nextcloud-source-pairings/:operation_id/rotations/:rotation_id/retry", h.RetryRotation)
++	router.POST("/api/v1/datasource/nextcloud-source-pairings/:operation_id/rotations/:rotation_id/abort", h.AbortRotation)
++	request := func(method, path string, body []byte, tenantID uint64, role types.TenantRole) *httptest.ResponseRecorder {
++		req := httptest.NewRequest(method, path, bytes.NewReader(body))
++		req.Header.Set("Content-Type", "application/json")
++		ctx := context.WithValue(req.Context(), types.TenantIDContextKey, tenantID)
++		ctx = context.WithValue(ctx, types.TenantRoleContextKey, role)
++		rec := httptest.NewRecorder()
++		router.ServeHTTP(rec, req.WithContext(ctx))
++		return rec
++	}
++	rotationID := "6e359042-69aa-489e-bd9b-8754bf5beee1"
++	body, err := json.Marshal(map[string]string{
++		"operation_id": rotationID, "new_key_id": "rot_6e35904269aa489ebd9b8754bf5beee1",
++		"token": "new-secret"})
++	require.NoError(t, err)
++	require.Equal(t, http.StatusForbidden,
++		request(http.MethodPost, base, body, 7, types.TenantRoleViewer).Code)
++	first := request(http.MethodPost, base, body, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusAccepted, first.Code, first.Body.String())
++	require.Contains(t, first.Body.String(), `"state":"pending"`)
++	require.NotContains(t, first.Body.String(), "new-secret")
++	path := base + "/" + rotationID
++	require.Equal(t, http.StatusNotFound,
++		request(http.MethodGet, path, nil, 8, types.TenantRoleAdmin).Code)
++	second := request(http.MethodPost, path+"/retry", nil, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusAccepted, second.Code, second.Body.String())
++	require.Contains(t, second.Body.String(), `"state":"switched"`)
++	third := request(http.MethodPost, path+"/retry", nil, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, third.Code, third.Body.String())
++	require.Contains(t, third.Body.String(), `"state":"finalized"`)
++	require.Equal(t, 2, commits)
++	require.Equal(t, 2, finalizes)
++	require.NotContains(t, third.Body.String(), "new-secret")
++	status := request(http.MethodGet, path, nil, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, status.Code)
++	require.NotContains(t, status.Body.String(), "new-secret")
++
++	// A deterministic rejection leaves the old source credential working. A
++	// signed remote abort can be retried after its first ACK is lost.
++	h.rotateCommit = func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error {
++		return &nextcloud.SourcePairingRemoteError{StatusCode: http.StatusConflict}
++	}
++	abortAttempts := 0
++	h.rotateAbort = func(_ context.Context, old *types.DataSourceConfig, tuple nextcloud.SourceRotation) error {
++		abortAttempts++
++		require.Equal(t, "new-secret", old.Credentials["token"])
++		if abortAttempts == 1 {
++			return errors.New("abort ACK lost")
++		}
++		return nil
++	}
++	secondID := "e293b10b-4d80-43c5-8bb5-67425903e394"
++	secondBody, err := json.Marshal(map[string]string{
++		"operation_id": secondID, "new_key_id": "rot_e293b10b4d8043c58bb567425903e394",
++		"token": "discarded-secret"})
++	require.NoError(t, err)
++	rejected := request(http.MethodPost, base, secondBody, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusConflict, rejected.Code, rejected.Body.String())
++	abortPath := base + "/" + secondID + "/abort"
++	firstAbort := request(http.MethodPost, abortPath, nil, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusAccepted, firstAbort.Code, firstAbort.Body.String())
++	secondAbort := request(http.MethodPost, abortPath, nil, 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, secondAbort.Code, secondAbort.Body.String())
++	require.Contains(t, secondAbort.Body.String(), `"state":"aborted"`)
++	var aborted repository.NextcloudSourceRotation
++	require.NoError(t, db.Where("operation_id = ?", secondID).Take(&aborted).Error)
++	require.NotContains(t, string(aborted.NewConfig), "discarded-secret")
++	require.Equal(t, "{}", string(aborted.NewConfig))
++}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 544e45aa..811326be 100644
+index 544e45a..811326b 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
 @@ -508,6 +508,15 @@ func buildMessageExecutionContext(
@@ -15165,7 +16334,7 @@ index 544e45aa..811326be 100644
  
  // runVLMAnalysisIfNeeded runs VLM image analysis within the async goroutine,
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d6183..01633faf 100644
+index 734d618..01633fa 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -7,6 +7,7 @@ import (
@@ -15435,7 +16604,7 @@ index 734d6183..01633faf 100644
 +}
 diff --git a/internal/handler/session/stream_nextcloud_history_test.go b/internal/handler/session/stream_nextcloud_history_test.go
 new file mode 100644
-index 00000000..2f541e8f
+index 0000000..2f541e8
 --- /dev/null
 +++ b/internal/handler/session/stream_nextcloud_history_test.go
 @@ -0,0 +1,67 @@
@@ -15508,7 +16677,7 @@ index 00000000..2f541e8f
 +}
 diff --git a/internal/handler/session/stream_nextcloud_live_test.go b/internal/handler/session/stream_nextcloud_live_test.go
 new file mode 100644
-index 00000000..c6c2f9cb
+index 0000000..c6c2f9c
 --- /dev/null
 +++ b/internal/handler/session/stream_nextcloud_live_test.go
 @@ -0,0 +1,104 @@
@@ -15617,7 +16786,7 @@ index 00000000..c6c2f9cb
 +	}
 +}
 diff --git a/internal/handler/wiki_page.go b/internal/handler/wiki_page.go
-index fb44a997..e59164cc 100644
+index fb44a99..e59164c 100644
 --- a/internal/handler/wiki_page.go
 +++ b/internal/handler/wiki_page.go
 @@ -20,11 +20,13 @@ import (
@@ -15676,7 +16845,7 @@ index fb44a997..e59164cc 100644
  }
 diff --git a/internal/handler/wiki_page_nextcloud_policy_test.go b/internal/handler/wiki_page_nextcloud_policy_test.go
 new file mode 100644
-index 00000000..c62fdf01
+index 0000000..c62fdf0
 --- /dev/null
 +++ b/internal/handler/wiki_page_nextcloud_policy_test.go
 @@ -0,0 +1,49 @@
@@ -15730,7 +16899,7 @@ index 00000000..c62fdf01
 +	require.Contains(t, err.Error(), "Wiki is unavailable")
 +}
 diff --git a/internal/mcpserver/tools_retrieve.go b/internal/mcpserver/tools_retrieve.go
-index 5a2fd0bb..961f8fac 100644
+index 5a2fd0b..961f8fa 100644
 --- a/internal/mcpserver/tools_retrieve.go
 +++ b/internal/mcpserver/tools_retrieve.go
 @@ -3,11 +3,13 @@ package mcpserver
@@ -15849,7 +17018,7 @@ index 5a2fd0bb..961f8fac 100644
  	if err != nil {
 diff --git a/internal/mcpserver/tools_retrieve_nextcloud_test.go b/internal/mcpserver/tools_retrieve_nextcloud_test.go
 new file mode 100644
-index 00000000..4ca5529d
+index 0000000..4ca5529
 --- /dev/null
 +++ b/internal/mcpserver/tools_retrieve_nextcloud_test.go
 @@ -0,0 +1,79 @@
@@ -15933,7 +17102,7 @@ index 00000000..4ca5529d
 +	}
 +}
 diff --git a/internal/router/files.go b/internal/router/files.go
-index bd4744b6..878ac2a4 100644
+index bd4744b..878ac2a 100644
 --- a/internal/router/files.go
 +++ b/internal/router/files.go
 @@ -165,6 +165,94 @@ func authorizeResourceKnowledgeBases(
@@ -16322,7 +17491,7 @@ index bd4744b6..878ac2a4 100644
  			backendID, provider := parseStorageTarget(filePath)
  			fileSvc, resolvedProvider, err := resolveFileService(ctx, tenant, backendID, provider, absDir, storageResolver)
 diff --git a/internal/router/router.go b/internal/router/router.go
-index b5c85dfc..99c53236 100644
+index b5c85df..99c5323 100644
 --- a/internal/router/router.go
 +++ b/internal/router/router.go
 @@ -13,6 +13,7 @@ import (
@@ -16583,7 +17752,7 @@ index b5c85dfc..99c53236 100644
  		RegisterWikiPageRoutes(v1, params.WikiPageHandler, rbacGuards)
  		RegisterMemoryRoutes(v1, params.MemoryHandler, rbacGuards)
 diff --git a/internal/router/router_api_key_capabilities_test.go b/internal/router/router_api_key_capabilities_test.go
-index 713a0b5d..7d96e1da 100644
+index 713a0b5..7d96e1d 100644
 --- a/internal/router/router_api_key_capabilities_test.go
 +++ b/internal/router/router_api_key_capabilities_test.go
 @@ -391,6 +391,34 @@ func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
@@ -16623,7 +17792,7 @@ index 713a0b5d..7d96e1da 100644
  	g := &rbacGuards{}
 diff --git a/internal/router/router_files_nextcloud_test.go b/internal/router/router_files_nextcloud_test.go
 new file mode 100644
-index 00000000..2311e414
+index 0000000..2311e41
 --- /dev/null
 +++ b/internal/router/router_files_nextcloud_test.go
 @@ -0,0 +1,221 @@
@@ -16849,7 +18018,7 @@ index 00000000..2311e414
 +	}
 +}
 diff --git a/internal/router/router_files_test.go b/internal/router/router_files_test.go
-index c9dca976..49ceee94 100644
+index c9dca97..49ceee9 100644
 --- a/internal/router/router_files_test.go
 +++ b/internal/router/router_files_test.go
 @@ -25,10 +25,11 @@ type stubFileService struct {
@@ -16897,7 +18066,7 @@ index c9dca976..49ceee94 100644
  	panic("unexpected CreateAccessGrant")
  }
 diff --git a/internal/router/routes_agent.go b/internal/router/routes_agent.go
-index 6ea042b1..5dd1097c 100644
+index 6ea042b..5dd1097 100644
 --- a/internal/router/routes_agent.go
 +++ b/internal/router/routes_agent.go
 @@ -9,6 +9,7 @@ import (
@@ -16925,10 +18094,10 @@ index 6ea042b1..5dd1097c 100644
  	}
  }
 diff --git a/internal/router/routes_infra.go b/internal/router/routes_infra.go
-index 4fb5c4b9..875d7027 100644
+index 4fb5c4b..9b5c347 100644
 --- a/internal/router/routes_infra.go
 +++ b/internal/router/routes_infra.go
-@@ -335,6 +335,32 @@ func RegisterDataSourceRoutes(
+@@ -335,6 +335,36 @@ func RegisterDataSourceRoutes(
  	}
  }
  
@@ -16956,13 +18125,17 @@ index 4fb5c4b9..875d7027 100644
 +	ds.POST("/nextcloud-source-pairings", g.Admin(), h.Pair)
 +	ds.GET("/nextcloud-source-pairings/:operation_id", g.Admin(), h.Status)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/retry", g.Admin(), h.Retry)
++	ds.POST("/nextcloud-source-pairings/:operation_id/rotations", g.Admin(), h.Rotate)
++	ds.GET("/nextcloud-source-pairings/:operation_id/rotations/:rotation_id", g.Admin(), h.RotationStatus)
++	ds.POST("/nextcloud-source-pairings/:operation_id/rotations/:rotation_id/retry", g.Admin(), h.RetryRotation)
++	ds.POST("/nextcloud-source-pairings/:operation_id/rotations/:rotation_id/abort", g.Admin(), h.AbortRotation)
 +}
 +
  // RegisterWeKnoraCloudRoutes 注册 WeKnoraCloud 初始化路由
  // RegisterWeKnoraCloudRoutes registers the WeKnoraCloud credential
  // management endpoints. SaveCredentials persists external SaaS keys
 diff --git a/internal/types/datasource.go b/internal/types/datasource.go
-index 5130b931..9b663db6 100644
+index 5130b93..9b663db 100644
 --- a/internal/types/datasource.go
 +++ b/internal/types/datasource.go
 @@ -38,6 +38,7 @@ const (
@@ -16985,7 +18158,7 @@ index 5130b931..9b663db6 100644
  	// Data source ID to sync
  	DataSourceID string `json:"data_source_id"`
 diff --git a/internal/types/interfaces/resource.go b/internal/types/interfaces/resource.go
-index 52fc309c..5f1abc6a 100644
+index 52fc309..5f1abc6 100644
 --- a/internal/types/interfaces/resource.go
 +++ b/internal/types/interfaces/resource.go
 @@ -23,6 +23,8 @@ type ResourceRepository interface {
@@ -17046,7 +18219,7 @@ index 52fc309c..5f1abc6a 100644
  // Only the catalog can turn a raw locator into a registered resource identity.
  type MessageFileBindingLookup interface {
 diff --git a/internal/types/knowledgebase.go b/internal/types/knowledgebase.go
-index 14a1618b..e201da08 100644
+index 14a1618..e201da0 100644
 --- a/internal/types/knowledgebase.go
 +++ b/internal/types/knowledgebase.go
 @@ -69,6 +69,9 @@ type KnowledgeBase struct {
@@ -17073,7 +18246,7 @@ index 14a1618b..e201da08 100644
  		Capabilities KBCapabilities `json:"capabilities"`
 diff --git a/internal/types/knowledgebase_nextcloud_profile_test.go b/internal/types/knowledgebase_nextcloud_profile_test.go
 new file mode 100644
-index 00000000..9664df0a
+index 0000000..9664df0
 --- /dev/null
 +++ b/internal/types/knowledgebase_nextcloud_profile_test.go
 @@ -0,0 +1,22 @@
@@ -17100,7 +18273,7 @@ index 00000000..9664df0a
 +	}
 +}
 diff --git a/internal/types/message.go b/internal/types/message.go
-index 28d5c161..51563219 100644
+index 28d5c16..5156321 100644
 --- a/internal/types/message.go
 +++ b/internal/types/message.go
 @@ -450,7 +450,11 @@ type Message struct {
@@ -17117,7 +18290,7 @@ index 28d5c161..51563219 100644
  	KnowledgeBaseIDs      []string                  `json:"knowledge_base_ids,omitempty"`
  	KnowledgeIDs          []string                  `json:"knowledge_ids,omitempty"`
 diff --git a/internal/types/resource.go b/internal/types/resource.go
-index 350dcab7..ecff5702 100644
+index 350dcab..ecff570 100644
 --- a/internal/types/resource.go
 +++ b/internal/types/resource.go
 @@ -1,6 +1,7 @@
@@ -17177,14 +18350,14 @@ index 350dcab7..ecff5702 100644
  
 diff --git a/migrations/sqlite/000029_resource_source_provenance.down.sql b/migrations/sqlite/000029_resource_source_provenance.down.sql
 new file mode 100644
-index 00000000..3752ed3c
+index 0000000..3752ed3
 --- /dev/null
 +++ b/migrations/sqlite/000029_resource_source_provenance.down.sql
 @@ -0,0 +1 @@
 +ALTER TABLE resources DROP COLUMN source_provenance;
 diff --git a/migrations/sqlite/000029_resource_source_provenance.up.sql b/migrations/sqlite/000029_resource_source_provenance.up.sql
 new file mode 100644
-index 00000000..56ea3ebd
+index 0000000..56ea3eb
 --- /dev/null
 +++ b/migrations/sqlite/000029_resource_source_provenance.up.sql
 @@ -0,0 +1,23 @@
@@ -17213,7 +18386,7 @@ index 00000000..56ea3ebd
 +);
 diff --git a/migrations/sqlite/000030_kb_nextcloud_provenance.down.sql b/migrations/sqlite/000030_kb_nextcloud_provenance.down.sql
 new file mode 100644
-index 00000000..b583b109
+index 0000000..b583b10
 --- /dev/null
 +++ b/migrations/sqlite/000030_kb_nextcloud_provenance.down.sql
 @@ -0,0 +1,2 @@
@@ -17221,7 +18394,7 @@ index 00000000..b583b109
 +ALTER TABLE knowledge_bases DROP COLUMN ever_had_nextcloud_source;
 diff --git a/migrations/sqlite/000030_kb_nextcloud_provenance.up.sql b/migrations/sqlite/000030_kb_nextcloud_provenance.up.sql
 new file mode 100644
-index 00000000..1e12d852
+index 0000000..1e12d85
 --- /dev/null
 +++ b/migrations/sqlite/000030_kb_nextcloud_provenance.up.sql
 @@ -0,0 +1,27 @@
@@ -17254,14 +18427,14 @@ index 00000000..1e12d852
 +END;
 diff --git a/migrations/sqlite/000031_nextcloud_source_versions.down.sql b/migrations/sqlite/000031_nextcloud_source_versions.down.sql
 new file mode 100644
-index 00000000..d5a6800f
+index 0000000..d5a6800
 --- /dev/null
 +++ b/migrations/sqlite/000031_nextcloud_source_versions.down.sql
 @@ -0,0 +1 @@
 +DROP TABLE IF EXISTS nextcloud_source_versions;
 diff --git a/migrations/sqlite/000031_nextcloud_source_versions.up.sql b/migrations/sqlite/000031_nextcloud_source_versions.up.sql
 new file mode 100644
-index 00000000..85433dbd
+index 0000000..85433db
 --- /dev/null
 +++ b/migrations/sqlite/000031_nextcloud_source_versions.up.sql
 @@ -0,0 +1,15 @@
@@ -17282,7 +18455,7 @@ index 00000000..85433dbd
 +    WHERE candidate_knowledge_id <> '';
 diff --git a/migrations/sqlite/000032_nextcloud_event_inbox.down.sql b/migrations/sqlite/000032_nextcloud_event_inbox.down.sql
 new file mode 100644
-index 00000000..c1a1710b
+index 0000000..c1a1710
 --- /dev/null
 +++ b/migrations/sqlite/000032_nextcloud_event_inbox.down.sql
 @@ -0,0 +1,4 @@
@@ -17292,7 +18465,7 @@ index 00000000..c1a1710b
 +DROP TABLE IF EXISTS nextcloud_event_connections;
 diff --git a/migrations/sqlite/000032_nextcloud_event_inbox.up.sql b/migrations/sqlite/000032_nextcloud_event_inbox.up.sql
 new file mode 100644
-index 00000000..358f3ca2
+index 0000000..358f3ca
 --- /dev/null
 +++ b/migrations/sqlite/000032_nextcloud_event_inbox.up.sql
 @@ -0,0 +1,69 @@
@@ -17367,7 +18540,7 @@ index 00000000..358f3ca2
 +);
 diff --git a/migrations/sqlite/000033_nextcloud_event_dispatch.down.sql b/migrations/sqlite/000033_nextcloud_event_dispatch.down.sql
 new file mode 100644
-index 00000000..670ecad8
+index 0000000..670ecad
 --- /dev/null
 +++ b/migrations/sqlite/000033_nextcloud_event_dispatch.down.sql
 @@ -0,0 +1,3 @@
@@ -17376,7 +18549,7 @@ index 00000000..670ecad8
 +DROP TABLE IF EXISTS nextcloud_event_dispatch;
 diff --git a/migrations/sqlite/000033_nextcloud_event_dispatch.up.sql b/migrations/sqlite/000033_nextcloud_event_dispatch.up.sql
 new file mode 100644
-index 00000000..27a610f0
+index 0000000..27a610f
 --- /dev/null
 +++ b/migrations/sqlite/000033_nextcloud_event_dispatch.up.sql
 @@ -0,0 +1,53 @@
@@ -17435,7 +18608,7 @@ index 00000000..27a610f0
 +END;
 diff --git a/migrations/sqlite/000035_nextcloud_source_pairing.down.sql b/migrations/sqlite/000035_nextcloud_source_pairing.down.sql
 new file mode 100644
-index 00000000..8ebf44cd
+index 0000000..8ebf44c
 --- /dev/null
 +++ b/migrations/sqlite/000035_nextcloud_source_pairing.down.sql
 @@ -0,0 +1,7 @@
@@ -17448,7 +18621,7 @@ index 00000000..8ebf44cd
 +DROP TABLE IF EXISTS nextcloud_source_pairings;
 diff --git a/migrations/sqlite/000035_nextcloud_source_pairing.up.sql b/migrations/sqlite/000035_nextcloud_source_pairing.up.sql
 new file mode 100644
-index 00000000..57702447
+index 0000000..5770244
 --- /dev/null
 +++ b/migrations/sqlite/000035_nextcloud_source_pairing.up.sql
 @@ -0,0 +1,65 @@
@@ -17519,7 +18692,7 @@ index 00000000..57702447
 +BEGIN SELECT RAISE(ABORT, 'nextcloud_paired_kb_delete_forbidden'); END;
 diff --git a/migrations/sqlite/000036_nextcloud_source_pairing_guards.down.sql b/migrations/sqlite/000036_nextcloud_source_pairing_guards.down.sql
 new file mode 100644
-index 00000000..8a80e4d9
+index 0000000..8a80e4d
 --- /dev/null
 +++ b/migrations/sqlite/000036_nextcloud_source_pairing_guards.down.sql
 @@ -0,0 +1,96 @@
@@ -17621,7 +18794,7 @@ index 00000000..8a80e4d9
 +BEGIN SELECT RAISE(ABORT, 'nextcloud_paired_kb_delete_forbidden'); END;
 diff --git a/migrations/sqlite/000036_nextcloud_source_pairing_guards.up.sql b/migrations/sqlite/000036_nextcloud_source_pairing_guards.up.sql
 new file mode 100644
-index 00000000..eaa27e77
+index 0000000..eaa27e7
 --- /dev/null
 +++ b/migrations/sqlite/000036_nextcloud_source_pairing_guards.up.sql
 @@ -0,0 +1,111 @@
@@ -17736,9 +18909,108 @@ index 00000000..eaa27e77
 +    SELECT 1 FROM data_sources d WHERE d.id = OLD.datasource_id AND d.status <> 'paused'
 +)
 +BEGIN SELECT RAISE(ABORT, 'nextcloud_source_pairing_delete_forbidden'); END;
+diff --git a/migrations/sqlite/000037_nextcloud_source_rotation.down.sql b/migrations/sqlite/000037_nextcloud_source_rotation.down.sql
+new file mode 100644
+index 0000000..8e2c98c
+--- /dev/null
++++ b/migrations/sqlite/000037_nextcloud_source_rotation.down.sql
+@@ -0,0 +1,30 @@
++CREATE TEMP TABLE nextcloud_source_rotation_rollback_guard (count INTEGER NOT NULL CHECK (count = 0));
++INSERT INTO nextcloud_source_rotation_rollback_guard SELECT COUNT(*) FROM nextcloud_source_rotations;
++DROP TABLE nextcloud_source_rotation_rollback_guard;
++
++DROP TRIGGER nextcloud_source_pairing_row_guard_update;
++CREATE TRIGGER nextcloud_source_pairing_row_guard_update
++BEFORE UPDATE ON nextcloud_source_pairings
++WHEN NEW.operation_id IS NOT OLD.operation_id
++  OR NEW.tenant_id IS NOT OLD.tenant_id
++  OR NEW.knowledge_base_id IS NOT OLD.knowledge_base_id
++  OR NEW.datasource_id IS NOT OLD.datasource_id
++  OR NEW.nextcloud_instance_id IS NOT OLD.nextcloud_instance_id
++  OR NEW.binding_id IS NOT OLD.binding_id
++  OR NEW.datasource_base_url IS NOT OLD.datasource_base_url
++  OR NEW.datasource_config_sha256 IS NOT OLD.datasource_config_sha256
++  OR NEW.publication_epoch IS NOT OLD.publication_epoch
++  OR NEW.key_id IS NOT OLD.key_id
++  OR (OLD.state = 'active' AND NEW.state IS NOT OLD.state)
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_pairing_immutable'); END;
++
++DROP TRIGGER nextcloud_source_pairing_immutable_update;
++CREATE TRIGGER nextcloud_source_pairing_immutable_update
++BEFORE UPDATE OF config, type, tenant_id, knowledge_base_id, deleted_at ON data_sources
++WHEN EXISTS (SELECT 1 FROM nextcloud_source_pairings p WHERE p.datasource_id = OLD.id)
++ AND (NEW.config IS NOT OLD.config OR NEW.type IS NOT OLD.type
++  OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.knowledge_base_id IS NOT OLD.knowledge_base_id
++  OR NEW.deleted_at IS NOT OLD.deleted_at)
++BEGIN SELECT RAISE(ABORT, 'nextcloud_paired_source_immutable'); END;
++
++DROP TABLE nextcloud_source_rotations;
+diff --git a/migrations/sqlite/000037_nextcloud_source_rotation.up.sql b/migrations/sqlite/000037_nextcloud_source_rotation.up.sql
+new file mode 100644
+index 0000000..3ca2661
+--- /dev/null
++++ b/migrations/sqlite/000037_nextcloud_source_rotation.up.sql
+@@ -0,0 +1,57 @@
++CREATE TABLE nextcloud_source_rotations (
++    operation_id TEXT PRIMARY KEY,
++    pair_operation_id TEXT NOT NULL REFERENCES nextcloud_source_pairings (operation_id) ON DELETE RESTRICT,
++    tenant_id INTEGER NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL REFERENCES data_sources (id) ON DELETE RESTRICT,
++    nextcloud_instance_id TEXT NOT NULL,
++    binding_id TEXT NOT NULL,
++    old_key_id TEXT NOT NULL,
++    new_key_id TEXT NOT NULL UNIQUE,
++    old_config_sha256 TEXT NOT NULL,
++    new_config_sha256 TEXT NOT NULL,
++    old_config TEXT NOT NULL,
++    new_config TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('pending', 'committed', 'switched', 'finalized', 'aborted')),
++    last_error_code TEXT NOT NULL DEFAULT '',
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
++);
++CREATE UNIQUE INDEX nextcloud_source_rotation_live_pair
++    ON nextcloud_source_rotations (pair_operation_id)
++    WHERE state IN ('pending', 'committed', 'switched');
++
++DROP TRIGGER nextcloud_source_pairing_immutable_update;
++CREATE TRIGGER nextcloud_source_pairing_immutable_update
++BEFORE UPDATE OF config, type, tenant_id, knowledge_base_id, deleted_at ON data_sources
++WHEN EXISTS (SELECT 1 FROM nextcloud_source_pairings p WHERE p.datasource_id = OLD.id)
++ AND (NEW.type IS NOT OLD.type OR NEW.tenant_id IS NOT OLD.tenant_id
++  OR NEW.knowledge_base_id IS NOT OLD.knowledge_base_id OR NEW.deleted_at IS NOT OLD.deleted_at
++  OR (NEW.config IS NOT OLD.config AND NOT EXISTS (
++      SELECT 1 FROM nextcloud_source_rotations r
++      WHERE r.datasource_id = OLD.id AND r.state = 'committed'
++        AND r.old_config = OLD.config AND r.new_config = NEW.config
++  )))
++BEGIN SELECT RAISE(ABORT, 'nextcloud_paired_source_immutable'); END;
++
++DROP TRIGGER nextcloud_source_pairing_row_guard_update;
++CREATE TRIGGER nextcloud_source_pairing_row_guard_update
++BEFORE UPDATE ON nextcloud_source_pairings
++WHEN NEW.operation_id IS NOT OLD.operation_id
++  OR NEW.tenant_id IS NOT OLD.tenant_id
++  OR NEW.knowledge_base_id IS NOT OLD.knowledge_base_id
++  OR NEW.datasource_id IS NOT OLD.datasource_id
++  OR NEW.nextcloud_instance_id IS NOT OLD.nextcloud_instance_id
++  OR NEW.binding_id IS NOT OLD.binding_id
++  OR NEW.datasource_base_url IS NOT OLD.datasource_base_url
++  OR NEW.publication_epoch IS NOT OLD.publication_epoch
++  OR (OLD.state = 'active' AND NEW.state IS NOT OLD.state)
++  OR ((NEW.datasource_config_sha256 IS NOT OLD.datasource_config_sha256
++    OR NEW.key_id IS NOT OLD.key_id) AND NOT EXISTS (
++      SELECT 1 FROM nextcloud_source_rotations r
++      WHERE r.pair_operation_id = OLD.operation_id AND r.state = 'committed'
++        AND r.old_key_id = OLD.key_id AND r.new_key_id = NEW.key_id
++        AND r.old_config_sha256 = OLD.datasource_config_sha256
++        AND r.new_config_sha256 = NEW.datasource_config_sha256
++  ))
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_pairing_immutable'); END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
-index 00000000..cf1f675a
+index 0000000..cf1f675
 --- /dev/null
 +++ b/migrations/versioned/000110_resource_source_provenance.down.sql
 @@ -0,0 +1,2 @@
@@ -17746,7 +19018,7 @@ index 00000000..cf1f675a
 +ALTER TABLE resources DROP COLUMN IF EXISTS source_provenance;
 diff --git a/migrations/versioned/000110_resource_source_provenance.up.sql b/migrations/versioned/000110_resource_source_provenance.up.sql
 new file mode 100644
-index 00000000..f9a342b0
+index 0000000..f9a342b
 --- /dev/null
 +++ b/migrations/versioned/000110_resource_source_provenance.up.sql
 @@ -0,0 +1,29 @@
@@ -17781,7 +19053,7 @@ index 00000000..f9a342b0
 +CHECK (source_provenance IN ('unknown', 'ordinary', 'nextcloud'));
 diff --git a/migrations/versioned/000111_kb_nextcloud_provenance.down.sql b/migrations/versioned/000111_kb_nextcloud_provenance.down.sql
 new file mode 100644
-index 00000000..4fc380f7
+index 0000000..4fc380f
 --- /dev/null
 +++ b/migrations/versioned/000111_kb_nextcloud_provenance.down.sql
 @@ -0,0 +1,3 @@
@@ -17790,7 +19062,7 @@ index 00000000..4fc380f7
 +ALTER TABLE knowledge_bases DROP COLUMN IF EXISTS ever_had_nextcloud_source;
 diff --git a/migrations/versioned/000111_kb_nextcloud_provenance.up.sql b/migrations/versioned/000111_kb_nextcloud_provenance.up.sql
 new file mode 100644
-index 00000000..8aee7e73
+index 0000000..8aee7e7
 --- /dev/null
 +++ b/migrations/versioned/000111_kb_nextcloud_provenance.up.sql
 @@ -0,0 +1,32 @@
@@ -17828,14 +19100,14 @@ index 00000000..8aee7e73
 +    FOR EACH ROW EXECUTE FUNCTION preserve_kb_nextcloud_provenance();
 diff --git a/migrations/versioned/000112_nextcloud_source_versions.down.sql b/migrations/versioned/000112_nextcloud_source_versions.down.sql
 new file mode 100644
-index 00000000..d5a6800f
+index 0000000..d5a6800
 --- /dev/null
 +++ b/migrations/versioned/000112_nextcloud_source_versions.down.sql
 @@ -0,0 +1 @@
 +DROP TABLE IF EXISTS nextcloud_source_versions;
 diff --git a/migrations/versioned/000112_nextcloud_source_versions.up.sql b/migrations/versioned/000112_nextcloud_source_versions.up.sql
 new file mode 100644
-index 00000000..89d75bea
+index 0000000..89d75be
 --- /dev/null
 +++ b/migrations/versioned/000112_nextcloud_source_versions.up.sql
 @@ -0,0 +1,15 @@
@@ -17856,7 +19128,7 @@ index 00000000..89d75bea
 +    WHERE candidate_knowledge_id <> '';
 diff --git a/migrations/versioned/000113_nextcloud_event_inbox.down.sql b/migrations/versioned/000113_nextcloud_event_inbox.down.sql
 new file mode 100644
-index 00000000..c1a1710b
+index 0000000..c1a1710
 --- /dev/null
 +++ b/migrations/versioned/000113_nextcloud_event_inbox.down.sql
 @@ -0,0 +1,4 @@
@@ -17866,7 +19138,7 @@ index 00000000..c1a1710b
 +DROP TABLE IF EXISTS nextcloud_event_connections;
 diff --git a/migrations/versioned/000113_nextcloud_event_inbox.up.sql b/migrations/versioned/000113_nextcloud_event_inbox.up.sql
 new file mode 100644
-index 00000000..5f344005
+index 0000000..5f34400
 --- /dev/null
 +++ b/migrations/versioned/000113_nextcloud_event_inbox.up.sql
 @@ -0,0 +1,69 @@
@@ -17941,7 +19213,7 @@ index 00000000..5f344005
 +);
 diff --git a/migrations/versioned/000114_nextcloud_event_dispatch.down.sql b/migrations/versioned/000114_nextcloud_event_dispatch.down.sql
 new file mode 100644
-index 00000000..1ed7b40a
+index 0000000..1ed7b40
 --- /dev/null
 +++ b/migrations/versioned/000114_nextcloud_event_dispatch.down.sql
 @@ -0,0 +1,4 @@
@@ -17951,7 +19223,7 @@ index 00000000..1ed7b40a
 +DROP TABLE IF EXISTS nextcloud_event_dispatch;
 diff --git a/migrations/versioned/000114_nextcloud_event_dispatch.up.sql b/migrations/versioned/000114_nextcloud_event_dispatch.up.sql
 new file mode 100644
-index 00000000..45ff71bb
+index 0000000..45ff71b
 --- /dev/null
 +++ b/migrations/versioned/000114_nextcloud_event_dispatch.up.sql
 @@ -0,0 +1,61 @@
@@ -18018,7 +19290,7 @@ index 00000000..45ff71bb
 +EXECUTE FUNCTION nextcloud_event_sync_admit();
 diff --git a/migrations/versioned/000116_nextcloud_source_pairing.down.sql b/migrations/versioned/000116_nextcloud_source_pairing.down.sql
 new file mode 100644
-index 00000000..73c83265
+index 0000000..73c8326
 --- /dev/null
 +++ b/migrations/versioned/000116_nextcloud_source_pairing.down.sql
 @@ -0,0 +1,9 @@
@@ -18033,7 +19305,7 @@ index 00000000..73c83265
 +DROP TABLE IF EXISTS nextcloud_source_pairings;
 diff --git a/migrations/versioned/000116_nextcloud_source_pairing.up.sql b/migrations/versioned/000116_nextcloud_source_pairing.up.sql
 new file mode 100644
-index 00000000..cc53eb1f
+index 0000000..cc53eb1
 --- /dev/null
 +++ b/migrations/versioned/000116_nextcloud_source_pairing.up.sql
 @@ -0,0 +1,86 @@
@@ -18125,7 +19397,7 @@ index 00000000..cc53eb1f
 +EXECUTE FUNCTION nextcloud_paired_kb_delete_guard();
 diff --git a/migrations/versioned/000117_nextcloud_source_pairing_guards.down.sql b/migrations/versioned/000117_nextcloud_source_pairing_guards.down.sql
 new file mode 100644
-index 00000000..15b1621f
+index 0000000..15b1621
 --- /dev/null
 +++ b/migrations/versioned/000117_nextcloud_source_pairing_guards.down.sql
 @@ -0,0 +1,12 @@
@@ -18143,7 +19415,7 @@ index 00000000..15b1621f
 +DROP FUNCTION IF EXISTS nextcloud_paired_kb_hard_delete_guard();
 diff --git a/migrations/versioned/000117_nextcloud_source_pairing_guards.up.sql b/migrations/versioned/000117_nextcloud_source_pairing_guards.up.sql
 new file mode 100644
-index 00000000..d70692c2
+index 0000000..d70692c
 --- /dev/null
 +++ b/migrations/versioned/000117_nextcloud_source_pairing_guards.up.sql
 @@ -0,0 +1,60 @@
@@ -18207,3 +19479,163 @@ index 00000000..d70692c2
 +CREATE TRIGGER nextcloud_source_pairing_row_guard_delete
 +BEFORE DELETE ON nextcloud_source_pairings FOR EACH ROW
 +EXECUTE FUNCTION nextcloud_source_pairing_row_guard();
+diff --git a/migrations/versioned/000118_nextcloud_source_rotation.down.sql b/migrations/versioned/000118_nextcloud_source_rotation.down.sql
+new file mode 100644
+index 0000000..7649cb8
+--- /dev/null
++++ b/migrations/versioned/000118_nextcloud_source_rotation.down.sql
+@@ -0,0 +1,60 @@
++DO $nextcloud_rotation_rollback$
++BEGIN
++    IF EXISTS (SELECT 1 FROM nextcloud_source_rotations) THEN
++        RAISE EXCEPTION 'cannot roll back source rotation with persisted operations';
++    END IF;
++END
++$nextcloud_rotation_rollback$;
++DROP TABLE nextcloud_source_rotations;
++
++CREATE OR REPLACE FUNCTION nextcloud_source_pairing_admit() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_pairing$
++BEGIN
++    IF TG_OP = 'UPDATE' THEN
++        IF EXISTS (SELECT 1 FROM nextcloud_source_pairings p WHERE p.datasource_id = OLD.id)
++           AND (NEW.config IS DISTINCT FROM OLD.config OR NEW.type IS DISTINCT FROM OLD.type
++             OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
++             OR NEW.knowledge_base_id IS DISTINCT FROM OLD.knowledge_base_id
++             OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at) THEN
++            RAISE EXCEPTION 'nextcloud_paired_source_immutable' USING ERRCODE = '23514';
++        END IF;
++    END IF;
++    IF NEW.type = 'nextcloud' AND NEW.status <> 'paused' AND NOT EXISTS (
++        SELECT 1 FROM nextcloud_source_pairings p
++        WHERE p.datasource_id = NEW.id AND p.tenant_id = NEW.tenant_id
++          AND p.knowledge_base_id = NEW.knowledge_base_id AND p.state = 'active'
++    ) THEN
++        RAISE EXCEPTION 'nextcloud_source_unpaired' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_pairing$;
++
++CREATE OR REPLACE FUNCTION nextcloud_source_pairing_row_guard() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_pair_row$
++BEGIN
++    IF TG_OP = 'DELETE' THEN
++        IF OLD.state = 'active' OR EXISTS (
++            SELECT 1 FROM data_sources d
++            WHERE d.id = OLD.datasource_id AND d.status <> 'paused'
++        ) THEN
++            RAISE EXCEPTION 'nextcloud_source_pairing_delete_forbidden' USING ERRCODE = '23514';
++        END IF;
++        RETURN OLD;
++    END IF;
++    IF NEW.operation_id IS DISTINCT FROM OLD.operation_id
++       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
++       OR NEW.knowledge_base_id IS DISTINCT FROM OLD.knowledge_base_id
++       OR NEW.datasource_id IS DISTINCT FROM OLD.datasource_id
++       OR NEW.nextcloud_instance_id IS DISTINCT FROM OLD.nextcloud_instance_id
++       OR NEW.binding_id IS DISTINCT FROM OLD.binding_id
++       OR NEW.datasource_base_url IS DISTINCT FROM OLD.datasource_base_url
++       OR NEW.datasource_config_sha256 IS DISTINCT FROM OLD.datasource_config_sha256
++       OR NEW.publication_epoch IS DISTINCT FROM OLD.publication_epoch
++       OR NEW.key_id IS DISTINCT FROM OLD.key_id
++       OR (OLD.state = 'active' AND NEW.state IS DISTINCT FROM OLD.state) THEN
++        RAISE EXCEPTION 'nextcloud_source_pairing_immutable' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_pair_row$;
+diff --git a/migrations/versioned/000118_nextcloud_source_rotation.up.sql b/migrations/versioned/000118_nextcloud_source_rotation.up.sql
+new file mode 100644
+index 0000000..1317969
+--- /dev/null
++++ b/migrations/versioned/000118_nextcloud_source_rotation.up.sql
+@@ -0,0 +1,88 @@
++CREATE TABLE nextcloud_source_rotations (
++    operation_id TEXT PRIMARY KEY,
++    pair_operation_id TEXT NOT NULL REFERENCES nextcloud_source_pairings (operation_id) ON DELETE RESTRICT,
++    tenant_id BIGINT NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL REFERENCES data_sources (id) ON DELETE RESTRICT,
++    nextcloud_instance_id TEXT NOT NULL,
++    binding_id TEXT NOT NULL,
++    old_key_id TEXT NOT NULL,
++    new_key_id TEXT NOT NULL UNIQUE,
++    old_config_sha256 TEXT NOT NULL,
++    new_config_sha256 TEXT NOT NULL,
++    old_config JSONB NOT NULL,
++    new_config JSONB NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('pending', 'committed', 'switched', 'finalized', 'aborted')),
++    last_error_code TEXT NOT NULL DEFAULT '',
++    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
++);
++CREATE UNIQUE INDEX nextcloud_source_rotation_live_pair
++    ON nextcloud_source_rotations (pair_operation_id)
++    WHERE state IN ('pending', 'committed', 'switched');
++
++-- The sole exception to paired-source immutability is the exact encrypted
++-- config prepared in a rotation whose Nextcloud commit has been acknowledged.
++CREATE OR REPLACE FUNCTION nextcloud_source_pairing_admit() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_pairing$
++BEGIN
++    IF TG_OP = 'UPDATE' THEN
++        IF EXISTS (SELECT 1 FROM nextcloud_source_pairings p WHERE p.datasource_id = OLD.id)
++           AND (NEW.type IS DISTINCT FROM OLD.type
++             OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
++             OR NEW.knowledge_base_id IS DISTINCT FROM OLD.knowledge_base_id
++             OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
++             OR (NEW.config IS DISTINCT FROM OLD.config AND NOT EXISTS (
++                 SELECT 1 FROM nextcloud_source_rotations r
++                 WHERE r.datasource_id = OLD.id AND r.state = 'committed'
++                   AND r.old_config = OLD.config AND r.new_config = NEW.config
++             ))) THEN
++            RAISE EXCEPTION 'nextcloud_paired_source_immutable' USING ERRCODE = '23514';
++        END IF;
++    END IF;
++    IF NEW.type = 'nextcloud' AND NEW.status <> 'paused' AND NOT EXISTS (
++        SELECT 1 FROM nextcloud_source_pairings p
++        WHERE p.datasource_id = NEW.id AND p.tenant_id = NEW.tenant_id
++          AND p.knowledge_base_id = NEW.knowledge_base_id AND p.state = 'active'
++    ) THEN
++        RAISE EXCEPTION 'nextcloud_source_unpaired' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_pairing$;
++
++CREATE OR REPLACE FUNCTION nextcloud_source_pairing_row_guard() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_pair_row$
++BEGIN
++    IF TG_OP = 'DELETE' THEN
++        IF OLD.state = 'active' OR EXISTS (
++            SELECT 1 FROM data_sources d
++            WHERE d.id = OLD.datasource_id AND d.status <> 'paused'
++        ) THEN
++            RAISE EXCEPTION 'nextcloud_source_pairing_delete_forbidden' USING ERRCODE = '23514';
++        END IF;
++        RETURN OLD;
++    END IF;
++
++    IF NEW.operation_id IS DISTINCT FROM OLD.operation_id
++       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
++       OR NEW.knowledge_base_id IS DISTINCT FROM OLD.knowledge_base_id
++       OR NEW.datasource_id IS DISTINCT FROM OLD.datasource_id
++       OR NEW.nextcloud_instance_id IS DISTINCT FROM OLD.nextcloud_instance_id
++       OR NEW.binding_id IS DISTINCT FROM OLD.binding_id
++       OR NEW.datasource_base_url IS DISTINCT FROM OLD.datasource_base_url
++       OR NEW.publication_epoch IS DISTINCT FROM OLD.publication_epoch
++       OR (OLD.state = 'active' AND NEW.state IS DISTINCT FROM OLD.state)
++       OR ((NEW.datasource_config_sha256 IS DISTINCT FROM OLD.datasource_config_sha256
++         OR NEW.key_id IS DISTINCT FROM OLD.key_id) AND NOT EXISTS (
++           SELECT 1 FROM nextcloud_source_rotations r
++           WHERE r.pair_operation_id = OLD.operation_id AND r.state = 'committed'
++             AND r.old_key_id = OLD.key_id AND r.new_key_id = NEW.key_id
++             AND r.old_config_sha256 = OLD.datasource_config_sha256
++             AND r.new_config_sha256 = NEW.datasource_config_sha256
++       )) THEN
++        RAISE EXCEPTION 'nextcloud_source_pairing_immutable' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_pair_row$;

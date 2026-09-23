@@ -49,9 +49,52 @@ a paused pending source and a provenance
 tombstone for its KB. Status and retry never reissue the token. An operator
 must inspect both sides, abort the pending Nextcloud operation when possible,
 and use a new dedicated KB for a fresh operation. There is no automated
-WeKnora pending-abort cleanup in this slice. Rotation/recovery of an active
-source key is also not implemented. Direct revocation of a pending or active
-pairing key is rejected; binding removal retires the pair and its key together.
+WeKnora pending-pair abort in this slice. Direct revocation of a pending or
+active pairing key is rejected; binding removal retires the pair and its keys
+together.
+
+## Active source-key rotation
+
+For an established pair, a Nextcloud administrator prepares a distinct UUID
+with `POST /api/v1/admin/bindings/{id}/source-pairing/rotation` and JSON
+`{"operation_id":"<rotation UUID>"}`. The response returns a `rot_` key ID
+and machine token only on HTTP 201. Identical repeats and GET status return
+nonsecret metadata. WeKnora's tenant administrator, with KB edit permission,
+passes that one-time credential to
+`POST /api/v1/datasource/nextcloud-source-pairings/{pair_operation_id}/rotations`:
+
+```json
+{"operation_id":"<rotation UUID>","new_key_id":"rot_<32 lowercase hex>","token":"<one-time token>"}
+```
+
+WeKnora verifies the same live instance and binding with the new key, stores
+the credential encrypted in a pending rotation, and signs the exact tenant,
+KB, source, instance, pair operation, and rotation operation tuple to
+Nextcloud's `/bindings/{id}/source-pairing/rotation/commit`. Nextcloud then
+accepts both keys. The old key has a maximum 24-hour grace interval from
+commit. WeKnora atomically switches its data-source config and pinned hash,
+then signs `/rotation/finalize` with the new key. The final ACK immediately
+removes the old key. A lost commit ACK leaves WeKnora pending; a lost finalize
+ACK leaves it switched. `GET` status and `POST .../{rotation_id}/retry`
+resume either state using the encrypted local credential. The same signed
+remote operation is idempotent.
+
+Before remote commit, the WeKnora administrator may `POST
+.../{rotation_id}/abort`. WeKnora signs `/rotation/abort` with the old key.
+Nextcloud revokes only the pending new key; an identical abort can be retried
+after a lost ACK. WeKnora then marks the local operation aborted and erases
+its stored config copies. An administrator can also abort a Nextcloud-only
+pending rotation with `DELETE` on its admin rotation route and the operation
+UUID. A committed rotation cannot be aborted: use retry to finish the switch
+and finalization. If the old key's grace time expires during an outage,
+ordinary reads with the old key stop; retry uses the encrypted new key to
+complete recovery. A lost one-time token before WeKnora stores it requires
+aborting that pending Nextcloud operation and creating a fresh UUID.
+
+Source-key rotation changes the exact source config hash. An optional
+WeKnora event-inbox connection pinned to the former hash must be re-paired
+after rotation; it does not silently gain the new source credential. The
+operator CLI is `scripts/ops/local-source-rotation.py`.
 
 Nextcloud Stop blocks source reads. Resume does not change the paired tenant,
 KB, binding, source ID, or credentials. A pending commit whose publication

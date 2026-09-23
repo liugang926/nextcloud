@@ -73,6 +73,42 @@ return [
             'requirements' => ['id' => '[A-Za-z0-9_-]+'],
         ],
         [
+            'name' => 'source_pairing#rotationStatus',
+            'url' => '/api/v1/admin/bindings/{id}/source-pairing/rotation',
+            'verb' => 'GET',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#prepareRotation',
+            'url' => '/api/v1/admin/bindings/{id}/source-pairing/rotation',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#abortRotation',
+            'url' => '/api/v1/admin/bindings/{id}/source-pairing/rotation',
+            'verb' => 'DELETE',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#commitRotation',
+            'url' => '/api/v1/bindings/{id}/source-pairing/rotation/commit',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#finalizeRotation',
+            'url' => '/api/v1/bindings/{id}/source-pairing/rotation/finalize',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_pairing#abortRotationMachine',
+            'url' => '/api/v1/bindings/{id}/source-pairing/rotation/abort',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
             'name' => 'binding_admin#stop',
             'url' => '/api/v1/admin/bindings/{id}/stop',
             'verb' => 'POST',

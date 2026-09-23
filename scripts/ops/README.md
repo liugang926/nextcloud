@@ -2,7 +2,7 @@
 
 ## Local Nextcloud source pairing
 
-Install Nextcloud app 0.4.13 and deploy the WeKnora patch before this probe.
+Install Nextcloud app 0.4.14 and deploy the WeKnora patch before this probe.
 Keep the selected Nextcloud binding active with its original root. As a
 WeKnora administrator, create an **empty, dedicated** knowledge base in the
 same tenant; record its ID and the canonical positive decimal tenant ID. A
@@ -59,8 +59,40 @@ lost before WeKnora stored the operation, a retry cannot recover it. Inspect
 both sides and any in-flight request before aborting the **pending** Nextcloud
 intent with administrator `DELETE /admin/bindings/{id}/source-pairing` and a
 JSON `operation_id`, then start a new operation. An active pair cannot be
-aborted this way. WeKnora currently has no pending source-pair abort or
-source-key rotation endpoint; a pending WeKnora record needs repair and retry.
+aborted this way. WeKnora currently has no pending **initial source-pair**
+abort; a pending WeKnora record needs repair and retry.
+
+### Rotate an active source credential
+
+Save the original pair UUID, then run:
+
+```sh
+python3 scripts/ops/local-source-rotation.py rotate \
+  --binding dev-published \
+  --pair-operation-id YOUR_ACTIVE_PAIR_UUID
+```
+
+The CLI prints a new rotation UUID before sending requests. It moves the
+one-time `rot_` credential from Nextcloud to WeKnora without printing it.
+WeKnora first commits the new key remotely while the old key still works,
+then atomically switches its encrypted source config, then requests remote
+finalization. Finalization immediately revokes the old key. If any response
+is lost, inspect and retry the same operation:
+
+```sh
+python3 scripts/ops/local-source-rotation.py status --binding dev-published --pair-operation-id YOUR_ACTIVE_PAIR_UUID --operation-id YOUR_ROTATION_UUID
+python3 scripts/ops/local-source-rotation.py retry --binding dev-published --pair-operation-id YOUR_ACTIVE_PAIR_UUID --operation-id YOUR_ROTATION_UUID
+```
+
+The old key expires at most 24 hours after remote commit even when
+finalization has not completed. Retry uses WeKnora's encrypted new credential
+and repairs a pending or locally switched operation. A committed rotation
+cannot be aborted. A pending rotation may be aborted with the same CLI and
+`abort`; this asks Nextcloud to revoke the new key while retaining the old
+one. If the token was lost before WeKnora stored it, the CLI aborts the
+Nextcloud-only pending operation. Start a new UUID afterward. Rotation
+changes the source config hash, so re-pair any optional event-inbox
+connection pinned to the old source config.
 
 Source pairing is separate from the event-delivery connection. It establishes
 the intended binding, tenant, and dedicated knowledge base, but does not prove
@@ -70,7 +102,7 @@ AD acceptance gate yet.
 
 ## Local Nextcloud to WeKnora delivery probe
 
-With both local stacks healthy, Nextcloud app 0.4.13 installed, and a new
+With both local stacks healthy, Nextcloud app 0.4.14 installed, and a new
 synthetic data source actively source-paired as above, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
 WeKnora administrator credentials and run:

@@ -10,6 +10,7 @@ use OCP\IDBConnection;
 
 /** Durable, binding-scoped intent for one dedicated WeKnora knowledge base. */
 final class SourcePairingRegistryService {
+    private const ROTATION_GRACE_SECONDS = 86400;
     public function __construct(
         private IDBConnection $db,
         private IConfig $config,
@@ -229,6 +230,383 @@ final class SourcePairingRegistryService {
     public function status(string $bindingId): ?array {
         $row = $this->latestForBinding($bindingId);
         return $row === null ? null : $this->publicRow($row);
+    }
+
+    /** Prepare an overlapping key. The token is returned only on first creation. */
+    public function prepareRotation(string $bindingId, string $operationId, string $actorUid): array {
+        if (!self::validOperationId($operationId) || $actorUid === '' || strlen($actorUid) > 64) {
+            throw new \InvalidArgumentException('Invalid rotation intent');
+        }
+        $operationId = strtolower($operationId);
+        $this->db->beginTransaction();
+        try {
+            $this->lockRegistry();
+            $pair = $this->requireCurrentActivePair($bindingId);
+            [$binding] = $this->requireActiveBinding($bindingId);
+            $existing = $this->rotationByOperation($operationId);
+            if ($existing !== null) {
+                if ($existing['pair_operation_id'] !== $pair['operation_id'] ||
+                    $existing['binding_id'] !== $bindingId ||
+                    $existing['state'] === 'aborted') {
+                    throw new \DomainException('Rotation operation conflicts with its original intent');
+                }
+                $this->db->commit();
+                return ['rotation' => $this->publicRotation($existing), 'created' => false];
+            }
+            if ($this->liveRotation($pair['operation_id']) !== null) {
+                throw new \DomainException('A source-key rotation is already in progress');
+            }
+            if ((int)$pair['publication_epoch'] > $binding['publication_epoch']) {
+                throw new \DomainException('Pairing publication epoch is invalid');
+            }
+            $newKeyId = 'rot_' . str_replace('-', '', $operationId);
+            $token = rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '=');
+            $now = time();
+            if ($this->db->insertIgnoreConflict('weknora_machine_key', [
+                'key_id' => $newKeyId,
+                'binding_id' => $bindingId,
+                'token_sha256' => hash('sha256', $token),
+                'source_hash' => $pair['source_hash'],
+                'created_at' => $now,
+                'created_by_uid' => $actorUid,
+                'expires_at' => 0,
+            ]) !== 1) {
+                throw new \DomainException('Rotation key ID was already used');
+            }
+            $row = [
+                'operation_id' => $operationId,
+                'pair_operation_id' => $pair['operation_id'],
+                'binding_id' => $bindingId,
+                'instance_id' => $pair['instance_id'],
+                'tenant_id' => $pair['tenant_id'],
+                'knowledge_base_id' => $pair['knowledge_base_id'],
+                'data_source_id' => $pair['data_source_id'],
+                'old_key_id' => $pair['key_id'],
+                'new_key_id' => $newKeyId,
+                'publication_epoch' => $binding['publication_epoch'],
+                'state' => 'pending',
+                'old_key_expires_at' => 0,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+            if ($this->db->insertIgnoreConflict('weknora_src_pair_rot', $row) !== 1) {
+                throw new \DomainException('Rotation operation was already used');
+            }
+            $this->db->commit();
+            return ['rotation' => $this->publicRotation($row), 'token' => $token, 'created' => true];
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    public function rotationStatus(string $bindingId): ?array {
+        $query = $this->db->getQueryBuilder();
+        $result = $query->select('*')->from('weknora_src_pair_rot')
+            ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+            ->orderBy('id', 'DESC')->setMaxResults(1)->executeQuery();
+        try {
+            $row = $result->fetchAssociative();
+            return $row === false ? null : $this->publicRotation($row);
+        } finally {
+            $result->closeCursor();
+        }
+    }
+
+    /** Signed by the new key. Keep the old key valid until WeKnora switches. */
+    public function commitRotation(string $bindingId, string $keyId, string $operationId,
+        string $pairOperationId, string $instanceId, string $tenantId,
+        string $knowledgeBaseId, string $dataSourceId): array {
+        return $this->advanceRotation($bindingId, $keyId, $operationId, $pairOperationId,
+            $instanceId, $tenantId, $knowledgeBaseId, $dataSourceId, false);
+    }
+
+    /** Called after WeKnora durably switches its source config to the new key. */
+    public function finalizeRotation(string $bindingId, string $keyId, string $operationId,
+        string $pairOperationId, string $instanceId, string $tenantId,
+        string $knowledgeBaseId, string $dataSourceId): array {
+        return $this->advanceRotation($bindingId, $keyId, $operationId, $pairOperationId,
+            $instanceId, $tenantId, $knowledgeBaseId, $dataSourceId, true);
+    }
+
+    private function advanceRotation(string $bindingId, string $keyId, string $operationId,
+        string $pairOperationId, string $instanceId, string $tenantId,
+        string $knowledgeBaseId, string $dataSourceId, bool $finalize): array {
+        $this->validateInput($bindingId, $pairOperationId, $tenantId, $knowledgeBaseId);
+        if (!self::validOperationId($operationId) || !self::validRemoteId($dataSourceId) ||
+            $instanceId === '' || strlen($instanceId) > 64) {
+            throw new \InvalidArgumentException('Invalid rotation source identity');
+        }
+        $operationId = strtolower($operationId);
+        $pairOperationId = strtolower($pairOperationId);
+        $this->db->beginTransaction();
+        try {
+            $this->lockRegistry();
+            $rotation = $this->rotationByOperation($operationId);
+            $pair = $this->byOperation($pairOperationId);
+            if ($rotation === null || $pair === null ||
+                $rotation['binding_id'] !== $bindingId ||
+                $rotation['pair_operation_id'] !== $pairOperationId ||
+                !hash_equals($rotation['new_key_id'], $keyId) ||
+                $rotation['instance_id'] !== $instanceId ||
+                (string)$rotation['tenant_id'] !== $tenantId ||
+                $rotation['knowledge_base_id'] !== $knowledgeBaseId ||
+                $rotation['data_source_id'] !== $dataSourceId ||
+                $pair['binding_id'] !== $bindingId || $pair['state'] !== 'active' ||
+                $pair['instance_id'] !== $instanceId || $instanceId !== $this->instanceId() ||
+                (string)$pair['tenant_id'] !== $tenantId ||
+                $pair['knowledge_base_id'] !== $knowledgeBaseId ||
+                $pair['data_source_id'] !== $dataSourceId ||
+                $rotation['state'] === 'aborted') {
+                throw new \DomainException('Rotation operation or source tuple does not match');
+            }
+            $key = $this->machineKey($keyId, $bindingId);
+            if ($key === null || !hash_equals($pair['source_hash'], $key['source_hash'])) {
+                throw new \DomainException('Rotation key is missing or changed');
+            }
+            [$binding, $root] = $this->requireActiveBinding($bindingId);
+            if ($pair['source_hash'] !== MachineKeyRegistryService::sourceHash($binding) ||
+                $pair['root_hash'] !== self::rootHash($root)) {
+                throw new \DomainException('Paired source moved or changed');
+            }
+            if ($rotation['state'] === 'pending') {
+                if ($finalize || (int)$rotation['publication_epoch'] !== $binding['publication_epoch'] ||
+                    $pair['key_id'] !== $rotation['old_key_id']) {
+                    throw new \DomainException('Pending rotation is stale');
+                }
+                $old = $this->machineKey($rotation['old_key_id'], $bindingId);
+                if ($old === null || !hash_equals($pair['source_hash'], $old['source_hash'])) {
+                    throw new \DomainException('Old source key is missing or changed');
+                }
+                $now = time();
+                $expiry = $now + self::ROTATION_GRACE_SECONDS;
+                $query = $this->db->getQueryBuilder();
+                $query->update('weknora_machine_key')
+                    ->set('expires_at', $query->createNamedParameter($expiry))
+                    ->where($query->expr()->eq('key_id', $query->createNamedParameter($rotation['old_key_id'])))
+                    ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+                    ->executeStatement();
+                $query = $this->db->getQueryBuilder();
+                $query->update('weknora_src_pair')
+                    ->set('key_id', $query->createNamedParameter($keyId))
+                    ->set('updated_at', $query->createNamedParameter($now))
+                    ->where($query->expr()->eq('operation_id', $query->createNamedParameter($pairOperationId)))
+                    ->executeStatement();
+                $query = $this->db->getQueryBuilder();
+                $query->update('weknora_src_pair_rot')
+                    ->set('state', $query->createNamedParameter('committed'))
+                    ->set('old_key_expires_at', $query->createNamedParameter($expiry))
+                    ->set('updated_at', $query->createNamedParameter($now))
+                    ->where($query->expr()->eq('operation_id', $query->createNamedParameter($operationId)))
+                    ->executeStatement();
+                $rotation['state'] = 'committed';
+                $rotation['old_key_expires_at'] = $expiry;
+                $this->db->commit();
+                return ['rotation' => $this->publicRotation($rotation), 'changed' => true];
+            }
+            if ($pair['key_id'] !== $keyId ||
+                !in_array($rotation['state'], ['committed', 'finalized'], true)) {
+                throw new \DomainException('Rotation state is inconsistent');
+            }
+            if ($finalize && $rotation['state'] === 'committed') {
+                $query = $this->db->getQueryBuilder();
+                $query->delete('weknora_machine_key')
+                    ->where($query->expr()->eq('key_id', $query->createNamedParameter($rotation['old_key_id'])))
+                    ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+                    ->executeStatement();
+                $query = $this->db->getQueryBuilder();
+                $query->update('weknora_src_pair_rot')
+                    ->set('state', $query->createNamedParameter('finalized'))
+                    ->set('updated_at', $query->createNamedParameter(time()))
+                    ->where($query->expr()->eq('operation_id', $query->createNamedParameter($operationId)))
+                    ->executeStatement();
+                $rotation['state'] = 'finalized';
+                $this->db->commit();
+                return ['rotation' => $this->publicRotation($rotation), 'changed' => true];
+            }
+            $this->db->commit();
+            return ['rotation' => $this->publicRotation($rotation), 'changed' => false];
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    public function abortRotation(string $bindingId, string $operationId): array {
+        if (!self::validOperationId($operationId)) {
+            throw new \InvalidArgumentException('Invalid rotation operation');
+        }
+        $this->db->beginTransaction();
+        try {
+            $this->lockRegistry();
+            $rotation = $this->rotationByOperation(strtolower($operationId));
+            if ($rotation === null || $rotation['binding_id'] !== $bindingId) {
+                throw new \OutOfBoundsException('Rotation was not found');
+            }
+            if ($rotation['state'] === 'committed' || $rotation['state'] === 'finalized') {
+                throw new \DomainException('Committed rotation must be recovered');
+            }
+            if ($rotation['state'] === 'aborted' || $rotation['state'] === 'retired') {
+                $this->db->commit();
+                return ['rotation' => $this->publicRotation($rotation), 'revoked_key' => false];
+            }
+            $query = $this->db->getQueryBuilder();
+            $revoked = $query->delete('weknora_machine_key')
+                ->where($query->expr()->eq('key_id', $query->createNamedParameter($rotation['new_key_id'])))
+                ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+                ->executeStatement();
+            $query = $this->db->getQueryBuilder();
+            $query->update('weknora_src_pair_rot')
+                ->set('state', $query->createNamedParameter('aborted'))
+                ->set('updated_at', $query->createNamedParameter(time()))
+                ->where($query->expr()->eq('operation_id', $query->createNamedParameter(strtolower($operationId))))
+                ->executeStatement();
+            $rotation['state'] = 'aborted';
+            $this->db->commit();
+            return ['rotation' => $this->publicRotation($rotation), 'revoked_key' => $revoked === 1];
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    /** Signed by the still-active old key, so a lost abort ACK is retryable. */
+    public function abortRotationMachine(string $bindingId, string $keyId, string $operationId,
+        string $pairOperationId, string $instanceId, string $tenantId,
+        string $knowledgeBaseId, string $dataSourceId): array {
+        $this->validateInput($bindingId, $pairOperationId, $tenantId, $knowledgeBaseId);
+        if (!self::validOperationId($operationId) || !self::validRemoteId($dataSourceId)) {
+            throw new \InvalidArgumentException('Invalid rotation source identity');
+        }
+        $operationId = strtolower($operationId);
+        $pairOperationId = strtolower($pairOperationId);
+        $this->db->beginTransaction();
+        try {
+            $this->lockRegistry();
+            $rotation = $this->rotationByOperation($operationId);
+            $pair = $this->byOperation($pairOperationId);
+            if ($rotation === null || $pair === null ||
+                $rotation['binding_id'] !== $bindingId ||
+                $rotation['pair_operation_id'] !== $pairOperationId ||
+                !hash_equals($rotation['old_key_id'], $keyId) ||
+                $rotation['instance_id'] !== $instanceId ||
+                (string)$rotation['tenant_id'] !== $tenantId ||
+                $rotation['knowledge_base_id'] !== $knowledgeBaseId ||
+                $rotation['data_source_id'] !== $dataSourceId ||
+                $pair['binding_id'] !== $bindingId || $pair['state'] !== 'active' ||
+                $pair['instance_id'] !== $instanceId || $instanceId !== $this->instanceId() ||
+                (string)$pair['tenant_id'] !== $tenantId ||
+                $pair['knowledge_base_id'] !== $knowledgeBaseId ||
+                $pair['data_source_id'] !== $dataSourceId ||
+                $pair['key_id'] !== $keyId ||
+                !in_array($rotation['state'], ['pending', 'aborted'], true)) {
+                throw new \DomainException('Rotation cannot be aborted');
+            }
+            $old = $this->machineKey($keyId, $bindingId);
+            [$binding, $root] = $this->requireActiveBinding($bindingId);
+            if ($old === null || !hash_equals($pair['source_hash'], $old['source_hash']) ||
+                $pair['source_hash'] !== MachineKeyRegistryService::sourceHash($binding) ||
+                $pair['root_hash'] !== self::rootHash($root)) {
+                throw new \DomainException('Paired source changed');
+            }
+            if ($rotation['state'] === 'aborted') {
+                $this->db->commit();
+                return ['rotation' => $this->publicRotation($rotation), 'changed' => false];
+            }
+            $query = $this->db->getQueryBuilder();
+            $query->delete('weknora_machine_key')
+                ->where($query->expr()->eq('key_id', $query->createNamedParameter($rotation['new_key_id'])))
+                ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+                ->executeStatement();
+            $query = $this->db->getQueryBuilder();
+            $query->update('weknora_src_pair_rot')
+                ->set('state', $query->createNamedParameter('aborted'))
+                ->set('updated_at', $query->createNamedParameter(time()))
+                ->where($query->expr()->eq('operation_id', $query->createNamedParameter($operationId)))
+                ->executeStatement();
+            $rotation['state'] = 'aborted';
+            $this->db->commit();
+            return ['rotation' => $this->publicRotation($rotation), 'changed' => true];
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    private function requireCurrentActivePair(string $bindingId): array {
+        $pair = $this->liveForBinding($bindingId);
+        if ($pair === null || $pair['state'] !== 'active') {
+            throw new \DomainException('An active source pairing is required');
+        }
+        [$binding, $root] = $this->requireActiveBinding($bindingId);
+        if ($pair['instance_id'] !== $this->instanceId() ||
+            $pair['source_hash'] !== MachineKeyRegistryService::sourceHash($binding) ||
+            $pair['root_hash'] !== self::rootHash($root) ||
+            $this->machineKey($pair['key_id'], $bindingId) === null) {
+            throw new \DomainException('Active source pairing is no longer valid');
+        }
+        return $pair;
+    }
+
+    private function machineKey(string $keyId, string $bindingId): ?array {
+        $query = $this->db->getQueryBuilder();
+        $result = $query->select('source_hash', 'expires_at')->from('weknora_machine_key')
+            ->where($query->expr()->eq('key_id', $query->createNamedParameter($keyId)))
+            ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+            ->executeQuery();
+        try {
+            $row = $result->fetchAssociative();
+            return $row === false || ((int)$row['expires_at'] > 0 && (int)$row['expires_at'] <= time())
+                ? null : $row;
+        } finally {
+            $result->closeCursor();
+        }
+    }
+
+    private function rotationByOperation(string $operationId): ?array {
+        $query = $this->db->getQueryBuilder();
+        $result = $query->select('*')->from('weknora_src_pair_rot')
+            ->where($query->expr()->eq('operation_id', $query->createNamedParameter($operationId)))
+            ->executeQuery();
+        try {
+            $row = $result->fetchAssociative();
+            return $row === false ? null : $row;
+        } finally {
+            $result->closeCursor();
+        }
+    }
+
+    private function liveRotation(string $pairOperationId): ?array {
+        $query = $this->db->getQueryBuilder();
+        $result = $query->select('operation_id')->from('weknora_src_pair_rot')
+            ->where($query->expr()->eq('pair_operation_id', $query->createNamedParameter($pairOperationId)))
+            ->andWhere($query->expr()->orX(
+                $query->expr()->eq('state', $query->createNamedParameter('pending')),
+                $query->expr()->eq('state', $query->createNamedParameter('committed')),
+            ))->setMaxResults(1)->executeQuery();
+        try {
+            $row = $result->fetchAssociative();
+            return $row === false ? null : $row;
+        } finally {
+            $result->closeCursor();
+        }
+    }
+
+    private function publicRotation(array $row): array {
+        return [
+            'operation_id' => (string)$row['operation_id'],
+            'pair_operation_id' => (string)$row['pair_operation_id'],
+            'binding_id' => (string)$row['binding_id'],
+            'instance_id' => (string)$row['instance_id'],
+            'tenant_id' => (string)$row['tenant_id'],
+            'knowledge_base_id' => (string)$row['knowledge_base_id'],
+            'data_source_id' => (string)$row['data_source_id'],
+            'old_key_id' => (string)$row['old_key_id'],
+            'new_key_id' => (string)$row['new_key_id'],
+            'state' => (string)$row['state'],
+            'publication_epoch' => (int)$row['publication_epoch'],
+            'old_key_expires_at' => (int)$row['old_key_expires_at'],
+        ];
     }
 
     private function validateInput(string $bindingId, string $operationId, string $tenantId,

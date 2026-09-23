@@ -20,7 +20,7 @@ final class MachineKeyRegistryService {
             return null;
         }
         $query = $this->db->getQueryBuilder();
-        $query->select('binding_id', 'token_sha256', 'source_hash')->from('weknora_machine_key')
+        $query->select('binding_id', 'token_sha256', 'source_hash', 'expires_at')->from('weknora_machine_key')
             ->where($query->expr()->eq('key_id', $query->createNamedParameter($keyId)));
         $result = $query->executeQuery();
         try {
@@ -28,7 +28,8 @@ final class MachineKeyRegistryService {
         } finally {
             $result->closeCursor();
         }
-        if ($row === false || !self::validHash($row['token_sha256'] ?? null) ||
+        if ($row === false || ((int)$row['expires_at'] > 0 && (int)$row['expires_at'] <= time()) ||
+            !self::validHash($row['token_sha256'] ?? null) ||
             !self::validHash($row['source_hash'] ?? null)) {
             return null;
         }
@@ -144,6 +145,24 @@ final class MachineKeyRegistryService {
                 }
             } finally {
                 $pairResult->closeCursor();
+            }
+            $rotationQuery = $this->db->getQueryBuilder();
+            $rotationResult = $rotationQuery->select('operation_id')->from('weknora_src_pair_rot')
+                ->where($rotationQuery->expr()->eq('binding_id', $rotationQuery->createNamedParameter($bindingId)))
+                ->andWhere($rotationQuery->expr()->orX(
+                    $rotationQuery->expr()->eq('old_key_id', $rotationQuery->createNamedParameter($keyId)),
+                    $rotationQuery->expr()->eq('new_key_id', $rotationQuery->createNamedParameter($keyId)),
+                ))
+                ->andWhere($rotationQuery->expr()->orX(
+                    $rotationQuery->expr()->eq('state', $rotationQuery->createNamedParameter('pending')),
+                    $rotationQuery->expr()->eq('state', $rotationQuery->createNamedParameter('committed')),
+                ))->executeQuery();
+            try {
+                if ($rotationResult->fetchOne() !== false) {
+                    throw new \DomainException('Rotating source key cannot be revoked directly');
+                }
+            } finally {
+                $rotationResult->closeCursor();
             }
             $query = $this->db->getQueryBuilder();
             $revoked = $query->delete('weknora_machine_key')

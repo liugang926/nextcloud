@@ -404,6 +404,15 @@ final class BindingRegistryService {
                     $retirePair->expr()->eq('state', $retirePair->createNamedParameter('pending')),
                     $retirePair->expr()->eq('state', $retirePair->createNamedParameter('active')),
                 ))->executeStatement();
+            $retireRotation = $this->db->getQueryBuilder();
+            $retireRotation->update('weknora_src_pair_rot')
+                ->set('state', $retireRotation->createNamedParameter('retired'))
+                ->set('updated_at', $retireRotation->createNamedParameter(time()))
+                ->where($retireRotation->expr()->eq('binding_id', $retireRotation->createNamedParameter($id)))
+                ->andWhere($retireRotation->expr()->orX(
+                    $retireRotation->expr()->eq('state', $retireRotation->createNamedParameter('pending')),
+                    $retireRotation->expr()->eq('state', $retireRotation->createNamedParameter('committed')),
+                ))->executeStatement();
             $storedRemaining = array_map(static fn (array $binding): array => [
                 'id' => $binding['id'],
                 'name' => $binding['name'],

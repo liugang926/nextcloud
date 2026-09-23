@@ -25,7 +25,9 @@ def purge_retired_test_pair(binding_id):
     # Binding removal retains tombstones by design. This test has a unique
     # synthetic ID and removes only its retired/aborted pairing history.
     assert binding_id.startswith("source-pair-smoke-") and binding_id.replace("-", "").isalnum()
-    statement = ("DELETE FROM oc_weknora_src_pair "
+    statement = ("DELETE FROM oc_weknora_src_pair_rot "
+                 f"WHERE binding_id='{binding_id}' AND state IN ('finalized','aborted','retired'); "
+                 "DELETE FROM oc_weknora_src_pair "
                  f"WHERE binding_id='{binding_id}' AND state IN ('retired','aborted')")
     subprocess.run(["docker", "compose", "exec", "-T", "db", "psql", "-U", "nextcloud",
                     "-d", "nextcloud", "-v", "ON_ERROR_STOP=1", "-c", statement],
@@ -75,6 +77,21 @@ def main():
                    "X-WeKnora-Key-Id": pairing["key_id"],
                    "Content-Type": "application/json"}
         return request(machine, commit_url, "POST", headers, json.dumps(payload).encode())
+
+    def signed_rotation(action, pairing, rotation, token, key_id, data_source_id, overrides=None):
+        payload = {
+            "operation_id": rotation["operation_id"],
+            "pair_operation_id": pairing["operation_id"],
+            "instance_id": pairing["instance_id"],
+            "tenant_id": pairing["tenant_id"],
+            "knowledge_base_id": pairing["knowledge_base_id"],
+            "data_source_id": data_source_id,
+        }
+        payload.update(overrides or {})
+        headers = {"Authorization": "Bearer " + token,
+                   "X-WeKnora-Key-Id": key_id, "Content-Type": "application/json"}
+        return request(machine, f"{api}/bindings/{binding_id}/source-pairing/rotation/{action}",
+                       "POST", headers, json.dumps(payload).encode())
 
     try:
         status, _ = request(machine, folder_url, "MKCOL", dav_headers)
@@ -222,6 +239,74 @@ def main():
                             {**dav_headers, "Destination": folder_url})
         assert status in (201, 204), (status, "restore paired root")
         moved = False
+
+        rotation_url = pairing_url + "/rotation"
+        aborted_operation = str(uuid.uuid4())
+        status, body = admin_json("POST", rotation_url, {"operation_id": aborted_operation})
+        check(status, 201, "prepare abortable source rotation")
+        aborted = decoded(body)["rotation"]
+        aborted_token = decoded(body)["token"]
+        assert aborted["old_key_id"] == pair2["key_id"]
+        assert aborted["new_key_id"] == "rot_" + aborted_operation.replace("-", "")
+        status, body = admin_json("POST", rotation_url, {"operation_id": aborted_operation})
+        check(status, 200, "idempotent rotation preparation")
+        assert "token" not in decoded(body)
+        status, _ = admin_json("DELETE", f"{binding_url}/keys/{aborted['new_key_id']}")
+        check(status, 409, "pending rotation key cannot be revoked directly")
+        status, body = signed_rotation("abort", pair2, aborted, token2,
+                                       pair2["key_id"], data_source)
+        check(status, 200, "abort pending rotation with old key")
+        assert decoded(body)["rotation"]["state"] == "aborted"
+        status, body = signed_rotation("abort", pair2, aborted, token2,
+                                       pair2["key_id"], data_source)
+        check(status, 200, "idempotent signed rotation abort")
+        assert decoded(body)["changed"] is False
+        status, _ = signed_rotation("commit", pair2, aborted, aborted_token,
+                                    aborted["new_key_id"], data_source)
+        check(status, 401, "aborted new key is revoked")
+
+        rotation_operation = str(uuid.uuid4())
+        status, body = admin_json("POST", rotation_url, {"operation_id": rotation_operation})
+        check(status, 201, "prepare active source rotation")
+        rotation = decoded(body)["rotation"]
+        new_token = decoded(body)["token"]
+        status, _ = signed_rotation("commit", pair2, rotation, token2,
+                                    pair2["key_id"], data_source)
+        check(status, 409, "old key cannot commit new rotation")
+        status, _ = signed_rotation("commit", pair2, rotation, new_token,
+                                    rotation["new_key_id"], str(uuid.uuid4()))
+        check(status, 409, "rotated key cannot change data source")
+        status, body = signed_rotation("commit", pair2, rotation, new_token,
+                                       rotation["new_key_id"], data_source)
+        check(status, 200, "commit new source key")
+        assert decoded(body)["rotation"]["state"] == "committed"
+        status, body = signed_rotation("commit", pair2, rotation, new_token,
+                                       rotation["new_key_id"], data_source)
+        check(status, 200, "idempotent rotation commit")
+        assert decoded(body)["changed"] is False
+        status, _ = request(machine, f"{api}/capabilities",
+                            headers={"Authorization": "Bearer " + token2,
+                                     "X-WeKnora-Key-Id": pair2["key_id"]})
+        check(status, 200, "old key overlaps until finalize")
+        status, _ = signed_rotation("abort", pair2, rotation, token2,
+                                    pair2["key_id"], data_source)
+        check(status, 409, "committed rotation cannot be aborted")
+        status, body = signed_rotation("finalize", pair2, rotation, new_token,
+                                       rotation["new_key_id"], data_source)
+        check(status, 200, "finalize source rotation")
+        assert decoded(body)["rotation"]["state"] == "finalized"
+        status, _ = request(machine, f"{api}/capabilities",
+                            headers={"Authorization": "Bearer " + token2,
+                                     "X-WeKnora-Key-Id": pair2["key_id"]})
+        check(status, 401, "old source key revoked after finalize")
+        status, _ = request(machine, f"{api}/capabilities",
+                            headers={"Authorization": "Bearer " + new_token,
+                                     "X-WeKnora-Key-Id": rotation["new_key_id"]})
+        check(status, 200, "new source key remains valid")
+        status, body = signed_rotation("finalize", pair2, rotation, new_token,
+                                       rotation["new_key_id"], data_source)
+        check(status, 200, "idempotent source rotation finalize")
+        assert decoded(body)["changed"] is False
         print("source pairing HTTP smoke passed")
     finally:
         if created_second_binding:
