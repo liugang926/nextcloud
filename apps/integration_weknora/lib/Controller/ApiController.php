@@ -270,6 +270,78 @@ final class ApiController extends Controller {
         }
     }
 
+    /**
+     * Recheck an already parsed candidate immediately before WeKnora makes
+     * it searchable. The signed JSON body fixes the exact source version;
+     * this route never accepts a caller supplied URL or another binding.
+     */
+    #[PublicPage]
+    #[NoCSRFRequired]
+    public function publicationCheck(string $id, int $fileId): Response {
+        if (!$this->isAuthorized($id)) {
+            return $this->unauthorized();
+        }
+        $instanceId = $this->request->getParam('instance_id');
+        $expectedEtag = $this->request->getParam('etag');
+        $expectedPath = $this->request->getParam('path');
+        if ($fileId < 1 || !is_string($instanceId) || $instanceId === '' ||
+            !is_string($expectedEtag) || trim($expectedEtag) === '' ||
+            !is_string($expectedPath) || $expectedPath === '' ||
+            strlen($instanceId) > 256 || strlen($expectedEtag) > 1024 ||
+            strlen($expectedPath) > 4096) {
+            return $this->json(['error' => 'invalid_request'], 400);
+        }
+        try {
+            if ($instanceId !== $this->config->getSystemValueString('instanceid')) {
+                return $this->json(['error' => 'source_changed'], 409);
+            }
+            $binding = $this->findBinding($id);
+            if ($binding === null) {
+                return $this->notFound();
+            }
+            $epoch = $this->bindingRegistry->requirePublicationActive($id);
+            $activeRoot = $this->bindingRegistry->requireActiveRoot($id);
+            [$userFolder, $bindingRoot] = $this->resolveRoot($binding);
+            if ($bindingRoot === null || $activeRoot->getId() !== $bindingRoot->getId() ||
+                $activeRoot->getPath() !== $bindingRoot->getPath()) {
+                return $this->notFound();
+            }
+            foreach ($bindingRoot->getById($fileId) as $node) {
+                if (!$node instanceof File || $node->getId() !== $fileId ||
+                    !$bindingRoot->isSubNode($node) || !$userFolder->isSubNode($node) ||
+                    !$node->isReadable()) {
+                    continue;
+                }
+                $node->lock(ILockingProvider::LOCK_SHARED);
+                try {
+                    $path = $bindingRoot->getRelativePath($node->getPath());
+                    if (!is_string($path) || ltrim($path, '/') !== $expectedPath ||
+                        $node->getEtag() !== $expectedEtag ||
+                        $this->publicationState->getState($id, $fileId) !== 'eligible') {
+                        return $this->json(['error' => 'publication_changed'], 409);
+                    }
+                    $freshRoot = $this->bindingRegistry->requireActiveRoot($id);
+                    if ($freshRoot->getId() !== $bindingRoot->getId() ||
+                        $freshRoot->getPath() !== $bindingRoot->getPath() ||
+                        $this->bindingRegistry->requirePublicationActive($id) !== $epoch ||
+                        $this->publicationState->getState($id, $fileId) !== 'eligible' ||
+                        $node->getEtag() !== $expectedEtag ||
+                        ltrim($bindingRoot->getRelativePath($node->getPath()), '/') !== $expectedPath) {
+                        return $this->json(['error' => 'publication_changed'], 409);
+                    }
+                    return new Response(204, ['Cache-Control' => 'no-store']);
+                } finally {
+                    $node->unlock(ILockingProvider::LOCK_SHARED);
+                }
+            }
+            return $this->notFound();
+        } catch (BindingPublicationStoppedException $exception) {
+            return $this->json(['error' => 'publication_stopped'], 423);
+        } catch (\Throwable $exception) {
+            return $this->json(['error' => 'publication_check_unavailable'], 503);
+        }
+    }
+
     private function isAuthorized(?string $bindingId = null): bool {
         return $this->serviceToken->verify($this->request, $bindingId);
     }

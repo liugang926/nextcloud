@@ -19,6 +19,12 @@ return [
             'requirements' => ['id' => '[A-Za-z0-9_-]+', 'fileId' => '[1-9][0-9]*'],
         ],
         [
+            'name' => 'api#publicationCheck',
+            'url' => '/api/v1/bindings/{id}/files/{fileId}/publication-check',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+', 'fileId' => '[1-9][0-9]*'],
+        ],
+        [
             'name' => 'changes#index',
             'url' => '/api/v1/bindings/{id}/changes',
             'verb' => 'GET',

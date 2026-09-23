@@ -167,7 +167,28 @@ def main():
         assert audit_actions(args.binding, args.file_id) == ["eligible", "withdrawn"]
         status, body = request(reader, f"{api}/bindings/{args.binding}/manifest", headers=bearer)
         check(status, 200, "manifest after republish")
-        assert args.file_id in [item["file_id"] for item in json.loads(body)["items"]]
+        item = next(item for item in json.loads(body)["items"] if item["file_id"] == args.file_id)
+        status, body = request(reader, f"{api}/capabilities", headers=bearer)
+        check(status, 200, "source capabilities for publication check")
+        instance_id = json.loads(body)["instance_id"]
+        publication_check = f"{api}/bindings/{args.binding}/files/{args.file_id}/publication-check"
+        exact = {"instance_id": instance_id, "etag": item["etag"], "path": item["path"]}
+        status, _ = request(reader, publication_check, "POST",
+                            {**bearer, "Content-Type": "application/json"}, json.dumps(exact).encode())
+        check(status, 204, "exact current publication")
+        for field, changed in (("etag", "stale-etag"), ("path", "other/path.md"),
+                               ("instance_id", "another-instance")):
+            status, _ = request(reader, publication_check, "POST",
+                                {**bearer, "Content-Type": "application/json"},
+                                json.dumps({**exact, field: changed}).encode())
+            check(status, 409, f"changed {field} publication check")
+        status, _ = request(admin, f"{file_api}/withdraw", "POST", admin_headers, b"")
+        check(status, 200, "withdraw before publication recheck")
+        status, _ = request(reader, publication_check, "POST",
+                            {**bearer, "Content-Type": "application/json"}, json.dumps(exact).encode())
+        check(status, 409, "withdrawn publication recheck")
+        status, _ = request(admin, f"{file_api}/republish", "POST", admin_headers, b"")
+        check(status, 200, "restore publication after recheck")
 
         status, body = request(admin, f"{api}/admin/bindings", headers=admin_headers)
         check(status, 200, "admin binding list")
