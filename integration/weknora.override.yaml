@@ -1,0 +1,14 @@
+services:
+  app:
+    image: weknora-ldap-app:nextcloud-integration
+    networks:
+      default:
+      nextcloud-dev:
+    environment:
+      # Exact hosts on the isolated local Docker network. This is test-only.
+      SSRF_WHITELIST_EXTRA: nextcloud,mock-embedding
+
+networks:
+  nextcloud-dev:
+    external: true
+    name: nextcloud-weknora-dev_default

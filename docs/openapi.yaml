@@ -1,0 +1,238 @@
+openapi: 3.0.3
+info:
+  title: Nextcloud WeKnora development API
+  version: 0.1.0
+  description: Local integration contract. A complete manifest means traversal succeeded; it is not a transactional snapshot. Enterprise user authorization remains unimplemented.
+servers:
+  - url: /index.php/apps/integration_weknora/api/v1
+security:
+  - serviceToken: []
+components:
+  securitySchemes:
+    serviceToken:
+      type: http
+      scheme: bearer
+    nextcloudSession:
+      type: apiKey
+      in: header
+      name: Cookie
+      description: Authenticated Nextcloud administrator session.
+    csrfToken:
+      type: apiKey
+      in: header
+      name: requesttoken
+      description: Nextcloud CSRF token for mutating requests.
+  schemas:
+    Binding:
+      type: object
+      required: [id, name, root_file_id]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        root_file_id:
+          type: integer
+    File:
+      type: object
+      required: [file_id, etag, name, path, mime_type, size, mtime, url]
+      properties:
+        file_id:
+          type: integer
+        etag:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        mime_type:
+          type: string
+        size:
+          type: integer
+        mtime:
+          type: integer
+        url:
+          type: string
+paths:
+  /capabilities:
+    get:
+      operationId: getCapabilities
+      responses:
+        '200':
+          description: Protocol and source instance identity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [protocol_version, instance_id]
+                properties:
+                  protocol_version: {type: string, enum: ['1']}
+                  instance_id: {type: string}
+        '401': {description: Invalid service token}
+  /bindings:
+    get:
+      operationId: listBindings
+      responses:
+        '200':
+          description: Published folder bindings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bindings]
+                properties:
+                  bindings:
+                    type: array
+                    items: {$ref: '#/components/schemas/Binding'}
+        '401': {description: Invalid service token}
+  /bindings/{bindingId}/manifest:
+    get:
+      operationId: getManifest
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor returned by the preceding page. Restart from page one on a changed generation.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Full traversal of the bound folder
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generation, items, complete, next_cursor]
+                properties:
+                  generation: {type: string}
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/File'}
+                  complete: {type: boolean}
+                  next_cursor: {type: string, nullable: true}
+        '401': {description: Invalid service token}
+        '404': {description: Binding not found}
+        '409': {description: The manifest changed during pagination; discard all prior pages and retry}
+  /bindings/{bindingId}/files/{fileId}/content:
+    get:
+      operationId: getFileContent
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+        - name: If-Match
+          in: header
+          required: false
+          description: The ETag from the manifest, quoted as an HTTP entity tag.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Current bytes of a file under the binding root
+          headers:
+            ETag:
+              schema: {type: string}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401': {description: Invalid service token}
+        '404': {description: File absent or outside binding}
+        '412': {description: Source version changed since the manifest}
+  /admin/bindings/{bindingId}/files/{fileId}/publication:
+    get:
+      operationId: getPublicationState
+      security:
+        - nextcloudSession: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Current publication state for a bound file}
+        '403': {description: Administrator privileges required}
+        '404': {description: File is not within the binding}
+  /admin/bindings:
+    get:
+      operationId: listAdminBindings
+      description: Full binding configuration for a Nextcloud system administrator.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200': {description: Configured bindings, including owner UID}
+        '403': {description: Administrator privileges required}
+    post:
+      operationId: saveAdminBinding
+      description: Create a binding or change its display name. Existing source identity cannot change.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name, owner_uid, root_file_id]
+              properties:
+                id: {type: string}
+                name: {type: string}
+                owner_uid: {type: string}
+                root_file_id: {type: integer}
+      responses:
+        '200': {description: Existing binding name updated}
+        '201': {description: New binding created}
+        '400': {description: Invalid binding or root folder}
+        '403': {description: Administrator privileges required}
+        '409': {description: Binding source conflict or overlapping roots}
+  /admin/bindings/{bindingId}/files/{fileId}/withdraw:
+    post:
+      operationId: withdrawPublication
+      description: Persistently exclude a file from future manifests and content reads.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Publication withdrawn}
+        '403': {description: Administrator privileges required}
+        '404': {description: File is not within the binding}
+  /admin/bindings/{bindingId}/files/{fileId}/republish:
+    post:
+      operationId: republishFile
+      description: Explicitly remove a manual withdrawal exclusion.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: File eligible for a new publication scan}
+        '403': {description: Administrator privileges required}
+        '404': {description: File is not within the binding}

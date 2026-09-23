@@ -1,0 +1,1443 @@
+diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
+index c0b24241..510bde51 100644
+--- a/internal/application/service/datasource_service.go
++++ b/internal/application/service/datasource_service.go
+@@ -768,8 +768,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+ 		return err
+ 	}
+ 
+-	// Update cursor for next incremental sync
+-	if nextCursor != nil {
++	// A Nextcloud cursor includes its confirmed source inventory. Advancing it
++	// after any failed ingest or deletion would acknowledge source changes that
++	// were never applied and could permanently skip a tombstone. Retain the
++	// previous cursor so the next run retries those changes. Other connectors
++	// retain their existing partial-sync checkpoint behavior.
++	if nextCursor != nil && (ds.Type != types.ConnectorTypeNextcloud || result.Failed == 0) {
+ 		cursorJSON, _ := nextCursor.ToJSON()
+ 		ds.LastSyncCursor = cursorJSON
+ 	}
+diff --git a/internal/application/service/datasource_service_test.go b/internal/application/service/datasource_service_test.go
+index bc90b995..b4046a43 100644
+--- a/internal/application/service/datasource_service_test.go
++++ b/internal/application/service/datasource_service_test.go
+@@ -687,6 +687,71 @@ func (mixedSyncConnector) FetchIncremental(
+ 	return items, nil, err
+ }
+ 
++type nextcloudCursorMixedConnector struct{ mixedSyncConnector }
++
++func (nextcloudCursorMixedConnector) Type() string { return types.ConnectorTypeNextcloud }
++
++func (nextcloudCursorMixedConnector) FetchIncremental(
++	ctx context.Context, config *types.DataSourceConfig, old *types.SyncCursor,
++) ([]types.FetchedItem, *types.SyncCursor, error) {
++	items, err := (mixedSyncConnector{}).FetchAll(ctx, config, nil)
++	return items, &types.SyncCursor{ConnectorCursor: map[string]interface{}{"marker": "new"}}, err
++}
++
++func TestProcessSync_NextcloudPartialFailureDoesNotAdvanceCursor(t *testing.T) {
++	for _, test := range []struct {
++		name       string
++		deleteFail bool
++		wantMarker string
++	}{
++		{name: "failed deletion retains checkpoint", deleteFail: true, wantMarker: "old"},
++		{name: "successful deletion advances checkpoint", wantMarker: "new"},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			configJSON, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud}).ToJSON()
++			require.NoError(t, err)
++			oldCursor, err := (&types.SyncCursor{ConnectorCursor: map[string]interface{}{"marker": "old"}}).ToJSON()
++			require.NoError(t, err)
++			ds := &types.DataSource{
++				ID: "ds-nextcloud", TenantID: 1, KnowledgeBaseID: "kb-1",
++				Type: types.ConnectorTypeNextcloud, Config: configJSON,
++				SyncMode: types.SyncModeIncremental, Status: types.DataSourceStatusActive,
++				SyncDeletions: true, LastSyncCursor: oldCursor,
++			}
++			syncLog := &types.SyncLog{
++				ID: "log-nextcloud", DataSourceID: ds.ID, TenantID: ds.TenantID,
++				Status: types.SyncLogStatusRunning, StartedAt: time.Now().UTC(),
++			}
++			repo := &keyedDeletionRepo{items: map[string]*types.Knowledge{
++				"file:gone": {ID: "knowledge-gone"},
++			}}
++			if test.deleteFail {
++				repo.hardDeleteErr = errors.New("hard delete failed")
++			}
++			registry := datasource.NewConnectorRegistry()
++			require.NoError(t, registry.Register(nextcloudCursorMixedConnector{}))
++			svc := &DataSourceService{
++				dsRepo: newKBDeleteDSRepo(ds.KnowledgeBaseID, ds),
++				syncLogRepo: &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{syncLog.ID: syncLog}},
++				knowledgeService: &sweepFakeKS{repo: repo},
++				kbService: &processSyncKBService{kb: &types.KnowledgeBase{ID: ds.KnowledgeBaseID, TenantID: ds.TenantID}},
++				connectorRegistry: registry,
++				tenantRepo: &processSyncTenantRepo{tenant: &types.Tenant{ID: ds.TenantID}},
++				tagService: &processSyncTagService{},
++			}
++			payload, err := json.Marshal(types.DataSourceSyncPayload{
++				DataSourceID: ds.ID, TenantID: ds.TenantID, SyncLogID: syncLog.ID,
++			})
++			require.NoError(t, err)
++			require.NoError(t, svc.ProcessSync(context.Background(), asynq.NewTask(types.TypeDataSourceSync, payload)))
++			stored, err := ds.ParseSyncCursor()
++			require.NoError(t, err)
++			require.NotNil(t, stored)
++			assert.Equal(t, test.wantMarker, stored.ConnectorCursor["marker"])
++		})
++	}
++}
++
+ func TestProcessSync_SyncDeletionsPartialWhenMixedResults(t *testing.T) {
+ 	configJSON, err := (&types.DataSourceConfig{Type: "test-sync-mixed"}).ToJSON()
+ 	require.NoError(t, err)
+diff --git a/internal/container/container.go b/internal/container/container.go
+index c27d12d1..b601c878 100644
+--- a/internal/container/container.go
++++ b/internal/container/container.go
+@@ -63,6 +63,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/datasource/connector/feishu/wiki"
+ 	gitlabConnector "github.com/Tencent/WeKnora/internal/datasource/connector/gitlab"
+ 	imaConnector "github.com/Tencent/WeKnora/internal/datasource/connector/ima"
++	nextcloudConnector "github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
+ 	notionConnector "github.com/Tencent/WeKnora/internal/datasource/connector/notion"
+ 	rssConnector "github.com/Tencent/WeKnora/internal/datasource/connector/rss"
+ 	yuqueConnector "github.com/Tencent/WeKnora/internal/datasource/connector/yuque"
+@@ -1879,6 +1880,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
+ 	if err := registry.Register(gitlabConnector.NewConnector()); err != nil {
+ 		errs = errors.Join(errs, fmt.Errorf("register gitlab connector: %w", err))
+ 	}
++	if err := registry.Register(nextcloudConnector.NewConnector()); err != nil {
++		errs = errors.Join(errs, fmt.Errorf("register nextcloud connector: %w", err))
++	}
+ 
+ 	// Future connectors will be registered here:
+ 	// if err := registry.Register(githubConnector.NewConnector()); err != nil { ... }
+diff --git a/internal/datasource/connector.go b/internal/datasource/connector.go
+index 67568c4c..28cae25c 100644
+--- a/internal/datasource/connector.go
++++ b/internal/datasource/connector.go
+@@ -310,6 +310,14 @@ var ConnectorMetadataRegistry = map[string]ConnectorMetadata{
+ 		AuthType:     "token",
+ 		Capabilities: []string{"incremental", "hierarchical"},
+ 	},
++	types.ConnectorTypeNextcloud: {
++		Type:         types.ConnectorTypeNextcloud,
++		Name:         "Nextcloud",
++		Description:  "Sync files from authorized Nextcloud publication folders",
++		Priority:     8,
++		AuthType:     "token",
++		Capabilities: []string{"incremental"},
++	},
+ }
+ 
+ // ListAvailableConnectors returns all available connector metadata
+diff --git a/internal/types/datasource.go b/internal/types/datasource.go
+index 5130b931..22c25356 100644
+--- a/internal/types/datasource.go
++++ b/internal/types/datasource.go
+@@ -38,6 +38,7 @@ const (
+ 	ConnectorTypeRSS         = "rss"
+ 	ConnectorTypeGitLab      = "gitlab"
+ 	ConnectorTypeIMA         = "ima"
++	ConnectorTypeNextcloud   = "nextcloud"
+ 
+ 	// Sync modes
+ 	SyncModeIncremental = "incremental"
+diff --git a/internal/datasource/connector/nextcloud/client.go b/internal/datasource/connector/nextcloud/client.go
+new file mode 100644
+index 00000000..76079fa0
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/client.go
+@@ -0,0 +1,232 @@
++package nextcloud
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/url"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/datasource"
++)
++
++const (
++	maxJSONResponseBytes int64 = 16 << 20
++	maxContentBytes      int64 = 64 << 20
++	maxManifestPages           = 1000
++	maxManifestItems           = 100000
++)
++
++type client struct {
++	cfg  config
++	http *http.Client
++}
++
++func newClient(cfg config) *client {
++	return &client{
++		cfg: cfg,
++		http: &http.Client{
++			Timeout: 60 * time.Second,
++			// A configured private instance is intentional for local/enterprise
++			// deployments. Requests are built only from our fixed API paths;
++			// redirects (including redirects to an arbitrary content URL) are
++			// never followed. Other connectors keep their global SSRF policy.
++			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
++				return http.ErrUseLastResponse
++			},
++			Transport: &http.Transport{
++				Proxy:                 nil,
++				DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
++				TLSHandshakeTimeout:   10 * time.Second,
++				ResponseHeaderTimeout: 20 * time.Second,
++				IdleConnTimeout:       30 * time.Second,
++				MaxIdleConns:          10,
++			},
++		},
++	}
++}
++
++func (c *client) endpointURL(endpoint string, query url.Values) string {
++	u := *c.cfg.baseURL
++	u.Path = strings.TrimRight(u.Path, "/") + apiPath + endpoint
++	u.RawPath = ""
++	if len(query) != 0 {
++		u.RawQuery = query.Encode()
++	}
++	return u.String()
++}
++
++func (c *client) get(ctx context.Context, endpoint string, query url.Values, ifMatch ...string) (*http.Response, error) {
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL(endpoint, query), nil)
++	if err != nil {
++		return nil, err
++	}
++	req.Header.Set("Authorization", "Bearer "+c.cfg.token)
++	req.Header.Set("Accept", "application/json")
++	if len(ifMatch) != 0 {
++		req.Header.Set("If-Match", `"`+normalizedETag(ifMatch[0])+`"`)
++	}
++	resp, err := c.http.Do(req)
++	if err != nil {
++		return nil, fmt.Errorf("Nextcloud request %s: %w", endpoint, err)
++	}
++	if resp.StatusCode != http.StatusOK {
++		resp.Body.Close()
++		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
++			return nil, fmt.Errorf("%w: Nextcloud %s returned status %d", datasource.ErrInvalidCredentials, endpoint, resp.StatusCode)
++		}
++		return nil, fmt.Errorf("Nextcloud %s returned status %d", endpoint, resp.StatusCode)
++	}
++	return resp, nil
++}
++
++func readLimited(body io.Reader, limit int64) ([]byte, error) {
++	data, err := io.ReadAll(io.LimitReader(body, limit+1))
++	if err != nil {
++		return nil, err
++	}
++	if int64(len(data)) > limit {
++		return nil, fmt.Errorf("response exceeds %d MiB limit", limit>>20)
++	}
++	return data, nil
++}
++
++func (c *client) getJSON(ctx context.Context, endpoint string, query url.Values, target interface{}) error {
++	resp, err := c.get(ctx, endpoint, query)
++	if err != nil {
++		return err
++	}
++	defer resp.Body.Close()
++	if resp.ContentLength > maxJSONResponseBytes {
++		return fmt.Errorf("Nextcloud %s exceeds manifest response size limit", endpoint)
++	}
++	data, err := readLimited(resp.Body, maxJSONResponseBytes)
++	if err != nil {
++		return fmt.Errorf("Nextcloud %s: %w", endpoint, err)
++	}
++	if err := json.Unmarshal(data, target); err != nil {
++		return fmt.Errorf("decode Nextcloud %s: %w", endpoint, err)
++	}
++	return nil
++}
++
++func (c *client) capabilities(ctx context.Context) (capabilities, error) {
++	var info capabilities
++	if err := c.getJSON(ctx, "/capabilities", nil, &info); err != nil {
++		return capabilities{}, err
++	}
++	if info.ProtocolVersion != "1" || strings.TrimSpace(info.InstanceID) == "" {
++		return capabilities{}, fmt.Errorf("unsupported or incomplete Nextcloud integration protocol")
++	}
++	return info, nil
++}
++
++func (c *client) bindings(ctx context.Context) ([]binding, error) {
++	var result bindingsResponse
++	if err := c.getJSON(ctx, "/bindings", nil, &result); err != nil {
++		return nil, err
++	}
++	seen := make(map[string]bool, len(result.Bindings))
++	for _, b := range result.Bindings {
++		if !validBindingID(b.ID) || strings.TrimSpace(b.Name) == "" || b.RootFileID <= 0 || seen[b.ID] {
++			return nil, fmt.Errorf("invalid or duplicate Nextcloud binding")
++		}
++		seen[b.ID] = true
++	}
++	return result.Bindings, nil
++}
++
++func (c *client) manifest(ctx context.Context, bindingID string) ([]manifestItem, string, error) {
++	if !validBindingID(bindingID) {
++		return nil, "", fmt.Errorf("%w: invalid binding ID", datasource.ErrInvalidConfig)
++	}
++	endpoint := "/bindings/" + bindingID + "/manifest"
++	seenCursor := make(map[string]bool)
++	seenFiles := make(map[int64]bool)
++	var items []manifestItem
++	var generation, cursor string
++	for pageNum := 0; pageNum < maxManifestPages; pageNum++ {
++		var query url.Values
++		if cursor != "" {
++			query = url.Values{"cursor": {cursor}}
++		}
++		var page manifestPage
++		if err := c.getJSON(ctx, endpoint, query, &page); err != nil {
++			return nil, "", err
++		}
++		if page.Complete == nil || strings.TrimSpace(page.Generation) == "" {
++			return nil, "", fmt.Errorf("Nextcloud manifest lacks completion or generation")
++		}
++		if generation == "" {
++			generation = page.Generation
++		} else if generation != page.Generation {
++			return nil, "", fmt.Errorf("Nextcloud manifest generation changed during pagination")
++		}
++		for _, item := range page.Items {
++			if err := item.validate(); err != nil {
++				return nil, "", err
++			}
++			if seenFiles[item.FileID] {
++				return nil, "", fmt.Errorf("Nextcloud manifest contains duplicate file_id %d", item.FileID)
++			}
++			seenFiles[item.FileID] = true
++			items = append(items, item)
++			if len(items) > maxManifestItems {
++				return nil, "", fmt.Errorf("Nextcloud manifest exceeds %d item limit", maxManifestItems)
++			}
++		}
++		if *page.Complete {
++			if page.NextCursor != nil && *page.NextCursor != "" {
++				return nil, "", fmt.Errorf("Nextcloud manifest is complete but has next_cursor")
++			}
++			return items, generation, nil
++		}
++		if page.NextCursor == nil || *page.NextCursor == "" || seenCursor[*page.NextCursor] {
++			return nil, "", fmt.Errorf("Nextcloud manifest is incomplete without a new next_cursor")
++		}
++		cursor = *page.NextCursor
++		seenCursor[cursor] = true
++	}
++	return nil, "", fmt.Errorf("Nextcloud manifest exceeds %d pages", maxManifestPages)
++}
++
++func normalizedETag(raw string) string {
++	raw = strings.TrimSpace(raw)
++	raw = strings.TrimPrefix(raw, "W/")
++	return strings.Trim(raw, `"`)
++}
++
++func (c *client) content(ctx context.Context, bindingID string, item manifestItem) ([]byte, string, error) {
++	if !validBindingID(bindingID) || item.FileID <= 0 {
++		return nil, "", fmt.Errorf("%w: invalid content identifier", datasource.ErrInvalidConfig)
++	}
++	endpoint := "/bindings/" + bindingID + "/files/" + strconv.FormatInt(item.FileID, 10) + "/content"
++	resp, err := c.get(ctx, endpoint, nil, item.ETag)
++	if err != nil {
++		return nil, "", err
++	}
++	defer resp.Body.Close()
++	if resp.ContentLength > maxContentBytes || item.Size > maxContentBytes {
++		return nil, "", fmt.Errorf("Nextcloud file %d exceeds %d MiB download limit", item.FileID, maxContentBytes>>20)
++	}
++	content, err := readLimited(resp.Body, maxContentBytes)
++	if err != nil {
++		return nil, "", fmt.Errorf("download Nextcloud file %d: %w", item.FileID, err)
++	}
++	if len(content) == 0 {
++		return nil, "", fmt.Errorf("Nextcloud file %d is empty; refusing to advance cursor without an importable item", item.FileID)
++	}
++	if tag := normalizedETag(resp.Header.Get("ETag")); tag == "" || tag != normalizedETag(item.ETag) {
++		return nil, "", fmt.Errorf("Nextcloud file %d ETag changed during download", item.FileID)
++	}
++	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
++	if contentType == "" {
++		contentType = item.MimeType
++	}
++	return content, contentType, nil
++}
+diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
+new file mode 100644
+index 00000000..bf259e34
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/connector.go
+@@ -0,0 +1,303 @@
++// Package nextcloud imports files exposed by the integration_weknora Nextcloud app.
++package nextcloud
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"sort"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/datasource"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++var _ datasource.Connector = (*Connector)(nil)
++var _ datasource.FullSyncWithCursor = (*Connector)(nil)
++
++type Connector struct{}
++
++func NewConnector() *Connector { return &Connector{} }
++
++func (*Connector) Type() string { return types.ConnectorTypeNextcloud }
++
++func (*Connector) Validate(ctx context.Context, ds *types.DataSourceConfig) error {
++	cfg, err := parseConfig(ds)
++	if err != nil {
++		return err
++	}
++	cli := newClient(cfg)
++	if _, err := cli.capabilities(ctx); err != nil {
++		return err
++	}
++	_, err = cli.bindings(ctx)
++	return err
++}
++
++func (*Connector) ListResources(ctx context.Context, ds *types.DataSourceConfig, parentID string) ([]types.Resource, error) {
++	if parentID != "" {
++		return []types.Resource{}, nil
++	}
++	cfg, err := parseConfig(ds)
++	if err != nil {
++		return nil, err
++	}
++	cli := newClient(cfg)
++	if _, err := cli.capabilities(ctx); err != nil {
++		return nil, err
++	}
++	bindings, err := cli.bindings(ctx)
++	if err != nil {
++		return nil, err
++	}
++	resources := make([]types.Resource, 0, len(bindings))
++	for _, binding := range bindings {
++		resources = append(resources, types.Resource{
++			ExternalID: binding.ID,
++			Name:       binding.Name,
++			Type:       "folder",
++			URL:        cfg.baseURL.String(),
++			Metadata:   map[string]interface{}{"root_file_id": binding.RootFileID},
++		})
++	}
++	return resources, nil
++}
++
++func (*Connector) ResolveResourceAncestors(context.Context, *types.DataSourceConfig, []string) ([]string, error) {
++	return []string{}, nil
++}
++
++func (c *Connector) FetchAll(ctx context.Context, ds *types.DataSourceConfig, resourceIDs []string) ([]types.FetchedItem, error) {
++	if len(resourceIDs) == 0 && ds != nil {
++		resourceIDs = ds.ResourceIDs
++	}
++	items, _, err := c.walk(ctx, ds, resourceIDs, nil, true, false)
++	return items, err
++}
++
++// FetchAllFromCursor re-fetches every current file while retaining the prior
++// inventory for the same two-scan deletion reconciliation as incremental sync.
++func (c *Connector) FetchAllFromCursor(
++	ctx context.Context, ds *types.DataSourceConfig, resourceIDs []string, old *types.SyncCursor,
++) ([]types.FetchedItem, *types.SyncCursor, error) {
++	return c.walk(ctx, ds, resourceIDs, old, true, true)
++}
++
++func (c *Connector) FetchIncremental(
++	ctx context.Context, ds *types.DataSourceConfig, old *types.SyncCursor,
++) ([]types.FetchedItem, *types.SyncCursor, error) {
++	if ds == nil {
++		return nil, nil, datasource.ErrInvalidConfig
++	}
++	return c.walk(ctx, ds, ds.ResourceIDs, old, false, true)
++}
++
++func selectedBindings(resourceIDs []string) ([]string, error) {
++	if len(resourceIDs) == 0 {
++		return nil, fmt.Errorf("%w: select at least one Nextcloud binding", datasource.ErrInvalidConfig)
++	}
++	seen := make(map[string]bool, len(resourceIDs))
++	selected := make([]string, 0, len(resourceIDs))
++	for _, id := range resourceIDs {
++		if !validBindingID(id) {
++			return nil, fmt.Errorf("%w: invalid Nextcloud binding ID", datasource.ErrInvalidConfig)
++		}
++		if !seen[id] {
++			seen[id] = true
++			selected = append(selected, id)
++		}
++	}
++	return selected, nil
++}
++
++func (c *Connector) walk(
++	ctx context.Context, ds *types.DataSourceConfig, resourceIDs []string,
++	old *types.SyncCursor, full bool, reconcile bool,
++) ([]types.FetchedItem, *types.SyncCursor, error) {
++	cfg, err := parseConfig(ds)
++	if err != nil {
++		return nil, nil, err
++	}
++	selected, err := selectedBindings(resourceIDs)
++	if err != nil {
++		return nil, nil, err
++	}
++	previous, err := decodeCursor(old)
++	if err != nil {
++		return nil, nil, err
++	}
++	cli := newClient(cfg)
++	cap, err := cli.capabilities(ctx)
++	if err != nil {
++		return nil, nil, err
++	}
++	if previous.InstanceID != cap.InstanceID {
++		previous.Files = nil // A restored/cloned instance must be re-imported.
++		previous.Missing = nil
++		previous.Tombstones = nil
++	}
++
++	// Never compare or download from a partial scan. All selected bindings
++	// must yield complete, internally consistent manifests first. A failed
++	// page, permission response, or generation change returns no new cursor.
++	manifests := make(map[string][]manifestItem, len(selected))
++	generations := make(map[string]string, len(selected))
++	globalFiles := make(map[int64]string)
++	for _, bindingID := range selected {
++		manifest, generation, err := cli.manifest(ctx, bindingID)
++		if err != nil {
++			return nil, nil, fmt.Errorf("Nextcloud binding %s manifest: %w", bindingID, err)
++		}
++		for _, file := range manifest {
++			if other, exists := globalFiles[file.FileID]; exists {
++				return nil, nil, fmt.Errorf("Nextcloud file %d appears in bindings %s and %s", file.FileID, other, bindingID)
++			}
++			globalFiles[file.FileID] = bindingID
++		}
++		manifests[bindingID] = manifest
++		generations[bindingID] = generation
++	}
++
++	next := syncState{
++		InstanceID: cap.InstanceID,
++		Files:      make(map[string]map[string]fileState, len(selected)),
++		Missing:    make(map[string]map[string]bool),
++		Tombstones: make(map[string]map[string]fileState),
++	}
++	var out []types.FetchedItem
++	importableFiles := make(map[int64]bool)
++	for _, bindingID := range selected {
++		current := make(map[string]fileState)
++		next.Files[bindingID] = current
++		for _, file := range manifests[bindingID] {
++			if !supportedFile(file.Name, ds.MultimodalEnabled) {
++				continue
++			}
++			importableFiles[file.FileID] = true
++			id := strconv.FormatInt(file.FileID, 10)
++			state := file.state()
++			if !full && previous.Files != nil && previous.Files[bindingID][id] == state {
++				current[id] = state
++				continue
++			}
++			content, contentType, err := cli.content(ctx, bindingID, file)
++			if err != nil {
++				return nil, nil, err
++			}
++			out = append(out, fetchedItem(cap.InstanceID, bindingID, generations[bindingID], file, content, contentType))
++			current[id] = state
++		}
++	}
++
++	if !reconcile {
++		return out, nil, nil
++	}
++	// A manifest is only a complete traversal, not an atomic snapshot. A
++	// missing file is therefore a deletion candidate on the first complete
++	// scan and a tombstone only after a separate complete scan confirms it.
++	// Keep emitting confirmed tombstones until the file reappears because the
++	// importer has no per-item acknowledgement or deletion receipt.
++	for _, bindingID := range selected {
++		current := next.Files[bindingID]
++		for _, id := range sortedStateIDs(previous.Files[bindingID]) {
++			state := previous.Files[bindingID][id]
++			fileID, err := strconv.ParseInt(id, 10, 64)
++			if err != nil || fileID < 1 {
++				return nil, nil, fmt.Errorf("invalid Nextcloud file ID in cursor")
++			}
++			if importableFiles[fileID] {
++				// A move to another selected binding is an upsert there, not
++				// a deletion of this stable source identity.
++				continue
++			}
++			if _, alreadyConfirmed := previous.Tombstones[bindingID][id]; alreadyConfirmed {
++				continue
++			}
++			if previous.Missing[bindingID][id] {
++				rememberTombstone(&next, bindingID, id, state)
++				out = append(out, deletedItem(cap.InstanceID, bindingID, id, state))
++			} else {
++				current[id] = state
++				if next.Missing[bindingID] == nil {
++					next.Missing[bindingID] = make(map[string]bool)
++				}
++				next.Missing[bindingID][id] = true
++			}
++		}
++		for _, id := range sortedStateIDs(previous.Tombstones[bindingID]) {
++			state := previous.Tombstones[bindingID][id]
++			fileID, err := strconv.ParseInt(id, 10, 64)
++			if err != nil || fileID < 1 {
++				return nil, nil, fmt.Errorf("invalid Nextcloud tombstone file ID in cursor")
++			}
++			if importableFiles[fileID] {
++				continue
++			}
++			rememberTombstone(&next, bindingID, id, state)
++			out = append(out, deletedItem(cap.InstanceID, bindingID, id, state))
++		}
++	}
++	cursorMap := make(map[string]interface{})
++	raw, err := json.Marshal(next)
++	if err != nil {
++		return nil, nil, fmt.Errorf("encode Nextcloud cursor: %w", err)
++	}
++	if err := json.Unmarshal(raw, &cursorMap); err != nil {
++		return nil, nil, fmt.Errorf("decode Nextcloud cursor: %w", err)
++	}
++	return out, &types.SyncCursor{LastSyncTime: time.Now().UTC(), ConnectorCursor: cursorMap}, nil
++}
++
++func sortedStateIDs(states map[string]fileState) []string {
++	ids := make([]string, 0, len(states))
++	for id := range states {
++		ids = append(ids, id)
++	}
++	sort.Strings(ids)
++	return ids
++}
++
++func rememberTombstone(next *syncState, bindingID, id string, state fileState) {
++	if next.Tombstones[bindingID] == nil {
++		next.Tombstones[bindingID] = make(map[string]fileState)
++	}
++	next.Tombstones[bindingID][id] = state
++}
++
++func deletedItem(instanceID, bindingID, id string, state fileState) types.FetchedItem {
++	return types.FetchedItem{
++		ExternalID:       "nextcloud:" + instanceID + ":" + id,
++		SourceResourceID: bindingID,
++		Title:            state.Name,
++		FileName:         state.Name,
++		IsDeleted:        true,
++	}
++}
++
++func fetchedItem(instanceID, bindingID, generation string, file manifestItem, content []byte, contentType string) types.FetchedItem {
++	updatedAt := time.Time{}
++	if file.MTime > 0 {
++		updatedAt = time.Unix(file.MTime, 0).UTC()
++	}
++	return types.FetchedItem{
++		ExternalID:       "nextcloud:" + instanceID + ":" + strconv.FormatInt(file.FileID, 10),
++		SourceResourceID: bindingID,
++		Title:            file.Name,
++		FileName:         file.Name,
++		Content:          content,
++		ContentType:      contentType,
++		URL:              strings.TrimSpace(file.URL),
++		UpdatedAt:        updatedAt,
++		Metadata: map[string]string{
++			"channel":               types.ConnectorTypeNextcloud,
++			"nextcloud_instance_id": instanceID,
++			"nextcloud_binding_id":  bindingID,
++			"nextcloud_file_id":     strconv.FormatInt(file.FileID, 10),
++			"nextcloud_etag":        file.ETag,
++			"nextcloud_path":        file.Path,
++			"nextcloud_generation":  generation,
++		},
++	}
++}
+diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
+new file mode 100644
+index 00000000..dda26d18
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/connector_test.go
+@@ -0,0 +1,561 @@
++package nextcloud
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++func testConfig(base string) *types.DataSourceConfig {
++	return &types.DataSourceConfig{
++		Type:        types.ConnectorTypeNextcloud,
++		Settings:    map[string]interface{}{"base_url": base},
++		Credentials: map[string]interface{}{"token": "test-token"},
++		ResourceIDs: []string{"dev-published"},
++	}
++}
++
++func testManifest(tag string) map[string]interface{} {
++	return map[string]interface{}{
++		"generation": "generation-1", "complete": true, "next_cursor": nil,
++		"items": []map[string]interface{}{{
++			"file_id": 41, "etag": tag, "name": "Notes.md", "path": "/Published/Notes.md",
++			"mime_type": "text/markdown", "size": 5, "mtime": 1700000000,
++			"url": "https://files.example/index.php/f/41",
++		}},
++	}
++}
++
++func writeJSON(w http.ResponseWriter, value interface{}) {
++	w.Header().Set("Content-Type", "application/json")
++	_ = json.NewEncoder(w).Encode(value)
++}
++
++func TestConnectorContractAndIncrementalETag(t *testing.T) {
++	var tag = "etag-1"
++	var body = "hello"
++	var contentRequests int
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
++			t.Errorf("Authorization = %q", got)
++			http.Error(w, "unauthorized", http.StatusUnauthorized)
++			return
++		}
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings":
++			writeJSON(w, map[string]interface{}{"bindings": []map[string]interface{}{{
++				"id": "dev-published", "name": "Published", "root_file_id": 7,
++			}}})
++		case apiPath + "/bindings/dev-published/manifest":
++			writeJSON(w, testManifest(tag))
++		case apiPath + "/bindings/dev-published/files/41/content":
++			contentRequests++
++			if got := r.Header.Get("If-Match"); got != `"`+tag+`"` {
++				t.Errorf("If-Match = %q, want %q", got, `"`+tag+`"`)
++			}
++			w.Header().Set("Content-Type", "text/markdown")
++			w.Header().Set("ETag", `"`+tag+`"`)
++			_, _ = w.Write([]byte(body))
++		default:
++			t.Errorf("unexpected request path %s", r.URL.Path)
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	ctx := context.Background()
++	ds := testConfig(server.URL)
++	connector := NewConnector()
++	if got := connector.Type(); got != types.ConnectorTypeNextcloud {
++		t.Fatalf("Type() = %q", got)
++	}
++	if err := connector.Validate(ctx, ds); err != nil {
++		t.Fatalf("Validate: %v", err)
++	}
++	resources, err := connector.ListResources(ctx, ds, "")
++	if err != nil || len(resources) != 1 || resources[0].ExternalID != "dev-published" || resources[0].Name != "Published" {
++		t.Fatalf("ListResources = %+v, %v", resources, err)
++	}
++	children, err := connector.ListResources(ctx, ds, "dev-published")
++	if err != nil || len(children) != 0 {
++		t.Fatalf("ListResources(children) = %+v, %v", children, err)
++	}
++
++	all, err := connector.FetchAll(ctx, ds, ds.ResourceIDs)
++	if err != nil || len(all) != 1 || string(all[0].Content) != "hello" {
++		t.Fatalf("FetchAll = %+v, %v", all, err)
++	}
++	if all[0].ExternalID != "nextcloud:instance-1:41" || all[0].SourceResourceID != "dev-published" ||
++		all[0].ContentType != "text/markdown" || all[0].Metadata["nextcloud_etag"] != tag {
++		t.Fatalf("unexpected FetchedItem: %+v", all[0])
++	}
++
++	first, cursor, err := connector.FetchIncremental(ctx, ds, nil)
++	if err != nil || cursor == nil || len(first) != 1 {
++		t.Fatalf("first incremental = %+v, %+v, %v", first, cursor, err)
++	}
++	second, next, err := connector.FetchIncremental(ctx, ds, cursor)
++	if err != nil || next == nil || len(second) != 0 || contentRequests != 2 {
++		t.Fatalf("unchanged incremental = %+v, %+v, %v; downloads=%d", second, next, err, contentRequests)
++	}
++	tag, body = "etag-2", "world"
++	changed, _, err := connector.FetchIncremental(ctx, ds, next)
++	if err != nil || len(changed) != 1 || string(changed[0].Content) != "world" || contentRequests != 3 {
++		t.Fatalf("changed incremental = %+v, %v; downloads=%d", changed, err, contentRequests)
++	}
++}
++
++func TestIncompleteManifestNeverDownloadsOrDeletes(t *testing.T) {
++	var contentRequests int
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			writeJSON(w, map[string]interface{}{
++				"generation": "g1", "complete": false, "next_cursor": nil,
++				"items": []interface{}{testManifest("etag-1")["items"].([]map[string]interface{})[0]},
++			})
++		case apiPath + "/bindings/dev-published/files/41/content":
++			contentRequests++
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	old := &types.SyncCursor{ConnectorCursor: map[string]interface{}{
++		"instance_id": "instance-1",
++		"files": map[string]interface{}{"dev-published": map[string]interface{}{
++			"99": map[string]interface{}{"etag": "old", "name": "Old.md", "path": "/Old.md"},
++		}},
++	}}
++	items, next, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), old)
++	if err == nil || next != nil || len(items) != 0 || contentRequests != 0 {
++		t.Fatalf("incomplete manifest = %+v, %+v, %v; downloads=%d", items, next, err, contentRequests)
++	}
++}
++
++func TestDeletionNeedsTwoCompleteScansAndTombstoneRetries(t *testing.T) {
++	present := true
++	manifestStatus := http.StatusOK
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			if manifestStatus != http.StatusOK {
++				http.Error(w, "temporary outage", manifestStatus)
++				return
++			}
++			manifest := testManifest("etag-1")
++			if !present {
++				manifest["items"] = []map[string]interface{}{}
++			}
++			writeJSON(w, manifest)
++		case apiPath + "/bindings/dev-published/files/41/content":
++			w.Header().Set("ETag", "etag-1")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	connector := NewConnector()
++	config := testConfig(server.URL)
++	ctx := context.Background()
++	items, cursor, err := connector.FetchIncremental(ctx, config, nil)
++	if err != nil || len(items) != 1 || items[0].IsDeleted || cursor == nil {
++		t.Fatalf("initial import = %+v, %+v, %v", items, cursor, err)
++	}
++
++	present = false
++	items, firstMissing, err := connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 0 || firstMissing == nil {
++		t.Fatalf("first missing scan = %+v, %+v, %v", items, firstMissing, err)
++	}
++	state, err := decodeCursor(firstMissing)
++	if err != nil || !state.Missing["dev-published"]["41"] || state.Files["dev-published"]["41"].ETag != "etag-1" {
++		t.Fatalf("first missing cursor = %+v, %v", state, err)
++	}
++
++	// An incomplete or failed scan is never evidence of disappearance and
++	// must not advance the pending-deletion cursor.
++	manifestStatus = http.StatusServiceUnavailable
++	items, failedCursor, err := connector.FetchIncremental(ctx, config, firstMissing)
++	if err == nil || len(items) != 0 || failedCursor != nil {
++		t.Fatalf("failed scan = %+v, %+v, %v", items, failedCursor, err)
++	}
++	manifestStatus = http.StatusOK
++	items, confirmed, err := connector.FetchIncremental(ctx, config, firstMissing)
++	if err != nil || confirmed == nil || len(items) != 1 || !items[0].IsDeleted ||
++		items[0].ExternalID != "nextcloud:instance-1:41" || items[0].SourceResourceID != "dev-published" {
++		t.Fatalf("confirmed deletion = %+v, %+v, %v", items, confirmed, err)
++	}
++	state, err = decodeCursor(confirmed)
++	if err != nil || state.Tombstones["dev-published"]["41"].Name != "Notes.md" ||
++		len(state.Files["dev-published"]) != 0 {
++		t.Fatalf("confirmed cursor = %+v, %v", state, err)
++	}
++
++	// The downstream importer does not acknowledge individual deletes.
++	// Re-emit confirmed tombstones until the file returns.
++	items, retryCursor, err := connector.FetchIncremental(ctx, config, confirmed)
++	if err != nil || retryCursor == nil || len(items) != 1 || !items[0].IsDeleted {
++		t.Fatalf("retry tombstone = %+v, %+v, %v", items, retryCursor, err)
++	}
++	items, _, err = connector.FetchIncremental(ctx, config, firstMissing)
++	if err != nil || len(items) != 1 || !items[0].IsDeleted {
++		t.Fatalf("uncommitted tombstone replay = %+v, %v", items, err)
++	}
++
++	present = true
++	items, restored, err := connector.FetchIncremental(ctx, config, retryCursor)
++	if err != nil || restored == nil || len(items) != 1 || items[0].IsDeleted || string(items[0].Content) != "hello" {
++		t.Fatalf("restored file = %+v, %+v, %v", items, restored, err)
++	}
++	state, err = decodeCursor(restored)
++	if err != nil || len(state.Tombstones["dev-published"]) != 0 {
++		t.Fatalf("restored cursor retains tombstone: %+v, %v", state, err)
++	}
++}
++
++func TestFullSyncWithCursorRefetchesAndReconcilesDeletion(t *testing.T) {
++	present := true
++	downloads := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			manifest := testManifest("etag-1")
++			if !present {
++				manifest["items"] = []map[string]interface{}{}
++			}
++			writeJSON(w, manifest)
++		case apiPath + "/bindings/dev-published/files/41/content":
++			downloads++
++			w.Header().Set("ETag", "etag-1")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	connector := NewConnector()
++	config := testConfig(server.URL)
++	ctx := context.Background()
++	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
++	if err != nil || cursor == nil {
++		t.Fatalf("initial sync: cursor=%+v err=%v", cursor, err)
++	}
++	items, cursor, err := connector.FetchAllFromCursor(ctx, config, config.ResourceIDs, cursor)
++	if err != nil || cursor == nil || len(items) != 1 || items[0].IsDeleted || downloads != 2 {
++		t.Fatalf("full re-fetch = %+v, %+v, %v; downloads=%d", items, cursor, err, downloads)
++	}
++	present = false
++	items, cursor, err = connector.FetchAllFromCursor(ctx, config, config.ResourceIDs, cursor)
++	if err != nil || cursor == nil || len(items) != 0 {
++		t.Fatalf("first full absence = %+v, %+v, %v", items, cursor, err)
++	}
++	items, cursor, err = connector.FetchAllFromCursor(ctx, config, config.ResourceIDs, cursor)
++	if err != nil || cursor == nil || len(items) != 1 || !items[0].IsDeleted {
++		t.Fatalf("confirmed full deletion = %+v, %+v, %v", items, cursor, err)
++	}
++}
++
++func TestMoveBetweenSelectedBindingsDoesNotDeleteStableFileID(t *testing.T) {
++	binding := "a"
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/a/manifest", apiPath + "/bindings/b/manifest":
++			manifest := testManifest("etag-1")
++			if r.URL.Path != apiPath+"/bindings/"+binding+"/manifest" {
++				manifest["items"] = []map[string]interface{}{}
++			}
++			writeJSON(w, manifest)
++		case apiPath + "/bindings/a/files/41/content", apiPath + "/bindings/b/files/41/content":
++			w.Header().Set("ETag", "etag-1")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	config := testConfig(server.URL)
++	config.ResourceIDs = []string{"a", "b"}
++	connector := NewConnector()
++	items, cursor, err := connector.FetchIncremental(context.Background(), config, nil)
++	if err != nil || len(items) != 1 || items[0].SourceResourceID != "a" {
++		t.Fatalf("initial binding = %+v, %v", items, err)
++	}
++	binding = "b"
++	items, cursor, err = connector.FetchIncremental(context.Background(), config, cursor)
++	if err != nil || len(items) != 1 || items[0].IsDeleted || items[0].SourceResourceID != "b" {
++		t.Fatalf("moved binding = %+v, %v", items, err)
++	}
++	items, _, err = connector.FetchIncremental(context.Background(), config, cursor)
++	if err != nil || len(items) != 0 {
++		t.Fatalf("settled move = %+v, %v", items, err)
++	}
++}
++
++func TestReappearanceResetsMissingObservation(t *testing.T) {
++	present := true
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			manifest := testManifest("etag-1")
++			if !present {
++				manifest["items"] = []map[string]interface{}{}
++			}
++			writeJSON(w, manifest)
++		case apiPath + "/bindings/dev-published/files/41/content":
++			w.Header().Set("ETag", "etag-1")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	connector := NewConnector()
++	config := testConfig(server.URL)
++	ctx := context.Background()
++	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	present = false
++	items, cursor, err := connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 0 {
++		t.Fatalf("first absence = %+v, %v", items, err)
++	}
++	present = true
++	items, cursor, err = connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 0 {
++		t.Fatalf("reappearance = %+v, %v", items, err)
++	}
++	state, err := decodeCursor(cursor)
++	if err != nil || len(state.Missing["dev-published"]) != 0 {
++		t.Fatalf("missing observation not reset: %+v, %v", state, err)
++	}
++	present = false
++	items, cursor, err = connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 0 {
++		t.Fatalf("new first absence = %+v, %v", items, err)
++	}
++	items, _, err = connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 1 || !items[0].IsDeleted {
++		t.Fatalf("new second absence = %+v, %v", items, err)
++	}
++}
++
++func TestUnsupportedRenameWithdrawsPreviouslyImportedFile(t *testing.T) {
++	name := "Notes.md"
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			manifest := testManifest("etag-1")
++			manifest["items"].([]map[string]interface{})[0]["name"] = name
++			writeJSON(w, manifest)
++		case apiPath + "/bindings/dev-published/files/41/content":
++			w.Header().Set("ETag", "etag-1")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	connector := NewConnector()
++	config := testConfig(server.URL)
++	ctx := context.Background()
++	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	name = "Notes.bin"
++	items, cursor, err := connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 0 {
++		t.Fatalf("first unsupported scan = %+v, %v", items, err)
++	}
++	items, _, err = connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 1 || !items[0].IsDeleted || items[0].ExternalID != "nextcloud:instance-1:41" {
++		t.Fatalf("confirmed unsupported rename = %+v, %v", items, err)
++	}
++}
++
++func TestInstanceChangeDoesNotApplyOldDeletionEvidence(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "new-instance"})
++		case apiPath + "/bindings/dev-published/manifest":
++			writeJSON(w, map[string]interface{}{
++				"generation": "empty", "complete": true, "next_cursor": nil,
++				"items": []interface{}{},
++			})
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	old := &types.SyncCursor{ConnectorCursor: map[string]interface{}{
++		"instance_id": "old-instance",
++		"files": map[string]interface{}{"dev-published": map[string]interface{}{
++			"41": map[string]interface{}{"etag": "etag-1", "name": "Notes.md"},
++		}},
++		"missing": map[string]interface{}{"dev-published": map[string]interface{}{"41": true}},
++		"tombstones": map[string]interface{}{"dev-published": map[string]interface{}{
++			"42": map[string]interface{}{"etag": "etag-2", "name": "Old.md"},
++		}},
++	}}
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), old)
++	if err != nil || cursor == nil || len(items) != 0 {
++		t.Fatalf("new instance = %+v, %+v, %v", items, cursor, err)
++	}
++	state, err := decodeCursor(cursor)
++	if err != nil || state.InstanceID != "new-instance" || len(state.Missing) != 0 || len(state.Tombstones) != 0 {
++		t.Fatalf("old deletion evidence retained: %+v, %v", state, err)
++	}
++}
++
++func TestPaginatedManifestCompletesBeforeDownload(t *testing.T) {
++	var pages, downloads int
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			pages++
++			if r.URL.Query().Get("cursor") == "" {
++				writeJSON(w, map[string]interface{}{"generation": "g1", "complete": false, "next_cursor": "page-2", "items": testManifest("etag-1")["items"]})
++			} else if r.URL.Query().Get("cursor") == "page-2" {
++				writeJSON(w, map[string]interface{}{"generation": "g1", "complete": true, "next_cursor": nil, "items": []interface{}{}})
++			} else {
++				t.Errorf("unexpected cursor %q", r.URL.Query().Get("cursor"))
++			}
++		case apiPath + "/bindings/dev-published/files/41/content":
++			if pages != 2 {
++				t.Errorf("download before complete manifest: pages=%d", pages)
++			}
++			downloads++
++			w.Header().Set("ETag", "etag-1")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	if err != nil || len(items) != 1 || cursor == nil || pages != 2 || downloads != 1 {
++		t.Fatalf("paged sync = %+v, %+v, %v; pages=%d downloads=%d", items, cursor, err, pages, downloads)
++	}
++}
++
++func TestChangedContentETagRejectsCursor(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			writeJSON(w, testManifest("etag-1"))
++		case apiPath + "/bindings/dev-published/files/41/content":
++			w.Header().Set("ETag", `"etag-2"`)
++			_, _ = w.Write([]byte("newer"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	if err == nil || !strings.Contains(err.Error(), "ETag changed") || len(items) != 0 || cursor != nil {
++		t.Fatalf("ETag race = %+v, %+v, %v", items, cursor, err)
++	}
++}
++
++func TestRedirectAndOversizeAreRejected(t *testing.T) {
++	var redirected int
++	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		redirected++
++	}))
++	defer target.Close()
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			writeJSON(w, testManifest("etag-1"))
++		case apiPath + "/bindings/dev-published/files/41/content":
++			if r.URL.Query().Get("oversize") == "1" {
++				w.Header().Set("Content-Length", fmt.Sprint(maxContentBytes+1))
++				w.Header().Set("ETag", "etag-1")
++				_, _ = w.Write([]byte("hello"))
++			} else {
++				http.Redirect(w, r, target.URL+"/stolen", http.StatusFound)
++			}
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	_, _, err := NewConnector().FetchIncremental(context.Background(), testConfig(server.URL), nil)
++	if err == nil || redirected != 0 {
++		t.Fatalf("redirect followed or accepted: err=%v target calls=%d", err, redirected)
++	}
++
++	// Exercise the Content-Length guard directly; the endpoint is fixed and
++	// cannot take caller query parameters, so this second server sends oversize.
++	large := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			writeJSON(w, testManifest("etag-1"))
++		case apiPath + "/bindings/dev-published/files/41/content":
++			w.Header().Set("Content-Length", fmt.Sprint(maxContentBytes+1))
++			w.Header().Set("ETag", "etag-1")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer large.Close()
++	items, cursor, err := NewConnector().FetchIncremental(context.Background(), testConfig(large.URL), nil)
++	if err == nil || !strings.Contains(err.Error(), "download limit") || len(items) != 0 || cursor != nil {
++		t.Fatalf("oversize = %+v, %+v, %v", items, cursor, err)
++	}
++}
++
++func TestBaseURLValidationAllowsExplicitPrivateHost(t *testing.T) {
++	for _, raw := range []string{
++		"http://user:secret@nextcloud:80", "http://nextcloud/#fragment",
++		"http://nextcloud/?q=x", "file:///tmp/nextcloud", "http://nextcloud/%2e%2e",
++		"http://nextcloud/a%2fb", "http://nextcloud//other",
++	} {
++		if _, err := parseConfig(testConfig(raw)); err == nil {
++			t.Errorf("unsafe URL accepted: %q", raw)
++		}
++	}
++	if _, err := parseConfig(testConfig("http://nextcloud:80")); err != nil {
++		t.Errorf("explicit Docker private URL rejected: %v", err)
++	}
++}
+diff --git a/internal/datasource/connector/nextcloud/types.go b/internal/datasource/connector/nextcloud/types.go
+new file mode 100644
+index 00000000..79c2ca5f
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/types.go
+@@ -0,0 +1,175 @@
++package nextcloud
++
++import (
++	"encoding/json"
++	"fmt"
++	"net/url"
++	"path"
++	"regexp"
++	"strings"
++
++	"github.com/Tencent/WeKnora/internal/datasource"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++const apiPath = "/index.php/apps/integration_weknora/api/v1"
++
++var bindingIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
++
++type config struct {
++	baseURL *url.URL
++	token   string
++}
++
++func parseConfig(ds *types.DataSourceConfig) (config, error) {
++	if ds == nil {
++		return config{}, datasource.ErrInvalidConfig
++	}
++	base, _ := ds.Settings["base_url"].(string)
++	token, _ := ds.Credentials["token"].(string)
++	base = strings.TrimSpace(base)
++	token = strings.TrimSpace(token)
++	if base == "" || token == "" {
++		return config{}, fmt.Errorf("%w: settings.base_url and credentials.token are required", datasource.ErrInvalidCredentials)
++	}
++	parsed, err := url.Parse(base)
++	if err != nil || parsed == nil || parsed.Hostname() == "" || parsed.Opaque != "" ||
++		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil ||
++		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
++		return config{}, fmt.Errorf("%w: base_url must be an HTTP(S) Nextcloud instance URL without credentials, query or fragment", datasource.ErrInvalidConfig)
++	}
++	// The configured URL is an instance root (which may be deployed below a
++	// context path), never a caller-supplied API/content URL. Keep its path
++	// simple so appending our fixed endpoint cannot escape that context.
++	for _, part := range strings.Split(parsed.EscapedPath(), "/") {
++		decoded, err := url.PathUnescape(part)
++		if err != nil || decoded == "." || decoded == ".." || strings.ContainsAny(decoded, "/\\\r\n") {
++			return config{}, fmt.Errorf("%w: unsafe base_url path", datasource.ErrInvalidConfig)
++		}
++	}
++	if strings.Contains(parsed.Path, "//") {
++		return config{}, fmt.Errorf("%w: unsafe base_url path", datasource.ErrInvalidConfig)
++	}
++	parsed.Path = strings.TrimRight(parsed.Path, "/")
++	parsed.RawPath = ""
++	return config{baseURL: parsed, token: token}, nil
++}
++
++func validBindingID(id string) bool {
++	return bindingIDPattern.MatchString(id)
++}
++
++type capabilities struct {
++	ProtocolVersion string `json:"protocol_version"`
++	InstanceID      string `json:"instance_id"`
++}
++
++type binding struct {
++	ID         string `json:"id"`
++	Name       string `json:"name"`
++	RootFileID int64  `json:"root_file_id"`
++}
++
++type bindingsResponse struct {
++	Bindings []binding `json:"bindings"`
++}
++
++type manifestItem struct {
++	FileID   int64  `json:"file_id"`
++	ETag     string `json:"etag"`
++	Name     string `json:"name"`
++	Path     string `json:"path"`
++	MimeType string `json:"mime_type"`
++	Size     int64  `json:"size"`
++	MTime    int64  `json:"mtime"`
++	URL      string `json:"url"`
++}
++
++type manifestPage struct {
++	Generation string         `json:"generation"`
++	Items      []manifestItem `json:"items"`
++	Complete   *bool          `json:"complete"`
++	NextCursor *string        `json:"next_cursor"`
++}
++
++func (i manifestItem) validate() error {
++	if i.FileID <= 0 || strings.TrimSpace(i.ETag) == "" || i.Name == "" ||
++		i.Name == "." || i.Name == ".." || strings.ContainsAny(i.Name, "/\\\r\n") ||
++		i.Size < 0 || i.MTime < 0 {
++		return fmt.Errorf("invalid manifest item for file_id %d", i.FileID)
++	}
++	return nil
++}
++
++// fileState compares both the version token and the user-visible file fields.
++// Nextcloud ETags are opaque change tokens, and a rename need not change one.
++type fileState struct {
++	ETag     string `json:"etag"`
++	Name     string `json:"name"`
++	Path     string `json:"path"`
++	MimeType string `json:"mime_type"`
++	Size     int64  `json:"size"`
++	MTime    int64  `json:"mtime"`
++}
++
++func (i manifestItem) state() fileState {
++	return fileState{ETag: i.ETag, Name: i.Name, Path: i.Path, MimeType: i.MimeType, Size: i.Size, MTime: i.MTime}
++}
++
++type syncState struct {
++	InstanceID string                          `json:"instance_id"`
++	Files      map[string]map[string]fileState `json:"files"`
++	// Missing marks the first complete scan on which a previously imported
++	// file was absent. Files retains its last known state until a second
++	// complete scan confirms the absence.
++	Missing map[string]map[string]bool `json:"missing,omitempty"`
++	// Tombstones are retained and emitted on every later complete scan. The
++	// importer has no per-item acknowledgement, so dropping them after one
++	// attempt could lose a deletion with an uncertain downstream outcome.
++	Tombstones map[string]map[string]fileState `json:"tombstones,omitempty"`
++}
++
++func decodeCursor(old *types.SyncCursor) (syncState, error) {
++	state := syncState{Files: make(map[string]map[string]fileState)}
++	if old == nil || old.ConnectorCursor == nil {
++		return state, nil
++	}
++	raw, err := json.Marshal(old.ConnectorCursor)
++	if err != nil {
++		return syncState{}, fmt.Errorf("encode Nextcloud cursor: %w", err)
++	}
++	if err := json.Unmarshal(raw, &state); err != nil {
++		return syncState{}, fmt.Errorf("decode Nextcloud cursor: %w", err)
++	}
++	if state.Files == nil {
++		state.Files = make(map[string]map[string]fileState)
++	}
++	if state.Missing == nil {
++		state.Missing = make(map[string]map[string]bool)
++	}
++	if state.Tombstones == nil {
++		state.Tombstones = make(map[string]map[string]fileState)
++	}
++	return state, nil
++}
++
++// The knowledge importer accepts these extensions. Unsupported files remain
++// in Nextcloud and are omitted from this connector's import cursor.
++var importExtensions = map[string]bool{
++	"pdf": true, "txt": true, "docx": true, "doc": true, "epub": true,
++	"html": true, "htm": true, "mhtml": true, "md": true, "markdown": true,
++	"xmind": true, "png": true, "jpg": true, "jpeg": true, "gif": true,
++	"csv": true, "xlsx": true, "xls": true, "pptx": true, "ppt": true,
++	"json": true, "mp3": true, "wav": true, "m4a": true, "flac": true, "ogg": true,
++}
++
++func supportedFile(name string, multimodal bool) bool {
++	ext := strings.TrimPrefix(strings.ToLower(path.Ext(name)), ".")
++	if !importExtensions[ext] {
++		return false
++	}
++	if !multimodal && (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif") {
++		return false
++	}
++	return true
++}
