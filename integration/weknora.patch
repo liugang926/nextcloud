@@ -4966,10 +4966,10 @@ index 00000000..25e375cf
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
 new file mode 100644
-index 00000000..de1ad49e
+index 00000000..645395a4
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector.go
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,363 @@
 +// Package nextcloud imports files exposed by the integration_weknora Nextcloud app.
 +package nextcloud
 +
@@ -5000,12 +5000,24 @@ index 00000000..de1ad49e
 +	if err != nil {
 +		return err
 +	}
++	selected, err := selectedBindings(ds.ResourceIDs)
++	if err != nil {
++		return err
++	}
 +	cli := newClient(cfg)
 +	if _, err := cli.capabilities(ctx); err != nil {
 +		return err
 +	}
-+	_, err = cli.bindings(ctx)
-+	return err
++	bindings, err := cli.bindings(ctx)
++	if err != nil {
++		return err
++	}
++	for _, binding := range bindings {
++		if binding.ID == selected[0] {
++			return nil
++		}
++	}
++	return fmt.Errorf("%w: selected Nextcloud binding is unavailable", datasource.ErrInvalidConfig)
 +}
 +
 +func (*Connector) ListResources(ctx context.Context, ds *types.DataSourceConfig, parentID string) ([]types.Resource, error) {
@@ -5323,10 +5335,10 @@ index 00000000..de1ad49e
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
 new file mode 100644
-index 00000000..2233df0c
+index 00000000..e836f050
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_test.go
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,571 @@
 +package nextcloud
 +
 +import (
@@ -5442,6 +5454,40 @@ index 00000000..2233df0c
 +	changed, _, err := connector.FetchIncremental(ctx, ds, next)
 +	if err != nil || len(changed) != 1 || string(changed[0].Content) != "world" || contentRequests != 3 {
 +		t.Fatalf("changed incremental = %+v, %v; downloads=%d", changed, err, contentRequests)
++	}
++}
++
++func TestValidateRejectsUnpairedOrMultipleBindings(t *testing.T) {
++	var requests int
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests++
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings":
++			writeJSON(w, map[string]interface{}{"bindings": []map[string]interface{}{{
++				"id": "dev-published", "name": "Published", "root_file_id": 7,
++			}}})
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	connector := NewConnector()
++	for _, selection := range [][]string{nil, {"dev-published", "another"}, {"unsafe/id"}} {
++		cfg := testConfig(server.URL)
++		cfg.ResourceIDs = selection
++		if err := connector.Validate(context.Background(), cfg); err == nil {
++			t.Fatalf("Validate accepted selection %q", selection)
++		}
++	}
++	if requests != 0 {
++		t.Fatalf("invalid selections triggered %d source requests", requests)
++	}
++	cfg := testConfig(server.URL)
++	cfg.ResourceIDs = []string{"other"}
++	if err := connector.Validate(context.Background(), cfg); err == nil {
++		t.Fatal("Validate accepted a binding absent from the source registry")
 +	}
 +}
 +
