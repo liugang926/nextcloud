@@ -24,7 +24,26 @@ final class BindingRegistryService {
 
     /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */
     public function listBindings(): array {
-        return $this->decodeBindings($this->config->getAppValue(self::APP_ID, 'bindings', '[]'));
+        // App configuration can be changed by another PHP process (for
+        // example an administrator using occ). Read the committed registry
+        // rather than a worker-local config cache before making an access
+        // decision about a live binding.
+        return $this->readCommittedBindings();
+    }
+
+    /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */
+    private function readCommittedBindings(): array {
+        $read = $this->db->getQueryBuilder();
+        $read->select('configvalue')->from('appconfig')
+            ->where($read->expr()->eq('appid', $read->createNamedParameter(self::APP_ID)))
+            ->andWhere($read->expr()->eq('configkey', $read->createNamedParameter('bindings')));
+        $readResult = $read->executeQuery();
+        try {
+            $raw = $readResult->fetchOne();
+        } finally {
+            $readResult->closeCursor();
+        }
+        return $this->decodeBindings($raw === false ? '[]' : (string)$raw);
     }
 
     /**
@@ -119,17 +138,7 @@ final class BindingRegistryService {
                 $lockResult->closeCursor();
             }
 
-            $read = $this->db->getQueryBuilder();
-            $read->select('configvalue')->from('appconfig')
-                ->where($read->expr()->eq('appid', $read->createNamedParameter(self::APP_ID)))
-                ->andWhere($read->expr()->eq('configkey', $read->createNamedParameter('bindings')));
-            $readResult = $read->executeQuery();
-            try {
-                $raw = $readResult->fetchOne();
-            } finally {
-                $readResult->closeCursor();
-            }
-            $bindings = $this->decodeBindings($raw === false ? '[]' : (string)$raw);
+            $bindings = $this->readCommittedBindings();
             $found = false;
             foreach ($bindings as &$binding) {
                 if ($binding['id'] === $id) {
