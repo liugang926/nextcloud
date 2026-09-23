@@ -43,6 +43,11 @@ services:
       NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?set NEXTCLOUD_ADMIN_PASSWORD in .env}
       NEXTCLOUD_TRUSTED_DOMAINS: localhost nextcloud host.docker.internal
       REDIS_HOST: redis
+      # This Compose stack is a local development environment. The sender
+      # will accept exactly this Docker-network WeKnora origin, not an
+      # administrator-supplied arbitrary URL.
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
       PHP_MEMORY_LIMIT: 512M
       PHP_UPLOAD_LIMIT: 512M
     volumes:
@@ -70,6 +75,8 @@ services:
       POSTGRES_USER: nextcloud
       POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
       REDIS_HOST: redis
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
     volumes:
       - nextcloud-html:/var/www/html
       - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro

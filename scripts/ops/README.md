@@ -1,5 +1,25 @@
 # Local operations probes
 
+## Local Nextcloud to WeKnora delivery probe
+
+With both local stacks healthy, Nextcloud app 0.4.11 installed, and the
+synthetic `dev-published` data source configured, set
+`WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
+WeKnora administrator credentials and run:
+
+```sh
+python3 scripts/ops/local-event-pipeline-smoke.py --data-source-id YOUR_SYNTHETIC_NEXTCLOUD_DATASOURCE_UUID
+```
+
+The probe refuses an already active WeKnora or Nextcloud event connection.
+It pairs the synthetic data source, saves the one-time credential in Nextcloud,
+creates a temporary WebDAV file, executes the Nextcloud delivery job, and
+compares the durable receipt watermarks on both sides. It removes the file and
+revokes both test connections on exit. An existing retained outbox can require
+several job executions to catch up. A matching watermark proves signed
+delivery and durable inbox receipt, **not** dispatch, parsing, publication, or
+an application acknowledgement.
+
 ## Local event connection probe
 
 After building and starting the patched local WeKnora app, set

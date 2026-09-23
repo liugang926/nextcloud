@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: Nextcloud WeKnora development API
-  version: 0.4.10
-  description: Local integration contract. Machine calls require a binding-scoped Bearer key and signed headers specified in docs/machine-request-signing.md. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API returns the current file ETag for a guarded read. The paired WeKnora patch covers tested read paths; independent user identity proof, enterprise permission and publication acceptance remain outstanding.
+  version: 0.4.11
+  description: Local integration contract. Machine calls require a binding-scoped Bearer key and signed headers specified in docs/machine-request-signing.md. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API returns the current file ETag for a guarded read. Event sender watermarks attest durable receipt only, not WeKnora application. The paired WeKnora patch covers tested read paths; independent user identity proof, enterprise permission and publication acceptance remain outstanding.
 servers:
   - url: /index.php/apps/integration_weknora/api/v1
 security:
@@ -74,6 +74,29 @@ components:
           type: integer
         url:
           type: string
+    EventSenderStatus:
+      type: object
+      required: [binding_id, connection_id, key_id, receiver_url, status, received_through_event_id, attempt_count, next_attempt_at, last_error_code]
+      properties:
+        binding_id: {type: string}
+        connection_id: {type: string}
+        key_id: {type: string}
+        receiver_url: {type: string, format: uri}
+        status: {type: string, enum: [active, paused]}
+        received_through_event_id: {type: string, pattern: '^(0|[1-9][0-9]*)$', description: Durable WeKnora receipt only; not a sync or publication acknowledgement}
+        attempt_count: {type: integer, minimum: 0}
+        next_attempt_at: {type: integer, description: Unix seconds}
+        last_error_code: {type: string}
+    EventSenderCredential:
+      type: object
+      required: [binding_id, nextcloud_instance_id, connection_id, key_id, secret, receiver_url]
+      properties:
+        binding_id: {type: string}
+        nextcloud_instance_id: {type: string}
+        connection_id: {type: string}
+        key_id: {type: string}
+        secret: {type: string, description: One-time secret from the WeKnora administrator Pair or Rotate response; encrypted at rest by Nextcloud}
+        receiver_url: {type: string, format: uri, description: Full fixed events path under an operator-approved origin; HTTPS except when the explicit local development HTTP switch is enabled}
 paths:
   /admin/diagnostics:
     get:
@@ -439,6 +462,62 @@ paths:
         '200': {description: Key revoked}
         '403': {description: Administrator privileges required}
         '404': {description: Binding or key not found}
+  /admin/bindings/{bindingId}/event-connection:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getEventSenderConnection
+      description: Read connection metadata and the durable receipt watermark. The secret is never returned.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200':
+          description: Current sender connection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventSenderStatus'}
+        '403': {description: Administrator privileges required}
+        '404': {description: Sender is not configured}
+    post:
+      operationId: configureEventSenderConnection
+      description: Provision a paired WeKnora credential or rotate to a new key for the same connection and receiver. A different connection requires explicit revocation and re-pairing. The server validates current Nextcloud instance and binding, approved receiver origin, and any outbox history floor.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EventSenderCredential'}
+      responses:
+        '200':
+          description: Same-connection key rotated
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventSenderStatus'}
+        '201':
+          description: New sender configured
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventSenderStatus'}
+        '400': {description: Invalid identity, credential, or receiver URL}
+        '403': {description: Administrator privileges required}
+        '409': {description: Binding unavailable, outbox history already pruned, or replacement requires explicit revocation}
+        '503': {description: Sender configuration unavailable}
+    delete:
+      operationId: revokeEventSenderConnection
+      description: Delete the local encrypted sender credential and stop future delivery. Revoke the matching WeKnora connection separately.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      responses:
+        '200': {description: Local sender credential revoked}
+        '403': {description: Administrator privileges required}
+        '404': {description: Sender is not configured}
+        '503': {description: Sender configuration unavailable}
   /admin/identities:
     get:
       operationId: listIdentityMappings

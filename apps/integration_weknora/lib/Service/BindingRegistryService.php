@@ -217,7 +217,7 @@ final class BindingRegistryService {
         }
     }
 
-    /** Remove a binding and all of its machine credentials atomically. */
+    /** Remove a binding and all of its machine and event credentials atomically. */
     public function remove(string $id): ?int {
         if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $id)) {
             throw new \InvalidArgumentException('Invalid binding ID');
@@ -256,6 +256,10 @@ final class BindingRegistryService {
             $delete = $this->db->getQueryBuilder();
             $revoked = $delete->delete('weknora_machine_key')
                 ->where($delete->expr()->eq('binding_id', $delete->createNamedParameter($id)))
+                ->executeStatement();
+            $eventDelete = $this->db->getQueryBuilder();
+            $eventDelete->delete('weknora_event_conn')
+                ->where($eventDelete->expr()->eq('binding_id', $eventDelete->createNamedParameter($id)))
                 ->executeStatement();
             $this->config->setAppValue(self::APP_ID, 'bindings',
                 json_encode($remaining, JSON_THROW_ON_ERROR));

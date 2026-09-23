@@ -67,6 +67,22 @@ final class ChangeOutboxService {
             $insert->executeStatement();
             $id = $this->db->lastInsertId('weknora_outbox');
             $this->db->commit();
+            try {
+                // Wake a healthy idle sender after releasing the global
+                // outbox lock. A sender may hold its own row while doing a
+                // bounded HTTP request; no file writer should hold up all
+                // other bindings' outbox commits while waiting for that row.
+                $wake = $this->db->getQueryBuilder();
+                $wake->update('weknora_event_conn')
+                    ->set('next_attempt_at', $wake->createNamedParameter(0))
+                    ->where($wake->expr()->eq('binding_id', $wake->createNamedParameter($bindingId)))
+                    ->andWhere($wake->expr()->eq('status', $wake->createNamedParameter('active')))
+                    ->andWhere($wake->expr()->eq('last_error_code', $wake->createNamedParameter('')))
+                    ->executeStatement();
+            } catch (\Throwable $exception) {
+                // The hint is already durable. Scheduled polling still
+                // catches it if this opportunistic wake fails.
+            }
             return $id;
         } catch (\Throwable $exception) {
             $this->db->rollBack();
@@ -146,6 +162,20 @@ final class ChangeOutboxService {
         $this->db->beginTransaction();
         try {
             $this->lockOutbox();
+            // Durable receipt is only a delivery checkpoint, not an applied
+            // acknowledgement. Nevertheless an active/paused sender must
+            // retain every unsent hint. Pairing takes the same outbox lock
+            // when it checks the floor, avoiding a first-pairing prune race.
+            $senderQuery = $this->db->getQueryBuilder();
+            $senderQuery->select('received_id')->from('weknora_event_conn')
+                ->where($senderQuery->expr()->eq('binding_id',
+                    $senderQuery->createNamedParameter($bindingId)));
+            $senderResult = $senderQuery->executeQuery();
+            try {
+                $senderReceivedId = $senderResult->fetchOne();
+            } finally {
+                $senderResult->closeCursor();
+            }
             $query = $this->db->getQueryBuilder();
             $query->select('id', 'created_at')->from('weknora_outbox')
                 ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
@@ -160,7 +190,8 @@ final class ChangeOutboxService {
             $count = 0;
             $lastId = 0;
             foreach ($rows as $row) {
-                if ((int)$row['created_at'] >= $cutoff) {
+                if ((int)$row['created_at'] >= $cutoff ||
+                    ($senderReceivedId !== false && (int)$row['id'] > (int)$senderReceivedId)) {
                     break;
                 }
                 $lastId = (int)$row['id'];

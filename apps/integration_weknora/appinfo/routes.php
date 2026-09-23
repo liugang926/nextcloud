@@ -73,6 +73,24 @@ return [
             'requirements' => ['id' => '[A-Za-z0-9_-]+', 'keyId' => '[A-Za-z0-9._-]+'],
         ],
         [
+            'name' => 'event_connection_admin#show',
+            'url' => '/api/v1/admin/bindings/{id}/event-connection',
+            'verb' => 'GET',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'event_connection_admin#configure',
+            'url' => '/api/v1/admin/bindings/{id}/event-connection',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'event_connection_admin#revoke',
+            'url' => '/api/v1/admin/bindings/{id}/event-connection',
+            'verb' => 'DELETE',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
             'name' => 'publication#withdraw',
             'url' => '/api/v1/admin/bindings/{id}/files/{fileId}/withdraw',
             'verb' => 'POST',

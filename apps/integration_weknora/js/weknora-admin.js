@@ -21,6 +21,16 @@
         const refreshBindings = document.getElementById('weknora-refresh-bindings');
         const bindingMessage = document.getElementById('weknora-binding-message');
         const bindingRows = document.getElementById('weknora-bindings-list');
+        const connectionBinding = document.getElementById('weknora-connection-binding');
+        const refreshConnection = document.getElementById('weknora-refresh-connection');
+        const connectionMessage = document.getElementById('weknora-connection-message');
+        const connectionDetails = document.getElementById('weknora-connection-details');
+        const connectionForm = document.getElementById('weknora-connection-form');
+        const connectionOrigin = document.getElementById('weknora-connection-origin');
+        const connectionCredential = document.getElementById('weknora-connection-credential');
+        const saveConnection = document.getElementById('weknora-save-connection');
+        const revokeConnection = document.getElementById('weknora-revoke-connection');
+        const cancelRevoke = document.getElementById('weknora-cancel-revoke');
         const publicationForm = document.getElementById('weknora-publication-form');
         const publicationBinding = document.getElementById('weknora-publication-binding');
         const publicationFileId = document.getElementById('weknora-publication-file-id');
@@ -34,6 +44,10 @@
         let currentState = null;
         let publicationBusy = false;
         let withdrawalArmed = false;
+        let connectionBusy = false;
+        let connectionConfigured = false;
+        let connectionRequestEpoch = 0;
+        let revokeArmed = false;
 
         function message(element, value, kind) {
             element.textContent = value;
@@ -107,6 +121,15 @@
                     return 'The publication service is unavailable. Try again after checking the server logs.';
                 case 'not_found':
                     return 'The binding or file ID was not found in the allowed scope.';
+                case 'invalid_connection':
+                case 'invalid_binding_id':
+                    return 'The event credential or receiver address is invalid. Check the selected binding and approved WeKnora origin.';
+                case 'connection_conflict':
+                    return 'The event connection conflicts with an existing connection or pruned change history. Revoke the old local connection before pairing a new ID; pruned history needs operator reconciliation.';
+                case 'binding_unavailable':
+                    return 'The selected binding is unavailable. Check its publication folder and retry.';
+                case 'connection_unavailable':
+                    return 'The event connection service is unavailable. Check the server logs and retry.';
                 default:
                     return error.message || 'The request failed. Please try again.';
             }
@@ -139,8 +162,11 @@
 
         function renderBindings(preferredId) {
             const selected = preferredId || publicationBinding.value;
+            const selectedConnection = preferredId || connectionBinding.value;
+            connectionCredential.value = '';
             bindingRows.replaceChildren();
             publicationBinding.replaceChildren(new Option('Choose a binding', ''));
+            connectionBinding.replaceChildren(new Option('Choose a binding', ''));
 
             if (bindings.length === 0) {
                 const row = bindingRows.insertRow();
@@ -167,12 +193,19 @@
                 });
                 row.insertCell().append(edit);
                 publicationBinding.add(new Option(`${binding.name} (${binding.id})`, binding.id));
+                connectionBinding.add(new Option(`${binding.name} (${binding.id})`, binding.id));
             });
 
             if (bindings.some((binding) => binding.id === selected)) {
                 publicationBinding.value = selected;
             }
+            connectionBinding.value = bindings.some((binding) => binding.id === selectedConnection)
+                ? selectedConnection : (bindings[0] ? bindings[0].id : '');
             clearPublicationState();
+            connectionConfigured = false;
+            connectionDetails.hidden = true;
+            resetRevoke();
+            setConnectionControls();
         }
 
         async function loadBindings(preferredId) {
@@ -186,6 +219,7 @@
                 bindings = data.bindings;
                 renderBindings(preferredId);
                 message(bindingMessage, `${bindings.length} binding(s) loaded.`, 'success');
+                loadConnectionStatus();
                 return true;
             } catch (error) {
                 message(bindingMessage, errorText(error), 'error');
@@ -193,6 +227,135 @@
             } finally {
                 refreshBindings.disabled = false;
             }
+        }
+
+        function connectionUrl(binding) {
+            if (!bindings.some((entry) => entry.id === binding)) {
+                throw new Error('Choose a configured binding.');
+            }
+            return `${bindingsUrl}/${encodeURIComponent(binding)}/event-connection`;
+        }
+
+        function resetRevoke() {
+            revokeArmed = false;
+            revokeConnection.textContent = 'Revoke local connection';
+            cancelRevoke.hidden = true;
+        }
+
+        function setConnectionControls() {
+            const hasBinding = bindings.some((entry) => entry.id === connectionBinding.value);
+            connectionBinding.disabled = connectionBusy || bindings.length === 0;
+            refreshConnection.disabled = connectionBusy || !hasBinding;
+            saveConnection.disabled = connectionBusy || !hasBinding;
+            revokeConnection.hidden = !connectionConfigured;
+            revokeConnection.disabled = connectionBusy || !hasBinding;
+            cancelRevoke.disabled = connectionBusy;
+        }
+
+        function renderConnection(data, binding) {
+            if (data.binding_id !== binding || typeof data.connection_id !== 'string' ||
+                typeof data.key_id !== 'string' || typeof data.receiver_url !== 'string' ||
+                typeof data.status !== 'string' ||
+                typeof data.received_through_event_id !== 'string' ||
+                !/^(0|[1-9][0-9]*)$/.test(data.received_through_event_id) ||
+                !Number.isSafeInteger(data.attempt_count) || data.attempt_count < 0 ||
+                !Number.isSafeInteger(data.next_attempt_at) || data.next_attempt_at < 0 ||
+                typeof data.last_error_code !== 'string') {
+                throw new Error('The server returned invalid event connection status.');
+            }
+            document.getElementById('weknora-connection-status').textContent = data.status;
+            document.getElementById('weknora-connection-id').textContent = data.connection_id;
+            document.getElementById('weknora-connection-key-id').textContent = data.key_id;
+            document.getElementById('weknora-connection-receiver').textContent = data.receiver_url;
+            document.getElementById('weknora-connection-received').textContent =
+                data.received_through_event_id === '0' ? 'None yet (0)' : data.received_through_event_id;
+            document.getElementById('weknora-connection-attempts').textContent = String(data.attempt_count);
+            document.getElementById('weknora-connection-next-attempt').textContent =
+                data.next_attempt_at === 0 ? 'None scheduled' : new Date(data.next_attempt_at * 1000).toLocaleString();
+            document.getElementById('weknora-connection-error').textContent = data.last_error_code || 'None';
+            connectionDetails.hidden = false;
+            connectionConfigured = true;
+            try {
+                connectionOrigin.value = new URL(data.receiver_url).origin;
+            } catch (_) {
+                // Status is still safe to display if an older receiver URL is invalid.
+            }
+            setConnectionControls();
+        }
+
+        async function loadConnectionStatus() {
+            const binding = connectionBinding.value;
+            const epoch = ++connectionRequestEpoch;
+            connectionCredential.value = '';
+            resetRevoke();
+            connectionConfigured = false;
+            connectionDetails.hidden = true;
+            setConnectionControls();
+            if (!binding) {
+                message(connectionMessage, 'Create or choose a binding to inspect event delivery.', '');
+                return;
+            }
+            message(connectionMessage, 'Loading local event connection…', '');
+            try {
+                const data = await request('GET', connectionUrl(binding));
+                if (epoch !== connectionRequestEpoch || binding !== connectionBinding.value) {
+                    return;
+                }
+                renderConnection(data, binding);
+                message(connectionMessage,
+                    data.status === 'paused' ? 'Local delivery is paused. Inspect the error code and repair the connection.' :
+                        'Local event connection loaded. A durable receipt is not a synchronization or indexing result.',
+                    data.status === 'paused' ? 'warning' : 'success');
+            } catch (error) {
+                if (epoch !== connectionRequestEpoch || binding !== connectionBinding.value) {
+                    return;
+                }
+                if (error.status === 404 && error.code === 'connection_not_found') {
+                    message(connectionMessage, 'No local event connection is configured for this binding.', '');
+                } else {
+                    message(connectionMessage, errorText(error), 'error');
+                }
+            }
+        }
+
+        function parseConnectionCredential(text, binding, originText) {
+            let credential;
+            try {
+                credential = JSON.parse(text);
+            } catch (_) {
+                throw new Error('Paste the complete one-time JSON response from WeKnora Pair or Rotate.');
+            }
+            if (!credential || typeof credential !== 'object' || Array.isArray(credential) ||
+                ['binding_id', 'nextcloud_instance_id', 'connection_id', 'key_id', 'secret', 'receiver_url']
+                    .some((field) => typeof credential[field] !== 'string' || credential[field] === '')) {
+                throw new Error('The one-time response is missing required event connection fields.');
+            }
+            if (credential.binding_id !== binding) {
+                throw new Error('The one-time response belongs to a different binding.');
+            }
+            let origin;
+            try {
+                origin = new URL(originText);
+            } catch (_) {
+                throw new Error('Enter the approved WeKnora origin, including http:// or https://.');
+            }
+            if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password ||
+                (origin.pathname !== '/' && origin.pathname !== '') || origin.search || origin.hash) {
+                throw new Error('Enter only the WeKnora origin, without a path, credentials, query, or fragment.');
+            }
+            const receiverUrl = `${origin.origin}/api/v1/integrations/nextcloud/events`;
+            if (credential.receiver_url !== '/api/v1/integrations/nextcloud/events' &&
+                credential.receiver_url !== receiverUrl) {
+                throw new Error('The one-time response has a different event receiver address.');
+            }
+            return {
+                binding_id: credential.binding_id,
+                nextcloud_instance_id: credential.nextcloud_instance_id,
+                connection_id: credential.connection_id,
+                key_id: credential.key_id,
+                secret: credential.secret,
+                receiver_url: receiverUrl,
+            };
         }
 
         function formatAge(seconds) {
@@ -242,6 +405,96 @@
                 refreshDiagnostics.disabled = false;
             }
         }
+
+        connectionBinding.addEventListener('change', () => {
+            connectionCredential.value = '';
+            connectionOrigin.value = '';
+            loadConnectionStatus();
+        });
+        refreshConnection.addEventListener('click', loadConnectionStatus);
+        connectionForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (connectionBusy) {
+                return;
+            }
+            if (!connectionForm.reportValidity()) {
+                connectionCredential.value = '';
+                return;
+            }
+            const binding = connectionBinding.value;
+            let rawCredential = connectionCredential.value;
+            connectionCredential.value = '';
+            let payload;
+            try {
+                connectionUrl(binding);
+                payload = parseConnectionCredential(rawCredential, binding, connectionOrigin.value.trim());
+            } catch (error) {
+                message(connectionMessage, error.message, 'error');
+                return;
+            } finally {
+                rawCredential = '';
+            }
+            connectionBusy = true;
+            ++connectionRequestEpoch;
+            resetRevoke();
+            setConnectionControls();
+            message(connectionMessage, 'Installing event connection credential…', '');
+            try {
+                const data = await request('POST', connectionUrl(binding), payload);
+                renderConnection(data, binding);
+                message(connectionMessage,
+                    'Event credential installed. Delivery starts with the next local worker run; the receipt ID does not confirm WeKnora indexing.',
+                    'success');
+            } catch (error) {
+                message(connectionMessage, errorText(error), 'error');
+            } finally {
+                payload.secret = '';
+                connectionBusy = false;
+                setConnectionControls();
+            }
+        });
+        revokeConnection.addEventListener('click', async () => {
+            if (connectionBusy || !connectionConfigured) {
+                return;
+            }
+            const binding = connectionBinding.value;
+            if (!revokeArmed) {
+                revokeArmed = true;
+                revokeConnection.textContent = 'Confirm local revocation';
+                cancelRevoke.hidden = false;
+                message(connectionMessage,
+                    `Confirm local revocation for ${binding}. Delivery will stop; revoke the paired connection in WeKnora separately.`,
+                    'warning');
+                return;
+            }
+            connectionCredential.value = '';
+            connectionBusy = true;
+            ++connectionRequestEpoch;
+            setConnectionControls();
+            try {
+                const data = await request('DELETE', connectionUrl(binding));
+                if (data.revoked !== true) {
+                    throw new Error('The server returned an invalid revocation response.');
+                }
+                connectionConfigured = false;
+                connectionDetails.hidden = true;
+                resetRevoke();
+                message(connectionMessage,
+                    'Local event delivery stopped and its credential was removed. Revoke the connection in WeKnora separately.',
+                    'success');
+            } catch (error) {
+                resetRevoke();
+                message(connectionMessage, errorText(error), 'error');
+            } finally {
+                connectionBusy = false;
+                setConnectionControls();
+            }
+        });
+        cancelRevoke.addEventListener('click', () => {
+            connectionCredential.value = '';
+            resetRevoke();
+            message(connectionMessage, 'Local revocation cancelled.', '');
+        });
 
         bindingForm.addEventListener('submit', async (event) => {
             event.preventDefault();
@@ -357,6 +610,7 @@
         });
 
         setPublicationButtons();
+        setConnectionControls();
         loadBindings();
         loadDiagnostics();
     }
