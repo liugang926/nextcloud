@@ -8929,7 +8929,7 @@ index 00000000..674b3ed9
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
 new file mode 100644
-index 00000000..5dc1aff9
+index 00000000..0eacd94f
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_test.go
 @@ -0,0 +1,708 @@
@@ -9357,7 +9357,7 @@ index 00000000..5dc1aff9
 +	}
 +	present = true
 +	items, cursor, err = connector.FetchIncremental(ctx, config, cursor)
-+	if err != nil || len(items) != 0 {
++	if err != nil || len(items) != 1 || items[0].IsDeleted || string(items[0].Content) != "hello" {
 +		t.Fatalf("reappearance = %+v, %v", items, err)
 +	}
 +	state, err := decodeCursor(cursor)
