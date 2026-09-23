@@ -88,8 +88,7 @@ def main():
         assert any(e["type"] == "subtree_deleted" and e["file_id"] == root_id
                    for e in events), events
 
-        # A future retention job advances this floor only after durable
-        # consumer acknowledgement. An old cursor must request a full rescan.
+        # Simulate a retention floor; an old cursor must request a full rescan.
         last_event_id = max(int(e["event_id"]) for e in events)
         sql("INSERT INTO oc_weknora_change_floor (binding_id, floor_id) "
             f"VALUES ('{binding_id}', {last_event_id})")

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\IntegrationWeknora\Service;
 
+use OCP\IConfig;
 use OCP\IDBConnection;
 
 /**
@@ -14,6 +15,8 @@ use OCP\IDBConnection;
  */
 final class ChangeOutboxService {
     public const PAGE_SIZE = 200;
+    public const MIN_RETENTION_DAYS = 30;
+    private const PRUNE_BATCH_SIZE = 1000;
 
     private const TYPES = [
         'upsert' => true,
@@ -25,7 +28,7 @@ final class ChangeOutboxService {
         'reconcile' => true,
     ];
 
-    public function __construct(private IDBConnection $db) {
+    public function __construct(private IDBConnection $db, private IConfig $config) {
     }
 
     public function append(
@@ -49,19 +52,7 @@ final class ChangeOutboxService {
 
         $this->db->beginTransaction();
         try {
-            $this->db->insertIgnoreConflict('weknora_outbox_lock', ['id' => 1]);
-            $lock = $this->db->getQueryBuilder();
-            $lock->select('id')->from('weknora_outbox_lock')
-                ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))
-                ->forUpdate();
-            $result = $lock->executeQuery();
-            try {
-                if ($result->fetchOne() === false) {
-                    throw new \UnexpectedValueException('Outbox lock is missing');
-                }
-            } finally {
-                $result->closeCursor();
-            }
+            $this->lockOutbox();
 
             $insert = $this->db->getQueryBuilder();
             $insert->insert('weknora_outbox')->values([
@@ -91,6 +82,136 @@ final class ChangeOutboxService {
         if ($afterId < 0) {
             throw new \InvalidArgumentException('Invalid change cursor');
         }
+        // The floor and page must be one locked observation. Otherwise a
+        // prune between the two SELECTs could return a false empty page.
+        $this->db->beginTransaction();
+        try {
+            $this->lockOutbox();
+            $page = $this->readPage($bindingId, $afterId);
+            $this->db->commit();
+            return $page;
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    /**
+     * Delete at most one batch of expired events per binding per invocation.
+     * A newer event in a binding stops that binding's deletion prefix, even
+     * when a later event has an older timestamp. This keeps floor_id honest.
+     */
+    public function pruneExpired(?int $now = null): int {
+        $cutoff = $this->retentionCutoff($now);
+        $bindingsQuery = $this->db->getQueryBuilder();
+        $bindingsQuery->select('binding_id')->from('weknora_outbox')
+            ->where($bindingsQuery->expr()->lt('created_at',
+                $bindingsQuery->createNamedParameter($cutoff)))
+            ->groupBy('binding_id')->orderBy('binding_id', 'ASC');
+        $result = $bindingsQuery->executeQuery();
+        try {
+            $bindingIds = $result->fetchFirstColumn();
+        } finally {
+            $result->closeCursor();
+        }
+
+        $removed = 0;
+        foreach ($bindingIds as $bindingId) {
+            $removed += $this->pruneBindingPrefix((string)$bindingId, $cutoff);
+        }
+        return $removed;
+    }
+
+    /** The scoped entry point also keeps local integration tests isolated. */
+    public function pruneExpiredBinding(string $bindingId, ?int $now = null): int {
+        self::assertBindingId($bindingId);
+        return $this->pruneBindingPrefix($bindingId, $this->retentionCutoff($now));
+    }
+
+    private function retentionCutoff(?int $now): int {
+        $rawDays = $this->config->getAppValue('integration_weknora', 'outbox_retention_days', '30');
+        $configuredDays = filter_var($rawDays, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 0, 'max_range' => 36500],
+        ]);
+        if ($configuredDays === false) {
+            // An invalid operator setting must not unexpectedly shorten a
+            // requested retention period.
+            throw new \UnexpectedValueException('Invalid outbox retention period');
+        }
+        $days = max(self::MIN_RETENTION_DAYS, $configuredDays);
+        return ($now ?? time()) - ($days * 86400);
+    }
+
+    private function pruneBindingPrefix(string $bindingId, int $cutoff): int {
+        $this->db->beginTransaction();
+        try {
+            $this->lockOutbox();
+            $query = $this->db->getQueryBuilder();
+            $query->select('id', 'created_at')->from('weknora_outbox')
+                ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+                ->orderBy('id', 'ASC')->setMaxResults(self::PRUNE_BATCH_SIZE);
+            $result = $query->executeQuery();
+            try {
+                $rows = $result->fetchAllAssociative();
+            } finally {
+                $result->closeCursor();
+            }
+
+            $count = 0;
+            $lastId = 0;
+            foreach ($rows as $row) {
+                if ((int)$row['created_at'] >= $cutoff) {
+                    break;
+                }
+                $lastId = (int)$row['id'];
+                $count++;
+            }
+            if ($count === 0) {
+                $this->db->commit();
+                return 0;
+            }
+
+            $floorQuery = $this->db->getQueryBuilder();
+            $floorQuery->select('floor_id')->from('weknora_change_floor')
+                ->where($floorQuery->expr()->eq('binding_id',
+                    $floorQuery->createNamedParameter($bindingId)));
+            $floorResult = $floorQuery->executeQuery();
+            try {
+                $floor = $floorResult->fetchOne();
+            } finally {
+                $floorResult->closeCursor();
+            }
+            if ($floor === false) {
+                $this->db->insertIgnoreConflict('weknora_change_floor', [
+                    'binding_id' => $bindingId,
+                    'floor_id' => $lastId,
+                ]);
+            }
+            $update = $this->db->getQueryBuilder();
+            $update->update('weknora_change_floor')
+                ->set('floor_id', $update->createNamedParameter($lastId))
+                ->where($update->expr()->eq('binding_id', $update->createNamedParameter($bindingId)))
+                ->andWhere($update->expr()->lt('floor_id', $update->createNamedParameter($lastId)))
+                ->executeStatement();
+
+            $delete = $this->db->getQueryBuilder();
+            $deleted = $delete->delete('weknora_outbox')
+                ->where($delete->expr()->eq('binding_id', $delete->createNamedParameter($bindingId)))
+                ->andWhere($delete->expr()->lte('id', $delete->createNamedParameter($lastId)))
+                ->executeStatement();
+            if ($deleted !== $count) {
+                throw new \UnexpectedValueException('Outbox deletion prefix changed');
+            }
+            $this->db->commit();
+            return $deleted;
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    /** @return array{expired: bool, items: list<array<string, mixed>>, next_id: int, has_more: bool} */
+    private function readPage(string $bindingId, int $afterId): array {
         $floorQuery = $this->db->getQueryBuilder();
         $floorQuery->select('floor_id')->from('weknora_change_floor')
             ->where($floorQuery->expr()->eq('binding_id', $floorQuery->createNamedParameter($bindingId)));
@@ -139,6 +260,22 @@ final class ChangeOutboxService {
             ];
         }
         return ['expired' => false, 'items' => $items, 'next_id' => $nextId, 'has_more' => $hasMore];
+    }
+
+    private function lockOutbox(): void {
+        $this->db->insertIgnoreConflict('weknora_outbox_lock', ['id' => 1]);
+        $lock = $this->db->getQueryBuilder();
+        $lock->select('id')->from('weknora_outbox_lock')
+            ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))
+            ->forUpdate();
+        $result = $lock->executeQuery();
+        try {
+            if ($result->fetchOne() === false) {
+                throw new \UnexpectedValueException('Outbox lock is missing');
+            }
+        } finally {
+            $result->closeCursor();
+        }
     }
 
     private static function assertBindingId(string $bindingId): void {

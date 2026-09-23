@@ -5,9 +5,9 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_dir="$(cd "$project_dir/.." && pwd)"
 source_dir="$workspace_dir/WeKnora-ldap-ad"
 patch_file="$project_dir/integration/weknora.patch"
-dockerfile="$workspace_dir/weknora-ldap-local/Dockerfile.domain-scope"
-# submission/feat/ldap-ad-group-permissions at the start of this integration.
-base_commit="11ad8c1ddc02537693e091e4b3a0278b82ffdd68"
+dockerfile="$project_dir/integration/Dockerfile.weknora"
+# Fixed submission/feat/ldap-ad-group-permissions baseline for this patch.
+base_commit="c6c4bd445a8ee49e742da9d804957a3fe4bf52d4"
 
 if [[ ! -d "$source_dir/.git" && ! -f "$source_dir/.git" ]]; then
   echo "WeKnora source was not found at $source_dir" >&2
@@ -38,6 +38,10 @@ docker run --rm \
   -w /src \
   weknora-go-test:1.26-sqlite \
   make build-prod
+
+# Upstream's .dockerignore excludes its ordinary WeKnora build output. Stage
+# the binary under a distinct name so Docker copies the artifact we just built.
+cp "$build_dir/WeKnora" "$build_dir/nextcloud-integration-bin"
 
 docker build \
   -f "$dockerfile" \

@@ -22,6 +22,33 @@ Service read endpoints:
 - `GET /bindings/{id}/files/{fileId}/content`: streamed file bytes with `Content-Type` and `ETag`. An optional `If-Match` header rejects a changed version with HTTP 412. Withdrawn files return HTTP 404.
 - `GET /bindings/{id}/changes[?cursor=...]`: ordered file-change hints with a signed cursor. The feed is a wakeup and reconciliation aid, not authority for physical deletion. A 409 response requires a complete rescan.
 
+The change outbox is pruned by a Nextcloud background job once per day. The
+default retention period is 30 days. Administrators may lengthen it with
+`php occ config:app:set integration_weknora outbox_retention_days --value=90`;
+values from 0 to 29 days are clamped to 30. Invalid values stop cleanup and
+appear as a background job error, avoiding unexpected early deletion. The job
+needs Nextcloud background jobs to be running (the local Compose stack has a
+`cron` service). It removes up to 1,000 old events per binding per run and
+advances that binding's durable `weknora_change_floor` in the same database
+transaction as deletion. A recent event blocks deletion of later events in that
+binding, even if their timestamps appear older, so the floor cannot skip an event
+still in the journal.
+
+An old signed change cursor below the floor receives HTTP 409 with
+`rescan_required: true`. The connector must finish a full manifest
+reconciliation before using the response's `next_cursor` checkpoint. Events
+above the floor remain available during that reconciliation. Append, page,
+and cleanup all take the same database row lock, so a page cannot observe a
+new floor with old rows or old floor with deleted rows. A long backlog can
+take several daily runs to clear; cleanup is deliberately batched to limit
+database lock time.
+
+After upgrading the local Compose app, run
+`python3 apps/integration_weknora/tests/outbox_retention_http_smoke.py` to
+exercise expiry, floor 409, timestamp-order safety, append after pruning,
+and page serialization against the database lock. The test uses a temporary
+binding and removes its files and database rows.
+
 Administrator endpoints (browser session and CSRF protected):
 
 - `GET /admin/bindings`: list full binding configuration.
@@ -79,8 +106,9 @@ connector's service token remains a high-trust credential: the holder can
 submit any mapped directory identity and access any configured binding.
 The current single app-wide token has no per-binding scope or overlapping-key
 rotation; use TLS and implement scoped credential rotation before enterprise
-deployment. A service-side authenticated principal and all WeKnora retrieval
-entry points must enforce this API's result.
+deployment. The paired WeKnora patch enforces this API's live decision on its
+tested read paths. An enterprise entry-point and permission-matrix audit is
+still required before production use.
 
 After the local Compose upgrade, run
 `python3 apps/integration_weknora/tests/authorization_http_smoke.py --file-id <sample-file-id>`.

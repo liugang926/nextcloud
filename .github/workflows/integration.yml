@@ -38,3 +38,49 @@ jobs:
           python3 apps/integration_weknora/tests/changes_http_smoke.py
           python3 apps/integration_weknora/tests/root_events_http_smoke.py
           python3 apps/integration_weknora/tests/runtime_binding_scope_http_smoke.py --simulate-missing-bind-lock
+          python3 apps/integration_weknora/tests/outbox_retention_http_smoke.py
+
+  weknora-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out integration repository
+        uses: actions/checkout@v7.0.1
+        with:
+          path: nextcloud
+
+      - name: Check out the fixed WeKnora baseline
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          path: weknora
+          persist-credentials: false
+
+      - name: Apply connector and authorization patch
+        run: |
+          git -C weknora apply --check ../nextcloud/integration/weknora.patch
+          git -C weknora apply ../nextcloud/integration/weknora.patch
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora/go.mod
+          cache-dependency-path: weknora/go.sum
+
+      - name: Compile and test Nextcloud integration paths
+        working-directory: weknora
+        run: |
+          go test -p 2 -run 'Nextcloud|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile' \
+            ./internal/application/access \
+            ./internal/application/repository \
+            ./internal/application/service \
+            ./internal/application/service/file \
+            ./internal/agent/tools \
+            ./internal/handler \
+            ./internal/handler/session \
+            ./internal/router \
+            ./internal/mcpserver \
+            ./internal/types \
+            ./internal/container
+          go test -p 2 ./internal/datasource/connector/nextcloud ./internal/application/service/chat_pipeline
