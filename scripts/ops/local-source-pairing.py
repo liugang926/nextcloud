@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -60,8 +61,22 @@ def wk_request(base, token, method, path, payload=None):
         with urllib.request.urlopen(request, timeout=25) as response:
             return response.status, json.load(response)
     except urllib.error.HTTPError as error:
-        # Error details may contain remote data. Return only a stable code.
-        return error.code, {}
+        # Never echo a remote response body: it may contain source metadata.
+        # Keep only a bounded machine-readable error identifier for recovery.
+        try:
+            raw = error.read(4097)
+            response = json.loads(raw) if len(raw) <= 4096 else {}
+        except (TypeError, ValueError):
+            response = {}
+        code = response.get("error") if isinstance(response, dict) else None
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
+            code = None
+        return error.code, {"error": code} if code else {}
+
+
+def remote_error(body):
+    code = body.get("error") if isinstance(body, dict) else None
+    return f" ({code})" if isinstance(code, str) else ""
 
 
 def nc_request(session, csrf, url, method, payload=None):
@@ -139,7 +154,7 @@ def main():
             one_time_token = prepared.get("token")
             if not isinstance(one_time_token, str) or not one_time_token:
                 raise RuntimeError("Nextcloud prepare returned no one-time token")
-            wk_status, _ = wk_request(wk_base, wk_token, "POST", wk_pair_path, {
+            wk_status, wk_response = wk_request(wk_base, wk_token, "POST", wk_pair_path, {
                 "knowledge_base_id": args.knowledge_base_id,
                 "base_url": args.nextcloud_machine_base_url,
                 "binding_id": args.binding,
@@ -152,19 +167,19 @@ def main():
             del one_time_token
             if wk_status not in (200, 201, 202):
                 raise RuntimeError(
-                    f"WeKnora pair: HTTP {wk_status}; inspect operation_id={operation_id}")
+                    f"WeKnora pair: HTTP {wk_status}{remote_error(wk_response)}; inspect operation_id={operation_id}")
         else:
             # The token is deliberately not recoverable from a repeated prepare.
-            wk_status, _ = wk_request(wk_base, wk_token, "POST",
+            wk_status, wk_response = wk_request(wk_base, wk_token, "POST",
                                       f"{wk_pair_path}/{operation_id}/retry")
             if wk_status not in (200, 202):
                 raise RuntimeError(
-                    f"WeKnora retry: HTTP {wk_status}; inspect operation_id={operation_id}")
+                    f"WeKnora retry: HTTP {wk_status}{remote_error(wk_response)}; inspect operation_id={operation_id}")
     elif args.action == "retry":
-        status, _ = wk_request(wk_base, wk_token, "POST",
+        status, wk_response = wk_request(wk_base, wk_token, "POST",
                                f"{wk_pair_path}/{operation_id}/retry")
         if status not in (200, 202):
-            raise RuntimeError(f"WeKnora retry: HTTP {status}; operation_id={operation_id}")
+            raise RuntimeError(f"WeKnora retry: HTTP {status}{remote_error(wk_response)}; operation_id={operation_id}")
 
     nc_status, nc_body = nc_request(nc_session, csrf, nc_pair_url, "GET")
     nc_pair = require_pairing(nc_status, nc_body, "Nextcloud status")
@@ -191,6 +206,7 @@ def main():
         "nextcloud_state": nc_pair.get("state"),
         "weknora_state": wk_pair.get("state"),
         "data_source_id": wk_pair.get("data_source_id"),
+        "weknora_last_error_code": wk_pair.get("last_error_code") or None,
     }, separators=(",", ":")))
     if nc_pair.get("state") != "active" or wk_pair.get("state") != "active":
         raise RuntimeError("pairing remains pending; retry the same operation after repair")

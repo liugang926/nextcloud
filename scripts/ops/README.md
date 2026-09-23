@@ -11,7 +11,8 @@ The WeKnora API derives the tenant from the authenticated administrator and
 checks it against the Nextcloud intent; the CLI cannot choose a different
 tenant through a request field. A legacy synthetic Nextcloud data source or
 knowledge base created before source pairing cannot be adopted in place. Use
-a newly created empty dedicated knowledge base and a new operation; do not
+a newly created empty dedicated knowledge base and a binding that no existing
+Nextcloud data source targets; do not
 delete or reuse a knowledge base with permanent Nextcloud provenance.
 
 Set `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` for the local
@@ -20,7 +21,7 @@ credentials from this repository's `.env`. Run from this repository:
 
 ```sh
 python3 scripts/ops/local-source-pairing.py pair \
-  --binding dev-published \
+  --binding YOUR_UNUSED_BINDING_ID \
   --tenant-id YOUR_CANONICAL_TENANT_ID \
   --knowledge-base-id YOUR_EMPTY_DEDICATED_KB_ID \
   --nextcloud-machine-base-url http://nextcloud
@@ -45,14 +46,15 @@ sync or retrieval.
 For an interrupted or pending operation, inspect or retry **the same** UUID:
 
 ```sh
-python3 scripts/ops/local-source-pairing.py status --binding dev-published --operation-id YOUR_OPERATION_UUID
-python3 scripts/ops/local-source-pairing.py retry --binding dev-published --operation-id YOUR_OPERATION_UUID
+python3 scripts/ops/local-source-pairing.py status --binding YOUR_UNUSED_BINDING_ID --operation-id YOUR_OPERATION_UUID
+python3 scripts/ops/local-source-pairing.py retry --binding YOUR_UNUSED_BINDING_ID --operation-id YOUR_OPERATION_UUID
 ```
 
 These use WeKnora's `GET /api/v1/datasource/nextcloud-source-pairings/{operation_id}`
 and `POST /api/v1/datasource/nextcloud-source-pairings/{operation_id}/retry`.
-The CLI reports both source and target states plus the data-source ID, without
-secrets. Its success requires `active` on both sides. If the one-time token was
+The CLI reports both source and target states, the data-source ID, and a bounded
+WeKnora error code when present, without secrets or remote error bodies. Its
+success requires `active` on both sides. If the one-time token was
 lost before WeKnora stored the operation, a retry cannot recover it. Inspect
 both sides and any in-flight request before aborting the **pending** Nextcloud
 intent with administrator `DELETE /admin/bindings/{id}/source-pairing` and a
@@ -69,7 +71,7 @@ AD acceptance gate yet.
 ## Local Nextcloud to WeKnora delivery probe
 
 With both local stacks healthy, Nextcloud app 0.4.13 installed, and a new
-synthetic `dev-published` data source actively source-paired as above, set
+synthetic data source actively source-paired as above, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
 WeKnora administrator credentials and run:
 
