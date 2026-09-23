@@ -147,8 +147,9 @@ remains a high-trust credential: the holder can
 submit any mapped directory identity within its one binding. Binding-scoped
 keys prevent it from reading other configured roots, and revocation takes
 effect without a Web restart. The machine signature alone does not prove that
-a querying person owns the GUID in the authorization body. Use TLS and add
-independent user proof before enterprise deployment. The paired WeKnora patch enforces this API's live decision on its
+a querying person owns the GUID in the authorization body. WeKnora must
+authenticate that person and resolve the stable GUID independently; use TLS for
+the machine call. The paired patch enforces this API's live decision on its
 tested read paths. An enterprise entry-point and permission-matrix audit is
 still required before production use.
 
