@@ -8,11 +8,12 @@ use OCP\IDBConnection;
 use OCP\IUser;
 use OCP\IUserManager;
 
-/** Administrator-attested, persistent and unambiguous AD identity links. */
+/** Persistent one-to-one AD identities, checked against live LDAP on use. */
 final class IdentityMappingService {
     public function __construct(
         private IDBConnection $db,
         private IUserManager $users,
+        private LiveLdapGuidVerifier $ldapGuids,
     ) {
     }
 
@@ -54,6 +55,9 @@ final class IdentityMappingService {
             $user->getBackendClassName() !== $mapping['backend_class']) {
             return null;
         }
+        if (!$this->ldapGuids->matches($user, $directoryId, $objectGuid)) {
+            return null;
+        }
         return ['uid' => $uid, 'user' => $user, 'mapping_id' => (int)$mapping['id']];
     }
 
@@ -64,6 +68,9 @@ final class IdentityMappingService {
         $user = $this->users->get($uid);
         if ($user === null || !$user->isEnabled() || $user->getUID() !== $uid) {
             throw new \InvalidArgumentException('Nextcloud account is unavailable');
+        }
+        if (!$this->ldapGuids->matches($user, $directoryId, $objectGuid)) {
+            throw new \InvalidArgumentException('Nextcloud account does not match the live AD objectGUID');
         }
         $backendClass = $user->getBackendClassName();
         if (!is_string($backendClass) || $backendClass === '' || strlen($backendClass) > 255) {

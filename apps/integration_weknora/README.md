@@ -126,18 +126,24 @@ session and CSRF protected endpoints:
   creation, so access is denied between the two operations.
 
 Mappings and their create/revoke audit records are stored in the Nextcloud
-database. The account's backend class is pinned at creation and rechecked on
-every authorization, and disabled or missing accounts are denied. Authorization
+database. Configure the exact WeKnora directory namespace on Nextcloud with
+`php occ config:app:set integration_weknora ad_directory_id --value='corp-ad'`.
+The account must use Nextcloud's LDAP backend. Mapping creation and each
+authorization read its current binary AD `objectGUID` through Nextcloud's
+public LDAP provider and a fresh LDAP connection, convert it to canonical UUID
+form, and compare it with the claimed GUID. A missing LDAP provider, directory
+configuration, entry or GUID, or a failed LDAP read prevents mapping creation
+or access. The account's backend class is pinned at creation and rechecked on
+every authorization; disabled or missing accounts are denied. Authorization
 resolves the binding root and target file through the mapped user's mount view
 and checks each directory in the path for read access, plus publication state.
 No mapping is inferred from email, display name, or Nextcloud UID similarity.
 
-The administrator currently attests that a pair of identifiers refers to the
-same person. This app does not independently read AD objectGUID from
-`user_ldap`, prove that the two systems use the same directory, or validate
-enterprise team-folder advanced ACL behavior. These must be verified against
-the target AD and Nextcloud permission setup before production use. The
-connector's service token remains a high-trust credential: the holder can
+This proves the UID-to-GUID relationship against Nextcloud's configured AD.
+The directory ID remains an operator-configured namespace. Confirm WeKnora and
+Nextcloud use the same enterprise AD and run the real-user permission and
+team-folder ACL matrix before production use. The connector's service token
+remains a high-trust credential: the holder can
 submit any mapped directory identity within its one binding. Binding-scoped
 keys prevent it from reading other configured roots, and revocation takes
 effect without a Web restart. The machine signature alone does not prove that
@@ -152,6 +158,14 @@ The test covers machine authentication, administrator and CSRF controls,
 mapping conflicts, sharing and share revocation, disabled accounts, and
 publication withdrawal. It removes the temporary account and share and
 restores the sample publication state.
+
+The local account HTTP smokes use synthetic GUIDs. For those probes only, set
+`WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY=1` in the repository's local Compose
+environment and recreate its Nextcloud container. This bypass is accepted only
+alongside the repository Compose's `WEKNORA_LOCAL_COMPOSE=1` and
+`WEKNORA_EVENT_DEV_HTTP=1`; it is disabled by default and must be
+removed before any enterprise AD or production test. With the bypass off,
+non-LDAP accounts and unverified GUIDs cannot be mapped or authorized.
 
 ## Employee Files sidebar
 

@@ -11,6 +11,9 @@ jobs:
   local-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # This job intentionally uses local Nextcloud accounts and fake GUIDs.
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: '1'
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -34,6 +37,9 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             sh -c 'find apps/integration_weknora -name "*.php" -exec php -l "{}" ";"'
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/ldap_guid_identity_contract.php
 
       - name: Start isolated Docker stack
         run: ./scripts/dev-up.sh

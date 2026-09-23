@@ -48,6 +48,10 @@ services:
       # administrator-supplied arbitrary URL.
       WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
       WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      # Explicit opt-in for local accounts used by synthetic permission smokes.
+      # Defaults to fail-closed live LDAP GUID proof.
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
       PHP_MEMORY_LIMIT: 512M
       PHP_UPLOAD_LIMIT: 512M
     volumes:
@@ -77,6 +81,8 @@ services:
       REDIS_HOST: redis
       WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
       WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
     volumes:
       - nextcloud-html:/var/www/html
       - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
