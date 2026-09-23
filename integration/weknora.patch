@@ -1,3 +1,87 @@
+diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
+new file mode 100644
+index 00000000..7fc3c630
+--- /dev/null
++++ b/docs/nextcloud-event-receiver.md
+@@ -0,0 +1,78 @@
++# Nextcloud event receiver (phase 1)
++
++`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
++The route is independently authenticated before user and API key middleware.
++An HTTP `202` means the entire batch and its receipt watermark committed to the
++database. It does **not** mean that WeKnora reconciled the source, parsed a
++document, published a version, or applied a deletion. This phase does not send
++an application acknowledgement or start sync jobs from inbox rows.
++
++Only an `active` connection row may receive events. The row fixes one
++Nextcloud instance and binding to one tenant, knowledge base, and Nextcloud
++data source. The data source must still select exactly that binding. Pairing
++and key provisioning are separate work; installing this receiver alone does
++not create an active connection. Connection secrets must be generated with
++high entropy and stored as `enc:v1:` ciphertext using `SYSTEM_AES_KEY`.
++The connection also pins the normalized complete Nextcloud base URL and the
++SHA-256 fingerprint of the data source's **committed, encrypted** configuration
++bytes. An endpoint edit, credential clear/rotation/reprovision, or other
++configuration edit invalidates the old connection and requires re-pairing.
++The receiver checks this identity inside the same locked transaction as the
++inbox write; it does not hash or log a plaintext machine token.
++
++## Request contract
++
++The request body is JSON, at most 1 MiB and 200 hints. Event IDs and
++`after_event_id` are decimal strings because database IDs may exceed the
++integer precision of a JavaScript number. IDs are strictly increasing within
++a batch; gaps are expected because Nextcloud allocates IDs across bindings.
++
++```json
++{
++  "connection_id": "an-opaque-paired-connection-id",
++  "nextcloud_instance_id": "example-instance",
++  "binding_id": "example-binding",
++  "after_event_id": "0",
++  "events": [
++    {"event_id": "41", "file_id": 123, "type": "upsert", "etag": "example-etag"}
++  ]
++}
++```
++
++Send one value each for `X-Nextcloud-Connection-Id`, `X-Nextcloud-Key-Id`,
++`X-Nextcloud-Timestamp` (Unix seconds), `X-Nextcloud-Nonce` (32 lowercase hex
++characters), and `X-Nextcloud-Signature` (64 lowercase hex characters).
++The timestamp must be within five minutes of the receiver's clock. Each
++connection/key/nonce can be consumed once. Retries must generate a fresh
++nonce and signature.
++
++The signature is lowercase hex HMAC-SHA256 using the paired, decrypted
++connection secret as the key. Its message is these lines joined by `\n`,
++without a trailing newline:
++
++1. `nextcloud-event-hmac-sha256-v1`
++2. `POST`
++3. `/api/v1/integrations/nextcloud/events`
++4. an empty line (queries are rejected)
++5. lowercase hex SHA-256 of the exact request body bytes
++6. timestamp header value
++7. nonce header value
++8. connection ID header value
++9. key ID header value
++
++The receiver reads the committed connection key under a database lock. A
++previous key is accepted only while its explicit rotation window remains
++valid. An expired or revoked key fails closed, including when another web
++worker has a stale configuration cache.
++
++`after_event_id` must equal the receiver's `received_id` for a new batch.
++Replaying an older batch with a fresh nonce is accepted only if every event
++ID and fingerprint already exist and none extends past the current watermark.
++Otherwise the route returns `409` without advancing the watermark. The
++nonce, all inbox rows, and the new watermark are one transaction, so a
++database error cannot produce a false durable receipt. Reusing a nonce is
++rejected even for an otherwise identical retry.
++
++Hints remain non-authoritative. A future consumer must re-read the current
++Nextcloud manifest, authorization state, and file version before publication
++or deletion. Outbox retention must not treat `202` as an applied checkpoint.
 diff --git a/docs/nextcloud-source-provenance.md b/docs/nextcloud-source-provenance.md
 new file mode 100644
 index 00000000..eedc64e0
@@ -1482,6 +1566,371 @@ index 00000000..b8ccb615
 +	require.NoError(t, err)
 +	require.Empty(t, parsed.Credentials)
 +	require.NotContains(t, strings.ToLower(string(stored.Config)), "new-token")
++}
+diff --git a/internal/application/repository/nextcloud_event_inbox.go b/internal/application/repository/nextcloud_event_inbox.go
+new file mode 100644
+index 00000000..2c6944ff
+--- /dev/null
++++ b/internal/application/repository/nextcloud_event_inbox.go
+@@ -0,0 +1,359 @@
++package repository
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/url"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++// These errors contain no credentials or source paths and are safe to map to
++// a machine response. The incoming events are hints, never delete commands.
++var (
++	ErrNextcloudEventUnauthorized = errors.New("Nextcloud event credential is invalid")
++	ErrNextcloudEventScope        = errors.New("Nextcloud event connection is no longer bound to this data source")
++	ErrNextcloudEventConflict     = errors.New("Nextcloud event batch conflicts with the durable inbox")
++)
++
++type NextcloudEventHint struct {
++	EventID       int64
++	PayloadSHA256 string
++	EventType     string
++	FileID        *int64
++}
++
++type SignedNextcloudEventBatch struct {
++	ConnectionID        string
++	NextcloudInstanceID string
++	BindingID           string
++	KeyID               string
++	Nonce               string
++	Signature           []byte
++	CanonicalRequest    []byte
++	AfterEventID        int64
++	Events              []NextcloudEventHint
++	Now                 time.Time
++}
++
++type NextcloudEventInboxRepository struct{ db *gorm.DB }
++
++func NewNextcloudEventInboxRepository(db *gorm.DB) *NextcloudEventInboxRepository {
++	return &NextcloudEventInboxRepository{db: db}
++}
++
++type nextcloudEventConnection struct {
++	ConnectionID             string     `gorm:"column:connection_id"`
++	TenantID                 uint64     `gorm:"column:tenant_id"`
++	KnowledgeBaseID          string     `gorm:"column:knowledge_base_id"`
++	DatasourceID             string     `gorm:"column:datasource_id"`
++	NextcloudInstanceID      string     `gorm:"column:nextcloud_instance_id"`
++	BindingID                string     `gorm:"column:binding_id"`
++	DatasourceBaseURL        string     `gorm:"column:datasource_base_url"`
++	DatasourceConfigSHA256   string     `gorm:"column:datasource_config_sha256"`
++	Status                   string     `gorm:"column:status"`
++	CurrentKeyID             string     `gorm:"column:current_key_id"`
++	CurrentSecretCiphertext  string     `gorm:"column:current_secret_ciphertext"`
++	PreviousKeyID            *string    `gorm:"column:previous_key_id"`
++	PreviousSecretCiphertext *string    `gorm:"column:previous_secret_ciphertext"`
++	PreviousValidUntil       *time.Time `gorm:"column:previous_valid_until"`
++}
++
++type nextcloudEventCheckpoint struct {
++	ConnectionID string `gorm:"column:connection_id"`
++	ReceivedID   int64  `gorm:"column:received_id"`
++}
++
++type nextcloudEventInboxRow struct {
++	ConnectionID  string    `gorm:"column:connection_id"`
++	EventID       int64     `gorm:"column:event_id"`
++	PayloadSHA256 string    `gorm:"column:payload_sha256"`
++	EventType     string    `gorm:"column:event_type"`
++	FileID        *int64    `gorm:"column:file_id"`
++	ReceivedAt    time.Time `gorm:"column:received_at"`
++	State         string    `gorm:"column:state"`
++}
++
++// IngestSigned atomically consumes a nonce, stores every event, and advances
++// the receipt watermark. A 202 response from its caller means only that the
++// inbox transaction committed. It does not acknowledge source reconciliation,
++// parsing, or publication.
++func (r *NextcloudEventInboxRepository) IngestSigned(ctx context.Context, batch SignedNextcloudEventBatch) (int64, error) {
++	if batch.AfterEventID < 0 || len(batch.Events) == 0 || len(batch.Events) > 200 {
++		return 0, ErrNextcloudEventConflict
++	}
++	previousID := batch.AfterEventID
++	for _, event := range batch.Events {
++		if event.EventID <= previousID || len(event.PayloadSHA256) != 64 {
++			return 0, ErrNextcloudEventConflict
++		}
++		previousID = event.EventID
++	}
++	var receivedID int64
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if tx.Dialector.Name() == "sqlite" {
++			// SQLite ignores SELECT FOR UPDATE. Acquire its write lock before
++			// reading the paired source so a concurrent source reconfiguration
++			// cannot slip between our identity check and durable receipt.
++			lock := tx.Exec(`UPDATE nextcloud_event_connections SET status = status
++				WHERE connection_id = ? AND status = 'active'`, batch.ConnectionID)
++			if lock.Error != nil {
++				return fmt.Errorf("lock Nextcloud event connection: %w", lock.Error)
++			}
++			if lock.RowsAffected != 1 {
++				return ErrNextcloudEventUnauthorized
++			}
++		}
++		var connection nextcloudEventConnection
++		if err := tx.Table("nextcloud_event_connections").
++			Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("connection_id = ? AND status = ?", batch.ConnectionID, "active").
++			Take(&connection).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNextcloudEventUnauthorized
++			}
++			return fmt.Errorf("read Nextcloud event connection: %w", err)
++		}
++		if connection.NextcloudInstanceID != batch.NextcloudInstanceID ||
++			connection.BindingID != batch.BindingID {
++			return ErrNextcloudEventScope
++		}
++		if err := verifyNextcloudEventSignature(connection, batch); err != nil {
++			return err
++		}
++		if err := checkNextcloudEventDataSource(tx, connection); err != nil {
++			return err
++		}
++
++		// The nonce and inbox writes share one transaction: a database error
++		// never burns a nonce while returning a false durable receipt.
++		if err := tx.Table("nextcloud_event_nonces").
++			Where("connection_id = ? AND expires_at < ?", batch.ConnectionID, batch.Now).
++			Delete(nil).Error; err != nil {
++			return fmt.Errorf("prune Nextcloud event nonces: %w", err)
++		}
++		nonce := map[string]any{
++			"connection_id": batch.ConnectionID,
++			"key_id":        batch.KeyID,
++			"nonce":         batch.Nonce,
++			"expires_at":    batch.Now.Add(601 * time.Second),
++		}
++		insertNonce := tx.Table("nextcloud_event_nonces").Clauses(clause.OnConflict{DoNothing: true}).Create(nonce)
++		if insertNonce.Error != nil {
++			return fmt.Errorf("record Nextcloud event nonce: %w", insertNonce.Error)
++		}
++		if insertNonce.RowsAffected != 1 {
++			return ErrNextcloudEventUnauthorized
++		}
++
++		// Lock the checkpoint so two signed, individually valid requests cannot
++		// each advance from the same after_event_id. Event IDs are global and
++		// can have gaps within this binding, so equality is against the prior
++		// batch watermark, not a numeric +1 rule.
++		var checkpoint nextcloudEventCheckpoint
++		if err := tx.Table("nextcloud_event_checkpoint").
++			Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("connection_id = ?", batch.ConnectionID).
++			Take(&checkpoint).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNextcloudEventScope
++			}
++			return fmt.Errorf("read Nextcloud event checkpoint: %w", err)
++		}
++		if batch.AfterEventID > checkpoint.ReceivedID {
++			return ErrNextcloudEventConflict
++		}
++		if batch.AfterEventID < checkpoint.ReceivedID {
++			for _, hint := range batch.Events {
++				if hint.EventID > checkpoint.ReceivedID {
++					return ErrNextcloudEventConflict
++				}
++				var existing nextcloudEventInboxRow
++				if err := tx.Table("nextcloud_event_inbox").
++					Where("connection_id = ? AND event_id = ?", batch.ConnectionID, hint.EventID).
++					Take(&existing).Error; err != nil {
++					if errors.Is(err, gorm.ErrRecordNotFound) {
++						return ErrNextcloudEventConflict
++					}
++					return fmt.Errorf("read duplicate Nextcloud event: %w", err)
++				}
++				if existing.PayloadSHA256 != hint.PayloadSHA256 {
++					return ErrNextcloudEventConflict
++				}
++			}
++			receivedID = checkpoint.ReceivedID
++			return nil
++		}
++
++		for _, hint := range batch.Events {
++			row := nextcloudEventInboxRow{
++				ConnectionID:  batch.ConnectionID,
++				EventID:       hint.EventID,
++				PayloadSHA256: hint.PayloadSHA256,
++				EventType:     hint.EventType,
++				FileID:        hint.FileID,
++				ReceivedAt:    batch.Now,
++				State:         "pending",
++			}
++			insert := tx.Table("nextcloud_event_inbox").Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
++			if insert.Error != nil {
++				return fmt.Errorf("record Nextcloud event: %w", insert.Error)
++			}
++			if insert.RowsAffected == 0 {
++				var existing nextcloudEventInboxRow
++				if err := tx.Table("nextcloud_event_inbox").
++					Where("connection_id = ? AND event_id = ?", batch.ConnectionID, hint.EventID).
++					Take(&existing).Error; err != nil {
++					return fmt.Errorf("read existing Nextcloud event: %w", err)
++				}
++				if existing.PayloadSHA256 != hint.PayloadSHA256 {
++					return ErrNextcloudEventConflict
++				}
++			}
++		}
++		last := batch.Events[len(batch.Events)-1].EventID
++		update := tx.Table("nextcloud_event_checkpoint").
++			Where("connection_id = ? AND received_id = ?", batch.ConnectionID, batch.AfterEventID).
++			Update("received_id", last)
++		if update.Error != nil {
++			return fmt.Errorf("advance Nextcloud event receipt: %w", update.Error)
++		}
++		if update.RowsAffected != 1 {
++			return ErrNextcloudEventConflict
++		}
++		receivedID = last
++		return nil
++	})
++	return receivedID, err
++}
++
++func verifyNextcloudEventSignature(connection nextcloudEventConnection, batch SignedNextcloudEventBatch) error {
++	var ciphertext string
++	switch {
++	case batch.KeyID == connection.CurrentKeyID:
++		ciphertext = connection.CurrentSecretCiphertext
++	case connection.PreviousKeyID != nil && batch.KeyID == *connection.PreviousKeyID &&
++		connection.PreviousValidUntil != nil && batch.Now.Before(*connection.PreviousValidUntil) &&
++		connection.PreviousSecretCiphertext != nil:
++		ciphertext = *connection.PreviousSecretCiphertext
++	default:
++		return ErrNextcloudEventUnauthorized
++	}
++	if !strings.HasPrefix(ciphertext, utils.EncPrefix) {
++		return ErrNextcloudEventUnauthorized
++	}
++	secret, err := utils.DecryptStoredSecret(ciphertext)
++	if err != nil {
++		// Missing/rotated at-rest encryption keys are a service fault, never
++		// a reason to treat ciphertext as a usable signing secret.
++		return fmt.Errorf("decrypt Nextcloud event key: %w", err)
++	}
++	if len(secret) < 32 || len(secret) > 128 {
++		return ErrNextcloudEventUnauthorized
++	}
++	mac := hmac.New(sha256.New, []byte(secret))
++	_, _ = mac.Write(batch.CanonicalRequest)
++	if !hmac.Equal(mac.Sum(nil), batch.Signature) {
++		return ErrNextcloudEventUnauthorized
++	}
++	return nil
++}
++
++func checkNextcloudEventDataSource(tx *gorm.DB, connection nextcloudEventConnection) error {
++	var kb types.KnowledgeBase
++	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
++		Where("id = ? AND tenant_id = ?", connection.KnowledgeBaseID, connection.TenantID).
++		Take(&kb).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return ErrNextcloudEventScope
++		}
++		return fmt.Errorf("read Nextcloud event knowledge base: %w", err)
++	}
++	var ds types.DataSource
++	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
++		Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND type = ?",
++			connection.DatasourceID, connection.TenantID, connection.KnowledgeBaseID, types.ConnectorTypeNextcloud).
++		Take(&ds).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return ErrNextcloudEventScope
++		}
++		return fmt.Errorf("read Nextcloud event data source: %w", err)
++	}
++	baseURL, configSHA256, bindingID, err := NextcloudEventDataSourceIdentity(ds.Config)
++	if err != nil || bindingID != connection.BindingID ||
++		baseURL != connection.DatasourceBaseURL || configSHA256 != connection.DatasourceConfigSHA256 {
++		return ErrNextcloudEventScope
++	}
++	return nil
++}
++
++// NextcloudEventDataSourceIdentity pins a connection to the exact committed
++// connector configuration, including the encrypted outbound machine token.
++// Credential rotation, clearing/reprovisioning, an endpoint edit, or changing
++// the selected binding changes this identity and requires a new pairing. This
++// reads the persisted JSON bytes, not an in-memory, potentially stale DS copy.
++func NextcloudEventDataSourceIdentity(raw types.JSON) (baseURL, configSHA256, bindingID string, err error) {
++	if len(raw) == 0 {
++		return "", "", "", ErrNextcloudEventScope
++	}
++	var cfg struct {
++		ResourceIDs []string               `json:"resource_ids"`
++		Settings    map[string]interface{} `json:"settings"`
++		Credentials map[string]interface{} `json:"credentials"`
++	}
++	if err := json.Unmarshal(raw, &cfg); err != nil || len(cfg.ResourceIDs) != 1 {
++		return "", "", "", ErrNextcloudEventScope
++	}
++	base, _ := cfg.Settings["base_url"].(string)
++	token, _ := cfg.Credentials["token"].(string)
++	if !strings.HasPrefix(token, utils.EncPrefix) || len(token) <= len(utils.EncPrefix) {
++		return "", "", "", ErrNextcloudEventScope
++	}
++	if plaintext, decryptErr := utils.DecryptStoredSecret(token); decryptErr != nil || plaintext == "" {
++		return "", "", "", ErrNextcloudEventScope
++	}
++	baseURL, err = normalizeNextcloudEventBaseURL(base)
++	if err != nil {
++		return "", "", "", ErrNextcloudEventScope
++	}
++	sum := sha256.Sum256(raw)
++	return baseURL, hex.EncodeToString(sum[:]), cfg.ResourceIDs[0], nil
++}
++
++func normalizeNextcloudEventBaseURL(raw string) (string, error) {
++	parsed, err := url.Parse(strings.TrimSpace(raw))
++	if err != nil || parsed == nil || parsed.Hostname() == "" || parsed.Opaque != "" ||
++		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil ||
++		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" ||
++		strings.Contains(parsed.Path, "//") {
++		return "", ErrNextcloudEventScope
++	}
++	for _, segment := range strings.Split(parsed.EscapedPath(), "/") {
++		decoded, err := url.PathUnescape(segment)
++		if err != nil || decoded == "." || decoded == ".." ||
++			strings.ContainsAny(decoded, "/\\\r\n") {
++			return "", ErrNextcloudEventScope
++		}
++	}
++	parsed.Host = strings.ToLower(parsed.Host)
++	parsed.Path = strings.TrimRight(parsed.Path, "/")
++	parsed.RawPath = ""
++	return parsed.String(), nil
++}
++
++// NextcloudEventPayloadHash is the canonical per-hint fingerprint used for
++// duplicate event-ID detection. It is not an authentication primitive.
++func NextcloudEventPayloadHash(raw []byte) string {
++	sum := sha256.Sum256(raw)
++	return hex.EncodeToString(sum[:])
 +}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
@@ -5050,7 +5499,7 @@ index 83fb0990..af50dbf7 100644
  }
  
 diff --git a/internal/container/container.go b/internal/container/container.go
-index c27d12d1..1d692b2f 100644
+index c27d12d1..a36daedc 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -34,6 +34,7 @@ import (
@@ -5069,10 +5518,11 @@ index c27d12d1..1d692b2f 100644
  	notionConnector "github.com/Tencent/WeKnora/internal/datasource/connector/notion"
  	rssConnector "github.com/Tencent/WeKnora/internal/datasource/connector/rss"
  	yuqueConnector "github.com/Tencent/WeKnora/internal/datasource/connector/yuque"
-@@ -191,6 +193,12 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -191,6 +193,13 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Provide(repository.NewUserResourceFavoriteRepository))
  	must(container.Provide(service.NewWebSearchStateService))
  	must(container.Provide(repository.NewDataSourceRepository))
++	must(container.Provide(repository.NewNextcloudEventInboxRepository))
 +	must(container.Provide(func(
 +		directories interfaces.DirectoryRepository,
 +		dataSources interfaces.DataSourceRepository,
@@ -5082,7 +5532,15 @@ index c27d12d1..1d692b2f 100644
  	must(container.Provide(repository.NewSyncLogRepository))
  	must(container.Provide(repository.NewWikiPageRepository))
  	must(container.Provide(repository.NewMemoryRepository))
-@@ -1137,12 +1145,15 @@ func syncSequences(db *gorm.DB) {
+@@ -582,6 +591,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
+ 	must(container.Provide(handler.NewModelCredentialsHandler))
+ 	must(container.Provide(handler.NewWebSearchProviderCredentialsHandler))
+ 	must(container.Provide(handler.NewDataSourceCredentialsHandler))
++	must(container.Provide(handler.NewNextcloudEventHandler))
+ 	must(container.Invoke(handler.ConfigureDataSourceCredentialsGroupAccess))
+ 	must(container.Provide(handler.NewWebSearchHandler))
+ 	must(container.Provide(handler.NewWebSearchProviderHandler))
+@@ -1137,12 +1147,15 @@ func syncSequences(db *gorm.DB) {
  // Returns:
  //   - Configured file service implementation
  //   - Error if initialization fails
@@ -5100,7 +5558,7 @@ index c27d12d1..1d692b2f 100644
  }
  
  func initRawFileService(_ *config.Config) (interfaces.FileService, error) {
-@@ -1879,6 +1890,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
+@@ -1879,6 +1892,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
  	if err := registry.Register(gitlabConnector.NewConnector()); err != nil {
  		errs = errors.Join(errs, fmt.Errorf("register gitlab connector: %w", err))
  	}
@@ -5110,6 +5568,39 @@ index c27d12d1..1d692b2f 100644
  
  	// Future connectors will be registered here:
  	// if err := registry.Register(githubConnector.NewConnector()); err != nil { ... }
+diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
+index 9cc4e515..3620d46a 100644
+--- a/internal/database/migration_sqlite_versioned_schema_test.go
++++ b/internal/database/migration_sqlite_versioned_schema_test.go
+@@ -15,7 +15,7 @@ import (
+ // create to stay in sync with the versioned (PostgreSQL) migrations:
+ // 000041 task queue, 000053 system settings, 000055 processing spans,
+ // 000063 knowledge multi-tags, 000093 browser authorization, 000103 message
+-// artifacts.
++// artifacts, 000113 Nextcloud event inbox.
+ var versionedSQLiteTables = []string{
+ 	"memory_extraction_sessions",
+ 	"task_pending_ops",
+@@ -39,6 +39,10 @@ var versionedSQLiteTables = []string{
+ 	"resource_access_policies",
+ 	"resource_group_grants",
+ 	"directory_permission_versions",
++	"nextcloud_event_connections",
++	"nextcloud_event_nonces",
++	"nextcloud_event_inbox",
++	"nextcloud_event_checkpoint",
+ }
+ 
+ // versionedSQLiteColumns maps each existing table to the columns that the
+@@ -63,7 +67,7 @@ var versionedSQLiteColumns = map[string][]string{
+ 	"directories":        {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
+ }
+ 
+-const expectedSQLiteMigrationVersion = 28
++const expectedSQLiteMigrationVersion = 32
+ 
+ func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
+ 	repoRoot := sqliteRepoRoot(t)
 diff --git a/internal/datasource/connector.go b/internal/datasource/connector.go
 index 67568c4c..28cae25c 100644
 --- a/internal/datasource/connector.go
@@ -8164,6 +8655,583 @@ index 991bcbc5..c09f455a 100644
  		return
  	}
  
+diff --git a/internal/handler/nextcloud_events.go b/internal/handler/nextcloud_events.go
+new file mode 100644
+index 00000000..f2df39a6
+--- /dev/null
++++ b/internal/handler/nextcloud_events.go
+@@ -0,0 +1,246 @@
++package handler
++
++import (
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"io"
++	"mime"
++	"net/http"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/gin-gonic/gin"
++)
++
++const (
++	nextcloudEventPath          = "/api/v1/integrations/nextcloud/events"
++	maxNextcloudEventBodyBytes  = 1 << 20
++	maxNextcloudEventBatchItems = 200
++)
++
++type NextcloudEventHandler struct {
++	inbox *repository.NextcloudEventInboxRepository
++}
++
++func NewNextcloudEventHandler(inbox *repository.NextcloudEventInboxRepository) *NextcloudEventHandler {
++	return &NextcloudEventHandler{inbox: inbox}
++}
++
++type nextcloudEventRequest struct {
++	ConnectionID        string                   `json:"connection_id"`
++	NextcloudInstanceID string                   `json:"nextcloud_instance_id"`
++	BindingID           string                   `json:"binding_id"`
++	AfterEventID        string                   `json:"after_event_id"`
++	Events              []nextcloudEventHintJSON `json:"events"`
++}
++
++type nextcloudEventHintJSON struct {
++	EventID   string  `json:"event_id"`
++	FileID    *int64  `json:"file_id"`
++	Type      string  `json:"type"`
++	OldPath   *string `json:"old_path"`
++	Path      *string `json:"path"`
++	ETag      *string `json:"etag"`
++	CreatedAt *int64  `json:"created_at"`
++}
++
++// Receive stores signed change hints. Neither a successful HTTP response nor
++// a hint in the inbox means that the corresponding document was published.
++func (h *NextcloudEventHandler) Receive(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	if c.Request.Method != http.MethodPost || c.Request.URL.EscapedPath() != nextcloudEventPath ||
++		c.Request.URL.RawQuery != "" || c.Request.URL.ForceQuery {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request_target"})
++		return
++	}
++	mediaType, _, mediaErr := mime.ParseMediaType(c.GetHeader("Content-Type"))
++	if mediaErr != nil || mediaType != "application/json" {
++		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "json_required"})
++		return
++	}
++	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxNextcloudEventBodyBytes+1))
++	if err != nil || len(body) > maxNextcloudEventBodyBytes {
++		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "event_batch_too_large"})
++		return
++	}
++	var request nextcloudEventRequest
++	decoder := json.NewDecoder(strings.NewReader(string(body)))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&request); err != nil || decoder.Decode(new(any)) != io.EOF {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_event_batch"})
++		return
++	}
++	if !validNextcloudOpaqueID(request.ConnectionID, 16, 128) ||
++		!validNextcloudOpaqueID(request.NextcloudInstanceID, 1, 128) ||
++		!validNextcloudOpaqueID(request.BindingID, 1, 128) ||
++		len(request.Events) == 0 || len(request.Events) > maxNextcloudEventBatchItems {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_event_batch"})
++		return
++	}
++	afterID, ok := parseNextcloudEventID(request.AfterEventID, true)
++	if !ok {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_event_batch"})
++		return
++	}
++
++	connectionID, okConnection := oneNextcloudHeader(c.Request, "X-Nextcloud-Connection-Id")
++	keyID, okKey := oneNextcloudHeader(c.Request, "X-Nextcloud-Key-Id")
++	timestamp, okTimestamp := oneNextcloudHeader(c.Request, "X-Nextcloud-Timestamp")
++	nonce, okNonce := oneNextcloudHeader(c.Request, "X-Nextcloud-Nonce")
++	signatureHex, okSignature := oneNextcloudHeader(c.Request, "X-Nextcloud-Signature")
++	if !okConnection || connectionID != request.ConnectionID || !okKey ||
++		!validNextcloudKeyID(keyID) || !okTimestamp || !okNonce || !okSignature ||
++		!isLowerHex(nonce, 32) || !isLowerHex(signatureHex, 64) {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		return
++	}
++	timestampValue, ok := parseNextcloudEventID(timestamp, false)
++	now := time.Now().UTC()
++	if !ok || timestampValue < now.Add(-5*time.Minute).Unix() ||
++		timestampValue > now.Add(5*time.Minute).Unix() {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		return
++	}
++	signature, err := hex.DecodeString(signatureHex)
++	if err != nil {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		return
++	}
++
++	hints := make([]repository.NextcloudEventHint, 0, len(request.Events))
++	previousID := afterID
++	for _, event := range request.Events {
++		id, valid := parseNextcloudEventID(event.EventID, false)
++		if !valid || id <= previousID || !validNextcloudEventType(event.Type) ||
++			(event.FileID != nil && *event.FileID <= 0) ||
++			(event.Type == "delete" && event.FileID == nil) ||
++			!validOptionalNextcloudPath(event.OldPath) || !validOptionalNextcloudPath(event.Path) ||
++			(event.ETag != nil && len(*event.ETag) > 255) ||
++			(event.CreatedAt != nil && *event.CreatedAt < 0) {
++			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_event_batch"})
++			return
++		}
++		serialized, err := json.Marshal(event)
++		if err != nil {
++			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_event_batch"})
++			return
++		}
++		hints = append(hints, repository.NextcloudEventHint{
++			EventID: id, PayloadSHA256: repository.NextcloudEventPayloadHash(serialized),
++			EventType: event.Type, FileID: event.FileID,
++		})
++		previousID = id
++	}
++	canonical := nextcloudEventCanonicalRequest(body, timestamp, nonce, connectionID, keyID)
++	receivedID, err := h.inbox.IngestSigned(c.Request.Context(), repository.SignedNextcloudEventBatch{
++		ConnectionID: request.ConnectionID, NextcloudInstanceID: request.NextcloudInstanceID,
++		BindingID: request.BindingID, KeyID: keyID, Nonce: nonce,
++		Signature: signature, CanonicalRequest: canonical, AfterEventID: afterID,
++		Events: hints, Now: now,
++	})
++	if err != nil {
++		switch {
++		case errors.Is(err, repository.ErrNextcloudEventUnauthorized):
++			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		case errors.Is(err, repository.ErrNextcloudEventScope):
++			c.JSON(http.StatusForbidden, gin.H{"error": "connection_unavailable"})
++		case errors.Is(err, repository.ErrNextcloudEventConflict):
++			c.JSON(http.StatusConflict, gin.H{"error": "event_sequence_conflict"})
++		default:
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "event_inbox_unavailable"})
++		}
++		return
++	}
++	c.JSON(http.StatusAccepted, gin.H{
++		"connection_id":             request.ConnectionID,
++		"received_through_event_id": strconv.FormatInt(receivedID, 10),
++		"durable_receipt_only":      true,
++	})
++}
++
++func nextcloudEventCanonicalRequest(body []byte, timestamp, nonce, connectionID, keyID string) []byte {
++	return []byte(strings.Join([]string{
++		"nextcloud-event-hmac-sha256-v1",
++		http.MethodPost,
++		nextcloudEventPath,
++		"", // This endpoint does not accept query parameters.
++		repository.NextcloudEventPayloadHash(body),
++		timestamp,
++		nonce,
++		connectionID,
++		keyID,
++	}, "\n"))
++}
++
++func oneNextcloudHeader(r *http.Request, name string) (string, bool) {
++	values := r.Header.Values(name)
++	if len(values) != 1 || strings.Contains(values[0], ",") || strings.TrimSpace(values[0]) != values[0] {
++		return "", false
++	}
++	return values[0], values[0] != ""
++}
++
++func parseNextcloudEventID(raw string, allowZero bool) (int64, bool) {
++	if raw == "" || len(raw) > 19 || (len(raw) > 1 && raw[0] == '0') {
++		return 0, false
++	}
++	for _, ch := range raw {
++		if ch < '0' || ch > '9' {
++			return 0, false
++		}
++	}
++	id, err := strconv.ParseInt(raw, 10, 64)
++	return id, err == nil && (allowZero || id > 0)
++}
++
++func validNextcloudOpaqueID(value string, minLength, maxLength int) bool {
++	if len(value) < minLength || len(value) > maxLength {
++		return false
++	}
++	for _, ch := range value {
++		if !(ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-') {
++			return false
++		}
++	}
++	return true
++}
++
++func validNextcloudKeyID(value string) bool {
++	if len(value) < 1 || len(value) > 64 {
++		return false
++	}
++	for _, ch := range value {
++		if !(ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '-') {
++			return false
++		}
++	}
++	return true
++}
++
++func isLowerHex(raw string, expectedLength int) bool {
++	if len(raw) != expectedLength {
++		return false
++	}
++	for _, ch := range raw {
++		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
++			return false
++		}
++	}
++	return true
++}
++
++func validNextcloudEventType(kind string) bool {
++	switch kind {
++	case "upsert", "metadata", "delete", "subtree_scan", "subtree_moved", "subtree_deleted", "reconcile":
++		return true
++	default:
++		return false
++	}
++}
++
++func validOptionalNextcloudPath(path *string) bool {
++	return path == nil || len(*path) <= 4096 && !strings.ContainsRune(*path, 0)
++}
+diff --git a/internal/handler/nextcloud_events_test.go b/internal/handler/nextcloud_events_test.go
+new file mode 100644
+index 00000000..f3a9d8f0
+--- /dev/null
++++ b/internal/handler/nextcloud_events_test.go
+@@ -0,0 +1,319 @@
++package handler
++
++import (
++	"bytes"
++	"crypto/hmac"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	"gorm.io/gorm/logger"
++)
++
++const (
++	testEventConnection = "conn_nextcloud_synthetic_001"
++	testEventInstance   = "instance_synthetic"
++	testEventBinding    = "binding_synthetic"
++)
++
++func setupNextcloudEventHTTPTest(t *testing.T) (*gorm.DB, *gin.Engine, string) {
++	t.Helper()
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "events.db")),
++		&gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++	require.NoError(t, err)
++	return prepareNextcloudEventHTTPTest(t, db, "../../migrations/sqlite/000032_nextcloud_event_inbox.up.sql")
++}
++
++func prepareNextcloudEventHTTPTest(t *testing.T, db *gorm.DB, migrationPath string) (*gorm.DB, *gin.Engine, string) {
++	t.Helper()
++	key := make([]byte, 32)
++	_, err := rand.Read(key)
++	require.NoError(t, err)
++	t.Setenv("SYSTEM_AES_KEY", base64.RawURLEncoding.EncodeToString(key)[:32])
++	secretBytes := make([]byte, 32)
++	_, err = rand.Read(secretBytes)
++	require.NoError(t, err)
++	secret := base64.RawURLEncoding.EncodeToString(secretBytes)
++	ciphertext, err := utils.EncryptAESGCM(secret, utils.GetAESKey())
++	require.NoError(t, err)
++	require.True(t, strings.HasPrefix(ciphertext, utils.EncPrefix))
++
++	migration, err := os.ReadFile(migrationPath)
++	require.NoError(t, err)
++	for _, statement := range strings.Split(string(migration), ";") {
++		if strings.TrimSpace(statement) != "" {
++			require.NoError(t, db.Exec(statement).Error)
++		}
++	}
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases (
++		id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, deleted_at TIMESTAMP
++	)`).Error)
++	configColumnType := "TEXT"
++	if strings.Contains(migrationPath, "/versioned/") {
++		configColumnType = "JSONB"
++	}
++	require.NoError(t, db.Exec(fmt.Sprintf(`CREATE TABLE data_sources (
++		id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
++		knowledge_base_id TEXT NOT NULL, type TEXT NOT NULL,
++		config %s NOT NULL, deleted_at TIMESTAMP
++	)`, configColumnType)).Error)
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES (?, ?)`, "kb-synthetic", 7).Error)
++	config := syntheticNextcloudEventDataSourceConfig(t, "https://nextcloud.example.test", true)
++	require.NoError(t, db.Exec(`INSERT INTO data_sources
++		(id, tenant_id, knowledge_base_id, type, config)
++		VALUES (?, ?, ?, ?, ?)`, "ds-synthetic", 7, "kb-synthetic", "nextcloud",
++		string(config)).Error)
++	var stored types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds-synthetic").Take(&stored).Error)
++	baseURL, configSHA256, bindingID, err := repository.NextcloudEventDataSourceIdentity(stored.Config)
++	require.NoError(t, err)
++	require.Equal(t, testEventBinding, bindingID)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_connections
++		(connection_id, tenant_id, knowledge_base_id, datasource_id,
++		nextcloud_instance_id, binding_id, datasource_base_url,
++		datasource_config_sha256, status,
++		current_key_id, current_secret_ciphertext)
++		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, testEventConnection, 7,
++		"kb-synthetic", "ds-synthetic", testEventInstance,
++		testEventBinding, baseURL, configSHA256, "active", "current", ciphertext).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_checkpoint
++		(connection_id, received_id) VALUES (?, 0)`, testEventConnection).Error)
++
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.POST(nextcloudEventPath,
++		NewNextcloudEventHandler(repository.NewNextcloudEventInboxRepository(db)).Receive)
++	return db, router, secret
++}
++
++func syntheticNextcloudEventDataSourceConfig(t *testing.T, baseURL string, withCredentials bool) types.JSON {
++	t.Helper()
++	config := &types.DataSourceConfig{
++		Type:        types.ConnectorTypeNextcloud,
++		ResourceIDs: []string{testEventBinding},
++		Settings:    map[string]interface{}{"base_url": baseURL},
++	}
++	if withCredentials {
++		secret := make([]byte, 32)
++		_, err := rand.Read(secret)
++		require.NoError(t, err)
++		config.Credentials = map[string]interface{}{
++			"token": base64.RawURLEncoding.EncodeToString(secret), "key_id": "default",
++		}
++	}
++	blob, err := config.ToJSON()
++	require.NoError(t, err)
++	return blob
++}
++
++func signedNextcloudEventRequest(t *testing.T, secret string, body nextcloudEventRequest, nonce string) *http.Request {
++	return signedNextcloudEventRequestWithKey(t, secret, "current", body, nonce)
++}
++
++func signedNextcloudEventRequestWithKey(t *testing.T, secret, keyID string, body nextcloudEventRequest, nonce string) *http.Request {
++	t.Helper()
++	encoded, err := json.Marshal(body)
++	require.NoError(t, err)
++	req := httptest.NewRequest(http.MethodPost, nextcloudEventPath, bytes.NewReader(encoded))
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("X-Nextcloud-Connection-Id", body.ConnectionID)
++	req.Header.Set("X-Nextcloud-Key-Id", keyID)
++	timestamp := strconv.FormatInt(time.Now().UTC().Unix(), 10)
++	req.Header.Set("X-Nextcloud-Timestamp", timestamp)
++	req.Header.Set("X-Nextcloud-Nonce", nonce)
++	mac := hmac.New(sha256.New, []byte(secret))
++	_, err = mac.Write(nextcloudEventCanonicalRequest(encoded, timestamp, nonce, body.ConnectionID, keyID))
++	require.NoError(t, err)
++	req.Header.Set("X-Nextcloud-Signature", hex.EncodeToString(mac.Sum(nil)))
++	return req
++}
++
++func sampleNextcloudEventBatch(after, eventID string) nextcloudEventRequest {
++	return nextcloudEventRequest{
++		ConnectionID: testEventConnection, NextcloudInstanceID: testEventInstance,
++		BindingID: testEventBinding, AfterEventID: after,
++		Events: []nextcloudEventHintJSON{{EventID: eventID, Type: "upsert", FileID: ptrInt64(41)}},
++	}
++}
++
++func ptrInt64(value int64) *int64 { return &value }
++
++func postNextcloudEvent(router *gin.Engine, request *http.Request) *httptest.ResponseRecorder {
++	recorder := httptest.NewRecorder()
++	router.ServeHTTP(recorder, request)
++	return recorder
++}
++
++func TestNextcloudEventInboxReceiptSequenceAndReplay(t *testing.T) {
++	db, router, secret := setupNextcloudEventHTTPTest(t)
++	first := sampleNextcloudEventBatch("0", "9007199254740993") // exact beyond JS Number precision
++	response := postNextcloudEvent(router, signedNextcloudEventRequest(t, secret, first, strings.Repeat("a", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++	require.Contains(t, response.Body.String(), `"received_through_event_id":"9007199254740993"`)
++	require.Contains(t, response.Body.String(), `"durable_receipt_only":true`)
++
++	// A lost 202 can be retried with a fresh signed nonce; it cannot re-use
++	// the original nonce, and an altered hint cannot reuse the event ID.
++	response = postNextcloudEvent(router, signedNextcloudEventRequest(t, secret, first, strings.Repeat("b", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++	response = postNextcloudEvent(router, signedNextcloudEventRequest(t, secret, first, strings.Repeat("a", 32)))
++	require.Equal(t, http.StatusUnauthorized, response.Code)
++	changed := first
++	changed.Events = []nextcloudEventHintJSON{{EventID: first.Events[0].EventID, Type: "metadata", FileID: ptrInt64(41)}}
++	response = postNextcloudEvent(router, signedNextcloudEventRequest(t, secret, changed, strings.Repeat("c", 32)))
++	require.Equal(t, http.StatusConflict, response.Code)
++
++	second := sampleNextcloudEventBatch("9007199254740993", "9007199254740995")
++	response = postNextcloudEvent(router, signedNextcloudEventRequest(t, secret, second, strings.Repeat("d", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++	response = postNextcloudEvent(router, signedNextcloudEventRequest(t, secret,
++		sampleNextcloudEventBatch("9007199254740996", "9007199254740997"), strings.Repeat("e", 32)))
++	require.Equal(t, http.StatusConflict, response.Code)
++
++	var received int64
++	require.NoError(t, db.Raw(`SELECT received_id FROM nextcloud_event_checkpoint WHERE connection_id = ?`,
++		testEventConnection).Scan(&received).Error)
++	require.Equal(t, int64(9007199254740995), received)
++	var count int64
++	require.NoError(t, db.Table("nextcloud_event_inbox").Count(&count).Error)
++	require.Equal(t, int64(2), count)
++}
++
++func TestNextcloudEventInboxAuthenticationScopeAndDatabaseFailure(t *testing.T) {
++	db, router, secret := setupNextcloudEventHTTPTest(t)
++	batch := sampleNextcloudEventBatch("0", "21")
++	request := signedNextcloudEventRequest(t, secret, batch, strings.Repeat("1", 32))
++	request.Header.Set("X-Nextcloud-Signature", strings.Repeat("0", 64))
++	require.Equal(t, http.StatusUnauthorized, postNextcloudEvent(router, request).Code)
++
++	otherScope := batch
++	otherScope.BindingID = "other-binding"
++	require.Equal(t, http.StatusForbidden, postNextcloudEvent(router,
++		signedNextcloudEventRequest(t, secret, otherScope, strings.Repeat("2", 32))).Code)
++
++	request = signedNextcloudEventRequest(t, secret, batch, strings.Repeat("3", 32))
++	request.Header.Set("X-Nextcloud-Timestamp", strconv.FormatInt(time.Now().Add(-6*time.Minute).Unix(), 10))
++	require.Equal(t, http.StatusUnauthorized, postNextcloudEvent(router, request).Code)
++
++	// No 202, nonce consumption, or checkpoint advancement is possible if
++	// inbox persistence fails mid-transaction.
++	require.NoError(t, db.Exec(`DROP TABLE nextcloud_event_inbox`).Error)
++	require.Equal(t, http.StatusServiceUnavailable, postNextcloudEvent(router,
++		signedNextcloudEventRequest(t, secret, batch, strings.Repeat("4", 32))).Code)
++	var nonceCount, received int64
++	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM nextcloud_event_nonces`).Scan(&nonceCount).Error)
++	require.NoError(t, db.Raw(`SELECT received_id FROM nextcloud_event_checkpoint WHERE connection_id = ?`,
++		testEventConnection).Scan(&received).Error)
++	require.Zero(t, nonceCount)
++	require.Zero(t, received)
++}
++
++func TestNextcloudEventInboxRejectsStaleDataSourceIdentity(t *testing.T) {
++	db, router, secret := setupNextcloudEventHTTPTest(t)
++	changes := []types.JSON{
++		syntheticNextcloudEventDataSourceConfig(t, "https://different.example.test", true),
++		syntheticNextcloudEventDataSourceConfig(t, "https://nextcloud.example.test", false),
++		syntheticNextcloudEventDataSourceConfig(t, "https://nextcloud.example.test", true),
++	}
++	for i, config := range changes {
++		require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`,
++			string(config), "ds-synthetic").Error)
++		response := postNextcloudEvent(router, signedNextcloudEventRequest(t, secret,
++			sampleNextcloudEventBatch("0", "1"), strings.Repeat(strconv.Itoa(i+5), 32)))
++		require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
++	}
++	var received, nonceCount int64
++	require.NoError(t, db.Raw(`SELECT received_id FROM nextcloud_event_checkpoint WHERE connection_id = ?`,
++		testEventConnection).Scan(&received).Error)
++	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM nextcloud_event_nonces`).Scan(&nonceCount).Error)
++	require.Zero(t, received)
++	require.Zero(t, nonceCount)
++}
++
++func TestNextcloudEventInboxRevocationAndPreviousKeyWindow(t *testing.T) {
++	db, router, currentSecret := setupNextcloudEventHTTPTest(t)
++	oldBytes := make([]byte, 32)
++	_, err := rand.Read(oldBytes)
++	require.NoError(t, err)
++	oldSecret := base64.RawURLEncoding.EncodeToString(oldBytes)
++	ciphertext, err := utils.EncryptAESGCM(oldSecret, utils.GetAESKey())
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_connections
++		SET previous_key_id = ?, previous_secret_ciphertext = ?, previous_valid_until = ?
++		WHERE connection_id = ?`, "previous", ciphertext, time.Now().Add(time.Minute),
++		testEventConnection).Error)
++	first := sampleNextcloudEventBatch("0", "1")
++	require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
++		signedNextcloudEventRequestWithKey(t, oldSecret, "previous", first,
++			strings.Repeat("6", 32))).Code)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_connections
++		SET previous_valid_until = ? WHERE connection_id = ?`,
++		time.Now().Add(-time.Minute), testEventConnection).Error)
++	second := sampleNextcloudEventBatch("1", "2")
++	require.Equal(t, http.StatusUnauthorized, postNextcloudEvent(router,
++		signedNextcloudEventRequestWithKey(t, oldSecret, "previous", second,
++			strings.Repeat("7", 32))).Code)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_connections
++		SET status = 'revoked' WHERE connection_id = ?`, testEventConnection).Error)
++	require.Equal(t, http.StatusUnauthorized, postNextcloudEvent(router,
++		signedNextcloudEventRequest(t, currentSecret, second,
++			strings.Repeat("8", 32))).Code)
++}
++
++func TestNextcloudEventInboxPostgresTransaction(t *testing.T) {
++	dsn := os.Getenv("NEXTCLOUD_EVENT_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set NEXTCLOUD_EVENT_TEST_POSTGRES_DSN for isolated PostgreSQL receiver test")
++	}
++	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++	if err != nil {
++		t.Fatal("connect isolated PostgreSQL event test database failed")
++	}
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	random := make([]byte, 6)
++	_, err = rand.Read(random)
++	require.NoError(t, err)
++	schema := "nextcloud_event_test_" + hex.EncodeToString(random)
++	require.NoError(t, db.Exec("CREATE SCHEMA "+schema).Error)
++	t.Cleanup(func() { _ = db.Exec("DROP SCHEMA " + schema + " CASCADE").Error })
++	require.NoError(t, db.Exec("SET search_path TO "+schema).Error)
++	db, router, secret := prepareNextcloudEventHTTPTest(t, db,
++		"../../migrations/versioned/000113_nextcloud_event_inbox.up.sql")
++
++	first := sampleNextcloudEventBatch("0", "101")
++	require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
++		signedNextcloudEventRequest(t, secret, first, strings.Repeat("a", 32))).Code)
++	require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
++		signedNextcloudEventRequest(t, secret, first, strings.Repeat("b", 32))).Code)
++	require.Equal(t, http.StatusConflict, postNextcloudEvent(router,
++		signedNextcloudEventRequest(t, secret,
++			sampleNextcloudEventBatch("102", "103"), strings.Repeat("c", 32))).Code)
++	var count, received int64
++	require.NoError(t, db.Table("nextcloud_event_inbox").Count(&count).Error)
++	require.NoError(t, db.Raw(`SELECT received_id FROM nextcloud_event_checkpoint WHERE connection_id = ?`,
++		testEventConnection).Scan(&received).Error)
++	require.Equal(t, int64(1), count)
++	require.Equal(t, int64(101), received)
++}
 diff --git a/internal/handler/nextcloud_publication.go b/internal/handler/nextcloud_publication.go
 new file mode 100644
 index 00000000..21b9ecad
@@ -9583,7 +10651,7 @@ index bd4744b6..878ac2a4 100644
  			backendID, provider := parseStorageTarget(filePath)
  			fileSvc, resolvedProvider, err := resolveFileService(ctx, tenant, backendID, provider, absDir, storageResolver)
 diff --git a/internal/router/router.go b/internal/router/router.go
-index b5c85dfc..7c4de66b 100644
+index b5c85dfc..3115872c 100644
 --- a/internal/router/router.go
 +++ b/internal/router/router.go
 @@ -13,6 +13,7 @@ import (
@@ -9602,7 +10670,15 @@ index b5c85dfc..7c4de66b 100644
  	TenantMemberHandler          *handler.TenantMemberHandler
  	TenantInvitationHandler      *handler.TenantInvitationHandler
  	AuditLogHandler              *handler.AuditLogHandler
-@@ -101,6 +103,8 @@ type RouterParams struct {
+@@ -92,6 +94,7 @@ type RouterParams struct {
+ 	RedisClient                  *redis.Client
+ 	DataSourceHandler            *handler.DataSourceHandler
+ 	DataSourceCredentialsHandler *handler.DataSourceCredentialsHandler
++	NextcloudEventHandler        *handler.NextcloudEventHandler
+ 	WeKnoraCloudHandler          *handler.WeKnoraCloudHandler
+ 	WikiPageHandler              *handler.WikiPageHandler
+ 	MemoryHandler                *handler.MemoryHandler
+@@ -101,6 +104,8 @@ type RouterParams struct {
  func NewRouter(params RouterParams) *gin.Engine {
  	r := gin.New()
  	r.ContextWithFallback = true
@@ -9611,7 +10687,19 @@ index b5c85dfc..7c4de66b 100644
  
  	// Trusted proxies: gin defaults to trusting ALL proxies, which makes
  	// c.ClientIP() honor a client-supplied X-Forwarded-For. Public, unauthed
-@@ -184,6 +188,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -172,6 +177,11 @@ func NewRouter(params RouterParams) *gin.Engine {
+ 
+ 	// IM 回调路由（在认证中间件之前注册，使用各平台自身的签名验证）
+ 	RegisterIMRoutes(r, params.IMHandler)
++	// Nextcloud signs this machine request with a connection-scoped key.
++	// Register before user/API-key auth, and fail closed if no connection exists.
++	if params.NextcloudEventHandler != nil {
++		r.POST("/api/v1/integrations/nextcloud/events", params.NextcloudEventHandler.Receive)
++	}
+ 
+ 	// Web embed 公开路由（使用 publish token 鉴权，不走全局 Auth）
+ 	RegisterEmbedPublicRoutes(
+@@ -184,6 +194,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.GroupAccessService,
  		params.ChunkService,
@@ -9619,7 +10707,7 @@ index b5c85dfc..7c4de66b 100644
  		params.ResourceCatalog,
  	)
  
-@@ -200,6 +205,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -200,6 +211,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.FileService,
  		params.StorageBackendResolver,
  		params.GroupAccessService,
@@ -9627,7 +10715,7 @@ index b5c85dfc..7c4de66b 100644
  	)
  
  	// Sandbox terminal WebSocket (self-authenticated via a short-lived
-@@ -216,7 +222,8 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -216,7 +228,8 @@ func NewRouter(params RouterParams) *gin.Engine {
  	r.Use(middleware.Auth(params.TenantService, params.UserService, params.TenantMemberService, params.TenantAPIKeyService, params.Config, params.GroupAccessService))
  
  	// 文件服务：统一代理本地/MinIO/COS/TOS存储后端（需要认证）
@@ -9637,7 +10725,7 @@ index b5c85dfc..7c4de66b 100644
  
  	// Presigned file access: no auth required, signature-verified.
  	servePresignedFiles(
-@@ -225,10 +232,12 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -225,10 +238,12 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.ResourceCatalog,
  		params.GroupAccessService,
@@ -9651,7 +10739,7 @@ index b5c85dfc..7c4de66b 100644
  
  	// Langfuse observability — only active when LANGFUSE_* env vars are set.
  	// The middleware is registered unconditionally; when disabled it's a no-op.
-@@ -292,13 +301,14 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -292,13 +307,14 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// KB-scoped image proxy: lets tenants render images embedded in
  		// org-shared / agent-visible KB content, which the tenant-scoped
  		// /files route cannot serve because it enforces same-tenant paths.
@@ -9667,7 +10755,7 @@ index b5c85dfc..7c4de66b 100644
  		)
  		// Message-scoped image proxy: shared-agent replies belong to the
  		// caller's session but may reference resources stored in the agent's
-@@ -306,7 +316,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -306,7 +322,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// never from a client-provided workspace ID. Replies produced by the
  		// caller's own agent over an org-shared KB fall back to the KB share
  		// relation instead (#3022).
@@ -9676,7 +10764,7 @@ index b5c85dfc..7c4de66b 100644
  			v1,
  			rbacGuards,
  			params.MessageService,
-@@ -319,6 +329,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -319,6 +335,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  			params.KBService,
  			params.KnowledgeService,
  			params.GroupAccessService,
@@ -10255,6 +11343,91 @@ index 00000000..85433dbd
 +CREATE UNIQUE INDEX idx_nextcloud_source_versions_candidate
 +    ON nextcloud_source_versions (candidate_knowledge_id)
 +    WHERE candidate_knowledge_id <> '';
+diff --git a/migrations/sqlite/000032_nextcloud_event_inbox.down.sql b/migrations/sqlite/000032_nextcloud_event_inbox.down.sql
+new file mode 100644
+index 00000000..c1a1710b
+--- /dev/null
++++ b/migrations/sqlite/000032_nextcloud_event_inbox.down.sql
+@@ -0,0 +1,4 @@
++DROP TABLE IF EXISTS nextcloud_event_checkpoint;
++DROP TABLE IF EXISTS nextcloud_event_inbox;
++DROP TABLE IF EXISTS nextcloud_event_nonces;
++DROP TABLE IF EXISTS nextcloud_event_connections;
+diff --git a/migrations/sqlite/000032_nextcloud_event_inbox.up.sql b/migrations/sqlite/000032_nextcloud_event_inbox.up.sql
+new file mode 100644
+index 00000000..358f3ca2
+--- /dev/null
++++ b/migrations/sqlite/000032_nextcloud_event_inbox.up.sql
+@@ -0,0 +1,69 @@
++CREATE TABLE nextcloud_event_connections (
++    connection_id TEXT PRIMARY KEY,
++    tenant_id INTEGER NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL,
++    nextcloud_instance_id TEXT NOT NULL,
++    binding_id TEXT NOT NULL,
++    datasource_base_url TEXT NOT NULL,
++    datasource_config_sha256 TEXT NOT NULL
++        CHECK (LENGTH(datasource_config_sha256) = 64),
++    status TEXT NOT NULL DEFAULT 'pending'
++        CHECK (status IN ('pending', 'active', 'revoked')),
++    current_key_id TEXT NOT NULL,
++    current_secret_ciphertext TEXT NOT NULL
++        CHECK (SUBSTR(current_secret_ciphertext, 1, LENGTH('enc:v1:')) = 'enc:v1:'
++               AND LENGTH(current_secret_ciphertext) > LENGTH('enc:v1:')),
++    previous_key_id TEXT,
++    previous_secret_ciphertext TEXT,
++    previous_valid_until DATETIME,
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CHECK (connection_id <> '' AND knowledge_base_id <> '' AND datasource_id <> ''
++           AND nextcloud_instance_id <> '' AND binding_id <> ''
++           AND datasource_base_url <> '' AND current_key_id <> ''),
++    CHECK ((previous_key_id IS NULL AND previous_secret_ciphertext IS NULL
++            AND previous_valid_until IS NULL)
++           OR (previous_key_id IS NOT NULL AND previous_key_id <> ''
++               AND previous_secret_ciphertext IS NOT NULL
++               AND SUBSTR(previous_secret_ciphertext, 1, LENGTH('enc:v1:')) = 'enc:v1:'
++               AND LENGTH(previous_secret_ciphertext) > LENGTH('enc:v1:')
++               AND previous_valid_until IS NOT NULL))
++);
++
++CREATE UNIQUE INDEX uq_nextcloud_event_connections_active_datasource
++    ON nextcloud_event_connections (datasource_id) WHERE status = 'active';
++
++CREATE UNIQUE INDEX uq_nextcloud_event_connections_active_binding
++    ON nextcloud_event_connections (nextcloud_instance_id, binding_id)
++    WHERE status = 'active';
++
++CREATE TABLE nextcloud_event_nonces (
++    connection_id TEXT NOT NULL REFERENCES nextcloud_event_connections (connection_id) ON DELETE RESTRICT,
++    key_id TEXT NOT NULL,
++    nonce TEXT NOT NULL,
++    expires_at DATETIME NOT NULL,
++    PRIMARY KEY (connection_id, key_id, nonce)
++);
++
++CREATE INDEX idx_nextcloud_event_nonces_expires
++    ON nextcloud_event_nonces (expires_at);
++
++CREATE TABLE nextcloud_event_inbox (
++    connection_id TEXT NOT NULL REFERENCES nextcloud_event_connections (connection_id) ON DELETE RESTRICT,
++    event_id INTEGER NOT NULL CHECK (event_id > 0),
++    payload_sha256 TEXT NOT NULL,
++    event_type TEXT NOT NULL,
++    file_id INTEGER,
++    received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    state TEXT NOT NULL DEFAULT 'pending',
++    PRIMARY KEY (connection_id, event_id)
++);
++
++CREATE INDEX idx_nextcloud_event_inbox_state
++    ON nextcloud_event_inbox (connection_id, state, event_id);
++
++CREATE TABLE nextcloud_event_checkpoint (
++    connection_id TEXT PRIMARY KEY REFERENCES nextcloud_event_connections (connection_id) ON DELETE RESTRICT,
++    received_id INTEGER NOT NULL DEFAULT 0 CHECK (received_id >= 0)
++);
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -10373,3 +11546,88 @@ index 00000000..89d75bea
 +CREATE UNIQUE INDEX idx_nextcloud_source_versions_candidate
 +    ON nextcloud_source_versions (candidate_knowledge_id)
 +    WHERE candidate_knowledge_id <> '';
+diff --git a/migrations/versioned/000113_nextcloud_event_inbox.down.sql b/migrations/versioned/000113_nextcloud_event_inbox.down.sql
+new file mode 100644
+index 00000000..c1a1710b
+--- /dev/null
++++ b/migrations/versioned/000113_nextcloud_event_inbox.down.sql
+@@ -0,0 +1,4 @@
++DROP TABLE IF EXISTS nextcloud_event_checkpoint;
++DROP TABLE IF EXISTS nextcloud_event_inbox;
++DROP TABLE IF EXISTS nextcloud_event_nonces;
++DROP TABLE IF EXISTS nextcloud_event_connections;
+diff --git a/migrations/versioned/000113_nextcloud_event_inbox.up.sql b/migrations/versioned/000113_nextcloud_event_inbox.up.sql
+new file mode 100644
+index 00000000..5f344005
+--- /dev/null
++++ b/migrations/versioned/000113_nextcloud_event_inbox.up.sql
+@@ -0,0 +1,69 @@
++CREATE TABLE nextcloud_event_connections (
++    connection_id TEXT PRIMARY KEY,
++    tenant_id BIGINT NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL,
++    nextcloud_instance_id TEXT NOT NULL,
++    binding_id TEXT NOT NULL,
++    datasource_base_url TEXT NOT NULL,
++    datasource_config_sha256 TEXT NOT NULL
++        CHECK (LENGTH(datasource_config_sha256) = 64),
++    status TEXT NOT NULL DEFAULT 'pending'
++        CHECK (status IN ('pending', 'active', 'revoked')),
++    current_key_id TEXT NOT NULL,
++    current_secret_ciphertext TEXT NOT NULL
++        CHECK (SUBSTR(current_secret_ciphertext, 1, LENGTH('enc:v1:')) = 'enc:v1:'
++               AND LENGTH(current_secret_ciphertext) > LENGTH('enc:v1:')),
++    previous_key_id TEXT,
++    previous_secret_ciphertext TEXT,
++    previous_valid_until TIMESTAMPTZ,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CHECK (connection_id <> '' AND knowledge_base_id <> '' AND datasource_id <> ''
++           AND nextcloud_instance_id <> '' AND binding_id <> ''
++           AND datasource_base_url <> '' AND current_key_id <> ''),
++    CHECK ((previous_key_id IS NULL AND previous_secret_ciphertext IS NULL
++            AND previous_valid_until IS NULL)
++           OR (previous_key_id IS NOT NULL AND previous_key_id <> ''
++               AND previous_secret_ciphertext IS NOT NULL
++               AND SUBSTR(previous_secret_ciphertext, 1, LENGTH('enc:v1:')) = 'enc:v1:'
++               AND LENGTH(previous_secret_ciphertext) > LENGTH('enc:v1:')
++               AND previous_valid_until IS NOT NULL))
++);
++
++CREATE UNIQUE INDEX uq_nextcloud_event_connections_active_datasource
++    ON nextcloud_event_connections (datasource_id) WHERE status = 'active';
++
++CREATE UNIQUE INDEX uq_nextcloud_event_connections_active_binding
++    ON nextcloud_event_connections (nextcloud_instance_id, binding_id)
++    WHERE status = 'active';
++
++CREATE TABLE nextcloud_event_nonces (
++    connection_id TEXT NOT NULL REFERENCES nextcloud_event_connections (connection_id) ON DELETE RESTRICT,
++    key_id TEXT NOT NULL,
++    nonce TEXT NOT NULL,
++    expires_at TIMESTAMPTZ NOT NULL,
++    PRIMARY KEY (connection_id, key_id, nonce)
++);
++
++CREATE INDEX idx_nextcloud_event_nonces_expires
++    ON nextcloud_event_nonces (expires_at);
++
++CREATE TABLE nextcloud_event_inbox (
++    connection_id TEXT NOT NULL REFERENCES nextcloud_event_connections (connection_id) ON DELETE RESTRICT,
++    event_id BIGINT NOT NULL CHECK (event_id > 0),
++    payload_sha256 TEXT NOT NULL,
++    event_type TEXT NOT NULL,
++    file_id BIGINT,
++    received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    state TEXT NOT NULL DEFAULT 'pending',
++    PRIMARY KEY (connection_id, event_id)
++);
++
++CREATE INDEX idx_nextcloud_event_inbox_state
++    ON nextcloud_event_inbox (connection_id, state, event_id);
++
++CREATE TABLE nextcloud_event_checkpoint (
++    connection_id TEXT PRIMARY KEY REFERENCES nextcloud_event_connections (connection_id) ON DELETE RESTRICT,
++    received_id BIGINT NOT NULL DEFAULT 0 CHECK (received_id >= 0)
++);

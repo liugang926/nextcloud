@@ -8,25 +8,10 @@ import secrets
 import urllib.parse
 
 from changes_http_smoke import drain, file_id, load_env, request, PROJECT
-from publication_http_smoke import login, request as session_request
-
-
-def occ(*args):
-    result = subprocess.run(
-        ["docker", "compose", "exec", "-T", "-u", "www-data", "nextcloud",
-         "php", "occ", *args], cwd=PROJECT, check=True, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    return result.stdout.strip()
-
-
-def bindings():
-    return json.loads(occ("config:app:get", "integration_weknora", "bindings"))
-
-
-def set_bindings(value):
-    occ("config:app:set", "integration_weknora", "bindings",
-        "--value=" + json.dumps(value, separators=(",", ":")))
+from publication_http_smoke import (
+    issue_machine_key, login, remove_binding, request as session_request,
+    revoke_machine_key,
+)
 
 
 def sql(statement):
@@ -46,7 +31,10 @@ def main():
         f"{env['NEXTCLOUD_ADMIN_USER']}:{env['NEXTCLOUD_ADMIN_PASSWORD']}".encode()
     ).decode()
     dav_headers = {"Authorization": f"Basic {auth}"}
-    machine_headers = {"Authorization": f"Bearer {env['WEKNORA_SERVICE_TOKEN']}"}
+    api = f"{base}/index.php/apps/integration_weknora/api/v1"
+    machine_headers = None
+    key_id = None
+    admin = csrf = None
     suffix = secrets.token_hex(8)
     binding_id = f"root-events-{suffix}"
     original_url = f"{dav_base}/root-events-{suffix}"
@@ -69,8 +57,8 @@ def main():
         )
         assert status == 201, (status, body[:300])
         configured = True
-        changes_url = (f"{base}/index.php/apps/integration_weknora/api/v1/"
-                       f"bindings/{binding_id}/changes")
+        machine_headers, key_id = issue_machine_key(admin, api, binding_id, csrf)
+        changes_url = f"{api}/bindings/{binding_id}/changes"
         _, cursor = drain(changes_url, machine_headers)
         initial_cursor = cursor
 
@@ -109,13 +97,20 @@ def main():
         assert status == 200 and json.loads(body)["hint_only"] is True, (status, body[:300])
         print("bound-root event HTTP smoke passed")
     finally:
-        if floor_set:
-            sql(f"DELETE FROM oc_weknora_change_floor WHERE binding_id = '{binding_id}'")
-        if configured:
-            # Preserve any other binding edits made during this test.
-            set_bindings([item for item in bindings() if item["id"] != binding_id])
-        request(original_url, "DELETE", dav_headers)
-        request(moved_url, "DELETE", dav_headers)
+        try:
+            if floor_set:
+                sql(f"DELETE FROM oc_weknora_change_floor WHERE binding_id = '{binding_id}'")
+        finally:
+            try:
+                if key_id is not None:
+                    revoke_machine_key(admin, api, binding_id, key_id, csrf)
+            finally:
+                try:
+                    if configured:
+                        remove_binding(admin, api, binding_id, csrf)
+                finally:
+                    request(original_url, "DELETE", dav_headers)
+                    request(moved_url, "DELETE", dav_headers)
 
 
 if __name__ == "__main__":

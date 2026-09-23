@@ -63,6 +63,22 @@ final class BindingAdminController extends Controller {
         }
     }
 
+    public function remove(string $id): JSONResponse {
+        if (!$this->isAdmin()) {
+            return $this->json(['error' => 'forbidden'], 403);
+        }
+        try {
+            $revokedKeys = $this->bindings->remove($id);
+            return $revokedKeys === null
+                ? $this->json(['error' => 'binding_not_found'], 404)
+                : $this->json(['removed' => true, 'revoked_keys' => $revokedKeys]);
+        } catch (\InvalidArgumentException $exception) {
+            return $this->json(['error' => 'invalid_binding'], 400);
+        } catch (\Throwable $exception) {
+            return $this->json(['error' => 'binding_registry_unavailable'], 503);
+        }
+    }
+
     private function isAdmin(): bool {
         $user = $this->userSession->getUser();
         return $user !== null && $this->groupManager->isAdmin($user->getUID());

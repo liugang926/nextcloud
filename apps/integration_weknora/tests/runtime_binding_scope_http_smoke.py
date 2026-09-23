@@ -16,25 +16,10 @@ import urllib.request
 import uuid
 
 from changes_http_smoke import file_id, request as dav_request
-from publication_http_smoke import PROJECT, check, load_env, login, request, run_occ
-
-
-def occ(*args):
-    result = subprocess.run(
-        ["docker", "compose", "exec", "-T", "-u", "www-data", "nextcloud",
-         "php", "occ", *args], cwd=PROJECT, check=True, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    return result.stdout.strip()
-
-
-def bindings():
-    return json.loads(occ("config:app:get", "integration_weknora", "bindings"))
-
-
-def set_bindings(value):
-    occ("config:app:set", "integration_weknora", "bindings",
-        "--value=" + json.dumps(value, separators=(",", ":")))
+from publication_http_smoke import (
+    PROJECT, check, issue_machine_key, load_env, login, request,
+    remove_binding, revoke_machine_key, run_occ,
+)
 
 
 def sql(statement):
@@ -63,7 +48,8 @@ def main():
     admin, csrf = login(base, admin_uid, env["NEXTCLOUD_ADMIN_PASSWORD"])
     admin_headers = {"requesttoken": csrf}
     machine = urllib.request.build_opener()
-    bearer = {"Authorization": f"Bearer {env['WEKNORA_SERVICE_TOKEN']}"}
+    a_headers = b_headers = None
+    a_key_id = b_key_id = None
     dav_auth = base64.b64encode(
         f"{admin_uid}:{env['NEXTCLOUD_ADMIN_PASSWORD']}".encode()).decode()
     dav_headers = {"Authorization": f"Basic {dav_auth}"}
@@ -76,6 +62,7 @@ def main():
     file_url = f"{b_url}/member.txt"
     moved_file_url = f"{moved_b_url}/member.txt"
     root_a = root_b = member = None
+    a_configured = b_configured = False
     moved = False
     admin_disabled = False
     guest_created = False
@@ -103,13 +90,27 @@ def main():
                 "owner_uid": admin_uid, "root_file_id": root_id,
             }, admin_headers)
             check(status, 201, "create sibling binding")
+            if binding_id == a_id:
+                a_configured = True
+            else:
+                b_configured = True
         if args.simulate_missing_bind_lock:
             assert sql("SELECT count(*) FROM oc_weknora_bind_lock WHERE id = 1") == "1"
 
-        status, body = request(machine, f"{api}/bindings/{a_id}/manifest", headers=bearer)
+        a_headers, a_key_id = issue_machine_key(admin, api, a_id, csrf)
+        b_headers, b_key_id = issue_machine_key(admin, api, b_id, csrf)
+        status, _ = request(machine, f"{api}/bindings/{b_id}/manifest", headers=a_headers)
+        assert status in (401, 403), "key for sibling A accessed sibling B"
+        status, _ = request(machine, f"{api}/bindings/{a_id}/manifest", headers=b_headers)
+        assert status in (401, 403), "key for sibling B accessed sibling A"
+        status, body = request(machine, f"{api}/bindings", headers=b_headers)
+        check(status, 200, "scoped binding list")
+        assert [item["id"] for item in json.loads(body)["bindings"]] == [b_id]
+
+        status, body = request(machine, f"{api}/bindings/{a_id}/manifest", headers=a_headers)
         check(status, 200, "sibling A baseline manifest")
         assert member not in [item["file_id"] for item in json.loads(body)["items"]]
-        status, body = request(machine, f"{api}/bindings/{b_id}/manifest", headers=bearer)
+        status, body = request(machine, f"{api}/bindings/{b_id}/manifest", headers=b_headers)
         check(status, 200, "sibling B baseline manifest")
         assert member in [item["file_id"] for item in json.loads(body)["items"]]
 
@@ -146,7 +147,7 @@ def main():
                    "object_guid": identity["object_guid"], "file_id": member}
 
         def decision():
-            return post_json(machine, authorize_url, payload, bearer)
+            return post_json(machine, authorize_url, payload, b_headers)
 
         status, body = decision()
         check(status, 200, "baseline authorization")
@@ -157,9 +158,9 @@ def main():
         })
         assert status in (201, 204), (status, body[:300])
         moved = True
-        for url in (f"{api}/bindings/{a_id}/manifest",
-                    f"{api}/bindings/{b_id}/files/{member}/content"):
-            status, body = request(machine, url, headers=bearer)
+        for url, headers in ((f"{api}/bindings/{a_id}/manifest", a_headers),
+                             (f"{api}/bindings/{b_id}/files/{member}/content", b_headers)):
+            status, body = request(machine, url, headers=headers)
             check(status, 503, "overlapping roots must block source reads")
         status, body = decision()
         check(status, 503, "overlapping roots must block authorization")
@@ -181,7 +182,7 @@ def main():
         status, body = decision()
         check(status, 503, "disabled binding owner must deny authorization")
         assert json.loads(body)["allow"] is False
-        status, body = request(machine, f"{api}/bindings/{b_id}/manifest", headers=bearer)
+        status, body = request(machine, f"{api}/bindings/{b_id}/manifest", headers=b_headers)
         check(status, 503, "disabled binding owner must block manifest")
 
         run_occ("user:enable", admin_uid)
@@ -189,6 +190,20 @@ def main():
         status, body = decision()
         check(status, 200, "re-enabled binding owner restores authorization")
         assert json.loads(body)["allow"] is True, body
+
+        status, body = request(admin, f"{api}/admin/bindings/{a_id}", "DELETE", admin_headers)
+        check(status, 200, "delete sibling A binding and credentials")
+        assert json.loads(body)["removed"] is True
+        assert json.loads(body)["revoked_keys"] >= 1
+        a_key_id = None  # The supported binding deletion revoked this key.
+        a_configured = False
+        status, body = post_json(admin, f"{api}/admin/bindings", {
+            "id": a_id, "name": a_id,
+            "owner_uid": admin_uid, "root_file_id": root_a,
+        }, admin_headers)
+        check(status, 409, "retired binding ID must not be reused")
+        status, _ = request(machine, f"{api}/bindings/{a_id}/manifest", headers=a_headers)
+        check(status, 401, "deleted binding key must stay revoked after ID reuse")
 
         print("runtime binding scope HTTP smoke passed")
     finally:
@@ -204,8 +219,14 @@ def main():
             request(admin, f"{shares_url}/{share_id}", "DELETE", share_headers)
         if guest_created:
             run_occ("user:delete", guest_uid)
-        if root_a is not None or root_b is not None:
-            set_bindings([item for item in bindings() if item["id"] not in (a_id, b_id)])
+        if a_key_id is not None:
+            revoke_machine_key(admin, api, a_id, a_key_id, csrf)
+        if b_key_id is not None:
+            revoke_machine_key(admin, api, b_id, b_key_id, csrf)
+        if a_configured:
+            remove_binding(admin, api, a_id, csrf)
+        if b_configured:
+            remove_binding(admin, api, b_id, csrf)
         dav_request(moved_file_url, "DELETE", dav_headers)
         dav_request(file_url, "DELETE", dav_headers)
         dav_request(moved_b_url, "DELETE", dav_headers)

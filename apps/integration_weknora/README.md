@@ -2,23 +2,27 @@
 
 This app exposes service read APIs and administrator publication operations under `/index.php/apps/integration_weknora/api/v1`. Every machine API request requires `Authorization: Bearer <service token>` plus the versioned HMAC headers described in [the request-signing contract](../../docs/machine-request-signing.md). A nonce is consumed once in the Nextcloud database; a Bearer-only request is rejected. Administrator operations require a logged-in Nextcloud system administrator and a valid CSRF request token; the service token cannot call them.
 
-The service token is stored only as a SHA-256 hash, and that hash's 32 raw bytes are the HMAC key. Configure it and a JSON array of bindings as the Nextcloud web user, for example:
+Only the SHA-256 hash of each machine token is stored in the database; the
+hash's 32 raw bytes are the HMAC key. A Nextcloud system administrator creates
+the source binding with `POST /admin/bindings`, then issues a key for it with
+`POST /admin/bindings/{id}/keys` and JSON `{"key_id":"unique-id"}`. This
+CSRF-protected response returns the plaintext token once. Set that token and
+key ID as the WeKnora data source's `credentials.token` and
+`credentials.key_id`. See [the signing contract](../../docs/machine-request-signing.md)
+for the exact rotation and migration procedure. The local Docker
+`scripts/bootstrap.sh` creates a sample `dev-published` binding and its
+`default` key from the local `.env` fixture.
 
-```sh
-TOKEN='replace-with-a-long-random-token'
-HASH=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
-php occ config:app:set integration_weknora service_token_sha256 --value="$HASH"
-php occ config:app:set integration_weknora service_key_id --value=default
-php occ config:app:set integration_weknora bindings --value='[{"id":"dev-published","name":"Published","owner_uid":"devadmin","root_file_id":123}]'
-php occ app:enable integration_weknora
-```
-
-`root_file_id` must identify a child folder in the `owner_uid` user's files; binding the user's entire files root is refused. The binding ID uses letters, digits, `_`, and `-`. A missing token hash or invalid signature rejects all machine requests. Invalid binding configuration returns HTTP 503. The WeKnora data source uses `credentials.token` and optional `credentials.key_id` (default `default`); both must match this app's current or previous key configuration.
+`root_file_id` must identify a child folder in the `owner_uid` user's files;
+binding the user's entire files root is refused. The binding ID uses letters,
+digits, `_`, and `-`. Missing or invalid scoped credentials reject all machine
+requests. Invalid binding configuration returns HTTP 503. A machine key sees
+only its binding and cannot call a different binding's source endpoints.
 
 Service read endpoints:
 
 - `GET /capabilities`: protocol version and Nextcloud instance ID.
-- `GET /bindings`: configured binding IDs, names, and root file IDs.
+- `GET /bindings`: the authenticated key's one binding ID, name, and root file ID.
 - `GET /bindings/{id}/manifest[?cursor=...]`: readable, non-withdrawn files recursively under the binding root. Each page has at most 200 items plus a generation, `complete` flag, and `next_cursor`. The first page stores a ten-minute immutable list; later pages use that list. A changed source or expired list returns HTTP 409; restart the traversal rather than applying a partial manifest.
 - `GET /bindings/{id}/files/{fileId}/content`: streamed file bytes with `Content-Type` and `ETag`. An optional `If-Match` header rejects a changed version with HTTP 412. Withdrawn files return HTTP 404.
 - `GET /bindings/{id}/changes[?cursor=...]`: ordered file-change hints with a signed cursor. The feed is a wakeup and reconciliation aid, not authority for physical deletion. A 409 response requires a complete rescan.
@@ -54,6 +58,10 @@ Administrator endpoints (browser session and CSRF protected):
 
 - `GET /admin/bindings`: list full binding configuration.
 - `POST /admin/bindings`: create a binding or update its name with JSON fields `id`, `name`, `owner_uid`, `root_file_id`. The root must be a readable child folder of the owner. Overlapping roots are rejected, and an existing binding cannot silently change its owner or root. V1 configuration accepts bindings for one owner account only, because overlapping shared mounts across owners cannot yet be proved disjoint.
+- `DELETE /admin/bindings/{id}`: remove a binding and revoke all of its machine keys atomically. Its ID is permanently retired because publication and change history are keyed by that ID.
+- `GET /admin/bindings/{id}/keys`: list key IDs and creation metadata, never token values or hashes.
+- `POST /admin/bindings/{id}/keys`: issue a unique key ID for this binding and return its token exactly once.
+- `DELETE /admin/bindings/{id}/keys/{keyId}`: revoke a key immediately. A second key ID can overlap on the same binding during rotation.
 - `GET /admin/bindings/{id}/files/{fileId}/publication`: current `eligible` or `withdrawn` state.
 - `POST /admin/bindings/{id}/files/{fileId}/withdraw`: persist exclusion from the manifest and content API.
 - `POST /admin/bindings/{id}/files/{fileId}/republish`: explicitly clear the exclusion.
@@ -104,11 +112,11 @@ same person. This app does not independently read AD objectGUID from
 enterprise team-folder advanced ACL behavior. These must be verified against
 the target AD and Nextcloud permission setup before production use. The
 connector's service token remains a high-trust credential: the holder can
-submit any mapped directory identity and access any configured binding.
-The current token is app-wide and has no per-binding scope. A current and
-previous key may overlap briefly during rotation, with removal taking effect
-on the next request without a Web restart. Use TLS and implement scoped
-credentials before enterprise deployment. The paired WeKnora patch enforces this API's live decision on its
+submit any mapped directory identity within its one binding. Binding-scoped
+keys prevent it from reading other configured roots, and revocation takes
+effect without a Web restart. The machine signature alone does not prove that
+a querying person owns the GUID in the authorization body. Use TLS and add
+independent user proof before enterprise deployment. The paired WeKnora patch enforces this API's live decision on its
 tested read paths. An enterprise entry-point and permission-matrix audit is
 still required before production use.
 

@@ -56,12 +56,14 @@ final class ApiController extends Controller {
     #[PublicPage]
     #[NoCSRFRequired]
     public function bindings(): Response {
-        if (!$this->isAuthorized()) {
+        $authorizedBindingId = $this->serviceToken->authenticatedBinding($this->request);
+        if ($authorizedBindingId === null) {
             return $this->unauthorized();
         }
 
         try {
-            $bindings = $this->loadBindings();
+            $bindings = array_values(array_filter($this->loadBindings(),
+                static fn (array $binding): bool => $binding['id'] === $authorizedBindingId));
         } catch (\UnexpectedValueException $exception) {
             return $this->configurationError();
         }
@@ -78,7 +80,7 @@ final class ApiController extends Controller {
     #[PublicPage]
     #[NoCSRFRequired]
     public function manifest(string $id): Response {
-        if (!$this->isAuthorized()) {
+        if (!$this->isAuthorized($id)) {
             return $this->unauthorized();
         }
 
@@ -156,7 +158,7 @@ final class ApiController extends Controller {
     #[PublicPage]
     #[NoCSRFRequired]
     public function content(string $id, int $fileId): Response {
-        if (!$this->isAuthorized()) {
+        if (!$this->isAuthorized($id)) {
             return $this->unauthorized();
         }
 
@@ -238,38 +240,13 @@ final class ApiController extends Controller {
         }
     }
 
-    private function isAuthorized(): bool {
-        return $this->serviceToken->verify($this->request);
+    private function isAuthorized(?string $bindingId = null): bool {
+        return $this->serviceToken->verify($this->request, $bindingId);
     }
 
     /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */
     private function loadBindings(): array {
-        $raw = $this->config->getAppValue(self::APP_ID, 'bindings', '[]');
-        try {
-            $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $exception) {
-            throw new \UnexpectedValueException('Invalid bindings JSON', 0, $exception);
-        }
-
-        if (!is_array($decoded) || !array_is_list($decoded)) {
-            throw new \UnexpectedValueException('Bindings must be a JSON array');
-        }
-
-        $ids = [];
-        foreach ($decoded as $binding) {
-            if (!is_array($binding) ||
-                !isset($binding['id'], $binding['name'], $binding['owner_uid'], $binding['root_file_id']) ||
-                !is_string($binding['id']) || !preg_match('/\A[A-Za-z0-9_-]+\z/D', $binding['id']) ||
-                !is_string($binding['name']) || $binding['name'] === '' ||
-                !is_string($binding['owner_uid']) || $binding['owner_uid'] === '' ||
-                !is_int($binding['root_file_id']) || $binding['root_file_id'] < 1 ||
-                isset($ids[$binding['id']])) {
-                throw new \UnexpectedValueException('Invalid or duplicate binding');
-            }
-            $ids[$binding['id']] = true;
-        }
-
-        return $decoded;
+        return $this->bindingRegistry->listBindings();
     }
 
     /** @return array{id: string, name: string, owner_uid: string, root_file_id: int}|null */

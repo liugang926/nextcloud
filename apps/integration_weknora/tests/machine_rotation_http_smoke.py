@@ -1,79 +1,80 @@
 #!/usr/bin/env python3
-"""Verify overlapping current/previous machine keys in the local Compose DB."""
+"""Verify administrator-issued scoped keys, overlap and committed revocation."""
 
-import hashlib
+import json
 import secrets
-import subprocess
 import urllib.error
 import urllib.request
 
 from machine_auth import signed_headers
-from publication_http_smoke import PROJECT, load_env
+from publication_http_smoke import load_env, login, request
 
 
-def occ(*args):
-    return subprocess.run(
-        ["docker", "compose", "exec", "-T", "-u", "www-data", "nextcloud",
-         "php", "occ", *args], cwd=PROJECT, text=True, capture_output=True,
-    )
-
-
-def get_config(key):
-    result = occ("config:app:get", "integration_weknora", key)
-    if result.returncode:
-        return None
-    return result.stdout.strip()
-
-
-def set_config(key, value):
-    if value is None:
-        result = occ("config:app:delete", "integration_weknora", key)
-    else:
-        result = occ("config:app:set", "integration_weknora", key, "--value=" + value)
-    assert result.returncode == 0, result.stderr
-
-
-def request(url, token, key_id):
-    headers = signed_headers("GET", url, {"Authorization": "Bearer " + token}, key_id=key_id)
+def machine_request(url, token, key_id):
+    headers = signed_headers("GET", url, {"Authorization": "Bearer " + token},
+                             key_id=key_id)
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
-            return response.status
+            return response.status, response.read()
     except urllib.error.HTTPError as error:
-        return error.code
+        return error.code, error.read()
 
 
 def main():
     env = load_env()
-    url = (f"http://127.0.0.1:{env.get('NEXTCLOUD_HTTP_PORT', '18082')}"
-           "/index.php/apps/integration_weknora/api/v1/capabilities")
-    active_id = get_config("service_key_id") or "default"
-    old_id = "rotation-smoke-" + secrets.token_hex(4)
-    old_token = secrets.token_urlsafe(32)
-    active_hash = get_config("service_token_sha256")
-    assert active_hash and len(active_hash) == 64
-    previous = {key: get_config(key) for key in (
-        "service_previous_key_id", "service_previous_token_sha256")}
+    base = f"http://127.0.0.1:{env.get('NEXTCLOUD_HTTP_PORT', '18082')}"
+    api = f"{base}/index.php/apps/integration_weknora/api/v1"
+    binding_id = "dev-published"
+    capabilities = f"{api}/capabilities"
+    bindings = f"{api}/bindings"
+    keys_url = f"{api}/admin/bindings/{binding_id}/keys"
+    admin, csrf = login(base, env["NEXTCLOUD_ADMIN_USER"], env["NEXTCLOUD_ADMIN_PASSWORD"])
+    admin_headers = {"requesttoken": csrf}
+    issued = []
+
+    def issue(key_id):
+        status, body = request(admin, keys_url, "POST",
+                               {**admin_headers, "Content-Type": "application/json"},
+                               json.dumps({"key_id": key_id}).encode())
+        assert status == 201, f"key issue returned HTTP {status}"
+        value = json.loads(body)
+        assert value["binding_id"] == binding_id and value["key_id"] == key_id
+        assert isinstance(value["token"], str) and len(value["token"]) >= 48
+        issued.append(key_id)
+        return value["token"]
+
     try:
-        set_config("service_previous_token_sha256", hashlib.sha256(old_token.encode()).hexdigest())
-        set_config("service_previous_key_id", old_id)
-        assert request(url, env["WEKNORA_SERVICE_TOKEN"], active_id) == 200
-        assert request(url, old_token, old_id) == 200
-        assert request(url, old_token, active_id) == 401
-        assert request(url, env["WEKNORA_SERVICE_TOKEN"], old_id) == 401
-        set_config("service_previous_key_id", None)
-        assert request(url, old_token, old_id) == 401, "revoked previous key remained usable"
-        assert request(url, env["WEKNORA_SERVICE_TOKEN"], active_id) == 200
-        new_current_token = secrets.token_urlsafe(32)
-        set_config("service_token_sha256", hashlib.sha256(new_current_token.encode()).hexdigest())
-        assert request(url, env["WEKNORA_SERVICE_TOKEN"], active_id) == 401, "revoked active key remained usable"
-        assert request(url, new_current_token, active_id) == 200
-        set_config("service_token_sha256", active_hash)
-        assert request(url, env["WEKNORA_SERVICE_TOKEN"], active_id) == 200
+        first_id = "rotation-smoke-" + secrets.token_hex(5)
+        second_id = "rotation-smoke-" + secrets.token_hex(5)
+        first_token = issue(first_id)
+        second_token = issue(second_id)
+
+        assert machine_request(capabilities, env["WEKNORA_SERVICE_TOKEN"], "default")[0] == 200
+        assert machine_request(capabilities, first_token, first_id)[0] == 200
+        assert machine_request(capabilities, second_token, second_id)[0] == 200
+        assert machine_request(capabilities, first_token, second_id)[0] == 401
+        assert machine_request(capabilities, second_token, first_id)[0] == 401
+
+        status, body = machine_request(bindings, first_token, first_id)
+        assert status == 200 and [item["id"] for item in json.loads(body)["bindings"]] == [binding_id]
+
+        status, body = request(admin, keys_url, headers=admin_headers)
+        assert status == 200
+        metadata = json.loads(body)["keys"]
+        assert {first_id, second_id, "default"}.issubset({item["key_id"] for item in metadata})
+        assert first_token.encode() not in body and second_token.encode() not in body
+        assert all("token" not in item and "token_sha256" not in item for item in metadata)
+
+        status, _ = request(admin, f"{keys_url}/{first_id}", "DELETE", admin_headers)
+        assert status == 200
+        issued.remove(first_id)
+        assert machine_request(capabilities, first_token, first_id)[0] == 401, "revoked key still works"
+        assert machine_request(capabilities, second_token, second_id)[0] == 200
+        assert machine_request(capabilities, env["WEKNORA_SERVICE_TOKEN"], "default")[0] == 200
         print("machine key rotation HTTP smoke passed")
     finally:
-        set_config("service_token_sha256", active_hash)
-        set_config("service_previous_token_sha256", previous["service_previous_token_sha256"])
-        set_config("service_previous_key_id", previous["service_previous_key_id"])
+        for key_id in issued:
+            request(admin, f"{keys_url}/{key_id}", "DELETE", admin_headers)
 
 
 if __name__ == "__main__":

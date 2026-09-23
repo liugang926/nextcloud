@@ -62,6 +62,40 @@ def check(status, expected, message):
     assert status == expected, f"{message}: expected {expected}, got {status}"
 
 
+def issue_machine_key(admin, api, binding_id, csrf):
+    """Issue a temporary binding-scoped credential without printing its secret."""
+    key_id = "smoke-" + secrets.token_hex(12)
+    url = f"{api}/admin/bindings/{binding_id}/keys"
+    status, body = request(
+        admin, url, "POST",
+        {"requesttoken": csrf, "Content-Type": "application/json"},
+        json.dumps({"key_id": key_id}).encode(),
+    )
+    check(status, 201, "issue binding machine key")
+    issued = json.loads(body)
+    assert issued["binding_id"] == binding_id and issued["key_id"] == key_id
+    assert isinstance(issued.get("token"), str) and issued["token"]
+    return {"Authorization": "Bearer " + issued["token"],
+            "X-WeKnora-Key-Id": key_id}, key_id
+
+
+def revoke_machine_key(admin, api, binding_id, key_id, csrf):
+    status, _ = request(
+        admin, f"{api}/admin/bindings/{binding_id}/keys/{key_id}",
+        "DELETE", {"requesttoken": csrf},
+    )
+    check(status, 200, "revoke binding machine key")
+
+
+def remove_binding(admin, api, binding_id, csrf):
+    status, body = request(
+        admin, f"{api}/admin/bindings/{binding_id}",
+        "DELETE", {"requesttoken": csrf},
+    )
+    check(status, 200, "remove synthetic binding")
+    assert json.loads(body)["removed"] is True
+
+
 def run_occ(*args, env=None):
     command = ["docker", "compose", "exec", "-T", "-u", "www-data"]
     if env is not None and "NC_PASS" in env:

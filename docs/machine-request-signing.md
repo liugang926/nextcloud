@@ -5,7 +5,7 @@ Bearer token and four headers:
 
 | Header | Value |
 | --- | --- |
-| `X-WeKnora-Key-Id` | ASCII `[A-Za-z0-9._-]`, 1–64 bytes; default `default` |
+| `X-WeKnora-Key-Id` | ASCII `[A-Za-z0-9._-]`, 1–64 bytes; unique to one binding |
 | `X-WeKnora-Timestamp` | Decimal Unix seconds, without a sign or leading zero |
 | `X-WeKnora-Nonce` | 16 cryptographically random bytes, lowercase hex (32 chars) |
 | `X-WeKnora-Signature` | Lowercase hex HMAC-SHA256 (64 chars) |
@@ -62,26 +62,57 @@ Bearer token `paired-secret`. The canonical query is
 `a=1&b=two%20words&empty=`, and the signature is
 `204a5da882a867f96220bab1e17d1ed2df2503c288a290fa8c17b3262bb7cc01`.
 
-## Key configuration and rotation
+## Binding keys and rotation
 
-Nextcloud stores the current `service_key_id` (default `default`) and
-`service_token_sha256`, plus optional `service_previous_key_id` and
-`service_previous_token_sha256`. The Go data source uses `credentials.token`
-and `credentials.key_id` (default `default`). Never reuse a token across
-different Nextcloud instances. Keep the Bearer token and HTTPS even though the
-request is signed.
+Each active `key_id` belongs to exactly one binding and its original owner/root
+identity in the durable `weknora_machine_key` registry. `/capabilities` accepts any active key;
+`/bindings` returns only its binding. The manifest, changes, content and
+authorization routes return HTTP 401 when a valid key is used for a different
+binding. A key cannot be moved to another binding. The Go data source uses
+`credentials.token` and `credentials.key_id`; both must be the pair issued for
+that source binding. Keep the Bearer token and HTTPS even though the request is
+signed, and never reuse a token across Nextcloud instances.
 
-For a planned rotation, first set the previous token hash and previous key ID
-to the current pair. Set a distinct new current key ID, then its new token
-hash. Update WeKnora credentials to that new pair and verify signed requests.
-After in-flight old requests finish, delete `service_previous_key_id` and then
-`service_previous_token_sha256`. The previous key is rejected immediately
-after the ID deletion commits; Nextcloud reads these four config rows directly
-from the database on each request, avoiding stale Web process caches. During
-a partial previous-key update only the current key is valid. If a token is
-compromised, skip the overlap and revoke it immediately. Machine APIs are
-currently scoped to the whole app, so a token holder may request any configured
-binding and any mapped principal; per-binding credentials remain future work.
+A Nextcloud system administrator issues a key with a CSRF-protected `POST` to
+`/api/v1/admin/bindings/{bindingId}/keys` and JSON body
+`{"key_id":"unique-key-id"}`. The response contains the plaintext `token`
+**once**. Subsequent `GET` requests to the same path list IDs and creation
+metadata only. Set the issued pair in WeKnora data-source credentials; the
+ordinary data-source update cannot change a stored token or its destination.
+To rotate, issue a different key ID for the same binding, update WeKnora, verify
+signed requests, then send a CSRF-protected `DELETE` to
+`/api/v1/admin/bindings/{bindingId}/keys/{keyId}` for the old key. Several IDs
+may be active for the same binding during this overlap. Deletion is checked
+against committed database rows on each machine request, so a revoked key is
+rejected without restarting Web workers. Protect the one-time response as a
+secret; do not put it in logs or issue bodies.
+
+An administrator can remove a binding with a CSRF-protected `DELETE` to
+`/api/v1/admin/bindings/{bindingId}`. Its keys are deleted in the same database
+transaction. Issuance and binding deletion share a registry lock, so they
+cannot leave a live key behind under concurrent requests. The binding ID is
+permanently retired and cannot be reused: outbox, publication and snapshot
+rows use that ID and would otherwise leak old state into a new publication.
+The binding registry also rejects an operator's direct appconfig edit that
+points an existing ID at a different owner or root.
+
+App upgrade migration 0010 imports legacy `service_key_id` /
+`service_token_sha256` and a valid optional previous pair only when the legacy
+configuration has **exactly one valid, active binding root**. With zero,
+multiple, unavailable or overlapping roots, it imports nothing and machine
+requests fail closed until an administrator issues binding keys. Runtime
+authentication has no fallback to legacy appconfig credentials. The local
+`scripts/bootstrap.sh` explicitly provisions `default` for its sample
+`dev-published` binding on a fresh install. Migration 0011 pins migrated keys
+to their configured binding source; an unresolved source leaves the key
+unusable. Migration 0012 registers existing binding identities and creates
+permanent deletion tombstones.
+
+Binding keys bound the connector's access to source folders. The current
+authorization request body still contains a directory ID and object GUID
+supplied by WeKnora; this machine signature does not prove that the querying
+person owns that GUID. Independent user identity proof remains required before
+using this endpoint for enterprise user-facing answers.
 
 ## Approved destination
 

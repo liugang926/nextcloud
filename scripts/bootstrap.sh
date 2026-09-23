@@ -37,14 +37,35 @@ if [[ ! "$root_id" =~ ^[0-9]+$ ]]; then
 fi
 
 token_hash="$(printf '%s' "$WEKNORA_SERVICE_TOKEN" | shasum -a 256 | awk '{print $1}')"
+source_hash="$(python3 - "$NEXTCLOUD_ADMIN_USER" "$root_id" <<'PY'
+import hashlib
+import sys
+value = b'dev-published\0' + sys.argv[1].encode() + b'\0' + sys.argv[2].encode()
+print(hashlib.sha256(value).hexdigest())
+PY
+)"
 bindings="$(python3 - "$NEXTCLOUD_ADMIN_USER" "$root_id" <<'PY'
 import json
 import sys
 print(json.dumps([{"id": "dev-published", "name": "Published", "owner_uid": sys.argv[1], "root_file_id": int(sys.argv[2])}], separators=(',', ':')))
 PY
 )"
-"${occ[@]}" config:app:set integration_weknora service_token_sha256 --value="$token_hash"
+registered="$(docker compose exec -T db psql -U nextcloud -d nextcloud \
+  -v ON_ERROR_STOP=1 -qAtc "INSERT INTO oc_weknora_binding_id (binding_id, source_hash, retired_at) VALUES ('dev-published', '$source_hash', 0) ON CONFLICT (binding_id) DO NOTHING; SELECT CASE WHEN source_hash = '$source_hash' AND retired_at = 0 THEN 1 ELSE 0 END FROM oc_weknora_binding_id WHERE binding_id = 'dev-published'")"
+if [[ "$registered" != 1 ]]; then
+  echo 'Sample binding ID is retired or belongs to a different source.' >&2
+  exit 1
+fi
 "${occ[@]}" config:app:set integration_weknora bindings --value="$bindings"
+# The runtime has no global-token fallback. On a fresh installation the
+# migration ran before the sample binding existed, so provision its exact
+# binding key after the folder and binding have been created.
+key_ready="$(docker compose exec -T db psql -U nextcloud -d nextcloud -v ON_ERROR_STOP=1 -qAtc \
+  "INSERT INTO oc_weknora_machine_key (key_id, binding_id, token_sha256, source_hash, created_at, created_by_uid) VALUES ('default', 'dev-published', '$token_hash', '$source_hash', EXTRACT(EPOCH FROM NOW())::BIGINT, 'bootstrap') ON CONFLICT (key_id) DO UPDATE SET token_sha256 = EXCLUDED.token_sha256 WHERE oc_weknora_machine_key.binding_id = EXCLUDED.binding_id AND oc_weknora_machine_key.source_hash = EXCLUDED.source_hash; SELECT CASE WHEN binding_id = 'dev-published' AND source_hash = '$source_hash' AND token_sha256 = '$token_hash' THEN 1 ELSE 0 END FROM oc_weknora_machine_key WHERE key_id = 'default'")"
+if [[ "$key_ready" != 1 ]]; then
+  echo 'Sample key ID is already assigned to a different binding.' >&2
+  exit 1
+fi
 "${occ[@]}" background:cron
 
 # On a fresh installation the Apache worker may still hold the route cache

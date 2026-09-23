@@ -49,6 +49,30 @@ return [
         ['name' => 'binding_admin#index', 'url' => '/api/v1/admin/bindings', 'verb' => 'GET'],
         ['name' => 'binding_admin#save', 'url' => '/api/v1/admin/bindings', 'verb' => 'POST'],
         [
+            'name' => 'binding_admin#remove',
+            'url' => '/api/v1/admin/bindings/{id}',
+            'verb' => 'DELETE',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'machine_key_admin#index',
+            'url' => '/api/v1/admin/bindings/{id}/keys',
+            'verb' => 'GET',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'machine_key_admin#issue',
+            'url' => '/api/v1/admin/bindings/{id}/keys',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'machine_key_admin#revoke',
+            'url' => '/api/v1/admin/bindings/{id}/keys/{keyId}',
+            'verb' => 'DELETE',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+', 'keyId' => '[A-Za-z0-9._-]+'],
+        ],
+        [
             'name' => 'publication#withdraw',
             'url' => '/api/v1/admin/bindings/{id}/files/{fileId}/withdraw',
             'verb' => 'POST',

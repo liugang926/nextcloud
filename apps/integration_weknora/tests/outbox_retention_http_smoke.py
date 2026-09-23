@@ -14,8 +14,10 @@ import time
 import urllib.parse
 
 from changes_http_smoke import drain, file_id, load_env, request, PROJECT
-from publication_http_smoke import login, request as session_request
-from root_events_http_smoke import bindings, set_bindings
+from publication_http_smoke import (
+    issue_machine_key, login, remove_binding, request as session_request,
+    revoke_machine_key,
+)
 
 
 def sql(statement):
@@ -92,7 +94,10 @@ def main():
         f"{env['NEXTCLOUD_ADMIN_USER']}:{env['NEXTCLOUD_ADMIN_PASSWORD']}".encode()
     ).decode()
     dav_headers = {"Authorization": f"Basic {auth}"}
-    machine_headers = {"Authorization": f"Bearer {env['WEKNORA_SERVICE_TOKEN']}"}
+    machine_headers = None
+    key_id = None
+    admin = csrf = None
+    api = f"{base}/index.php/apps/integration_weknora/api/v1"
     suffix = secrets.token_hex(8)
     binding_id = f"retention-{suffix}"
     root_url = f"{dav_base}/{binding_id}"
@@ -115,6 +120,7 @@ def main():
         )
         assert status == 201, (status, body[:300])
         configured = True
+        machine_headers, key_id = issue_machine_key(admin, api, binding_id, csrf)
         _, initial_cursor = drain(changes_url, machine_headers)
 
         ids = []
@@ -171,14 +177,18 @@ def main():
         print("outbox retention HTTP/DB smoke passed")
     finally:
         try:
-            if configured:
-                set_bindings([item for item in bindings() if item["id"] != binding_id])
+            if key_id is not None:
+                revoke_machine_key(admin, api, binding_id, key_id, csrf)
         finally:
             try:
-                request(root_url, "DELETE", dav_headers)
+                if configured:
+                    remove_binding(admin, api, binding_id, csrf)
             finally:
-                sql(f"DELETE FROM oc_weknora_outbox WHERE binding_id = '{binding_id}'; "
-                    f"DELETE FROM oc_weknora_change_floor WHERE binding_id = '{binding_id}'")
+                try:
+                    request(root_url, "DELETE", dav_headers)
+                finally:
+                    sql(f"DELETE FROM oc_weknora_outbox WHERE binding_id = '{binding_id}'; "
+                        f"DELETE FROM oc_weknora_change_floor WHERE binding_id = '{binding_id}'")
 
 
 if __name__ == "__main__":

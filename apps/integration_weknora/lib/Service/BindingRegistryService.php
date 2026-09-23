@@ -43,7 +43,35 @@ final class BindingRegistryService {
         } finally {
             $readResult->closeCursor();
         }
-        return $this->decodeBindings($raw === false ? '[]' : (string)$raw);
+        $bindings = $this->decodeBindings($raw === false ? '[]' : (string)$raw);
+        $this->requireRegisteredSources($bindings);
+        return $bindings;
+    }
+
+    /** A retired ID, or one reused for a different root, is never active. */
+    private function requireRegisteredSources(array $bindings): void {
+        if ($bindings === []) {
+            return;
+        }
+        $query = $this->db->getQueryBuilder();
+        $query->select('binding_id', 'source_hash')->from('weknora_binding_id')
+            ->where($query->expr()->eq('retired_at', $query->createNamedParameter(0)));
+        $result = $query->executeQuery();
+        try {
+            $active = [];
+            while (($row = $result->fetchAssociative()) !== false) {
+                $active[(string)$row['binding_id']] = (string)$row['source_hash'];
+            }
+        } finally {
+            $result->closeCursor();
+        }
+        foreach ($bindings as $binding) {
+            $expected = MachineKeyRegistryService::sourceHash($binding);
+            if (!isset($active[$binding['id']]) ||
+                !hash_equals($expected, $active[$binding['id']])) {
+                throw new \UnexpectedValueException('Binding ID is unregistered or retired');
+            }
+        }
     }
 
     /**
@@ -161,6 +189,18 @@ final class BindingRegistryService {
             }
             unset($binding);
             if (!$found) {
+                $registered = $this->db->insertIgnoreConflict('weknora_binding_id', [
+                    'binding_id' => $id,
+                    'source_hash' => MachineKeyRegistryService::sourceHash([
+                        'id' => $id,
+                        'owner_uid' => $ownerUid,
+                        'root_file_id' => $rootFileId,
+                    ]),
+                    'retired_at' => 0,
+                ]);
+                if ($registered !== 1) {
+                    throw new \DomainException('Binding ID has already been used');
+                }
                 $bindings[] = [
                     'id' => $id,
                     'name' => $name,
@@ -171,6 +211,56 @@ final class BindingRegistryService {
             $this->config->setAppValue(self::APP_ID, 'bindings', json_encode($bindings, JSON_THROW_ON_ERROR));
             $this->db->commit();
             return !$found;
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    /** Remove a binding and all of its machine credentials atomically. */
+    public function remove(string $id): ?int {
+        if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $id)) {
+            throw new \InvalidArgumentException('Invalid binding ID');
+        }
+        $this->db->beginTransaction();
+        try {
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
+            $lock = $this->db->getQueryBuilder();
+            $lock->select('id')->from('weknora_bind_lock')
+                ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))
+                ->forUpdate();
+            $lockResult = $lock->executeQuery();
+            try {
+                if ($lockResult->fetchOne() === false) {
+                    throw new \UnexpectedValueException('Binding registry lock is missing');
+                }
+            } finally {
+                $lockResult->closeCursor();
+            }
+            $bindings = $this->readCommittedBindings();
+            $remaining = array_values(array_filter($bindings,
+                static fn (array $binding): bool => $binding['id'] !== $id));
+            if (count($remaining) === count($bindings)) {
+                $this->db->commit();
+                return null;
+            }
+            $retire = $this->db->getQueryBuilder();
+            $retired = $retire->update('weknora_binding_id')
+                ->set('retired_at', $retire->createNamedParameter(time()))
+                ->where($retire->expr()->eq('binding_id', $retire->createNamedParameter($id)))
+                ->andWhere($retire->expr()->eq('retired_at', $retire->createNamedParameter(0)))
+                ->executeStatement();
+            if ($retired !== 1) {
+                throw new \UnexpectedValueException('Binding ID registration is missing');
+            }
+            $delete = $this->db->getQueryBuilder();
+            $revoked = $delete->delete('weknora_machine_key')
+                ->where($delete->expr()->eq('binding_id', $delete->createNamedParameter($id)))
+                ->executeStatement();
+            $this->config->setAppValue(self::APP_ID, 'bindings',
+                json_encode($remaining, JSON_THROW_ON_ERROR));
+            $this->db->commit();
+            return $revoked;
         } catch (\Throwable $exception) {
             $this->db->rollBack();
             throw $exception;

@@ -31,7 +31,7 @@ final class ChangesController extends Controller {
     #[PublicPage]
     #[NoCSRFRequired]
     public function index(string $id): JSONResponse {
-        if (!$this->serviceToken->verify($this->request)) {
+        if (!$this->serviceToken->verify($this->request, $id)) {
             return $this->json(['error' => 'unauthorized'], 401, [
                 'WWW-Authenticate' => 'Bearer realm="WeKnora Integration"',
             ]);

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace OCA\IntegrationWeknora\Service;
 
-use OCP\IDBConnection;
 use OCP\IRequest;
 
 /** Bearer authentication plus canonical HMAC and durable replay protection. */
@@ -13,49 +12,41 @@ final class PairedServiceToken {
     private const MAX_CLOCK_SKEW_SECONDS = 300;
 
     public function __construct(
-        private IDBConnection $db,
+        private MachineKeyRegistryService $keys,
         private MachineRequestNonceService $nonces,
     ) {
     }
 
-    public function verify(IRequest $request): bool {
-        try {
-            $keys = $this->readCommittedKeys();
-        } catch (\Throwable $exception) {
-            return false;
-        }
-        $currentId = $keys['service_key_id'] ?? 'default';
-        $currentHash = $keys['service_token_sha256'] ?? '';
-        $previousId = $keys['service_previous_key_id'] ?? '';
-        $previousHash = $keys['service_previous_token_sha256'] ?? '';
-        if (!self::validKeyId($currentId) || !self::validHash($currentHash)) {
-            return false;
-        }
-        // A rotation consists of two appconfig writes. Until both previous
-        // fields are valid, only the current key is accepted; this avoids an
-        // outage during setup and revokes the old key as soon as its ID is
-        // removed. No partially configured previous credential is usable.
-        $previousEnabled = self::validKeyId($previousId) && self::validHash($previousHash) &&
-            $previousId !== $currentId;
+    public function verify(IRequest $request, ?string $bindingId = null): bool {
+        return $this->authenticatedBinding($request, $bindingId) !== null;
+    }
 
+    /** Return the sole binding attached to a fully authenticated request. */
+    public function authenticatedBinding(IRequest $request, ?string $requiredBindingId = null): ?string {
         $keyId = $request->getHeader('X-WeKnora-Key-Id');
-        if (!is_string($keyId) || !self::validKeyId($keyId)) {
-            return false;
+        if (!is_string($keyId) || !MachineKeyRegistryService::validKeyId($keyId)) {
+            return null;
         }
-        if ($keyId === $currentId) {
-            $expectedHash = strtolower($currentHash);
-        } elseif ($previousEnabled && $keyId === $previousId) {
-            $expectedHash = strtolower($previousHash);
-        } else {
-            return false;
+        try {
+            // Read the committed key row for every request. Deleting that row
+            // revokes the key without waiting for a PHP worker to restart.
+            $key = $this->keys->find($keyId);
+            if ($key === null || ($requiredBindingId !== null &&
+                !hash_equals($key['binding_id'], $requiredBindingId)) ||
+                !$this->keys->matchesCurrentBinding($key)) {
+                return null;
+            }
+        } catch (\Throwable $exception) {
+            return null;
         }
+        $expectedHash = $key['token_sha256'];
         $authorization = $request->getHeader('Authorization');
         if (!is_string($authorization) ||
             !preg_match('/\ABearer[ \t]+([^\s]+)\z/iD', $authorization, $matches)) {
-            return false;
+            return null;
         }
         if (!hash_equals($expectedHash, hash('sha256', $matches[1]))) {
-            return false;
+            return null;
         }
 
         $timestamp = $request->getHeader('X-WeKnora-Timestamp');
@@ -64,11 +55,11 @@ final class PairedServiceToken {
         if (!is_string($timestamp) || !preg_match('/\A(?:0|[1-9][0-9]{0,11})\z/D', $timestamp) ||
             !is_string($nonce) || !preg_match('/\A[a-f0-9]{32}\z/D', $nonce) ||
             !is_string($signature) || !preg_match('/\A[a-f0-9]{64}\z/D', $signature)) {
-            return false;
+            return null;
         }
         $now = time();
         if (abs($now - (int)$timestamp) > self::MAX_CLOCK_SKEW_SECONDS) {
-            return false;
+            return null;
         }
 
         $method = strtoupper($request->getMethod());
@@ -76,16 +67,16 @@ final class PairedServiceToken {
         if (!preg_match('/\A[A-Z]+\z/D', $method) || !is_string($uri) ||
             strlen($uri) > 8192 || !str_starts_with($uri, '/') ||
             preg_match('/[\x00-\x20\x7f#]/', $uri)) {
-            return false;
+            return null;
         }
         [$path, $rawQuery] = array_pad(explode('?', $uri, 2), 2, '');
         $query = self::canonicalQuery($rawQuery);
         if ($query === null) {
-            return false;
+            return null;
         }
         $body = file_get_contents('php://input', false, null, 0, self::MAX_BODY_BYTES + 1);
         if ($body === false || strlen($body) > self::MAX_BODY_BYTES) {
-            return false;
+            return null;
         }
         $canonical = implode("\n", [
             'weknora-hmac-sha256-v1',
@@ -97,52 +88,23 @@ final class PairedServiceToken {
             $nonce,
             $keyId,
         ]);
-        $key = hex2bin($expectedHash);
-        if ($key === false || !hash_equals(hash_hmac('sha256', $canonical, $key), $signature)) {
-            return false;
+        $hmacKey = hex2bin($expectedHash);
+        if ($hmacKey === false || !hash_equals(hash_hmac('sha256', $canonical, $hmacKey), $signature)) {
+            return null;
         }
         try {
-            return $this->nonces->consume($nonce, $keyId, $now);
+            if (!$this->nonces->consume($nonce, $keyId, $now)) {
+                return null;
+            }
+            // Re-read after nonce consumption so a key deleted while the
+            // signature was checked cannot use a stale credential snapshot.
+            $stillActive = $this->keys->find($keyId);
+            return $stillActive !== null && $stillActive === $key &&
+                $this->keys->matchesCurrentBinding($stillActive) ? $key['binding_id'] : null;
         } catch (\Throwable $exception) {
             // A missing migration or database outage cannot bypass replay checks.
-            return false;
+            return null;
         }
-    }
-
-    private static function validKeyId(mixed $keyId): bool {
-        return is_string($keyId) && (bool)preg_match('/\A[A-Za-z0-9._-]{1,64}\z/D', $keyId);
-    }
-
-    /**
-     * Read committed appconfig rows directly. Nextcloud's IConfig cache is
-     * process-local, so using it here could keep a revoked key alive until a
-     * Web worker restart. One SQL statement sees a consistent configuration.
-     *
-     * @return array<string, string>
-     */
-    private function readCommittedKeys(): array {
-        $query = $this->db->getQueryBuilder();
-        $query->select('configkey', 'configvalue')->from('appconfig')
-            ->where($query->expr()->eq('appid', $query->createNamedParameter('integration_weknora')));
-        $result = $query->executeQuery();
-        try {
-            $keys = [];
-            while (($row = $result->fetchAssociative()) !== false) {
-                if (in_array($row['configkey'], [
-                    'service_key_id', 'service_token_sha256',
-                    'service_previous_key_id', 'service_previous_token_sha256',
-                ], true)) {
-                    $keys[$row['configkey']] = (string)$row['configvalue'];
-                }
-            }
-            return $keys;
-        } finally {
-            $result->closeCursor();
-        }
-    }
-
-    private static function validHash(mixed $hash): bool {
-        return is_string($hash) && (bool)preg_match('/\A[a-fA-F0-9]{64}\z/D', $hash);
     }
 
     /** RFC 3986 encoded, sorted query pairs; repeated pairs are retained. */

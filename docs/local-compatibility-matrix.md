@@ -20,7 +20,7 @@ volumes; the application is mounted read-only from this repository.
 
 `docker compose ps` reported the Nextcloud, PostgreSQL, Redis and mock
 embedding services healthy. The installed and enabled
-`integration_weknora` application reported version `0.4.6`; its `info.xml`
+`integration_weknora` application reported version `0.4.10` after local migration; its `info.xml`
 declares Nextcloud major version 34 as its local compatibility range. The
 instance's `occ status` reported `maintenance: false` and
 `needsDbUpgrade: false`.
@@ -32,7 +32,7 @@ instance's `occ status` reported `maintenance: false` and
 | Nextcloud app frontend | Host `node` and `npm`; CI requests Node major 24 in `.github/workflows/integration.yml` | Node `v24.14.0`; npm `11.9.0`; `package-lock.json` is used by `npm ci` |
 | WeKnora Go build and test | Local `weknora-go-test:1.26-sqlite` image | Go `1.26.8 linux/arm64`; local image ID `sha256:5a74e8b5137496d3e22c72c01d862c4cbb1fe6ce476ddf5616fd9a807d6ae9ac` |
 | WeKnora runtime base | Local `weknora-ldap-app:final` image | Local image ID `sha256:36667b698350db76c044e797d3c92e98f8acb146750e30401a2dd6a61a6b6c79` |
-| Patched WeKnora runtime | Local `weknora-ldap-app:nextcloud-integration` image | Running container and local tag used image ID `sha256:5f8cd403b4401c1faa77ffcc6dad023aed60d073e6747e224b2c3f7d6aa71c84` at capture time |
+| Patched WeKnora runtime | Local `weknora-ldap-app:nextcloud-integration` image | Running container and local tag used image ID `sha256:2044aac87d6d026a230d949518f857c7a30facb74877f40980d18a993bdc239e` after the event inbox source-pinning build |
 
 The WeKnora source baseline is the fixed commit
 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` from
