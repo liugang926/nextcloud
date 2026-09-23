@@ -23,6 +23,20 @@ final class PairedServiceToken {
 
     /** Return the sole binding attached to a fully authenticated request. */
     public function authenticatedBinding(IRequest $request, ?string $requiredBindingId = null): ?string {
+        return $this->authenticate($request, $requiredBindingId, null);
+    }
+
+    /** An expired pair key may authenticate only a repeat of its own abort. */
+    public function authenticatedBindingForPairAbort(IRequest $request,
+        string $bindingId, string $operationId): ?string {
+        if (!SourcePairingRegistryService::validOperationId($operationId)) {
+            return null;
+        }
+        return $this->authenticate($request, $bindingId, $operationId);
+    }
+
+    private function authenticate(IRequest $request, ?string $requiredBindingId,
+        ?string $abortOperationId): ?string {
         $keyId = $request->getHeader('X-WeKnora-Key-Id');
         if (!is_string($keyId) || !MachineKeyRegistryService::validKeyId($keyId)) {
             return null;
@@ -31,6 +45,10 @@ final class PairedServiceToken {
             // Read the committed key row for every request. Deleting that row
             // revokes the key without waiting for a PHP worker to restart.
             $key = $this->keys->find($keyId);
+            if ($key === null && $abortOperationId !== null && $requiredBindingId !== null) {
+                $key = $this->keys->findForPairAbort($keyId, $requiredBindingId,
+                    $abortOperationId);
+            }
             if ($key === null || ($requiredBindingId !== null &&
                 !hash_equals($key['binding_id'], $requiredBindingId)) ||
                 !$this->keys->matchesCurrentBinding($key)) {
@@ -99,6 +117,10 @@ final class PairedServiceToken {
             // Re-read after nonce consumption so a key deleted while the
             // signature was checked cannot use a stale credential snapshot.
             $stillActive = $this->keys->find($keyId);
+            if ($stillActive === null && $abortOperationId !== null && $requiredBindingId !== null) {
+                $stillActive = $this->keys->findForPairAbort($keyId,
+                    $requiredBindingId, $abortOperationId);
+            }
             return $stillActive !== null && $stillActive === $key &&
                 $this->keys->matchesCurrentBinding($stillActive) ? $key['binding_id'] : null;
         } catch (\Throwable $exception) {

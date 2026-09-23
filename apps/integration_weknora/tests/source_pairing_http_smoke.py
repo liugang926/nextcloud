@@ -53,6 +53,7 @@ def main():
     binding_url = f"{api}/admin/bindings/{binding_id}"
     pairing_url = binding_url + "/source-pairing"
     commit_url = f"{api}/bindings/{binding_id}/source-pairing/commit"
+    abort_url = f"{api}/bindings/{binding_id}/source-pairing/abort"
     machine = urllib.request.build_opener()
     created_folder = False
     moved = False
@@ -77,6 +78,19 @@ def main():
                    "X-WeKnora-Key-Id": pairing["key_id"],
                    "Content-Type": "application/json"}
         return request(machine, commit_url, "POST", headers, json.dumps(payload).encode())
+
+    def signed_abort(pairing, token, overrides=None):
+        payload = {
+            "operation_id": pairing["operation_id"],
+            "instance_id": pairing["instance_id"],
+            "tenant_id": pairing["tenant_id"],
+            "knowledge_base_id": pairing["knowledge_base_id"],
+        }
+        payload.update(overrides or {})
+        headers = {"Authorization": "Bearer " + token,
+                   "X-WeKnora-Key-Id": pairing["key_id"],
+                   "Content-Type": "application/json"}
+        return request(machine, abort_url, "POST", headers, json.dumps(payload).encode())
 
     def signed_rotation(action, pairing, rotation, token, key_id, data_source_id, overrides=None):
         payload = {
@@ -175,9 +189,18 @@ def main():
         check(status, 200, "resume publication")
         status, _ = signed_commit(pair1, token1, data_source)
         check(status, 409, "changed publication epoch cannot commit")
-        status, body = admin_json("DELETE", pairing_url, {"operation_id": op1})
-        check(status, 200, "abort stale pairing")
+        status, _ = signed_abort(pair1, token1, {"tenant_id": "7"})
+        check(status, 409, "abort cannot change original tenant")
+        status, _ = request(machine, abort_url, "POST",
+                            {"Content-Type": "application/json"},
+                            json.dumps({"operation_id": op1}).encode())
+        check(status, 401, "unsigned abort denied")
+        status, body = signed_abort(pair1, token1)
+        check(status, 200, "signed abort stale pairing")
         assert decoded(body)["pairing"]["state"] == "aborted" and decoded(body)["revoked_key"]
+        status, body = signed_abort(pair1, token1)
+        check(status, 200, "lost abort ACK may retry with abort-only key")
+        assert decoded(body)["revoked_key"] is False
         status, body = admin_json("DELETE", pairing_url, {"operation_id": op1})
         check(status, 200, "idempotent abort")
         assert decoded(body)["revoked_key"] is False
@@ -213,6 +236,8 @@ def main():
         check(status, 409, "committed data source identity cannot change")
         status, _ = admin_json("DELETE", pairing_url, {"operation_id": op2})
         check(status, 409, "active pairing cannot be aborted")
+        status, _ = signed_abort(pair2, token2)
+        check(status, 409, "active pairing cannot be machine-aborted")
         status, _ = admin_json("POST", binding_url + "/stop", {})
         check(status, 200, "stop established pairing")
         status, _ = signed_commit(pair2, token2, data_source)

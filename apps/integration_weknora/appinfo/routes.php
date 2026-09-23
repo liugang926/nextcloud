@@ -73,6 +73,12 @@ return [
             'requirements' => ['id' => '[A-Za-z0-9_-]+'],
         ],
         [
+            'name' => 'source_pairing#abortMachine',
+            'url' => '/api/v1/bindings/{id}/source-pairing/abort',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
             'name' => 'source_pairing#rotationStatus',
             'url' => '/api/v1/admin/bindings/{id}/source-pairing/rotation',
             'verb' => 'GET',

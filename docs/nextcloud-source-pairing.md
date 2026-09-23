@@ -44,14 +44,36 @@ and exactly one Nextcloud binding.
 
 A deterministic Nextcloud rejection (wrong tuple, revoked key, or stale
 uncommitted epoch) returns HTTP 409 with `last_error_code:
-remote_commit_conflict` in the nonsecret pairing status. It currently leaves
-a paused pending source and a provenance
-tombstone for its KB. Status and retry never reissue the token. An operator
-must inspect both sides, abort the pending Nextcloud operation when possible,
-and use a new dedicated KB for a fresh operation. There is no automated
-WeKnora pending-pair abort in this slice. Direct revocation of a pending or
+remote_commit_conflict` in the nonsecret pairing status. It leaves the source
+paused and pending until an administrator retries or aborts the same operation.
+Status and retry never reissue the token. Direct revocation of a pending or
 active pairing key is rejected; binding removal retires the pair and its keys
 together.
+
+## Abort an initial pending pair
+
+A WeKnora tenant administrator with KB edit permission may call `POST
+/api/v1/datasource/nextcloud-source-pairings/{operation_id}/abort`, or use
+`scripts/ops/local-source-pairing.py abort --binding BINDING --operation-id
+UUID`. WeKnora signs the exact original operation, tenant, KB, instance and
+binding tuple using the pending source credential. Nextcloud atomically closes
+the pending intent and expires that key. The expired verifier is usable only
+to repeat this same signed abort if its response was lost; ordinary machine
+calls and source commit reject it. Once WeKnora has the remote aborted ACK, it
+transactionally removes only the empty paused source and keeps a nonsecret
+operation tombstone. The KB may then be used by a new pairing operation, while
+the original UUID and key cannot be reused. An active pair cannot be aborted.
+
+HTTP 202 means the remote abort outcome or local cleanup is uncertain. The
+source stays paused until `POST .../{operation_id}/abort` is retried; do not
+prepare a replacement while the old operation remains pending. A remote 409
+leaves the local source intact for inspection. If the token never reached
+WeKnora, the Nextcloud administrator can instead `DELETE
+/api/v1/admin/bindings/{id}/source-pairing` with its pending
+`operation_id`; an idempotent repeat returns the aborted status. After an
+operator aborts Nextcloud first, WeKnora's signed abort can still complete
+its local cleanup using the original credential. In both cases, use a new
+operation UUID for replacement.
 
 ## Active source-key rotation
 
@@ -107,5 +129,7 @@ create/update/credential routes. Generic resume and sync refuse pending or
 legacy unpaired sources; database triggers enforce active pairing on running
 sync logs. The event connection has its own credentials and lifecycle.
 
-Migrations are PostgreSQL `000116`/`000117` and SQLite `000035`/`000036`. The intervening
-numbers are intentionally reserved for independent evaluation-run changes.
+Source pairing uses PostgreSQL `000116`/`000117` and SQLite `000035`/`000036`;
+rotation uses PostgreSQL `000118` and SQLite `000037`; initial abort uses
+PostgreSQL `000120` and SQLite `000039`. The intervening numbers are used by
+independent evaluation-run and garbage-collection changes.

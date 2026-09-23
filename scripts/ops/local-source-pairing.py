@@ -100,7 +100,7 @@ def require_pairing(status, body, stage):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("pair", "retry", "status"))
+    parser.add_argument("action", choices=("pair", "retry", "status", "abort"))
     parser.add_argument("--binding", required=True)
     parser.add_argument("--operation-id", help="UUID; generated for a new pair")
     parser.add_argument("--tenant-id", help="canonical decimal WeKnora tenant ID")
@@ -112,7 +112,7 @@ def main():
     args = parser.parse_args()
 
     if args.action != "pair" and not args.operation_id:
-        parser.error("--operation-id is required for retry/status")
+        parser.error("--operation-id is required for retry/status/abort")
     if args.action == "pair" and (not args.tenant_id or not args.knowledge_base_id):
         parser.error("pair requires --tenant-id and --knowledge-base-id")
     if args.tenant_id and (not args.tenant_id.isascii() or
@@ -180,6 +180,50 @@ def main():
                                f"{wk_pair_path}/{operation_id}/retry")
         if status not in (200, 202):
             raise RuntimeError(f"WeKnora retry: HTTP {status}{remote_error(wk_response)}; operation_id={operation_id}")
+    elif args.action == "abort":
+        wk_abort_status, wk_abort_body = wk_request(wk_base, wk_token, "POST",
+                                         f"{wk_pair_path}/{operation_id}/abort")
+        if wk_abort_status == 404:
+            # The one-time token never reached WeKnora. Nextcloud can close
+            # its own pending intent with administrator authentication.
+            nc_abort_status, nc_abort_body = nc_request(nc_session, csrf, nc_pair_url,
+                                                        "DELETE", {"operation_id": operation_id})
+            if nc_abort_status != 200:
+                raise RuntimeError(f"Nextcloud-only abort: HTTP {nc_abort_status}")
+            nc_pair = nc_abort_body.get("pairing")
+            if (not isinstance(nc_pair, dict) or
+                    nc_pair.get("operation_id") != operation_id or
+                    nc_pair.get("binding_id") != args.binding or
+                    nc_pair.get("state") != "aborted"):
+                raise RuntimeError("Nextcloud-only abort ACK has wrong operation")
+            print(json.dumps({"operation_id": operation_id, "nextcloud_state": "aborted",
+                              "weknora_state": "absent"}, separators=(",", ":")))
+            return
+        elif wk_abort_status == 202:
+            raise RuntimeError("abort remains pending; retry the same operation")
+        elif wk_abort_status != 200:
+            raise RuntimeError(f"WeKnora abort: HTTP {wk_abort_status}; inspect both sides")
+        wk_pair = wk_abort_body.get("pairing")
+        if (not isinstance(wk_pair, dict) or
+                wk_pair.get("operation_id") != operation_id or
+                wk_pair.get("binding_id") != args.binding or
+                wk_pair.get("state") != "aborted"):
+            raise RuntimeError("WeKnora abort ACK has wrong operation")
+        nc_status, nc_body = nc_request(nc_session, csrf, nc_pair_url, "GET")
+        nc_pair = require_pairing(nc_status, nc_body, "Nextcloud status")
+        if nc_pair.get("binding_id") != args.binding or (
+                nc_pair.get("operation_id") == operation_id and
+                nc_pair.get("state") != "aborted"):
+            raise RuntimeError("abort states differ; inspect both operations")
+        # The admin status endpoint shows only the newest intent. A later
+        # prepare may supersede its display, while WeKnora's tombstone proves
+        # that this exact operation already received the signed remote ACK.
+        nc_state = ("aborted" if nc_pair.get("operation_id") == operation_id
+                    else "aborted_prior_operation")
+        print(json.dumps({"operation_id": operation_id, "nextcloud_state": nc_state,
+                          "weknora_state": "aborted"},
+                         separators=(",", ":")))
+        return
 
     nc_status, nc_body = nc_request(nc_session, csrf, nc_pair_url, "GET")
     nc_pair = require_pairing(nc_status, nc_body, "Nextcloud status")

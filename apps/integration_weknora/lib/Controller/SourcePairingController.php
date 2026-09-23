@@ -240,6 +240,37 @@ final class SourcePairingController extends Controller {
         }
     }
 
+    #[PublicPage]
+    #[NoCSRFRequired]
+    public function abortMachine(string $id): JSONResponse {
+        $operationId = $this->request->getParam('operation_id');
+        if (!SourcePairingRegistryService::validOperationId($operationId) ||
+            $this->serviceToken->authenticatedBindingForPairAbort(
+                $this->request, $id, $operationId) === null) {
+            return $this->json(['error' => 'unauthorized'], 401);
+        }
+        $keyId = $this->request->getHeader('X-WeKnora-Key-Id');
+        $instanceId = $this->request->getParam('instance_id');
+        $tenantId = $this->request->getParam('tenant_id');
+        $knowledgeBaseId = $this->request->getParam('knowledge_base_id');
+        if (!is_string($keyId) || !is_string($instanceId) ||
+            $instanceId === '' || strlen($instanceId) > 64 ||
+            !SourcePairingRegistryService::validTenantId($tenantId) ||
+            !SourcePairingRegistryService::validRemoteId($knowledgeBaseId)) {
+            return $this->json(['error' => 'invalid_pairing'], 400);
+        }
+        try {
+            return $this->json($this->pairings->abortMachine($id, $keyId,
+                $operationId, $instanceId, $tenantId, $knowledgeBaseId));
+        } catch (\InvalidArgumentException $exception) {
+            return $this->json(['error' => 'invalid_pairing'], 400);
+        } catch (\DomainException|\OutOfBoundsException $exception) {
+            return $this->json(['error' => 'pairing_conflict'], 409);
+        } catch (\Throwable $exception) {
+            return $this->json(['error' => 'pairing_unavailable'], 503);
+        }
+    }
+
     private function isAdmin(): bool {
         $user = $this->userSession->getUser();
         return $user !== null && $this->groupManager->isAdmin($user->getUID());

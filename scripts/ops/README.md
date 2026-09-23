@@ -2,7 +2,7 @@
 
 ## Local Nextcloud source pairing
 
-Install Nextcloud app 0.4.15 and deploy the WeKnora patch before this probe.
+Install Nextcloud app 0.4.16 and deploy the WeKnora patch before this probe.
 Keep the selected Nextcloud binding active with its original root. As a
 WeKnora administrator, create an **empty, dedicated** knowledge base in the
 same tenant; record its ID and the canonical positive decimal tenant ID. A
@@ -54,13 +54,20 @@ These use WeKnora's `GET /api/v1/datasource/nextcloud-source-pairings/{operation
 and `POST /api/v1/datasource/nextcloud-source-pairings/{operation_id}/retry`.
 The CLI reports both source and target states, the data-source ID, and a bounded
 WeKnora error code when present, without secrets or remote error bodies. Its
-success requires `active` on both sides. If the one-time token was
-lost before WeKnora stored the operation, a retry cannot recover it. Inspect
-both sides and any in-flight request before aborting the **pending** Nextcloud
-intent with administrator `DELETE /admin/bindings/{id}/source-pairing` and a
-JSON `operation_id`, then start a new operation. An active pair cannot be
-aborted this way. WeKnora currently has no pending **initial source-pair**
-abort; a pending WeKnora record needs repair and retry.
+success requires `active` on both sides. To close a **pending** operation on
+both sides, run:
+
+```sh
+python3 scripts/ops/local-source-pairing.py abort --binding dev-published --operation-id YOUR_OPERATION_UUID
+```
+
+WeKnora signs the abort with its encrypted pending credential. Once Nextcloud
+returns the exact aborted ACK, WeKnora removes the empty paused source and
+keeps a credential-free operation tombstone. HTTP 202 means the outcome is
+uncertain; retry the same UUID. HTTP 409 requires operator inspection. If the
+one-time token never reached WeKnora, the CLI closes the Nextcloud-only
+pending intent with administrator `DELETE /admin/bindings/{id}/source-pairing`.
+An active pair cannot be aborted. A replacement uses a new operation UUID.
 
 ### Rotate an active source credential
 
@@ -103,7 +110,7 @@ document is indexed or satisfy the AD acceptance gate.
 
 ## Local Nextcloud to WeKnora delivery probe
 
-With both local stacks healthy, Nextcloud app 0.4.15 installed, and a new
+With both local stacks healthy, Nextcloud app 0.4.16 installed, and a new
 synthetic data source actively source-paired as above, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
 WeKnora administrator credentials. The probe requires that neither side has

@@ -40,6 +40,41 @@ final class MachineKeyRegistryService {
         ];
     }
 
+    /** Expired abort-only key for replay of an already-aborted pair. */
+    public function findForPairAbort(string $keyId, string $bindingId, string $operationId): ?array {
+        if (!self::validKeyId($keyId) || !SourcePairingRegistryService::validOperationId($operationId)) {
+            return null;
+        }
+        $query = $this->db->getQueryBuilder();
+        $query->select('k.binding_id', 'k.token_sha256', 'k.source_hash', 'k.expires_at')
+            ->from('weknora_machine_key', 'k')
+            ->innerJoin('k', 'weknora_src_pair', 'p',
+                $query->expr()->eq('p.key_id', 'k.key_id'))
+            ->where($query->expr()->eq('k.key_id', $query->createNamedParameter($keyId)))
+            ->andWhere($query->expr()->eq('k.binding_id', $query->createNamedParameter($bindingId)))
+            ->andWhere($query->expr()->eq('p.binding_id', $query->createNamedParameter($bindingId)))
+            ->andWhere($query->expr()->eq('p.operation_id',
+                $query->createNamedParameter(strtolower($operationId))))
+            ->andWhere($query->expr()->eq('p.state', $query->createNamedParameter('aborted')));
+        $result = $query->executeQuery();
+        try {
+            $row = $result->fetchAssociative();
+        } finally {
+            $result->closeCursor();
+        }
+        if ($row === false || (int)$row['expires_at'] <= 0 ||
+            (int)$row['expires_at'] > time() ||
+            !self::validHash($row['token_sha256'] ?? null) ||
+            !self::validHash($row['source_hash'] ?? null)) {
+            return null;
+        }
+        return [
+            'binding_id' => (string)$row['binding_id'],
+            'token_sha256' => strtolower((string)$row['token_sha256']),
+            'source_hash' => strtolower((string)$row['source_hash']),
+        ];
+    }
+
     /** @return list<array{key_id: string, binding_id: string, created_at: int, created_by_uid: string}> */
     public function listForBinding(string $bindingId): array {
         $this->requireConfiguredBinding($bindingId);
@@ -47,6 +82,10 @@ final class MachineKeyRegistryService {
         $query->select('key_id', 'binding_id', 'created_at', 'created_by_uid')
             ->from('weknora_machine_key')
             ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
+            ->andWhere($query->expr()->orX(
+                $query->expr()->eq('expires_at', $query->createNamedParameter(0)),
+                $query->expr()->gt('expires_at', $query->createNamedParameter(time())),
+            ))
             ->orderBy('created_at', 'ASC')->addOrderBy('key_id', 'ASC');
         $result = $query->executeQuery();
         try {
@@ -138,6 +177,7 @@ final class MachineKeyRegistryService {
                 ->andWhere($pairQuery->expr()->orX(
                     $pairQuery->expr()->eq('state', $pairQuery->createNamedParameter('pending')),
                     $pairQuery->expr()->eq('state', $pairQuery->createNamedParameter('active')),
+                    $pairQuery->expr()->eq('state', $pairQuery->createNamedParameter('aborted')),
                 ))->executeQuery();
             try {
                 if ($pairResult->fetchOne() !== false) {

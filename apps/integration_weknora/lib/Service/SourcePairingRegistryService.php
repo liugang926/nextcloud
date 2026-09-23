@@ -207,24 +207,77 @@ final class SourcePairingRegistryService {
                 $this->db->commit();
                 return ['pairing' => $this->publicRow($row), 'revoked_key' => false];
             }
-            $query = $this->db->getQueryBuilder();
-            $revoked = $query->delete('weknora_machine_key')
-                ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
-                ->andWhere($query->expr()->eq('key_id', $query->createNamedParameter($row['key_id'])))
-                ->executeStatement();
-            $query = $this->db->getQueryBuilder();
-            $query->update('weknora_src_pair')
-                ->set('state', $query->createNamedParameter('aborted'))
-                ->set('updated_at', $query->createNamedParameter(time()))
-                ->where($query->expr()->eq('operation_id', $query->createNamedParameter($operationId)))
-                ->executeStatement();
-            $row['state'] = 'aborted';
+            $revoked = $this->abortPendingRow($row);
             $this->db->commit();
             return ['pairing' => $this->publicRow($row), 'revoked_key' => $revoked === 1];
         } catch (\Throwable $exception) {
             $this->db->rollBack();
             throw $exception;
         }
+    }
+
+    /** Signed by the pair key. A lost ACK may retry with its abort-only tombstone. */
+    public function abortMachine(string $bindingId, string $keyId, string $operationId,
+        string $instanceId, string $tenantId, string $knowledgeBaseId): array {
+        $this->validateInput($bindingId, $operationId, $tenantId, $knowledgeBaseId);
+        if ($instanceId === '' || strlen($instanceId) > 64) {
+            throw new \InvalidArgumentException('Invalid pairing instance');
+        }
+        $operationId = strtolower($operationId);
+        $this->db->beginTransaction();
+        try {
+            $this->lockRegistry();
+            $row = $this->byOperation($operationId);
+            if ($row === null || $row['binding_id'] !== $bindingId ||
+                !hash_equals($row['key_id'], $keyId) ||
+                $row['instance_id'] !== $instanceId || $instanceId !== $this->instanceId() ||
+                (string)$row['tenant_id'] !== $tenantId ||
+                $row['knowledge_base_id'] !== $knowledgeBaseId ||
+                !in_array($row['state'], ['pending', 'aborted'], true)) {
+                throw new \DomainException('Pairing cannot be aborted');
+            }
+            if ($row['state'] === 'aborted') {
+                $this->db->commit();
+                return ['pairing' => $this->publicRow($row), 'revoked_key' => false];
+            }
+            $revoked = $this->abortPendingRow($row);
+            $this->db->commit();
+            return ['pairing' => $this->publicRow($row), 'revoked_key' => $revoked === 1];
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    /** @param array<string, mixed> $row Mutated to its aborted state. */
+    private function abortPendingRow(array &$row): int {
+        $now = time();
+        // Keep the verifier hash solely for an identical abort retry. Normal
+        // service requests reject the expired key immediately after commit.
+        $query = $this->db->getQueryBuilder();
+        $revoked = $query->update('weknora_machine_key')
+            ->set('expires_at', $query->createNamedParameter($now))
+            ->where($query->expr()->eq('binding_id',
+                $query->createNamedParameter((string)$row['binding_id'])))
+            ->andWhere($query->expr()->eq('key_id',
+                $query->createNamedParameter((string)$row['key_id'])))
+            ->andWhere($query->expr()->eq('expires_at', $query->createNamedParameter(0)))
+            ->executeStatement();
+        if ($revoked !== 1) {
+            throw new \DomainException('Pending pairing key is unavailable');
+        }
+        $query = $this->db->getQueryBuilder();
+        if ($query->update('weknora_src_pair')
+            ->set('state', $query->createNamedParameter('aborted'))
+            ->set('updated_at', $query->createNamedParameter($now))
+            ->where($query->expr()->eq('operation_id',
+                $query->createNamedParameter((string)$row['operation_id'])))
+            ->andWhere($query->expr()->eq('state', $query->createNamedParameter('pending')))
+            ->executeStatement() !== 1) {
+            throw new \DomainException('Pairing state changed concurrently');
+        }
+        $row['state'] = 'aborted';
+        return $revoked;
     }
 
     public function status(string $bindingId): ?array {
