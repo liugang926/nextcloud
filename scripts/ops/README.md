@@ -2,13 +2,20 @@
 
 ## Local Nextcloud to WeKnora delivery probe
 
-With both local stacks healthy, Nextcloud app 0.4.11 installed, and the
+With both local stacks healthy, Nextcloud app 0.4.12 installed, and the
 synthetic `dev-published` data source configured, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
 WeKnora administrator credentials and run:
 
 ```sh
 python3 scripts/ops/local-event-pipeline-smoke.py --data-source-id YOUR_SYNTHETIC_NEXTCLOUD_DATASOURCE_UUID
+```
+
+To also wait for WeKnora to accept a full-source sync into its task queue,
+using the patched dispatch worker, add `--expect-dispatch`:
+
+```sh
+python3 scripts/ops/local-event-pipeline-smoke.py --data-source-id YOUR_SYNTHETIC_NEXTCLOUD_DATASOURCE_UUID --expect-dispatch
 ```
 
 The probe refuses an already active WeKnora or Nextcloud event connection.
@@ -19,6 +26,14 @@ revokes both test connections on exit. An existing retained outbox can require
 several job executions to catch up. A matching watermark proves signed
 delivery and durable inbox receipt, **not** dispatch, parsing, publication, or
 an application acknowledgement.
+
+With `--expect-dispatch`, the probe polls the WeKnora connection status for up
+to 120 seconds before cleaning up its temporary connection. It requires the
+`dispatched_through_event_id` checkpoint to include the temporary file event,
+which advances only after queue acceptance, and requires
+`applied_through_event_id` to remain `0`. A timeout reports the received and
+dispatched IDs, dispatch state, and last error code. Queue acceptance still
+does **not** prove that the source sync, parsing, or indexing succeeded.
 
 ## Local event connection probe
 

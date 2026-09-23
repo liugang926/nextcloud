@@ -4527,7 +4527,7 @@ ${message.stack}`;
       this.replaceChildren(section);
     }
     renderStatus(data) {
-      if (!data || !["in_scope", "withdrawn", "outside_scope"].includes(data.source_state)) {
+      if (!data || !["in_scope", "withdrawn", "publication_stopped", "outside_scope"].includes(data.source_state)) {
         this.renderMessage("\u6682\u65F6\u65E0\u6CD5\u786E\u8BA4\u53D1\u5E03\u72B6\u6001\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002");
         return;
       }
@@ -4542,10 +4542,11 @@ ${message.stack}`;
       state.textContent = {
         in_scope: "\u5DF2\u7EB3\u5165\u53D1\u5E03\u8303\u56F4",
         withdrawn: "\u5DF2\u64A4\u56DE\u53D1\u5E03",
+        publication_stopped: "\u53D1\u5E03\u76EE\u5F55\u5DF2\u505C\u6B62\u53D1\u5E03",
         outside_scope: "\u4E0D\u5728\u53D1\u5E03\u76EE\u5F55\u4E2D"
       }[data.source_state];
       section.append(state);
-      if (data.source_state === "in_scope" || data.source_state === "withdrawn") {
+      if (data.source_state === "in_scope" || data.source_state === "withdrawn" || data.source_state === "publication_stopped") {
         this.addRow(section, "\u53D1\u5E03\u76EE\u5F55", data.binding_name || "\u672A\u63D0\u4F9B");
       }
       this.addRow(section, "\u6E90\u6587\u4EF6\u66F4\u65B0\u65F6\u95F4", this.formatTime(data.source_modified_at));
@@ -4557,6 +4558,8 @@ ${message.stack}`;
         explanation.textContent = "\u6587\u4EF6\u53EF\u4EE5\u7531\u8FDE\u63A5\u5668\u8BFB\u53D6\uFF0C\u4F46\u5F53\u524D\u65E0\u6CD5\u9A8C\u8BC1\u540C\u6B65\u3001\u89E3\u6790\u6216\u95EE\u7B54\u662F\u5426\u5DF2\u5C31\u7EEA\u3002\u8BF7\u4EE5 WeKnora \u767B\u5F55\u540E\u7684\u4E2A\u4EBA\u6743\u9650\u7ED3\u679C\u4E3A\u51C6\u3002";
       } else if (data.source_state === "withdrawn") {
         explanation.textContent = "\u7BA1\u7406\u5458\u5DF2\u64A4\u56DE\u6B64\u6587\u4EF6\u7684\u53D1\u5E03\u8D44\u683C\u3002\u539F\u6587\u4EF6\u4ECD\u4FDD\u7559\u5728 Nextcloud\u3002";
+      } else if (data.source_state === "publication_stopped") {
+        explanation.textContent = data.file_withdrawn ? "\u7BA1\u7406\u5458\u5DF2\u505C\u6B62\u6574\u4E2A\u53D1\u5E03\u76EE\u5F55\uFF0C\u6B64\u6587\u4EF6\u7684\u5355\u72EC\u64A4\u56DE\u4E5F\u4ECD\u7136\u6709\u6548\u3002\u539F\u6587\u4EF6\u4FDD\u7559\u5728 Nextcloud\u3002" : "\u7BA1\u7406\u5458\u5DF2\u505C\u6B62\u6574\u4E2A\u53D1\u5E03\u76EE\u5F55\u3002\u539F\u6587\u4EF6\u4FDD\u7559\u5728 Nextcloud\uFF0C\u5F53\u524D\u4E0D\u80FD\u4ECE\u6B64\u53D1\u5E03\u76EE\u5F55\u8BFB\u53D6\u6216\u6388\u6743\u95EE\u7B54\u3002";
       } else {
         explanation.textContent = "\u6B64\u6587\u4EF6\u6CA1\u6709\u901A\u8FC7\u5F53\u524D\u53EF\u8BBF\u95EE\u7684\u53D1\u5E03\u76EE\u5F55\u8FDB\u5165\u77E5\u8BC6\u5E93\u3002";
       }

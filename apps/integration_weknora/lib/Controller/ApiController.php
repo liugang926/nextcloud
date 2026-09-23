@@ -19,6 +19,7 @@ use OCP\IURLGenerator;
 use OCA\IntegrationWeknora\Service\FilePublicationStateService;
 use OCA\IntegrationWeknora\Service\ManifestSnapshotService;
 use OCA\IntegrationWeknora\Service\BindingRegistryService;
+use OCA\IntegrationWeknora\Service\BindingPublicationStoppedException;
 use OCA\IntegrationWeknora\Service\PairedServiceToken;
 use OCP\Lock\ILockingProvider;
 
@@ -73,6 +74,8 @@ final class ApiController extends Controller {
                 'id' => $binding['id'],
                 'name' => $binding['name'],
                 'root_file_id' => $binding['root_file_id'],
+                'publication_state' => $binding['publication_state'],
+                'publication_epoch' => $binding['publication_epoch'],
             ], $bindings),
         ]);
     }
@@ -89,6 +92,7 @@ final class ApiController extends Controller {
             if ($binding === null) {
                 return $this->notFound();
             }
+            $bindingEpoch = $this->bindingRegistry->requirePublicationActive($id);
             $this->bindingRegistry->requireActiveRoot($id);
             [$userFolder, $bindingRoot] = $this->resolveRoot($binding);
             if ($bindingRoot === null) {
@@ -114,10 +118,12 @@ final class ApiController extends Controller {
                 $freshRoot = $this->bindingRegistry->requireActiveRoot($id);
                 if ($freshRoot->getPath() !== $bindingRoot->getPath() ||
                     $freshRoot->getEtag() !== $rootEtag ||
+                    $this->bindingRegistry->requirePublicationActive($id) !== $bindingEpoch ||
                     $this->manifestSnapshots->publicationRevision($id) !== $publicationRevision) {
                     return $this->json(['error' => 'manifest_changed'], 409);
                 }
-                $snapshotId = $this->manifestSnapshots->save($id, $generation, $rootEtag, $publicationRevision, $items);
+                $snapshotId = $this->manifestSnapshots->save($id, $generation, $rootEtag,
+                    $publicationRevision, $bindingEpoch, $items);
                 $offset = 0;
             } else {
                 $decoded = $this->decodeManifestCursor($cursor);
@@ -127,6 +133,7 @@ final class ApiController extends Controller {
                 [$snapshotId, $offset] = $decoded;
                 $stored = $this->manifestSnapshots->load($id, $snapshotId);
                 if ($stored === null || $stored['root_etag'] !== $bindingRoot->getEtag() ||
+                    $stored['binding_epoch'] !== $bindingEpoch ||
                     $stored['publication_revision'] !== $this->manifestSnapshots->publicationRevision($id)) {
                     return $this->json(['error' => 'manifest_changed'], 409);
                 }
@@ -140,6 +147,13 @@ final class ApiController extends Controller {
             $nextOffset = $offset + count($page);
             $complete = $nextOffset >= count($items);
 
+            // Stop/resume can commit while a tree is being scanned or while
+            // a stored page is read. Never return that old page after the
+            // newly committed gate is visible to this request.
+            if ($this->bindingRegistry->requirePublicationActive($id) !== $bindingEpoch) {
+                return $this->json(['error' => 'manifest_changed'], 409);
+            }
+
             return $this->json([
                 'generation' => $generation,
                 'items' => $page,
@@ -148,6 +162,8 @@ final class ApiController extends Controller {
             ]);
         } catch (\LengthException $exception) {
             return $this->json(['error' => 'manifest_too_large'], 503);
+        } catch (BindingPublicationStoppedException $exception) {
+            return $this->json(['error' => 'publication_stopped'], 423);
         } catch (\UnexpectedValueException $exception) {
             return $this->configurationError();
         } catch (\Throwable $exception) {
@@ -171,6 +187,7 @@ final class ApiController extends Controller {
             if ($binding === null) {
                 return $this->notFound();
             }
+            $bindingEpoch = $this->bindingRegistry->requirePublicationActive($id);
             $this->bindingRegistry->requireActiveRoot($id);
             [$userFolder, $bindingRoot] = $this->resolveRoot($binding);
             if ($bindingRoot === null) {
@@ -219,6 +236,17 @@ final class ApiController extends Controller {
                         fclose($buffer);
                         return $this->json(['error' => 'version_changed'], 412);
                     }
+                    try {
+                        $freshEpoch = $this->bindingRegistry->requirePublicationActive($id);
+                    } catch (BindingPublicationStoppedException $exception) {
+                        fclose($buffer);
+                        throw $exception;
+                    }
+                    if ($freshEpoch !== $bindingEpoch ||
+                        $this->publicationState->getState($id, $fileId) !== 'eligible') {
+                        fclose($buffer);
+                        return $this->json(['error' => 'publication_changed'], 409);
+                    }
                     rewind($buffer);
                     return new StreamResponse($buffer, 200, [
                         'Content-Type' => $node->getMimeType(),
@@ -233,6 +261,8 @@ final class ApiController extends Controller {
             }
 
             return $this->notFound();
+        } catch (BindingPublicationStoppedException $exception) {
+            return $this->json(['error' => 'publication_stopped'], 423);
         } catch (\UnexpectedValueException $exception) {
             return $this->configurationError();
         } catch (\Throwable $exception) {

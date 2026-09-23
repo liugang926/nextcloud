@@ -216,12 +216,21 @@ VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
             source = ROOT / "apps/integration_weknora"
             for name in ("appinfo", "lib", "css", "js", "templates"):
                 shutil.copytree(source / name, app_dir / name, dirs_exist_ok=True)
-            if "<version>0.4.11</version>" not in (app_dir / "appinfo/info.xml").read_text():
-                raise AssertionError("upgrade app is not version 0.4.11")
+            if "<version>0.4.12</version>" not in (app_dir / "appinfo/info.xml").read_text():
+                raise AssertionError("upgrade app is not version 0.4.12")
             occ("upgrade")
 
             if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_event_conn';") != "1":
                 raise AssertionError("direct upgrade did not create the event sender table")
+            if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_bind_pub_audit';") != "1":
+                raise AssertionError("direct upgrade did not create the binding publication audit table")
+            for table, column in (("oc_weknora_binding_id", "publication_state"),
+                                  ("oc_weknora_binding_id", "publication_epoch"),
+                                  ("oc_weknora_manifest_snap", "binding_epoch")):
+                count = sql("SELECT COUNT(*) FROM information_schema.columns "
+                            f"WHERE table_name = '{table}' AND column_name = '{column}';")
+                if count != "1":
+                    raise AssertionError(f"direct upgrade did not create {table}.{column}")
 
             rows = sql("SELECT binding_id, retired_at FROM oc_weknora_binding_id ORDER BY binding_id;")
             states = {name: int(retired) for name, retired in
@@ -232,6 +241,10 @@ VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
             if case == "valid-current":
                 if states.get("upgrade-current") != 0:
                     raise AssertionError("current binding was retired")
+                gate = sql("SELECT publication_state || '|' || publication_epoch "
+                           "FROM oc_weknora_binding_id WHERE binding_id = 'upgrade-current';")
+                if gate != "active|0":
+                    raise AssertionError(f"existing binding gate was not backfilled active|0: {gate}")
                 match = sql("""SELECT COUNT(*) FROM oc_weknora_machine_key k
 JOIN oc_weknora_binding_id b USING (binding_id)
 WHERE k.key_id = 'default' AND k.binding_id = 'upgrade-current'
@@ -265,7 +278,11 @@ WHERE k.key_id = 'default' AND k.binding_id = 'upgrade-current'
                     raise AssertionError(f"{case}: {binding_id} reused with HTTP {status}")
             if save("upgrade-fresh") != 201:
                 raise AssertionError(f"{case}: fresh binding could not be created")
-            print(f"{case}: direct 0.4.6→0.4.11 upgrade tombstone smoke passed")
+            fresh_gate = sql("SELECT publication_state || '|' || publication_epoch "
+                             "FROM oc_weknora_binding_id WHERE binding_id = 'upgrade-fresh';")
+            if fresh_gate != "active|0":
+                raise AssertionError(f"new binding gate was not active|0: {fresh_gate}")
+            print(f"{case}: direct 0.4.6→0.4.12 upgrade tombstone smoke passed")
         finally:
             # The project name is random and every volume belongs to this
             # disposable Compose instance; existing development volumes stay.

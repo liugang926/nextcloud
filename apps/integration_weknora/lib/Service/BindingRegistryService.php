@@ -22,7 +22,7 @@ final class BindingRegistryService {
     ) {
     }
 
-    /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */
+    /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int, publication_state: string, publication_epoch: int}> */
     public function listBindings(): array {
         // App configuration can be changed by another PHP process (for
         // example an administrator using occ). Read the committed registry
@@ -31,7 +31,7 @@ final class BindingRegistryService {
         return $this->readCommittedBindings();
     }
 
-    /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */
+    /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int, publication_state: string, publication_epoch: int}> */
     private function readCommittedBindings(): array {
         $read = $this->db->getQueryBuilder();
         $read->select('configvalue')->from('appconfig')
@@ -44,33 +44,145 @@ final class BindingRegistryService {
             $readResult->closeCursor();
         }
         $bindings = $this->decodeBindings($raw === false ? '[]' : (string)$raw);
-        $this->requireRegisteredSources($bindings);
-        return $bindings;
+        return $this->requireRegisteredSources($bindings);
     }
 
     /** A retired ID, or one reused for a different root, is never active. */
-    private function requireRegisteredSources(array $bindings): void {
+    private function requireRegisteredSources(array $bindings): array {
         if ($bindings === []) {
-            return;
+            return [];
         }
         $query = $this->db->getQueryBuilder();
-        $query->select('binding_id', 'source_hash')->from('weknora_binding_id')
+        $query->select('binding_id', 'source_hash', 'publication_state', 'publication_epoch')
+            ->from('weknora_binding_id')
             ->where($query->expr()->eq('retired_at', $query->createNamedParameter(0)));
         $result = $query->executeQuery();
         try {
             $active = [];
             while (($row = $result->fetchAssociative()) !== false) {
-                $active[(string)$row['binding_id']] = (string)$row['source_hash'];
+                $active[(string)$row['binding_id']] = $row;
             }
         } finally {
             $result->closeCursor();
         }
-        foreach ($bindings as $binding) {
+        foreach ($bindings as &$binding) {
             $expected = MachineKeyRegistryService::sourceHash($binding);
             if (!isset($active[$binding['id']]) ||
-                !hash_equals($expected, $active[$binding['id']])) {
+                !hash_equals($expected, (string)$active[$binding['id']]['source_hash'])) {
                 throw new \UnexpectedValueException('Binding ID is unregistered or retired');
             }
+            $row = $active[$binding['id']];
+            $state = $row['publication_state'] ?? null;
+            $rawEpoch = $row['publication_epoch'] ?? null;
+            $epoch = (is_int($rawEpoch) || is_string($rawEpoch)) &&
+                preg_match('/\A(0|[1-9][0-9]*)\z/D', (string)$rawEpoch)
+                ? filter_var($rawEpoch, FILTER_VALIDATE_INT,
+                    ['options' => ['min_range' => 0]])
+                : false;
+            if (($state !== 'active' && $state !== 'stopped') || $epoch === false) {
+                throw new \UnexpectedValueException('Invalid binding publication state');
+            }
+            $binding['publication_state'] = $state;
+            $binding['publication_epoch'] = $epoch;
+        }
+        unset($binding);
+        return $bindings;
+    }
+
+    /** A fresh gate check is required for every source read. */
+    public function requirePublicationActive(string $bindingId): int {
+        foreach ($this->listBindings() as $binding) {
+            if ($binding['id'] !== $bindingId) {
+                continue;
+            }
+            if ($binding['publication_state'] === 'stopped') {
+                throw new BindingPublicationStoppedException('Binding publication is stopped');
+            }
+            return $binding['publication_epoch'];
+        }
+        throw new \UnexpectedValueException('Binding is no longer configured');
+    }
+
+    /**
+     * Toggle only the publication gate. Files, keys, binding identity and
+     * per-file exclusions are retained. Resume validates today's root view.
+     *
+     * @return array{publication_state: string, publication_epoch: int, changed: bool}|null
+     */
+    public function setPublicationState(string $id, string $state, string $actorUid): ?array {
+        if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $id) ||
+            !in_array($state, ['active', 'stopped'], true) ||
+            $actorUid === '' || strlen($actorUid) > 64) {
+            throw new \InvalidArgumentException('Invalid binding publication update');
+        }
+        $this->db->beginTransaction();
+        try {
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
+            $lock = $this->db->getQueryBuilder();
+            $lock->select('id')->from('weknora_bind_lock')
+                ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))
+                ->forUpdate();
+            $lockResult = $lock->executeQuery();
+            try {
+                if ($lockResult->fetchOne() === false) {
+                    throw new \UnexpectedValueException('Binding registry lock is missing');
+                }
+            } finally {
+                $lockResult->closeCursor();
+            }
+
+            $selected = null;
+            foreach ($this->readCommittedBindings() as $binding) {
+                if ($binding['id'] === $id) {
+                    $selected = $binding;
+                    break;
+                }
+            }
+            if ($selected === null) {
+                $this->db->commit();
+                return null;
+            }
+            if ($selected['publication_state'] === $state) {
+                $this->db->commit();
+                return ['publication_state' => $state,
+                    'publication_epoch' => $selected['publication_epoch'], 'changed' => false];
+            }
+            if ($state === 'active') {
+                // A stopped binding cannot resume against a moved, missing,
+                // unreadable, or newly overlapping publication root.
+                $this->requireActiveRoot($id);
+            }
+            if ($selected['publication_epoch'] === PHP_INT_MAX) {
+                throw new \UnexpectedValueException('Publication epoch exhausted');
+            }
+            $epoch = $selected['publication_epoch'] + 1;
+            $update = $this->db->getQueryBuilder();
+            $changed = $update->update('weknora_binding_id')
+                ->set('publication_state', $update->createNamedParameter($state))
+                ->set('publication_epoch', $update->createNamedParameter($epoch))
+                ->where($update->expr()->eq('binding_id', $update->createNamedParameter($id)))
+                ->andWhere($update->expr()->eq('retired_at', $update->createNamedParameter(0)))
+                ->andWhere($update->expr()->eq('publication_state',
+                    $update->createNamedParameter($selected['publication_state'])))
+                ->andWhere($update->expr()->eq('publication_epoch',
+                    $update->createNamedParameter($selected['publication_epoch'])))
+                ->executeStatement();
+            if ($changed !== 1) {
+                throw new \UnexpectedValueException('Binding publication state changed concurrently');
+            }
+            $audit = $this->db->getQueryBuilder();
+            $audit->insert('weknora_bind_pub_audit')->values([
+                'binding_id' => $audit->createNamedParameter($id),
+                'action' => $audit->createNamedParameter($state === 'stopped' ? 'stop' : 'resume'),
+                'actor_uid' => $audit->createNamedParameter($actorUid),
+                'publication_epoch' => $audit->createNamedParameter($epoch),
+                'created_at' => $audit->createNamedParameter(time()),
+            ])->executeStatement();
+            $this->db->commit();
+            return ['publication_state' => $state, 'publication_epoch' => $epoch, 'changed' => true];
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
         }
     }
 
@@ -208,7 +320,13 @@ final class BindingRegistryService {
                     'root_file_id' => $rootFileId,
                 ];
             }
-            $this->config->setAppValue(self::APP_ID, 'bindings', json_encode($bindings, JSON_THROW_ON_ERROR));
+            $storedBindings = array_map(static fn (array $binding): array => [
+                'id' => $binding['id'],
+                'name' => $binding['name'],
+                'owner_uid' => $binding['owner_uid'],
+                'root_file_id' => $binding['root_file_id'],
+            ], $bindings);
+            $this->config->setAppValue(self::APP_ID, 'bindings', json_encode($storedBindings, JSON_THROW_ON_ERROR));
             $this->db->commit();
             return !$found;
         } catch (\Throwable $exception) {
@@ -261,8 +379,14 @@ final class BindingRegistryService {
             $eventDelete->delete('weknora_event_conn')
                 ->where($eventDelete->expr()->eq('binding_id', $eventDelete->createNamedParameter($id)))
                 ->executeStatement();
+            $storedRemaining = array_map(static fn (array $binding): array => [
+                'id' => $binding['id'],
+                'name' => $binding['name'],
+                'owner_uid' => $binding['owner_uid'],
+                'root_file_id' => $binding['root_file_id'],
+            ], $remaining);
             $this->config->setAppValue(self::APP_ID, 'bindings',
-                json_encode($remaining, JSON_THROW_ON_ERROR));
+                json_encode($storedRemaining, JSON_THROW_ON_ERROR));
             $this->db->commit();
             return $revoked;
         } catch (\Throwable $exception) {

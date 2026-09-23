@@ -91,7 +91,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
     }
 
     renderStatus(data) {
-        if (!data || !['in_scope', 'withdrawn', 'outside_scope'].includes(data.source_state)) {
+        if (!data || !['in_scope', 'withdrawn', 'publication_stopped', 'outside_scope'].includes(data.source_state)) {
             this.renderMessage('暂时无法确认发布状态，请稍后重试。')
             return
         }
@@ -108,11 +108,13 @@ class WeknoraFileSidebarTab extends HTMLElement {
         state.textContent = {
             in_scope: '已纳入发布范围',
             withdrawn: '已撤回发布',
+            publication_stopped: '发布目录已停止发布',
             outside_scope: '不在发布目录中',
         }[data.source_state]
         section.append(state)
 
-        if (data.source_state === 'in_scope' || data.source_state === 'withdrawn') {
+        if (data.source_state === 'in_scope' || data.source_state === 'withdrawn'
+            || data.source_state === 'publication_stopped') {
             this.addRow(section, '发布目录', data.binding_name || '未提供')
         }
         this.addRow(section, '源文件更新时间', this.formatTime(data.source_modified_at))
@@ -125,6 +127,10 @@ class WeknoraFileSidebarTab extends HTMLElement {
             explanation.textContent = '文件可以由连接器读取，但当前无法验证同步、解析或问答是否已就绪。请以 WeKnora 登录后的个人权限结果为准。'
         } else if (data.source_state === 'withdrawn') {
             explanation.textContent = '管理员已撤回此文件的发布资格。原文件仍保留在 Nextcloud。'
+        } else if (data.source_state === 'publication_stopped') {
+            explanation.textContent = data.file_withdrawn
+                ? '管理员已停止整个发布目录，此文件的单独撤回也仍然有效。原文件保留在 Nextcloud。'
+                : '管理员已停止整个发布目录。原文件保留在 Nextcloud，当前不能从此发布目录读取或授权问答。'
         } else {
             explanation.textContent = '此文件没有通过当前可访问的发布目录进入知识库。'
         }

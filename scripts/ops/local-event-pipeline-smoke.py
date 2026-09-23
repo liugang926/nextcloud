@@ -5,7 +5,9 @@ Only operates on the two local loopback development stacks. Requires an
 existing synthetic Nextcloud data source and an unpaired dev-published binding.
 Set WEKNORA_TEST_ADMIN_EMAIL/PASSWORD in the process environment. The test
 creates a uniquely named WebDAV file and revokes both temporary connections.
-It does not claim that WeKnora has applied or published the event.
+By default it checks the durable receipt only. --expect-dispatch also waits for
+the WeKnora worker to accept a full-source sync into its queue; neither mode
+claims that WeKnora has applied or published the event.
 """
 
 import argparse
@@ -32,6 +34,8 @@ from publication_http_smoke import login, request as session_request  # noqa: E4
 WEKNORA = "http://127.0.0.1:18081"
 RECEIVER_PATH = "/api/v1/integrations/nextcloud/events"
 JOB_CLASS = r"OCA\IntegrationWeknora\BackgroundJob\EventDeliveryJob"
+DISPATCH_TIMEOUT_SECONDS = 120
+DISPATCH_POLL_SECONDS = 3
 
 
 def weknora_request(method, path, *, token=None):
@@ -108,17 +112,63 @@ def outbox_event_id(binding_id, source_file_id):
     return event_id
 
 
-def receipt_watermark(body):
-    value = json.loads(body).get("received_through_event_id")
+def decimal_status_id(status, field):
+    value = status.get(field)
     if not isinstance(value, str) or not re.fullmatch(r"0|[1-9][0-9]*", value):
-        raise AssertionError("status did not expose a decimal receipt watermark")
+        raise AssertionError(f"status did not expose a decimal {field}")
     return int(value)
+
+
+def receipt_watermark(body):
+    return decimal_status_id(json.loads(body), "received_through_event_id")
+
+
+def wait_for_dispatch(source_url, source_admin, event_id):
+    """Observe the durable queue-accepted checkpoint, never an applied ACK."""
+    deadline = time.monotonic() + DISPATCH_TIMEOUT_SECONDS
+    observed = None
+    while True:
+        http_status, body = weknora_request("GET", source_url, token=source_admin)
+        if http_status != 200:
+            raise AssertionError(f"WeKnora dispatch status: HTTP {http_status}, expected 200")
+        observed = json.loads(body)
+        received = decimal_status_id(observed, "received_through_event_id")
+        dispatched = decimal_status_id(observed, "dispatched_through_event_id")
+        applied = decimal_status_id(observed, "applied_through_event_id")
+        dispatch_state = observed.get("dispatch_state")
+        error_code = observed.get("last_error_code")
+        if not isinstance(dispatch_state, str) or not isinstance(error_code, str):
+            raise AssertionError("WeKnora dispatch status lacks state or error code")
+        if applied != 0:
+            raise AssertionError(
+                f"unexpected applied checkpoint {applied}; this probe expects no applied ACK")
+        if received < event_id:
+            raise AssertionError(
+                f"WeKnora receipt regressed during dispatch: event={event_id}, received={received}")
+        # The dispatcher advances this ID only after enqueue succeeds. Its
+        # state can later become retry while the queued sync is processed.
+        if dispatched >= event_id:
+            return observed
+        if dispatch_state == "blocked":
+            raise AssertionError(
+                "WeKnora dispatch blocked before queue acceptance: "
+                f"event={event_id}, received={received}, dispatched={dispatched}, "
+                f"state={dispatch_state}, error={error_code or 'none'}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                "WeKnora dispatch timed out before queue acceptance: "
+                f"event={event_id}, received={received}, dispatched={dispatched}, "
+                f"applied={applied}, state={dispatch_state}, error={error_code or 'none'}")
+        time.sleep(min(DISPATCH_POLL_SECONDS, remaining))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-source-id", required=True)
     parser.add_argument("--binding", default="dev-published")
+    parser.add_argument("--expect-dispatch", action="store_true",
+                        help="also wait up to 120 seconds for WeKnora queue acceptance")
     args = parser.parse_args()
     data_source_id = str(uuid.UUID(args.data_source_id))
     if args.binding != "dev-published":
@@ -199,6 +249,8 @@ def main():
                 f"sender_state={cloud_status.get('status')}, "
                 f"sender_error={cloud_status.get('last_error_code')}, "
                 f"receiver_state={receiver_status.get('status')}")
+        if args.expect_dispatch:
+            wait_for_dispatch(source_url, source_admin, event_id)
     finally:
         cleanup_errors = []
         if created_file:
@@ -221,7 +273,10 @@ def main():
                 cleanup_errors.append(error)
         if cleanup_errors:
             raise AssertionError("local event probe cleanup failed") from cleanup_errors[0]
-    print("local event pipeline smoke passed: signed delivery and durable receipt")
+    result = "signed delivery and durable receipt"
+    if args.expect_dispatch:
+        result += "; WeKnora full-source sync accepted into queue (applied checkpoint remains 0)"
+    print(f"local event pipeline smoke passed: {result}")
 
 
 if __name__ == "__main__":

@@ -49,6 +49,18 @@ return [
         ['name' => 'binding_admin#index', 'url' => '/api/v1/admin/bindings', 'verb' => 'GET'],
         ['name' => 'binding_admin#save', 'url' => '/api/v1/admin/bindings', 'verb' => 'POST'],
         [
+            'name' => 'binding_admin#stop',
+            'url' => '/api/v1/admin/bindings/{id}/stop',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'binding_admin#resume',
+            'url' => '/api/v1/admin/bindings/{id}/resume',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
             'name' => 'binding_admin#remove',
             'url' => '/api/v1/admin/bindings/{id}',
             'verb' => 'DELETE',

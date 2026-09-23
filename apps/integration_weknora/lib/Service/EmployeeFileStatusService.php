@@ -73,10 +73,21 @@ final class EmployeeFileStatusService {
                         continue;
                     }
                     $state = $this->publication->getState($binding['id'], $fileId);
+                    $stopped = $binding['publication_state'] === 'stopped';
+                    try {
+                        $freshEpoch = $this->bindings->requirePublicationActive($binding['id']);
+                        if ($freshEpoch !== $binding['publication_epoch']) {
+                            throw new \UnexpectedValueException('Publication state changed during status read');
+                        }
+                    } catch (BindingPublicationStoppedException $exception) {
+                        $stopped = true;
+                    }
                     return array_merge($base, [
-                        'source_state' => $state === 'withdrawn' ? 'withdrawn' : 'in_scope',
+                        'source_state' => $stopped ? 'publication_stopped' :
+                            ($state === 'withdrawn' ? 'withdrawn' : 'in_scope'),
+                        'file_withdrawn' => $state === 'withdrawn',
                         'binding_name' => $binding['name'],
-                        'weknora_login_url' => $state === 'withdrawn' ? null : $this->loginUrl(),
+                        'weknora_login_url' => $stopped || $state === 'withdrawn' ? null : $this->loginUrl(),
                     ]);
                 }
             }

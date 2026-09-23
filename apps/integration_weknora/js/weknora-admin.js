@@ -127,7 +127,7 @@
                 case 'connection_conflict':
                     return 'The event connection conflicts with an existing connection or pruned change history. Revoke the old local connection before pairing a new ID; pruned history needs operator reconciliation.';
                 case 'binding_unavailable':
-                    return 'The selected binding is unavailable. Check its publication folder and retry.';
+                    return 'The selected binding or its publication root is unavailable. Check the current folder, owner and overlap before resuming.';
                 case 'connection_unavailable':
                     return 'The event connection service is unavailable. Check the server logs and retry.';
                 default:
@@ -171,7 +171,7 @@
             if (bindings.length === 0) {
                 const row = bindingRows.insertRow();
                 const cell = row.insertCell();
-                cell.colSpan = 5;
+                cell.colSpan = 6;
                 cell.textContent = 'No bindings configured.';
             }
 
@@ -180,6 +180,9 @@
                 [binding.id, binding.name, binding.owner_uid, binding.root_file_id].forEach((value) => {
                     row.insertCell().textContent = String(value);
                 });
+                row.insertCell().textContent = binding.publication_state === 'stopped'
+                    ? 'Stopped' : 'Active';
+                const actions = row.insertCell();
                 const edit = document.createElement('button');
                 edit.type = 'button';
                 edit.className = 'button';
@@ -191,7 +194,42 @@
                     rootFileId.value = String(binding.root_file_id);
                     bindingName.focus();
                 });
-                row.insertCell().append(edit);
+                actions.append(edit);
+                const toggle = document.createElement('button');
+                toggle.type = 'button';
+                toggle.className = 'button';
+                toggle.textContent = binding.publication_state === 'stopped'
+                    ? 'Resume publication' : 'Stop publication';
+                toggle.addEventListener('click', async () => {
+                    const stopping = binding.publication_state !== 'stopped';
+                    if (stopping && toggle.dataset.armed !== 'true') {
+                        toggle.dataset.armed = 'true';
+                        toggle.textContent = 'Confirm stop';
+                        message(bindingMessage, `Confirm stopping publication for ${binding.id}. New source reads and authorization will be denied; existing copies need WeKnora's retrieval guard.`, 'warning');
+                        return;
+                    }
+                    toggle.disabled = true;
+                    try {
+                        const action = stopping ? 'stop' : 'resume';
+                        const data = await request('POST',
+                            `${bindingsUrl}/${encodeURIComponent(binding.id)}/${action}`, {});
+                        const refreshed = await loadBindings(binding.id);
+                        if (refreshed) {
+                            message(bindingMessage,
+                                `${binding.id}: publication ${data.publication_state}. ` +
+                                (data.reconcile_hint_recorded
+                                    ? 'A source reconciliation hint was recorded.'
+                                    : 'The hint could not be recorded; verify the next full reconciliation.'),
+                                data.reconcile_hint_recorded ? 'success' : 'warning');
+                        }
+                    } catch (error) {
+                        toggle.disabled = false;
+                        delete toggle.dataset.armed;
+                        toggle.textContent = stopping ? 'Stop publication' : 'Resume publication';
+                        message(bindingMessage, errorText(error), 'error');
+                    }
+                });
+                actions.append(toggle);
                 publicationBinding.add(new Option(`${binding.name} (${binding.id})`, binding.id));
                 connectionBinding.add(new Option(`${binding.name} (${binding.id})`, binding.id));
             });
@@ -215,6 +253,12 @@
                 const data = await request('GET', bindingsUrl);
                 if (!Array.isArray(data.bindings)) {
                     throw new Error('The server returned an invalid binding list.');
+                }
+                if (data.bindings.some((binding) => !binding ||
+                    !['active', 'stopped'].includes(binding.publication_state) ||
+                    !Number.isSafeInteger(binding.publication_epoch) ||
+                    binding.publication_epoch < 0)) {
+                    throw new Error('The server returned an invalid binding publication state.');
                 }
                 bindings = data.bindings;
                 renderBindings(preferredId);

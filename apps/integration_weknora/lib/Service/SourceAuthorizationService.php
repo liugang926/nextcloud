@@ -35,6 +35,11 @@ final class SourceAuthorizationService {
         if ($binding === null) {
             return $this->deny('binding_not_found');
         }
+        try {
+            $bindingEpoch = $this->bindings->requirePublicationActive($bindingId);
+        } catch (BindingPublicationStoppedException $exception) {
+            return $this->deny('publication_stopped');
+        }
         $identity = $this->identities->resolve($directoryId, $objectGuid);
         if ($identity === null) {
             return $this->deny('identity_unmapped_or_disabled');
@@ -91,6 +96,15 @@ final class SourceAuthorizationService {
                     $identity['mapping_id'],
                     $permissionChain,
                 ], JSON_THROW_ON_ERROR));
+                try {
+                    $freshEpoch = $this->bindings->requirePublicationActive($bindingId);
+                } catch (BindingPublicationStoppedException $exception) {
+                    return $this->deny('publication_stopped');
+                }
+                if ($freshEpoch !== $bindingEpoch ||
+                    $this->publications->getState($bindingId, $fileId) !== 'eligible') {
+                    return $this->deny('publication_changed');
+                }
                 return [
                     'allow' => true,
                     'reason' => 'authorized',

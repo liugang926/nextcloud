@@ -20,13 +20,13 @@ volumes; the application is mounted read-only from this repository.
 
 `docker compose ps` reported the Nextcloud, PostgreSQL, Redis and mock
 embedding services healthy. The installed and enabled
-`integration_weknora` application reported version `0.4.11` after local migration; its `info.xml`
+`integration_weknora` application reported version `0.4.12` after local migration; its `info.xml`
 declares Nextcloud major version 34 as its local compatibility range. The
 instance's `occ status` reported `maintenance: false` and
 `needsDbUpgrade: false`.
-The runtime-only `dist/integration_weknora-0.4.11.tar.gz` archive was built
+The runtime-only `dist/integration_weknora-0.4.12.tar.gz` archive was built
 twice with the same SHA-256 checksum
-`3731aa8bc1c237e6acc38098df57152116b1bbae7ce5d5be94276b14c68c1d20`.
+`cbf9fa1ea8a08437be62b87eeb35de4c836ff69ce61f6a0c76079a977646a194`.
 
 ## Build inputs and paired WeKnora runtime
 
@@ -35,7 +35,7 @@ twice with the same SHA-256 checksum
 | Nextcloud app frontend | Host `node` and `npm`; CI requests Node major 24 in `.github/workflows/integration.yml` | Node `v24.14.0`; npm `11.9.0`; `package-lock.json` is used by `npm ci` |
 | WeKnora Go build and test | Local `weknora-go-test:1.26-sqlite` image | Go `1.26.8 linux/arm64`; local image ID `sha256:5a74e8b5137496d3e22c72c01d862c4cbb1fe6ce476ddf5616fd9a807d6ae9ac` |
 | WeKnora runtime base | Local `weknora-ldap-app:final` image | Local image ID `sha256:36667b698350db76c044e797d3c92e98f8acb146750e30401a2dd6a61a6b6c79` |
-| Patched WeKnora runtime | Local `weknora-ldap-app:nextcloud-integration` image | Running container and local tag used image ID `sha256:087835793fd2993080014d19ee84f8b16abc998b43663e6418f57e465b359c0d` after the event-connection build |
+| Patched WeKnora runtime | Local `weknora-ldap-app:nextcloud-integration` image | Running container and local tag used image ID `sha256:2f1b4e28585f557ea9958bb61adf7b612610877c23b06f31cc36b8ff6425694d` after the event-dispatch build |
 
 The WeKnora source baseline is the fixed commit
 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` from

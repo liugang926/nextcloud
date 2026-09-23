@@ -4,8 +4,10 @@
 The route is independently authenticated before user and API key middleware.
 An HTTP `202` means the entire batch and its receipt watermark committed to the
 database. It does **not** mean that WeKnora reconciled the source, parsed a
-document, published a version, or applied a deletion. This phase does not send
-an application acknowledgement or start sync jobs from inbox rows.
+document, published a version, or applied a deletion. A background dispatcher
+submits source reconciliation jobs from committed inbox rows. The applied
+watermark remains at zero until a later complete publication proof is
+implemented; HTTP `202` is never an application acknowledgement.
 
 Only an `active` connection row may receive events. The row fixes one
 Nextcloud instance and binding to one tenant, knowledge base, and Nextcloud
@@ -33,7 +35,7 @@ under the database lock before committing the connection.
 | Method | Route | Result |
 | --- | --- | --- |
 | `POST` | `/api/v1/datasource/:id/nextcloud-event-connection` | Create one active connection; `201` once, then `409` on repeat. |
-| `GET` | `/api/v1/datasource/:id/nextcloud-event-connection` | Read connection status and decimal received watermark; never returns a secret. |
+| `GET` | `/api/v1/datasource/:id/nextcloud-event-connection` | Read receipt, dispatch, and applied status; never returns a secret. |
 | `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Replace the only accepted key immediately; `200` returns the new secret once. |
 | `DELETE` | `/api/v1/datasource/:id/nextcloud-event-connection` | Revoke the active connection immediately; `204`. |
 
@@ -46,13 +48,72 @@ connection ID, key ID, secret, instance ID, and binding ID in the Nextcloud
 sender configuration. No management read can retrieve the secret again. If
 the one-time response is lost, inspect status and rotate the key; repeating
 Pair will not reveal an existing key. Rotation clears any previous-key grace
-period, so the old key is rejected at commit. A changed source is reported
+period, so the old key is rejected at commit. This does not yet provide the
+short dual-key overlap described in the PRD: delivery can pause with `401`
+between WeKnora rotation and installing the new key in Nextcloud. Keep the
+one-time response available while updating the sender. A changed source is reported
 as `source_changed` by GET; revoke and then pair again after resolving the
 source. Revocation does not require a live Nextcloud call, so it remains
 possible after credentials are cleared or the endpoint changes.
 
-Connection provisioning does not advance an applied checkpoint. The only
-watermark exposed here is `received_through_event_id` for durable receipt.
+Connection provisioning does not advance any event watermark.
+
+## Background reconciliation and status
+
+The dispatcher polls due connections every 30 seconds. For each connection it
+claims the current committed receipt watermark under a database lease, then
+queues a forced full Nextcloud source scan. The scan reads the current
+Nextcloud manifest and binding authorization through the existing connector;
+an event hint is never used directly as a delete instruction. Repeated or
+coalesced hints can cause another full scan. A failed queue operation or
+partial/failed/canceled sync remains retryable with exponential backoff.
+Source configuration drift blocks dispatch; revoke blocks further claims and
+cancels queued event tasks when they start. A running event task checks the
+pinned connection and its running sync log before each knowledge item, and
+rejects a fetched cursor from a different Nextcloud instance. A write already
+in progress when an administrator revokes the connection can finish; revoke
+does not provide an atomic cancellation barrier for that one write.
+
+The administrator GET returns decimal-string watermarks with distinct meanings:
+
+| Field | Meaning |
+| --- | --- |
+| `received_through_event_id` | Highest event ID committed in the inbox; the value returned by HTTP `202`. |
+| `dispatched_through_event_id` | Highest receipt watermark for which the sync queue accepted a job. This does not prove that the job ran or succeeded. |
+| `applied_through_event_id` | Highest event ID proven published or deleted. It remains `"0"` in this increment because the asynchronous parser and publication path has no reliable complete-run proof. |
+| `backlog_count` | Inbox rows above the applied watermark, including rows already dispatched. |
+| `undispatched_count` | Inbox rows above the dispatched watermark. |
+| `dispatch_state` | `idle`, `leased`, `queued`, `retry`, or `blocked`. |
+| `last_error_code` | Static failure category; contains no source URL or credential. |
+
+The dispatch cursor and queue intent survive process restarts. The event task
+creates a running sync log only when it starts. If the process dies before
+enqueue, an expired lease with no log can be retried; a task that started is
+reconciled by its exact log ID. An event task still marked running after 150
+minutes moves to `blocked` with `sync_stale_manual_review`. An administrator
+must investigate the source task and repair or re-pair the connection; the
+dispatcher does not start a second task that might write concurrently.
+Manual and scheduled Nextcloud syncs share the running-log admission slot.
+If their queue enqueue result is uncertain, the running log keeps that slot;
+if the queue did not actually accept the task, an administrator must verify
+the queue and repair the log before another sync can start. These non-event
+logs do not use the event dispatcher's 150-minute blocked transition.
+`applied_through_event_id` does not advance. Source deletion still follows
+the connector's two-complete-scan rule, so an absent file is not treated as
+deleted from a single failed or partial manifest. A missing or malformed old
+source cursor with prior imported knowledge blocks event dispatch for manual
+review; the old inventory is required to find deletions. Manual and scheduled
+syncs use the same baseline check. A live instance change fails the sync and
+requires manual repair or re-pairing; until repaired, the dispatch state is
+`retry` with `sync_not_successful` and may retry on its normal backoff.
+
+Each event dispatch currently requests a true full scan, including content
+downloads. The connector accumulates fetched content in memory before applying
+it, so the current implementation cannot safely meet the 10,000-file / 100 GB
+performance target. The dispatcher polls every 30 seconds, so it also cannot
+meet the PRD's event-to-durable-job P95 target of 10 seconds. Neither target
+has been accepted. ETag is a change hint, not a content hash, so skipping an
+unchanged ETag is not proof of content equivalence.
 
 ## Request contract
 
@@ -107,6 +168,7 @@ nonce, all inbox rows, and the new watermark are one transaction, so a
 database error cannot produce a false durable receipt. Reusing a nonce is
 rejected even for an otherwise identical retry.
 
-Hints remain non-authoritative. A future consumer must re-read the current
-Nextcloud manifest, authorization state, and file version before publication
-or deletion. Outbox retention must not treat `202` as an applied checkpoint.
+Hints remain non-authoritative. The dispatcher re-reads the current Nextcloud
+manifest, authorization state, and file version before publication or deletion.
+Outbox retention must not treat `202` or `dispatched_through_event_id` as an
+applied checkpoint.

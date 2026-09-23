@@ -29,7 +29,7 @@ final class ManifestSnapshotService {
     }
 
     /** @param list<array<string, mixed>> $items */
-    public function save(string $bindingId, string $generation, string $rootEtag, int $publicationRevision, array $items): string {
+    public function save(string $bindingId, string $generation, string $rootEtag, int $publicationRevision, int $bindingEpoch, array $items): string {
         $json = json_encode($items, JSON_THROW_ON_ERROR);
         if (strlen($json) > self::MAX_JSON_BYTES) {
             throw new \LengthException('Manifest exceeds snapshot limit');
@@ -43,6 +43,7 @@ final class ManifestSnapshotService {
             'generation' => $query->createNamedParameter($generation),
             'root_etag' => $query->createNamedParameter($rootEtag),
             'publication_revision' => $query->createNamedParameter($publicationRevision),
+            'binding_epoch' => $query->createNamedParameter($bindingEpoch),
             'items_json' => $query->createNamedParameter($json),
             'format_version' => $query->createNamedParameter(2),
             'created_at' => $query->createNamedParameter(time()),
@@ -51,13 +52,13 @@ final class ManifestSnapshotService {
         return $id;
     }
 
-    /** @return array{generation: string, root_etag: string, publication_revision: int, items: list<array<string, mixed>>}|null */
+    /** @return array{generation: string, root_etag: string, publication_revision: int, binding_epoch: int, items: list<array<string, mixed>>}|null */
     public function load(string $bindingId, string $id): ?array {
         if (!preg_match('/\A[a-f0-9]{48}\z/D', $id)) {
             return null;
         }
         $query = $this->db->getQueryBuilder();
-        $query->select('generation', 'root_etag', 'publication_revision', 'items_json', 'format_version', 'created_at')
+        $query->select('generation', 'root_etag', 'publication_revision', 'binding_epoch', 'items_json', 'format_version', 'created_at')
             ->from('weknora_manifest_snap')
             ->where($query->expr()->eq('snapshot_id', $query->createNamedParameter($id)))
             ->andWhere($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)));
@@ -79,6 +80,7 @@ final class ManifestSnapshotService {
             'generation' => (string)$row['generation'],
             'root_etag' => (string)$row['root_etag'],
             'publication_revision' => (int)$row['publication_revision'],
+            'binding_epoch' => (int)$row['binding_epoch'],
             'items' => $items,
         ];
     }
