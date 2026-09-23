@@ -563,10 +563,10 @@ index 00000000..fee41ef6
 +}
 diff --git a/internal/application/access/nextcloud_publication.go b/internal/application/access/nextcloud_publication.go
 new file mode 100644
-index 00000000..bd341fb1
+index 00000000..e6959522
 --- /dev/null
 +++ b/internal/application/access/nextcloud_publication.go
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,208 @@
 +package access
 +
 +import (
@@ -688,15 +688,11 @@ index 00000000..bd341fb1
 +	if err != nil || config == nil {
 +		return fmt.Errorf("%w: data source configuration failed: %v", ErrNextcloudPublicationUnavailable, err)
 +	}
-+	selected := false
-+	for _, id := range config.ResourceIDs {
-+		if id == bindingID {
-+			selected = true
-+			break
-+		}
-+	}
-+	if !selected {
-+		return fmt.Errorf("%w: binding is no longer selected", ErrNextcloudPublicationDenied)
++	// The V1 rollout binds one dedicated knowledge base to one source folder.
++	// Old multi-binding configurations must not remain readable after a policy
++	// change, even if this particular file still belongs to one of the roots.
++	if len(config.ResourceIDs) != 1 || config.ResourceIDs[0] != bindingID {
++		return fmt.Errorf("%w: source requires exactly one selected binding", ErrNextcloudPublicationDenied)
 +	}
 +	config.Type = ds.Type
 +
@@ -781,10 +777,10 @@ index 00000000..bd341fb1
 +}
 diff --git a/internal/application/access/nextcloud_publication_test.go b/internal/application/access/nextcloud_publication_test.go
 new file mode 100644
-index 00000000..9af6e3fc
+index 00000000..345e4807
 --- /dev/null
 +++ b/internal/application/access/nextcloud_publication_test.go
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,218 @@
 +package access
 +
 +import (
@@ -976,6 +972,12 @@ index 00000000..9af6e3fc
 +		}, ErrNextcloudPublicationDenied},
 +		{"wrong source tenant", func(g *NextcloudPublicationGuard, _ *context.Context, _ *types.Knowledge) {
 +			g.dataSources.(*publicationDataSourceLookup).source.TenantID = 99
++		}, ErrNextcloudPublicationDenied},
++		{"multiple selected bindings", func(g *NextcloudPublicationGuard, _ *context.Context, _ *types.Knowledge) {
++			g.dataSources.(*publicationDataSourceLookup).source.Config = types.JSON(`{"type":"nextcloud","resource_ids":["binding-1","binding-2"]}`)
++		}, ErrNextcloudPublicationDenied},
++		{"no selected binding", func(g *NextcloudPublicationGuard, _ *context.Context, _ *types.Knowledge) {
++			g.dataSources.(*publicationDataSourceLookup).source.Config = types.JSON(`{"type":"nextcloud","resource_ids":[]}`)
 +		}, ErrNextcloudPublicationDenied},
 +		{"missing source", func(g *NextcloudPublicationGuard, _ *context.Context, _ *types.Knowledge) {
 +			g.dataSources.(*publicationDataSourceLookup).err = errors.New("database down")
@@ -4855,10 +4857,10 @@ index 00000000..25e375cf
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
 new file mode 100644
-index 00000000..700c177d
+index 00000000..de1ad49e
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector.go
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,351 @@
 +// Package nextcloud imports files exposed by the integration_weknora Nextcloud app.
 +package nextcloud
 +
@@ -4956,8 +4958,11 @@ index 00000000..700c177d
 +}
 +
 +func selectedBindings(resourceIDs []string) ([]string, error) {
-+	if len(resourceIDs) == 0 {
-+		return nil, fmt.Errorf("%w: select at least one Nextcloud binding", datasource.ErrInvalidConfig)
++	// V1 publication is one folder per dedicated knowledge base. Reject
++	// multiple selections before any source reads so legacy configurations
++	// cannot silently combine different audiences in one index.
++	if len(resourceIDs) != 1 {
++		return nil, fmt.Errorf("%w: select exactly one Nextcloud binding", datasource.ErrInvalidConfig)
 +	}
 +	seen := make(map[string]bool, len(resourceIDs))
 +	selected := make([]string, 0, len(resourceIDs))
@@ -5209,10 +5214,10 @@ index 00000000..700c177d
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
 new file mode 100644
-index 00000000..6038192f
+index 00000000..2233df0c
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_test.go
-@@ -0,0 +1,564 @@
+@@ -0,0 +1,537 @@
 +package nextcloud
 +
 +import (
@@ -5491,42 +5496,15 @@ index 00000000..6038192f
 +	}
 +}
 +
-+func TestMoveBetweenSelectedBindingsDoesNotDeleteStableFileID(t *testing.T) {
-+	binding := "a"
-+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-+		switch r.URL.Path {
-+		case apiPath + "/capabilities":
-+			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
-+		case apiPath + "/bindings/a/manifest", apiPath + "/bindings/b/manifest":
-+			manifest := testManifest("etag-1")
-+			if r.URL.Path != apiPath+"/bindings/"+binding+"/manifest" {
-+				manifest["items"] = []map[string]interface{}{}
-+			}
-+			writeJSON(w, manifest)
-+		case apiPath + "/bindings/a/files/41/content", apiPath + "/bindings/b/files/41/content":
-+			w.Header().Set("ETag", "etag-1")
-+			_, _ = w.Write([]byte("hello"))
-+		default:
-+			http.NotFound(w, r)
++func TestNextcloudConnectorRequiresExactlyOneBinding(t *testing.T) {
++	for _, ids := range [][]string{nil, {}, {"a", "b"}, {"a", "a"}} {
++		if _, err := selectedBindings(ids); err == nil {
++			t.Fatalf("selectedBindings(%q) accepted a non-single selection", ids)
 +		}
-+	}))
-+	defer server.Close()
-+
-+	config := testConfig(server.URL)
-+	config.ResourceIDs = []string{"a", "b"}
-+	connector := NewConnector()
-+	items, cursor, err := connector.FetchIncremental(context.Background(), config, nil)
-+	if err != nil || len(items) != 1 || items[0].SourceResourceID != "a" {
-+		t.Fatalf("initial binding = %+v, %v", items, err)
 +	}
-+	binding = "b"
-+	items, cursor, err = connector.FetchIncremental(context.Background(), config, cursor)
-+	if err != nil || len(items) != 1 || items[0].IsDeleted || items[0].SourceResourceID != "b" {
-+		t.Fatalf("moved binding = %+v, %v", items, err)
-+	}
-+	items, _, err = connector.FetchIncremental(context.Background(), config, cursor)
-+	if err != nil || len(items) != 0 {
-+		t.Fatalf("settled move = %+v, %v", items, err)
++	selected, err := selectedBindings([]string{"a"})
++	if err != nil || len(selected) != 1 || selected[0] != "a" {
++		t.Fatalf("selectedBindings(a) = %q, %v", selected, err)
 +	}
 +}
 +
