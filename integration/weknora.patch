@@ -3965,6 +3965,31 @@ index 00000000..8414c898
 +		t.Fatalf("stale source reference reached model context: results=%+v content=%q", manage.MergeResult, manage.UserContent)
 +	}
 +}
+diff --git a/internal/application/service/datasource_delete_sqlite_test.go b/internal/application/service/datasource_delete_sqlite_test.go
+index b4087b96..a21ceef4 100644
+--- a/internal/application/service/datasource_delete_sqlite_test.go
++++ b/internal/application/service/datasource_delete_sqlite_test.go
+@@ -30,6 +30,11 @@ func newSQLiteDataSourceDeleteFixture(t *testing.T) *sqliteDataSourceDeleteFixtu
+ 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "weknora.db")), &gorm.Config{})
+ 	require.NoError(t, err)
+ 	require.NoError(t, db.AutoMigrate(&types.DataSource{}, &types.SyncLog{}))
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases (
++		id TEXT PRIMARY KEY,
++		tenant_id INTEGER NOT NULL,
++		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT 0
++	)`).Error)
+ 
+ 	dsRepo := repository.NewDataSourceRepository(db)
+ 	syncLogRepo := repository.NewSyncLogRepository(db)
+@@ -42,6 +47,8 @@ func newSQLiteDataSourceDeleteFixture(t *testing.T) *sqliteDataSourceDeleteFixtu
+ 		Status:          types.DataSourceStatusActive,
+ 		SyncSchedule:    "0 0 * * * *",
+ 	}
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES (?, ?)`,
++		ds.KnowledgeBaseID, ds.TenantID).Error)
+ 	pendingLog := &types.SyncLog{
+ 		ID:           "log-pending",
+ 		DataSourceID: ds.ID,
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
 index c0b24241..07177239 100644
 --- a/internal/application/service/datasource_service.go
@@ -7454,6 +7479,18 @@ index 08cce460..d0afe9ec 100644
  }
  
  func validateStorageBackendEndpoint(backend *types.StorageBackend) error {
+diff --git a/internal/application/service/vectorstore_test.go b/internal/application/service/vectorstore_test.go
+index 86f43962..95924456 100644
+--- a/internal/application/service/vectorstore_test.go
++++ b/internal/application/service/vectorstore_test.go
+@@ -846,6 +846,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
+     pinned_at DATETIME NULL,
+     asr_config TEXT,
+ 		vector_store_id VARCHAR(36),
++		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT 0,
+ 		storage_backend_id VARCHAR(36),
+     wiki_config TEXT,
+     indexing_strategy TEXT,
 diff --git a/internal/application/service/wiki_ingest.go b/internal/application/service/wiki_ingest.go
 index 1e2ea5f8..8d711813 100644
 --- a/internal/application/service/wiki_ingest.go
