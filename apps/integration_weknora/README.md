@@ -170,20 +170,32 @@ non-LDAP accounts and unverified GUIDs cannot be mapped or authorized.
 
 ## Employee Files sidebar
 
-Version 0.4.5 adds a WeKnora tab to Nextcloud 34's Files sidebar. The tab
+The WeKnora tab in Nextcloud 34's Files sidebar
 calls `GET /files/{fileId}/status` with the current Nextcloud browser session.
 It returns 404 for a file the current user cannot read. It only names a binding
 after verifying that the user can read its root and this file inside it. The
 source-side states are `in_scope`, `withdrawn`, and `outside_scope`.
 
-`in_scope` means only that the connector is allowed to read the current source
-through this app; it is **not** evidence that WeKnora has synchronized,
-parsed, or made that version available for questions. The endpoint therefore
-reports `knowledge_state: unverified`, `knowledge_ready_at: null`,
-`published_source_etag: null`, and `qa_available: false`. The sidebar presents
-these limits instead of showing a false “ready” status. Verified knowledge
-status and failure details need a separate authenticated WeKnora-to-Nextcloud
-status contract and version comparison.
+`in_scope` means only that the connector may read the current source. When an
+active source pair and event connection both exist, Nextcloud makes a bounded
+machine request to WeKnora's `/api/v1/integrations/nextcloud/files/status`.
+The connection's HMAC secret signs the exact connection, file ID and current
+source ETag request. WeKnora verifies the active connection and source pair,
+reads its version and candidate rows, and signs the response body. Nextcloud
+checks the response signature, full pair tuple, file ID and ETag, then checks
+the user's source access and ETag again. It reports `ready` only if the signed
+response proves that the candidate is completed, enabled and published for
+that same ETag. An older published ETag or a staged candidate is `updating`;
+a failed candidate for the current ETag is `failed`. No row, invalid proof,
+missing connection, transport error, or unsupported ETag remains `unverified`.
+Stopped, withdrawn, inaccessible and outside-scope files never use this feed.
+
+`knowledge_ready_at` is set only for a verified current publication. The
+signed feed does not establish an employee's individual WeKnora retrieval
+rights, so `qa_available` remains false for every state. The browser receives
+no machine credential, tenant ID or knowledge base ID. A status read does not
+claim that event delivery, queue admission or a sync cursor means parsing
+completed.
 
 An administrator may configure an ordinary WeKnora web login URL, for example
 `php occ config:app:set integration_weknora weknora_web_url --value=https://weknora.example/login`.

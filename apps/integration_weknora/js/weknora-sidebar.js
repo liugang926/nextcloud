@@ -4550,12 +4550,27 @@ ${message.stack}`;
         this.addRow(section, "\u53D1\u5E03\u76EE\u5F55", data.binding_name || "\u672A\u63D0\u4F9B");
       }
       this.addRow(section, "\u6E90\u6587\u4EF6\u66F4\u65B0\u65F6\u95F4", this.formatTime(data.source_modified_at));
-      this.addRow(section, "\u5F53\u524D\u53D1\u5E03\u7248\u672C", "\u5C1A\u672A\u63D0\u4F9B");
-      this.addRow(section, "\u77E5\u8BC6\u5C31\u7EEA\u65F6\u95F4", "\u5C1A\u672A\u63D0\u4F9B");
+      if (data.source_state === "in_scope") {
+        const knowledgeState = {
+          ready: "\u5F53\u524D\u7248\u672C\u5DF2\u89E3\u6790\u5E76\u53D1\u5E03",
+          updating: "\u6B63\u5728\u66F4\u65B0",
+          failed: "\u5F53\u524D\u7248\u672C\u89E3\u6790\u5931\u8D25",
+          unverified: "\u5C1A\u672A\u9A8C\u8BC1"
+        }[data.knowledge_state] || "\u5C1A\u672A\u9A8C\u8BC1";
+        this.addRow(section, "\u77E5\u8BC6\u72B6\u6001", knowledgeState);
+      }
+      this.addRow(section, "\u5F53\u524D\u6E90\u7248\u672C", data.source_etag || "\u672A\u77E5");
+      this.addRow(section, "\u5DF2\u53D1\u5E03\u6E90\u7248\u672C", data.published_source_etag || "\u5C1A\u672A\u9A8C\u8BC1");
+      this.addRow(section, "\u77E5\u8BC6\u5C31\u7EEA\u65F6\u95F4", this.formatTime(data.knowledge_ready_at));
       const explanation = document.createElement("p");
       explanation.className = "weknora-sidebar__explanation";
       if (data.source_state === "in_scope") {
-        explanation.textContent = "\u6587\u4EF6\u53EF\u4EE5\u7531\u8FDE\u63A5\u5668\u8BFB\u53D6\uFF0C\u4F46\u5F53\u524D\u65E0\u6CD5\u9A8C\u8BC1\u540C\u6B65\u3001\u89E3\u6790\u6216\u95EE\u7B54\u662F\u5426\u5DF2\u5C31\u7EEA\u3002\u8BF7\u4EE5 WeKnora \u767B\u5F55\u540E\u7684\u4E2A\u4EBA\u6743\u9650\u7ED3\u679C\u4E3A\u51C6\u3002";
+        explanation.textContent = {
+          ready: "WeKnora \u5DF2\u89E3\u6790\u5E76\u53D1\u5E03\u6B64\u6E90\u6587\u4EF6\u7684\u5F53\u524D\u7248\u672C\u3002\u80FD\u5426\u63D0\u95EE\u4ECD\u53D6\u51B3\u4E8E\u4F60\u5728 WeKnora \u767B\u5F55\u540E\u7684\u4E2A\u4EBA\u6743\u9650\u3002",
+          updating: "WeKnora \u5C1A\u672A\u53D1\u5E03\u6B64\u6E90\u6587\u4EF6\u7684\u5F53\u524D\u7248\u672C\u3002\u8BF7\u7A0D\u540E\u5237\u65B0\u3002",
+          failed: "WeKnora \u5904\u7406\u6B64\u6E90\u6587\u4EF6\u7684\u5F53\u524D\u7248\u672C\u65F6\u5931\u8D25\u3002\u8BF7\u8054\u7CFB\u7BA1\u7406\u5458\u67E5\u770B\u540C\u6B65\u4E0E\u89E3\u6790\u8BB0\u5F55\u3002",
+          unverified: "\u76EE\u524D\u65E0\u6CD5\u9A8C\u8BC1 WeKnora \u662F\u5426\u5DF2\u89E3\u6790\u5E76\u53D1\u5E03\u5F53\u524D\u7248\u672C\u3002\u8BF7\u7A0D\u540E\u5237\u65B0\u3002"
+        }[data.knowledge_state] || "\u76EE\u524D\u65E0\u6CD5\u9A8C\u8BC1 WeKnora \u662F\u5426\u5DF2\u89E3\u6790\u5E76\u53D1\u5E03\u5F53\u524D\u7248\u672C\u3002\u8BF7\u7A0D\u540E\u5237\u65B0\u3002";
       } else if (data.source_state === "withdrawn") {
         explanation.textContent = "\u7BA1\u7406\u5458\u5DF2\u64A4\u56DE\u6B64\u6587\u4EF6\u7684\u53D1\u5E03\u8D44\u683C\u3002\u539F\u6587\u4EF6\u4ECD\u4FDD\u7559\u5728 Nextcloud\u3002";
       } else if (data.source_state === "publication_stopped") {

@@ -38,6 +38,18 @@ def wait_login_url(opener, url, headers, expected):
     raise AssertionError(f"expected login URL {expected!r} was not observed")
 
 
+def check_knowledge_status(source):
+    assert source["qa_available"] is False
+    state = source["knowledge_state"]
+    assert state in ("unverified", "updating", "failed", "ready"), source
+    if state == "ready":
+        assert source["source_state"] == "in_scope", source
+        assert source["published_source_etag"] == source["source_etag"], source
+        assert isinstance(source["knowledge_ready_at"], int) and source["knowledge_ready_at"] > 0
+    else:
+        assert source["knowledge_ready_at"] is None, source
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binding", default="dev-published")
@@ -81,8 +93,7 @@ def main():
         check(status, 200, "owner status")
         source = json.loads(body)
         assert source["source_state"] == "in_scope" and source["binding_name"]
-        assert source["knowledge_state"] == "unverified" and source["qa_available"] is False
-        assert source["knowledge_ready_at"] is None and source["published_source_etag"] is None
+        check_knowledge_status(source)
         assert isinstance(source["source_modified_at"], int)
 
         status, body = request(admin, f"{api}/files/2147483647/status", headers=admin_headers)
@@ -114,7 +125,8 @@ def main():
         status, body = request(guest, status_url, headers={"requesttoken": guest_csrf})
         check(status, 200, "shared file status")
         shared = json.loads(body)
-        assert shared["source_state"] == "in_scope" and shared["qa_available"] is False
+        assert shared["source_state"] == "in_scope"
+        check_knowledge_status(shared)
         assert shared["weknora_login_url"] == "https://weknora.example/login"
 
         status, _ = request(admin, f"{api}/admin/bindings/{args.binding}/files/{args.file_id}/withdraw",
@@ -125,6 +137,7 @@ def main():
         withdrawn = json.loads(body)
         assert withdrawn["source_state"] == "withdrawn"
         assert withdrawn["weknora_login_url"] is None and withdrawn["qa_available"] is False
+        assert withdrawn["knowledge_state"] == "unverified"
 
         status, _ = request(admin, f"{shares}/{share_id}", "DELETE", share_headers)
         check(status, 200, "revoke file share")

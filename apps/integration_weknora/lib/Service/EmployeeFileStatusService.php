@@ -9,13 +9,14 @@ use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
 use OCP\IConfig;
 
-/** Resolves source-side status only; WeKnora indexing is not asserted here. */
+/** Resolves session-visible source state before trusting a paired machine feed. */
 final class EmployeeFileStatusService {
     public function __construct(
         private BindingRegistryService $bindings,
         private FilePublicationStateService $publication,
         private IRootFolder $rootFolder,
         private IConfig $config,
+        private RemoteFileStatusService $remote,
     ) {
     }
 
@@ -23,6 +24,33 @@ final class EmployeeFileStatusService {
      * @return array<string, mixed>|null Null when this user cannot read the file.
      */
     public function forUser(string $uid, int $fileId): ?array {
+        $before = $this->sourceForUser($uid, $fileId);
+        if ($before === null) {
+            return null;
+        }
+        if ($before['source_state'] !== 'in_scope') {
+            unset($before['_binding_id']);
+            return $before;
+        }
+        $remote = $this->remote->status((string)$before['_binding_id'], $fileId,
+            (string)$before['source_etag']);
+        // A remote lookup can take several seconds. Recheck the session's
+        // read access, publication state, binding and ETag before returning it.
+        $after = $this->sourceForUser($uid, $fileId);
+        if ($after === null) {
+            return null;
+        }
+        if ($remote !== null && $after['source_state'] === 'in_scope' &&
+            $after['_binding_id'] === $before['_binding_id'] &&
+            $after['source_etag'] === $before['source_etag']) {
+            $after = array_merge($after, $remote);
+        }
+        unset($after['_binding_id']);
+        return $after;
+    }
+
+    /** @return array<string, mixed>|null */
+    private function sourceForUser(string $uid, int $fileId): ?array {
         $userFolder = $this->rootFolder->getUserFolder($uid);
         $visibleFile = null;
         foreach ($userFolder->getById($fileId) as $node) {
@@ -85,6 +113,7 @@ final class EmployeeFileStatusService {
                     return array_merge($base, [
                         'source_state' => $stopped ? 'publication_stopped' :
                             ($state === 'withdrawn' ? 'withdrawn' : 'in_scope'),
+                        '_binding_id' => $binding['id'],
                         'file_withdrawn' => $state === 'withdrawn',
                         'binding_name' => $binding['name'],
                         'weknora_login_url' => $stopped || $state === 'withdrawn' ? null : $this->loginUrl(),

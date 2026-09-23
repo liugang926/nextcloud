@@ -118,13 +118,28 @@ class WeknoraFileSidebarTab extends HTMLElement {
             this.addRow(section, '发布目录', data.binding_name || '未提供')
         }
         this.addRow(section, '源文件更新时间', this.formatTime(data.source_modified_at))
-        this.addRow(section, '当前发布版本', '尚未提供')
-        this.addRow(section, '知识就绪时间', '尚未提供')
+        if (data.source_state === 'in_scope') {
+            const knowledgeState = {
+                ready: '当前版本已解析并发布',
+                updating: '正在更新',
+                failed: '当前版本解析失败',
+                unverified: '尚未验证',
+            }[data.knowledge_state] || '尚未验证'
+            this.addRow(section, '知识状态', knowledgeState)
+        }
+        this.addRow(section, '当前源版本', data.source_etag || '未知')
+        this.addRow(section, '已发布源版本', data.published_source_etag || '尚未验证')
+        this.addRow(section, '知识就绪时间', this.formatTime(data.knowledge_ready_at))
 
         const explanation = document.createElement('p')
         explanation.className = 'weknora-sidebar__explanation'
         if (data.source_state === 'in_scope') {
-            explanation.textContent = '文件可以由连接器读取，但当前无法验证同步、解析或问答是否已就绪。请以 WeKnora 登录后的个人权限结果为准。'
+            explanation.textContent = {
+                ready: 'WeKnora 已解析并发布此源文件的当前版本。能否提问仍取决于你在 WeKnora 登录后的个人权限。',
+                updating: 'WeKnora 尚未发布此源文件的当前版本。请稍后刷新。',
+                failed: 'WeKnora 处理此源文件的当前版本时失败。请联系管理员查看同步与解析记录。',
+                unverified: '目前无法验证 WeKnora 是否已解析并发布当前版本。请稍后刷新。',
+            }[data.knowledge_state] || '目前无法验证 WeKnora 是否已解析并发布当前版本。请稍后刷新。'
         } else if (data.source_state === 'withdrawn') {
             explanation.textContent = '管理员已撤回此文件的发布资格。原文件仍保留在 Nextcloud。'
         } else if (data.source_state === 'publication_stopped') {
