@@ -77,13 +77,17 @@ active Nextcloud pairing's abort rejection. Run it only against **two
 disposable Compose projects**, with explicit loopback origins and the
 isolated Nextcloud `.env` file. It rejects the shared development project
 names. The WeKnora app must be attached to the isolated Nextcloud network,
-where the Nextcloud service has the `nextcloud` alias. Before starting that
+where the isolated Nextcloud container's unique name is resolvable. The
+script verifies their shared Docker network and passes that container name
+to the relay, avoiding the ambiguous `nextcloud` alias on stacks attached to
+multiple networks. Before starting that
 WeKnora app, set `WEKNORA_NEXTCLOUD_DEV_HTTP=1` and approve its exact
 `http://127.0.0.1:18089` relay origin in
 `WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS`. The relay uses a preinstalled
 `python:3.12-alpine` image and runs in the app container's network namespace;
 it listens only on loopback, rejects one commit for the script's unique
-binding and UUID, then forwards requests to `nextcloud`. It prints no token.
+binding and UUID, then forwards requests to the verified isolated Nextcloud
+container. It prints no token.
 
 ```sh
 python3 scripts/ops/test-local-source-pairing-relay.py
@@ -95,6 +99,9 @@ python3 scripts/ops/local-source-pairing-abort-smoke.py \
   --weknora-compose-project YOUR_ISOLATED_WK_PROJECT \
   --relay-port 18089
 ```
+
+If the isolated WeKnora app service is named something other than `app`, pass
+`--weknora-app-service ITS_COMPOSE_SERVICE_NAME`.
 
 The smoke creates a unique folder, binding, and empty KB. On normal exit it
 removes its relay and only those owned fixtures. If abort cannot be confirmed,

@@ -92,14 +92,19 @@ def require_isolated_containers(nc_info, wk_info, nc_port, wk_port, relay_port):
         raise RuntimeError("WeKnora origin does not map to the isolated Compose container")
     nc_networks = nc_info["NetworkSettings"]["Networks"]
     wk_networks = wk_info["NetworkSettings"]["Networks"]
-    shared = set(nc_networks) & set(wk_networks)
-    if not any("nextcloud" in (nc_networks[name].get("Aliases") or []) for name in shared):
-        raise RuntimeError("isolated WeKnora cannot resolve the Nextcloud service alias")
+    shared = {name for name in set(nc_networks) & set(wk_networks)
+              if nc_networks[name].get("NetworkID") and
+              nc_networks[name]["NetworkID"] == wk_networks[name].get("NetworkID")}
+    upstream_host = nc_info.get("Name", "").lstrip("/")
+    if (not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", upstream_host) or
+            not any(upstream_host in (nc_networks[name].get("Aliases") or []) for name in shared)):
+        raise RuntimeError("isolated WeKnora does not share the verified Nextcloud container network")
     env = dict(item.split("=", 1) for item in wk_info["Config"]["Env"] if "=" in item)
     relay_origin = f"http://127.0.0.1:{relay_port}"
     allowed = {item.strip() for item in env.get("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", "").split(",")}
     if env.get("WEKNORA_NEXTCLOUD_DEV_HTTP") != "1" or relay_origin not in allowed:
         raise RuntimeError("isolated WeKnora app has not approved the loopback relay origin")
+    return upstream_host
 
 
 def relay_health(name, port):
@@ -109,13 +114,14 @@ def relay_health(name, port):
     return json.loads(docker("exec", name, "python3", "-c", code))
 
 
-def start_relay(wk_container, binding, operation_id, port, image):
+def start_relay(wk_container, binding, operation_id, port, image, upstream_host):
     name = "nc-pair-abort-" + secrets.token_hex(6)
     source = base64.b64encode(RELAY_SCRIPT.read_bytes()).decode("ascii")
     code = f"import base64;exec(compile(base64.b64decode('{source}'),'/relay.py','exec'))"
     docker("run", "--rm", "-d", "--pull=never", "--name", name,
            "--network", f"container:{wk_container}", image, "python3", "-c", code,
-           "--binding", binding, "--operation-id", operation_id, "--port", str(port))
+           "--binding", binding, "--operation-id", operation_id, "--port", str(port),
+           "--upstream-host", upstream_host)
     try:
         for _ in range(25):
             try:
@@ -156,6 +162,8 @@ def main():
                         help=".env for that isolated Nextcloud stack; never printed")
     parser.add_argument("--nextcloud-compose-project", required=True)
     parser.add_argument("--weknora-compose-project", required=True)
+    parser.add_argument("--weknora-app-service", default="app",
+                        help="isolated WeKnora Compose service name (default: app)")
     parser.add_argument("--relay-port", required=True, type=int,
                         help="port approved in the isolated WeKnora app environment")
     parser.add_argument("--relay-image", default="python:3.12-alpine")
@@ -168,6 +176,8 @@ def main():
     for value in (args.nextcloud_compose_project, args.weknora_compose_project):
         if not SAFE_PROJECT.fullmatch(value) or value in SHARED_PROJECTS:
             parser.error("use explicit disposable Compose project names, not the shared projects")
+    if not SAFE_PROJECT.fullmatch(args.weknora_app_service):
+        parser.error("invalid isolated WeKnora Compose service name")
     if args.nextcloud_compose_project == args.weknora_compose_project:
         parser.error("provide separate isolated Compose project names")
     if not 1024 <= args.relay_port <= 65535:
@@ -179,10 +189,10 @@ def main():
     password = values.get("NEXTCLOUD_ADMIN_PASSWORD")
     if not owner or not password:
         parser.error("isolated Nextcloud env file needs admin credentials")
-    wk_container = compose_container(args.weknora_compose_project, "app")
+    wk_container = compose_container(args.weknora_compose_project, args.weknora_app_service)
     nc_container = compose_container(args.nextcloud_compose_project, "nextcloud")
-    require_isolated_containers(inspect(nc_container), inspect(wk_container),
-                                nc_origin.port, wk_origin.port, args.relay_port)
+    upstream_host = require_isolated_containers(inspect(nc_container), inspect(wk_container),
+                                                nc_origin.port, wk_origin.port, args.relay_port)
 
     nc_base = args.nextcloud_origin
     wk_base = args.weknora_origin
@@ -246,7 +256,8 @@ def main():
 
         stage = "WeKnora pending-pair abort"
         pending_op = str(uuid.uuid4())
-        relay_name = start_relay(wk_container, binding, pending_op, args.relay_port, args.relay_image)
+        relay_name = start_relay(wk_container, binding, pending_op, args.relay_port,
+                                 args.relay_image, upstream_host)
         status, body = nc_request(nc_admin, csrf, pair_url, "POST", {
             "operation_id": pending_op, "tenant_id": tenant_id, "knowledge_base_id": kb_id})
         require_status(status, 201, "prepare pending operation")

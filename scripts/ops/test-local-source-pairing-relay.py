@@ -19,7 +19,40 @@ def load_relay():
     return module
 
 
+def load_smoke():
+    path = Path(__file__).with_name("local-source-pairing-abort-smoke.py")
+    spec = importlib.util.spec_from_file_location("pair_abort_smoke", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class RelayTest(unittest.TestCase):
+    def test_upstream_is_the_verified_container_on_the_shared_network(self):
+        smoke = load_smoke()
+        nc = {
+            "Name": "/isolated-nc-nextcloud-1",
+            "NetworkSettings": {
+                "Ports": {"80/tcp": [{"HostPort": "18182"}]},
+                "Networks": {"isolated-net": {"NetworkID": "network-1",
+                                               "Aliases": ["isolated-nc-nextcloud-1", "nextcloud"]}},
+            },
+        }
+        wk = {
+            "Config": {"Env": ["WEKNORA_NEXTCLOUD_DEV_HTTP=1",
+                               "WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS=http://127.0.0.1:18089"]},
+            "NetworkSettings": {
+                "Ports": {"8080/tcp": [{"HostPort": "18086"}]},
+                "Networks": {"isolated-net": {"NetworkID": "network-1"},
+                             "other-net": {"NetworkID": "network-2"}},
+            },
+        }
+        self.assertEqual(smoke.require_isolated_containers(nc, wk, 18182, 18086, 18089),
+                         "isolated-nc-nextcloud-1")
+        wk["NetworkSettings"]["Networks"]["isolated-net"]["NetworkID"] = "different-network"
+        with self.assertRaises(RuntimeError):
+            smoke.require_isolated_containers(nc, wk, 18182, 18086, 18089)
+
     def test_only_exact_first_commit_is_blocked(self):
         forwarded = []
 
@@ -30,7 +63,7 @@ class RelayTest(unittest.TestCase):
             def handle_request(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 forwarded.append((self.command, self.path, body,
-                                  self.headers.get("Authorization")))
+                                  self.headers.get("Authorization"), self.headers.get("Host")))
                 answer = b'{"upstream":true}'
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(answer)))
@@ -69,6 +102,7 @@ class RelayTest(unittest.TestCase):
                 self.assertEqual(json.load(response), {"ready": True, "blocked": True})
             self.assertEqual(len(forwarded), 3)
             self.assertTrue(all(item[3] == "Bearer hidden-test-token" for item in forwarded))
+            self.assertTrue(all(item[4] == "nextcloud" for item in forwarded))
         finally:
             relay.shutdown()
             upstream.shutdown()

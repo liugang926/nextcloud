@@ -2,14 +2,15 @@
 """One-shot local fault relay for local-source-pairing-abort-smoke.py.
 
 Run only in a disposable WeKnora app container's network namespace. The
-listener is loopback-only, forwards to the fixed `nextcloud` Compose service,
-and never logs requests, headers, bodies, or responses.
+listener is loopback-only, forwards to the verified isolated Nextcloud
+container name, and never logs requests, headers, bodies, or responses.
 """
 
 import argparse
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
 import threading
 
 
@@ -20,7 +21,9 @@ MAX_BODY = 1 << 20
 MAX_RESPONSE = 4 << 20
 
 
-def make_server(binding, operation_id, port, upstream_host="nextcloud", upstream_port=80):
+def make_server(binding, operation_id, port, upstream_host, upstream_port=80):
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", upstream_host):
+        raise ValueError("invalid isolated upstream container name")
     commit_path = f"{API}/bindings/{binding}/source-pairing/commit"
     lock = threading.Lock()
     faulted = False
@@ -65,7 +68,9 @@ def make_server(binding, operation_id, port, upstream_host="nextcloud", upstream
                         return
             headers = {key: value for key, value in self.headers.items()
                        if key.lower() not in HOP_HEADERS}
-            headers["Host"] = upstream_host
+            # Route the TCP connection by the unique container name while
+            # retaining Nextcloud's configured trusted HTTP Host value.
+            headers["Host"] = "nextcloud"
             headers["Content-Length"] = str(len(body))
             conn = http.client.HTTPConnection(upstream_host, upstream_port, timeout=20)
             try:
@@ -99,5 +104,6 @@ if __name__ == "__main__":
     parser.add_argument("--binding", required=True)
     parser.add_argument("--operation-id", required=True)
     parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--upstream-host", required=True)
     args = parser.parse_args()
-    make_server(args.binding, args.operation_id, args.port).serve_forever()
+    make_server(args.binding, args.operation_id, args.port, args.upstream_host).serve_forever()
