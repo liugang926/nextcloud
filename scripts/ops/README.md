@@ -2,7 +2,7 @@
 
 ## Local Nextcloud source pairing
 
-Install Nextcloud app 0.4.17 and deploy the WeKnora patch before this probe.
+Install Nextcloud app 0.4.18 and deploy the WeKnora patch before this probe.
 Keep the selected Nextcloud binding active with its original root. As a
 WeKnora administrator, create an **empty, dedicated** knowledge base in the
 same tenant; record its ID and the canonical positive decimal tenant ID. A
@@ -149,7 +149,7 @@ document is indexed or satisfy the AD acceptance gate.
 
 ## Local Nextcloud to WeKnora delivery probe
 
-With both local stacks healthy, Nextcloud app 0.4.17 installed, and a new
+With both local stacks healthy, Nextcloud app 0.4.18 installed, and a new
 synthetic data source actively source-paired as above, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
 WeKnora administrator credentials. The probe requires that neither side has

@@ -1,9 +1,9 @@
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..702d0670
+index 00000000..fb2a5546
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,194 @@
 +# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
@@ -185,6 +185,78 @@ index 00000000..702d0670
 +manifest, authorization state, and file version before publication or deletion.
 +Outbox retention must not treat `202` or `dispatched_through_event_id` as an
 +applied checkpoint.
++
++When parsing completes, WeKnora checks the candidate's original paired source
++again with a signed `POST /bindings/{binding}/files/{file}/publication-check`.
++The signed body fixes the imported instance ID, ETag, and path. Nextcloud
++returns `204` only while the binding is active, the file remains readable in
++that binding, its ETag and path still match, and the file is eligible for
++publication. WeKnora compares the candidate, source config, and active pair
++again under its database lock before setting the publication ETag, then probes
++Nextcloud once more. A failed probe leaves or returns the candidate to staging
++with an empty publication ETag. The source request has a five-second timeout.
++These checks cannot form one transaction across the two services. A change
++after the final probe is denied by the live source authorization check on
++retrieval and is reconciled by later source scans.
+diff --git a/docs/nextcloud-file-status.md b/docs/nextcloud-file-status.md
+new file mode 100644
+index 00000000..5b0f41fd
+--- /dev/null
++++ b/docs/nextcloud-file-status.md
+@@ -0,0 +1,53 @@
++# Signed Nextcloud file publication status
++
++An installed Nextcloud event connection may query
++`GET /api/v1/integrations/nextcloud/files/status` with the exact, unescaped
++query order `connection_id=...&file_id=...&source_etag=...`. The file ID is a
++positive canonical decimal string. The ETag is 1–256 ASCII letters, digits,
++periods, underscores, colons or hyphens. The endpoint is registered outside
++human authentication and accepts only a current or still-valid rotated event
++connection key. It requires the connection's committed data source and source
++pair to remain active.
++
++Request headers are `X-Nextcloud-Connection-Id`, `X-Nextcloud-Key-Id`,
++`X-Nextcloud-Timestamp`, `X-Nextcloud-Nonce`, and
++`X-Nextcloud-Signature`. The signature is lower-case hex HMAC-SHA256 of these
++newline-separated fields, with no trailing newline:
++
++```
++nextcloud-file-status-hmac-sha256-v1
++GET
++/api/v1/integrations/nextcloud/files/status
++<exact query>
++<SHA256 of empty body, lower-case hex>
++<timestamp>
++<nonce>
++<connection ID>
++<key ID>
++```
++
++The timestamp may differ by at most five minutes. Nonces share the durable
++event connection nonce table and cannot be replayed, including across status
++and event operations. Success is an exact JSON body with the connection ID,
++Nextcloud instance, binding, tenant, knowledge base, data source, file ID,
++queried ETag, knowledge state, published source ETag and ready time. The
++`X-WeKnora-Status-Signature` header is lower-case hex HMAC-SHA256 of:
++
++```
++weknora-file-status-hmac-sha256-v1
++<request signature, lower-case hex>
++<SHA256 of exact response body bytes, lower-case hex>
++<connection ID>
++<key ID>
++<nonce>
++```
++
++`ready` requires a `published` version row whose candidate is still present,
++completed and enabled, with source identity metadata and publication ETag
++matching the version row and requested ETag. A published older ETag or staging
++is `updating`. A failed staged candidate for the requested ETag is `failed`.
++Missing or inconsistent provenance is `unverified`. The response's
++`qa_available` is always false: publication alone is not a per-user retrieval
++grant. This feed reads persisted publication state. A source change after the
++read is handled by Nextcloud's post-query ETag and access recheck and by
++WeKnora's separate live retrieval guard.
 diff --git a/docs/nextcloud-gc.md b/docs/nextcloud-gc.md
 new file mode 100644
 index 00000000..5993ac9f
@@ -1684,10 +1756,34 @@ index 77ed065c..9cf4d886 100644
  }
  
 diff --git a/internal/application/repository/knowledge.go b/internal/application/repository/knowledge.go
-index 4b29c552..65d9268e 100644
+index 4b29c552..b6ada280 100644
 --- a/internal/application/repository/knowledge.go
 +++ b/internal/application/repository/knowledge.go
-@@ -337,8 +337,25 @@ func (r *knowledgeRepository) UpdateKnowledge(ctx context.Context, knowledge *ty
+@@ -7,6 +7,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/Tencent/WeKnora/internal/common"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	"gorm.io/gorm"
+@@ -44,12 +45,13 @@ var omitFieldsOnUpdate = []string{"DeletedAt", "PendingSubtasksCount"}
+ 
+ // knowledgeRepository implements knowledge base and knowledge repository interface
+ type knowledgeRepository struct {
+-	db *gorm.DB
++	db                        *gorm.DB
++	nextcloudPublicationCheck nextcloudPublicationCheck
+ }
+ 
+ // NewKnowledgeRepository creates a new knowledge repository
+ func NewKnowledgeRepository(db *gorm.DB) interfaces.KnowledgeRepository {
+-	return &knowledgeRepository{db: db}
++	return &knowledgeRepository{db: db, nextcloudPublicationCheck: nextcloud.CheckCurrentPublication}
+ }
+ 
+ // CreateKnowledge creates knowledge
+@@ -337,8 +339,25 @@ func (r *knowledgeRepository) UpdateKnowledge(ctx context.Context, knowledge *ty
  	if knowledge.CustomMetadata == nil {
  		omit = append(append([]string{}, omitFieldsOnUpdate...), "custom_metadata")
  	}
@@ -1715,7 +1811,7 @@ index 4b29c552..65d9268e 100644
  }
  
  // UpdateKnowledgeBatch updates knowledge items in batch
-@@ -351,6 +368,20 @@ func (r *knowledgeRepository) UpdateKnowledgeBatch(ctx context.Context, knowledg
+@@ -351,6 +370,20 @@ func (r *knowledgeRepository) UpdateKnowledgeBatch(ctx context.Context, knowledg
  			knowledge.ErrorMessage = common.CleanInvalidUTF8(knowledge.ErrorMessage)
  		}
  	}
@@ -1736,7 +1832,7 @@ index 4b29c552..65d9268e 100644
  	return r.db.Debug().WithContext(ctx).Omit(omitFieldsOnUpdate...).Save(knowledgeList).Error
  }
  
-@@ -563,8 +594,7 @@ func (r *knowledgeRepository) UpdateKnowledgeColumn(
+@@ -563,8 +596,7 @@ func (r *knowledgeRepository) UpdateKnowledgeColumn(
  			value = common.CleanInvalidUTF8(string(v))
  		}
  	}
@@ -1746,7 +1842,7 @@ index 4b29c552..65d9268e 100644
  }
  
  // UpdateKnowledgeColumns writes multiple columns in a single UPDATE so callers
-@@ -587,7 +617,29 @@ func (r *knowledgeRepository) UpdateKnowledgeColumns(
+@@ -587,7 +619,29 @@ func (r *knowledgeRepository) UpdateKnowledgeColumns(
  			values["error_message"] = common.CleanInvalidUTF8(string(v))
  		}
  	}
@@ -1777,7 +1873,7 @@ index 4b29c552..65d9268e 100644
  }
  
  // UpdateActiveDeletingKnowledgeColumns only touches rows that are still visible
-@@ -674,6 +726,9 @@ func (r *knowledgeRepository) FinalizeSubtask(
+@@ -674,6 +728,9 @@ func (r *knowledgeRepository) FinalizeSubtask(
  		return 0, false, promoteRes.Error
  	}
  	promoted := promoteRes.RowsAffected > 0
@@ -1787,7 +1883,7 @@ index 4b29c552..65d9268e 100644
  
  	// 3) Best-effort re-read of the new count for diagnostics/return value
  	//    only. This read may be replica-stale and is intentionally NOT used
-@@ -735,7 +790,13 @@ func (r *knowledgeRepository) CompleteProcessingWithoutSubtasks(ctx context.Cont
+@@ -735,7 +792,13 @@ func (r *knowledgeRepository) CompleteProcessingWithoutSubtasks(ctx context.Cont
  			"processed_at":           now,
  			"updated_at":             now,
  		})
@@ -3610,6 +3706,244 @@ index 00000000..324cfb32
 +		return nil
 +	})
 +	return status, err
++}
+diff --git a/internal/application/repository/nextcloud_file_status.go b/internal/application/repository/nextcloud_file_status.go
+new file mode 100644
+index 00000000..9512e78b
+--- /dev/null
++++ b/internal/application/repository/nextcloud_file_status.go
+@@ -0,0 +1,232 @@
++package repository
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strconv"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++// SignedNextcloudFileStatusRequest is a nonce-bound query by the Nextcloud
++// instance that owns an active event connection. The response is signed with
++// that same connection key, including the exact request signature.
++type SignedNextcloudFileStatusRequest struct {
++	SignedNextcloudEventStatusRequest
++	FileID           int64
++	SourceETag       string
++	RequestSignature string
++}
++
++type NextcloudFileStatus struct {
++	ConnectionID        string  `json:"connection_id"`
++	NextcloudInstanceID string  `json:"nextcloud_instance_id"`
++	BindingID           string  `json:"binding_id"`
++	TenantID            string  `json:"tenant_id"`
++	KnowledgeBaseID     string  `json:"knowledge_base_id"`
++	DataSourceID        string  `json:"data_source_id"`
++	FileID              string  `json:"file_id"`
++	SourceETag          string  `json:"source_etag"`
++	KnowledgeState      string  `json:"knowledge_state"`
++	PublishedSourceETag *string `json:"published_source_etag"`
++	KnowledgeReadyAt    *int64  `json:"knowledge_ready_at"`
++	QAAvailable         bool    `json:"qa_available"`
++}
++
++// SignedFileStatus reads one source version only after authenticating the
++// connection and its current pairing. A historical published row is never
++// enough to report ready for a different source ETag.
++func (r *NextcloudEventInboxRepository) SignedFileStatus(
++	ctx context.Context, request SignedNextcloudFileStatusRequest,
++) ([]byte, string, error) {
++	if request.FileID < 1 || request.SourceETag == "" || len(request.SourceETag) > 256 {
++		return nil, "", ErrNextcloudEventScope
++	}
++	var body []byte
++	var signature string
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if tx.Dialector.Name() == "sqlite" {
++			lock := tx.Exec(`UPDATE nextcloud_event_connections SET status = status
++				WHERE connection_id = ? AND status = 'active'`, request.ConnectionID)
++			if lock.Error != nil {
++				return fmt.Errorf("lock Nextcloud file status connection: %w", lock.Error)
++			}
++			if lock.RowsAffected != 1 {
++				return ErrNextcloudEventUnauthorized
++			}
++		}
++		var connection nextcloudEventConnection
++		if err := tx.Table("nextcloud_event_connections").
++			Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("connection_id = ? AND status = 'active'", request.ConnectionID).
++			Take(&connection).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNextcloudEventUnauthorized
++			}
++			return fmt.Errorf("read Nextcloud file status connection: %w", err)
++		}
++		if err := verifyNextcloudEventSignature(connection, SignedNextcloudEventBatch{
++			KeyID: request.KeyID, Signature: request.Signature,
++			CanonicalRequest: request.CanonicalRequest, Now: request.Now,
++		}); err != nil {
++			return err
++		}
++		if err := checkNextcloudEventDataSource(tx, connection); err != nil {
++			return err
++		}
++		// A valid signature for another operation cannot reuse its nonce here.
++		if err := tx.Table("nextcloud_event_nonces").
++			Where("connection_id = ? AND expires_at < ?", request.ConnectionID, request.Now).
++			Delete(nil).Error; err != nil {
++			return fmt.Errorf("prune Nextcloud file status nonces: %w", err)
++		}
++		nonce := map[string]any{
++			"connection_id": request.ConnectionID,
++			"key_id": request.KeyID,
++			"nonce": request.Nonce,
++			"expires_at": request.Now.Add(601 * time.Second),
++		}
++		insert := tx.Table("nextcloud_event_nonces").Clauses(clause.OnConflict{DoNothing: true}).Create(nonce)
++		if insert.Error != nil {
++			return fmt.Errorf("record Nextcloud file status nonce: %w", insert.Error)
++		}
++		if insert.RowsAffected != 1 {
++			return ErrNextcloudEventUnauthorized
++		}
++
++		status := NextcloudFileStatus{
++			ConnectionID: connection.ConnectionID, NextcloudInstanceID: connection.NextcloudInstanceID,
++			BindingID: connection.BindingID, TenantID: strconv.FormatUint(connection.TenantID, 10),
++			KnowledgeBaseID: connection.KnowledgeBaseID, DataSourceID: connection.DatasourceID,
++			FileID: strconv.FormatInt(request.FileID, 10), SourceETag: request.SourceETag,
++			KnowledgeState: "unverified", QAAvailable: false,
++		}
++		if err := readNextcloudFileVersionStatus(tx, connection, request, &status); err != nil {
++			return err
++		}
++		var err error
++		body, err = json.Marshal(status)
++		if err != nil {
++			return err
++		}
++		secret, err := nextcloudEventResponseSecret(connection, request.KeyID, request.Now)
++		if err != nil {
++			return err
++		}
++		canonical := nextcloudFileStatusResponseCanonical(request, body)
++		mac := hmac.New(sha256.New, secret)
++		_, _ = mac.Write(canonical)
++		signature = hex.EncodeToString(mac.Sum(nil))
++		return nil
++	})
++	return body, signature, err
++}
++
++func readNextcloudFileVersionStatus(tx *gorm.DB, connection nextcloudEventConnection,
++	request SignedNextcloudFileStatusRequest, status *NextcloudFileStatus) error {
++	externalID := "nextcloud:" + connection.NextcloudInstanceID + ":" + status.FileID
++	var version nextcloudSourceVersion
++	err := nextcloudVersionQuery(tx, connection.TenantID, connection.KnowledgeBaseID,
++		connection.DatasourceID, externalID).
++		Clauses(clause.Locking{Strength: "SHARE"}).Take(&version).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil
++	}
++	if err != nil {
++		return fmt.Errorf("read Nextcloud source version: %w", err)
++	}
++	if version.State == "tombstone" || version.DesiredETag == "" || version.CandidateKnowledgeID == "" {
++		return nil
++	}
++	var candidate types.Knowledge
++	err = tx.Clauses(clause.Locking{Strength: "SHARE"}).
++		Where("tenant_id = ? AND knowledge_base_id = ? AND id = ? AND channel = ?",
++			connection.TenantID, connection.KnowledgeBaseID, version.CandidateKnowledgeID,
++			types.ConnectorTypeNextcloud).Take(&candidate).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil
++	}
++	if err != nil {
++		return fmt.Errorf("read Nextcloud candidate: %w", err)
++	}
++	metadata, err := nextcloudMetadata(&candidate)
++	if err != nil || nextcloudMetadataString(metadata, "datasource_id") != connection.DatasourceID ||
++		nextcloudMetadataString(metadata, "external_id") != externalID ||
++		nextcloudMetadataString(metadata, "nextcloud_instance_id") != connection.NextcloudInstanceID ||
++		nextcloudMetadataString(metadata, "nextcloud_binding_id") != connection.BindingID ||
++		nextcloudMetadataString(metadata, "nextcloud_file_id") != status.FileID ||
++		nextcloudMetadataString(metadata, "nextcloud_target_etag") != version.DesiredETag {
++		return nil
++	}
++	if version.State == "published" && candidate.ParseStatus == types.ParseStatusCompleted &&
++		candidate.EnableStatus == "enabled" &&
++		nextcloudMetadataString(metadata, "nextcloud_etag") == version.DesiredETag {
++		published := version.DesiredETag
++		status.PublishedSourceETag = &published
++		if published == request.SourceETag {
++			status.KnowledgeState = "ready"
++			readyAt := version.UpdatedAt.Unix()
++			if readyAt > 0 {
++				status.KnowledgeReadyAt = &readyAt
++			}
++		} else {
++			status.KnowledgeState = "updating"
++		}
++		return nil
++	}
++	if version.State == "staging" {
++		if version.DesiredETag != request.SourceETag {
++			status.KnowledgeState = "updating"
++		} else if candidate.ParseStatus == types.ParseStatusFailed {
++			status.KnowledgeState = "failed"
++		} else {
++			status.KnowledgeState = "updating"
++		}
++	}
++	return nil
++}
++
++func nextcloudEventResponseSecret(connection nextcloudEventConnection, keyID string, now time.Time) ([]byte, error) {
++	var ciphertext string
++	switch {
++	case keyID == connection.CurrentKeyID:
++		ciphertext = connection.CurrentSecretCiphertext
++	case connection.PreviousKeyID != nil && keyID == *connection.PreviousKeyID &&
++		connection.PreviousValidUntil != nil && now.Before(*connection.PreviousValidUntil) &&
++		connection.PreviousSecretCiphertext != nil:
++		ciphertext = *connection.PreviousSecretCiphertext
++	default:
++		return nil, ErrNextcloudEventUnauthorized
++	}
++	if !isEncryptedNextcloudSecret(ciphertext) {
++		return nil, ErrNextcloudEventUnauthorized
++	}
++	secret, err := utils.DecryptStoredSecret(ciphertext)
++	if err != nil {
++		return nil, fmt.Errorf("decrypt Nextcloud status key: %w", err)
++	}
++	if len(secret) < 32 || len(secret) > 128 {
++		return nil, ErrNextcloudEventUnauthorized
++	}
++	return []byte(secret), nil
++}
++
++func isEncryptedNextcloudSecret(ciphertext string) bool {
++	return len(ciphertext) > len(utils.EncPrefix) && ciphertext[:len(utils.EncPrefix)] == utils.EncPrefix
++}
++
++func nextcloudFileStatusResponseCanonical(request SignedNextcloudFileStatusRequest, body []byte) []byte {
++	bodyHash := sha256.Sum256(body)
++	return []byte("weknora-file-status-hmac-sha256-v1\n" + request.RequestSignature + "\n" +
++		hex.EncodeToString(bodyHash[:]) + "\n" + request.ConnectionID + "\n" +
++		request.KeyID + "\n" + request.Nonce)
 +}
 diff --git a/internal/application/repository/nextcloud_gc.go b/internal/application/repository/nextcloud_gc.go
 new file mode 100644
@@ -6408,10 +6742,10 @@ index 00000000..092c0ab5
 +}
 diff --git a/internal/application/repository/nextcloud_versions.go b/internal/application/repository/nextcloud_versions.go
 new file mode 100644
-index 00000000..a6fd790f
+index 00000000..2e595b56
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions.go
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,595 @@
 +package repository
 +
 +import (
@@ -6419,6 +6753,7 @@ index 00000000..a6fd790f
 +	"encoding/json"
 +	"errors"
 +	"fmt"
++	"strconv"
 +	"strings"
 +	"time"
 +
@@ -6441,6 +6776,169 @@ index 00000000..a6fd790f
 +}
 +
 +func (nextcloudSourceVersion) TableName() string { return "nextcloud_source_versions" }
++
++type nextcloudPublicationCheck func(context.Context, *types.DataSourceConfig,
++	string, string, int64, string, string) error
++
++type nextcloudPublicationCandidate struct {
++	version   nextcloudSourceVersion
++	config    *types.DataSourceConfig
++	configSHA string
++	instance  string
++	binding   string
++	fileID    int64
++	etag      string
++	path      string
++}
++
++func (r *knowledgeRepository) publicationCandidate(
++	tx *gorm.DB, candidateID string, lock bool,
++) (nextcloudPublicationCandidate, bool, error) {
++	var result nextcloudPublicationCandidate
++	versionQuery := tx.Where("candidate_knowledge_id = ? AND state IN ?", candidateID,
++		[]string{"staging", "published"})
++	if lock {
++		versionQuery = versionQuery.Clauses(clause.Locking{Strength: "UPDATE"})
++	}
++	err := versionQuery.Take(&result.version).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return result, false, nil
++	}
++	if err != nil {
++		return result, false, err
++	}
++	var candidate types.Knowledge
++	candidateQuery := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND id = ? AND channel = ?",
++		result.version.TenantID, result.version.KnowledgeBaseID, candidateID,
++		types.ConnectorTypeNextcloud)
++	if lock {
++		candidateQuery = candidateQuery.Clauses(clause.Locking{Strength: "UPDATE"})
++	}
++	err = candidateQuery.Take(&candidate).Error
++	if err != nil {
++		return result, false, err
++	}
++	if candidate.ParseStatus != types.ParseStatusCompleted || candidate.EnableStatus != "enabled" {
++		return result, false, nil
++	}
++	metadata, err := nextcloudMetadata(&candidate)
++	if err != nil {
++		return result, false, err
++	}
++	result.instance = nextcloudMetadataString(metadata, "nextcloud_instance_id")
++	result.binding = nextcloudMetadataString(metadata, "nextcloud_binding_id")
++	fileIDRaw := nextcloudMetadataString(metadata, "nextcloud_file_id")
++	result.etag = nextcloudMetadataString(metadata, "nextcloud_target_etag")
++	result.path = nextcloudMetadataString(metadata, "nextcloud_path")
++	result.fileID, err = strconv.ParseInt(fileIDRaw, 10, 64)
++	if err != nil || result.fileID < 1 || strconv.FormatInt(result.fileID, 10) != fileIDRaw ||
++		result.instance == "" || result.binding == "" || result.path == "" ||
++		result.etag != result.version.DesiredETag ||
++		nextcloudMetadataString(metadata, "datasource_id") != result.version.DataSourceID ||
++		nextcloudMetadataString(metadata, "external_id") != result.version.ExternalID ||
++		nextcloudMetadataString(metadata, "source_resource_id") != result.binding ||
++		result.version.ExternalID != "nextcloud:"+result.instance+":"+fileIDRaw {
++		return result, false, errors.New("Nextcloud candidate source identity mismatch")
++	}
++	currentETag := nextcloudMetadataString(metadata, "nextcloud_etag")
++	if currentETag != "" &&
++		(result.version.State != "published" || currentETag != result.version.DesiredETag) {
++		return result, false, errors.New("Nextcloud candidate publication identity mismatch")
++	}
++	var ds types.DataSource
++	sourceQuery := tx.Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND deleted_at IS NULL",
++		result.version.DataSourceID, result.version.TenantID, result.version.KnowledgeBaseID).
++		Where("type = ? AND status = ?", types.ConnectorTypeNextcloud, types.DataSourceStatusActive)
++	if lock {
++		sourceQuery = sourceQuery.Clauses(clause.Locking{Strength: "UPDATE"})
++	}
++	if err := sourceQuery.Take(&ds).Error; err != nil {
++		return result, false, fmt.Errorf("load paired Nextcloud source: %w", err)
++	}
++	baseURL, configSHA, bindingID, err := NextcloudEventDataSourceIdentity(ds.Config)
++	if err != nil || bindingID != result.binding {
++		return result, false, errors.New("Nextcloud source configuration changed")
++	}
++	pairQuery := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND state = ?",
++		ds.TenantID, ds.KnowledgeBaseID, ds.ID, "active")
++	if lock {
++		pairQuery = pairQuery.Clauses(clause.Locking{Strength: "UPDATE"})
++	}
++	var pairs []NextcloudSourcePairing
++	if err := pairQuery.Limit(2).Find(&pairs).Error; err != nil || len(pairs) != 1 {
++		return result, false, errors.New("Nextcloud source pairing is unavailable")
++	}
++	pair := pairs[0]
++	if pair.InstanceID != result.instance || pair.BindingID != result.binding ||
++		pair.BaseURL != baseURL || pair.ConfigSHA != configSHA {
++		return result, false, errors.New("Nextcloud source pairing is unavailable")
++	}
++	result.config, err = ds.ParseConfig()
++	if err != nil || result.config == nil {
++		return result, false, errors.New("Nextcloud source credential is unavailable")
++	}
++	result.config.Type = ds.Type
++	result.configSHA = configSHA
++	return result, true, nil
++}
++
++func samePublicationCandidate(a, b nextcloudPublicationCandidate) bool {
++	return a.version.TenantID == b.version.TenantID &&
++		a.version.KnowledgeBaseID == b.version.KnowledgeBaseID &&
++		a.version.DataSourceID == b.version.DataSourceID &&
++		a.version.ExternalID == b.version.ExternalID &&
++		a.version.CandidateKnowledgeID == b.version.CandidateKnowledgeID &&
++		a.version.DesiredETag == b.version.DesiredETag &&
++		a.instance == b.instance && a.binding == b.binding && a.fileID == b.fileID &&
++		a.etag == b.etag && a.path == b.path && a.configSHA == b.configSHA
++}
++
++// A failed source recheck after a successful local commit must close that
++// exact publication without hiding a newer candidate staged concurrently.
++func (r *knowledgeRepository) unpublishIfCurrent(ctx context.Context, checked nextcloudPublicationCandidate) error {
++	// A parser task may cancel its context when the second source probe fails.
++	// Use a bounded cleanup context so cancellation cannot preserve a marker
++	// that the failed probe has just called into question.
++	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
++	defer cancel()
++	return r.db.WithContext(cleanupCtx).Transaction(func(tx *gorm.DB) error {
++		var current nextcloudSourceVersion
++		err := nextcloudVersionQuery(tx, checked.version.TenantID, checked.version.KnowledgeBaseID,
++			checked.version.DataSourceID, checked.version.ExternalID).
++			Clauses(clause.Locking{Strength: "UPDATE"}).Take(&current).Error
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil
++		}
++		if err != nil {
++			return err
++		}
++		if current.State != "published" || current.CandidateKnowledgeID != checked.version.CandidateKnowledgeID ||
++			current.DesiredETag != checked.version.DesiredETag {
++			return nil
++		}
++		var candidate types.Knowledge
++		if err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND id = ?",
++			current.TenantID, current.KnowledgeBaseID, current.CandidateKnowledgeID).
++			Clauses(clause.Locking{Strength: "UPDATE"}).Take(&candidate).Error; err != nil {
++			return err
++		}
++		metadata, err := nextcloudMetadata(&candidate)
++		if err != nil {
++			return err
++		}
++		if (checked.path != "" && nextcloudMetadataString(metadata, "nextcloud_path") != checked.path) ||
++			(checked.etag != "" && nextcloudMetadataString(metadata, "nextcloud_target_etag") != checked.etag) {
++			return nil
++		}
++		if err := r.hideNextcloudSourceRows(tx, current.TenantID, current.KnowledgeBaseID,
++			current.DataSourceID, current.ExternalID); err != nil {
++			return err
++		}
++		return nextcloudVersionQuery(tx, current.TenantID, current.KnowledgeBaseID,
++			current.DataSourceID, current.ExternalID).
++			Update("state", "staging").Error
++	})
++}
 +
 +func nextcloudMetadata(k *types.Knowledge) (map[string]any, error) {
 +	var metadata map[string]any
@@ -6620,7 +7118,23 @@ index 00000000..a6fd790f
 +			return err
 +		}
 +		if sourceMetadata == nil {
-+			return nil
++			// The direct staging entry point still records the exact desired
++			// version on the candidate. The parser may finish asynchronously.
++			if err := tx.Where("tenant_id = ? AND id = ?", tenantID, candidateID).
++				Take(&candidate).Error; err != nil {
++				return err
++			}
++			metadata, err = nextcloudMetadata(&candidate)
++			if err != nil {
++				return err
++			}
++			metadata["nextcloud_target_etag"] = etag
++			encoded, err := json.Marshal(metadata)
++			if err != nil {
++				return err
++			}
++			return tx.Model(&types.Knowledge{}).Where("tenant_id = ? AND id = ?", tenantID, candidateID).
++				Update("metadata", types.JSON(encoded)).Error
 +		}
 +		// The hide operation has already rewritten the candidate's ETag. Reload
 +		// before merging so parser-owned metadata is not lost.
@@ -6655,61 +7169,97 @@ index 00000000..a6fd790f
 +}
 +
 +// PublishNextcloudVersion publishes only the currently desired candidate after
-+// processing has completed. Older workers cannot publish over a newer stage.
++// processing has completed and the exact source version is rechecked. Network
++// calls are outside the SQL transaction; the transaction compares the source
++// identity again before making the candidate visible. A second source check
++// catches changes during that local commit and closes this exact publication.
 +func (r *knowledgeRepository) PublishNextcloudVersion(ctx context.Context, candidateID string) (bool, error) {
 +	if candidateID == "" {
 +		return false, nil
 +	}
++	if r.nextcloudPublicationCheck == nil {
++		return false, errors.New("Nextcloud publication verifier unavailable")
++	}
++	checked, ready, err := r.publicationCandidate(r.db.WithContext(ctx), candidateID, false)
++	if err != nil {
++		if checked.version.CandidateKnowledgeID == candidateID {
++			if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
++				return false, fmt.Errorf("load publication candidate: %v; hide failed: %w", err, hideErr)
++			}
++		}
++		return false, err
++	}
++	if !ready {
++		return false, nil
++	}
++	verify := func() error {
++		return r.nextcloudPublicationCheck(ctx, checked.config, checked.instance,
++			checked.binding, checked.fileID, checked.etag, checked.path)
++	}
++	if err := verify(); err != nil {
++		if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
++			return false, fmt.Errorf("source publication check failed: %v; hide failed: %w", err, hideErr)
++		}
++		return false, fmt.Errorf("source publication check failed: %w", err)
++	}
 +	published := false
-+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-+		var version nextcloudSourceVersion
-+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-+			Where("candidate_knowledge_id = ? AND state IN ?", candidateID, []string{"staging", "published"}).
-+			Take(&version).Error
-+		if errors.Is(err, gorm.ErrRecordNotFound) {
-+			return nil
-+		}
++	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		current, ready, err := r.publicationCandidate(tx, candidateID, true)
 +		if err != nil {
 +			return err
 +		}
-+		var candidate types.Knowledge
-+		if err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND id = ? AND channel = ?",
-+			version.TenantID, version.KnowledgeBaseID, candidateID, types.ConnectorTypeNextcloud).
-+			Take(&candidate).Error; err != nil {
-+			return err
-+		}
-+		if candidate.ParseStatus != types.ParseStatusCompleted || candidate.EnableStatus != "enabled" {
++		if !ready || !samePublicationCandidate(checked, current) {
 +			return nil
 +		}
-+		metadata, err := nextcloudMetadata(&candidate)
-+		if err != nil {
-+			return err
-+		}
-+		if nextcloudMetadataString(metadata, "datasource_id") != version.DataSourceID ||
-+			nextcloudMetadataString(metadata, "external_id") != version.ExternalID {
-+			return errors.New("Nextcloud candidate source identity mismatch")
-+		}
-+		if err := r.hideNextcloudSourceRows(tx, version.TenantID, version.KnowledgeBaseID,
-+			version.DataSourceID, version.ExternalID); err != nil {
++		if err := r.hideNextcloudSourceRows(tx, current.version.TenantID, current.version.KnowledgeBaseID,
++			current.version.DataSourceID, current.version.ExternalID); err != nil {
 +			return err
 +		}
 +		// hideNextcloudSourceRows changed this row too. Reload to preserve other
 +		// metadata fields written by parsing since the original read.
++		var candidate types.Knowledge
 +		if err := tx.Where("id = ?", candidateID).Take(&candidate).Error; err != nil {
 +			return err
 +		}
-+		if err := writeNextcloudETag(tx, &candidate, version.DesiredETag); err != nil {
++		if err := writeNextcloudETag(tx, &candidate, current.version.DesiredETag); err != nil {
 +			return err
 +		}
-+		if err := nextcloudVersionQuery(tx, version.TenantID, version.KnowledgeBaseID,
-+			version.DataSourceID, version.ExternalID).
++		if err := nextcloudVersionQuery(tx, current.version.TenantID, current.version.KnowledgeBaseID,
++			current.version.DataSourceID, current.version.ExternalID).
 +			Updates(map[string]any{"state": "published", "updated_at": time.Now().UTC()}).Error; err != nil {
 +			return err
 +		}
 +		published = true
 +		return nil
 +	})
-+	return published, err
++	if err != nil || !published {
++		if err != nil {
++			if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
++				return false, fmt.Errorf("publish candidate: %v; hide failed: %w", err, hideErr)
++			}
++		}
++		return published, err
++	}
++	if err := verify(); err != nil {
++		if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
++			return false, fmt.Errorf("source publication changed after commit: %v; hide failed: %w", err, hideErr)
++		}
++		return false, fmt.Errorf("source publication changed after commit: %w", err)
++	}
++	final, ready, err := r.publicationCandidate(r.db.WithContext(ctx), candidateID, false)
++	if err != nil {
++		if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
++			return false, fmt.Errorf("final publication check failed: %v; hide failed: %w", err, hideErr)
++		}
++		return false, err
++	}
++	if !ready || final.version.State != "published" || !samePublicationCandidate(checked, final) {
++		if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
++			return false, fmt.Errorf("final publication identity changed; hide failed: %w", hideErr)
++		}
++		return false, nil
++	}
++	return true, nil
 +}
 +
 +// TombstoneNextcloudVersion hides and soft-deletes all retained versions before
@@ -6793,15 +7343,16 @@ index 00000000..a6fd790f
 +}
 diff --git a/internal/application/repository/nextcloud_versions_test.go b/internal/application/repository/nextcloud_versions_test.go
 new file mode 100644
-index 00000000..20a3b5d3
+index 00000000..f094a21a
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions_test.go
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,322 @@
 +package repository
 +
 +import (
 +	"context"
 +	"encoding/json"
++	"errors"
 +	"os"
 +	"strings"
 +	"testing"
@@ -6815,14 +7366,34 @@ index 00000000..20a3b5d3
 +
 +func newNextcloudVersionTestRepo(t *testing.T) (*knowledgeRepository, *gorm.DB) {
 +	t.Helper()
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
 +	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
 +	require.NoError(t, err)
 +	sqlDB, err := db.DB()
 +	require.NoError(t, err)
 +	sqlDB.SetMaxOpenConns(1)
 +	t.Cleanup(func() { _ = sqlDB.Close() })
-+	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &nextcloudSourceVersion{}))
-+	return &knowledgeRepository{db: db}, db
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &nextcloudSourceVersion{},
++		&types.DataSource{}, &NextcloudSourcePairing{}))
++	config, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		ResourceIDs: []string{"binding"},
++		Settings: map[string]interface{}{"base_url": "https://nextcloud.example"},
++		Credentials: map[string]interface{}{"token": "test-machine-token", "key_id": "pair_test"},
++	}).ToJSON()
++	require.NoError(t, err)
++	ds := &types.DataSource{ID: "ds", TenantID: 7, KnowledgeBaseID: "kb",
++		Type: types.ConnectorTypeNextcloud, Status: types.DataSourceStatusActive, Config: config}
++	require.NoError(t, db.Create(ds).Error)
++	baseURL, configSHA, bindingID, err := NextcloudEventDataSourceIdentity(ds.Config)
++	require.NoError(t, err)
++	require.NoError(t, db.Create(&NextcloudSourcePairing{
++		OperationID: uuid.NewString(), TenantID: 7, KnowledgeBaseID: "kb", DataSourceID: "ds",
++		InstanceID: "instance", BindingID: bindingID, BaseURL: baseURL,
++		ConfigSHA: configSHA, State: "active",
++	}).Error)
++	return &knowledgeRepository{db: db,
++		nextcloudPublicationCheck: func(context.Context, *types.DataSourceConfig,
++			string, string, int64, string, string) error { return nil }}, db
 +}
 +
 +func insertNextcloudVersionTestKnowledge(t *testing.T, db *gorm.DB, id, etag, status, enabled string) *types.Knowledge {
@@ -6831,6 +7402,7 @@ index 00000000..20a3b5d3
 +		"datasource_id": "ds", "external_id": "nextcloud:instance:77",
 +		"nextcloud_instance_id": "instance", "nextcloud_binding_id": "binding",
 +		"nextcloud_file_id": "77", "nextcloud_etag": etag,
++		"source_resource_id": "binding", "nextcloud_path": "file.md",
 +	})
 +	require.NoError(t, err)
 +	k := &types.Knowledge{
@@ -6867,6 +7439,111 @@ index 00000000..20a3b5d3
 +	require.True(t, published)
 +	require.Equal(t, "new-etag", reloadedNextcloudETag(t, db, newer.ID))
 +	require.Empty(t, reloadedNextcloudETag(t, db, old.ID))
++}
++
++func TestNextcloudPublicationRechecksSourceBeforeAndAfterCommit(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	repo, db := newNextcloudVersionTestRepo(t)
++	candidate := insertNextcloudVersionTestKnowledge(t, db, "candidate", "", types.ParseStatusCompleted, "enabled")
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds",
++		"nextcloud:instance:77", "etag-1", candidate.ID))
++	checks := 0
++	repo.nextcloudPublicationCheck = func(_ context.Context, source *types.DataSourceConfig,
++		instance, binding string, fileID int64, etag, path string) error {
++		checks++
++		require.Equal(t, []string{"binding"}, source.ResourceIDs)
++		require.Equal(t, "instance", instance)
++		require.Equal(t, "binding", binding)
++		require.Equal(t, int64(77), fileID)
++		require.Equal(t, "etag-1", etag)
++		require.Equal(t, "file.md", path)
++		if checks == 2 {
++			cancel() // Cleanup must still hide the marker after task cancellation.
++			return errors.New("source was withdrawn during publication")
++		}
++		return nil
++	}
++	published, err := repo.PublishNextcloudVersion(ctx, candidate.ID)
++	require.Error(t, err)
++	require.False(t, published)
++	require.Equal(t, 2, checks)
++	require.Empty(t, reloadedNextcloudETag(t, db, candidate.ID))
++	var version nextcloudSourceVersion
++	require.NoError(t, db.First(&version).Error)
++	require.Equal(t, "staging", version.State)
++}
++
++func TestNextcloudPublicationFailsClosedBeforeCommit(t *testing.T) {
++	ctx := context.Background()
++	repo, db := newNextcloudVersionTestRepo(t)
++	candidate := insertNextcloudVersionTestKnowledge(t, db, "candidate", "", types.ParseStatusCompleted, "enabled")
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds",
++		"nextcloud:instance:77", "etag-1", candidate.ID))
++	repo.nextcloudPublicationCheck = func(context.Context, *types.DataSourceConfig,
++		string, string, int64, string, string) error { return errors.New("source unavailable") }
++	published, err := repo.PublishNextcloudVersion(ctx, candidate.ID)
++	require.Error(t, err)
++	require.False(t, published)
++	require.Empty(t, reloadedNextcloudETag(t, db, candidate.ID))
++}
++
++func TestNextcloudPublicationClosesAfterConcurrentPairRetirement(t *testing.T) {
++	ctx := context.Background()
++	repo, db := newNextcloudVersionTestRepo(t)
++	candidate := insertNextcloudVersionTestKnowledge(t, db, "candidate", "", types.ParseStatusCompleted, "enabled")
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds",
++		"nextcloud:instance:77", "etag-1", candidate.ID))
++	checks := 0
++	repo.nextcloudPublicationCheck = func(context.Context, *types.DataSourceConfig,
++		string, string, int64, string, string) error {
++		checks++
++		if checks == 2 {
++			require.NoError(t, db.Model(&NextcloudSourcePairing{}).
++				Where("datasource_id = ?", "ds").Update("state", "retired").Error)
++		}
++		return nil
++	}
++	published, err := repo.PublishNextcloudVersion(ctx, candidate.ID)
++	require.Error(t, err)
++	require.False(t, published)
++	require.Equal(t, 2, checks)
++	require.Empty(t, reloadedNextcloudETag(t, db, candidate.ID))
++}
++
++func TestNextcloudPublicationRejectsConcurrentStageAndPairClosure(t *testing.T) {
++	for _, concurrentChange := range []string{"new candidate", "pair closed"} {
++		t.Run(concurrentChange, func(t *testing.T) {
++			ctx := context.Background()
++			repo, db := newNextcloudVersionTestRepo(t)
++			old := insertNextcloudVersionTestKnowledge(t, db, "old", "", types.ParseStatusCompleted, "enabled")
++			require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds",
++				"nextcloud:instance:77", "old-etag", old.ID))
++			checks := 0
++			repo.nextcloudPublicationCheck = func(context.Context, *types.DataSourceConfig,
++				string, string, int64, string, string) error {
++				checks++
++				if concurrentChange == "new candidate" {
++					newer := insertNextcloudVersionTestKnowledge(t, db, "new", "", types.ParseStatusPending, "disabled")
++					require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds",
++						"nextcloud:instance:77", "new-etag", newer.ID))
++				} else {
++					require.NoError(t, db.Model(&NextcloudSourcePairing{}).
++						Where("datasource_id = ?", "ds").Update("state", "retired").Error)
++				}
++				return nil
++			}
++			published, err := repo.PublishNextcloudVersion(ctx, old.ID)
++			if concurrentChange == "pair closed" {
++				require.Error(t, err)
++			} else {
++				require.NoError(t, err)
++			}
++			require.False(t, published)
++			require.Equal(t, 1, checks)
++			require.Empty(t, reloadedNextcloudETag(t, db, old.ID))
++		})
++	}
 +}
 +
 +func TestNextcloudFailedParseLeavesOldBytesRetainedAndBothVersionsHidden(t *testing.T) {
@@ -14270,6 +14947,172 @@ index 00000000..0eacd94f
 +		}
 +	}
 +}
+diff --git a/internal/datasource/connector/nextcloud/publication_check.go b/internal/datasource/connector/nextcloud/publication_check.go
+new file mode 100644
+index 00000000..029ab914
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/publication_check.go
+@@ -0,0 +1,63 @@
++package nextcloud
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// CheckCurrentPublication asks the paired Nextcloud binding whether the exact
++// candidate version is still eligible. It uses only the configured instance
++// origin and a fixed API path. The expected identity is in the signed body,
++// so a successful response attests to the instance, binding, file, ETag and
++// path together. Every non-204 response or transport failure denies publish.
++func CheckCurrentPublication(ctx context.Context, source *types.DataSourceConfig,
++	instanceID, bindingID string, fileID int64, etag, path string) error {
++	if source == nil || source.Type != types.ConnectorTypeNextcloud ||
++		len(source.ResourceIDs) != 1 || source.ResourceIDs[0] != bindingID ||
++		instanceID == "" || len(instanceID) > 256 || !validBindingID(bindingID) ||
++		len(bindingID) > 128 || fileID < 1 || strings.TrimSpace(etag) == "" ||
++		len(etag) > 1024 || path == "" || len(path) > 4096 || strings.HasPrefix(path, "/") {
++		return fmt.Errorf("invalid Nextcloud publication identity")
++	}
++	cfg, err := parseConfig(source)
++	if err != nil {
++		return err
++	}
++	body, err := json.Marshal(struct {
++		InstanceID string `json:"instance_id"`
++		ETag       string `json:"etag"`
++		Path       string `json:"path"`
++	}{instanceID, etag, path})
++	if err != nil {
++		return err
++	}
++	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
++	defer cancel()
++	cli := &client{cfg: cfg, http: authorizationHTTPClient}
++	endpoint := "/bindings/" + bindingID + "/files/" + strconv.FormatInt(fileID, 10) + "/publication-check"
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cli.endpointURL(endpoint, nil), bytes.NewReader(body))
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Content-Type", "application/json")
++	if err := signMachineRequest(req, cfg, body); err != nil {
++		return err
++	}
++	resp, err := cli.http.Do(req)
++	if err != nil {
++		return fmt.Errorf("Nextcloud publication check: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusNoContent {
++		return fmt.Errorf("Nextcloud publication check returned status %d", resp.StatusCode)
++	}
++	return nil
++}
+diff --git a/internal/datasource/connector/nextcloud/publication_check_test.go b/internal/datasource/connector/nextcloud/publication_check_test.go
+new file mode 100644
+index 00000000..8cb8abd8
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/publication_check_test.go
+@@ -0,0 +1,91 @@
++package nextcloud
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func TestCheckCurrentPublicationSignsExactPairedVersion(t *testing.T) {
++	requests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests++
++		if r.Method != http.MethodPost || r.URL.Path != apiPath+
++			"/bindings/binding-1/files/42/publication-check" || r.URL.RawQuery != "" {
++			t.Errorf("unexpected publication route: %s %s", r.Method, r.URL.String())
++			w.WriteHeader(http.StatusNotFound)
++			return
++		}
++		if r.Header.Get("Authorization") != "Bearer paired-secret" ||
++			r.Header.Get("X-WeKnora-Key-Id") != "default" {
++			t.Error("publication request lacked the paired machine credential")
++		}
++		body, err := io.ReadAll(r.Body)
++		if err != nil {
++			t.Error(err)
++		}
++		canonical, err := machineCanonicalRequest(r.Method, r.URL.EscapedPath(), r.URL.RawQuery,
++			body, r.Header.Get("X-WeKnora-Timestamp"), r.Header.Get("X-WeKnora-Nonce"), "default")
++		if err != nil {
++			t.Error(err)
++		}
++		key := sha256.Sum256([]byte("paired-secret"))
++		mac := hmac.New(sha256.New, key[:])
++		_, _ = mac.Write([]byte(canonical))
++		signature, err := hex.DecodeString(r.Header.Get("X-WeKnora-Signature"))
++		if err != nil || !hmac.Equal(signature, mac.Sum(nil)) {
++			t.Error("publication body was not signed")
++		}
++		var payload struct {
++			InstanceID string `json:"instance_id"`
++			ETag       string `json:"etag"`
++			Path       string `json:"path"`
++		}
++		if err := json.Unmarshal(body, &payload); err != nil {
++			t.Error(err)
++		}
++		if payload.InstanceID != "instance-1" || payload.ETag != "etag-42" ||
++			payload.Path != "folder/document.md" {
++			t.Errorf("unexpected publication identity: %+v", payload)
++		}
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	defer server.Close()
++	config := authorizationConfig(t, server.URL)
++	config.ResourceIDs = []string{"binding-1"}
++	if err := CheckCurrentPublication(context.Background(), config, "instance-1", "binding-1",
++		42, "etag-42", "folder/document.md"); err != nil {
++		t.Fatal(err)
++	}
++	if requests != 1 {
++		t.Fatalf("expected one exact source request, got %d", requests)
++	}
++	if err := CheckCurrentPublication(context.Background(), config, "instance-1", "another",
++		42, "etag-42", "folder/document.md"); err == nil || requests != 1 {
++		t.Fatal("cross-binding publication check was allowed")
++	}
++}
++
++func TestCheckCurrentPublicationFailsClosed(t *testing.T) {
++	for _, status := range []int{http.StatusOK, http.StatusConflict, http.StatusNotFound,
++		http.StatusLocked, http.StatusServiceUnavailable, http.StatusFound} {
++		t.Run(http.StatusText(status), func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				w.WriteHeader(status)
++			}))
++			defer server.Close()
++			config := authorizationConfig(t, server.URL)
++			config.ResourceIDs = []string{"binding-1"}
++			if err := CheckCurrentPublication(context.Background(), config, "instance-1",
++				"binding-1", 42, "etag-42", "file.md"); err == nil {
++				t.Fatalf("source status %d permitted publication", status)
++			}
++		})
++	}
++}
 diff --git a/internal/datasource/connector/nextcloud/signature.go b/internal/datasource/connector/nextcloud/signature.go
 new file mode 100644
 index 00000000..d132181c
@@ -18313,6 +19156,259 @@ index 00000000..d76a46d4
 +	require.Equal(t, int64(1), count)
 +	require.Equal(t, int64(101), received)
 +}
+diff --git a/internal/handler/nextcloud_file_status.go b/internal/handler/nextcloud_file_status.go
+new file mode 100644
+index 00000000..68491819
+--- /dev/null
++++ b/internal/handler/nextcloud_file_status.go
+@@ -0,0 +1,108 @@
++package handler
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"io"
++	"net/http"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/gin-gonic/gin"
++)
++
++const nextcloudFileStatusPath = "/api/v1/integrations/nextcloud/files/status"
++
++// FileStatus is machine-only. It reports a persisted publication version,
++// never an event receipt, sync cursor, or browser user's retrieval grant.
++func (h *NextcloudEventHandler) FileStatus(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	connectionID := c.Query("connection_id")
++	fileID := c.Query("file_id")
++	sourceETag := c.Query("source_etag")
++	query := "connection_id=" + connectionID + "&file_id=" + fileID + "&source_etag=" + sourceETag
++	parsedFileID, parseErr := strconv.ParseInt(fileID, 10, 64)
++	if c.Request.Method != http.MethodGet || c.Request.URL.EscapedPath() != nextcloudFileStatusPath ||
++		c.Request.URL.ForceQuery || c.Request.URL.RawQuery != query ||
++		!validNextcloudOpaqueID(connectionID, 16, 128) ||
++		parseErr != nil || parsedFileID < 1 || strconv.FormatInt(parsedFileID, 10) != fileID ||
++		!validNextcloudFileETag(sourceETag) {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request_target"})
++		return
++	}
++	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1))
++	if err != nil || len(body) != 0 {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request_body"})
++		return
++	}
++	headerConnection, okConnection := oneNextcloudHeader(c.Request, "X-Nextcloud-Connection-Id")
++	keyID, okKey := oneNextcloudHeader(c.Request, "X-Nextcloud-Key-Id")
++	timestamp, okTimestamp := oneNextcloudHeader(c.Request, "X-Nextcloud-Timestamp")
++	nonce, okNonce := oneNextcloudHeader(c.Request, "X-Nextcloud-Nonce")
++	signatureHex, okSignature := oneNextcloudHeader(c.Request, "X-Nextcloud-Signature")
++	if !okConnection || headerConnection != connectionID || !okKey || !validNextcloudKeyID(keyID) ||
++		!okTimestamp || !okNonce || !okSignature ||
++		!isLowerHex(nonce, 32) || !isLowerHex(signatureHex, 64) {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		return
++	}
++	timestampValue, ok := parseNextcloudEventID(timestamp, false)
++	now := time.Now().UTC()
++	if !ok || timestampValue < now.Add(-5*time.Minute).Unix() ||
++		timestampValue > now.Add(5*time.Minute).Unix() {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		return
++	}
++	signature, err := hex.DecodeString(signatureHex)
++	if err != nil {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		return
++	}
++	request := repository.SignedNextcloudFileStatusRequest{
++		SignedNextcloudEventStatusRequest: repository.SignedNextcloudEventStatusRequest{
++			ConnectionID: connectionID, KeyID: keyID, Nonce: nonce,
++			Signature: signature, CanonicalRequest: nextcloudFileStatusCanonicalRequest(query,
++				timestamp, nonce, connectionID, keyID), Now: now,
++		},
++		FileID: parsedFileID, SourceETag: sourceETag, RequestSignature: signatureHex,
++	}
++	response, responseSignature, err := h.inbox.SignedFileStatus(c.Request.Context(), request)
++	if err != nil {
++		switch {
++		case errors.Is(err, repository.ErrNextcloudEventUnauthorized):
++			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
++		case errors.Is(err, repository.ErrNextcloudEventScope):
++			c.JSON(http.StatusForbidden, gin.H{"error": "connection_unavailable"})
++		default:
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "file_status_unavailable"})
++		}
++		return
++	}
++	c.Header("X-WeKnora-Status-Signature", responseSignature)
++	c.Data(http.StatusOK, "application/json", response)
++}
++
++func validNextcloudFileETag(etag string) bool {
++	if len(etag) < 1 || len(etag) > 256 {
++		return false
++	}
++	for _, char := range etag {
++		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' ||
++			char >= '0' && char <= '9' || char == '.' || char == '_' || char == ':' || char == '-') {
++			return false
++		}
++	}
++	return true
++}
++
++func nextcloudFileStatusCanonicalRequest(query, timestamp, nonce, connectionID, keyID string) []byte {
++	emptyHash := sha256.Sum256(nil)
++	return []byte(strings.Join([]string{
++		"nextcloud-file-status-hmac-sha256-v1", http.MethodGet,
++		nextcloudFileStatusPath, query, hex.EncodeToString(emptyHash[:]),
++		timestamp, nonce, connectionID, keyID,
++	}, "\n"))
++}
+diff --git a/internal/handler/nextcloud_file_status_test.go b/internal/handler/nextcloud_file_status_test.go
+new file mode 100644
+index 00000000..3986fa2c
+--- /dev/null
++++ b/internal/handler/nextcloud_file_status_test.go
+@@ -0,0 +1,133 @@
++package handler
++
++import (
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func signedNextcloudFileStatusRequest(secret, nonce, fileID, etag string) *http.Request {
++	query := "connection_id=" + testEventConnection + "&file_id=" + fileID + "&source_etag=" + etag
++	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
++	request := httptest.NewRequest(http.MethodGet, nextcloudFileStatusPath+"?"+query, nil)
++	request.Header.Set("X-Nextcloud-Connection-Id", testEventConnection)
++	request.Header.Set("X-Nextcloud-Key-Id", "current")
++	request.Header.Set("X-Nextcloud-Timestamp", timestamp)
++	request.Header.Set("X-Nextcloud-Nonce", nonce)
++	mac := hmac.New(sha256.New, []byte(secret))
++	_, _ = mac.Write(nextcloudFileStatusCanonicalRequest(query, timestamp, nonce, testEventConnection, "current"))
++	request.Header.Set("X-Nextcloud-Signature", hex.EncodeToString(mac.Sum(nil)))
++	return request
++}
++
++func readNextcloudFileStatus(router http.Handler, request *http.Request) *httptest.ResponseRecorder {
++	recorder := httptest.NewRecorder()
++	router.ServeHTTP(recorder, request)
++	return recorder
++}
++
++func installNextcloudFileStatusVersion(t *testing.T, db *gorm.DB, state, parseStatus, enabled, etag string) {
++	t.Helper()
++	metadata, err := json.Marshal(map[string]string{
++		"datasource_id": "ds-synthetic", "external_id": "nextcloud:" + testEventInstance + ":77",
++		"nextcloud_instance_id": testEventInstance, "nextcloud_binding_id": testEventBinding,
++		"nextcloud_file_id": "77", "nextcloud_target_etag": etag,
++		"nextcloud_etag": map[bool]string{true: etag, false: ""}[state == "published"],
++	})
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(`INSERT INTO knowledges
++		(id, tenant_id, knowledge_base_id, channel, parse_status, enable_status, metadata)
++		VALUES (?, 7, 'kb-synthetic', 'nextcloud', ?, ?, ?)`, "candidate-77", parseStatus, enabled, string(metadata)).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_source_versions
++		(tenant_id, knowledge_base_id, datasource_id, external_id, desired_etag,
++		candidate_knowledge_id, state, updated_at)
++		VALUES (7, 'kb-synthetic', 'ds-synthetic', ?, ?, 'candidate-77', ?, ?)`,
++		"nextcloud:"+testEventInstance+":77", etag, state, time.Now().UTC()).Error)
++}
++
++func TestNextcloudSignedFileStatusProvesOnlyCurrentPublishedETag(t *testing.T) {
++	db, router, secret := setupNextcloudDispatchTest(t, false)
++	require.NoError(t, db.Exec(`ALTER TABLE nextcloud_source_versions ADD COLUMN updated_at TIMESTAMP`).Error)
++	router.GET(nextcloudFileStatusPath,
++		NewNextcloudEventHandler(repository.NewNextcloudEventInboxRepository(db)).FileStatus)
++	installNextcloudFileStatusVersion(t, db, "published", "completed", "enabled", "etag-77")
++
++	request := signedNextcloudFileStatusRequest(secret, strings.Repeat("a", 32), "77", "etag-77")
++	response := readNextcloudFileStatus(router, request)
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
++	var status repository.NextcloudFileStatus
++	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &status))
++	require.Equal(t, "ready", status.KnowledgeState)
++	require.Equal(t, "etag-77", *status.PublishedSourceETag)
++	require.NotNil(t, status.KnowledgeReadyAt)
++	require.False(t, status.QAAvailable, "file publication does not grant a user's Q&A access")
++	require.Equal(t, testEventInstance, status.NextcloudInstanceID)
++	require.Equal(t, testEventBinding, status.BindingID)
++	require.Equal(t, "ds-synthetic", status.DataSourceID)
++	require.Equal(t, "7", status.TenantID)
++	requestSignature := request.Header.Get("X-Nextcloud-Signature")
++	canonical := "weknora-file-status-hmac-sha256-v1\n" + requestSignature + "\n" +
++		func() string { sum := sha256.Sum256(response.Body.Bytes()); return hex.EncodeToString(sum[:]) }() +
++		"\n" + testEventConnection + "\ncurrent\n" + strings.Repeat("a", 32)
++	mac := hmac.New(sha256.New, []byte(secret))
++	_, _ = mac.Write([]byte(canonical))
++	require.Equal(t, hex.EncodeToString(mac.Sum(nil)), response.Header().Get("X-WeKnora-Status-Signature"))
++	require.Equal(t, http.StatusUnauthorized, readNextcloudFileStatus(router, request).Code,
++		"a signed response cannot be replayed under the same request nonce")
++
++	newer := readNextcloudFileStatus(router,
++		signedNextcloudFileStatusRequest(secret, strings.Repeat("b", 32), "77", "etag-78"))
++	require.Equal(t, http.StatusOK, newer.Code)
++	require.NoError(t, json.Unmarshal(newer.Body.Bytes(), &status))
++	require.Equal(t, "updating", status.KnowledgeState)
++	require.Nil(t, status.KnowledgeReadyAt)
++	require.Equal(t, "etag-77", *status.PublishedSourceETag)
++
++	tampered := signedNextcloudFileStatusRequest(secret, strings.Repeat("c", 32), "77", "etag-77")
++	tampered.URL.RawQuery = strings.Replace(tampered.URL.RawQuery, "file_id=77", "file_id=78", 1)
++	require.Equal(t, http.StatusUnauthorized, readNextcloudFileStatus(router, tampered).Code)
++	invalidTarget := signedNextcloudFileStatusRequest(secret, strings.Repeat("d", 32), "77", "etag-77")
++	invalidTarget.URL.RawQuery += "&extra=1"
++	require.Equal(t, http.StatusBadRequest, readNextcloudFileStatus(router, invalidTarget).Code)
++
++	require.NoError(t, db.Exec("DELETE FROM nextcloud_source_pairings WHERE datasource_id = ?", "ds-synthetic").Error)
++	require.Equal(t, http.StatusForbidden, readNextcloudFileStatus(router,
++		signedNextcloudFileStatusRequest(secret, strings.Repeat("e", 32), "77", "etag-77")).Code)
++}
++
++func TestNextcloudSignedFileStatusReportsFailedCandidateWithoutReady(t *testing.T) {
++	db, router, secret := setupNextcloudDispatchTest(t, false)
++	require.NoError(t, db.Exec(`ALTER TABLE nextcloud_source_versions ADD COLUMN updated_at TIMESTAMP`).Error)
++	router.GET(nextcloudFileStatusPath,
++		NewNextcloudEventHandler(repository.NewNextcloudEventInboxRepository(db)).FileStatus)
++	installNextcloudFileStatusVersion(t, db, "staging", "failed", "disabled", "etag-77")
++	response := readNextcloudFileStatus(router,
++		signedNextcloudFileStatusRequest(secret, strings.Repeat("f", 32), "77", "etag-77"))
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	var status repository.NextcloudFileStatus
++	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &status))
++	require.Equal(t, "failed", status.KnowledgeState)
++	require.Nil(t, status.PublishedSourceETag)
++	require.Nil(t, status.KnowledgeReadyAt)
++
++	require.NoError(t, db.Exec(`UPDATE knowledges SET metadata = ? WHERE id = 'candidate-77'`,
++		`{"datasource_id":"ds-synthetic","external_id":"nextcloud:instance_synthetic:77","nextcloud_instance_id":"instance_synthetic","nextcloud_binding_id":"wrong","nextcloud_file_id":"77","nextcloud_target_etag":"etag-77"}`).Error)
++	response = readNextcloudFileStatus(router,
++		signedNextcloudFileStatusRequest(secret, strings.Repeat("1", 32), "77", "etag-77"))
++	require.Equal(t, http.StatusOK, response.Code)
++	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &status))
++	require.Equal(t, "unverified", status.KnowledgeState,
++		"a candidate whose provenance no longer matches the pair is not trusted")
++}
 diff --git a/internal/handler/nextcloud_gc.go b/internal/handler/nextcloud_gc.go
 new file mode 100644
 index 00000000..763c64f9
@@ -20795,7 +21891,7 @@ index bd4744b6..878ac2a4 100644
  			backendID, provider := parseStorageTarget(filePath)
  			fileSvc, resolvedProvider, err := resolveFileService(ctx, tenant, backendID, provider, absDir, storageResolver)
 diff --git a/internal/router/router.go b/internal/router/router.go
-index b5c85dfc..2d94acea 100644
+index b5c85dfc..8ca5a05e 100644
 --- a/internal/router/router.go
 +++ b/internal/router/router.go
 @@ -13,6 +13,7 @@ import (
@@ -20958,7 +22054,7 @@ index b5c85dfc..2d94acea 100644
  
  	// Trusted proxies: gin defaults to trusting ALL proxies, which makes
  	// c.ClientIP() honor a client-supplied X-Forwarded-For. Public, unauthed
-@@ -172,6 +180,12 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -172,6 +180,13 @@ func NewRouter(params RouterParams) *gin.Engine {
  
  	// IM 回调路由（在认证中间件之前注册，使用各平台自身的签名验证）
  	RegisterIMRoutes(r, params.IMHandler)
@@ -20967,11 +22063,12 @@ index b5c85dfc..2d94acea 100644
 +	if params.NextcloudEventHandler != nil {
 +		r.POST("/api/v1/integrations/nextcloud/events", params.NextcloudEventHandler.Receive)
 +		r.GET("/api/v1/integrations/nextcloud/events/status", params.NextcloudEventHandler.Status)
++		r.GET("/api/v1/integrations/nextcloud/files/status", params.NextcloudEventHandler.FileStatus)
 +	}
  
  	// Web embed 公开路由（使用 publish token 鉴权，不走全局 Auth）
  	RegisterEmbedPublicRoutes(
-@@ -184,6 +198,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -184,6 +199,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.GroupAccessService,
  		params.ChunkService,
@@ -20979,7 +22076,7 @@ index b5c85dfc..2d94acea 100644
  		params.ResourceCatalog,
  	)
  
-@@ -200,6 +215,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -200,6 +216,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.FileService,
  		params.StorageBackendResolver,
  		params.GroupAccessService,
@@ -20987,7 +22084,7 @@ index b5c85dfc..2d94acea 100644
  	)
  
  	// Sandbox terminal WebSocket (self-authenticated via a short-lived
-@@ -216,7 +232,8 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -216,7 +233,8 @@ func NewRouter(params RouterParams) *gin.Engine {
  	r.Use(middleware.Auth(params.TenantService, params.UserService, params.TenantMemberService, params.TenantAPIKeyService, params.Config, params.GroupAccessService))
  
  	// 文件服务：统一代理本地/MinIO/COS/TOS存储后端（需要认证）
@@ -20997,7 +22094,7 @@ index b5c85dfc..2d94acea 100644
  
  	// Presigned file access: no auth required, signature-verified.
  	servePresignedFiles(
-@@ -225,10 +242,12 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -225,10 +243,12 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.ResourceCatalog,
  		params.GroupAccessService,
@@ -21011,7 +22108,7 @@ index b5c85dfc..2d94acea 100644
  
  	// Langfuse observability — only active when LANGFUSE_* env vars are set.
  	// The middleware is registered unconditionally; when disabled it's a no-op.
-@@ -292,13 +311,14 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -292,13 +312,14 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// KB-scoped image proxy: lets tenants render images embedded in
  		// org-shared / agent-visible KB content, which the tenant-scoped
  		// /files route cannot serve because it enforces same-tenant paths.
@@ -21027,7 +22124,7 @@ index b5c85dfc..2d94acea 100644
  		)
  		// Message-scoped image proxy: shared-agent replies belong to the
  		// caller's session but may reference resources stored in the agent's
-@@ -306,7 +326,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -306,7 +327,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// never from a client-provided workspace ID. Replies produced by the
  		// caller's own agent over an org-shared KB fall back to the KB share
  		// relation instead (#3022).
@@ -21036,7 +22133,7 @@ index b5c85dfc..2d94acea 100644
  			v1,
  			rbacGuards,
  			params.MessageService,
-@@ -319,6 +339,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -319,6 +340,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  			params.KBService,
  			params.KnowledgeService,
  			params.GroupAccessService,
@@ -21044,7 +22141,7 @@ index b5c85dfc..2d94acea 100644
  		)
  		RegisterKnowledgeTagRoutes(v1, params.TagHandler, rbacGuards)
  		RegisterKnowledgeRoutes(v1, params.KnowledgeHandler, rbacGuards)
-@@ -355,6 +376,15 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -355,6 +377,15 @@ func NewRouter(params RouterParams) *gin.Engine {
  		RegisterEmbedChannelRoutes(v1, params.EmbedChannelHandler, rbacGuards)
  		RegisterMCPEndpointRoutes(v1, params.MCPEndpointHandler, rbacGuards)
  		RegisterDataSourceRoutes(v1, params.DataSourceHandler, params.DataSourceCredentialsHandler, rbacGuards)
