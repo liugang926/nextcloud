@@ -28,6 +28,7 @@ style('integration_weknora', 'weknora-admin');
             <p>Oldest retained hint age: <strong id="weknora-diagnostics-oldest"></strong></p>
             <p>Latest change hint: <strong id="weknora-diagnostics-newest"></strong></p>
             <p>Explicit file withdrawals: <strong id="weknora-diagnostics-withdrawals"></strong></p>
+            <p>Verified applied status from an active connection: <strong id="weknora-diagnostics-applied-ack"></strong></p>
         </div>
         <p>Retained hints are historical records, not an undelivered backlog. The event connection below shows the latest durable receipt acknowledged by WeKnora, which does not mean the change was synchronized, parsed, or indexed.</p>
     </div>

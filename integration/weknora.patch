@@ -187,15 +187,16 @@ index 00000000..702d0670
 +applied checkpoint.
 diff --git a/docs/nextcloud-gc.md b/docs/nextcloud-gc.md
 new file mode 100644
-index 00000000..41852a99
+index 00000000..5993ac9f
 --- /dev/null
 +++ b/docs/nextcloud-gc.md
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,79 @@
 +# Nextcloud version GC safety boundary
 +
 +The hourly Nextcloud GC runner writes a durable inventory before attempting
 +cleanup. PostgreSQL migration `000119` and SQLite migration `000038` add
-+`nextcloud_gc_jobs` and `nextcloud_gc_items`. Each job is unique by knowledge
++`nextcloud_gc_jobs` and `nextcloud_gc_items`; forward migrations `000121`
++and `000040` add the durable object-deletion claim. Each job is unique by knowledge
 +ID. It records the retired source identity, why the version retired, the
 +earliest derived cleanup time, the 7-day original-copy expiry, a retry cursor,
 +and machine-readable failure status. Items preserve exact source-file and
@@ -215,15 +216,33 @@ index 00000000..41852a99
 +`confirmed_released_bytes` remains zero until a storage backend confirms
 +deletion. A blocked job must not be interpreted as reclaimed capacity.
 +
-+Automatic execution is deliberately limited. A retired terminal row with no
-+source file, chunks, embedding model or resource bindings can complete its
-+resource inventory with zero released bytes; the metadata row is retained for
-+history policy. A job that has any physical or derived resource remains
-+`blocked` with `safe_object_cleanup_unavailable` and is retried hourly. Invalid
-+image JSON is recorded as `invalid_image_inventory`; a later retry rebuilds
-+the image item list after the data is repaired. A row that becomes the current
-+candidate is blocked as `candidate_is_current`. The publication and access
-+guards continue to deny a retired or tombstoned row independently of GC.
++Automatic physical deletion is limited to registered Nextcloud resources on
++an explicit `storage://<backend>/local://<tenant>/...` local backend. An
++ordinary replaced source file can be released at or after its 7-day original
++deadline; a confirmed tombstone sets that deadline to now. An
++extracted image can be released after the one-hour derived window. A terminal
++failed build waits 24 hours. A resource shared with another bound owner stays
++on disk and credits zero bytes to this job. A sole-owner resource is locked,
++made `deleting`, and then removed by its exact provider path. Every new bind
++locks the same row and refuses `deleting`, so it cannot race the zero-owner
++decision. A persisted item lease prevents concurrent workers from deleting
++the same object. A provider failure leaves the resource `deleting` and the
++item retryable, with zero confirmed bytes. An already absent local file can
++complete a previously claimed `deleting` item after a crash, but credits
++zero bytes because this attempt cannot prove when the unlink happened. Only
++a successful local unlink in the current attempt credits the recorded
++resource size once. Filesystem snapshots or an open file descriptor can
++still retain blocks, so volume usage must be measured separately.
++
++A retired terminal row with no source file, chunks, embedding model or
++resource bindings can complete its resource inventory with zero released
++bytes; the metadata row is retained for history policy. Jobs containing
++derived indexes or cloud/legacy paths remain `blocked` and retry hourly.
++Invalid image JSON is recorded as `invalid_image_inventory`; a later retry
++rebuilds the image item list after the data is repaired. A row that becomes
++the current candidate is blocked as `candidate_is_current`. The publication
++and access guards continue to deny a retired or tombstoned row independently
++of GC.
 +
 +The existing generic `DeleteKnowledgeList` cannot yet execute these jobs:
 +it drops knowledge rows before deleting files, only logs file/image deletion
@@ -233,30 +252,24 @@ index 00000000..41852a99
 +the count and delete. Calling it from GC would risk lost objects and a false
 +"collected" state.
 +
-+The minimum physical deletion protocol is:
++The minimum protocol still needed for derived indexes and cloud storage is:
 +
 +1. Under a transaction, lock the source version, job, knowledge row and each
 +   stored resource. Recheck that the version is retired, the access barrier is
 +   active, no build/read lease exists, the original-copy deadline has passed,
 +   and the persisted object identity still matches the row and backend.
-+2. Serialize every new resource bind through the same resource-row lock.
-+   Remove only the retiring knowledge's binding, count remaining bindings in
-+   the transaction, and set the resource to `deleting` only at zero. Binding
-+   a `deleting` resource must fail, so a retry cannot race a new reference.
-+3. Delete the exact provider object recorded in the item and storage instance.
-+   Persist provider acknowledgement, then mark the resource `deleted`. If the
-+   provider call fails, leave it `deleting` and retry the same item; do not
-+   decrement confirmed bytes or drop its inventory.
-+4. Delete vectors, graph, chunks, wiki references and knowledge metadata in
++2. Add backend-specific acknowledgement for object stores. `DeleteObject`
++   alone may create a delete marker while previous versions still consume
++   capacity. Record logical unlink and confirmed physical capacity separately.
++3. Delete vectors, graph, chunks, wiki references and knowledge metadata in
 +   separate idempotent phases, each with a durable completion marker. Only
 +   mark a job `collected` after all items and phases are complete.
 +
-+The code touch points are `resourceRepository.CreateBinding`, resource state
-+lookups, `resourceCatalog.Bind`, `resourceCatalogFileService.DeleteFile`, the
-+knowledge delete plan, Nextcloud version transitions, and this GC store.
-+The current implementation does not yet reclaim normal Nextcloud source
-+files or derived indexes, enforce the one-old-original cap, purge 90-day
-+history metadata, or run a two-pass orphan scan.
++The remaining code touch points are the vector/graph/chunk delete adapters,
++wiki references, provider-specific storage adapters, the knowledge delete
++plan, and this GC store. The current implementation does not yet reclaim
++cloud-backed source files or derived indexes, enforce the one-old-original
++cap, purge 90-day history metadata, or run a two-pass orphan scan.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
 index 00000000..6e20933d
@@ -3600,10 +3613,10 @@ index 00000000..324cfb32
 +}
 diff --git a/internal/application/repository/nextcloud_gc.go b/internal/application/repository/nextcloud_gc.go
 new file mode 100644
-index 00000000..4ab01708
+index 00000000..aff2e176
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc.go
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,464 @@
 +package repository
 +
 +import (
@@ -3656,6 +3669,8 @@ index 00000000..4ab01708
 +	State                  string
 +	EstimatedBytes         int64
 +	ConfirmedReleasedBytes int64
++	LeaseToken             string
++	LeaseUntil             *time.Time
 +	CreatedAt              time.Time
 +	UpdatedAt              time.Time
 +}
@@ -3682,9 +3697,20 @@ index 00000000..4ab01708
 +	CompletedAt            *time.Time `json:"completed_at,omitempty"`
 +}
 +
-+type NextcloudGCStore struct{ db *gorm.DB }
++type NextcloudGCStore struct {
++	db           *gorm.DB
++	deleteObject func(context.Context, *types.StoredResource) (bool, error)
++}
 +
 +func NewNextcloudGCStore(db *gorm.DB) *NextcloudGCStore { return &NextcloudGCStore{db: db} }
++
++// ConfigureLocalDelete is set before the scheduler starts. The callback must
++// delete only the persisted, scoped local path of the passed resource. It
++// returns true only if this invocation confirmed an unlink. A missing path
++// after a crash can complete the item idempotently, but credits zero bytes.
++func (s *NextcloudGCStore) ConfigureLocalDelete(fn func(context.Context, *types.StoredResource) (bool, error)) {
++	s.deleteObject = fn
++}
 +
 +type nextcloudGCSource struct {
 +	types.Knowledge
@@ -3860,6 +3886,11 @@ index 00000000..4ab01708
 +					"attempts": gorm.Expr("attempts + 1")}).Error
 +			return processed, errors.Join(err, recordErr)
 +		}
++		if s.deleteObject != nil {
++			if err := s.runPhysical(ctx, id, now); err != nil {
++				return processed, err
++			}
++		}
 +		processed++
 +	}
 +	return processed, nil
@@ -3918,9 +3949,22 @@ index 00000000..4ab01708
 +				row.ParseStatus == types.ParseStatusFinalizing || row.PendingSubtasksCount > 0:
 +				code = "build_still_active"
 +			default:
-+				var objects int64
-+				if err := tx.Model(&nextcloudGCItem{}).Where("job_id = ? AND kind <> ?", job.ID, "knowledge").Count(&objects).Error; err != nil {
++				var pendingObjects int64
++				if err := tx.Model(&nextcloudGCItem{}).
++					Where("job_id = ? AND kind <> ? AND state <> ?", job.ID, "knowledge", "collected").
++					Count(&pendingObjects).Error; err != nil {
 +					return err
++				}
++				if row.FilePath != "" {
++					var inventoried int64
++					if err := tx.Model(&nextcloudGCItem{}).
++						Where("job_id = ? AND kind = ? AND object_ref = ? AND state = ?",
++							job.ID, "source_file", row.FilePath, "collected").Count(&inventoried).Error; err != nil {
++						return err
++					}
++					if inventoried != 1 {
++						pendingObjects++
++					}
 +				}
 +				var chunks, bindings int64
 +				if err := tx.Table("chunks").Where("tenant_id = ? AND knowledge_id = ?", job.TenantID, job.KnowledgeID).
@@ -3931,7 +3975,7 @@ index 00000000..4ab01708
 +					job.TenantID, types.ResourceOwnerKnowledge, job.KnowledgeID).Count(&bindings).Error; err != nil {
 +					return err
 +				}
-+				if objects > 0 || chunks > 0 || bindings > 0 || row.FilePath != "" || row.EmbeddingModelID != "" {
++				if pendingObjects > 0 || chunks > 0 || bindings > 0 || row.EmbeddingModelID != "" {
 +					code = "safe_object_cleanup_unavailable"
 +				} else {
 +					// No physical bytes are claimed. The metadata row remains for
@@ -3950,7 +3994,8 @@ index 00000000..4ab01708
 +		if code == "" {
 +			return errors.New("Nextcloud GC missing terminal state")
 +		}
-+		if err := tx.Model(&nextcloudGCItem{}).Where("job_id = ? AND kind <> ?", job.ID, "knowledge").
++		if err := tx.Model(&nextcloudGCItem{}).Where("job_id = ? AND kind <> ? AND state NOT IN ?",
++			job.ID, "knowledge", []string{"deleting", "collected"}).
 +			Updates(map[string]any{"state": "blocked", "updated_at": now}).Error; err != nil {
 +			return err
 +		}
@@ -4036,22 +4081,476 @@ index 00000000..4ab01708
 +		Updates(map[string]any{"state": "retry", "next_attempt_at": now, "updated_at": now})
 +	return result.RowsAffected > 0, result.Error
 +}
-diff --git a/internal/application/repository/nextcloud_gc_test.go b/internal/application/repository/nextcloud_gc_test.go
+diff --git a/internal/application/repository/nextcloud_gc_objects.go b/internal/application/repository/nextcloud_gc_objects.go
 new file mode 100644
-index 00000000..4b95806f
+index 00000000..d58fd57b
 --- /dev/null
-+++ b/internal/application/repository/nextcloud_gc_test.go
-@@ -0,0 +1,234 @@
++++ b/internal/application/repository/nextcloud_gc_objects.go
+@@ -0,0 +1,330 @@
 +package repository
 +
 +import (
 +	"context"
-+	"encoding/json"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++type nextcloudGCObjectClaim struct {
++	resource *types.StoredResource
++	token    string
++	code     string
++}
++
++const nextcloudGCObjectLease = 10 * time.Minute
++
++// scopedLocalGCPath accepts only immutable backend-scoped local objects made
++// for the resource's own tenant. Legacy raw paths and cloud object stores need
++// backend-specific deletion/acknowledgement and remain blocked.
++func scopedLocalGCPath(resource *types.StoredResource) bool {
++	if resource == nil || resource.TenantID == 0 || resource.Provider != "local" ||
++		resource.StorageBackendID == "" || resource.SourceProvenance != types.ResourceProvenanceNextcloud {
++		return false
++	}
++	backendID, inner, ok := types.ParseStorageBackendPath(resource.PhysicalPath)
++	if !ok || backendID != resource.StorageBackendID {
++		return false
++	}
++	relative := strings.TrimPrefix(inner, fmt.Sprintf("local://%d/", resource.TenantID))
++	if relative == inner || relative == "" {
++		return false
++	}
++	for _, part := range strings.Split(relative, "/") {
++		if part == "" || part == "." || part == ".." || strings.Contains(part, "\\") {
++			return false
++		}
++	}
++	return true
++}
++
++func (s *NextcloudGCStore) runPhysical(ctx context.Context, jobID string, now time.Time) error {
++	var job nextcloudGCJob
++	if err := s.db.WithContext(ctx).Where("id = ?", jobID).Take(&job).Error; err != nil {
++		return err
++	}
++	if job.State == "collected" {
++		return nil
++	}
++	var items []nextcloudGCItem
++	if err := s.db.WithContext(ctx).Where("job_id = ? AND kind IN ? AND state <> ?",
++		jobID, []string{"source_file", "extracted_image"}, "collected").
++		Order("kind ASC, object_ref ASC").Find(&items).Error; err != nil {
++		return err
++	}
++	for _, item := range items {
++		if item.Kind == "source_file" && now.Before(job.OriginalNotBefore) {
++			continue
++		}
++		claim, err := s.claimObject(ctx, jobID, item.Kind, item.ObjectRef, now)
++		if err != nil {
++			return errors.Join(err, s.blockObject(ctx, jobID, item.Kind, item.ObjectRef, "gc_step_failed", now))
++		}
++		if claim.code != "" {
++			if err := s.blockObject(ctx, jobID, item.Kind, item.ObjectRef, claim.code, now); err != nil {
++				return err
++			}
++			continue
++		}
++		if claim.resource == nil {
++			continue // another owner retained it, or the item was already done
++		}
++		unlinked, err := s.deleteObject(ctx, claim.resource)
++		if err != nil {
++			// The state remains deleting, so no new application binding can be
++			// admitted. Retrying the exact path is safe; no bytes are credited.
++			if recordErr := s.blockObject(ctx, jobID, item.Kind, item.ObjectRef,
++				"provider_delete_failed", now); recordErr != nil {
++				return errors.Join(err, recordErr)
++			}
++			continue
++		}
++		if err := s.finishObject(ctx, jobID, item.Kind, item.ObjectRef, claim.resource.ID, claim.token, unlinked, now); err != nil {
++			return errors.Join(err, s.blockObject(ctx, jobID, item.Kind, item.ObjectRef, "gc_step_failed", now))
++		}
++	}
++	return nil
++}
++
++// claimObject locks job, source, knowledge, item and resource in a fixed order. All new
++// binds lock the resource row before insertion. Once state=deleting commits,
++// no new owner can appear between the reference check and provider deletion.
++func (s *NextcloudGCStore) claimObject(ctx context.Context, jobID, kind, ref string, now time.Time) (nextcloudGCObjectClaim, error) {
++	claim := nextcloudGCObjectClaim{}
++	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var job nextcloudGCJob
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", jobID).Take(&job).Error; err != nil {
++			return err
++		}
++		if job.State == "collected" || now.Before(job.NotBefore) ||
++			(kind == "source_file" && now.Before(job.OriginalNotBefore)) {
++			claim.code = "retention_window_open"
++			return nil
++		}
++		// A malformed image inventory cannot prove that a source resource is
++		// not also referenced as an image. Defer every physical release until
++		// the complete inventory has been rebuilt.
++		if job.LastErrorCode == "invalid_image_inventory" {
++			claim.code = "invalid_image_inventory"
++			return nil
++		}
++		var version nextcloudSourceVersion
++		if err := nextcloudVersionQuery(tx.Clauses(clause.Locking{Strength: "UPDATE"}),
++			job.TenantID, job.KnowledgeBaseID, job.DataSourceID, job.ExternalID).
++			Take(&version).Error; err != nil {
++			return err
++		}
++		if version.State != "tombstone" && version.CandidateKnowledgeID == job.KnowledgeID {
++			claim.code = "candidate_is_current"
++			return nil
++		}
++		var knowledge types.Knowledge
++		if err := tx.Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND channel = ?",
++				job.KnowledgeID, job.TenantID, job.KnowledgeBaseID, types.ConnectorTypeNextcloud).
++			Take(&knowledge).Error; err != nil {
++			return err
++		}
++		metadata, err := nextcloudMetadata(&knowledge)
++		if err != nil {
++			return err
++		}
++		if nextcloudMetadataString(metadata, "datasource_id") != job.DataSourceID ||
++			nextcloudMetadataString(metadata, "external_id") != job.ExternalID ||
++			nextcloudMetadataString(metadata, "nextcloud_etag") != "" {
++			claim.code = "source_identity_changed"
++			return nil
++		}
++		if knowledge.ParseStatus != types.ParseStatusCompleted && knowledge.ParseStatus != types.ParseStatusFailed &&
++			knowledge.ParseStatus != types.ParseStatusCancelled || knowledge.PendingSubtasksCount > 0 {
++			claim.code = "build_still_active"
++			return nil
++		}
++		if kind == "source_file" && knowledge.FilePath != ref {
++			claim.code = "inventory_mismatch"
++			return nil
++		}
++		if kind == "extracted_image" && knowledge.FilePath == ref && now.Before(job.OriginalNotBefore) {
++			// An image item can name the same object as the original source.
++			// Releasing its knowledge binding before the original's deadline
++			// would silently shorten the seven-day recovery window.
++			claim.code = "retention_window_open"
++			return nil
++		}
++		var item nextcloudGCItem
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("job_id = ? AND kind = ? AND object_ref = ?", jobID, kind, ref).Take(&item).Error; err != nil {
++			return err
++		}
++		if item.State == "collected" {
++			return nil
++		}
++		handle, ok := types.ParseResourcePath(ref)
++		if !ok {
++			claim.code = "legacy_resource_reference"
++			return nil
++		}
++		var resource types.StoredResource
++		if err := tx.Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("handle = ? AND tenant_id = ?", handle, job.TenantID).
++			Take(&resource).Error; err != nil {
++			return err
++		}
++		if !scopedLocalGCPath(&resource) {
++			claim.code = "unsupported_storage_backend"
++			return nil
++		}
++		if resource.State == types.ResourceStateDeleted {
++			return tx.Model(&nextcloudGCItem{}).
++				Where("job_id = ? AND kind = ? AND object_ref = ?", jobID, kind, ref).
++				Updates(map[string]any{"state": "collected", "updated_at": now}).Error
++		}
++		var remaining int64
++		if err := tx.Model(&types.ResourceBinding{}).Where("resource_id = ?", resource.ID).Count(&remaining).Error; err != nil {
++			return err
++		}
++		if resource.State == types.ResourceStateDeleting {
++			if item.State != "deleting" || remaining != 0 {
++				claim.code = "resource_delete_in_progress"
++				return nil
++			}
++			if item.LeaseUntil != nil && now.Before(*item.LeaseUntil) {
++				claim.code = "resource_delete_in_progress"
++				return nil
++			}
++			claim.token = uuid.NewString()
++			leaseUntil := now.Add(nextcloudGCObjectLease)
++			if err := tx.Model(&nextcloudGCItem{}).
++				Where("job_id = ? AND kind = ? AND object_ref = ?", jobID, kind, ref).
++				Updates(map[string]any{"lease_token": claim.token, "lease_until": &leaseUntil, "updated_at": now}).Error; err != nil {
++				return err
++			}
++			copyOfResource := resource
++			claim.resource = &copyOfResource
++			return nil
++		}
++		if resource.State != types.ResourceStateActive || resource.DeletedAt.Valid {
++			claim.code = "resource_state_unavailable"
++			return nil
++		}
++		var owned int64
++		if err := tx.Model(&types.ResourceBinding{}).Where(
++			"resource_id = ? AND tenant_id = ? AND owner_type = ? AND owner_id = ?",
++			resource.ID, job.TenantID, types.ResourceOwnerKnowledge, job.KnowledgeID,
++		).Count(&owned).Error; err != nil {
++			return err
++		}
++		if owned == 0 {
++			claim.code = "resource_binding_missing"
++			return nil
++		}
++		if err := tx.Where("resource_id = ? AND tenant_id = ? AND owner_type = ? AND owner_id = ?",
++			resource.ID, job.TenantID, types.ResourceOwnerKnowledge, job.KnowledgeID).
++			Delete(&types.ResourceBinding{}).Error; err != nil {
++			return err
++		}
++		if err := tx.Model(&types.ResourceBinding{}).Where("resource_id = ?", resource.ID).Count(&remaining).Error; err != nil {
++			return err
++		}
++		if remaining > 0 {
++			// This version released its claim; the shared object belongs to
++			// another owner and contributes zero released bytes to this job.
++			return tx.Model(&nextcloudGCItem{}).
++				Where("job_id = ? AND kind = ? AND object_ref = ?", jobID, kind, ref).
++				Updates(map[string]any{"state": "collected", "updated_at": now}).Error
++		}
++		if err := tx.Model(&types.StoredResource{}).Where("id = ? AND state = ?", resource.ID, types.ResourceStateActive).
++			Updates(map[string]any{"state": types.ResourceStateDeleting, "updated_at": now}).Error; err != nil {
++			return err
++		}
++		claim.token = uuid.NewString()
++		if err := tx.Model(&nextcloudGCItem{}).
++			Where("job_id = ? AND kind = ? AND object_ref = ?", jobID, kind, ref).
++			Updates(map[string]any{"state": "deleting", "lease_token": claim.token,
++				"lease_until": now.Add(nextcloudGCObjectLease), "updated_at": now}).Error; err != nil {
++			return err
++		}
++		resource.State = types.ResourceStateDeleting
++		copyOfResource := resource
++		claim.resource = &copyOfResource
++		return nil
++	})
++	return claim, err
++}
++
++func (s *NextcloudGCStore) finishObject(ctx context.Context, jobID, kind, ref, resourceID, token string, unlinked bool, now time.Time) error {
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var item nextcloudGCItem
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("job_id = ? AND kind = ? AND object_ref = ?",
++			jobID, kind, ref).Take(&item).Error; err != nil {
++			return err
++		}
++		if item.State != "deleting" || token == "" || item.LeaseToken != token {
++			return errors.New("Nextcloud GC item deletion claim lost")
++		}
++		var resource types.StoredResource
++		if err := tx.Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", resourceID).
++			Take(&resource).Error; err != nil {
++			return err
++		}
++		if resource.State != types.ResourceStateDeleting {
++			return errors.New("resource deletion claim lost")
++		}
++		var remaining int64
++		if err := tx.Model(&types.ResourceBinding{}).Where("resource_id = ?", resourceID).Count(&remaining).Error; err != nil {
++			return err
++		}
++		if remaining != 0 {
++			return errors.New("resource rebound during deletion")
++		}
++		if err := tx.Model(&types.StoredResource{}).Where("id = ? AND state = ?", resourceID, types.ResourceStateDeleting).
++			Updates(map[string]any{"state": types.ResourceStateDeleted, "deleted_at": now, "updated_at": now}).Error; err != nil {
++			return err
++		}
++		credited := int64(0)
++		if unlinked {
++			credited = resource.Size
++		}
++		if credited < 0 {
++			credited = 0
++		}
++		return tx.Model(&nextcloudGCItem{}).Where("job_id = ? AND kind = ? AND object_ref = ?", jobID, kind, ref).
++			Updates(map[string]any{"state": "collected", "confirmed_released_bytes": credited,
++				"lease_token": "", "lease_until": nil, "updated_at": now}).Error
++	})
++}
++
++func (s *NextcloudGCStore) blockObject(ctx context.Context, jobID, kind, ref, code string, now time.Time) error {
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var job nextcloudGCJob
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", jobID).Take(&job).Error; err != nil {
++			return err
++		}
++		if job.State == "collected" {
++			return nil
++		}
++		if code == "provider_delete_failed" {
++			if err := tx.Model(&nextcloudGCItem{}).
++				Where("job_id = ? AND kind = ? AND object_ref = ? AND state = ?", jobID, kind, ref, "deleting").
++				Updates(map[string]any{"lease_token": "", "lease_until": nil, "updated_at": now}).Error; err != nil {
++				return err
++			}
++		}
++		if err := tx.Model(&nextcloudGCItem{}).
++			Where("job_id = ? AND kind = ? AND object_ref = ? AND state NOT IN ?", jobID, kind, ref,
++				[]string{"deleting", "collected"}).
++			Updates(map[string]any{"state": "blocked", "updated_at": now}).Error; err != nil {
++			return err
++		}
++		return tx.Model(&nextcloudGCJob{}).Where("id = ? AND state <> ?", jobID, "collected").
++			Updates(map[string]any{"state": "blocked", "last_error_code": code,
++				"next_attempt_at": now.Add(nextcloudGCRetryWindow), "updated_at": now}).Error
++	})
++}
+diff --git a/internal/application/repository/nextcloud_gc_pg_test.go b/internal/application/repository/nextcloud_gc_pg_test.go
+new file mode 100644
+index 00000000..54b3790b
+--- /dev/null
++++ b/internal/application/repository/nextcloud_gc_pg_test.go
+@@ -0,0 +1,109 @@
++package repository
++
++import (
++	"context"
++	"net/url"
 +	"os"
 +	"strings"
 +	"testing"
 +	"time"
 +
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++// A real PostgreSQL row lock is required for the bind/GC race. The test uses
++// a disposable schema and is opt-in so the normal unit suite needs no server.
++func TestPostgresNextcloudGCBindRaceSerializesOnResource(t *testing.T) {
++	dsn := os.Getenv("WEKNORA_GC_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set WEKNORA_GC_TEST_POSTGRES_DSN for disposable PostgreSQL")
++	}
++	admin, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	adminSQL, err := admin.DB()
++	require.NoError(t, err)
++	defer adminSQL.Close()
++	schema := "gc_bind_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
++	require.NoError(t, admin.Exec(`CREATE SCHEMA "`+schema+`"`).Error)
++	defer admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
++	scopedDSN := dsn + " search_path=" + schema
++	if strings.Contains(dsn, "://") {
++		u, err := url.Parse(dsn)
++		require.NoError(t, err)
++		q := u.Query()
++		q.Set("search_path", schema)
++		u.RawQuery = q.Encode()
++		scopedDSN = u.String()
++	}
++	db, err := gorm.Open(postgres.Open(scopedDSN), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(5)
++	defer sqlDB.Close()
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &types.Chunk{}, &nextcloudSourceVersion{},
++		&nextcloudGCJob{}, &nextcloudGCItem{}, &types.StoredResource{}, &types.ResourceBinding{}))
++	now := time.Now().UTC()
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("p", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-8*24*time.Hour))
++	store := NewNextcloudGCStore(db)
++	_, err = store.InventoryRetired(context.Background(), now, 100)
++	require.NoError(t, err)
++	var job nextcloudGCJob
++	require.NoError(t, db.Take(&job).Error)
++	var resource types.StoredResource
++	require.NoError(t, db.Where("handle = ?", strings.Repeat("p", 22)).Take(&resource).Error)
++	hold := db.Begin()
++	require.NoError(t, hold.Error)
++	require.NoError(t, hold.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", resource.ID).
++		Take(&types.StoredResource{}).Error)
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	type claimResult struct {
++		claim nextcloudGCObjectClaim
++		err   error
++	}
++	claimDone := make(chan claimResult, 1)
++	go func() {
++		claim, err := store.claimObject(ctx, job.ID, "source_file", ref, now)
++		claimDone <- claimResult{claim, err}
++	}()
++	bindDone := make(chan error, 1)
++	go func() {
++		bindDone <- (&resourceRepository{db: db}).CreateBinding(ctx, &types.ResourceBinding{
++			ResourceID: resource.ID, TenantID: 7, OwnerType: types.ResourceOwnerMessage,
++			OwnerID: "concurrent-owner", Relation: types.ResourceRelationArtifact,
++		})
++	}()
++	// Both operations must wait for the same resource row. Once released,
++	// either order is allowed; a successful bind and deletion claim must
++	// never coexist.
++	time.Sleep(100 * time.Millisecond)
++	require.NoError(t, hold.Commit().Error)
++	var got claimResult
++	select {
++	case got = <-claimDone:
++	case <-ctx.Done():
++		t.Fatal("GC claim did not finish")
++	}
++	var bindErr error
++	select {
++	case bindErr = <-bindDone:
++	case <-ctx.Done():
++		t.Fatal("concurrent bind did not finish")
++	}
++	require.NoError(t, got.err)
++	require.NoError(t, db.Unscoped().Where("id = ?", resource.ID).Take(&resource).Error)
++	if bindErr == nil {
++		require.Equal(t, types.ResourceStateActive, resource.State)
++		require.Nil(t, got.claim.resource)
++	} else {
++		require.Equal(t, types.ResourceStateDeleting, resource.State)
++		require.NotNil(t, got.claim.resource)
++	}
++}
+diff --git a/internal/application/repository/nextcloud_gc_test.go b/internal/application/repository/nextcloud_gc_test.go
+new file mode 100644
+index 00000000..e1807965
+--- /dev/null
++++ b/internal/application/repository/nextcloud_gc_test.go
+@@ -0,0 +1,552 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/google/uuid"
 +	"github.com/stretchr/testify/require"
@@ -4068,8 +4567,299 @@ index 00000000..4b95806f
 +	sqlDB.SetMaxOpenConns(1)
 +	t.Cleanup(func() { _ = sqlDB.Close() })
 +	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &types.Chunk{}, &nextcloudSourceVersion{},
-+		&nextcloudGCJob{}, &nextcloudGCItem{}, &types.ResourceBinding{}))
++		&nextcloudGCJob{}, &nextcloudGCItem{}, &types.StoredResource{}, &types.ResourceBinding{}))
 +	return NewNextcloudGCStore(db), db
++}
++
++func nextcloudGCTestLocalResource(t *testing.T, db *gorm.DB, handle, knowledgeID string) string {
++	t.Helper()
++	ref := types.BuildResourcePath(handle)
++	resource := &types.StoredResource{ID: uuid.NewString(), Handle: handle, TenantID: 7,
++		StorageBackendID: "backend", Provider: "local",
++		PhysicalPath: "storage://backend/local://7/" + knowledgeID + "/source.txt",
++		LocationHash: uuid.NewString(), SourceProvenance: types.ResourceProvenanceNextcloud,
++		Size: 23, State: types.ResourceStateActive}
++	require.NoError(t, db.Create(resource).Error)
++	require.NoError(t, db.Create(&types.ResourceBinding{ResourceID: resource.ID, TenantID: 7,
++		OwnerType: types.ResourceOwnerKnowledge, OwnerID: knowledgeID,
++		Relation: types.ResourceRelationSourceFile}).Error)
++	return ref
++}
++
++func TestNextcloudGCPhysicalLocalDeleteFailureRetryAndConfirmedBytes(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("a", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-8*24*time.Hour))
++	created, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, created)
++	deletes := 0
++	store.ConfigureLocalDelete(func(_ context.Context, resource *types.StoredResource) (bool, error) {
++		deletes++
++		require.Equal(t, types.ResourceStateDeleting, resource.State)
++		if deletes == 1 {
++			return false, errors.New("disk temporarily unavailable")
++		}
++		return true, nil
++	})
++	processed, err := store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, processed)
++	var resource types.StoredResource
++	require.NoError(t, db.Unscoped().Where("handle = ?", strings.Repeat("a", 22)).Take(&resource).Error)
++	require.Equal(t, types.ResourceStateDeleting, resource.State)
++	var bindings int64
++	require.NoError(t, db.Model(&types.ResourceBinding{}).Where("resource_id = ?", resource.ID).Count(&bindings).Error)
++	require.Zero(t, bindings)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, "provider_delete_failed", status[0].LastErrorCode)
++	require.Zero(t, status[0].ConfirmedReleasedBytes)
++	require.Error(t, (&resourceRepository{db: db}).CreateBinding(ctx, &types.ResourceBinding{
++		ResourceID: resource.ID, TenantID: 7, OwnerType: types.ResourceOwnerMessage,
++		OwnerID: "late-owner", Relation: types.ResourceRelationArtifact,
++	}), "a new owner cannot bind after the GC claim")
++	processed, err = store.RunDue(ctx, now.Add(time.Hour), 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, processed)
++	require.Equal(t, 2, deletes)
++	status, err = store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, int64(23), status[0].ConfirmedReleasedBytes)
++	require.NoError(t, db.Unscoped().Where("id = ?", resource.ID).Take(&resource).Error)
++	require.Equal(t, types.ResourceStateDeleted, resource.State)
++	processed, err = store.RunDue(ctx, now.Add(2*time.Hour), 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, processed)
++	status, err = store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, "collected", status[0].State)
++	require.Equal(t, int64(23), status[0].ConfirmedReleasedBytes)
++	require.Equal(t, 2, deletes, "a completed object cannot be deleted twice")
++}
++
++func TestNextcloudGCSharedResourceReleasesOnlyRetiredClaim(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("b", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-8*24*time.Hour))
++	var resource types.StoredResource
++	require.NoError(t, db.Where("handle = ?", strings.Repeat("b", 22)).Take(&resource).Error)
++	require.NoError(t, db.Create(&types.ResourceBinding{ResourceID: resource.ID, TenantID: 7,
++		OwnerType: types.ResourceOwnerMessage, OwnerID: "still-reading",
++		Relation: types.ResourceRelationArtifact}).Error)
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	deletes := 0
++	store.ConfigureLocalDelete(func(context.Context, *types.StoredResource) (bool, error) { deletes++; return true, nil })
++	_, err = store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	require.Zero(t, deletes)
++	require.NoError(t, db.Where("id = ?", resource.ID).Take(&resource).Error)
++	require.Equal(t, types.ResourceStateActive, resource.State)
++	var bindings []types.ResourceBinding
++	require.NoError(t, db.Where("resource_id = ?", resource.ID).Find(&bindings).Error)
++	require.Len(t, bindings, 1)
++	require.Equal(t, types.ResourceOwnerMessage, bindings[0].OwnerType)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Zero(t, status[0].ConfirmedReleasedBytes)
++}
++
++func TestNextcloudGCUnscopedOrCloudObjectStaysBlockedWithBinding(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	for _, testCase := range []struct {
++		name, provider, path, backend string
++	}{
++		{"unscoped local", "local", "local://7/old/source.txt", ""},
++		{"cloud", "minio", "storage://backend/minio://bucket/7/old/source.txt", "backend"},
++	} {
++		t.Run(testCase.name, func(t *testing.T) {
++			store, db := nextcloudGCTestDB(t)
++			handle := strings.Repeat("e", 22)
++			ref := types.BuildResourcePath(handle)
++			resource := &types.StoredResource{ID: uuid.NewString(), Handle: handle, TenantID: 7,
++				StorageBackendID: testCase.backend, Provider: testCase.provider,
++				PhysicalPath: testCase.path, LocationHash: uuid.NewString(),
++				SourceProvenance: types.ResourceProvenanceNextcloud, Size: 23,
++				State: types.ResourceStateActive}
++			require.NoError(t, db.Create(resource).Error)
++			require.NoError(t, db.Create(&types.ResourceBinding{ResourceID: resource.ID, TenantID: 7,
++				OwnerType: types.ResourceOwnerKnowledge, OwnerID: "old",
++				Relation: types.ResourceRelationSourceFile}).Error)
++			nextcloudGCTestSource(t, db, "old", ref, now.Add(-8*24*time.Hour))
++			_, err := store.InventoryRetired(ctx, now, 100)
++			require.NoError(t, err)
++			called := false
++			store.ConfigureLocalDelete(func(context.Context, *types.StoredResource) (bool, error) { called = true; return true, nil })
++			_, err = store.RunDue(ctx, now, 100)
++			require.NoError(t, err)
++			require.False(t, called)
++			var count int64
++			require.NoError(t, db.Model(&types.ResourceBinding{}).
++				Where("resource_id = ?", resource.ID).Count(&count).Error)
++			require.Equal(t, int64(1), count)
++			var after types.StoredResource
++			require.NoError(t, db.Where("id = ?", resource.ID).Take(&after).Error)
++			require.Equal(t, types.ResourceStateActive, after.State)
++			status, err := store.ListStatus(ctx, 7, 100)
++			require.NoError(t, err)
++			require.Equal(t, "unsupported_storage_backend", status[0].LastErrorCode)
++			require.Zero(t, status[0].ConfirmedReleasedBytes)
++		})
++	}
++}
++
++func TestNextcloudGCObjectLeaseAllowsCrashRecoveryWithoutDoubleCredit(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("c", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-8*24*time.Hour))
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	var job nextcloudGCJob
++	require.NoError(t, db.Take(&job).Error)
++	first, err := store.claimObject(ctx, job.ID, "source_file", ref, now)
++	require.NoError(t, err)
++	require.NotNil(t, first.resource)
++	require.NotEmpty(t, first.token)
++	concurrent, err := store.claimObject(ctx, job.ID, "source_file", ref, now.Add(time.Minute))
++	require.NoError(t, err)
++	require.Nil(t, concurrent.resource)
++	require.Equal(t, "resource_delete_in_progress", concurrent.code)
++	recovered, err := store.claimObject(ctx, job.ID, "source_file", ref, now.Add(11*time.Minute))
++	require.NoError(t, err)
++	require.NotNil(t, recovered.resource)
++	require.NotEqual(t, first.token, recovered.token)
++	require.Error(t, store.finishObject(ctx, job.ID, "source_file", ref,
++		first.resource.ID, first.token, true, now.Add(11*time.Minute)))
++	require.NoError(t, store.finishObject(ctx, job.ID, "source_file", ref,
++		recovered.resource.ID, recovered.token, true, now.Add(11*time.Minute)))
++	var item nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ? AND kind = ?", job.ID, "source_file").Take(&item).Error)
++	require.Equal(t, int64(23), item.ConfirmedReleasedBytes)
++	require.Equal(t, "collected", item.State)
++}
++
++func TestNextcloudGCScopedLocalProviderCrashAfterUnlinkRetriesExactly(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("d", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-8*24*time.Hour))
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	base := t.TempDir()
++	path := filepath.Join(base, "7", "old", "source.txt")
++	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
++	require.NoError(t, os.WriteFile(path, []byte("persisted-source-object"), 0o600))
++	provider := filesvc.NewBackendScopedFileService("backend", filesvc.NewLocalFileService(base, ""))
++	attempts := 0
++	store.ConfigureLocalDelete(func(ctx context.Context, resource *types.StoredResource) (bool, error) {
++		attempts++
++		err := provider.DeleteFile(ctx, resource.PhysicalPath)
++		if errors.Is(err, os.ErrNotExist) {
++			return false, nil
++		}
++		if err != nil {
++			return false, err
++		}
++		if attempts == 1 {
++			return false, errors.New("simulated crash before DB acknowledgement")
++		}
++		return true, nil
++	})
++	_, err = store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	_, err = os.Stat(path)
++	require.ErrorIs(t, err, os.ErrNotExist)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Zero(t, status[0].ConfirmedReleasedBytes)
++	_, err = store.RunDue(ctx, now.Add(time.Hour), 100)
++	require.NoError(t, err)
++	status, err = store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Zero(t, status[0].ConfirmedReleasedBytes, "a crash before acknowledgement leaves physical bytes unconfirmed")
++	require.Equal(t, 2, attempts)
++}
++
++func TestNextcloudGCImageAliasCannotShortenOriginalRetention(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("f", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-2*time.Hour))
++	require.NoError(t, db.Create(&types.Chunk{ID: "chunk", TenantID: 7, KnowledgeBaseID: "kb",
++		KnowledgeID: "old", ImageInfo: `[{"url":"` + ref + `"}]`}).Error)
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	deletes := 0
++	store.ConfigureLocalDelete(func(context.Context, *types.StoredResource) (bool, error) { deletes++; return true, nil })
++	_, err = store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	require.Zero(t, deletes)
++	var resource types.StoredResource
++	require.NoError(t, db.Where("handle = ?", strings.Repeat("f", 22)).Take(&resource).Error)
++	require.Equal(t, types.ResourceStateActive, resource.State)
++	var bindings int64
++	require.NoError(t, db.Model(&types.ResourceBinding{}).Where("resource_id = ?", resource.ID).Count(&bindings).Error)
++	require.Equal(t, int64(1), bindings)
++	_, err = store.RunDue(ctx, now.Add(7*24*time.Hour), 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, deletes)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, int64(23), status[0].ConfirmedReleasedBytes)
++}
++
++func TestNextcloudGCInvalidImageInventoryStopsPhysicalRelease(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("g", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-8*24*time.Hour))
++	require.NoError(t, db.Create(&types.Chunk{ID: "chunk", TenantID: 7, KnowledgeBaseID: "kb",
++		KnowledgeID: "old", ImageInfo: `{broken`}).Error)
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	deletes := 0
++	store.ConfigureLocalDelete(func(context.Context, *types.StoredResource) (bool, error) { deletes++; return true, nil })
++	_, err = store.RunDue(ctx, now.Add(time.Hour), 100)
++	require.NoError(t, err)
++	require.Zero(t, deletes)
++	var resource types.StoredResource
++	require.NoError(t, db.Where("handle = ?", strings.Repeat("g", 22)).Take(&resource).Error)
++	require.Equal(t, types.ResourceStateActive, resource.State)
++	var bindings int64
++	require.NoError(t, db.Model(&types.ResourceBinding{}).Where("resource_id = ?", resource.ID).Count(&bindings).Error)
++	require.Equal(t, int64(1), bindings)
++}
++
++func TestNextcloudGCPhysicalClaimFailureIsDurable(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	nextcloudGCTestSource(t, db, "old", types.BuildResourcePath(strings.Repeat("h", 22)),
++		now.Add(-8*24*time.Hour))
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	store.ConfigureLocalDelete(func(context.Context, *types.StoredResource) (bool, error) {
++		t.Fatal("provider must not run without a resource row")
++		return false, nil
++	})
++	_, err = store.RunDue(ctx, now, 100)
++	require.Error(t, err)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, "blocked", status[0].State)
++	require.Equal(t, "gc_step_failed", status[0].LastErrorCode)
++	require.Zero(t, status[0].ConfirmedReleasedBytes)
 +}
 +
 +func nextcloudGCTestSource(t *testing.T, db *gorm.DB, id, filePath string, at time.Time) {
@@ -4265,16 +5055,40 @@ index 00000000..4b95806f
 +func TestNextcloudGCSQLiteMigrationCreatesDurableTables(t *testing.T) {
 +	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
 +	require.NoError(t, err)
-+	script, err := os.ReadFile("../../../migrations/sqlite/000038_nextcloud_gc.up.sql")
-+	require.NoError(t, err)
-+	for _, statement := range strings.Split(string(script), ";") {
-+		statement = strings.TrimSpace(statement)
-+		if statement != "" {
-+			require.NoError(t, db.Exec(statement).Error)
++	applyScript := func(path string) {
++		t.Helper()
++		script, readErr := os.ReadFile(path)
++		require.NoError(t, readErr)
++		for _, statement := range strings.Split(string(script), ";") {
++			statement = strings.TrimSpace(statement)
++			if statement != "" {
++				require.NoError(t, db.Exec(statement).Error)
++			}
 +		}
 +	}
++	applyScript("../../../migrations/sqlite/000038_nextcloud_gc.up.sql")
 +	require.True(t, db.Migrator().HasTable("nextcloud_gc_jobs"))
 +	require.True(t, db.Migrator().HasTable("nextcloud_gc_items"))
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_jobs
++		(id, tenant_id, knowledge_base_id, datasource_id, external_id,
++		 knowledge_id, reason, state, not_before, original_not_before, next_attempt_at)
++		VALUES ('job', 7, 'kb', 'ds', 'node', 'old', 'retired', 'blocked',
++		 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_items
++		(job_id, kind, object_ref, state, estimated_bytes)
++		VALUES ('job', 'source_file', 'resource://original', 'blocked', 23)`).Error)
++	applyScript("../../../migrations/sqlite/000040_nextcloud_gc_object_claim.up.sql")
++	var item nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ?", "job").Take(&item).Error)
++	require.Equal(t, "blocked", item.State)
++	require.Equal(t, int64(23), item.EstimatedBytes)
++	require.Empty(t, item.LeaseToken)
++	require.True(t, db.Migrator().HasColumn(&nextcloudGCItem{}, "lease_until"))
++	require.NoError(t, db.Exec(`UPDATE nextcloud_gc_items
++		SET state = 'deleting', lease_token = 'claim' WHERE job_id = 'job'`).Error)
++	require.NoError(t, db.Where("job_id = ?", "job").Take(&item).Error)
++	require.Equal(t, "deleting", item.State)
++	require.Equal(t, "claim", item.LeaseToken)
 +}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
@@ -6179,10 +6993,10 @@ index 00000000..20a3b5d3
 +	require.NoError(t, db.Create(&second).Error)
 +}
 diff --git a/internal/application/repository/resource.go b/internal/application/repository/resource.go
-index b3d724b7..e0398d55 100644
+index b3d724b7..d75865d8 100644
 --- a/internal/application/repository/resource.go
 +++ b/internal/application/repository/resource.go
-@@ -67,6 +67,31 @@ func (r *resourceRepository) MarkDeleted(ctx context.Context, id string) error {
+@@ -67,8 +67,51 @@ func (r *resourceRepository) MarkDeleted(ctx context.Context, id string) error {
  		Updates(map[string]interface{}{"state": types.ResourceStateDeleted, "deleted_at": time.Now()}).Error
  }
  
@@ -6212,8 +7026,29 @@ index b3d724b7..e0398d55 100644
 +}
 +
  func (r *resourceRepository) CreateBinding(ctx context.Context, binding *types.ResourceBinding) error {
- 	return r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(binding).Error
+-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(binding).Error
++	if binding == nil || binding.ResourceID == "" || binding.TenantID == 0 {
++		return errors.New("incomplete resource binding")
++	}
++	// Every new claim takes the same resource-row lock as Nextcloud GC. A
++	// zero-binding check followed by state=deleting is therefore atomic with
++	// respect to all application binding writes. SQLite serializes writers;
++	// PostgreSQL enforces the row lock explicitly.
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var resource types.StoredResource
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("id = ? AND tenant_id = ?", binding.ResourceID, binding.TenantID).
++			Take(&resource).Error; err != nil {
++			return err
++		}
++		if resource.State != types.ResourceStateActive || resource.DeletedAt.Valid {
++			return errors.New("resource is not bindable")
++		}
++		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(binding).Error
++	})
  }
+ 
+ // DeleteBinding removes one owner's claim on a resource. Deleting a claim that
 diff --git a/internal/application/repository/resource_references.go b/internal/application/repository/resource_references.go
 index 8276ba00..800aad73 100644
 --- a/internal/application/repository/resource_references.go
@@ -10285,7 +11120,7 @@ index 04a5c8d0..6bd8ec72 100644
  		if err != nil {
  			logger.Warnf(ctx, "buildKBDocumentListing: failed to list knowledge for KB %s: %v", kbID, err)
 diff --git a/internal/application/service/storagebackend.go b/internal/application/service/storagebackend.go
-index 08cce460..d0afe9ec 100644
+index 08cce460..6437db47 100644
 --- a/internal/application/service/storagebackend.go
 +++ b/internal/application/service/storagebackend.go
 @@ -8,6 +8,7 @@ import (
@@ -10323,6 +11158,28 @@ index 08cce460..d0afe9ec 100644
  }
  
  func (s *StorageBackendService) Create(ctx context.Context, backend *types.StorageBackend) error {
+@@ -101,10 +106,10 @@ func (s *StorageBackendService) Update(ctx context.Context, incoming *types.Stor
+ 		if references == 0 {
+ 			if err := s.db.WithContext(ctx).Model(&types.StoredResource{}).
+ 				Where(
+-					"tenant_id = ? AND storage_backend_id = ? AND state = ?",
++					"tenant_id = ? AND storage_backend_id = ? AND state <> ?",
+ 					incoming.TenantID,
+ 					incoming.ID,
+-					types.ResourceStateActive,
++					types.ResourceStateDeleted,
+ 				).
+ 				Count(&references).Error; err != nil {
+ 				return err
+@@ -159,7 +164,7 @@ func (s *StorageBackendService) Delete(ctx context.Context, tenantID uint64, id
+ 		}
+ 		var resourceCount int64
+ 		if err := tx.Model(&types.StoredResource{}).
+-			Where("tenant_id = ? AND storage_backend_id = ? AND state = ?", tenantID, id, types.ResourceStateActive).
++			Where("tenant_id = ? AND storage_backend_id = ? AND state <> ?", tenantID, id, types.ResourceStateDeleted).
+ 			Count(&resourceCount).Error; err != nil {
+ 			return err
+ 		}
 @@ -337,7 +342,7 @@ func (s *StorageBackendService) ResolveFileService(ctx context.Context, tenant *
  			return nil, provider, err
  		}
@@ -10499,7 +11356,7 @@ index 83fb0990..af50dbf7 100644
  }
  
 diff --git a/internal/container/container.go b/internal/container/container.go
-index c27d12d1..aea56922 100644
+index c27d12d1..d19b75c8 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -34,6 +34,7 @@ import (
@@ -10591,14 +11448,44 @@ index c27d12d1..aea56922 100644
  
  	// Future connectors will be registered here:
  	// if err := registry.Register(githubConnector.NewConnector()); err != nil { ... }
-@@ -1901,6 +1925,51 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
+@@ -1901,6 +1925,81 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
  	})
  }
  
 +// startNextcloudGC records durable inventories and retries only cleanup that
-+// the current storage protocol can prove safe. Object jobs remain blocked and
-+// visible until a transactional resource deletion protocol is available.
-+func startNextcloudGC(gc *repository.NextcloudGCStore, cleaner interfaces.ResourceCleaner) {
++// the current storage protocol can prove safe. Scoped local objects use the
++// transactional claim/delete/ack path; unsupported objects remain blocked.
++func startNextcloudGC(
++	gc *repository.NextcloudGCStore,
++	tenants interfaces.TenantRepository,
++	storage interfaces.StorageBackendResolver,
++	cleaner interfaces.ResourceCleaner,
++) {
++	gc.ConfigureLocalDelete(func(ctx context.Context, resource *types.StoredResource) (bool, error) {
++		if resource == nil || resource.TenantID == 0 || resource.Provider != "local" ||
++			resource.State != types.ResourceStateDeleting || resource.StorageBackendID == "" {
++			return false, errors.New("Nextcloud GC resource is not a scoped local deletion claim")
++		}
++		backendID, inner, ok := types.ParseStorageBackendPath(resource.PhysicalPath)
++		if !ok || backendID != resource.StorageBackendID ||
++			!strings.HasPrefix(inner, fmt.Sprintf("local://%d/", resource.TenantID)) {
++			return false, errors.New("Nextcloud GC local path does not match owner backend")
++		}
++		tenant, err := tenants.GetTenantByID(ctx, resource.TenantID)
++		if err != nil || tenant == nil {
++			return false, errors.New("Nextcloud GC resource tenant unavailable")
++		}
++		fileService, provider, err := storage.ResolveFileService(ctx, tenant,
++			resource.StorageBackendID, "local", strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR")))
++		if err != nil || fileService == nil || provider != "local" {
++			return false, errors.New("Nextcloud GC local backend unavailable")
++		}
++		err = fileService.DeleteFile(ctx, resource.PhysicalPath)
++		if errors.Is(err, os.ErrNotExist) {
++			return false, nil // absent path is idempotent but proves no bytes released now
++		}
++		return err == nil, err
++	})
 +	stop := make(chan struct{})
 +	run := func() {
 +		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -10720,7 +11607,7 @@ index 47d4c024..ed4dc245 100644
  	db := setupResetPendingDB(t)
  	stale := time.Now().Add(-2 * time.Hour)
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e515..534a4262 100644
+index 9cc4e515..eda61599 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -10752,7 +11639,7 @@ index 9cc4e515..534a4262 100644
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 39
++const expectedSQLiteMigrationVersion = 40
 +
 +func TestSQLiteNextcloudPairingGuardsPendingAndActiveKnowledgeBase(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -20720,7 +21607,7 @@ index 28d5c161..51563219 100644
  	KnowledgeBaseIDs      []string                  `json:"knowledge_base_ids,omitempty"`
  	KnowledgeIDs          []string                  `json:"knowledge_ids,omitempty"`
 diff --git a/internal/types/resource.go b/internal/types/resource.go
-index 350dcab7..ecff5702 100644
+index 350dcab7..7ad15d27 100644
 --- a/internal/types/resource.go
 +++ b/internal/types/resource.go
 @@ -1,6 +1,7 @@
@@ -20731,7 +21618,11 @@ index 350dcab7..ecff5702 100644
  	"regexp"
  	"strconv"
  	"strings"
-@@ -18,8 +19,28 @@ const (
+@@ -15,11 +16,32 @@ const (
+ 	ResourceScheme              = "resource://"
+ 	ResourceHandleLength        = 22
+ 	ResourceStateActive         = "active"
++	ResourceStateDeleting       = "deleting"
  	ResourceStateDeleted        = "deleted"
  	ResourceLifecyclePersistent = "persistent"
  	ResourceLifecycleTemporary  = "temporary"
@@ -20760,7 +21651,7 @@ index 350dcab7..ecff5702 100644
  // Resource binding owner types. A binding is a claim on a stored object: the
  // bytes live as long as at least one owner still claims them, which is what
  // lets a chat answer be saved into the knowledge base without copying its
-@@ -54,6 +75,7 @@ type StoredResource struct {
+@@ -54,6 +76,7 @@ type StoredResource struct {
  	OriginalName     string         `json:"original_name,omitempty" gorm:"type:varchar(1024);not null;default:''"`
  	Size             int64          `json:"size" gorm:"not null;default:0"`
  	ContentHash      string         `json:"content_hash,omitempty" gorm:"type:varchar(64);not null;default:''"`
@@ -20768,7 +21659,7 @@ index 350dcab7..ecff5702 100644
  	Lifecycle        string         `json:"lifecycle" gorm:"type:varchar(16);not null;default:'persistent'"`
  	ExpiresAt        *time.Time     `json:"expires_at,omitempty"`
  	State            string         `json:"state" gorm:"type:varchar(16);not null;default:'active'"`
-@@ -79,6 +101,9 @@ func (r *StoredResource) BeforeCreate(_ *gorm.DB) error {
+@@ -79,6 +102,9 @@ func (r *StoredResource) BeforeCreate(_ *gorm.DB) error {
  	if r.State == "" {
  		r.State = ResourceStateActive
  	}
@@ -21521,6 +22412,67 @@ index 00000000..b32762ad
 +    created_at DATETIME NOT NULL,
 +    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 +);
+diff --git a/migrations/sqlite/000040_nextcloud_gc_object_claim.down.sql b/migrations/sqlite/000040_nextcloud_gc_object_claim.down.sql
+new file mode 100644
+index 00000000..be1dad27
+--- /dev/null
++++ b/migrations/sqlite/000040_nextcloud_gc_object_claim.down.sql
+@@ -0,0 +1,23 @@
++-- The INSERT fails its CHECK if any deletion claim is still in flight.
++CREATE TABLE nextcloud_gc_items_old (
++    job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,
++    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index')),
++    object_ref TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('pending', 'blocked', 'collected')),
++    estimated_bytes INTEGER NOT NULL DEFAULT 0,
++    confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (job_id, kind, object_ref)
++);
++
++INSERT INTO nextcloud_gc_items_old (
++    job_id, kind, object_ref, state, estimated_bytes,
++    confirmed_released_bytes, created_at, updated_at
++)
++SELECT job_id, kind, object_ref, state, estimated_bytes,
++       confirmed_released_bytes, created_at, updated_at
++FROM nextcloud_gc_items;
++
++DROP TABLE nextcloud_gc_items;
++ALTER TABLE nextcloud_gc_items_old RENAME TO nextcloud_gc_items;
+diff --git a/migrations/sqlite/000040_nextcloud_gc_object_claim.up.sql b/migrations/sqlite/000040_nextcloud_gc_object_claim.up.sql
+new file mode 100644
+index 00000000..93743bb9
+--- /dev/null
++++ b/migrations/sqlite/000040_nextcloud_gc_object_claim.up.sql
+@@ -0,0 +1,26 @@
++-- SQLite cannot change a CHECK constraint in place. Rebuild only this child
++-- table, preserving every existing inventory row from 000038.
++CREATE TABLE nextcloud_gc_items_new (
++    job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,
++    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index')),
++    object_ref TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('pending', 'blocked', 'deleting', 'collected')),
++    estimated_bytes INTEGER NOT NULL DEFAULT 0,
++    confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,
++    lease_token TEXT NOT NULL DEFAULT '',
++    lease_until DATETIME,
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (job_id, kind, object_ref)
++);
++
++INSERT INTO nextcloud_gc_items_new (
++    job_id, kind, object_ref, state, estimated_bytes,
++    confirmed_released_bytes, lease_token, lease_until, created_at, updated_at
++)
++SELECT job_id, kind, object_ref, state, estimated_bytes,
++       confirmed_released_bytes, '', NULL, created_at, updated_at
++FROM nextcloud_gc_items;
++
++DROP TABLE nextcloud_gc_items;
++ALTER TABLE nextcloud_gc_items_new RENAME TO nextcloud_gc_items;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -22237,3 +23189,42 @@ index 00000000..e33be6cf
 +    created_at TIMESTAMPTZ NOT NULL,
 +    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 +);
+diff --git a/migrations/versioned/000121_nextcloud_gc_object_claim.down.sql b/migrations/versioned/000121_nextcloud_gc_object_claim.down.sql
+new file mode 100644
+index 00000000..b281f4b6
+--- /dev/null
++++ b/migrations/versioned/000121_nextcloud_gc_object_claim.down.sql
+@@ -0,0 +1,17 @@
++-- Refuse to discard durable in-flight claims. A deleting resource must be
++-- recovered or explicitly reconciled before rolling this protocol back.
++DO $$
++BEGIN
++    IF EXISTS (SELECT 1 FROM nextcloud_gc_items WHERE state = 'deleting') THEN
++        RAISE EXCEPTION 'Nextcloud GC has in-flight object deletions';
++    END IF;
++END $$;
++
++ALTER TABLE nextcloud_gc_items
++    DROP CONSTRAINT nextcloud_gc_items_state_check;
++ALTER TABLE nextcloud_gc_items
++    ADD CONSTRAINT nextcloud_gc_items_state_check
++    CHECK (state IN ('pending', 'blocked', 'collected'));
++ALTER TABLE nextcloud_gc_items
++    DROP COLUMN lease_token,
++    DROP COLUMN lease_until;
+diff --git a/migrations/versioned/000121_nextcloud_gc_object_claim.up.sql b/migrations/versioned/000121_nextcloud_gc_object_claim.up.sql
+new file mode 100644
+index 00000000..20115907
+--- /dev/null
++++ b/migrations/versioned/000121_nextcloud_gc_object_claim.up.sql
+@@ -0,0 +1,10 @@
++-- Keep 000119 immutable: installations may already have applied it.
++ALTER TABLE nextcloud_gc_items
++    ADD COLUMN lease_token TEXT NOT NULL DEFAULT '',
++    ADD COLUMN lease_until TIMESTAMPTZ;
++
++ALTER TABLE nextcloud_gc_items
++    DROP CONSTRAINT nextcloud_gc_items_state_check;
++ALTER TABLE nextcloud_gc_items
++    ADD CONSTRAINT nextcloud_gc_items_state_check
++    CHECK (state IN ('pending', 'blocked', 'deleting', 'collected'));

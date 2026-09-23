@@ -507,7 +507,7 @@
                     typeof data.binding_roots_available !== 'boolean' ||
                     !Number.isSafeInteger(data.retained_change_hints) || data.retained_change_hints < 0 ||
                     !Number.isSafeInteger(data.explicit_withdrawal_count) || data.explicit_withdrawal_count < 0 ||
-                    data.consumer_acknowledgement_available !== false) {
+                    typeof data.consumer_acknowledgement_available !== 'boolean') {
                     throw new Error('The server returned invalid source diagnostics.');
                 }
                 document.getElementById('weknora-diagnostics-roots').textContent =
@@ -523,6 +523,8 @@
                         : 'None recorded';
                 document.getElementById('weknora-diagnostics-withdrawals').textContent =
                     String(data.explicit_withdrawal_count);
+                document.getElementById('weknora-diagnostics-applied-ack').textContent =
+                    data.consumer_acknowledgement_available ? 'Available' : 'Unavailable';
                 diagnosticsValues.hidden = false;
                 message(diagnosticsMessage, 'Source diagnostics refreshed.', 'success');
             } catch (error) {
