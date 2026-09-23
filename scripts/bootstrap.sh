@@ -14,6 +14,23 @@ set +a
 base_url="http://127.0.0.1:${NEXTCLOUD_HTTP_PORT:-18082}"
 occ=(docker compose exec -T -u www-data nextcloud php occ)
 
+# Docker reports a healthy HTTP endpoint as soon as Apache serves status.php,
+# while the first-install entrypoint can still be creating the database. Wait
+# for occ to report an installed instance before enabling the app.
+installed=false
+for attempt in {1..150}; do
+  if "${occ[@]}" status --output=json 2>/dev/null | python3 -c \
+    'import json, sys; sys.exit(not json.load(sys.stdin).get("installed", False))' 2>/dev/null; then
+    installed=true
+    break
+  fi
+  sleep 2
+done
+if [[ "$installed" != true ]]; then
+  echo 'Nextcloud did not finish first-time installation within five minutes.' >&2
+  exit 1
+fi
+
 "${occ[@]}" app:enable integration_weknora
 
 folder_url="$base_url/remote.php/dav/files/$NEXTCLOUD_ADMIN_USER/Published"
