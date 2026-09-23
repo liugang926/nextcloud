@@ -47,4 +47,23 @@ PY
 "${occ[@]}" config:app:set integration_weknora bindings --value="$bindings"
 "${occ[@]}" background:cron
 
+# On a fresh installation the Apache worker may still hold the route cache
+# built before app:enable. Restart it so the service API is reachable before
+# the first smoke request, then wait for the Nextcloud health check.
+docker compose restart nextcloud
+docker compose up -d --wait --wait-timeout 180 nextcloud
+route_status=''
+for attempt in {1..20}; do
+  route_status="$(curl -s -o /dev/null -w '%{http_code}' \
+    "$base_url/index.php/apps/integration_weknora/api/v1/capabilities" || true)"
+  if [[ "$route_status" == 401 ]]; then
+    break
+  fi
+  sleep 2
+done
+if [[ "$route_status" != 401 ]]; then
+  echo "Integration API route did not become ready (HTTP $route_status)." >&2
+  exit 1
+fi
+
 echo "Nextcloud app and sample binding are ready at $base_url (binding: dev-published, folder ID: $root_id)."
