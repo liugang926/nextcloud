@@ -8,6 +8,9 @@ creates a uniquely named WebDAV file and revokes both temporary connections.
 By default it checks the durable receipt only. --expect-dispatch also waits for
 the WeKnora worker to accept a full-source sync into its queue. --expect-applied
 requires the real applied watermark on both services to cover the probe event.
+--verify-index additionally checks the isolated WeKnora PostgreSQL rows for a
+ready chunk and enabled embedding before deletion, then a tombstone with no
+visible knowledge candidate afterward.
 """
 
 import argparse
@@ -125,6 +128,56 @@ def decimal_status_id(status, field):
     if not isinstance(value, str) or not re.fullmatch(r"0|[1-9][0-9]*", value):
         raise AssertionError(f"status did not expose a decimal {field}")
     return int(value)
+
+
+def weknora_sql_json(container, query):
+    command = ["docker", "exec", container, "sh", "-c",
+               'psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"',
+               "sh", query]
+    result = subprocess.run(command, text=True, capture_output=True, timeout=20, check=False)
+    if result.returncode != 0:
+        raise AssertionError("WeKnora index query failed")
+    rows = result.stdout.strip().splitlines()
+    if len(rows) != 1:
+        raise AssertionError("expected one exact WeKnora source version")
+    return json.loads(rows[0])
+
+
+def verify_published_index(container, data_source_id, source_file_id):
+    # Both identifiers are validated before this SQL is built. This is a
+    # read-only local probe, not part of the production acknowledgement path.
+    query = ("SELECT jsonb_build_object("
+             "'state', v.state, 'candidate_id', v.candidate_knowledge_id, "
+             "'parse', k.parse_status, 'enabled', k.enable_status, "
+             "'visible_etag', k.metadata->>'nextcloud_etag', 'desired_etag', v.desired_etag, "
+             "'ready_chunks', (SELECT COUNT(*) FROM chunks c WHERE c.knowledge_id = v.candidate_knowledge_id "
+             "AND c.deleted_at IS NULL AND c.is_enabled AND c.index_status = 'ready'), "
+             "'enabled_embeddings', (SELECT COUNT(*) FROM embeddings e "
+             "WHERE e.knowledge_id = v.candidate_knowledge_id AND e.is_enabled)) "
+             "FROM nextcloud_source_versions v JOIN knowledges k ON k.id = v.candidate_knowledge_id "
+             f"WHERE v.datasource_id = '{data_source_id}' "
+             f"AND v.external_id LIKE '%:{source_file_id}' AND k.deleted_at IS NULL")
+    proof = weknora_sql_json(container, query)
+    if (proof.get("state") != "published" or proof.get("parse") != "completed" or
+            proof.get("enabled") != "enabled" or not proof.get("desired_etag") or
+            proof.get("visible_etag") != proof.get("desired_etag") or
+            proof.get("ready_chunks", 0) < 1 or proof.get("enabled_embeddings", 0) < 1):
+        raise AssertionError("applied watermark lacks a ready indexed candidate")
+
+
+def verify_deleted_visibility(container, data_source_id, source_file_id):
+    query = ("SELECT jsonb_build_object("
+             "'state', v.state, 'candidate_id', v.candidate_knowledge_id, "
+             "'visible_count', (SELECT COUNT(*) FROM knowledges k "
+             "WHERE k.metadata->>'datasource_id' = v.datasource_id "
+             "AND k.metadata->>'external_id' = v.external_id "
+             "AND k.deleted_at IS NULL AND k.metadata->>'nextcloud_etag' <> '')) "
+             "FROM nextcloud_source_versions v "
+             f"WHERE v.datasource_id = '{data_source_id}' "
+             f"AND v.external_id LIKE '%:{source_file_id}'")
+    proof = weknora_sql_json(container, query)
+    if proof.get("state") != "tombstone" or proof.get("candidate_id") or proof.get("visible_count") != 0:
+        raise AssertionError("delete applied watermark lacks a hidden tombstone")
 
 
 def load_env_file(path):
@@ -285,7 +338,15 @@ def main():
                         help="also wait up to 120 seconds for WeKnora queue acceptance")
     parser.add_argument("--expect-applied", action="store_true",
                         help="require both real WeKnora and Nextcloud applied checkpoints")
+    parser.add_argument("--verify-index", action="store_true",
+                        help="verify a ready chunk and embedding, then deletion tombstone, in local PostgreSQL")
+    parser.add_argument("--weknora-db-container",
+                        help="explicit local WeKnora PostgreSQL container for --verify-index")
     args = parser.parse_args()
+    if args.verify_index and (not args.expect_applied or
+            not isinstance(args.weknora_db_container, str) or
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", args.weknora_db_container)):
+        parser.error("--verify-index requires --expect-applied and a local --weknora-db-container")
     try:
         data_source_id = str(uuid.UUID(args.data_source_id))
         weknora_base = local_origin(args.weknora_base_url, "--weknora-base-url")
@@ -385,6 +446,8 @@ def main():
             wait_for_applied(weknora_base, source_url, source_admin, event_url,
                              cloud_admin, csrf, event_id, compose_dir, env_file, job_id)
             probe_applied = True
+            if args.verify_index:
+                verify_published_index(args.weknora_db_container, data_source_id, source_file_id)
     finally:
         cleanup_errors = []
         if created_file:
@@ -399,6 +462,8 @@ def main():
                                      cloud_admin, csrf, delete_id, compose_dir, env_file, job_id)
                     wait_for_applied(weknora_base, source_url, source_admin, event_url,
                                      cloud_admin, csrf, delete_id, compose_dir, env_file, job_id)
+                    if args.verify_index:
+                        verify_deleted_visibility(args.weknora_db_container, data_source_id, source_file_id)
             except Exception as error:
                 cleanup_errors.append(error)
         if paired_source and not paired_cloud and connection_id is not None:
@@ -446,6 +511,8 @@ def main():
         result += "; WeKnora full-source sync accepted into queue"
     if args.expect_applied:
         result += "; probe upsert and cleanup delete applied on both sides"
+    if args.verify_index:
+        result += "; ready chunk, embedding and deletion tombstone checked"
     print(f"local event pipeline smoke passed: {result}")
 
 

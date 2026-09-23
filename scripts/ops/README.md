@@ -195,7 +195,9 @@ python3 scripts/ops/local-event-pipeline-smoke.py \
   --dav-folder-url http://127.0.0.1:18082/remote.php/dav/files/devadmin/YOUR_SYNTHETIC_BINDING_ID \
   --weknora-base-url http://127.0.0.1:18086 \
   --receiver-origin http://wkprobe-app:8080 \
-  --expect-applied
+  --expect-applied \
+  --verify-index \
+  --weknora-db-container YOUR_ISOLATED_WEKNORA_POSTGRES_CONTAINER
 ```
 
 The Nextcloud development stack must allow the exact receiver origin in
@@ -208,6 +210,14 @@ created. It does not assume either watermark begins at zero. A timeout reports
 checkpoint IDs and Nextcloud's bounded applied error code. `--compose-directory`
 and `--env-file` may point at the running Nextcloud checkout when the script
 runs from a separate worktree.
+
+`--verify-index` is an additional read-only PostgreSQL assertion for this
+synthetic text probe. After the upsert watermark, it requires one published
+current-ETag candidate with a ready chunk and enabled embedding. After the
+delete watermark, it requires a tombstone and zero visible candidates. Pass
+the exact disposable WeKnora PostgreSQL container name; the probe never
+changes its database. This checks one local index backend, not every format
+or the enterprise user's retrieval permission.
 
 ## Local event connection probe
 
