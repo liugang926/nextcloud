@@ -114,10 +114,14 @@ UUIDs without secrets. No existing binding or KB is selected for deletion.
 path for a newly paired source that has never admitted a sync, event connection,
 file or chunk. Run only after both **disposable** stacks have the decommission
 routes and migrations. The WeKnora app must share the isolated Nextcloud
-container's network and start with `WEKNORA_NEXTCLOUD_DEV_HTTP=1` and its exact
-`http://<isolated-nextcloud-container-name>` origin in
+container's network and start with `WEKNORA_NEXTCLOUD_DEV_HTTP=1` and the exact
+`http://127.0.0.1:18089` loopback relay origin in
 `WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS`. The script checks Compose labels, host
-ports, the shared network and the allowlist before creating fixtures.
+ports, the shared network and the allowlist before creating fixtures. The
+relay runs in the isolated WeKnora app's network namespace, forwards to the
+verified unique Nextcloud container with HTTP Host `nextcloud`, and injects no
+fault. `python:3.12-alpine` must already exist locally; the script never pulls
+an image.
 
 ```sh
 WEKNORA_TEST_ADMIN_EMAIL=YOUR_ISOLATED_WK_ADMIN \
@@ -127,7 +131,8 @@ python3 scripts/ops/local-empty-source-decommission-smoke.py \
   --weknora-origin http://127.0.0.1:YOUR_ISOLATED_WK_PORT \
   --nextcloud-env-file /path/to/isolated-nextcloud/.env \
   --nextcloud-compose-project YOUR_ISOLATED_NC_PROJECT \
-  --weknora-compose-project YOUR_ISOLATED_WK_PROJECT
+  --weknora-compose-project YOUR_ISOLATED_WK_PROJECT \
+  --relay-port 18089
 ```
 
 The script creates a unique empty WebDAV folder, binding, and dedicated empty
@@ -138,7 +143,8 @@ WeKnora ACK is retried only with the same UUID. An uncertain pair or ACK keeps
 the fixture and prints its IDs for recovery. After verified finalization, the
 script removes only its empty WebDAV folder. The dedicated WeKnora KB, paused
 source and immutable pair/decommission records remain as audit evidence in the
-**disposable** stack; discard that stack after review. It never operates on a
+**disposable** stack; discard that stack after review. The relay is removed in
+`finally`, including on a failed assertion. It never operates on a
 previously paired source or uses database row deletion to bypass retirement.
 
 ### Rotate an active source credential

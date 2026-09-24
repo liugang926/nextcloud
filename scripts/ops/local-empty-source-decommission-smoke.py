@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import runpy
 import secrets
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -41,6 +42,8 @@ origin = _abort["origin"]
 env_file_values = _abort["env_file_values"]
 compose_container = _abort["compose_container"]
 inspect = _abort["inspect"]
+require_isolated_containers = _abort["require_isolated_containers"]
+start_relay = _abort["start_relay"]
 SAFE_PROJECT = _abort["SAFE_PROJECT"]
 SHARED_PROJECTS = _abort["SHARED_PROJECTS"]
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -60,31 +63,6 @@ def object_row(status, body, key, stage):
 def same_fields(row, expected, names, stage):
     if any(row.get(name) != expected.get(name) for name in names):
         raise RuntimeError(f"{stage}: operation identity changed")
-
-
-def require_isolated_stacks(nc_info, wk_info, nc_port, wk_port):
-    nc_ports = nc_info["NetworkSettings"]["Ports"].get("80/tcp") or []
-    if not any(int(item["HostPort"]) == nc_port for item in nc_ports):
-        raise RuntimeError("Nextcloud origin is not this isolated container")
-    if not any(int(item["HostPort"]) == wk_port
-               for mappings in wk_info["NetworkSettings"]["Ports"].values()
-               for item in (mappings or [])):
-        raise RuntimeError("WeKnora origin is not this isolated container")
-    nc_networks = nc_info["NetworkSettings"]["Networks"]
-    wk_networks = wk_info["NetworkSettings"]["Networks"]
-    shared = {name for name in set(nc_networks) & set(wk_networks)
-              if nc_networks[name].get("NetworkID") and
-              nc_networks[name]["NetworkID"] == wk_networks[name].get("NetworkID")}
-    hostname = nc_info.get("Name", "").lstrip("/")
-    if (not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", hostname) or
-            not any(hostname in (nc_networks[name].get("Aliases") or []) for name in shared)):
-        raise RuntimeError("WeKnora cannot resolve this unique isolated Nextcloud container")
-    machine_origin = "http://" + hostname
-    env = dict(item.split("=", 1) for item in wk_info["Config"]["Env"] if "=" in item)
-    allowed = {item.strip() for item in env.get("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", "").split(",")}
-    if env.get("WEKNORA_NEXTCLOUD_DEV_HTTP") != "1" or machine_origin not in allowed:
-        raise RuntimeError("isolated WeKnora has not approved the exact machine origin")
-    return machine_origin
 
 
 def empty_dav_folder(opener, url, headers):
@@ -111,6 +89,10 @@ def main():
     parser.add_argument("--nextcloud-compose-project", required=True)
     parser.add_argument("--weknora-compose-project", required=True)
     parser.add_argument("--weknora-app-service", default="app")
+    parser.add_argument("--relay-port", type=int, default=18089,
+                        help="exact loopback port approved by isolated WeKnora (default: 18089)")
+    parser.add_argument("--relay-image", default="python:3.12-alpine",
+                        help="locally installed Python image; never pulled")
     args = parser.parse_args()
     try:
         nc_origin = origin(args.nextcloud_origin)
@@ -124,6 +106,10 @@ def main():
         parser.error("provide distinct Compose projects")
     if not SAFE_PROJECT.fullmatch(args.weknora_app_service):
         parser.error("invalid WeKnora app service name")
+    if not 1024 <= args.relay_port <= 65535:
+        parser.error("--relay-port must be an unprivileged TCP port")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,127}", args.relay_image):
+        parser.error("invalid relay image name")
     env_path = Path(args.nextcloud_env_file)
     if not env_path.is_file():
         parser.error("isolated Nextcloud env file does not exist")
@@ -132,9 +118,13 @@ def main():
     password = values.get("NEXTCLOUD_ADMIN_PASSWORD")
     if not owner or not password:
         parser.error("isolated Nextcloud env file lacks administrator login")
-    nc_info = inspect(compose_container(args.nextcloud_compose_project, "nextcloud"))
-    wk_info = inspect(compose_container(args.weknora_compose_project, args.weknora_app_service))
-    machine_origin = require_isolated_stacks(nc_info, wk_info, nc_origin.port, wk_origin.port)
+    nc_container = compose_container(args.nextcloud_compose_project, "nextcloud")
+    wk_container = compose_container(args.weknora_compose_project, args.weknora_app_service)
+    nc_info = inspect(nc_container)
+    wk_info = inspect(wk_container)
+    upstream_host = require_isolated_containers(nc_info, wk_info, nc_origin.port,
+                                                wk_origin.port, args.relay_port)
+    machine_origin = f"http://127.0.0.1:{args.relay_port}"
 
     nc_base = args.nextcloud_origin
     wk_base = args.weknora_origin
@@ -157,9 +147,12 @@ def main():
     wrong_op = str(uuid.uuid4())
     owned_folder = owned_binding = owned_kb = finalized = False
     cleanup_failed = passed = False
+    relay_name = None
     kb_id = source_id = machine_token = key_id = None
     stage = "create empty fixtures"
     try:
+        relay_name = start_relay(wk_container, binding, pair_op, args.relay_port,
+                                 args.relay_image, upstream_host, no_fault=True)
         status, _ = request(machine, folder_url, "MKCOL", dav_headers)
         expect(status, 201, "create owned empty folder")
         owned_folder = True
@@ -332,14 +325,24 @@ def main():
                     cleanup_failed = True
             except Exception:
                 cleanup_failed = True
+        if relay_name is not None:
+            try:
+                result = subprocess.run(["docker", "rm", "-f", relay_name],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        timeout=20, check=False)
+                if result.returncode:
+                    cleanup_failed = True
+            except Exception:
+                cleanup_failed = True
         if owned_binding or owned_folder or owned_kb:
             print(f"owned fixture: binding={binding} kb={kb_id or 'uncreated'} "
                   f"source={source_id or 'uncreated'} pair_operation={pair_op} "
                   f"decommission_operation={decom_op} stage={stage} "
-                  f"finalized={str(finalized).lower()}; discard the disposable stacks after review",
+                  f"finalized={str(finalized).lower()} relay={relay_name or 'none'}; "
+                  "discard the disposable stacks after review",
                   file=sys.stderr)
     if cleanup_failed:
-        raise RuntimeError("owned empty folder cleanup was incomplete")
+        raise RuntimeError("owned fixture or relay cleanup was incomplete")
     if passed:
         print("empty-source decommission smoke passed: exact ACK, retired credential, paused tombstone")
 

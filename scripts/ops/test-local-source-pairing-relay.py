@@ -109,6 +109,43 @@ class RelayTest(unittest.TestCase):
             relay.server_close()
             upstream.server_close()
 
+    def test_no_fault_mode_forwards_exact_commit_without_injection(self):
+        forwarded = []
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                forwarded.append((self.path, body, self.headers.get("Host")))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        relay = load_relay().make_server("owned-binding", "owned-op", 0,
+                                         "127.0.0.1", upstream.server_port,
+                                         inject_commit_fault=False)
+        for server in (upstream, relay):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{relay.server_port}"
+        path = "/index.php/apps/integration_weknora/api/v1/bindings/owned-binding/source-pairing/commit"
+        body = b'{"operation_id":"owned-op"}'
+        try:
+            for _ in range(2):
+                req = urllib.request.Request(base + path, data=body, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+            with urllib.request.urlopen(base + "/__relay_health", timeout=5) as response:
+                self.assertEqual(json.load(response), {"ready": True, "blocked": False})
+            self.assertEqual(forwarded, [(path, body, "nextcloud"), (path, body, "nextcloud")])
+        finally:
+            relay.shutdown()
+            upstream.shutdown()
+            relay.server_close()
+            upstream.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

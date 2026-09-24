@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot local fault relay for local-source-pairing-abort-smoke.py.
+"""Loopback relay for isolated source-pairing and decommission probes.
 
 Run only in a disposable WeKnora app container's network namespace. The
 listener is loopback-only, forwards to the verified isolated Nextcloud
@@ -21,7 +21,8 @@ MAX_BODY = 1 << 20
 MAX_RESPONSE = 4 << 20
 
 
-def make_server(binding, operation_id, port, upstream_host, upstream_port=80):
+def make_server(binding, operation_id, port, upstream_host, upstream_port=80,
+                inject_commit_fault=True):
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", upstream_host):
         raise ValueError("invalid isolated upstream container name")
     commit_path = f"{API}/bindings/{binding}/source-pairing/commit"
@@ -56,7 +57,7 @@ def make_server(binding, operation_id, port, upstream_host, upstream_port=80):
                 self.reply(413, b"{}")
                 return
             body = self.rfile.read(size)
-            if self.command == "POST" and self.path == commit_path:
+            if inject_commit_fault and self.command == "POST" and self.path == commit_path:
                 try:
                     operation = json.loads(body).get("operation_id")
                 except (ValueError, AttributeError):
@@ -101,9 +102,14 @@ def make_server(binding, operation_id, port, upstream_host, upstream_port=80):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binding", required=True)
-    parser.add_argument("--operation-id", required=True)
+    parser.add_argument("--binding")
+    parser.add_argument("--operation-id")
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--upstream-host", required=True)
+    parser.add_argument("--no-fault", action="store_true",
+                        help="forward every request; required for decommission smoke")
     args = parser.parse_args()
-    make_server(args.binding, args.operation_id, args.port, args.upstream_host).serve_forever()
+    if not args.no_fault and (not args.binding or not args.operation_id):
+        parser.error("--binding and --operation-id are required for fault injection")
+    make_server(args.binding or "", args.operation_id or "", args.port, args.upstream_host,
+                inject_commit_fault=not args.no_fault).serve_forever()

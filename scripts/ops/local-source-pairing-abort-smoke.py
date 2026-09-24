@@ -114,14 +114,18 @@ def relay_health(name, port):
     return json.loads(docker("exec", name, "python3", "-c", code))
 
 
-def start_relay(wk_container, binding, operation_id, port, image, upstream_host):
-    name = "nc-pair-abort-" + secrets.token_hex(6)
+def start_relay(wk_container, binding, operation_id, port, image, upstream_host,
+                no_fault=False):
+    name = ("nc-decom-" if no_fault else "nc-pair-abort-") + secrets.token_hex(6)
     source = base64.b64encode(RELAY_SCRIPT.read_bytes()).decode("ascii")
     code = f"import base64;exec(compile(base64.b64decode('{source}'),'/relay.py','exec'))"
+    relay_args = ["--binding", binding, "--operation-id", operation_id,
+                  "--port", str(port), "--upstream-host", upstream_host]
+    if no_fault:
+        relay_args.append("--no-fault")
     docker("run", "--rm", "-d", "--pull=never", "--name", name,
            "--network", f"container:{wk_container}", image, "python3", "-c", code,
-           "--binding", binding, "--operation-id", operation_id, "--port", str(port),
-           "--upstream-host", upstream_host)
+           *relay_args)
     try:
         for _ in range(25):
             try:
