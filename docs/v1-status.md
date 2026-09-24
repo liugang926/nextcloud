@@ -76,6 +76,18 @@ administrator, 403 to a non-administrator and 401 anonymously. The source
 retained two published, parse-completed candidates. This is one scoped event
 case, not the PRD's 10,000-file/100-GB or P95 latency acceptance.
 
+A disposable paired pilot harness now measures bulk sync and event-to-durable
+queue admission with explicit small and large fixture controls. Its final
+reduced run synchronized two 256-byte files in 0.335 seconds and observed
+three independent event-to-queue intervals of 6,073.6, 5,069.7 and 5,266.1
+milliseconds; all three reached the applied watermark. Nearest-rank P95 for
+these **three** samples was 6,073.6 ms. Five samples saw a 343,703,552-byte
+WeKnora process RSS peak. This is a tiny, sequential, synthetic check of the
+measurement path, not acceptance of the 10,000-file/100-GB, sustained P95,
+upload-latency or connector-memory targets. The two pilot projects and their
+private credentials were removed after recording a credential-free report;
+see [pilot load runbook](../scripts/ops/PILOT-load.md).
+
 The acceptance scripts now require a fresh, attribute-limited LDAP topology
 export before claiming a synthetic primary-group or nested-group case. A
 separate loopback-only probe checks GUID/UID mapping conflicts, and a watcher
