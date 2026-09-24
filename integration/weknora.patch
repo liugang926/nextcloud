@@ -644,6 +644,46 @@ index 00000000..eedc64e0
 +Migration `000111` for PostgreSQL and `000030` for SQLite backfill the flag from current and soft-deleted data sources and knowledge rows. **A source and all of its knowledge rows that were hard-deleted before this migration leave no reliable provenance to backfill.** Operators should inspect such older knowledge bases and remove or quarantine their derived Wiki pages and shares before enabling access. Subsequent Nextcloud source creation is covered by the transaction-backed flag.
 +
 +Knowledge bases with this flag are conservatively ineligible for cross-knowledge-base copies, organization KB shares, shared agents, and Wiki reads/generation. Ordinary knowledge bases retain these features.
+diff --git a/docs/nextcloud-source-revisions.md b/docs/nextcloud-source-revisions.md
+new file mode 100644
+index 00000000..e6ba9870
+--- /dev/null
++++ b/docs/nextcloud-source-revisions.md
+@@ -0,0 +1,34 @@
++# Nextcloud local source revision observations
++
++Migration 126 (PostgreSQL) / 45 (SQLite) preserves each committed mutation of
++`nextcloud_source_versions` in `nextcloud_source_revisions`. The source key is
++`(tenant_id, knowledge_base_id, datasource_id, external_id)` and `revision` is
++a per-key, increasing **local observation sequence**. Each observation stores
++the desired ETag, candidate knowledge ID, staging/published/tombstone state,
++source-row update time and ledger record time. These fields contain neither
++document bodies nor credentials.
++
++The migration copies each existing mutable row once at revision 1 with
++`legacy_history_unknown = true`. Earlier candidates, ETags, tombstones and
++other copies cannot be reconstructed. The flag remains true on later
++observations for that source. Sources first observed after migration start at
++revision 1 with the flag false. This only means the local version-row history
++is observed from creation; it does **not** prove a complete external copy
++inventory.
++
++Database triggers append in the same transaction as each current-row INSERT
++or UPDATE, including UPSERT conflict updates. They reject current-row key
++changes and deletion, ledger UPDATE/DELETE, and PostgreSQL TRUNCATE. A failed
++write rolls back its observation. PostgreSQL row locks and SQLite's single
++writer serialize competing writes for a source. State changes may produce
++multiple observations with the same ETag. The sequence is not a content hash,
++approved publication generation, or proof that every vector, graph, Wiki,
++resource or backup copy is known.
++
++PostgreSQL migration 125's indexed withdrawal fence still blocks subsequent
++source-version writes. This ledger does not change `inventory_complete=false`,
++authorize GC, produce a Nextcloud acknowledgement, or retire a signing key.
++It does not implement the PRD's full `document_revision` state machine,
++90-day retention policy, recovery-copy policy, or physical cleanup. Both down
++migrations intentionally fail closed; automatic rollback would destroy the
++only retained local history.
 diff --git a/internal/agent/tools/list_documents.go b/internal/agent/tools/list_documents.go
 index 24b2bede..f8e906fa 100644
 --- a/internal/agent/tools/list_documents.go
@@ -6679,6 +6719,459 @@ index 00000000..35c5f3de
 +		require.Equal(t, want, got, id)
 +	}
 +	require.Error(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source = 0 WHERE id = 'source'").Error)
++}
+diff --git a/internal/application/repository/nextcloud_revisions_pg_test.go b/internal/application/repository/nextcloud_revisions_pg_test.go
+new file mode 100644
+index 00000000..fe895e03
+--- /dev/null
++++ b/internal/application/repository/nextcloud_revisions_pg_test.go
+@@ -0,0 +1,254 @@
++package repository
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++	"net/url"
++	"os"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/google/uuid"
++	_ "github.com/jackc/pgx/v5/stdlib"
++	"github.com/stretchr/testify/require"
++)
++
++func TestPostgresNextcloudSourceRevisionUpgradeAndIndexedFence(t *testing.T) {
++	dsn := os.Getenv("WEKNORA_REVISION_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set WEKNORA_REVISION_TEST_POSTGRES_DSN for disposable PostgreSQL")
++	}
++	admin, err := sql.Open("pgx", dsn)
++	require.NoError(t, err)
++	defer admin.Close()
++	schema := "source_revisions_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
++	_, err = admin.Exec(`CREATE SCHEMA "` + schema + `"`)
++	require.NoError(t, err)
++	defer admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
++	u, err := url.Parse(dsn)
++	require.NoError(t, err)
++	q := u.Query()
++	q.Set("search_path", schema)
++	u.RawQuery = q.Encode()
++	db, err := sql.Open("pgx", u.String())
++	require.NoError(t, err)
++	defer db.Close()
++	db.SetMaxOpenConns(12)
++	_, err = db.Exec(`CREATE TABLE nextcloud_source_pairings (
++		operation_id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL,
++		datasource_id TEXT NOT NULL);
++		CREATE TABLE knowledge_bases (id TEXT PRIMARY KEY);
++		CREATE TABLE data_sources (id TEXT PRIMARY KEY, status TEXT NOT NULL);
++		CREATE TABLE knowledges (knowledge_base_id TEXT);
++		CREATE TABLE chunks (knowledge_base_id TEXT);
++		CREATE TABLE sync_logs (data_source_id TEXT);
++		CREATE TABLE nextcloud_event_connections (datasource_id TEXT);
++		INSERT INTO nextcloud_source_pairings VALUES ('pair', 'kb', 'ds');
++		INSERT INTO knowledge_bases VALUES ('kb');
++		INSERT INTO data_sources VALUES ('ds', 'active')`)
++	require.NoError(t, err)
++	for _, number := range []string{"000112_nextcloud_source_versions.up.sql"} {
++		script, readErr := os.ReadFile("../../../migrations/versioned/" + number)
++		require.NoError(t, readErr)
++		_, err = db.Exec(string(script))
++		require.NoError(t, err, number)
++	}
++	_, err = db.Exec(`INSERT INTO nextcloud_source_versions
++		(tenant_id, knowledge_base_id, datasource_id, external_id,
++		 desired_etag, candidate_knowledge_id, state)
++		VALUES (7, 'kb', 'ds', 'legacy', 'old-etag', 'old-candidate', 'published')`)
++	require.NoError(t, err)
++	// Run the migration chain on the same disposable schema; migration 124
++	// invalidates virgin proofs, and 125 installs the indexed-write fence.
++	for _, number := range []string{
++		"000123_nextcloud_empty_decommission.up.sql",
++		"000124_nextcloud_virgin_rebuild_guard.up.sql",
++		"000125_nextcloud_indexed_withdrawal.up.sql",
++	} {
++		script, readErr := os.ReadFile("../../../migrations/versioned/" + number)
++		require.NoError(t, readErr)
++		_, err = db.Exec(string(script))
++		require.NoError(t, err, number)
++	}
++	// A writer that started before the migration must be in its backfill;
++	// a writer queued after the migration lock must instead hit its trigger.
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++	inflight, err := db.Begin()
++	require.NoError(t, err)
++	var migrationConn, queuedConn *sql.Conn
++	defer func() {
++		// A failed assertion can leave both operations waiting on inflight.
++		// Release that row/table lock before closing their connections.
++		_ = inflight.Rollback()
++		if queuedConn != nil {
++			_ = queuedConn.Close()
++		}
++		if migrationConn != nil {
++			_ = migrationConn.Close()
++		}
++	}()
++	_, err = inflight.Exec(`UPDATE nextcloud_source_versions
++		SET desired_etag = 'pre-lock-etag', candidate_knowledge_id = 'pre-lock-candidate'
++		WHERE external_id = 'legacy'`)
++	require.NoError(t, err)
++	migrationConn, err = db.Conn(ctx)
++	require.NoError(t, err)
++	var migrationPID int
++	require.NoError(t, migrationConn.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&migrationPID))
++	script, err := os.ReadFile("../../../migrations/versioned/000126_nextcloud_source_revisions.up.sql")
++	require.NoError(t, err)
++	migrationDone := make(chan error, 1)
++	go func() {
++		_, migrationErr := migrationConn.ExecContext(ctx, string(script))
++		migrationDone <- migrationErr
++	}()
++	waitForNextcloudPGMigrationLock(t, db, migrationPID)
++	queuedConn, err = db.Conn(ctx)
++	require.NoError(t, err)
++	var queuedPID int
++	require.NoError(t, queuedConn.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&queuedPID))
++	queuedDone := make(chan error, 1)
++	go func() {
++		_, writeErr := queuedConn.ExecContext(ctx, `UPDATE nextcloud_source_versions
++			SET desired_etag = 'post-lock-etag', candidate_knowledge_id = 'post-lock-candidate'
++			WHERE external_id = 'legacy'`)
++		queuedDone <- writeErr
++	}()
++	waitForNextcloudPGMigrationLock(t, db, queuedPID)
++	require.NoError(t, inflight.Commit())
++	select {
++	case err = <-migrationDone:
++		require.NoError(t, err)
++	case <-time.After(5 * time.Second):
++		t.Fatal("source revision migration did not acquire its queued table lock")
++	}
++	select {
++	case err = <-queuedDone:
++		require.NoError(t, err)
++	case <-time.After(5 * time.Second):
++		t.Fatal("source writer did not resume after migration")
++	}
++	var revision int64
++	var unknown bool
++	var etag, candidate, state string
++	require.NoError(t, db.QueryRow(`SELECT revision, desired_etag, candidate_knowledge_id,
++		state, legacy_history_unknown FROM nextcloud_source_revisions
++		WHERE external_id = 'legacy' AND revision = 1`).Scan(&revision, &etag, &candidate, &state, &unknown))
++	require.Equal(t, int64(1), revision)
++	require.Equal(t, "pre-lock-etag", etag)
++	require.Equal(t, "pre-lock-candidate", candidate)
++	require.Equal(t, "published", state)
++	require.True(t, unknown)
++	require.NoError(t, db.QueryRow(`SELECT revision, desired_etag, candidate_knowledge_id,
++		legacy_history_unknown FROM nextcloud_source_revisions
++		WHERE external_id = 'legacy' ORDER BY revision DESC LIMIT 1`).
++		Scan(&revision, &etag, &candidate, &unknown))
++	require.Equal(t, int64(2), revision)
++	require.Equal(t, "post-lock-etag", etag)
++	require.Equal(t, "post-lock-candidate", candidate)
++	require.True(t, unknown)
++	_, err = db.Exec(`UPDATE nextcloud_source_versions SET desired_etag = 'new-etag',
++		candidate_knowledge_id = 'new-candidate', state = 'staging' WHERE external_id = 'legacy'`)
++	require.NoError(t, err)
++	require.NoError(t, db.QueryRow(`SELECT revision, legacy_history_unknown
++		FROM nextcloud_source_revisions WHERE external_id = 'legacy'
++		ORDER BY revision DESC LIMIT 1`).Scan(&revision, &unknown))
++	require.Equal(t, int64(3), revision)
++	require.True(t, unknown)
++
++	const writers = 8
++	var wg sync.WaitGroup
++	errors := make(chan error, writers)
++	for i := 0; i < writers; i++ {
++		wg.Add(1)
++		go func(i int) {
++			defer wg.Done()
++			_, writeErr := db.Exec(`INSERT INTO nextcloud_source_versions
++				(tenant_id, knowledge_base_id, datasource_id, external_id,
++				 desired_etag, candidate_knowledge_id, state)
++				VALUES (7, 'kb', 'ds', 'concurrent', $1, $2, 'staging')
++				ON CONFLICT (tenant_id, knowledge_base_id, datasource_id, external_id)
++				DO UPDATE SET desired_etag = excluded.desired_etag,
++				candidate_knowledge_id = excluded.candidate_knowledge_id,
++				state = excluded.state`, fmt.Sprintf("etag-%d", i), fmt.Sprintf("candidate-%d", i))
++			errors <- writeErr
++		}(i)
++	}
++	wg.Wait()
++	close(errors)
++	for err := range errors {
++		require.NoError(t, err)
++	}
++	var count, maxRevision int64
++	require.NoError(t, db.QueryRow(`SELECT COUNT(*), MAX(revision)
++		FROM nextcloud_source_revisions WHERE external_id = 'concurrent'`).Scan(&count, &maxRevision))
++	require.Equal(t, int64(writers), count)
++	require.Equal(t, int64(writers), maxRevision)
++	require.NoError(t, db.QueryRow(`SELECT desired_etag, candidate_knowledge_id, state
++		FROM nextcloud_source_revisions WHERE external_id = 'concurrent'
++		ORDER BY revision DESC LIMIT 1`).Scan(&etag, &candidate, &state))
++	var currentETag, currentCandidate, currentState string
++	require.NoError(t, db.QueryRow(`SELECT desired_etag, candidate_knowledge_id, state
++		FROM nextcloud_source_versions WHERE external_id = 'concurrent'`).
++		Scan(&currentETag, &currentCandidate, &currentState))
++	require.Equal(t, []string{etag, candidate, state},
++		[]string{currentETag, currentCandidate, currentState})
++
++	_, err = db.Exec(`UPDATE nextcloud_source_revisions SET desired_etag = 'forged'
++		WHERE external_id = 'legacy'`)
++	require.Error(t, err)
++	_, err = db.Exec(`TRUNCATE nextcloud_source_revisions`)
++	require.ErrorContains(t, err, "nextcloud_source_revision_immutable")
++	_, err = db.Exec(`TRUNCATE nextcloud_source_versions`)
++	require.ErrorContains(t, err, "nextcloud_source_revision_immutable")
++	_, err = db.Exec(`DELETE FROM nextcloud_source_versions WHERE external_id = 'legacy'`)
++	require.Error(t, err)
++	_, err = db.Exec(`UPDATE nextcloud_source_versions SET external_id = 'moved'
++		WHERE external_id = 'legacy'`)
++	require.Error(t, err)
++
++	tx, err := db.Begin()
++	require.NoError(t, err)
++	_, err = tx.Exec(`UPDATE nextcloud_source_versions SET state = 'published'
++		WHERE external_id = 'legacy'`)
++	require.NoError(t, err)
++	require.NoError(t, tx.Rollback())
++	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM nextcloud_source_revisions
++		WHERE external_id = 'legacy'`).Scan(&count))
++	require.Equal(t, int64(3), count)
++
++	_, err = db.Exec(`INSERT INTO nextcloud_indexed_withdrawals
++		(operation_id, pair_operation_id, tenant_id, knowledge_base_id,
++		 datasource_id, nextcloud_instance_id, binding_id, publication_epoch, key_id)
++		VALUES ('withdrawal', 'pair', 7, 'kb', 'ds', 'instance', 'binding', 0, 'key')`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE nextcloud_source_versions SET state = 'published'
++		WHERE external_id = 'legacy'`)
++	require.ErrorContains(t, err, "nextcloud_indexed_source_withdrawn")
++	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM nextcloud_source_revisions
++		WHERE external_id = 'legacy'`).Scan(&count))
++	require.Equal(t, int64(3), count,
++		"the indexed write fence rejects the source mutation before ledger append")
++	down, err := os.ReadFile("../../../migrations/versioned/000126_nextcloud_source_revisions.down.sql")
++	require.NoError(t, err)
++	_, err = db.Exec(string(down))
++	require.ErrorContains(t, err, "nextcloud_source_revision_rollback_requires_audit_export")
++	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM nextcloud_source_revisions
++		WHERE external_id = 'legacy'`).Scan(&count))
++	require.Equal(t, int64(3), count)
++}
++
++func waitForNextcloudPGMigrationLock(t *testing.T, db *sql.DB, pid int) {
++	t.Helper()
++	require.Eventually(t, func() bool {
++		var event sql.NullString
++		err := db.QueryRow(`SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`, pid).
++			Scan(&event)
++		return err == nil && event.Valid && event.String == "Lock"
++	}, 5*time.Second, 10*time.Millisecond,
++		"backend %d did not wait for the migration/source table lock", pid)
++}
+diff --git a/internal/application/repository/nextcloud_revisions_test.go b/internal/application/repository/nextcloud_revisions_test.go
+new file mode 100644
+index 00000000..865f5ae2
+--- /dev/null
++++ b/internal/application/repository/nextcloud_revisions_test.go
+@@ -0,0 +1,187 @@
++package repository
++
++import (
++	"database/sql"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/google/uuid"
++	_ "github.com/mattn/go-sqlite3"
++	"github.com/stretchr/testify/require"
++)
++
++type nextcloudRevisionObservation struct {
++	Revision             int64
++	DesiredETag          string
++	CandidateKnowledgeID string
++	State                string
++	LegacyHistoryUnknown bool
++}
++
++func nextcloudRevisionSQLiteDB(t *testing.T) *sql.DB {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "revisions-"+uuid.NewString()+".db")
++	db, err := sql.Open("sqlite3", "file:"+path+"?_busy_timeout=5000&_journal_mode=WAL")
++	require.NoError(t, err)
++	db.SetMaxOpenConns(12)
++	t.Cleanup(func() { _ = db.Close() })
++	for _, name := range []string{
++		"000031_nextcloud_source_versions.up.sql",
++	} {
++		script, err := os.ReadFile("../../../migrations/sqlite/" + name)
++		require.NoError(t, err)
++		_, err = db.Exec(string(script))
++		require.NoError(t, err)
++	}
++	return db
++}
++
++func installNextcloudRevisionSQLite(t *testing.T, db *sql.DB) {
++	t.Helper()
++	script, err := os.ReadFile("../../../migrations/sqlite/000045_nextcloud_source_revisions.up.sql")
++	require.NoError(t, err)
++	_, err = db.Exec(string(script))
++	require.NoError(t, err)
++}
++
++func nextcloudRevisionRows(t *testing.T, db *sql.DB, externalID string) []nextcloudRevisionObservation {
++	t.Helper()
++	rows, err := db.Query(`SELECT revision, desired_etag, candidate_knowledge_id, state,
++		legacy_history_unknown FROM nextcloud_source_revisions
++		WHERE tenant_id = 7 AND knowledge_base_id = 'kb' AND datasource_id = 'ds'
++		AND external_id = ? ORDER BY revision`, externalID)
++	require.NoError(t, err)
++	defer rows.Close()
++	var observed []nextcloudRevisionObservation
++	for rows.Next() {
++		var row nextcloudRevisionObservation
++		require.NoError(t, rows.Scan(&row.Revision, &row.DesiredETag,
++			&row.CandidateKnowledgeID, &row.State, &row.LegacyHistoryUnknown))
++		observed = append(observed, row)
++	}
++	require.NoError(t, rows.Err())
++	return observed
++}
++
++func TestSQLiteNextcloudRevisionUpgradeAndMutationLedger(t *testing.T) {
++	db := nextcloudRevisionSQLiteDB(t)
++	_, err := db.Exec(`INSERT INTO nextcloud_source_versions
++		(tenant_id, knowledge_base_id, datasource_id, external_id,
++		 desired_etag, candidate_knowledge_id, state)
++		VALUES (7, 'kb', 'ds', 'legacy', 'old-etag', 'old-candidate', 'published')`)
++	require.NoError(t, err)
++	installNextcloudRevisionSQLite(t, db)
++	initial := nextcloudRevisionRows(t, db, "legacy")
++	require.Equal(t, []nextcloudRevisionObservation{{1, "old-etag", "old-candidate", "published", true}}, initial)
++
++	_, err = db.Exec(`INSERT INTO nextcloud_source_versions
++		(tenant_id, knowledge_base_id, datasource_id, external_id,
++		 desired_etag, candidate_knowledge_id, state)
++		VALUES (7, 'kb', 'ds', 'legacy', 'new-etag', 'new-candidate', 'staging')
++		ON CONFLICT (tenant_id, knowledge_base_id, datasource_id, external_id)
++		DO UPDATE SET desired_etag = excluded.desired_etag,
++		candidate_knowledge_id = excluded.candidate_knowledge_id, state = excluded.state`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE nextcloud_source_versions SET state = 'published'
++		WHERE external_id = 'legacy'`)
++	require.NoError(t, err)
++	_, err = db.Exec(`UPDATE nextcloud_source_versions SET desired_etag = '',
++		candidate_knowledge_id = '', state = 'tombstone' WHERE external_id = 'legacy'`)
++	require.NoError(t, err)
++	rows := nextcloudRevisionRows(t, db, "legacy")
++	require.Equal(t, []nextcloudRevisionObservation{
++		{1, "old-etag", "old-candidate", "published", true},
++		{2, "new-etag", "new-candidate", "staging", true},
++		{3, "new-etag", "new-candidate", "published", true},
++		{4, "", "", "tombstone", true},
++	}, rows)
++
++	_, err = db.Exec(`INSERT INTO nextcloud_source_versions
++		(tenant_id, knowledge_base_id, datasource_id, external_id,
++		 desired_etag, candidate_knowledge_id, state)
++		VALUES (7, 'kb', 'ds', 'new-source', 'etag-1', 'candidate-1', 'staging')`)
++	require.NoError(t, err)
++	require.Equal(t, []nextcloudRevisionObservation{
++		{1, "etag-1", "candidate-1", "staging", false},
++	}, nextcloudRevisionRows(t, db, "new-source"))
++
++	for _, statement := range []string{
++		`UPDATE nextcloud_source_revisions SET desired_etag = 'forged'`,
++		`DELETE FROM nextcloud_source_revisions`,
++		`DELETE FROM nextcloud_source_versions WHERE external_id = 'legacy'`,
++		`UPDATE nextcloud_source_versions SET external_id = 'moved' WHERE external_id = 'legacy'`,
++	} {
++		_, err = db.Exec(statement)
++		require.Error(t, err, statement)
++	}
++	require.Equal(t, rows, nextcloudRevisionRows(t, db, "legacy"))
++
++	tx, err := db.Begin()
++	require.NoError(t, err)
++	_, err = tx.Exec(`UPDATE nextcloud_source_versions SET state = 'staging' WHERE external_id = 'legacy'`)
++	require.NoError(t, err)
++	require.NoError(t, tx.Rollback())
++	require.Equal(t, rows, nextcloudRevisionRows(t, db, "legacy"),
++		"source mutation and ledger append must roll back together")
++	down, err := os.ReadFile("../../../migrations/sqlite/000045_nextcloud_source_revisions.down.sql")
++	require.NoError(t, err)
++	_, err = db.Exec(string(down))
++	require.ErrorContains(t, err, "rollback_requires_audit_export")
++	require.Equal(t, rows, nextcloudRevisionRows(t, db, "legacy"))
++}
++
++func TestSQLiteNextcloudRevisionConcurrentUpsertsStayMonotonic(t *testing.T) {
++	db := nextcloudRevisionSQLiteDB(t)
++	installNextcloudRevisionSQLite(t, db)
++	const writers = 8
++	var wg sync.WaitGroup
++	errors := make(chan error, writers)
++	for i := 0; i < writers; i++ {
++		wg.Add(1)
++		go func(i int) {
++			defer wg.Done()
++			for attempt := 0; attempt < 12; attempt++ {
++				_, err := db.Exec(`INSERT INTO nextcloud_source_versions
++					(tenant_id, knowledge_base_id, datasource_id, external_id,
++					 desired_etag, candidate_knowledge_id, state)
++					VALUES (7, 'kb', 'ds', 'concurrent', ?, ?, 'staging')
++					ON CONFLICT (tenant_id, knowledge_base_id, datasource_id, external_id)
++					DO UPDATE SET desired_etag = excluded.desired_etag,
++					candidate_knowledge_id = excluded.candidate_knowledge_id,
++					state = excluded.state`, fmt.Sprintf("etag-%d", i), fmt.Sprintf("candidate-%d", i))
++				if err == nil {
++					return
++				}
++				if !strings.Contains(err.Error(), "locked") && !strings.Contains(err.Error(), "busy") {
++					errors <- err
++					return
++				}
++				time.Sleep(time.Duration(attempt+1) * time.Millisecond)
++			}
++			errors <- fmt.Errorf("writer %d exhausted SQLite lock retries", i)
++		}(i)
++	}
++	wg.Wait()
++	close(errors)
++	for err := range errors {
++		require.NoError(t, err)
++	}
++	rows := nextcloudRevisionRows(t, db, "concurrent")
++	require.Len(t, rows, writers)
++	for i, row := range rows {
++		require.Equal(t, int64(i+1), row.Revision)
++		require.False(t, row.LegacyHistoryUnknown)
++	}
++	var desired, candidate, state string
++	require.NoError(t, db.QueryRow(`SELECT desired_etag, candidate_knowledge_id, state
++		FROM nextcloud_source_versions WHERE external_id = 'concurrent'`).
++		Scan(&desired, &candidate, &state))
++	require.Equal(t, rows[len(rows)-1].DesiredETag, desired)
++	require.Equal(t, rows[len(rows)-1].CandidateKnowledgeID, candidate)
++	require.Equal(t, rows[len(rows)-1].State, state)
 +}
 diff --git a/internal/application/repository/nextcloud_source_decommission.go b/internal/application/repository/nextcloud_source_decommission.go
 new file mode 100644
@@ -14095,7 +14588,7 @@ index 48620fad..c6fbfd4f 100644
  	// Run all pending migrations
  	logger.Infof(ctx, "Running pending migrations...")
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e515..00b5f576 100644
+index 9cc4e515..1ca1f714 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -14107,7 +14600,7 @@ index 9cc4e515..00b5f576 100644
  var versionedSQLiteTables = []string{
  	"memory_extraction_sessions",
  	"task_pending_ops",
-@@ -39,6 +39,15 @@ var versionedSQLiteTables = []string{
+@@ -39,6 +39,16 @@ var versionedSQLiteTables = []string{
  	"resource_access_policies",
  	"resource_group_grants",
  	"directory_permission_versions",
@@ -14120,15 +14613,57 @@ index 9cc4e515..00b5f576 100644
 +	"nextcloud_source_rotations",
 +	"nextcloud_source_pairing_aborts",
 +	"nextcloud_pair_rebuild_history",
++	"nextcloud_source_revisions",
  }
  
  // versionedSQLiteColumns maps each existing table to the columns that the
-@@ -63,7 +72,110 @@ var versionedSQLiteColumns = map[string][]string{
+@@ -63,7 +73,151 @@ var versionedSQLiteColumns = map[string][]string{
  	"directories":        {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 44
++const expectedSQLiteMigrationVersion = 45
++
++func TestSQLiteNextcloudRevisionUpgradeFrom43PreservesUnknownHistory(t *testing.T) {
++	repoRoot := sqliteRepoRoot(t)
++	legacyRoot := copySQLiteMigrationsThrough(t, repoRoot, 43)
++	chdirAndRestore(t, legacyRoot)
++	dbPath := filepath.Join(t.TempDir(), "source-revision-upgrade.db")
++	require.NoError(t, RunMigrationsWithOptions("sqlite3://unused", MigrationOptions{SQLiteDBPath: dbPath}))
++	db := openSQLiteDB(t, dbPath)
++	_, err := db.Exec(`INSERT INTO nextcloud_source_versions
++		(tenant_id, knowledge_base_id, datasource_id, external_id,
++		 desired_etag, candidate_knowledge_id, state)
++		VALUES (7, 'kb', 'ds', 'nextcloud:instance:77', 'etag-before-upgrade',
++		'candidate-before-upgrade', 'published')`)
++	require.NoError(t, err)
++
++	chdirAndRestore(t, repoRoot)
++	require.NoError(t, RunMigrationsWithOptions("sqlite3://unused", MigrationOptions{SQLiteDBPath: dbPath}))
++	version, dirty := sqliteMigrationState(t, db)
++	require.Equal(t, expectedSQLiteMigrationVersion, version)
++	require.False(t, dirty)
++	var revision, unknown int
++	var etag, candidate, state string
++	require.NoError(t, db.QueryRow(`SELECT revision, desired_etag, candidate_knowledge_id,
++		state, legacy_history_unknown FROM nextcloud_source_revisions
++		WHERE external_id = 'nextcloud:instance:77'`).Scan(&revision, &etag, &candidate, &state, &unknown))
++	require.Equal(t, 1, revision)
++	require.Equal(t, "etag-before-upgrade", etag)
++	require.Equal(t, "candidate-before-upgrade", candidate)
++	require.Equal(t, "published", state)
++	require.Equal(t, 1, unknown, "pre-migration candidates cannot be reconstructed")
++
++	_, err = db.Exec(`UPDATE nextcloud_source_versions SET desired_etag = 'etag-after-upgrade',
++		candidate_knowledge_id = 'candidate-after-upgrade', state = 'staging'
++		WHERE external_id = 'nextcloud:instance:77'`)
++	require.NoError(t, err)
++	require.NoError(t, db.QueryRow(`SELECT revision, legacy_history_unknown
++		FROM nextcloud_source_revisions WHERE external_id = 'nextcloud:instance:77'
++		ORDER BY revision DESC LIMIT 1`).Scan(&revision, &unknown))
++	require.Equal(t, 2, revision)
++	require.Equal(t, 1, unknown, "future observations retain the legacy gap marker")
++}
 +
 +func TestSQLiteVirginProofUpgradeWithExistingDecommissionStaysCleanAt42(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -14235,7 +14770,7 @@ index 9cc4e515..00b5f576 100644
  
  func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
  	repoRoot := sqliteRepoRoot(t)
-@@ -200,6 +312,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
+@@ -200,6 +354,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
  	require.True(t, sqliteColumnExists(t, db, "messages", "sandbox_checkpoint"))
  }
  
@@ -26253,6 +26788,104 @@ index 00000000..9749ba1f
 +WHEN NEW.status <> 'paused' AND EXISTS (
 +    SELECT 1 FROM nextcloud_indexed_withdrawals WHERE datasource_id = NEW.id)
 +BEGIN SELECT RAISE(ABORT, 'nextcloud_indexed_source_withdrawn'); END;
+diff --git a/migrations/sqlite/000045_nextcloud_source_revisions.down.sql b/migrations/sqlite/000045_nextcloud_source_revisions.down.sql
+new file mode 100644
+index 00000000..6fa3529c
+--- /dev/null
++++ b/migrations/sqlite/000045_nextcloud_source_revisions.down.sql
+@@ -0,0 +1,3 @@
++-- Automated rollback would erase an append-only provenance record. This
++-- deliberately fails until an operator exports and reconciles the history.
++SELECT * FROM nextcloud_source_revision_rollback_requires_audit_export;
+diff --git a/migrations/sqlite/000045_nextcloud_source_revisions.up.sql b/migrations/sqlite/000045_nextcloud_source_revisions.up.sql
+new file mode 100644
+index 00000000..ac9412e6
+--- /dev/null
++++ b/migrations/sqlite/000045_nextcloud_source_revisions.up.sql
+@@ -0,0 +1,83 @@
++-- Local source mutation observations only; legacy rows have unknown history.
++CREATE TABLE nextcloud_source_revisions (
++    tenant_id INTEGER NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL,
++    external_id TEXT NOT NULL,
++    revision INTEGER NOT NULL CHECK (revision > 0),
++    desired_etag TEXT NOT NULL,
++    candidate_knowledge_id TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('staging', 'published', 'tombstone')),
++    source_updated_at DATETIME NOT NULL,
++    recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    legacy_history_unknown INTEGER NOT NULL CHECK (legacy_history_unknown IN (0, 1)),
++    PRIMARY KEY (tenant_id, knowledge_base_id, datasource_id, external_id, revision)
++);
++
++INSERT INTO nextcloud_source_revisions (
++    tenant_id, knowledge_base_id, datasource_id, external_id, revision,
++    desired_etag, candidate_knowledge_id, state, source_updated_at,
++    legacy_history_unknown
++)
++SELECT tenant_id, knowledge_base_id, datasource_id, external_id, 1,
++       desired_etag, candidate_knowledge_id, state, updated_at, 1
++FROM nextcloud_source_versions;
++
++CREATE TRIGGER nextcloud_source_revision_immutable_update
++BEFORE UPDATE ON nextcloud_source_revisions
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_revision_immutable'); END;
++CREATE TRIGGER nextcloud_source_revision_immutable_delete
++BEFORE DELETE ON nextcloud_source_revisions
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_revision_immutable'); END;
++
++CREATE TRIGGER nextcloud_source_version_identity_update
++BEFORE UPDATE ON nextcloud_source_versions
++WHEN OLD.tenant_id IS NOT NEW.tenant_id
++  OR OLD.knowledge_base_id IS NOT NEW.knowledge_base_id
++  OR OLD.datasource_id IS NOT NEW.datasource_id
++  OR OLD.external_id IS NOT NEW.external_id
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_version_identity_immutable'); END;
++CREATE TRIGGER nextcloud_source_version_identity_delete
++BEFORE DELETE ON nextcloud_source_versions
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_version_identity_immutable'); END;
++CREATE TRIGGER nextcloud_source_version_history_missing
++BEFORE UPDATE ON nextcloud_source_versions
++WHEN NOT EXISTS (
++    SELECT 1 FROM nextcloud_source_revisions AS r
++    WHERE r.tenant_id = OLD.tenant_id AND r.knowledge_base_id = OLD.knowledge_base_id
++      AND r.datasource_id = OLD.datasource_id AND r.external_id = OLD.external_id
++)
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_revision_history_missing'); END;
++
++-- SQLite serializes writers, including conflicting UPSERTs. AFTER triggers
++-- observe the actual winning INSERT or UPDATE in the same transaction.
++CREATE TRIGGER nextcloud_source_revision_append_insert
++AFTER INSERT ON nextcloud_source_versions
++BEGIN
++    SELECT CASE WHEN EXISTS (
++        SELECT 1 FROM nextcloud_source_revisions AS r
++        WHERE r.tenant_id = NEW.tenant_id AND r.knowledge_base_id = NEW.knowledge_base_id
++          AND r.datasource_id = NEW.datasource_id AND r.external_id = NEW.external_id
++    ) THEN RAISE(ABORT, 'nextcloud_source_revision_reinsert') END;
++    INSERT INTO nextcloud_source_revisions (
++        tenant_id, knowledge_base_id, datasource_id, external_id, revision,
++        desired_etag, candidate_knowledge_id, state, source_updated_at,
++        legacy_history_unknown
++    ) VALUES (NEW.tenant_id, NEW.knowledge_base_id, NEW.datasource_id, NEW.external_id,
++        1, NEW.desired_etag, NEW.candidate_knowledge_id, NEW.state, NEW.updated_at, 0);
++END;
++CREATE TRIGGER nextcloud_source_revision_append_update
++AFTER UPDATE ON nextcloud_source_versions
++BEGIN
++    INSERT INTO nextcloud_source_revisions (
++        tenant_id, knowledge_base_id, datasource_id, external_id, revision,
++        desired_etag, candidate_knowledge_id, state, source_updated_at,
++        legacy_history_unknown
++    ) SELECT NEW.tenant_id, NEW.knowledge_base_id, NEW.datasource_id, NEW.external_id,
++        r.revision + 1, NEW.desired_etag, NEW.candidate_knowledge_id, NEW.state,
++        NEW.updated_at, r.legacy_history_unknown
++    FROM nextcloud_source_revisions AS r
++    WHERE r.tenant_id = NEW.tenant_id AND r.knowledge_base_id = NEW.knowledge_base_id
++      AND r.datasource_id = NEW.datasource_id AND r.external_id = NEW.external_id
++    ORDER BY r.revision DESC LIMIT 1;
++END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -27525,3 +28158,129 @@ index 00000000..00b26f48
 +CREATE TRIGGER nextcloud_indexed_withdrawal_resume_guard
 +BEFORE UPDATE OF status ON data_sources FOR EACH ROW
 +EXECUTE FUNCTION nextcloud_indexed_withdrawal_resume_guard();
+diff --git a/migrations/versioned/000126_nextcloud_source_revisions.down.sql b/migrations/versioned/000126_nextcloud_source_revisions.down.sql
+new file mode 100644
+index 00000000..13631c77
+--- /dev/null
++++ b/migrations/versioned/000126_nextcloud_source_revisions.down.sql
+@@ -0,0 +1,6 @@
++-- Automated rollback would erase an append-only provenance record. Export,
++-- reconcile, and approve the retained history before any manual schema change.
++DO $$ BEGIN
++    RAISE EXCEPTION 'nextcloud_source_revision_rollback_requires_audit_export'
++        USING ERRCODE = '23514';
++END $$;
+diff --git a/migrations/versioned/000126_nextcloud_source_revisions.up.sql b/migrations/versioned/000126_nextcloud_source_revisions.up.sql
+new file mode 100644
+index 00000000..42960700
+--- /dev/null
++++ b/migrations/versioned/000126_nextcloud_source_revisions.up.sql
+@@ -0,0 +1,108 @@
++-- A local mutation ledger for source publication intent. This is not an
++-- inventory of copies in vector stores, object storage, graph, Wiki, or backups.
++-- golang-migrate sends this file as one PostgreSQL query/transaction. Hold a
++-- write-blocking table lock from before backfill through trigger installation:
++-- earlier writers finish first, and later writers see the append trigger.
++LOCK TABLE nextcloud_source_versions IN SHARE ROW EXCLUSIVE MODE;
++
++CREATE TABLE nextcloud_source_revisions (
++    tenant_id BIGINT NOT NULL,
++    knowledge_base_id TEXT NOT NULL,
++    datasource_id TEXT NOT NULL,
++    external_id TEXT NOT NULL,
++    revision BIGINT NOT NULL CHECK (revision > 0),
++    desired_etag TEXT NOT NULL,
++    candidate_knowledge_id TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('staging', 'published', 'tombstone')),
++    source_updated_at TIMESTAMPTZ NOT NULL,
++    recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
++    legacy_history_unknown BOOLEAN NOT NULL,
++    PRIMARY KEY (tenant_id, knowledge_base_id, datasource_id, external_id, revision)
++);
++
++-- The old mutable row contains only the latest known state. No earlier
++-- candidate, ETag, publication, or tombstone can be reconstructed from it.
++INSERT INTO nextcloud_source_revisions (
++    tenant_id, knowledge_base_id, datasource_id, external_id, revision,
++    desired_etag, candidate_knowledge_id, state, source_updated_at,
++    legacy_history_unknown
++)
++SELECT tenant_id, knowledge_base_id, datasource_id, external_id, 1,
++       desired_etag, candidate_knowledge_id, state, updated_at, TRUE
++FROM nextcloud_source_versions;
++
++CREATE FUNCTION nextcloud_source_revision_immutable() RETURNS trigger
++LANGUAGE plpgsql AS $guard$
++BEGIN
++    RAISE EXCEPTION 'nextcloud_source_revision_immutable' USING ERRCODE = '23514';
++END
++$guard$;
++CREATE TRIGGER nextcloud_source_revision_immutable
++BEFORE UPDATE OR DELETE ON nextcloud_source_revisions FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_revision_immutable();
++CREATE TRIGGER nextcloud_source_revision_no_truncate
++BEFORE TRUNCATE ON nextcloud_source_revisions FOR EACH STATEMENT
++EXECUTE FUNCTION nextcloud_source_revision_immutable();
++
++-- A source key may never move to another lineage or be deleted behind the
++-- append-only record. Tombstone state is used for source deletion instead.
++CREATE FUNCTION nextcloud_source_version_identity_guard() RETURNS trigger
++LANGUAGE plpgsql AS $guard$
++BEGIN
++    IF TG_OP = 'DELETE' THEN
++        RAISE EXCEPTION 'nextcloud_source_version_identity_immutable' USING ERRCODE = '23514';
++    END IF;
++    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
++       OR NEW.knowledge_base_id IS DISTINCT FROM OLD.knowledge_base_id
++       OR NEW.datasource_id IS DISTINCT FROM OLD.datasource_id
++       OR NEW.external_id IS DISTINCT FROM OLD.external_id THEN
++        RAISE EXCEPTION 'nextcloud_source_version_identity_immutable' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$guard$;
++CREATE TRIGGER nextcloud_source_version_identity_guard
++BEFORE UPDATE OR DELETE ON nextcloud_source_versions FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_version_identity_guard();
++CREATE TRIGGER nextcloud_source_version_no_truncate
++BEFORE TRUNCATE ON nextcloud_source_versions FOR EACH STATEMENT
++EXECUTE FUNCTION nextcloud_source_revision_immutable();
++
++-- PostgreSQL serializes UPDATE and conflicting UPSERTs on the current row.
++-- AFTER triggers run only for the actual INSERT or UPDATE chosen by UPSERT.
++-- The next number is chosen while that row lock is held by this transaction.
++CREATE FUNCTION nextcloud_source_revision_append() RETURNS trigger
++LANGUAGE plpgsql AS $append$
++DECLARE
++    prior_revision BIGINT;
++    prior_unknown BOOLEAN;
++BEGIN
++    SELECT revision, legacy_history_unknown
++      INTO prior_revision, prior_unknown
++      FROM nextcloud_source_revisions
++     WHERE tenant_id = NEW.tenant_id
++       AND knowledge_base_id = NEW.knowledge_base_id
++       AND datasource_id = NEW.datasource_id
++       AND external_id = NEW.external_id
++     ORDER BY revision DESC LIMIT 1;
++    IF TG_OP = 'INSERT' AND prior_revision IS NOT NULL THEN
++        RAISE EXCEPTION 'nextcloud_source_revision_reinsert' USING ERRCODE = '23514';
++    ELSIF TG_OP = 'UPDATE' AND prior_revision IS NULL THEN
++        RAISE EXCEPTION 'nextcloud_source_revision_history_missing' USING ERRCODE = '23514';
++    END IF;
++    INSERT INTO nextcloud_source_revisions (
++        tenant_id, knowledge_base_id, datasource_id, external_id, revision,
++        desired_etag, candidate_knowledge_id, state, source_updated_at,
++        legacy_history_unknown
++    ) VALUES (
++        NEW.tenant_id, NEW.knowledge_base_id, NEW.datasource_id, NEW.external_id,
++        COALESCE(prior_revision, 0) + 1, NEW.desired_etag,
++        NEW.candidate_knowledge_id, NEW.state, NEW.updated_at,
++        COALESCE(prior_unknown, FALSE)
++    );
++    RETURN NEW;
++END
++$append$;
++CREATE TRIGGER nextcloud_source_revision_append
++AFTER INSERT OR UPDATE ON nextcloud_source_versions FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_revision_append();
