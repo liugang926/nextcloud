@@ -1,0 +1,1201 @@
+openapi: 3.0.3
+info:
+  title: Nextcloud WeKnora development API
+  version: 0.4.23
+  description: Local integration contract. Machine calls require a binding-scoped Bearer key and signed headers specified in docs/machine-request-signing.md. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API checks the mapped Nextcloud UID against a live AD objectGUID and returns the current file ETag for a guarded read. Source pairing is a durable intent and signed commit for one dedicated WeKnora knowledge base. Event sender watermarks attest durable receipt only, not WeKnora application. Same-AD integration, enterprise permission and publication acceptance remain outstanding.
+servers:
+  - url: /index.php/apps/integration_weknora/api/v1
+security:
+  - serviceToken: []
+    machineKeyId: []
+    machineTimestamp: []
+    machineNonce: []
+    machineSignature: []
+components:
+  securitySchemes:
+    serviceToken:
+      type: http
+      scheme: bearer
+      description: Secret token whose SHA-256 digest is also the binary HMAC key.
+    machineKeyId:
+      type: apiKey
+      in: header
+      name: X-WeKnora-Key-Id
+    machineTimestamp:
+      type: apiKey
+      in: header
+      name: X-WeKnora-Timestamp
+    machineNonce:
+      type: apiKey
+      in: header
+      name: X-WeKnora-Nonce
+    machineSignature:
+      type: apiKey
+      in: header
+      name: X-WeKnora-Signature
+    nextcloudSession:
+      type: apiKey
+      in: header
+      name: Cookie
+      description: Authenticated Nextcloud session. Administrator routes additionally require system administrator privileges.
+    csrfToken:
+      type: apiKey
+      in: header
+      name: requesttoken
+      description: Nextcloud CSRF token for mutating requests.
+  schemas:
+    Binding:
+      type: object
+      required: [id, name, root_file_id, publication_state, publication_epoch]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        root_file_id:
+          type: integer
+        publication_state: {type: string, enum: [active, stopped]}
+        publication_epoch: {type: integer, minimum: 0, description: Increments on each binding-wide stop or resume}
+    BindingPublicationTransition:
+      type: object
+      required: [binding_id, publication_state, publication_epoch, changed, reconcile_hint_recorded]
+      properties:
+        binding_id: {type: string}
+        publication_state: {type: string, enum: [active, stopped]}
+        publication_epoch: {type: integer, minimum: 0}
+        changed: {type: boolean}
+        reconcile_hint_recorded: {type: boolean, description: True when this explicit request recorded a reconcile hint; retry the same operation if false}
+    SourcePairing:
+      type: object
+      required: [binding_id, operation_id, instance_id, tenant_id, knowledge_base_id, data_source_id, state, key_id, publication_epoch]
+      properties:
+        binding_id: {type: string}
+        operation_id: {type: string, format: uuid, description: Exact durable operation identity}
+        instance_id: {type: string, description: Nextcloud instance ID captured at prepare time}
+        tenant_id: {type: string, pattern: '^[1-9][0-9]{0,19}$', description: Canonical unsigned 64-bit positive decimal string; the WeKnora API derives and verifies the actual tenant from administrator authentication}
+        knowledge_base_id: {type: string, pattern: '^[A-Za-z0-9._-]{1,128}$'}
+        data_source_id: {type: string, nullable: true, description: Null until a signed commit succeeds}
+        state: {type: string, enum: [pending, active, aborted, retired]}
+        key_id: {type: string, description: Dedicated machine key derived from the operation ID}
+        publication_epoch: {type: integer, minimum: 0, description: Captured at prepare time; a stop and resume invalidate an uncommitted intent}
+    SourceRotation:
+      type: object
+      required: [operation_id, pair_operation_id, binding_id, instance_id, tenant_id, knowledge_base_id, data_source_id, old_key_id, new_key_id, state, publication_epoch, old_key_expires_at]
+      properties:
+        operation_id: {type: string, format: uuid}
+        pair_operation_id: {type: string, format: uuid}
+        binding_id: {type: string}
+        instance_id: {type: string}
+        tenant_id: {type: string, pattern: '^[1-9][0-9]{0,19}$'}
+        knowledge_base_id: {type: string}
+        data_source_id: {type: string}
+        old_key_id: {type: string}
+        new_key_id: {type: string}
+        state: {type: string, enum: [pending, committed, finalized, aborted, retired]}
+        publication_epoch: {type: integer, minimum: 0}
+        old_key_expires_at: {type: integer, description: Unix timestamp; zero before commit}
+    SourceRotationTuple:
+      type: object
+      required: [operation_id, pair_operation_id, instance_id, tenant_id, knowledge_base_id, data_source_id]
+      properties:
+        operation_id: {type: string, format: uuid}
+        pair_operation_id: {type: string, format: uuid}
+        instance_id: {type: string}
+        tenant_id: {type: string, pattern: '^[1-9][0-9]{0,19}$'}
+        knowledge_base_id: {type: string}
+        data_source_id: {type: string}
+    File:
+      type: object
+      required: [file_id, etag, name, path, mime_type, size, mtime, url]
+      properties:
+        file_id:
+          type: integer
+        etag:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        mime_type:
+          type: string
+        size:
+          type: integer
+        mtime:
+          type: integer
+        url:
+          type: string
+    EventSenderStatus:
+      type: object
+      required: [binding_id, connection_id, key_id, receiver_url, status, received_through_event_id, applied_through_event_id, applied_checked_at, applied_error_code, attempt_count, next_attempt_at, last_error_code]
+      properties:
+        binding_id: {type: string}
+        connection_id: {type: string}
+        key_id: {type: string}
+        receiver_url: {type: string, format: uri}
+        status: {type: string, enum: [active, paused]}
+        received_through_event_id: {type: string, pattern: '^(0|[1-9][0-9]*)$', description: Durable WeKnora receipt only; not a sync or publication acknowledgement}
+        applied_through_event_id: {type: string, pattern: '^(0|[1-9][0-9]*)$', description: Highest WeKnora applied watermark verified by a signed GET status query for this connection and binding}
+        applied_checked_at: {type: integer, description: Unix seconds of the most recent applied status attempt}
+        applied_error_code: {type: string, description: Empty only after a valid same-scope applied status; any error blocks connected outbox pruning}
+        attempt_count: {type: integer, minimum: 0}
+        next_attempt_at: {type: integer, description: Unix seconds}
+        last_error_code: {type: string}
+    EventSenderCredential:
+      type: object
+      required: [binding_id, nextcloud_instance_id, connection_id, key_id, secret, receiver_url]
+      properties:
+        binding_id: {type: string}
+        nextcloud_instance_id: {type: string}
+        connection_id: {type: string}
+        key_id: {type: string}
+        secret: {type: string, description: One-time secret from the WeKnora administrator Pair or Rotate response; encrypted at rest by Nextcloud}
+        receiver_url: {type: string, format: uri, description: Full fixed events path under an operator-approved origin; HTTPS except when the explicit local development HTTP switch is enabled}
+paths:
+  /admin/diagnostics:
+    get:
+      operationId: getSourceDiagnostics
+      description: Administrator-only Nextcloud source-side counters. Pending delivery counts cover configured local senders, including paused senders, with outbox IDs above their durable receipt watermark. Unconfigured bindings and retained already-received hints are excluded. These counters and connection-wide watermarks do not describe WeKnora's task queue, synchronization delay, parsing health, or per-file publication state.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200':
+          description: Current Nextcloud integration diagnostics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [checked_at, binding_count, binding_roots_available, retained_change_hints, oldest_retained_hint_age_seconds, newest_change_hint_at, newest_change_hint_id, explicit_withdrawal_count, consumer_acknowledgement_available, outbox_pending_delivery_hints, oldest_outbox_pending_delivery_age_seconds, event_connections]
+                properties:
+                  checked_at: {type: integer, description: Unix seconds}
+                  binding_count: {type: integer, minimum: 0}
+                  binding_roots_available: {type: boolean}
+                  retained_change_hints: {type: integer, minimum: 0}
+                  oldest_retained_hint_age_seconds: {type: integer, nullable: true, minimum: 0}
+                  newest_change_hint_at: {type: integer, nullable: true}
+                  newest_change_hint_id: {type: integer, nullable: true}
+                  explicit_withdrawal_count: {type: integer, minimum: 0}
+                  consumer_acknowledgement_available: {type: boolean, description: True when at least one active event connection has a valid signed WeKnora applied status; inspect each connection separately}
+                  outbox_pending_delivery_hints: {type: integer, minimum: 0, description: Sum of local outbox hints above each configured sender's durable receipt ID}
+                  oldest_outbox_pending_delivery_age_seconds: {type: integer, nullable: true, minimum: 0}
+                  event_connections:
+                    type: array
+                    description: Non-sensitive local delivery state; no credential, receiver URL, file path or content is included
+                    items:
+                      type: object
+                      required: [binding_id, status, received_through_event_id, applied_through_event_id, applied_checked_at, applied_error_code, attempt_count, next_attempt_at, last_error_code, outbox_pending_delivery_hints, oldest_outbox_pending_delivery_age_seconds]
+                      properties:
+                        binding_id: {type: string}
+                        status: {type: string, enum: [active, paused]}
+                        received_through_event_id: {type: string, pattern: '^[0-9]+$', description: Durable WeKnora inbox receipt watermark}
+                        applied_through_event_id: {type: string, pattern: '^[0-9]+$', description: Last separately verified signed applied watermark}
+                        applied_checked_at: {type: integer, minimum: 0, description: Unix seconds; zero means never checked}
+                        applied_error_code: {type: string}
+                        attempt_count: {type: integer, minimum: 0}
+                        next_attempt_at: {type: integer, minimum: 0}
+                        last_error_code: {type: string}
+                        outbox_pending_delivery_hints: {type: integer, minimum: 0}
+                        oldest_outbox_pending_delivery_age_seconds: {type: integer, nullable: true, minimum: 0}
+        '403': {description: Administrator session required}
+        '503': {description: Diagnostics unavailable}
+  /files/{fileId}/status:
+    get:
+      operationId: getEmployeeFileStatus
+      description: Session-scoped source status plus a signed, paired WeKnora publication observation for the current file ETag. Ready means that version is parsed and published in WeKnora; it does not grant this user Q&A access. Remote failure remains unverified. The optional URL opens WeKnora's ordinary personal login and carries no source identity or machine credential.
+      security:
+        - nextcloudSession: []
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: Source state and verified current-version knowledge state for the user's readable file
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file_id, source_modified_at, source_etag, source_state, knowledge_state, knowledge_ready_at, published_source_etag, qa_available, weknora_login_url]
+                properties:
+                  file_id: {type: integer}
+                  source_modified_at: {type: integer, description: Unix seconds}
+                  source_etag: {type: string}
+                  source_state: {type: string, enum: [in_scope, withdrawn, publication_stopped, outside_scope]}
+                  file_withdrawn: {type: boolean, description: Present for a readable bound file; remains true when its binding is stopped}
+                  binding_name: {type: string, description: Present only when the user can read the binding root and file within it}
+                  knowledge_state: {type: string, enum: [unverified, updating, failed, ready]}
+                  knowledge_ready_at: {type: integer, nullable: true}
+                  published_source_etag: {type: string, nullable: true}
+                  qa_available: {type: boolean, enum: [false]}
+                  weknora_login_url: {type: string, nullable: true, description: Administrator-configured HTTPS or development loopback URL, without any token}
+        '401': {description: A Nextcloud user session is required}
+        '404': {description: File missing or not readable to this user; no binding details disclosed}
+        '503': {description: The source-side status could not be checked}
+  /capabilities:
+    get:
+      operationId: getCapabilities
+      responses:
+        '200':
+          description: Protocol and source instance identity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [protocol_version, instance_id]
+                properties:
+                  protocol_version: {type: string, enum: ['1']}
+                  instance_id: {type: string}
+        '401': {description: Invalid service token}
+  /bindings:
+    get:
+      operationId: listBindings
+      description: Returns only the one binding attached to the authenticated machine key, including a stopped binding. Stopping publication preserves its identity and machine key.
+      responses:
+        '200':
+          description: Configured folder binding and publication state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bindings]
+                properties:
+                  bindings:
+                    type: array
+                    items: {$ref: '#/components/schemas/Binding'}
+        '401': {description: Invalid service token}
+  /bindings/{bindingId}/manifest:
+    get:
+      operationId: getManifest
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor into a ten-minute stored list. Restart from page one if it expires or the source changes.
+          schema: {type: string}
+      responses:
+        '200':
+          description: One page from a short-lived stored traversal of the bound folder
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generation, items, complete, next_cursor]
+                properties:
+                  generation: {type: string}
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/File'}
+                  complete: {type: boolean}
+                  next_cursor: {type: string, nullable: true}
+        '401': {description: Invalid service token}
+        '404': {description: Binding not found}
+        '409': {description: The manifest changed during pagination; discard all prior pages and retry}
+        '423': {description: Binding publication is stopped; no empty completed manifest is returned}
+        '503': {description: Manifest unavailable or over the configured snapshot size limit}
+  /bindings/{bindingId}/changes:
+    get:
+      operationId: getChangeHints
+      description: Durable, ordered file-change hints, pruned after at least 30 days by a daily background job. A complete manifest remains the authority for deletion and missed events.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque signed cursor from the preceding page; omit to start at the beginning.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Hint page, possibly empty
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [binding_id, items, next_cursor, has_more, hint_only, rescan_required]
+                properties:
+                  binding_id: {type: string}
+                  items: {type: array, items: {type: object}}
+                  next_cursor: {type: string}
+                  has_more: {type: boolean}
+                  hint_only: {type: boolean, enum: [true]}
+                  rescan_required: {type: boolean, enum: [false]}
+        '400': {description: Invalid cursor}
+        '401': {description: Invalid service token}
+        '404': {description: Binding not found}
+        '409': {description: Cursor expired; complete a full rescan before adopting the returned signed next_cursor checkpoint}
+  /bindings/{bindingId}/authorize:
+    post:
+      operationId: authorizeSourceFile
+      description: Verify a currently mapped, enabled Nextcloud user's live AD objectGUID and ability to read an eligible file through their own mount view. The caller must independently authenticate the WeKnora principal and resolve its stable directory identity. LDAP failures deny access.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [directory_id, object_guid, file_id]
+              properties:
+                directory_id: {type: string}
+                object_guid: {type: string, format: uuid}
+                file_id: {type: integer}
+      responses:
+        '200':
+          description: Current allow or deny decision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [allow, reason, policy_revision, source_etag, checked_at]
+                properties:
+                  allow: {type: boolean}
+                  reason: {type: string, description: Includes publication_stopped when the binding-wide gate is closed}
+                  policy_revision: {type: string, nullable: true}
+                  source_etag:
+                    type: string
+                    nullable: true
+                    description: Live opaque file ETag; readers must compare it with the indexed Nextcloud ETag before serving the knowledge version.
+                  checked_at: {type: integer}
+        '400': {description: Invalid identity or file ID}
+        '401': {description: Invalid service token}
+        '503': {description: Source authorization unavailable; deny access}
+  /bindings/{bindingId}/source-pairing/commit:
+    post:
+      operationId: commitSourcePairing
+      description: WeKnora commits the exact pending source-pairing intent using its dedicated operation key and normal signed machine headers. Matching repeats return changed false. The binding root and instance must still match; a stop and resume invalidates a pending intent. This confirms a source identity pair, not indexing or publication.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id, instance_id, tenant_id, knowledge_base_id, data_source_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+                instance_id: {type: string}
+                tenant_id: {type: string, pattern: '^[1-9][0-9]{0,19}$'}
+                knowledge_base_id: {type: string}
+                data_source_id: {type: string}
+      responses:
+        '200':
+          description: The exact pairing is active
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pairing, changed]
+                properties:
+                  pairing: {$ref: '#/components/schemas/SourcePairing'}
+                  changed: {type: boolean}
+        '400': {description: Invalid pairing identity}
+        '401': {description: Invalid or unsigned machine credential}
+        '409': {description: Operation, key, source, target, root, epoch, or data source conflicts}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Pairing registry unavailable}
+  /bindings/{bindingId}/source-pairing/abort:
+    post:
+      operationId: abortSourcePairingMachine
+      description: WeKnora signs the original pending pair tuple with its dedicated key. The exact abort atomically closes the Nextcloud intent and expires the key. An expired verifier can authenticate only an identical signed abort retry; active pairs cannot be aborted.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id, instance_id, tenant_id, knowledge_base_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+                instance_id: {type: string}
+                tenant_id: {type: string, pattern: '^[1-9][0-9]{0,19}$'}
+                knowledge_base_id: {type: string}
+      responses:
+        '200':
+          description: Exact pending operation aborted or identical repeat
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pairing, revoked_key]
+                properties:
+                  pairing: {$ref: '#/components/schemas/SourcePairing'}
+                  revoked_key: {type: boolean}
+        '400': {description: Invalid pairing identity}
+        '401': {description: Invalid or unsigned machine credential}
+        '409': {description: Operation, key, source, target or active state conflicts}
+        '503': {description: Pairing registry unavailable}
+  /bindings/{bindingId}/source-pairing/rotation/commit:
+    post:
+      operationId: commitSourceRotation
+      description: The dedicated new key signs the exact active source tuple. The old key remains usable until finalization, with a maximum 24-hour grace period. Identical retries are idempotent.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceRotationTuple'}
+      responses:
+        '200': {description: Rotation committed or already committed; returns rotation and changed}
+        '400': {description: Invalid rotation tuple}
+        '401': {description: Invalid or unsigned new machine key}
+        '409': {description: Operation, key, source, target, root, or epoch conflict}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Rotation registry unavailable}
+  /bindings/{bindingId}/source-pairing/rotation/finalize:
+    post:
+      operationId: finalizeSourceRotation
+      description: The new key signs after WeKnora durably switches its source config. An exact retry is idempotent; the first success immediately revokes the old key.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceRotationTuple'}
+      responses:
+        '200': {description: Rotation finalized or already finalized; returns rotation and changed}
+        '401': {description: Invalid or unsigned new machine key}
+        '409': {description: Rotation not remotely committed or tuple changed}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Rotation registry unavailable}
+  /bindings/{bindingId}/source-pairing/rotation/abort:
+    post:
+      operationId: abortSourceRotationMachine
+      description: The old key signs a compare-and-swap abort of a pending rotation. A committed rotation cannot be aborted. The same old key makes lost abort ACKs retryable.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceRotationTuple'}
+      responses:
+        '200': {description: Rotation aborted or already aborted; returns rotation and changed}
+        '401': {description: Invalid or unsigned old machine key}
+        '409': {description: Rotation committed or tuple changed}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Rotation registry unavailable}
+  /bindings/{bindingId}/files/{fileId}/content:
+    get:
+      operationId: getFileContent
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+        - name: If-Match
+          in: header
+          required: false
+          description: The ETag from the manifest, quoted as an HTTP entity tag.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Current bytes of a file under the binding root
+          headers:
+            ETag:
+              schema: {type: string}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401': {description: Invalid service token}
+        '404': {description: File absent or outside binding}
+        '409': {description: Publication changed while the buffered content response was prepared}
+        '412': {description: Source version changed since the manifest}
+        '423': {description: Binding publication is stopped}
+  /bindings/{bindingId}/files/{fileId}/publication-check:
+    post:
+      operationId: checkCurrentPublicationCandidate
+      description: Signed, binding-scoped machine recheck before WeKnora publishes a parsed candidate. HTTP 204 confirms that the exact source instance, file ID, path, ETag and publication gate are current at this check; WeKnora must still guard retrieval against later changes.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [instance_id, etag, path]
+              properties:
+                instance_id: {type: string}
+                etag: {type: string}
+                path: {type: string, description: Relative path inside the bound root}
+      responses:
+        '204': {description: The exact source version is currently eligible}
+        '400': {description: Incomplete candidate identity}
+        '401': {description: Invalid or unsigned scoped machine credential}
+        '404': {description: Binding or file is unavailable}
+        '409': {description: Source identity, version, path or publication state changed}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Source check unavailable; candidate must remain hidden}
+  /admin/bindings/{bindingId}/files/{fileId}/publication:
+    get:
+      operationId: getPublicationState
+      security:
+        - nextcloudSession: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Current publication state for a bound file}
+        '403': {description: Administrator privileges required}
+        '404': {description: File is not within the binding}
+  /admin/bindings:
+    get:
+      operationId: listAdminBindings
+      description: Full binding configuration for a Nextcloud system administrator.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200': {description: Configured bindings, including owner UID}
+        '403': {description: Administrator privileges required}
+    post:
+      operationId: saveAdminBinding
+      description: Create a binding or change its display name. Existing source identity cannot change.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name, owner_uid, root_file_id]
+              properties:
+                id: {type: string}
+                name: {type: string}
+                owner_uid: {type: string}
+                root_file_id: {type: integer}
+      responses:
+        '200': {description: Existing binding name updated}
+        '201': {description: New binding created}
+        '400': {description: Invalid binding or root folder}
+        '403': {description: Administrator privileges required}
+        '409': {description: Binding source conflict or overlapping roots}
+  /bindings/{bindingId}/decommission/{operationId}:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+      - name: operationId
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: getSignedSourceDecommissionIntent
+      description: Signed pair-key read of the exact stopped binding, pair, source and retirement operation. A different binding key cannot read it.
+      responses:
+        '200': {description: Nonsecret prepared or acknowledged intent}
+        '401': {description: Invalid signed machine credential}
+        '409': {description: Operation, key or publication state mismatch}
+  /bindings/{bindingId}/decommission/{operationId}/ack:
+    post:
+      operationId: acknowledgeEmptySourceDecommission
+      description: Signed pair-key, idempotent ACK of an exact, complete empty inventory. General source GC cannot use this endpoint.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: operationId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200': {description: Exact empty inventory acknowledged}
+        '400': {description: Invalid or nonempty proof}
+        '401': {description: Invalid signed machine credential}
+        '409': {description: Operation, pair or publication epoch mismatch}
+  /admin/bindings/{bindingId}/decommission:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getSourceDecommission
+      security:
+        - nextcloudSession: []
+      responses:
+        '200': {description: Nonsecret retry and cleanup status}
+        '404': {description: No retirement intent}
+    post:
+      operationId: beginSourceDecommission
+      description: Stop publication first and persist one exact-pair operation; normal resume is then blocked.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+      responses:
+        '200': {description: Prepared or idempotent retry}
+        '404': {description: Binding not found}
+        '409': {description: No exact active pair or conflicting rotation}
+  /admin/bindings/{bindingId}/decommission/finalize:
+    post:
+      operationId: finalizeSourceDecommission
+      description: Retire the binding and all credentials only after the durable exact-pair empty-inventory ACK.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+      responses:
+        '200': {description: Finalized or identical retry}
+        '409': {description: Exact remote ACK has not been durably recorded}
+  /admin/bindings/{bindingId}/source-pairing:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getSourcePairing
+      description: Return the binding's latest pairing operation without a machine token.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200':
+          description: Latest pairing state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pairing]
+                properties:
+                  pairing: {$ref: '#/components/schemas/SourcePairing'}
+        '403': {description: Administrator privileges required}
+        '404': {description: No pairing operation for this binding}
+        '503': {description: Pairing registry unavailable}
+    post:
+      operationId: prepareSourcePairing
+      description: Reserve one binding and one tenant knowledge base for an exact operation. The first response is the only delivery of the dedicated machine token. An identical retry returns the pairing without the token. The binding must be active with its current root available.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id, tenant_id, knowledge_base_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+                tenant_id: {type: string, pattern: '^[1-9][0-9]{0,19}$', description: Canonical unsigned 64-bit positive decimal string}
+                knowledge_base_id: {type: string, pattern: '^[A-Za-z0-9._-]{1,128}$'}
+      responses:
+        '200':
+          description: Identical operation already prepared; token is never repeated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pairing]
+                properties:
+                  pairing: {$ref: '#/components/schemas/SourcePairing'}
+        '201':
+          description: New pending operation; store or pass the one-time token securely
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pairing, token]
+                properties:
+                  pairing: {$ref: '#/components/schemas/SourcePairing'}
+                  token: {type: string, description: Returned once; never returned by status or an idempotent prepare retry}
+        '400': {description: Invalid operation or target identity}
+        '403': {description: Administrator privileges required}
+        '404': {description: Binding not found}
+        '409': {description: Operation, binding, knowledge base, or root conflicts}
+        '412': {description: Nextcloud CSRF token required}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Pairing registry unavailable}
+    delete:
+      operationId: abortSourcePairing
+      description: Abort only a pending operation and expire its dedicated machine key atomically. The verifier remains usable only for an identical signed machine abort retry. An active pair cannot be aborted; an already aborted operation is idempotent.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Pending operation aborted or already closed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pairing, revoked_key]
+                properties:
+                  pairing: {$ref: '#/components/schemas/SourcePairing'}
+                  revoked_key: {type: boolean}
+        '400': {description: Invalid operation ID}
+        '403': {description: Administrator privileges required}
+        '404': {description: Pairing operation not found for this binding}
+        '409': {description: Active pair cannot be aborted}
+        '412': {description: Nextcloud CSRF token required}
+        '503': {description: Pairing registry unavailable}
+  /admin/bindings/{bindingId}/source-pairing/rotation:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getSourceRotation
+      description: Return the latest nonsecret source-key rotation for this binding.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200':
+          description: Latest rotation state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rotation]
+                properties:
+                  rotation: {$ref: '#/components/schemas/SourceRotation'}
+        '403': {description: Administrator privileges required}
+        '404': {description: No rotation for this binding}
+    post:
+      operationId: prepareSourceRotation
+      description: Reserve a new key for the active exact source pair. The first response alone includes its machine token. Only one pending or committed rotation may exist per pair.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+      responses:
+        '200': {description: Identical operation already prepared; no token}
+        '201': {description: New rotation and one-time token; returns rotation and token}
+        '400': {description: Invalid operation ID}
+        '403': {description: Administrator privileges required}
+        '409': {description: Pair missing, source changed, or another rotation active}
+        '412': {description: Nextcloud CSRF token required}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Rotation registry unavailable}
+    delete:
+      operationId: abortSourceRotationAdmin
+      description: Abort a pending Nextcloud-only rotation and revoke its new key. A committed rotation must be retried to completion.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+      responses:
+        '200': {description: Pending rotation aborted or already aborted}
+        '400': {description: Invalid operation ID}
+        '403': {description: Administrator privileges required}
+        '404': {description: Rotation operation not found}
+        '409': {description: Rotation already committed}
+        '412': {description: Nextcloud CSRF token required}
+  /admin/bindings/{bindingId}/stop:
+    post:
+      operationId: stopBindingPublication
+      description: Persistently stop source reads and live authorization for the binding. The binding identity, machine keys, Nextcloud originals, and per-file withdrawal records are retained. A reconcile hint is best effort; WeKnora cleanup is not acknowledged by this operation.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Binding publication is stopped
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BindingPublicationTransition'}
+        '400': {description: Invalid binding ID}
+        '403': {description: Administrator privileges required}
+        '404': {description: Binding not found}
+        '503': {description: Publication state unavailable}
+  /admin/bindings/{bindingId}/resume:
+    post:
+      operationId: resumeBindingPublication
+      description: Explicitly reopen publication after validating the current owner root and nonoverlap. This records a source reconciliation hint when possible; the source API does not attest WeKnora indexing or cleanup.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Binding publication is active
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BindingPublicationTransition'}
+        '400': {description: Invalid binding ID}
+        '403': {description: Administrator privileges required}
+        '404': {description: Binding not found}
+        '409': {description: Current publication root is unavailable or overlaps another binding}
+        '503': {description: Publication state unavailable}
+  /admin/bindings/{bindingId}:
+    delete:
+      operationId: removeAdminBinding
+      description: Remove an unpaired binding and all of its machine keys atomically. A binding with any source-pairing history returns 409 and retains its credentials pending a durable remote decommission protocol. A removed binding ID is permanently retired and cannot be reused.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Binding removed and keys revoked}
+        '400': {description: Invalid binding ID}
+        '403': {description: Administrator privileges required}
+        '404': {description: Binding not found}
+        '409': {description: Paired binding requires remote decommission; credentials retained}
+  /admin/bindings/{bindingId}/keys:
+    get:
+      operationId: listBindingMachineKeys
+      description: List key IDs and creation metadata for a binding; token hashes and plaintext tokens are never returned.
+      security:
+        - nextcloudSession: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Binding key metadata}
+        '403': {description: Administrator privileges required}
+        '404': {description: Binding not found}
+    post:
+      operationId: issueBindingMachineKey
+      description: Generate a key for exactly one binding. The plaintext token is returned once in this response.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key_id]
+              properties:
+                key_id: {type: string, pattern: '^[A-Za-z0-9._-]{1,64}$'}
+      responses:
+        '201':
+          description: Issued key; protect the one-time plaintext token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [binding_id, key_id, token]
+                properties:
+                  binding_id: {type: string}
+                  key_id: {type: string}
+                  token: {type: string}
+        '400': {description: Invalid key ID}
+        '403': {description: Administrator privileges required}
+        '404': {description: Binding not found}
+        '409': {description: Key ID already exists}
+  /admin/bindings/{bindingId}/keys/{keyId}:
+    delete:
+      operationId: revokeBindingMachineKey
+      description: Immediately revoke an ordinary machine key. A pending or active source-pairing key follows the pairing lifecycle and cannot be revoked independently.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: keyId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Key revoked}
+        '403': {description: Administrator privileges required}
+        '404': {description: Binding or key not found}
+        '409': {description: Key belongs to a pending or active source pairing}
+  /admin/bindings/{bindingId}/event-connection:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getEventSenderConnection
+      description: Read connection metadata and the durable receipt watermark. The secret is never returned.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200':
+          description: Current sender connection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventSenderStatus'}
+        '403': {description: Administrator privileges required}
+        '404': {description: Sender is not configured}
+    post:
+      operationId: configureEventSenderConnection
+      description: Provision a paired WeKnora credential or rotate to a new key for the same connection and receiver. A different connection requires explicit revocation and re-pairing. The server validates current Nextcloud instance and binding, approved receiver origin, and any outbox history floor.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EventSenderCredential'}
+      responses:
+        '200':
+          description: Same-connection key rotated
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventSenderStatus'}
+        '201':
+          description: New sender configured
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventSenderStatus'}
+        '400': {description: Invalid identity, credential, or receiver URL}
+        '403': {description: Administrator privileges required}
+        '409': {description: Binding unavailable, outbox history already pruned, or replacement requires explicit revocation}
+        '503': {description: Sender configuration unavailable}
+    delete:
+      operationId: revokeEventSenderConnection
+      description: Delete the local encrypted sender credential and stop future delivery. Revoke the matching WeKnora connection separately.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      responses:
+        '200': {description: Local sender credential revoked}
+        '403': {description: Administrator privileges required}
+        '404': {description: Sender is not configured}
+        '503': {description: Sender configuration unavailable}
+  /admin/bindings/{bindingId}/event-connection/retry:
+    post:
+      operationId: retryPausedEventSenderConnection
+      description: After operator inspection, schedule the same paused sender to retry its next unsent event. The durable receipt cursor and failure history are preserved. A stale connection identity or cursor is rejected.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [connection_id, key_id, received_through_event_id]
+              properties:
+                connection_id: {type: string}
+                key_id: {type: string}
+                received_through_event_id: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+      responses:
+        '200':
+          description: Paused sender scheduled for the next worker run
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventSenderStatus'}
+        '400': {description: Invalid connection identity or receiver policy}
+        '403': {description: Administrator privileges required}
+        '404': {description: Sender is not configured}
+        '409': {description: Sender identity or cursor changed, or binding root unavailable}
+        '423': {description: Binding publication is stopped}
+        '503': {description: Sender retry unavailable}
+  /admin/identities:
+    get:
+      operationId: listIdentityMappings
+      description: List recorded links between stable directory identities and Nextcloud UIDs; listing does not itself prove that each remains valid.
+      security:
+        - nextcloudSession: []
+      responses:
+        '200': {description: Current mappings}
+        '403': {description: Administrator privileges required}
+    post:
+      operationId: createIdentityMapping
+      description: Create a one-to-one stable identity link only after a live AD objectGUID read matches the LDAP-backed Nextcloud UID; duplicate UID or principal conflicts are rejected.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [directory_id, object_guid, nextcloud_uid]
+              properties:
+                directory_id: {type: string}
+                object_guid: {type: string, format: uuid}
+                nextcloud_uid: {type: string}
+      responses:
+        '200': {description: Identical mapping already present}
+        '201': {description: New mapping created}
+        '400': {description: Invalid identity or Nextcloud account}
+        '403': {description: Administrator privileges required}
+        '409': {description: Conflicting identity link}
+        '503': {description: LDAP identity proof unavailable; no mapping created}
+  /admin/identities/revoke:
+    post:
+      operationId: revokeIdentityMapping
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [directory_id, object_guid, nextcloud_uid]
+              properties:
+                directory_id: {type: string}
+                object_guid: {type: string, format: uuid}
+                nextcloud_uid: {type: string}
+      responses:
+        '200': {description: Revocation applied, or mapping already absent}
+        '400': {description: Invalid identity}
+        '403': {description: Administrator privileges required}
+        '409': {description: Mapping belongs to a different Nextcloud UID}
+  /admin/bindings/{bindingId}/files/{fileId}/withdraw:
+    post:
+      operationId: withdrawPublication
+      description: Persistently exclude a file from future manifests and content reads.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Publication withdrawn}
+        '403': {description: Administrator privileges required}
+        '404': {description: File is not within the binding}
+  /admin/bindings/{bindingId}/files/{fileId}/republish:
+    post:
+      operationId: republishFile
+      description: Explicitly remove a manual withdrawal exclusion.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: fileId
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: File eligible for a new publication scan}
+        '403': {description: Administrator privileges required}
+        '404': {description: File is not within the binding}

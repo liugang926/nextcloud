@@ -1,0 +1,203 @@
+name: Nextcloud integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  local-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # This job intentionally uses local Nextcloud accounts and fake GUIDs.
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: '1'
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/integration_weknora/package-lock.json
+
+      - name: Static checks
+        run: |
+          bash -n scripts/*.sh
+          bash -n scripts/ops/*.sh
+          npm ci --prefix apps/integration_weknora
+          npm run build --prefix apps/integration_weknora
+          git diff --exit-code -- apps/integration_weknora/js/weknora-sidebar.js
+          node --check apps/integration_weknora/js/weknora-admin.js
+          node --check apps/integration_weknora/js/weknora-sidebar.js
+          python3 -m compileall -q apps/integration_weknora/tests scripts
+          python3 scripts/ops/test-ad-permission-acceptance.py
+          python3 scripts/ops/test-synthetic-ldap-topology.py
+          python3 scripts/ops/test-synthetic-identity-conflict-smoke.py
+          python3 scripts/ops/test-synthetic-ldap-revocation-watch.py
+          python3 scripts/ops/test-pilot-load.py
+          python3 scripts/package-nextcloud-app.py
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            sh -c 'find apps/integration_weknora -name "*.php" -exec php -l "{}" ";"'
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/ldap_guid_identity_contract.php
+
+      - name: Install packaged app on an empty isolated stack
+        run: python3 scripts/ops/isolated-fresh-install-smoke.py
+
+      - name: Start isolated Docker stack
+        run: ./scripts/dev-up.sh
+
+      - name: Install app and sample binding
+        run: ./scripts/bootstrap.sh
+
+      - name: API and event smoke
+        run: |
+          python3 apps/integration_weknora/tests/machine_signature_http_smoke.py
+          python3 apps/integration_weknora/tests/machine_rotation_http_smoke.py
+          ./scripts/smoke.sh
+          ./scripts/smoke-manifest.py
+          python3 apps/integration_weknora/tests/publication_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/binding_publication_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/source_pairing_http_smoke.py
+          python3 apps/integration_weknora/tests/authorization_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/changes_http_smoke.py
+          python3 apps/integration_weknora/tests/root_events_http_smoke.py
+          python3 apps/integration_weknora/tests/runtime_binding_scope_http_smoke.py --simulate-missing-bind-lock
+          python3 apps/integration_weknora/tests/outbox_retention_http_smoke.py
+          python3 apps/integration_weknora/tests/event_delivery_http_smoke.py
+          python3 apps/integration_weknora/tests/employee_file_status_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/diagnostics_http_smoke.py
+          ./scripts/ops/isolated-restore-drill.sh
+
+      - name: Check out the fixed WeKnora baseline for live signature verification
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          path: weknora
+          persist-credentials: false
+
+      - name: Set up Go for live signature verification
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora/go.mod
+          cache-dependency-path: weknora/go.sum
+
+      - name: Verify Go-signed GET and POST against the running PHP app
+        run: |
+          git -C weknora apply --check ../integration/weknora.patch
+          git -C weknora apply ../integration/weknora.patch
+          set -a
+          source .env
+          set +a
+          cd weknora
+          NEXTCLOUD_LIVE_BASE_URL="http://127.0.0.1:${NEXTCLOUD_HTTP_PORT:-18082}" \
+            NEXTCLOUD_LIVE_TOKEN="$WEKNORA_SERVICE_TOKEN" \
+            go test -p 2 ./internal/datasource/connector/nextcloud \
+              -run TestLiveSignedNextcloudMachineRequests -count=1
+
+  weknora-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+        env:
+          POSTGRES_PASSWORD: nextcloud-event-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: Check out integration repository
+        uses: actions/checkout@v7.0.1
+        with:
+          path: nextcloud
+
+      - name: Check out the fixed WeKnora baseline
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          path: weknora
+          persist-credentials: false
+
+      - name: Apply connector and authorization patch
+        run: |
+          git -C weknora apply --check ../nextcloud/integration/weknora.patch
+          git -C weknora apply ../nextcloud/integration/weknora.patch
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora/go.mod
+          cache-dependency-path: weknora/go.sum
+
+      - name: Compile and test Nextcloud integration paths
+        working-directory: weknora
+        run: |
+          go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile' \
+            ./internal/application/access \
+            ./internal/application/repository \
+            ./internal/application/service \
+            ./internal/application/service/file \
+            ./internal/agent/tools \
+            ./internal/handler \
+            ./internal/handler/dto \
+            ./internal/handler/session \
+            ./internal/router \
+            ./internal/mcpserver \
+            ./internal/types \
+            ./internal/container
+          go test -p 2 ./internal/datasource/connector/nextcloud ./internal/application/service/chat_pipeline
+          go test -p 2 ./internal/datasource -run Nextcloud -count=1
+
+      - name: Verify event receipt and pairing in PostgreSQL and SQLite
+        working-directory: weknora
+        env:
+          NEXTCLOUD_EVENT_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_PAIRING_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_INDEXED_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+        run: |
+          go test -p 2 ./internal/handler -run '^TestNextcloudEvent' -count=1
+          go test -p 2 ./internal/application/repository \
+            -run '^Test(PostgresNextcloud|NextcloudSourcePairingPostgres)' -count=1
+          go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
+
+  direct-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Generate disposable test credentials
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from secrets import token_urlsafe
+          values = {
+              'NEXTCLOUD_ADMIN_USER': 'devadmin',
+              'NEXTCLOUD_ADMIN_PASSWORD': token_urlsafe(24),
+              'NEXTCLOUD_DB_PASSWORD': token_urlsafe(24),
+              'WEKNORA_SERVICE_TOKEN': token_urlsafe(32),
+              'NEXTCLOUD_HTTP_PORT': '18082',
+          }
+          path = Path('.env')
+          path.write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+          path.chmod(0o600)
+          PY
+
+      - name: Verify historical binding tombstones on direct upgrade
+        run: python3 scripts/ops/direct-upgrade-tombstone-smoke.py

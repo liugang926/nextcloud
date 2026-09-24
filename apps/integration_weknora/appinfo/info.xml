@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+    <id>integration_weknora</id>
+    <name>WeKnora Integration</name>
+    <summary>WeKnora source API, publication controls, and file status.</summary>
+    <description>Exposes configured Nextcloud folders to a WeKnora connector, lets administrators manage publication exclusions, and shows source-side status in Files.</description>
+    <version>0.4.23</version>
+    <licence>Apache-2.0</licence>
+    <author>WeKnora Integration</author>
+    <namespace>IntegrationWeknora</namespace>
+    <category>integration</category>
+    <dependencies>
+        <nextcloud min-version="34" max-version="34" />
+    </dependencies>
+    <settings>
+        <admin>OCA\IntegrationWeknora\Settings\Admin</admin>
+        <admin-section>OCA\IntegrationWeknora\Settings\AdminSection</admin-section>
+    </settings>
+    <background-jobs>
+        <job>OCA\IntegrationWeknora\BackgroundJob\OutboxRetentionJob</job>
+        <job>OCA\IntegrationWeknora\BackgroundJob\EventDeliveryJob</job>
+        <job>OCA\IntegrationWeknora\BackgroundJob\EventAppliedStatusJob</job>
+    </background-jobs>
+    <commands>
+        <command>OCA\IntegrationWeknora\Command\DeliverEvents</command>
+        <command>OCA\IntegrationWeknora\Command\PollEventStatus</command>
+    </commands>
+</info>
