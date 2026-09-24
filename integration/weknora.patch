@@ -1,9 +1,24 @@
+diff --git a/.env.example b/.env.example
+index e18b1ae9..8df286cd 100644
+--- a/.env.example
++++ b/.env.example
+@@ -694,6 +694,10 @@ WEKNORA_SANDBOX_DOCKER_ENABLED=false
+ # 允许上传的目录白名单（逗号分隔；留空禁用文件上传工具）。
+ # MCP_ALLOWED_UPLOAD_DIRS=
+ 
++# ========== H3. Nextcloud 事件调度（可选）==========
++# 已持久化事件的扫描周期，默认 5s，可设置 1s..1m；修改后重启 WeKnora app。
++# WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL=5s
++
+ 
+ # #####################################################################
+ # I. 可观测性（Langfuse，可选）
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..a35cee55
+index 00000000..12587a5e
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,216 @@
 +# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
@@ -66,13 +81,21 @@ index 00000000..a35cee55
 +
 +## Background reconciliation and status
 +
-+The dispatcher polls due connections every 30 seconds. For each connection it
++The dispatcher polls due connections every 5 seconds by default. Set
++`WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL` to a Go duration from `1s` through
++`1m` to tune this at process startup; an empty or invalid value uses `5s`.
++For each connection it
 +claims the current committed receipt watermark under a database lease, then
 +queues a forced full Nextcloud source scan. The scan reads the current
 +Nextcloud manifest and binding authorization through the existing connector;
 +an event hint is never used directly as a delete instruction. Repeated or
 +coalesced hints can cause another full scan. A failed queue operation or
 +partial/failed/canceled sync remains retryable with exponential backoff.
++Each sweep examines at most 32 due connections and runs them sequentially;
++the poll interval alone is not an event-to-queue latency guarantee. The
++Nextcloud sender cadence, network, database load, and queue admission also
++affect that latency. Short intervals can increase full-scan work under bursty
++edits, so measure the pilot workload before claiming the PRD's P95 target.
 +Source configuration drift blocks dispatch; revoke blocks further claims and
 +cancels queued event tasks when they start. A running event task checks the
 +pinned connection and its running sync log before each knowledge item, and
@@ -12118,10 +12141,10 @@ index 00000000..eabdc6ed
 +}
 diff --git a/internal/application/service/nextcloud_event_dispatcher.go b/internal/application/service/nextcloud_event_dispatcher.go
 new file mode 100644
-index 00000000..8064b4c2
+index 00000000..cd9408c7
 --- /dev/null
 +++ b/internal/application/service/nextcloud_event_dispatcher.go
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,183 @@
 +package service
 +
 +import (
@@ -12129,6 +12152,8 @@ index 00000000..8064b4c2
 +	"encoding/json"
 +	"errors"
 +	"fmt"
++	"os"
++	"strings"
 +	"sync"
 +	"time"
 +
@@ -12139,6 +12164,28 @@ index 00000000..8064b4c2
 +	"github.com/google/uuid"
 +	"github.com/hibiken/asynq"
 +)
++
++const (
++	nextcloudEventDispatchIntervalEnv     = "WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL"
++	defaultNextcloudEventDispatchInterval = 5 * time.Second
++	minNextcloudEventDispatchInterval     = time.Second
++	maxNextcloudEventDispatchInterval     = time.Minute
++)
++
++func nextcloudEventDispatchInterval() time.Duration {
++	raw := strings.TrimSpace(os.Getenv(nextcloudEventDispatchIntervalEnv))
++	if raw == "" {
++		return defaultNextcloudEventDispatchInterval
++	}
++	interval, err := time.ParseDuration(raw)
++	if err != nil || interval < minNextcloudEventDispatchInterval || interval > maxNextcloudEventDispatchInterval {
++		logger.Warnf(context.Background(), "[NextcloudEvents] invalid %s; using %s (allowed: %s..%s)",
++			nextcloudEventDispatchIntervalEnv, defaultNextcloudEventDispatchInterval,
++			minNextcloudEventDispatchInterval, maxNextcloudEventDispatchInterval)
++		return defaultNextcloudEventDispatchInterval
++	}
++	return interval
++}
 +
 +// NextcloudEventDispatcher periodically turns durable hints into authoritative
 +// full-manifest sync jobs. Queueing is at least once; publication/applied ACK
@@ -12171,10 +12218,11 @@ index 00000000..8064b4c2
 +	ctx, cancel := context.WithCancel(context.Background())
 +	d.cancel = cancel
 +	d.done = make(chan struct{})
++	interval := nextcloudEventDispatchInterval()
 +	go func() {
 +		defer close(d.done)
 +		d.runOnce(ctx, time.Now().UTC())
-+		ticker := time.NewTicker(30 * time.Second)
++		ticker := time.NewTicker(interval)
 +		defer ticker.Stop()
 +		for {
 +			select {
@@ -12279,6 +12327,41 @@ index 00000000..8064b4c2
 +		return err
 +	}
 +	return nil
++}
+diff --git a/internal/application/service/nextcloud_event_dispatcher_interval_test.go b/internal/application/service/nextcloud_event_dispatcher_interval_test.go
+new file mode 100644
+index 00000000..0b59c6a7
+--- /dev/null
++++ b/internal/application/service/nextcloud_event_dispatcher_interval_test.go
+@@ -0,0 +1,29 @@
++package service
++
++import (
++	"testing"
++	"time"
++)
++
++func TestNextcloudEventDispatchInterval(t *testing.T) {
++	for _, tc := range []struct {
++		name string
++		raw  string
++		want time.Duration
++	}{
++		{name: "default", raw: "", want: 5 * time.Second},
++		{name: "lower_bound", raw: "1s", want: time.Second},
++		{name: "override", raw: " 8s ", want: 8 * time.Second},
++		{name: "upper_bound", raw: "1m", want: time.Minute},
++		{name: "too_fast", raw: "500ms", want: 5 * time.Second},
++		{name: "too_slow", raw: "61s", want: 5 * time.Second},
++		{name: "invalid", raw: "fast", want: 5 * time.Second},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Setenv(nextcloudEventDispatchIntervalEnv, tc.raw)
++			if got := nextcloudEventDispatchInterval(); got != tc.want {
++				t.Fatalf("dispatch interval = %s, want %s", got, tc.want)
++			}
++		})
++	}
 +}
 diff --git a/internal/application/service/nextcloud_metadata_guard_test.go b/internal/application/service/nextcloud_metadata_guard_test.go
 new file mode 100644
@@ -18703,10 +18786,10 @@ index 00000000..18674663
 +}
 diff --git a/internal/handler/nextcloud_event_dispatch_test.go b/internal/handler/nextcloud_event_dispatch_test.go
 new file mode 100644
-index 00000000..9b47c1ea
+index 00000000..282fa7c9
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_dispatch_test.go
-@@ -0,0 +1,767 @@
+@@ -0,0 +1,805 @@
 +package handler
 +
 +import (
@@ -19473,6 +19556,44 @@ index 00000000..9b47c1ea
 +			}
 +		})
 +	}
++}
++
++func TestNextcloudEventDispatcherPollsForPostStartupHint(t *testing.T) {
++	t.Setenv("WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL", "1s")
++	db, router, secret := setupNextcloudDispatchTest(t, false)
++	var ds types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds-synthetic").Take(&ds).Error)
++	ds.Status = types.DataSourceStatusActive
++	created := false
++	queue := eventDispatchQueue{tasks: make(chan *asynq.Task, 1)}
++	repo := repository.NewNextcloudEventInboxRepository(db)
++	dispatcher := service.NewNextcloudEventDispatcher(
++		repo,
++		eventDispatchDataSources{ds: &ds},
++		eventDispatchSyncLogs{created: &created}, queue)
++	dispatcher.Start()
++	defer dispatcher.Stop()
++
++	// Let the startup sweep and one timer tick observe the empty inbox. The
++	// next hint must then be picked up by a later configured timer tick.
++	time.Sleep(1200 * time.Millisecond)
++	receiveDispatchHint(t, router, secret, "0", "41", "9")
++	receivedAt := time.Now()
++	select {
++	case task := <-queue.tasks:
++		t.Logf("local SQLite receipt-to-enqueue sample: %s", time.Since(receivedAt))
++		var payload types.DataSourceSyncPayload
++		require.NoError(t, json.Unmarshal(task.Payload(), &payload))
++		require.Equal(t, "nextcloud_event", payload.Trigger)
++		require.True(t, payload.ForceFull)
++	case <-time.After(3 * time.Second):
++		t.Fatal("post-startup Nextcloud hint was not queued by the configured polling interval")
++	}
++	require.Eventually(t, func() bool {
++		status, err := repo.ConnectionStatus(context.Background(), 7, "ds-synthetic")
++		return err == nil && status.DispatchState == "queued" && status.DispatchedThroughEventID == "41"
++	}, 2*time.Second, 10*time.Millisecond)
++	require.False(t, created)
 +}
 diff --git a/internal/handler/nextcloud_event_status.go b/internal/handler/nextcloud_event_status.go
 new file mode 100644
