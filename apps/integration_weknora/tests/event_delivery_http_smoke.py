@@ -410,18 +410,20 @@ def main():
             assert code == 404, "binding deletion left event credential active"
             print("event delivery HTTP/fault smoke passed: fairness, signature, retry, receipts, pause, retention, rotation")
         finally:
-            clear_idle_rows(idle_ids)
-            if connection_created:
-                request(admin, connection_url, "DELETE", {"requesttoken": csrf})
-            if binding_created:
-                request(admin, f"{binding_url}/{binding_id}", "DELETE", {"requesttoken": csrf})
-            if folder_created:
-                dav_request(root_url, "DELETE", dav_headers)
-            if mock_container:
-                subprocess.run(["docker", "stop", mock_container], cwd=PROJECT,
-                               text=True, capture_output=True, check=False)
-            if worker_running:
-                compose("start", "event-worker")
+            try:
+                clear_idle_rows(idle_ids)
+                if connection_created:
+                    request(admin, connection_url, "DELETE", {"requesttoken": csrf})
+                if binding_created:
+                    request(admin, f"{binding_url}/{binding_id}", "DELETE", {"requesttoken": csrf})
+                if folder_created:
+                    dav_request(root_url, "DELETE", dav_headers)
+                if mock_container:
+                    subprocess.run(["docker", "stop", mock_container], cwd=PROJECT,
+                                   text=True, capture_output=True, check=False)
+            finally:
+                if worker_running:
+                    compose("start", "event-worker")
 
 
 if __name__ == "__main__":

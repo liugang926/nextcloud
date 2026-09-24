@@ -1,0 +1,6 @@
+# Opt-in development listener for one private host interface. The base Compose
+# file keeps the existing loopback listener for local tools and tests.
+services:
+  nextcloud:
+    ports:
+      - "${NEXTCLOUD_LAN_HOST:?run scripts/allow-lan-access.sh}:${NEXTCLOUD_HTTP_PORT:-18082}:80"

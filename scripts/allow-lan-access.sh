@@ -7,6 +7,9 @@ if [[ ! -f .env ]]; then
   echo 'Run scripts/dev-up.sh and scripts/bootstrap.sh first.' >&2
   exit 1
 fi
+# Use this project's saved Compose settings, even when the invoking shell has
+# exported settings for another Compose project.
+unset COMPOSE_FILE COMPOSE_PROJECT_NAME NEXTCLOUD_LAN_HOST NEXTCLOUD_HTTP_BIND_IP NEXTCLOUD_HTTP_PORT
 
 lan_host="${1:-}"
 if [[ -z "$lan_host" ]] && command -v ipconfig >/dev/null 2>&1; then
@@ -45,8 +48,9 @@ import tempfile
 path = Path('.env')
 lines = path.read_text().splitlines()
 values = {
-    'NEXTCLOUD_HTTP_BIND_IP': '0.0.0.0',
+    'NEXTCLOUD_HTTP_BIND_IP': '127.0.0.1',
     'NEXTCLOUD_LAN_HOST': sys.argv[1],
+    'COMPOSE_FILE': 'compose.yaml:integration/nextcloud.lan.yaml',
 }
 seen = set()
 updated = []
@@ -55,6 +59,8 @@ for line in lines:
     if key in values:
         if key in seen:
             raise SystemExit(f'Duplicate {key} in .env')
+        if key == 'COMPOSE_FILE' and line.split('=', 1)[1] != values[key]:
+            raise SystemExit('Existing COMPOSE_FILE needs manual review before LAN setup')
         updated.append(f'{key}={values[key]}')
         seen.add(key)
     else:
@@ -73,6 +79,14 @@ finally:
     temporary.unlink(missing_ok=True)
 PY
 
+docker compose --env-file .env config --format json | python3 -c '
+import json, sys
+expected = {"127.0.0.1", sys.argv[1]}
+ports = json.load(sys.stdin)["services"]["nextcloud"]["ports"]
+hosts = {item.get("host_ip") for item in ports if item.get("target") == 80}
+if hosts != expected:
+    raise SystemExit("refusing unexpected Nextcloud listener interfaces")
+' "$lan_host"
 docker compose --env-file .env up -d --wait --wait-timeout 180 nextcloud
 trusted="$(docker compose --env-file .env exec -T -u www-data nextcloud \
   php occ config:system:get trusted_domains --output=json)"
