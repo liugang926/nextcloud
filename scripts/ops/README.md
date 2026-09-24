@@ -1,5 +1,10 @@
 # Local operations probes
 
+The [two-account AD acceptance guide](AD-acceptance.md) defines the separate
+operator-run permission matrix for isolated test accounts and synthetic files.
+Its read-only probe has offline contract tests; no real AD acceptance has been
+recorded in this development stack.
+
 ## Local Nextcloud source pairing
 
 Install Nextcloud app 0.4.20 and deploy the WeKnora patch before this probe.
