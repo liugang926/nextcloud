@@ -1,5 +1,22 @@
 # Local operations probes
 
+## Fresh packaged-app installation
+
+Build the deterministic app archive and install it on a disposable Nextcloud
+34.0.4 stack with new PostgreSQL, Redis, and file volumes:
+
+```sh
+python3 scripts/package-nextcloud-app.py
+python3 scripts/ops/isolated-fresh-install-smoke.py
+```
+
+The smoke verifies the packaged version, fresh migration tables, and an
+authenticated DAV request. It generates its own credentials, listens only on
+loopback, and removes only its uniquely named Compose project and volumes in
+`finally`. It never mounts this repository's app source or uses the shared
+development database. This is a clean-install check; rollback and coordinated
+application restore need separate acceptance.
+
 The [two-account AD acceptance guide](AD-acceptance.md) defines the separate
 operator-run permission matrix for isolated test accounts and synthetic files.
 Its read-only probe has offline contract tests; no real AD acceptance has been
