@@ -92,6 +92,15 @@ Outbox retention cannot remove unsent hints while a sender exists, including
 while paused. It may prune hints already durably received after the configured
 minimum retention period; this still does not mean they were applied.
 
+The signed applied-watermark GET runs separately from delivery. Its own worker
+selects at most ten active connections whose last status check is at least 30
+seconds old, oldest first, and stops polling after a 45-second pass budget.
+Each GET still holds that connection's row lock across its bounded request so
+rotation and revocation cannot race verification. A slow status endpoint can
+briefly delay delivery for the same connection, but it no longer serially
+delays all sender work. Failed or invalid status responses leave the applied
+watermark unchanged and never authorize outbox pruning.
+
 If outbox retention had already passed the new connection's initial ID,
 pairing fails closed. Restore the missing outbox and floor from a verified
 backup before pairing, or retire the old binding and provision a **new**
@@ -101,13 +110,14 @@ checkpoint divergence, compare its durable connection status and the local
 outbox before re-pairing; a Nextcloud restore may require a new connection and
 full source scan.
 
-The job remains registered with a 60-second interval as a fallback under
-ordinary Nextcloud cron. The local Compose stack also runs `event-worker`,
-which calls the bounded `occ integration_weknora:deliver-events` pass every
-five seconds as the `www-data` user. A pass has a 90-second process timeout;
-the worker retries after failure, and the database sender row lock serializes
-it with ordinary cron. Production operators must schedule and monitor an
-equivalent worker. This implementation has no measured end-to-end P95
+The delivery and applied-status jobs remain registered with 60-second
+intervals as a fallback under ordinary Nextcloud cron. The local Compose
+stack runs separate `event-worker` and `event-status-worker` processes. Each
+calls its bounded `occ` pass, then sleeps five seconds as the `www-data` user.
+The process timeouts are 90 and 60 seconds respectively. Both workers retry
+after failure, and connection row locks serialize them with ordinary cron and
+credential changes. Production operators must schedule and monitor equivalent
+independent workers. This implementation has no measured end-to-end P95
 10-second delivery guarantee.
 
 Local verification:
@@ -115,8 +125,11 @@ Local verification:
 ```sh
 python3 apps/integration_weknora/tests/event_delivery_http_smoke.py
 docker compose exec -T -u www-data nextcloud php occ integration_weknora:deliver-events
+docker compose exec -T -u www-data nextcloud php occ integration_weknora:poll-event-status
 docker compose exec -T -u www-data nextcloud php occ background-job:list \
   --class='OCA\IntegrationWeknora\BackgroundJob\EventDeliveryJob' --output=json
+docker compose exec -T -u www-data nextcloud php occ background-job:list \
+  --class='OCA\IntegrationWeknora\BackgroundJob\EventAppliedStatusJob' --output=json
 ```
 
 The HTTP smoke creates an isolated mock receiver and synthetic binding,

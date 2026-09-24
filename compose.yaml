@@ -114,6 +114,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  event-status-worker:
+    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    user: www-data
+    entrypoint: ["/bin/sh", "/srv/weknora-event-status-worker.sh"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
+      REDIS_HOST: redis
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
+    volumes:
+      - nextcloud-html:/var/www/html
+      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ./scripts/weknora-event-status-worker.sh:/srv/weknora-event-status-worker.sh:ro
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+
   mock-embedding:
     image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
     command: ["python", "/srv/mock_embedding.py"]

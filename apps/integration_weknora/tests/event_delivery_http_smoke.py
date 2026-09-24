@@ -29,6 +29,7 @@ COMPOSE_NAME = os.environ.get("COMPOSE_PROJECT_NAME", "nextcloud-weknora-dev")
 MOCK_NAME = COMPOSE_NAME + "-event-receiver-smoke"
 MOCK_URL = "http://event-receiver-smoke:8080/api/v1/integrations/nextcloud/events"
 JOB_CLASS = "OCA\\IntegrationWeknora\\BackgroundJob\\EventDeliveryJob"
+STATUS_JOB_CLASS = "OCA\\IntegrationWeknora\\BackgroundJob\\EventAppliedStatusJob"
 
 
 def compose(*args):
@@ -51,11 +52,11 @@ def status(admin, url, csrf):
     return data
 
 
-def job_id():
+def job_id(job_class=JOB_CLASS):
     data = json.loads(compose("exec", "-T", "-u", "www-data", "nextcloud", "php", "occ",
-                              "background-job:list", "--class=" + JOB_CLASS,
+                              "background-job:list", "--class=" + job_class,
                               "--output=json"))
-    assert len(data) == 1 and data[0]["class"] == JOB_CLASS, data
+    assert len(data) == 1 and data[0]["class"] == job_class, data
     return data[0]["id"]
 
 
@@ -66,6 +67,11 @@ def run_job(identifier):
 
 def requests_seen(state_dir):
     path = state_dir / "requests.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def status_requests_seen(state_dir):
+    path = state_dir / "status_requests.jsonl"
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
@@ -169,13 +175,22 @@ def main():
     mock_container = None
     folder_created = binding_created = connection_created = False
     with tempfile.TemporaryDirectory(prefix="weknora-event-smoke-") as tmp:
-        # This smoke drives the sender one pass at a time to assert retry and
-        # fairness state. Restore the dedicated worker after the fixture is
-        # removed so its five-second loop cannot race these assertions.
-        worker_running = "event-worker" in compose(
-            "ps", "--status", "running", "--services", "event-worker").splitlines()
-        if worker_running:
-            compose("stop", "event-worker")
+        # Drive both independent loops one pass at a time. Restore the status
+        # worker only after cleanup so it cannot race watermark assertions.
+        running_workers = set(compose(
+            "ps", "--status", "running", "--services").splitlines())
+        worker_running = "event-worker" in running_workers
+        status_worker_running = "event-status-worker" in running_workers
+        stopped_workers = []
+        try:
+            for worker in ("event-worker", "event-status-worker"):
+                if worker in running_workers:
+                    compose("stop", worker)
+                    stopped_workers.append(worker)
+        except Exception:
+            for worker in stopped_workers:
+                compose("start", worker)
+            raise
         state_dir = Path(tmp)
         (state_dir / "mode").write_text("503")
         (state_dir / "received").write_text("0")
@@ -294,11 +309,25 @@ def main():
             assert code == 200 and secret.encode() not in body
             update_mock_credential(state_dir, credential)
             (state_dir / "mode").write_text("accept")
+            force_status_due(binding_id)
+            status_count = len(status_requests_seen(state_dir))
             run_job(identifier)
             received = status(admin, connection_url, csrf)
             assert received["status"] == "active" and int(received["received_through_event_id"]) > 0
+            assert len(status_requests_seen(state_dir)) == status_count, (
+                "sender synchronously polled applied status")
             payload = verify_signature(requests_seen(state_dir)[-1], secret)
             assert received["received_through_event_id"] == payload["events"][-1]["event_id"]
+
+            # The separate command and ordinary cron fallback still verify
+            # signed applied watermarks without running inside delivery.
+            compose("exec", "-T", "-u", "www-data", "nextcloud", "php", "occ",
+                    "integration_weknora:poll-event-status")
+            assert len(status_requests_seen(state_dir)) == status_count + 1
+            assert status(admin, connection_url, csrf)["applied_checked_at"] > 0
+            force_status_due(binding_id)
+            run_job(job_id(STATUS_JOB_CLASS))
+            assert len(status_requests_seen(state_dir)) == status_count + 2
 
             # A durable 202 receipt cannot expire even an aged prefix. The
             # separate signed status must attest its applied watermark.
@@ -422,8 +451,12 @@ def main():
                     subprocess.run(["docker", "stop", mock_container], cwd=PROJECT,
                                    text=True, capture_output=True, check=False)
             finally:
-                if worker_running:
-                    compose("start", "event-worker")
+                try:
+                    if worker_running:
+                        compose("start", "event-worker")
+                finally:
+                    if status_worker_running:
+                        compose("start", "event-status-worker")
 
 
 if __name__ == "__main__":

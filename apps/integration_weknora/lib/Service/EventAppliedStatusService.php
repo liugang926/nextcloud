@@ -13,6 +13,7 @@ use OCP\Security\ICrypto;
 final class EventAppliedStatusService {
     private const MAX_STATUS_BYTES = 4096;
     private const POLL_INTERVAL_SECONDS = 30;
+    private const MAX_BINDINGS_PER_RUN = 10;
 
     public function __construct(
         private IDBConnection $db,
@@ -23,6 +24,40 @@ final class EventAppliedStatusService {
         private IClientService $clientService,
         private IConfig $config,
     ) {
+    }
+
+    /** @return int Number of connections whose signed status was verified. */
+    public function pollDue(?int $now = null): int {
+        $now ??= time();
+        $query = $this->db->getQueryBuilder();
+        $query->select('binding_id')->from('weknora_event_conn')
+            ->where($query->expr()->eq('status', $query->createNamedParameter('active')))
+            ->andWhere($query->expr()->lte('applied_checked_at',
+                $query->createNamedParameter($now - self::POLL_INTERVAL_SECONDS)))
+            ->orderBy('applied_checked_at', 'ASC')
+            ->addOrderBy('binding_id', 'ASC')
+            ->setMaxResults(self::MAX_BINDINGS_PER_RUN);
+        $result = $query->executeQuery();
+        try {
+            $bindingIds = $result->fetchFirstColumn();
+        } finally {
+            $result->closeCursor();
+        }
+
+        $verified = 0;
+        $deadline = time() + 45;
+        foreach ($bindingIds as $bindingId) {
+            if (time() >= $deadline) {
+                break;
+            }
+            // poll() locks the same connection row as delivery and checks
+            // the interval again, so parallel workers cannot trust stale
+            // selections or a credential rotated after this query.
+            if ($this->poll((string)$bindingId)) {
+                $verified++;
+            }
+        }
+        return $verified;
     }
 
     /** A failed or unsupported status query keeps the existing outbox intact. */
