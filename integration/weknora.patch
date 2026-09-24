@@ -7585,10 +7585,10 @@ index 00000000..710594de
 +}
 diff --git a/internal/application/repository/nextcloud_source_pairing_test.go b/internal/application/repository/nextcloud_source_pairing_test.go
 new file mode 100644
-index 00000000..fbabc30a
+index 00000000..8faadb2d
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_source_pairing_test.go
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,253 @@
 +package repository
 +
 +import (
@@ -7705,7 +7705,8 @@ index 00000000..fbabc30a
 +	t.Cleanup(func() { _ = migrationSQLDB.Close() })
 +	require.NoError(t, migrationDB.Exec("SET search_path TO "+schema).Error)
 +	for _, name := range []string{"000116_nextcloud_source_pairing.up.sql",
-+		"000117_nextcloud_source_pairing_guards.up.sql"} {
++		"000117_nextcloud_source_pairing_guards.up.sql",
++		"000120_nextcloud_source_pairing_abort.up.sql"} {
 +		migration, err := os.ReadFile("../../../migrations/versioned/" + name)
 +		require.NoError(t, err)
 +		require.NoError(t, migrationDB.Exec(string(migration)).Error)
