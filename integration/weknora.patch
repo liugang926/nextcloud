@@ -506,10 +506,10 @@ index 00000000..8229f8a4
 +ACK Nextcloud or release credentials.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
-index 00000000..42fc2c81
+index 00000000..6b5c2c5e
 --- /dev/null
 +++ b/docs/nextcloud-source-pairing.md
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,220 @@
 +# Nextcloud source pairing
 +
 +The source pairing is separate from the optional event-inbox connection. A
@@ -683,8 +683,10 @@ index 00000000..42fc2c81
 +legacy unpaired sources; database triggers enforce active pairing on running
 +sync logs. The event connection has its own credentials and lifecycle.
 +
-+Migrations are PostgreSQL `000116`/`000117` and SQLite `000035`/`000036`. The intervening
-+numbers are intentionally reserved for independent evaluation-run changes.
++Source pairing uses PostgreSQL `000116`/`000117` and SQLite `000035`/`000036`;
++rotation uses PostgreSQL `000118` and SQLite `000037`; initial abort uses
++PostgreSQL `000120` and SQLite `000039`. The intervening numbers are used by
++independent evaluation-run and garbage-collection changes.
 +
 +## Retiring a paired, untouched source
 +
@@ -15729,10 +15731,10 @@ index 00000000..4e4bdcf6
 +}
 diff --git a/internal/datasource/connector/nextcloud/changes_test.go b/internal/datasource/connector/nextcloud/changes_test.go
 new file mode 100644
-index 00000000..5a86611b
+index 00000000..9e65a67c
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/changes_test.go
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,479 @@
 +package nextcloud
 +
 +import (
@@ -16046,8 +16048,11 @@ index 00000000..5a86611b
 +	}
 +	deleteHint = true
 +	items, cursor, err := connector.FetchIncremental(ctx, config, cursor)
-+	if err != nil || len(items) != 0 || manifestCalls != 2 {
-+		t.Fatalf("hint deleted present file: %+v, %v; manifest=%d", items, err, manifestCalls)
++	// The hint is not deletion proof. A file still in the complete manifest
++	// is re-read and remains an ordinary upsert, even with identical metadata.
++	if err != nil || len(items) != 1 || items[0].IsDeleted ||
++		string(items[0].Content) != "hello" || manifestCalls != 2 {
++		t.Fatalf("delete hint hid present file: %+v, %v; manifest=%d", items, err, manifestCalls)
 +	}
 +	present = false
 +	// With no further hint, force a complete scan using the periodic deadline.
@@ -16125,7 +16130,7 @@ index 00000000..5a86611b
 +	}
 +	manifestStatus = http.StatusOK
 +	items, recovered, err := connector.FetchIncremental(ctx, config, old)
-+	if err != nil || len(items) != 0 || recovered == nil {
++	if err != nil || len(items) != 1 || items[0].IsDeleted || recovered == nil {
 +		t.Fatalf("successful rescan = %+v, %+v, %v", items, recovered, err)
 +	}
 +	state, _ := decodeCursor(recovered)
@@ -16134,7 +16139,7 @@ index 00000000..5a86611b
 +	}
 +	afterFloorHint = true
 +	items, recovered, err = connector.FetchIncremental(ctx, config, recovered)
-+	if err != nil || len(items) != 0 || manifestCalls != 4 {
++	if err != nil || len(items) != 1 || items[0].IsDeleted || manifestCalls != 4 {
 +		t.Fatalf("post-floor event was skipped: %+v, %v; manifest=%d", items, err, manifestCalls)
 +	}
 +	state, _ = decodeCursor(recovered)
@@ -16606,10 +16611,10 @@ index 00000000..74dcf636
 +}
 diff --git a/internal/datasource/connector/nextcloud/compression_test.go b/internal/datasource/connector/nextcloud/compression_test.go
 new file mode 100644
-index 00000000..6180792c
+index 00000000..25b82781
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/compression_test.go
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,56 @@
 +package nextcloud
 +
 +import (
@@ -16617,6 +16622,7 @@ index 00000000..6180792c
 +	"net/http"
 +	"net/http/httptest"
 +	"strings"
++	"sync/atomic"
 +	"testing"
 +)
 +
@@ -16625,7 +16631,7 @@ index 00000000..6180792c
 +// so the content request must use that same representation and tag.
 +func TestContentRequestsIdentityRepresentationForManifestETag(t *testing.T) {
 +	const tag = "source-etag-42"
-+	var compressionOffered bool
++	var compressionOffered atomic.Bool
 +	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		switch r.URL.Path {
 +		case apiPath + "/capabilities":
@@ -16634,7 +16640,7 @@ index 00000000..6180792c
 +			writeJSON(w, testManifest(tag))
 +		case apiPath + "/bindings/dev-published/files/41/content":
 +			if strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
-+				compressionOffered = true
++				compressionOffered.Store(true)
 +				w.Header().Set("ETag", `"`+tag+`-gzip"`)
 +			} else {
 +				w.Header().Set("ETag", `"`+tag+`"`)
@@ -16661,7 +16667,7 @@ index 00000000..6180792c
 +	if _, _, err := client.content(context.Background(), "dev-published", manifest[0]); err != nil {
 +		t.Fatal(err)
 +	}
-+	if compressionOffered {
++	if compressionOffered.Load() {
 +		t.Fatal("content request offered gzip, changing the strong source ETag")
 +	}
 +}
@@ -17433,10 +17439,10 @@ index 00000000..3a71f667
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_test.go b/internal/datasource/connector/nextcloud/connector_test.go
 new file mode 100644
-index 00000000..0eacd94f
+index 00000000..f6823ee2
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_test.go
-@@ -0,0 +1,708 @@
+@@ -0,0 +1,710 @@
 +package nextcloud
 +
 +import (
@@ -17560,12 +17566,14 @@ index 00000000..0eacd94f
 +		t.Fatalf("first incremental = %+v, %+v, %v", first, cursor, err)
 +	}
 +	second, next, err := connector.FetchIncremental(ctx, ds, cursor)
-+	if err != nil || next == nil || len(second) != 0 || contentRequests != 2 {
-+		t.Fatalf("unchanged incremental = %+v, %+v, %v; downloads=%d", second, next, err, contentRequests)
++	// An older app without the changes endpoint cannot prove a scoped hint
++	// history. Reconcile its complete content even when metadata is unchanged.
++	if err != nil || next == nil || len(second) != 1 || contentRequests != 3 {
++		t.Fatalf("unsupported changes fallback = %+v, %+v, %v; downloads=%d", second, next, err, contentRequests)
 +	}
 +	tag, body = "etag-2", "world"
 +	changed, _, err := connector.FetchIncremental(ctx, ds, next)
-+	if err != nil || len(changed) != 1 || string(changed[0].Content) != "world" || contentRequests != 3 {
++	if err != nil || len(changed) != 1 || string(changed[0].Content) != "world" || contentRequests != 4 {
 +		t.Fatalf("changed incremental = %+v, %v; downloads=%d", changed, err, contentRequests)
 +	}
 +}

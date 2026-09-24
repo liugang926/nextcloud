@@ -242,3 +242,7 @@ reclamation remains a separate, retryable GC status. In particular, the
 current GC scan does not prove a complete per-source inventory when a knowledge
 row has no matching source-version row, and derived indexes are not yet
 deleted.
+
+An indexed source can enter the separate, non-final withdrawal stage described
+in [nextcloud-indexed-withdrawal.md](nextcloud-indexed-withdrawal.md); it cannot
+receive an empty-inventory ACK or retire its Nextcloud credential yet.
