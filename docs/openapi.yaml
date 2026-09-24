@@ -154,7 +154,7 @@ paths:
   /admin/diagnostics:
     get:
       operationId: getSourceDiagnostics
-      description: Administrator-only source-side counters. Retained change hints are not themselves the consumer backlog; inspect each event sender's applied watermark and status separately.
+      description: Administrator-only Nextcloud source-side counters. Pending delivery counts cover configured local senders, including paused senders, with outbox IDs above their durable receipt watermark. Unconfigured bindings and retained already-received hints are excluded. These counters and connection-wide watermarks do not describe WeKnora's task queue, synchronization delay, parsing health, or per-file publication state.
       security:
         - nextcloudSession: []
       responses:
@@ -164,7 +164,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [checked_at, binding_count, binding_roots_available, retained_change_hints, oldest_retained_hint_age_seconds, newest_change_hint_at, newest_change_hint_id, explicit_withdrawal_count, consumer_acknowledgement_available]
+                required: [checked_at, binding_count, binding_roots_available, retained_change_hints, oldest_retained_hint_age_seconds, newest_change_hint_at, newest_change_hint_id, explicit_withdrawal_count, consumer_acknowledgement_available, outbox_pending_delivery_hints, oldest_outbox_pending_delivery_age_seconds, event_connections]
                 properties:
                   checked_at: {type: integer, description: Unix seconds}
                   binding_count: {type: integer, minimum: 0}
@@ -175,6 +175,26 @@ paths:
                   newest_change_hint_id: {type: integer, nullable: true}
                   explicit_withdrawal_count: {type: integer, minimum: 0}
                   consumer_acknowledgement_available: {type: boolean, description: True when at least one active event connection has a valid signed WeKnora applied status; inspect each connection separately}
+                  outbox_pending_delivery_hints: {type: integer, minimum: 0, description: Sum of local outbox hints above each configured sender's durable receipt ID}
+                  oldest_outbox_pending_delivery_age_seconds: {type: integer, nullable: true, minimum: 0}
+                  event_connections:
+                    type: array
+                    description: Non-sensitive local delivery state; no credential, receiver URL, file path or content is included
+                    items:
+                      type: object
+                      required: [binding_id, status, received_through_event_id, applied_through_event_id, applied_checked_at, applied_error_code, attempt_count, next_attempt_at, last_error_code, outbox_pending_delivery_hints, oldest_outbox_pending_delivery_age_seconds]
+                      properties:
+                        binding_id: {type: string}
+                        status: {type: string, enum: [active, paused]}
+                        received_through_event_id: {type: string, pattern: '^[0-9]+$', description: Durable WeKnora inbox receipt watermark}
+                        applied_through_event_id: {type: string, pattern: '^[0-9]+$', description: Last separately verified signed applied watermark}
+                        applied_checked_at: {type: integer, minimum: 0, description: Unix seconds; zero means never checked}
+                        applied_error_code: {type: string}
+                        attempt_count: {type: integer, minimum: 0}
+                        next_attempt_at: {type: integer, minimum: 0}
+                        last_error_code: {type: string}
+                        outbox_pending_delivery_hints: {type: integer, minimum: 0}
+                        oldest_outbox_pending_delivery_age_seconds: {type: integer, nullable: true, minimum: 0}
         '403': {description: Administrator session required}
         '503': {description: Diagnostics unavailable}
   /files/{fileId}/status:

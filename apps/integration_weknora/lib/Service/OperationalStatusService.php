@@ -59,18 +59,78 @@ final class OperationalStatusService {
             throw new \UnexpectedValueException('Publication state unavailable');
         }
 
-        $ackQuery = $this->db->getQueryBuilder();
-        $ackQuery->select('binding_id')->from('weknora_event_conn')
-            ->where($ackQuery->expr()->eq('status', $ackQuery->createNamedParameter('active')))
-            ->andWhere($ackQuery->expr()->gt('applied_checked_at', $ackQuery->createNamedParameter(0)))
-            ->andWhere($ackQuery->expr()->eq('applied_error_code',
-                $ackQuery->createNamedParameter('')))
-            ->setMaxResults(1);
-        $ackResult = $ackQuery->executeQuery();
+        // List only non-sensitive sender state. Never select the encrypted
+        // credential, receiver URL or file/path fields for diagnostics.
+        $connectionsQuery = $this->db->getQueryBuilder();
+        $connectionsQuery->select('binding_id', 'status', 'received_id', 'applied_id',
+                'applied_checked_at', 'applied_error_code', 'attempt_count',
+                'next_attempt_at', 'last_error_code')
+            ->from('weknora_event_conn')->orderBy('binding_id', 'ASC');
+        $connectionsResult = $connectionsQuery->executeQuery();
         try {
-            $ackAvailable = $ackResult->fetchOne() !== false;
+            $connectionRows = $connectionsResult->fetchAllAssociative();
         } finally {
-            $ackResult->closeCursor();
+            $connectionsResult->closeCursor();
+        }
+
+        // A hint is locally pending only while a configured sender has not
+        // received a durable receipt for its ID. The existing
+        // weknora_outbox_cursor(binding_id, id) index supports this join.
+        // Unconfigured bindings and already received retained hints are not
+        // counted as a delivery backlog.
+        $pendingQuery = $this->db->getQueryBuilder();
+        $pendingQuery->select('c.binding_id')
+            ->selectAlias($pendingQuery->func()->count('o.id'), 'pending_count')
+            ->selectAlias($pendingQuery->func()->min('o.created_at'), 'oldest_pending_at')
+            ->from('weknora_event_conn', 'c')
+            ->innerJoin('c', 'weknora_outbox', 'o',
+                $pendingQuery->expr()->andX(
+                    $pendingQuery->expr()->eq('o.binding_id', 'c.binding_id'),
+                    $pendingQuery->expr()->gt('o.id', 'c.received_id'),
+                ))
+            ->groupBy('c.binding_id');
+        $pendingResult = $pendingQuery->executeQuery();
+        try {
+            $pendingRows = $pendingResult->fetchAllAssociative();
+        } finally {
+            $pendingResult->closeCursor();
+        }
+        $pendingByBinding = [];
+        foreach ($pendingRows as $row) {
+            $pendingByBinding[(string)$row['binding_id']] = $row;
+        }
+
+        $ackAvailable = false;
+        $pendingCount = 0;
+        $oldestPendingAt = null;
+        $connectionStatuses = [];
+        foreach ($connectionRows as $row) {
+            $bindingId = (string)$row['binding_id'];
+            $pending = $pendingByBinding[$bindingId] ?? null;
+            $count = $pending === null ? 0 : (int)$pending['pending_count'];
+            $pendingAt = $pending === null ? null : (int)$pending['oldest_pending_at'];
+            $pendingCount += $count;
+            if ($pendingAt !== null && ($oldestPendingAt === null || $pendingAt < $oldestPendingAt)) {
+                $oldestPendingAt = $pendingAt;
+            }
+            $ackAvailable = $ackAvailable ||
+                ((string)$row['status'] === 'active' &&
+                 (int)$row['applied_checked_at'] > 0 &&
+                 (string)$row['applied_error_code'] === '');
+            $connectionStatuses[] = [
+                'binding_id' => $bindingId,
+                'status' => (string)$row['status'],
+                'received_through_event_id' => (string)$row['received_id'],
+                'applied_through_event_id' => (string)$row['applied_id'],
+                'applied_checked_at' => (int)$row['applied_checked_at'],
+                'applied_error_code' => (string)$row['applied_error_code'],
+                'attempt_count' => (int)$row['attempt_count'],
+                'next_attempt_at' => (int)$row['next_attempt_at'],
+                'last_error_code' => (string)$row['last_error_code'],
+                'outbox_pending_delivery_hints' => $count,
+                'oldest_outbox_pending_delivery_age_seconds' => $pendingAt === null
+                    ? null : max(0, $now - $pendingAt),
+            ];
         }
 
         $oldest = $events['oldest_at'] === null ? null : (int)$events['oldest_at'];
@@ -84,6 +144,10 @@ final class OperationalStatusService {
             'newest_change_hint_id' => $events['newest_id'] === null ? null : (int)$events['newest_id'],
             'explicit_withdrawal_count' => (int)$withdrawn,
             'consumer_acknowledgement_available' => $ackAvailable,
+            'outbox_pending_delivery_hints' => $pendingCount,
+            'oldest_outbox_pending_delivery_age_seconds' => $oldestPendingAt === null
+                ? null : max(0, $now - $oldestPendingAt),
+            'event_connections' => $connectionStatuses,
         ];
     }
 }

@@ -52,6 +52,21 @@ def status(admin, url, csrf):
     return data
 
 
+def delivery_diagnostics(admin, api, csrf, binding_id, secret):
+    code, body = request(admin, f"{api}/admin/diagnostics",
+                         headers={"requesttoken": csrf})
+    assert code == 200, f"sender diagnostics HTTP {code}"
+    assert secret.encode() not in body
+    data = json.loads(body)
+    matching = [row for row in data["event_connections"]
+                if row["binding_id"] == binding_id]
+    assert len(matching) == 1, matching
+    row = matching[0]
+    assert "secret_ciphertext" not in row and "receiver_url" not in row
+    assert data["outbox_pending_delivery_hints"] >= row["outbox_pending_delivery_hints"]
+    return row
+
+
 def job_id(job_class=JOB_CLASS):
     data = json.loads(compose("exec", "-T", "-u", "www-data", "nextcloud", "php", "occ",
                               "background-job:list", "--class=" + job_class,
@@ -265,6 +280,13 @@ def main():
             file_url = root_url + "/first.txt"
             code, _ = dav_request(file_url, "PUT", dav_headers, b"first event")
             assert code in (201, 204), f"create fixture event HTTP {code}"
+            pending_before = delivery_diagnostics(admin, api, csrf, binding_id, secret)
+            pending_ids = sql("SELECT id FROM oc_weknora_outbox "
+                              f"WHERE binding_id = '{binding_id}' ORDER BY id").splitlines()
+            assert pending_before["status"] == "active"
+            assert pending_before["received_through_event_id"] == "0"
+            assert pending_before["outbox_pending_delivery_hints"] == len(pending_ids) > 0
+            assert pending_before["oldest_outbox_pending_delivery_age_seconds"] >= 0
             idle_ids = add_idle_rows(suffix)
             identifier = job_id()
             run_job(identifier)
@@ -318,6 +340,10 @@ def main():
                 "sender synchronously polled applied status")
             payload = verify_signature(requests_seen(state_dir)[-1], secret)
             assert received["received_through_event_id"] == payload["events"][-1]["event_id"]
+            after_receipt = delivery_diagnostics(admin, api, csrf, binding_id, secret)
+            assert after_receipt["received_through_event_id"] == received["received_through_event_id"]
+            assert after_receipt["outbox_pending_delivery_hints"] == 0
+            assert after_receipt["oldest_outbox_pending_delivery_age_seconds"] is None
 
             # The separate command and ordinary cron fallback still verify
             # signed applied watermarks without running inside delivery.
@@ -375,6 +401,13 @@ def main():
             redirected = status(admin, connection_url, csrf)
             assert redirected["status"] == "paused" and redirected["last_error_code"] == "redirect_rejected", redirected
             assert redirected["received_through_event_id"] == received["received_through_event_id"]
+            paused_diagnostics = delivery_diagnostics(admin, api, csrf, binding_id, secret)
+            assert paused_diagnostics["status"] == "paused"
+            assert paused_diagnostics["last_error_code"] == "redirect_rejected"
+            assert paused_diagnostics["received_through_event_id"] == received["received_through_event_id"]
+            assert paused_diagnostics["applied_through_event_id"] == acknowledged["applied_through_event_id"]
+            assert paused_diagnostics["outbox_pending_delivery_hints"] > 0
+            assert paused_diagnostics["oldest_outbox_pending_delivery_age_seconds"] >= 0
 
             pending = sql("SELECT id FROM oc_weknora_outbox "
                           f"WHERE binding_id = '{binding_id}' AND id > "

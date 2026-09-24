@@ -519,9 +519,9 @@
             };
         }
 
-        function formatAge(seconds) {
+        function formatAge(seconds, emptyLabel = 'None retained') {
             if (!Number.isSafeInteger(seconds) || seconds < 0) {
-                return 'None retained';
+                return emptyLabel;
             }
             if (seconds < 3600) {
                 return `${Math.floor(seconds / 60)} minute(s)`;
@@ -541,7 +541,22 @@
                     typeof data.binding_roots_available !== 'boolean' ||
                     !Number.isSafeInteger(data.retained_change_hints) || data.retained_change_hints < 0 ||
                     !Number.isSafeInteger(data.explicit_withdrawal_count) || data.explicit_withdrawal_count < 0 ||
-                    typeof data.consumer_acknowledgement_available !== 'boolean') {
+                    typeof data.consumer_acknowledgement_available !== 'boolean' ||
+                    !Number.isSafeInteger(data.outbox_pending_delivery_hints) ||
+                    data.outbox_pending_delivery_hints < 0 ||
+                    (data.oldest_outbox_pending_delivery_age_seconds !== null &&
+                        (!Number.isSafeInteger(data.oldest_outbox_pending_delivery_age_seconds) ||
+                         data.oldest_outbox_pending_delivery_age_seconds < 0)) ||
+                    !Array.isArray(data.event_connections) ||
+                    data.event_connections.some((connection) =>
+                        !connection || typeof connection.binding_id !== 'string' ||
+                        typeof connection.status !== 'string' ||
+                        !/^\d+$/.test(connection.received_through_event_id) ||
+                        !/^\d+$/.test(connection.applied_through_event_id) ||
+                        !Number.isSafeInteger(connection.outbox_pending_delivery_hints) ||
+                        connection.outbox_pending_delivery_hints < 0 ||
+                        typeof connection.last_error_code !== 'string' ||
+                        typeof connection.applied_error_code !== 'string')) {
                     throw new Error('The server returned invalid source diagnostics.');
                 }
                 document.getElementById('weknora-diagnostics-roots').textContent =
@@ -559,6 +574,41 @@
                     String(data.explicit_withdrawal_count);
                 document.getElementById('weknora-diagnostics-applied-ack').textContent =
                     data.consumer_acknowledgement_available ? 'Available' : 'Unavailable';
+                document.getElementById('weknora-diagnostics-pending').textContent =
+                    String(data.outbox_pending_delivery_hints);
+                document.getElementById('weknora-diagnostics-pending-oldest').textContent =
+                    formatAge(data.oldest_outbox_pending_delivery_age_seconds, 'None pending');
+                const connectionRows = document.getElementById('weknora-diagnostics-connections');
+                connectionRows.textContent = '';
+                if (data.event_connections.length === 0) {
+                    const row = document.createElement('tr');
+                    const cell = document.createElement('td');
+                    cell.colSpan = 9;
+                    cell.textContent = 'No local event connection is configured.';
+                    row.appendChild(cell);
+                    connectionRows.appendChild(row);
+                }
+                for (const connection of data.event_connections) {
+                    const values = [
+                        connection.binding_id,
+                        connection.status,
+                        String(connection.outbox_pending_delivery_hints),
+                        formatAge(connection.oldest_outbox_pending_delivery_age_seconds, 'None pending'),
+                        connection.received_through_event_id,
+                        connection.applied_through_event_id,
+                        connection.applied_checked_at > 0
+                            ? new Date(connection.applied_checked_at * 1000).toLocaleString() : 'Never',
+                        connection.last_error_code || 'None',
+                        connection.applied_error_code || 'None',
+                    ];
+                    const row = document.createElement('tr');
+                    for (const value of values) {
+                        const cell = document.createElement('td');
+                        cell.textContent = value;
+                        row.appendChild(cell);
+                    }
+                    connectionRows.appendChild(row);
+                }
                 diagnosticsValues.hidden = false;
                 message(diagnosticsMessage, 'Source diagnostics refreshed.', 'success');
             } catch (error) {

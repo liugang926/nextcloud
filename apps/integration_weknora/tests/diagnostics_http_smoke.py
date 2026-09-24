@@ -33,8 +33,33 @@ def main():
     assert data["binding_roots_available"] is True, data
     assert data["retained_change_hints"] >= 0, data
     assert data["explicit_withdrawal_count"] >= 0, data
-    assert data["consumer_acknowledgement_available"] is False, data
+    assert isinstance(data["consumer_acknowledgement_available"], bool), data
     assert isinstance(data["checked_at"], int) and data["checked_at"] > 0, data
+    assert isinstance(data["outbox_pending_delivery_hints"], int), data
+    assert data["outbox_pending_delivery_hints"] >= 0, data
+    assert isinstance(data["event_connections"], list), data
+    assert sum(row["outbox_pending_delivery_hints"] for row in data["event_connections"]) == \
+        data["outbox_pending_delivery_hints"], data
+    ages = [row["oldest_outbox_pending_delivery_age_seconds"]
+            for row in data["event_connections"]
+            if row["oldest_outbox_pending_delivery_age_seconds"] is not None]
+    if data["outbox_pending_delivery_hints"]:
+        assert data["oldest_outbox_pending_delivery_age_seconds"] == max(ages), data
+    else:
+        assert data["oldest_outbox_pending_delivery_age_seconds"] is None, data
+    safe_fields = {"binding_id", "status", "received_through_event_id",
+                   "applied_through_event_id", "applied_checked_at", "applied_error_code",
+                   "attempt_count", "next_attempt_at", "last_error_code",
+                   "outbox_pending_delivery_hints",
+                   "oldest_outbox_pending_delivery_age_seconds"}
+    for row in data["event_connections"]:
+        assert set(row) == safe_fields, row
+        assert row["received_through_event_id"].isdigit(), row
+        assert row["applied_through_event_id"].isdigit(), row
+        if row["outbox_pending_delivery_hints"]:
+            assert row["oldest_outbox_pending_delivery_age_seconds"] >= 0, row
+        else:
+            assert row["oldest_outbox_pending_delivery_age_seconds"] is None, row
     if data["retained_change_hints"]:
         assert data["newest_change_hint_id"] > 0, data
         assert data["oldest_retained_hint_age_seconds"] >= 0, data

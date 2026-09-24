@@ -92,6 +92,19 @@ Outbox retention cannot remove unsent hints while a sender exists, including
 while paused. It may prune hints already durably received after the configured
 minimum retention period; this still does not mean they were applied.
 
+The administrator-only Source diagnostics page and
+`GET /index.php/apps/integration_weknora/api/v1/admin/diagnostics` report the
+number and oldest age of local outbox hints whose IDs exceed each configured
+sender's durable `received_through_event_id`. Paused senders are included;
+bindings without an event connection and retained hints already received are
+excluded. The response also lists each sender's binding ID, state, receipt and
+separately verified applied watermarks, check time, retry state, and
+non-sensitive error codes. It does not include receiver URLs, key IDs,
+credentials, file paths, ETags, or content. A zero local pending count does not
+establish that WeKnora's task queue is empty or that synchronization, parsing,
+indexing, deletion, or per-file publication is healthy. The applied watermark
+must also be read with its latest verification error and check time.
+
 The signed applied-watermark GET runs separately from delivery. Its own worker
 selects at most ten active connections whose last status check is at least 30
 seconds old, oldest first, and stops polling after a 45-second pass budget.
