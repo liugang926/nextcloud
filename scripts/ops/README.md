@@ -108,6 +108,39 @@ removes its relay and only those owned fixtures. If abort cannot be confirmed,
 it retains the binding and KB for recovery and prints their IDs and operation
 UUIDs without secrets. No existing binding or KB is selected for deletion.
 
+### Isolated virgin empty-source decommission smoke
+
+`local-empty-source-decommission-smoke.py` exercises the limited retirement
+path for a newly paired source that has never admitted a sync, event connection,
+file or chunk. Run only after both **disposable** stacks have the decommission
+routes and migrations. The WeKnora app must share the isolated Nextcloud
+container's network and start with `WEKNORA_NEXTCLOUD_DEV_HTTP=1` and its exact
+`http://<isolated-nextcloud-container-name>` origin in
+`WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS`. The script checks Compose labels, host
+ports, the shared network and the allowlist before creating fixtures.
+
+```sh
+WEKNORA_TEST_ADMIN_EMAIL=YOUR_ISOLATED_WK_ADMIN \
+WEKNORA_TEST_ADMIN_PASSWORD=YOUR_ISOLATED_WK_PASSWORD \
+python3 scripts/ops/local-empty-source-decommission-smoke.py \
+  --nextcloud-origin http://127.0.0.1:YOUR_ISOLATED_NC_PORT \
+  --weknora-origin http://127.0.0.1:YOUR_ISOLATED_WK_PORT \
+  --nextcloud-env-file /path/to/isolated-nextcloud/.env \
+  --nextcloud-compose-project YOUR_ISOLATED_NC_PROJECT \
+  --weknora-compose-project YOUR_ISOLATED_WK_PROJECT
+```
+
+The script creates a unique empty WebDAV folder, binding, and dedicated empty
+KB, then pairs them. It checks idempotent begin, remote ACK and finalize, wrong
+operation rejection, retired source credentials, a removed active binding,
+and the paused WeKnora source with its acknowledged tombstone. HTTP 202 on the
+WeKnora ACK is retried only with the same UUID. An uncertain pair or ACK keeps
+the fixture and prints its IDs for recovery. After verified finalization, the
+script removes only its empty WebDAV folder. The dedicated WeKnora KB, paused
+source and immutable pair/decommission records remain as audit evidence in the
+**disposable** stack; discard that stack after review. It never operates on a
+previously paired source or uses database row deletion to bypass retirement.
+
 ### Rotate an active source credential
 
 Save the original pair UUID, then run:
