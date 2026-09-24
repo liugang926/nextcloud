@@ -307,7 +307,7 @@ def prepare(image, mode):
             (directory / name).mkdir(mode=0o700)
         suffix = secrets.token_hex(4)
         project = "nc-synldap-" + suffix
-        passwords = {key: secrets.token_urlsafe(24) for key in
+        passwords = {key: "x" + secrets.token_urlsafe(24) for key in
                      ("ldap_admin", "ldap_bind", "alice", "bob", "charlie",
                       "nc_admin", "nc_db", "wk_admin", "wk_db", "jwt")}
         passwords["aes"] = secrets.token_hex(16)

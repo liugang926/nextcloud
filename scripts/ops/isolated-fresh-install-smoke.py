@@ -43,6 +43,23 @@ def run(*args: str, timeout: int = 600) -> str:
     return result.stdout.strip()
 
 
+def startup_diagnostics(compose: tuple[str, ...], private_values: tuple[str, ...]) -> str:
+    details = []
+    for suffix in (("ps", "--all"),
+                   ("logs", "--no-color", "--tail", "100", "db", "redis", "nextcloud")):
+        try:
+            result = subprocess.run((*compose, *suffix), text=True,
+                                    capture_output=True, timeout=30)
+            detail = (result.stdout + "\n" + result.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired) as error:
+            detail = type(error).__name__
+        for value in private_values:
+            if value:
+                detail = detail.replace(value, "[redacted]")
+        details.append(" ".join(suffix) + ": " + detail[:7500])
+    return "\n".join(details)
+
+
 def free_loopback_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -114,10 +131,13 @@ def main() -> None:
     project = "nc-fresh-install-" + secrets.token_hex(4)
     port = free_loopback_port()
     user = "fresh-admin"
-    password = secrets.token_urlsafe(30)
+    # The image passes these values as separate occ CLI arguments. A value
+    # starting with '-' is parsed by Symfony as another option.
+    password = "x" + secrets.token_urlsafe(30)
+    db_password = "x" + secrets.token_urlsafe(30)
     with tempfile.TemporaryDirectory(prefix="nc-fresh-install-") as tmp:
         config = Path(tmp) / "compose.yaml"
-        config.write_text(compose_text(port, secrets.token_urlsafe(30), user, password))
+        config.write_text(compose_text(port, db_password, user, password))
         config.chmod(0o600)
         compose = ("docker", "compose", "-p", project, "-f", str(config))
         started = False
@@ -131,7 +151,11 @@ def main() -> None:
                 raise RuntimeError("fixture unexpectedly bind mounts host files")
 
             started = True
-            run(*compose, "up", "-d", "--wait", "--wait-timeout", "600", timeout=660)
+            try:
+                run(*compose, "up", "-d", "--wait", "--wait-timeout", "600", timeout=660)
+            except RuntimeError as error:
+                detail = startup_diagnostics(compose, (password, db_password))
+                raise RuntimeError(f"fresh Nextcloud startup failed:\n{detail}") from error
             container = run(*compose, "ps", "-q", "nextcloud")
             if not container:
                 raise RuntimeError("Nextcloud container missing")

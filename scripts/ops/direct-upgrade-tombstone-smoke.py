@@ -42,6 +42,24 @@ def command(args, *, env=None, input_text=None, label="command", timeout=660):
     return result.stdout.strip()
 
 
+def startup_diagnostics(compose, env, values):
+    details = []
+    private_values = [values[key] for key in (
+        "NEXTCLOUD_ADMIN_PASSWORD", "NEXTCLOUD_DB_PASSWORD", "WEKNORA_SERVICE_TOKEN")]
+    for suffix in (["ps", "--all"],
+                   ["logs", "--no-color", "--tail", "100", "db", "redis", "nextcloud"]):
+        try:
+            result = subprocess.run(compose + suffix, cwd=ROOT, env=env,
+                                    text=True, capture_output=True, timeout=30)
+            detail = (result.stdout + "\n" + result.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired) as error:
+            detail = type(error).__name__
+        for value in private_values:
+            detail = detail.replace(value, "[redacted]")
+        details.append(" ".join(suffix) + ": " + detail[:7500])
+    return "\n".join(details)
+
+
 def local_env():
     values = {}
     for line in (ROOT / ".env").read_text().splitlines():
@@ -159,9 +177,13 @@ def run_case(case, values):
                    "-f", str(ROOT / "compose.yaml"), "-f", str(override)]
         verify_mount(compose, env, app_dir, port)
         try:
-            command(compose + ["up", "-d", "--wait", "--wait-timeout", "600",
-                               "db", "redis", "nextcloud"], env=env,
-                    label="isolated 0.4.6 stack")
+            try:
+                command(compose + ["up", "-d", "--wait", "--wait-timeout", "600",
+                                   "db", "redis", "nextcloud"], env=env,
+                        label="isolated 0.4.6 stack")
+            except RuntimeError as error:
+                detail = startup_diagnostics(compose, env, values)
+                raise RuntimeError(f"isolated 0.4.6 startup failed:\n{detail}") from error
 
             def occ(*args):
                 return command(compose + ["exec", "-T", "-u", "www-data",

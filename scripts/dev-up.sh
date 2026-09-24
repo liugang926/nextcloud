@@ -11,8 +11,8 @@ from secrets import token_urlsafe
 
 content = "\n".join([
     "NEXTCLOUD_ADMIN_USER=devadmin",
-    f"NEXTCLOUD_ADMIN_PASSWORD={token_urlsafe(24)}",
-    f"NEXTCLOUD_DB_PASSWORD={token_urlsafe(24)}",
+    f"NEXTCLOUD_ADMIN_PASSWORD=x{token_urlsafe(24)}",
+    f"NEXTCLOUD_DB_PASSWORD=x{token_urlsafe(24)}",
     f"WEKNORA_SERVICE_TOKEN={token_urlsafe(32)}",
     "NEXTCLOUD_HTTP_BIND_IP=127.0.0.1",
     "NEXTCLOUD_HTTP_PORT=18082",

@@ -69,8 +69,8 @@ def main():
 
     nc_env = "\n".join((
         "NEXTCLOUD_ADMIN_USER=pilotadmin",
-        f"NEXTCLOUD_ADMIN_PASSWORD={secrets.token_urlsafe(24)}",
-        f"NEXTCLOUD_DB_PASSWORD={secrets.token_urlsafe(24)}",
+        f"NEXTCLOUD_ADMIN_PASSWORD=x{secrets.token_urlsafe(24)}",
+        f"NEXTCLOUD_DB_PASSWORD=x{secrets.token_urlsafe(24)}",
         f"WEKNORA_SERVICE_TOKEN={secrets.token_urlsafe(32)}",
         "NEXTCLOUD_HTTP_BIND_IP=127.0.0.1",
         f"NEXTCLOUD_HTTP_PORT={args.nextcloud_port}",
