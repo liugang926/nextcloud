@@ -90,6 +90,7 @@ def main():
     outside_url = (f"{base}/remote.php/dav/files/"
                    f"{urllib.parse.quote(env['NEXTCLOUD_ADMIN_USER'])}/changes-outside-{suffix}")
     moved_url = f"{outside_url}/moved.txt"
+    moved_folder_url = f"{outside_url}/changes-folder-{suffix}"
     moving_url = f"{dav_base}/changes-moving-{suffix}.txt"
     try:
         status, body = request(file_url, "PUT", dav_headers, b"first version\n")
@@ -113,6 +114,17 @@ def main():
         events, cursor = drain(api_url, machine_headers, cursor)
         assert not any(e["type"] == "delete" and e["file_id"] == new_id for e in events), events
 
+        status, body = request(file_url, "PUT", dav_headers, b"new file, same name\n")
+        assert status in (201, 204), (status, body[:300])
+        replacement_id = file_id(file_url, dav_headers)
+        assert replacement_id != new_id, "re-upload must have a new source identity"
+        events, cursor = drain(api_url, machine_headers, cursor)
+        assert any(e["type"] == "upsert" and e["file_id"] == replacement_id for e in events), events
+        assert not any(e["type"] == "upsert" and e["file_id"] == new_id for e in events), events
+        status, body = request(file_url, "DELETE", dav_headers)
+        assert status == 204, (status, body[:300])
+        _, cursor = drain(api_url, machine_headers, cursor)
+
         status, body = request(outside_url, "MKCOL", dav_headers)
         assert status == 201, (status, body[:300])
         status, body = request(moving_url, "PUT", dav_headers, b"move out\n")
@@ -132,7 +144,34 @@ def main():
         assert status == 201, (status, body[:300])
         status, body = request(child_url, "PUT", dav_headers, b"folder member\n")
         assert status in (201, 204), (status, body[:300])
+        child_id = file_id(child_url, dav_headers)
         _, cursor = drain(api_url, machine_headers, cursor)
+        status, body = request(folder_url, "MOVE", {
+            **dav_headers, "Destination": moved_folder_url,
+        })
+        assert status in (201, 204), (status, body[:300])
+        events, cursor = drain(api_url, machine_headers, cursor)
+        assert any(e["type"] == "subtree_deleted" and
+                   e["old_path"] and e["old_path"].endswith(f"/changes-folder-{suffix}")
+                   for e in events), events
+        status, _ = request(
+            f"{base}/index.php/apps/integration_weknora/api/v1/bindings/dev-published/files/{child_id}/content",
+            headers=machine_headers)
+        assert status == 404, f"moved-out descendant was readable: HTTP {status}"
+
+        status, body = request(moved_folder_url, "MOVE", {
+            **dav_headers, "Destination": folder_url,
+        })
+        assert status in (201, 204), (status, body[:300])
+        events, cursor = drain(api_url, machine_headers, cursor)
+        assert any(e["type"] == "subtree_scan" and
+                   e["path"] and e["path"].endswith(f"/changes-folder-{suffix}")
+                   for e in events), events
+        status, body = request(
+            f"{base}/index.php/apps/integration_weknora/api/v1/bindings/dev-published/files/{child_id}/content",
+            headers=machine_headers)
+        assert status == 200 and body == b"folder member\n", (status, body[:300])
+
         status, body = request(folder_url, "DELETE", dav_headers)
         assert status == 204, (status, body[:300])
         events, cursor = drain(api_url, machine_headers, cursor)

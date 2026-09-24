@@ -15,10 +15,10 @@ index e18b1ae9..8df286cd 100644
  # I. 可观测性（Langfuse，可选）
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..8ed685e3
+index 00000000..27927704
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,255 @@
 +# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
@@ -27,8 +27,8 @@ index 00000000..8ed685e3
 +database. It does **not** mean that WeKnora reconciled the source, parsed a
 +document, published a version, or applied a deletion. A background dispatcher
 +submits source reconciliation jobs from committed inbox rows. The applied
-+watermark remains at zero until a later complete publication proof is
-+implemented; HTTP `202` is never an application acknowledgement.
++watermark advances only after WeKnora proves a complete publication run;
++HTTP `202` is never an application acknowledgement.
 +
 +Only an `active` connection row on an `active` data source may receive events.
 +Pausing a source stops new durable receipts even when its connection remains
@@ -88,18 +88,19 @@ index 00000000..8ed685e3
 +The dispatcher polls due connections every 5 seconds by default. Set
 +`WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL` to a Go duration from `1s` through
 +`1m` to tune this at process startup; an empty or invalid value uses `5s`.
-+For each connection it
-+claims the current committed receipt watermark under a database lease, then
-+queues a forced full Nextcloud source scan. The scan reads the current
-+Nextcloud manifest and binding authorization through the existing connector;
-+an event hint is never used directly as a delete instruction. Repeated or
-+coalesced hints can cause another full scan. A failed queue operation or
++For each connection it claims the current committed receipt watermark under a
++database lease, then
++queues an incremental source reconciliation. The connector validates the
++complete current Nextcloud manifest and binding authorization before it
++downloads touched files. Broad hints, an absent or expired changes cursor,
++and the periodic content audit re-download all current files. An event hint
++is never used directly as a delete instruction. A failed queue operation or
 +partial/failed/canceled sync remains retryable with exponential backoff.
 +Each sweep examines at most 32 due connections and runs them sequentially;
 +the poll interval alone is not an event-to-queue latency guarantee. The
 +Nextcloud sender cadence, network, database load, and queue admission also
-+affect that latency. Short intervals can increase full-scan work under bursty
-+edits, so measure the pilot workload before claiming the PRD's P95 target.
++affect that latency. Short intervals can increase reconciliation work under
++bursty edits, so measure the pilot workload before claiming the PRD's P95 target.
 +Source configuration drift blocks dispatch; revoke blocks further claims and
 +cancels queued event tasks when they start. A running event task checks the
 +pinned connection and its running sync log before each knowledge item, and
@@ -113,7 +114,7 @@ index 00000000..8ed685e3
 +| --- | --- |
 +| `received_through_event_id` | Highest event ID committed in the inbox; the value returned by HTTP `202`. |
 +| `dispatched_through_event_id` | Highest receipt watermark for which the sync queue accepted a job. This does not prove that the job ran or succeeded. |
-+| `applied_through_event_id` | Highest event ID proven published or deleted. It remains `"0"` in this increment because the asynchronous parser and publication path has no reliable complete-run proof. |
++| `applied_through_event_id` | Highest event ID covered by WeKnora's complete publication proof. It can remain `"0"` while work is pending or proof is unavailable. |
 +| `backlog_count` | Inbox rows above the applied watermark, including rows already dispatched. |
 +| `undispatched_count` | Inbox rows above the dispatched watermark. |
 +| `dispatch_state` | `idle`, `leased`, `queued`, `retry`, or `blocked`. |
@@ -140,20 +141,19 @@ index 00000000..8ed685e3
 +requires manual repair or re-pairing; until repaired, the dispatch state is
 +`retry` with `sync_not_successful` and may retry on its normal backoff.
 +
-+Each event dispatch currently requests a true full scan, including content
-+downloads. The connector validates and buffers the complete metadata manifest,
-+then emits one downloaded file at a time to the importer; it no longer retains
-+all fetched file bodies in a single item slice. The current file is still held
-+in memory as a byte slice (up to the 64 MiB download limit), and the manifest,
-+old inventory, and new inventory are proportional to file count. To preserve
-+the two-complete-scan deletion rule, the source cursor advances only after the
-+whole scan and every emitted item have been processed successfully. An interrupted
-+scan therefore repeats its downloads. The 10,000-file / 100 GB pilot target
-+remains unaccepted: every event still downloads all selected content, sync tasks
-+have a two-hour timeout, and there is no resumable mid-scan checkpoint. The
-+dispatcher polls every 30 seconds, so it also cannot meet the PRD's
-+event-to-durable-job P95 target of 10 seconds. ETag is a change hint, not a
-+content hash, so skipping an unchanged ETag is not proof of content equivalence.
++Each event reconciliation validates and buffers the complete metadata manifest,
++then emits one downloaded file at a time to the importer. Ordinary scoped
++hints re-download only touched files. A separate content-audit deadline
++defaults to 24 hours and forces a full content refresh even if other hinted
++scans ran; opaque ETags and metadata cannot prove that an unhinted write did
++not happen. The current file is held in memory as a byte slice (up to the
++64 MiB download limit), and the manifest, old inventory, and new inventory
++are proportional to file count. The source cursor advances only after the
++whole scan and every emitted item have been processed successfully. An
++interrupted scan therefore repeats its downloads. The 10,000-file / 100 GB
++pilot target remains unaccepted; there is no resumable mid-scan checkpoint.
++The five-second default dispatcher interval alone does not prove the PRD's
++event-to-durable-job P95 target of 10 seconds.
 +
 +## Request contract
 +
@@ -239,6 +239,41 @@ index 00000000..8ed685e3
 +atomic revocation across the two services. A source change after an individual
 +read's live authorization but before that response is emitted is also outside
 +this protocol's atomicity guarantee.
++
++## Signed applied status and Nextcloud retention
++
++Nextcloud queries `GET /api/v1/integrations/nextcloud/events/status?connection_id=ID`
++with an empty body. The raw query has exactly the `connection_id` key and the
++connection's canonical ID; extra parameters, encoding changes, and redirects
++are rejected. It uses the same connection ID, key ID, timestamp, nonce, and
++signature headers as event delivery. The HMAC message has nine lines joined
++by `\n`, without a final newline:
++
++1. `nextcloud-event-status-hmac-sha256-v1`
++2. `GET`
++3. `/api/v1/integrations/nextcloud/events/status`
++4. the exact raw query string
++5. lowercase SHA-256 of the empty body
++6. timestamp
++7. nonce
++8. connection ID
++9. key ID
++
++The signed status route checks the current key, live paired source, and replay
++nonce before returning its connection, instance, binding, receipt, dispatch,
++and applied watermarks. Nextcloud accepts the applied watermark only if the
++connection, instance, and binding match its stored sender, the status is
++active, the reported receipt covers its local receipt, and the applied ID is
++monotonic and no greater than either receipt. A status failure or mismatch
++blocks connected outbox pruning. The local sender status exposes its last
++verified applied ID, check time, and status error without exposing the key.
++
++The retention job still waits at least 30 days. For a connected binding, it
++only removes a prefix through the verified applied ID after a valid status
++check. A `202` receipt alone leaves the hints in the outbox. A missing or
++failed status endpoint preserves them until the status is repaired; a later
++full manifest reconciliation remains necessary after any already-expired
++cursor or cross-system restore.
 diff --git a/docs/nextcloud-file-status.md b/docs/nextcloud-file-status.md
 new file mode 100644
 index 00000000..5b0f41fd
@@ -471,10 +506,10 @@ index 00000000..8229f8a4
 +ACK Nextcloud or release credentials.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
-index 00000000..ce21c7d8
+index 00000000..42fc2c81
 --- /dev/null
 +++ b/docs/nextcloud-source-pairing.md
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,218 @@
 +# Nextcloud source pairing
 +
 +The source pairing is separate from the optional event-inbox connection. A
@@ -521,14 +556,78 @@ index 00000000..ce21c7d8
 +
 +A deterministic Nextcloud rejection (wrong tuple, revoked key, or stale
 +uncommitted epoch) returns HTTP 409 with `last_error_code:
-+remote_commit_conflict` in the nonsecret pairing status. It currently leaves
-+a paused pending source and a provenance
-+tombstone for its KB. Status and retry never reissue the token. An operator
-+must inspect both sides, abort the pending Nextcloud operation when possible,
-+and use a new dedicated KB for a fresh operation. There is no automated
-+WeKnora pending-pair abort in this slice. Direct revocation of a pending or
-+active pairing key is rejected; binding removal retires the pair and its keys
-+together.
++remote_commit_conflict` in the nonsecret pairing status. It leaves the source
++paused and pending until an administrator retries or aborts the same operation.
++Status and retry never reissue the token. Direct revocation of a pending or
++active pairing key is rejected. Administrator binding deletion returns HTTP
++`409 paired_binding_decommission_required` whenever the binding has a pairing
++record, including an aborted pending intent. The source credential and an
++abort-only retry verifier remain available. A stopped binding is subject to
++the same deletion guard.
++
++## Abort an initial pending pair
++
++A WeKnora tenant administrator with KB edit permission may call `POST
++/api/v1/datasource/nextcloud-source-pairings/{operation_id}/abort`, or use
++`scripts/ops/local-source-pairing.py abort --binding BINDING --operation-id
++UUID`. WeKnora signs the exact original operation, tenant, KB, instance and
++binding tuple using the pending source credential. Nextcloud atomically closes
++the pending intent and expires that key. The expired verifier is usable only
++to repeat this same signed abort if its response was lost; ordinary machine
++calls and source commit reject it. Once WeKnora has the remote aborted ACK, it
++transactionally removes only the empty paused source and keeps a nonsecret
++operation tombstone. The KB may then be used by a new pairing operation, while
++the original UUID and key cannot be reused. An active pair cannot be aborted.
++
++HTTP 202 means the remote abort outcome or local cleanup is uncertain. The
++source stays paused until `POST .../{operation_id}/abort` is retried; do not
++prepare a replacement while the old operation remains pending. A remote 409
++leaves the local source intact for inspection. If the token never reached
++WeKnora, the Nextcloud administrator can instead `DELETE
++/api/v1/admin/bindings/{id}/source-pairing` with its pending
++`operation_id`; an idempotent repeat returns the aborted status. After an
++operator aborts Nextcloud first, WeKnora's signed abort can still complete
++its local cleanup using the original credential. In both cases, use a new
++operation UUID for replacement.
++
++## Paired source health
++
++`GET /api/v1/datasource/nextcloud-source-pairings/{operation_id}/health`
++requires a tenant administrator session and edit access to the paired
++knowledge base. Tenant API keys cannot call it. It returns `Cache-Control:
++no-store` and excludes machine credentials, source URLs, file paths, document
++content, and free-form error messages. A missing event connection is
++represented by `event_inbox: null`; it does not mean the shared task queue is
++empty. An aborted pair has no live source and returns HTTP 409.
++
++The `event_inbox` counters are scoped to the paired source's latest event
++connection. `unapplied_count` counts durable receipts above the verified
++applied watermark, including already dispatched receipts;
++`undispatched_count` counts receipts above the dispatch watermark. Its oldest
++age is measured from the oldest unapplied receipt. The three watermarks keep
++their distinct received, dispatched, and applied meanings. A received event
++does not prove that a source scan ran, and a dispatched event does not prove
++that a file is ready.
++
++`sync_logs.running_count` and `oldest_running_age_seconds` describe rows
++still marked running for this data source. `failed_last_24_hours` and
++`partial_last_24_hours` count retained logs whose scan started in the last
++24 hours. The background log retention policy can prune older rows;
++`latest_status` is `null` when no log remains. These values do not count
++the Redis/Asynq queue or any parser jobs that have not written a sync log.
++
++`current_versions` groups only the latest `nextcloud_source_versions` rows
++for this tenant, KB, and data source. Its parse counters inspect their
++currently referenced, non-deleted knowledge candidates.
++`missing_candidate_count` includes a staging or published row whose candidate
++is absent, soft-deleted, or outside the paired tenant/KB.
++`oldest_staging_age_seconds` is measured from the oldest current staging
++version's `updated_at`; it is not the parser task's queue wait. The source
++revision ledger and older knowledge rows are deliberately outside these
++current-version counts. Even `parse_completed_enabled_count` is not a
++per-file publication proof, an index completeness check, or permission to
++answer a question. Use the signed current-ETag file-status response and the
++query authorization path for those decisions.
 +
 +## Active source-key rotation
 +
@@ -7622,6 +7721,482 @@ index 00000000..1293a8b0
 +	require.ErrorContains(t, db.Exec(string(script)).Error, "CHECK constraint failed",
 +		"a possibly false 42-era ACK must not be silently carried into 43")
 +}
+diff --git a/internal/application/repository/nextcloud_source_health.go b/internal/application/repository/nextcloud_source_health.go
+new file mode 100644
+index 00000000..f9a3808c
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_health.go
+@@ -0,0 +1,274 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strconv"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++// NextcloudSourceHealth reports only database observations attributable to one
++// paired source. None of these counters is a proof of per-file publication or
++// a measure of the shared Asynq/Redis task queue.
++type NextcloudSourceHealth struct {
++	OperationID     string                       `json:"operation_id"`
++	CheckedAt       time.Time                    `json:"checked_at"`
++	SourceStatus    string                       `json:"source_status"`
++	EventInbox      *NextcloudSourceEventHealth  `json:"event_inbox"`
++	SyncLogs        NextcloudSourceSyncHealth    `json:"sync_logs"`
++	CurrentVersions NextcloudSourceVersionHealth `json:"current_versions"`
++}
++
++// EventInbox is nil when no event connection has ever been installed for the
++// paired source. Its pending counts refer to durable event receipts only.
++type NextcloudSourceEventHealth struct {
++	ConnectionStatus          string `json:"connection_status"`
++	ReceivedThroughEventID    string `json:"received_through_event_id"`
++	DispatchedThroughEventID  string `json:"dispatched_through_event_id"`
++	AppliedThroughEventID     string `json:"applied_through_event_id"`
++	UnappliedCount            int64  `json:"unapplied_count"`
++	UndispatchedCount         int64  `json:"undispatched_count"`
++	OldestUnappliedAgeSeconds *int64 `json:"oldest_unapplied_age_seconds"`
++	DispatchState             string `json:"dispatch_state"`
++	LastErrorCode             string `json:"last_error_code"`
++}
++
++// Failed and partial sync counts cover retained logs started in the previous
++// 24 hours. Log retention means they are not a lifetime failure total.
++type NextcloudSourceSyncHealth struct {
++	RunningCount            int64   `json:"running_count"`
++	OldestRunningAgeSeconds *int64  `json:"oldest_running_age_seconds"`
++	FailedLast24Hours       int64   `json:"failed_last_24_hours"`
++	PartialLast24Hours      int64   `json:"partial_last_24_hours"`
++	LatestStatus            *string `json:"latest_status"`
++}
++
++// These are the current source-version rows, not historical revisions or all
++// knowledge in the dedicated KB. A completed parse does not prove that the
++// current ETag was published or that a question is authorized.
++type NextcloudSourceVersionHealth struct {
++	StagingCount               int64  `json:"staging_count"`
++	PublishedCount             int64  `json:"published_count"`
++	TombstoneCount             int64  `json:"tombstone_count"`
++	MissingCandidateCount      int64  `json:"missing_candidate_count"`
++	ParsePendingCount          int64  `json:"parse_pending_count"`
++	ParseProcessingCount       int64  `json:"parse_processing_count"`
++	ParseFinalizingCount       int64  `json:"parse_finalizing_count"`
++	ParseFailedCount           int64  `json:"parse_failed_count"`
++	ParseCompletedEnabledCount int64  `json:"parse_completed_enabled_count"`
++	OtherCandidateStatusCount  int64  `json:"other_candidate_status_count"`
++	OldestStagingAgeSeconds    *int64 `json:"oldest_staging_age_seconds"`
++}
++
++type nextcloudSyncHealthRow struct {
++	RunningCount       int64 `gorm:"column:running_count"`
++	FailedLast24Hours  int64 `gorm:"column:failed_last_24_hours"`
++	PartialLast24Hours int64 `gorm:"column:partial_last_24_hours"`
++}
++
++type nextcloudVersionHealthRow struct {
++	StagingCount               int64 `gorm:"column:staging_count"`
++	PublishedCount             int64 `gorm:"column:published_count"`
++	TombstoneCount             int64 `gorm:"column:tombstone_count"`
++	MissingCandidateCount      int64 `gorm:"column:missing_candidate_count"`
++	ParsePendingCount          int64 `gorm:"column:parse_pending_count"`
++	ParseProcessingCount       int64 `gorm:"column:parse_processing_count"`
++	ParseFinalizingCount       int64 `gorm:"column:parse_finalizing_count"`
++	ParseFailedCount           int64 `gorm:"column:parse_failed_count"`
++	ParseCompletedEnabledCount int64 `gorm:"column:parse_completed_enabled_count"`
++	OtherCandidateStatusCount  int64 `gorm:"column:other_candidate_status_count"`
++}
++
++func nextcloudHealthAge(now time.Time, since *time.Time) *int64 {
++	if since == nil {
++		return nil
++	}
++	age := int64(now.Sub(*since).Seconds())
++	if age < 0 {
++		age = 0
++	}
++	return &age
++}
++
++func nextcloudHealthErrorCode(code string) string {
++	switch code {
++	case "", "source_changed", "cursor_missing_manual_review", "sync_stale_manual_review",
++		"sync_not_successful", "deletion_or_cursor_pending", "publication_pending",
++		"publication_unproven", "inbox_missing", "queue_unavailable", "source_paused",
++		"source_unavailable", "dispatch_failed", "queue_uncertain":
++		return code
++	default:
++		return "unknown"
++	}
++}
++
++// SourceHealth requires a pairing already authorized by the HTTP handler.
++// The queries repeat its tenant, KB and source identity to avoid counting any
++// other source in the same tenant. They intentionally never select a URL,
++// file path, error message, payload, key, or encrypted credential.
++func (r *NextcloudSourcePairingRepository) SourceHealth(
++	ctx context.Context, pair NextcloudSourcePairing, now time.Time,
++) (NextcloudSourceHealth, error) {
++	result := NextcloudSourceHealth{OperationID: pair.OperationID, CheckedAt: now.UTC()}
++	if pair.OperationID == "" || pair.TenantID == 0 || pair.KnowledgeBaseID == "" ||
++		pair.DataSourceID == "" || pair.InstanceID == "" || pair.BindingID == "" ||
++		pair.State == "aborted" {
++		return result, ErrNextcloudSourcePairingConflict
++	}
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var source struct {
++			Status string `gorm:"column:status"`
++		}
++		if err := tx.Table("data_sources").Select("status").Where(
++			"id = ? AND tenant_id = ? AND knowledge_base_id = ? AND type = ? AND deleted_at IS NULL",
++			pair.DataSourceID, pair.TenantID, pair.KnowledgeBaseID, types.ConnectorTypeNextcloud,
++		).Take(&source).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNextcloudSourcePairingConflict
++			}
++			return fmt.Errorf("read paired source health: %w", err)
++		}
++		result.SourceStatus = source.Status
++
++		var sync nextcloudSyncHealthRow
++		if err := tx.Raw(`SELECT
++			COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0) AS running_count,
++			COALESCE(SUM(CASE WHEN status = 'failed' AND started_at >= ? THEN 1 ELSE 0 END), 0) AS failed_last_24_hours,
++			COALESCE(SUM(CASE WHEN status = 'partial' AND started_at >= ? THEN 1 ELSE 0 END), 0) AS partial_last_24_hours
++			FROM sync_logs WHERE tenant_id = ? AND data_source_id = ?`,
++			now.Add(-24*time.Hour), now.Add(-24*time.Hour), pair.TenantID, pair.DataSourceID,
++		).Scan(&sync).Error; err != nil {
++			return fmt.Errorf("read paired sync health: %w", err)
++		}
++		result.SyncLogs = NextcloudSourceSyncHealth{
++			RunningCount:       sync.RunningCount,
++			FailedLast24Hours:  sync.FailedLast24Hours,
++			PartialLast24Hours: sync.PartialLast24Hours,
++		}
++		var oldestRunning struct {
++			StartedAt time.Time `gorm:"column:started_at"`
++		}
++		runningQuery := tx.Table("sync_logs").Select("started_at").Where(
++			"tenant_id = ? AND data_source_id = ? AND status = 'running'",
++			pair.TenantID, pair.DataSourceID,
++		).Order("started_at ASC, id ASC").Limit(1).Find(&oldestRunning)
++		if runningQuery.Error != nil {
++			return fmt.Errorf("read oldest paired sync: %w", runningQuery.Error)
++		}
++		if runningQuery.RowsAffected == 1 {
++			result.SyncLogs.OldestRunningAgeSeconds = nextcloudHealthAge(now, &oldestRunning.StartedAt)
++		}
++		var latest struct {
++			Status string `gorm:"column:status"`
++		}
++		latestQuery := tx.Table("sync_logs").Select("status").Where(
++			"tenant_id = ? AND data_source_id = ?", pair.TenantID, pair.DataSourceID,
++		).Order("started_at DESC, id DESC").Limit(1).Find(&latest)
++		if latestQuery.Error != nil {
++			return fmt.Errorf("read latest paired sync: %w", latestQuery.Error)
++		}
++		if latestQuery.RowsAffected == 1 {
++			result.SyncLogs.LatestStatus = &latest.Status
++		}
++
++		var versions nextcloudVersionHealthRow
++		if err := tx.Raw(`SELECT
++			COALESCE(SUM(CASE WHEN v.state = 'staging' THEN 1 ELSE 0 END), 0) AS staging_count,
++			COALESCE(SUM(CASE WHEN v.state = 'published' THEN 1 ELSE 0 END), 0) AS published_count,
++			COALESCE(SUM(CASE WHEN v.state = 'tombstone' THEN 1 ELSE 0 END), 0) AS tombstone_count,
++			COALESCE(SUM(CASE WHEN v.state <> 'tombstone' AND k.id IS NULL THEN 1 ELSE 0 END), 0) AS missing_candidate_count,
++			COALESCE(SUM(CASE WHEN k.parse_status = 'pending' THEN 1 ELSE 0 END), 0) AS parse_pending_count,
++			COALESCE(SUM(CASE WHEN k.parse_status = 'processing' THEN 1 ELSE 0 END), 0) AS parse_processing_count,
++			COALESCE(SUM(CASE WHEN k.parse_status = 'finalizing' THEN 1 ELSE 0 END), 0) AS parse_finalizing_count,
++			COALESCE(SUM(CASE WHEN k.parse_status = 'failed' THEN 1 ELSE 0 END), 0) AS parse_failed_count,
++			COALESCE(SUM(CASE WHEN k.parse_status = 'completed' AND k.enable_status = 'enabled' THEN 1 ELSE 0 END), 0) AS parse_completed_enabled_count,
++			COALESCE(SUM(CASE WHEN k.id IS NOT NULL AND
++				(k.parse_status NOT IN ('pending', 'processing', 'finalizing', 'failed', 'completed') OR
++				(k.parse_status = 'completed' AND k.enable_status <> 'enabled')) THEN 1 ELSE 0 END), 0) AS other_candidate_status_count
++			FROM nextcloud_source_versions AS v
++			LEFT JOIN knowledges AS k ON k.id = v.candidate_knowledge_id AND
++				k.tenant_id = v.tenant_id AND k.knowledge_base_id = v.knowledge_base_id AND
++				k.deleted_at IS NULL AND v.state <> 'tombstone'
++			WHERE v.tenant_id = ? AND v.knowledge_base_id = ? AND v.datasource_id = ?`,
++			pair.TenantID, pair.KnowledgeBaseID, pair.DataSourceID,
++		).Scan(&versions).Error; err != nil {
++			return fmt.Errorf("read paired version health: %w", err)
++		}
++		result.CurrentVersions = NextcloudSourceVersionHealth{
++			StagingCount: versions.StagingCount, PublishedCount: versions.PublishedCount,
++			TombstoneCount: versions.TombstoneCount, MissingCandidateCount: versions.MissingCandidateCount,
++			ParsePendingCount: versions.ParsePendingCount, ParseProcessingCount: versions.ParseProcessingCount,
++			ParseFinalizingCount: versions.ParseFinalizingCount, ParseFailedCount: versions.ParseFailedCount,
++			ParseCompletedEnabledCount: versions.ParseCompletedEnabledCount,
++			OtherCandidateStatusCount:  versions.OtherCandidateStatusCount,
++		}
++		var oldestStaging struct {
++			UpdatedAt time.Time `gorm:"column:updated_at"`
++		}
++		stagingQuery := tx.Table("nextcloud_source_versions").Select("updated_at").Where(
++			"tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND state = 'staging'",
++			pair.TenantID, pair.KnowledgeBaseID, pair.DataSourceID,
++		).Order("updated_at ASC, external_id ASC").Limit(1).Find(&oldestStaging)
++		if stagingQuery.Error != nil {
++			return fmt.Errorf("read oldest paired staging version: %w", stagingQuery.Error)
++		}
++		if stagingQuery.RowsAffected == 1 {
++			result.CurrentVersions.OldestStagingAgeSeconds = nextcloudHealthAge(now, &oldestStaging.UpdatedAt)
++		}
++		var currentConnection struct {
++			ConnectionID string `gorm:"column:connection_id"`
++		}
++		connectionQuery := tx.Table("nextcloud_event_connections").
++			Select("connection_id").
++			Where("tenant_id = ? AND datasource_id = ?", pair.TenantID, pair.DataSourceID).
++			Order("created_at DESC").Limit(1).Find(&currentConnection)
++		if connectionQuery.Error != nil {
++			return fmt.Errorf("read paired event connection: %w", connectionQuery.Error)
++		}
++		if connectionQuery.RowsAffected == 0 {
++			return nil
++		}
++		status, statusErr := (&NextcloudEventInboxRepository{db: tx}).ConnectionStatus(
++			ctx, pair.TenantID, pair.DataSourceID)
++		if statusErr != nil {
++			return fmt.Errorf("read paired event health: %w", statusErr)
++		}
++		if status.NextcloudInstanceID != pair.InstanceID || status.BindingID != pair.BindingID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		appliedID, err := strconv.ParseInt(status.AppliedThroughEventID, 10, 64)
++		if err != nil || appliedID < 0 {
++			return ErrNextcloudEventConflict
++		}
++		var oldest struct {
++			ReceivedAt time.Time `gorm:"column:received_at"`
++		}
++		oldestQuery := tx.Table("nextcloud_event_inbox").Select("received_at").Where(
++			"connection_id = ? AND event_id > ?", status.ConnectionID, appliedID,
++		).Order("event_id ASC").Limit(1).Find(&oldest)
++		if oldestQuery.Error != nil {
++			return fmt.Errorf("read oldest paired event: %w", oldestQuery.Error)
++		}
++		var oldestUnappliedAge *int64
++		if oldestQuery.RowsAffected == 1 {
++			oldestUnappliedAge = nextcloudHealthAge(now, &oldest.ReceivedAt)
++		}
++		result.EventInbox = &NextcloudSourceEventHealth{
++			ConnectionStatus:          status.Status,
++			ReceivedThroughEventID:    status.ReceivedThroughEventID,
++			DispatchedThroughEventID:  status.DispatchedThroughEventID,
++			AppliedThroughEventID:     status.AppliedThroughEventID,
++			UnappliedCount:            status.BacklogCount,
++			UndispatchedCount:         status.UndispatchedCount,
++			OldestUnappliedAgeSeconds: oldestUnappliedAge,
++			DispatchState:             status.DispatchState,
++			LastErrorCode:             nextcloudHealthErrorCode(status.LastErrorCode),
++		}
++		return nil
++	})
++	return result, err
++}
+diff --git a/internal/application/repository/nextcloud_source_health_test.go b/internal/application/repository/nextcloud_source_health_test.go
+new file mode 100644
+index 00000000..fdbff91d
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_health_test.go
+@@ -0,0 +1,190 @@
++package repository
++
++import (
++	"context"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func nextcloudHealthFixture(t *testing.T, db *gorm.DB) (NextcloudSourcePairing, time.Time) {
++	t.Helper()
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &types.DataSource{},
++		&types.SyncLog{}, &nextcloudSourceVersion{}, &NextcloudSourcePairing{}))
++	for _, statement := range []string{
++		`CREATE TABLE nextcloud_event_connections (connection_id TEXT PRIMARY KEY,
++			tenant_id BIGINT, knowledge_base_id TEXT, datasource_id TEXT,
++			nextcloud_instance_id TEXT, binding_id TEXT, datasource_base_url TEXT,
++			datasource_config_sha256 TEXT, status TEXT, current_key_id TEXT,
++			current_secret_ciphertext TEXT, created_at TIMESTAMP)`,
++		`CREATE TABLE nextcloud_event_checkpoint (connection_id TEXT PRIMARY KEY, received_id BIGINT)`,
++		`CREATE TABLE nextcloud_event_dispatch (connection_id TEXT PRIMARY KEY,
++			dispatched_id BIGINT, applied_id BIGINT, state TEXT, last_error_code TEXT,
++			last_sync_log_id TEXT)`,
++		`CREATE TABLE nextcloud_event_inbox (connection_id TEXT, event_id BIGINT,
++			received_at TIMESTAMP, PRIMARY KEY (connection_id, event_id))`,
++	} {
++		require.NoError(t, db.Exec(statement).Error)
++	}
++
++	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
++	config, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		ResourceIDs: []string{"binding"},
++		Settings:    map[string]interface{}{"base_url": "https://private.example.test"},
++		Credentials: map[string]interface{}{"token": "secret-machine-token", "key_id": "pair_fixture"},
++	}).ToJSON()
++	require.NoError(t, err)
++	ds := &types.DataSource{ID: "health-ds", TenantID: 7, KnowledgeBaseID: "health-kb",
++		Type: types.ConnectorTypeNextcloud, Status: types.DataSourceStatusActive, Config: config}
++	require.NoError(t, db.Create(ds).Error)
++	baseURL, configSHA, bindingID, err := NextcloudEventDataSourceIdentity(ds.Config)
++	require.NoError(t, err)
++	pair := NextcloudSourcePairing{OperationID: uuid.NewString(), TenantID: 7,
++		KnowledgeBaseID: ds.KnowledgeBaseID, DataSourceID: ds.ID,
++		InstanceID: "instance", BindingID: bindingID, BaseURL: baseURL,
++		ConfigSHA: configSHA, State: "active"}
++	require.NoError(t, db.Create(&pair).Error)
++
++	addKnowledge := func(id, status, enabled, knowledgeBase string) {
++		require.NoError(t, db.Create(&types.Knowledge{ID: id, TenantID: 7,
++			KnowledgeBaseID: knowledgeBase, Channel: types.ConnectorTypeNextcloud,
++			Type: "file", ParseStatus: status, EnableStatus: enabled,
++			Title: "private title", FilePath: "/private/source/path"}).Error)
++	}
++	addVersion := func(externalID, candidateID, state string, updatedAt time.Time) {
++		require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7,
++			KnowledgeBaseID: pair.KnowledgeBaseID, DataSourceID: pair.DataSourceID,
++			ExternalID: externalID, CandidateKnowledgeID: candidateID,
++			State: state, UpdatedAt: updatedAt}).Error)
++	}
++	addKnowledge("candidate-pending", types.ParseStatusPending, "disabled", pair.KnowledgeBaseID)
++	addKnowledge("candidate-failed", types.ParseStatusFailed, "disabled", pair.KnowledgeBaseID)
++	addKnowledge("candidate-completed", types.ParseStatusCompleted, "enabled", pair.KnowledgeBaseID)
++	addKnowledge("foreign-candidate", types.ParseStatusFailed, "disabled", "another-kb")
++	addVersion("nextcloud:instance:1", "candidate-pending", "staging", now.Add(-2*time.Hour))
++	addVersion("nextcloud:instance:2", "candidate-failed", "staging", now.Add(-3*time.Hour))
++	addVersion("nextcloud:instance:3", "candidate-completed", "published", now.Add(-time.Hour))
++	addVersion("nextcloud:instance:4", "", "tombstone", now.Add(-time.Hour))
++	addVersion("nextcloud:instance:5", "foreign-candidate", "staging", now.Add(-time.Hour))
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 8,
++		KnowledgeBaseID: "foreign-kb", DataSourceID: "foreign-ds", ExternalID: "foreign",
++		State: "staging", UpdatedAt: now.Add(-24 * time.Hour)}).Error)
++
++	for _, log := range []types.SyncLog{
++		{ID: uuid.NewString(), DataSourceID: ds.ID, TenantID: 7, Status: "running",
++			StartedAt: now.Add(-time.Hour), ErrorMessage: "hidden running detail"},
++		{ID: uuid.NewString(), DataSourceID: ds.ID, TenantID: 7, Status: "failed",
++			StartedAt: now.Add(-2 * time.Hour), ErrorMessage: "/private/failure secret"},
++		{ID: uuid.NewString(), DataSourceID: ds.ID, TenantID: 7, Status: "partial",
++			StartedAt: now.Add(-3 * time.Hour), ErrorMessage: "private partial detail"},
++		{ID: uuid.NewString(), DataSourceID: ds.ID, TenantID: 7, Status: "failed",
++			StartedAt: now.Add(-25 * time.Hour)},
++		{ID: uuid.NewString(), DataSourceID: "foreign-ds", TenantID: 8, Status: "failed",
++			StartedAt: now.Add(-time.Minute)},
++	} {
++		require.NoError(t, db.Create(&log).Error)
++	}
++	return pair, now
++}
++
++func testNextcloudSourceHealthObservations(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	pair, now := nextcloudHealthFixture(t, db)
++	repo := NewNextcloudSourcePairingRepository(db)
++	ctx := context.Background()
++	withoutConnection, err := repo.SourceHealth(ctx, pair, now)
++	require.NoError(t, err)
++	require.Nil(t, withoutConnection.EventInbox)
++	require.Equal(t, "active", withoutConnection.SourceStatus)
++	require.Equal(t, int64(1), withoutConnection.SyncLogs.RunningCount)
++	require.Equal(t, int64(3600), *withoutConnection.SyncLogs.OldestRunningAgeSeconds)
++	require.Equal(t, int64(1), withoutConnection.SyncLogs.FailedLast24Hours)
++	require.Equal(t, int64(1), withoutConnection.SyncLogs.PartialLast24Hours)
++	require.Equal(t, "running", *withoutConnection.SyncLogs.LatestStatus)
++	require.Equal(t, int64(3), withoutConnection.CurrentVersions.StagingCount)
++	require.Equal(t, int64(1), withoutConnection.CurrentVersions.PublishedCount)
++	require.Equal(t, int64(1), withoutConnection.CurrentVersions.TombstoneCount)
++	require.Equal(t, int64(1), withoutConnection.CurrentVersions.MissingCandidateCount)
++	require.Equal(t, int64(1), withoutConnection.CurrentVersions.ParsePendingCount)
++	require.Equal(t, int64(1), withoutConnection.CurrentVersions.ParseFailedCount)
++	require.Equal(t, int64(1), withoutConnection.CurrentVersions.ParseCompletedEnabledCount)
++	require.Equal(t, int64(10800), *withoutConnection.CurrentVersions.OldestStagingAgeSeconds)
++
++	conn := "health-conn"
++	require.NoError(t, db.Table("nextcloud_event_connections").Create(map[string]interface{}{
++		"connection_id": conn, "tenant_id": 7, "knowledge_base_id": pair.KnowledgeBaseID,
++		"datasource_id": pair.DataSourceID, "nextcloud_instance_id": pair.InstanceID,
++		"binding_id": pair.BindingID, "datasource_base_url": pair.BaseURL,
++		"datasource_config_sha256": pair.ConfigSHA, "status": "active",
++		"current_key_id": "event-key-secret", "current_secret_ciphertext": "enc:v1:private",
++		"created_at": now.Add(-time.Hour),
++	}).Error)
++	require.NoError(t, db.Table("nextcloud_event_checkpoint").Create(map[string]interface{}{
++		"connection_id": conn, "received_id": 4,
++	}).Error)
++	require.NoError(t, db.Table("nextcloud_event_dispatch").Create(map[string]interface{}{
++		"connection_id": conn, "dispatched_id": 3, "applied_id": 2,
++		"state": "retry", "last_error_code": "publication_unproven",
++	}).Error)
++	for _, event := range []struct {
++		id int64
++		at time.Time
++	}{{3, now.Add(-40 * time.Minute)}, {4, now.Add(-20 * time.Minute)}} {
++		require.NoError(t, db.Table("nextcloud_event_inbox").Create(map[string]interface{}{
++			"connection_id": conn, "event_id": event.id, "received_at": event.at,
++		}).Error)
++	}
++	health, err := repo.SourceHealth(ctx, pair, now)
++	require.NoError(t, err)
++	require.NotNil(t, health.EventInbox)
++	require.Equal(t, "4", health.EventInbox.ReceivedThroughEventID)
++	require.Equal(t, "3", health.EventInbox.DispatchedThroughEventID)
++	require.Equal(t, "2", health.EventInbox.AppliedThroughEventID)
++	require.Equal(t, int64(2), health.EventInbox.UnappliedCount)
++	require.Equal(t, int64(1), health.EventInbox.UndispatchedCount)
++	require.Equal(t, int64(2400), *health.EventInbox.OldestUnappliedAgeSeconds)
++	require.Equal(t, "retry", health.EventInbox.DispatchState)
++	require.Equal(t, "publication_unproven", health.EventInbox.LastErrorCode)
++	require.NoError(t, db.Table("nextcloud_event_dispatch").Where("connection_id = ?", conn).
++		Update("last_error_code", "/private/path secret-token").Error)
++	health, err = repo.SourceHealth(ctx, pair, now)
++	require.NoError(t, err)
++	require.Equal(t, "unknown", health.EventInbox.LastErrorCode)
++}
++
++func TestSQLiteNextcloudSourceHealthObservations(t *testing.T) {
++	// The fixture uses a temporary, isolated in-memory database.
++	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	testNextcloudSourceHealthObservations(t, db)
++}
++
++func TestPostgresNextcloudSourceHealthObservations(t *testing.T) {
++	dsn := os.Getenv("WEKNORA_SOURCE_HEALTH_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set WEKNORA_SOURCE_HEALTH_TEST_POSTGRES_DSN for disposable PostgreSQL")
++	}
++	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	defer sqlDB.Close()
++	schema := "source_health_" + uuid.NewString()[:8]
++	require.NoError(t, db.Exec(`CREATE SCHEMA "`+schema+`"`).Error)
++	defer db.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
++	require.NoError(t, db.Exec(`SET search_path TO "`+schema+`"`).Error)
++	testNextcloudSourceHealthObservations(t, db)
++}
 diff --git a/internal/application/repository/nextcloud_source_pairing.go b/internal/application/repository/nextcloud_source_pairing.go
 new file mode 100644
 index 00000000..710594de
@@ -13511,10 +14086,10 @@ index 00000000..eabdc6ed
 +}
 diff --git a/internal/application/service/nextcloud_event_dispatcher.go b/internal/application/service/nextcloud_event_dispatcher.go
 new file mode 100644
-index 00000000..cd9408c7
+index 00000000..721250f6
 --- /dev/null
 +++ b/internal/application/service/nextcloud_event_dispatcher.go
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,187 @@
 +package service
 +
 +import (
@@ -13671,8 +14246,12 @@ index 00000000..cd9408c7
 +	if err := d.inbox.PrepareDispatch(ctx, *claim, logID, time.Now().UTC()); err != nil {
 +		return err
 +	}
++	// The connector validates a complete current manifest for every hint and
++	// re-downloads touched files. Broad hints, missing cursors and expired feeds
++	// still force a content refresh; an ordinary event need not re-download
++	// every unchanged file in the source.
 +	payload := types.DataSourceSyncPayload{DataSourceID: ds.ID, TenantID: ds.TenantID,
-+		SyncLogID: logID, ForceFull: true, Trigger: "nextcloud_event",
++		SyncLogID: logID, ForceFull: false, Trigger: "nextcloud_event",
 +		NextcloudEventConnectionID: claim.ConnectionID,
 +		NextcloudEventConfigSHA256: claim.ConfigSHA256}
 +	encoded, err := json.Marshal(payload)
@@ -15150,10 +15729,10 @@ index 00000000..4e4bdcf6
 +}
 diff --git a/internal/datasource/connector/nextcloud/changes_test.go b/internal/datasource/connector/nextcloud/changes_test.go
 new file mode 100644
-index 00000000..ab2464d6
+index 00000000..5a86611b
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/changes_test.go
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,476 @@
 +package nextcloud
 +
 +import (
@@ -15235,6 +15814,137 @@ index 00000000..ab2464d6
 +	items, _, err = connector.FetchIncremental(ctx, config, cursor)
 +	if err != nil || len(items) != 0 || manifestCalls != 2 {
 +		t.Fatalf("settled feed still scanned: %+v, %v; manifest=%d", items, err, manifestCalls)
++	}
++}
++
++func TestChangesRefreshOnlyTouchedContentAndFallbackForBroadHint(t *testing.T) {
++	hintType := ""
++	body41 := "hello"
++	manifestCalls := 0
++	contentCalls := map[int]int{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/changes":
++			switch r.URL.Query().Get("cursor") {
++			case "":
++				writeJSON(w, testChangesPage("c0", nil, false))
++			case "c0":
++				if hintType != "upsert" {
++					t.Errorf("unexpected first hint state %q", hintType)
++				}
++				writeJSON(w, testChangesPage("c1", []map[string]interface{}{{
++					"event_id": "1", "file_id": 41, "type": "upsert",
++				}}, false))
++			case "c1":
++				if hintType != "reconcile" {
++					t.Errorf("unexpected broad hint state %q", hintType)
++				}
++				writeJSON(w, testChangesPage("c2", []map[string]interface{}{{
++					"event_id": "2", "type": "reconcile",
++				}}, false))
++			default:
++				t.Errorf("unexpected changes cursor %q", r.URL.Query().Get("cursor"))
++			}
++		case apiPath + "/bindings/dev-published/manifest":
++			manifestCalls++
++			manifest := testManifest("same-etag")
++			manifest["items"] = append(manifest["items"].([]map[string]interface{}), map[string]interface{}{
++				"file_id": 42, "etag": "same-etag", "name": "Other.md", "path": "/Published/Other.md",
++				"mime_type": "text/markdown", "size": 5, "mtime": 1700000000,
++				"url": "https://files.example/index.php/f/42",
++			})
++			writeJSON(w, manifest)
++		case apiPath + "/bindings/dev-published/files/41/content":
++			contentCalls[41]++
++			w.Header().Set("ETag", "same-etag")
++			_, _ = w.Write([]byte(body41))
++		case apiPath + "/bindings/dev-published/files/42/content":
++			contentCalls[42]++
++			w.Header().Set("ETag", "same-etag")
++			_, _ = w.Write([]byte("other"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	connector := NewConnector()
++	config := testConfig(t, server.URL)
++	ctx := context.Background()
++	items, cursor, err := connector.FetchIncremental(ctx, config, nil)
++	if err != nil || len(items) != 2 || contentCalls[41] != 1 || contentCalls[42] != 1 {
++		t.Fatalf("initial import = %+v, %v; downloads=%v", items, err, contentCalls)
++	}
++	// An opaque ETag can be reused. The explicit upsert still re-reads only
++	// that file, while the complete manifest remains the deletion authority.
++	hintType, body41 = "upsert", "world"
++	items, cursor, err = connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 1 || string(items[0].Content) != "world" ||
++		manifestCalls != 2 || contentCalls[41] != 2 || contentCalls[42] != 1 {
++		t.Fatalf("targeted hint = %+v, %v; manifests=%d downloads=%v", items, err, manifestCalls, contentCalls)
++	}
++	// An unscoped hint cannot identify safe skips, so every current file is
++	// re-read after another complete manifest preflight.
++	hintType = "reconcile"
++	items, _, err = connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 2 || manifestCalls != 3 ||
++		contentCalls[41] != 3 || contentCalls[42] != 2 {
++		t.Fatalf("broad hint = %+v, %v; manifests=%d downloads=%v", items, err, manifestCalls, contentCalls)
++	}
++}
++
++func TestScheduledContentAuditRecoversUnhintedSameMetadataChange(t *testing.T) {
++	body := "first"
++	manifestCalls, contentCalls := 0, 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/changes":
++			writeJSON(w, testChangesPage("c0", nil, false))
++		case apiPath + "/bindings/dev-published/manifest":
++			manifestCalls++
++			writeJSON(w, testManifest("same-etag"))
++		case apiPath + "/bindings/dev-published/files/41/content":
++			contentCalls++
++			w.Header().Set("ETag", "same-etag")
++			_, _ = w.Write([]byte(body))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	connector := NewConnector()
++	config := testConfig(t, server.URL)
++	ctx := context.Background()
++	_, cursor, err := connector.FetchIncremental(ctx, config, nil)
++	if err != nil || manifestCalls != 1 || contentCalls != 1 {
++		t.Fatalf("initial import: %v, manifest=%d content=%d", err, manifestCalls, contentCalls)
++	}
++	// Simulate a source write that emitted no retained hint and reused every
++	// manifest field. The independent audit deadline still requires content.
++	body = "other"
++	state, err := decodeCursor(cursor)
++	if err != nil {
++		t.Fatal(err)
++	}
++	state.LastContentAuditAt = time.Now().Add(-25 * time.Hour).Unix()
++	cursor, err = encodeSyncCursor(state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	items, next, err := connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 1 || string(items[0].Content) != body ||
++		manifestCalls != 2 || contentCalls != 2 {
++		t.Fatalf("scheduled content audit: %+v, %v; manifest=%d content=%d",
++			items, err, manifestCalls, contentCalls)
++	}
++	updated, err := decodeCursor(next)
++	if err != nil || updated.LastContentAuditAt <= state.LastContentAuditAt {
++		t.Fatalf("content audit checkpoint not advanced: %+v, %v", updated, err)
 +	}
 +}
 +
@@ -15501,10 +16211,10 @@ index 00000000..ab2464d6
 +}
 diff --git a/internal/datasource/connector/nextcloud/client.go b/internal/datasource/connector/nextcloud/client.go
 new file mode 100644
-index 00000000..c6eeac75
+index 00000000..74dcf636
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/client.go
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,389 @@
 +package nextcloud
 +
 +import (
@@ -15550,6 +16260,7 @@ index 00000000..c6eeac75
 +				return http.ErrUseLastResponse
 +			},
 +			Transport: &http.Transport{
++				DisableCompression:    true,
 +				Proxy:                 nil,
 +				DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 +				TLSHandshakeTimeout:   10 * time.Second,
@@ -15618,6 +16329,8 @@ index 00000000..c6eeac75
 +	endpoint := "/bindings/" + bindingID + "/changes"
 +	cursor := oldCursor
 +	seen := map[string]bool{}
++	changedFiles := map[int64]bool{}
++	forceAllContent := false
 +	var lastEventID uint64
 +	for pageNum := 0; pageNum < maxChangePages; pageNum++ {
 +		var query url.Values
@@ -15630,7 +16343,7 @@ index 00000000..c6eeac75
 +		}
 +		if resp.StatusCode == http.StatusNotFound {
 +			resp.Body.Close()
-+			return changeScan{Supported: false}, nil
++			return changeScan{Supported: false, ForceAllContent: true}, nil
 +		}
 +		if resp.StatusCode == http.StatusConflict {
 +			var conflict struct {
@@ -15645,7 +16358,7 @@ index 00000000..c6eeac75
 +			}
 +			// The recovery cursor is not authoritative until a complete manifest
 +			// has been processed and its downstream result committed.
-+			return changeScan{Supported: true, NeedsReconcile: true, Cursor: conflict.NextCursor}, nil
++			return changeScan{Supported: true, NeedsReconcile: true, ForceAllContent: true, Cursor: conflict.NextCursor}, nil
 +		}
 +		if resp.StatusCode != http.StatusOK {
 +			resp.Body.Close()
@@ -15671,6 +16384,20 @@ index 00000000..c6eeac75
 +				return changeScan{}, fmt.Errorf("invalid Nextcloud change hint for binding %s", bindingID)
 +			}
 +			lastEventID = id
++			// Hints trigger a complete manifest comparison, never deletion.
++			// A touched file must be re-read even when a backend reused its
++			// opaque ETag and other metadata. Broad or unscoped hints fall
++			// back to a full content refresh.
++			switch hint.Type {
++			case "upsert", "metadata", "delete":
++				if hint.FileID == nil {
++					forceAllContent = true
++				} else {
++					changedFiles[*hint.FileID] = true
++				}
++			case "subtree_scan", "subtree_moved", "subtree_deleted", "reconcile":
++				forceAllContent = true
++			}
 +		}
 +		if page.NextCursor == cursor || seen[page.NextCursor] {
 +			if *page.HasMore || len(page.Items) > 0 {
@@ -15680,16 +16407,20 @@ index 00000000..c6eeac75
 +		seen[page.NextCursor] = true
 +		cursor = page.NextCursor
 +		if !*page.HasMore {
-+			return changeScan{Supported: true, NeedsReconcile: len(page.Items) > 0 || pageNum > 0, Cursor: cursor}, nil
++			return changeScan{Supported: true, NeedsReconcile: len(page.Items) > 0 || pageNum > 0,
++				Cursor: cursor, ChangedFiles: changedFiles, ForceAllContent: forceAllContent}, nil
 +		}
 +	}
-+	return changeScan{Supported: true, NeedsReconcile: true, Cursor: cursor}, nil
++	return changeScan{Supported: true, NeedsReconcile: true, Cursor: cursor,
++		ChangedFiles: changedFiles, ForceAllContent: true}, nil
 +}
 +
 +type changeScan struct {
-+	Supported      bool
-+	NeedsReconcile bool
-+	Cursor         string
++	Supported       bool
++	NeedsReconcile  bool
++	Cursor          string
++	ChangedFiles    map[int64]bool
++	ForceAllContent bool
 +}
 +
 +func decodeChangeResponse(resp *http.Response, endpoint string, target interface{}) error {
@@ -15873,12 +16604,73 @@ index 00000000..c6eeac75
 +	}
 +	return content, contentType, nil
 +}
+diff --git a/internal/datasource/connector/nextcloud/compression_test.go b/internal/datasource/connector/nextcloud/compression_test.go
+new file mode 100644
+index 00000000..6180792c
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/compression_test.go
+@@ -0,0 +1,55 @@
++package nextcloud
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++// Some Nextcloud proxies suffix the entity tag with "-gzip" when the Go
++// transport offers compression. A manifest tag identifies the original file,
++// so the content request must use that same representation and tag.
++func TestContentRequestsIdentityRepresentationForManifestETag(t *testing.T) {
++	const tag = "source-etag-42"
++	var compressionOffered bool
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings/dev-published/manifest":
++			writeJSON(w, testManifest(tag))
++		case apiPath + "/bindings/dev-published/files/41/content":
++			if strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
++				compressionOffered = true
++				w.Header().Set("ETag", `"`+tag+`-gzip"`)
++			} else {
++				w.Header().Set("ETag", `"`+tag+`"`)
++			}
++			w.Header().Set("Content-Type", "text/markdown")
++			_, _ = w.Write([]byte("hello"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	cfg, err := parseConfig(testConfig(t, server.URL))
++	if err != nil {
++		t.Fatal(err)
++	}
++	client := newClient(cfg)
++	manifest, _, err := client.manifest(context.Background(), "dev-published")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(manifest) != 1 {
++		t.Fatalf("manifest count=%d", len(manifest))
++	}
++	if _, _, err := client.content(context.Background(), "dev-published", manifest[0]); err != nil {
++		t.Fatal(err)
++	}
++	if compressionOffered {
++		t.Fatal("content request offered gzip, changing the strong source ETag")
++	}
++}
 diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
 new file mode 100644
-index 00000000..73b4f4b2
+index 00000000..b6878409
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector.go
-@@ -0,0 +1,487 @@
+@@ -0,0 +1,503 @@
 +// Package nextcloud imports files exposed by the integration_weknora Nextcloud app.
 +package nextcloud
 +
@@ -16046,7 +16838,7 @@ index 00000000..73b4f4b2
 +}
 +
 +// FetchFullStream re-fetches content while retaining the old cursor as the
-+// deletion baseline, including on event-triggered forced full scans.
++// deletion baseline for explicit full scans.
 +func (c *Connector) FetchFullStream(
 +	ctx context.Context, ds *types.DataSourceConfig, old *types.SyncCursor, h datasource.StreamHandler,
 +) (*types.SyncCursor, error) {
@@ -16142,9 +16934,15 @@ index 00000000..73b4f4b2
 +	// between these two reads, its hint is still pending on the next run.
 +	// No hint is ever used as evidence that a file is gone.
 +	changeCursors := make(map[string]string, len(selected))
-+	forceManifest := full || previous.LastReconcileAt <= 0 ||
-+		previous.LastReconcileAt > time.Now().Unix() ||
-+		time.Since(time.Unix(previous.LastReconcileAt, 0)) >= cfg.reconcileInterval ||
++	changedFiles := make(map[int64]bool)
++	now := time.Now().UTC()
++	forceContentAudit := full || previous.LastContentAuditAt <= 0 ||
++		previous.LastContentAuditAt > now.Unix() ||
++		now.Sub(time.Unix(previous.LastContentAuditAt, 0)) >= cfg.reconcileInterval
++	forceAllContent := forceContentAudit
++	forceManifest := forceContentAudit || previous.LastReconcileAt <= 0 ||
++		previous.LastReconcileAt > now.Unix() ||
++		now.Sub(time.Unix(previous.LastReconcileAt, 0)) >= cfg.reconcileInterval ||
 +		previous.ImportPolicy != policy
 +	for _, bindingID := range selected {
 +		if previous.Files[bindingID] == nil || len(previous.Missing[bindingID]) > 0 ||
@@ -16160,6 +16958,12 @@ index 00000000..73b4f4b2
 +		}
 +		if !hints.Supported || hints.NeedsReconcile || previous.Changes[bindingID] == "" {
 +			forceManifest = true
++		}
++		if hints.ForceAllContent || previous.Changes[bindingID] == "" {
++			forceAllContent = true
++		}
++		for fileID := range hints.ChangedFiles {
++			changedFiles[fileID] = true
 +		}
 +		if hints.Supported {
 +			changeCursors[bindingID] = hints.Cursor
@@ -16195,13 +16999,17 @@ index 00000000..73b4f4b2
 +	}
 +
 +	next := syncState{
-+		InstanceID:      cap.InstanceID,
-+		Files:           make(map[string]map[string]fileState, len(selected)),
-+		ImportPolicy:    policy,
-+		Changes:         changeCursors,
-+		LastReconcileAt: time.Now().UTC().Unix(),
-+		Missing:         make(map[string]map[string]bool),
-+		Tombstones:      make(map[string]map[string]fileState),
++		InstanceID:         cap.InstanceID,
++		Files:              make(map[string]map[string]fileState, len(selected)),
++		ImportPolicy:       policy,
++		Changes:            changeCursors,
++		LastReconcileAt:    now.Unix(),
++		LastContentAuditAt: previous.LastContentAuditAt,
++		Missing:            make(map[string]map[string]bool),
++		Tombstones:         make(map[string]map[string]fileState),
++	}
++	if forceAllContent {
++		next.LastContentAuditAt = now.Unix()
 +	}
 +	var out []types.FetchedItem
 +	emit := func(item types.FetchedItem) error {
@@ -16224,7 +17032,7 @@ index 00000000..73b4f4b2
 +			state := file.state()
 +			oldState, hadOld := previous.Files[bindingID][id]
 +			_, wasTombstone := previous.Tombstones[bindingID][id]
-+			if !full && previous.ImportPolicy == policy &&
++			if !forceAllContent && !changedFiles[file.FileID] && previous.ImportPolicy == policy &&
 +				hadOld && !previous.Missing[bindingID][id] && !wasTombstone &&
 +				oldState == state {
 +				current[id] = state
@@ -18512,10 +19320,10 @@ index 00000000..1666bd12
 +}
 diff --git a/internal/datasource/connector/nextcloud/types.go b/internal/datasource/connector/nextcloud/types.go
 new file mode 100644
-index 00000000..6f3388a8
+index 00000000..9057caec
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/types.go
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,316 @@
 +package nextcloud
 +
 +import (
@@ -18771,6 +19579,10 @@ index 00000000..6f3388a8
 +	// LastReconcileAt bounds the time between complete manifest scans, which
 +	// recover Nextcloud storage changes that emitted no file event.
 +	LastReconcileAt int64 `json:"last_reconcile_at,omitempty"`
++	// LastContentAuditAt records the last complete content refresh. A hint
++	// manifest must not postpone this audit: ETags and metadata are opaque,
++	// and a source write may have emitted no retained hint.
++	LastContentAuditAt int64 `json:"last_content_audit_at,omitempty"`
 +	// Missing marks the first complete scan on which a previously imported
 +	// file was absent. Files retains its last known state until a second
 +	// complete scan confirms the absence.
@@ -20198,7 +21010,7 @@ index 00000000..18674663
 +}
 diff --git a/internal/handler/nextcloud_event_dispatch_test.go b/internal/handler/nextcloud_event_dispatch_test.go
 new file mode 100644
-index 00000000..282fa7c9
+index 00000000..d2ceee75
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_dispatch_test.go
 @@ -0,0 +1,805 @@
@@ -20896,7 +21708,7 @@ index 00000000..282fa7c9
 +	return &asynq.TaskInfo{ID: "accepted", Queue: types.QueueSync}, nil
 +}
 +
-+func TestNextcloudEventDispatcherQueuesFullScanWithoutPrematureSyncLog(t *testing.T) {
++func TestNextcloudEventDispatcherQueuesIncrementalManifestWithoutPrematureSyncLog(t *testing.T) {
 +	for _, fail := range []bool{false, true} {
 +		t.Run(map[bool]string{false: "accepted", true: "queue_failed"}[fail], func(t *testing.T) {
 +			db, router, secret := setupNextcloudDispatchTest(t, false)
@@ -20942,7 +21754,7 @@ index 00000000..282fa7c9
 +			var payload types.DataSourceSyncPayload
 +			require.NoError(t, json.Unmarshal(task.Payload(), &payload))
 +			require.Equal(t, "nextcloud_event", payload.Trigger)
-+			require.True(t, payload.ForceFull)
++			require.False(t, payload.ForceFull)
 +			require.Equal(t, testEventConnection, payload.NextcloudEventConnectionID)
 +			require.NotEmpty(t, payload.SyncLogID)
 +			var count int64
@@ -20997,7 +21809,7 @@ index 00000000..282fa7c9
 +		var payload types.DataSourceSyncPayload
 +		require.NoError(t, json.Unmarshal(task.Payload(), &payload))
 +		require.Equal(t, "nextcloud_event", payload.Trigger)
-+		require.True(t, payload.ForceFull)
++		require.False(t, payload.ForceFull)
 +	case <-time.After(3 * time.Second):
 +		t.Fatal("post-startup Nextcloud hint was not queued by the configured polling interval")
 +	}
@@ -22664,6 +23476,131 @@ index 00000000..9fe89231
 +		return
 +	}
 +	c.JSON(http.StatusAccepted, gin.H{"error": stage + "_uncertain"})
++}
+diff --git a/internal/handler/nextcloud_source_health.go b/internal/handler/nextcloud_source_health.go
+new file mode 100644
+index 00000000..ddf1ebe5
+--- /dev/null
++++ b/internal/handler/nextcloud_source_health.go
+@@ -0,0 +1,27 @@
++package handler
++
++import (
++	"net/http"
++	"time"
++
++	"github.com/gin-gonic/gin"
++)
++
++// Health is an administrator-only, source-scoped database observation. It
++// never probes Nextcloud or reports a per-file publication result.
++func (h *NextcloudSourcePairingHandler) Health(c *gin.Context) {
++	pair, ds, ok := h.authorizedPair(c)
++	if !ok {
++		return
++	}
++	if ds == nil || pair.State == "aborted" {
++		c.JSON(http.StatusConflict, gin.H{"error": "source_pairing_closed"})
++		return
++	}
++	health, err := h.repo.SourceHealth(c.Request.Context(), pair, time.Now().UTC())
++	if err != nil {
++		sourcePairingError(c, err)
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"health": health})
++}
+diff --git a/internal/handler/nextcloud_source_health_test.go b/internal/handler/nextcloud_source_health_test.go
+new file mode 100644
+index 00000000..be5bb5ce
+--- /dev/null
++++ b/internal/handler/nextcloud_source_health_test.go
+@@ -0,0 +1,86 @@
++package handler
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func TestNextcloudSourceHealthRequiresAdminSessionAndScopesTenant(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	defer sqlDB.Close()
++	require.NoError(t, db.AutoMigrate(&types.DataSource{}, &types.SyncLog{},
++		&repository.NextcloudSourcePairing{}, &repository.NextcloudSourcePairingAbort{}))
++	require.NoError(t, db.Exec(`CREATE TABLE knowledges (id TEXT, tenant_id INTEGER,
++		knowledge_base_id TEXT, deleted_at DATETIME, parse_status TEXT, enable_status TEXT)`).Error)
++	require.NoError(t, db.Exec(`CREATE TABLE nextcloud_source_versions (tenant_id INTEGER,
++		knowledge_base_id TEXT, datasource_id TEXT, external_id TEXT, state TEXT,
++		candidate_knowledge_id TEXT, updated_at DATETIME)`).Error)
++	require.NoError(t, db.Exec(`CREATE TABLE nextcloud_event_connections (connection_id TEXT,
++		tenant_id INTEGER, datasource_id TEXT, nextcloud_instance_id TEXT,
++		binding_id TEXT, created_at DATETIME)`).Error)
++	ds := &types.DataSource{ID: "health-source", TenantID: 7,
++		KnowledgeBaseID: "health-kb", Type: types.ConnectorTypeNextcloud,
++		Status: types.DataSourceStatusActive, Config: []byte(`{"secret":"private-machine-token"}`)}
++	require.NoError(t, db.Create(ds).Error)
++	pair := &repository.NextcloudSourcePairing{OperationID: uuid.NewString(),
++		TenantID: 7, KnowledgeBaseID: "health-kb", DataSourceID: ds.ID,
++		InstanceID: "instance", BindingID: "binding", State: "active",
++		BaseURL: "https://private.example.test"}
++	require.NoError(t, db.Create(pair).Error)
++	dsService := &stubDataSourceService{getDataSource: func(ctx context.Context, id string) (*types.DataSource, error) {
++		var row types.DataSource
++		err := db.WithContext(ctx).Where("id = ?", id).Take(&row).Error
++		return &row, err
++	}}
++	kbService := &stubKBServiceForDS{getByID: func(_ context.Context, id string) (*types.KnowledgeBase, error) {
++		return &types.KnowledgeBase{ID: id, TenantID: 7}, nil
++	}}
++	h := NewNextcloudSourcePairingHandler(repository.NewNextcloudSourcePairingRepository(db),
++		NewDataSourceHandler(dsService, kbService))
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(func(c *gin.Context) {
++		if tenant, ok := types.TenantIDFromContext(c.Request.Context()); ok {
++			c.Set(types.TenantIDContextKey.String(), tenant)
++		}
++		c.Next()
++	})
++	path := "/api/v1/datasource/nextcloud-source-pairings/" + pair.OperationID + "/health"
++	router.GET("/api/v1/datasource/nextcloud-source-pairings/:operation_id/health", h.Health)
++	request := func(tenant uint64, role types.TenantRole, apiKey bool) *httptest.ResponseRecorder {
++		req := httptest.NewRequest(http.MethodGet, path, nil)
++		ctx := context.WithValue(req.Context(), types.TenantIDContextKey, tenant)
++		ctx = context.WithValue(ctx, types.TenantRoleContextKey, role)
++		if apiKey {
++			ctx = types.WithTenantAPIKeyScope(ctx, types.TenantAPIKeyScope{KeyID: 1, FullAccess: true})
++		}
++		rec := httptest.NewRecorder()
++		router.ServeHTTP(rec, req.WithContext(ctx))
++		return rec
++	}
++	require.Equal(t, http.StatusForbidden, request(7, types.TenantRoleViewer, false).Code)
++	require.Equal(t, http.StatusForbidden, request(7, types.TenantRoleAdmin, true).Code)
++	require.Equal(t, http.StatusNotFound, request(8, types.TenantRoleAdmin, false).Code)
++	admin := request(7, types.TenantRoleAdmin, false)
++	require.Equal(t, http.StatusOK, admin.Code, admin.Body.String())
++	require.Equal(t, "no-store", admin.Header().Get("Cache-Control"))
++	require.Contains(t, admin.Body.String(), `"event_inbox":null`)
++	for _, sensitive := range []string{"private-machine-token", "private.example.test", "secret"} {
++		require.False(t, strings.Contains(admin.Body.String(), sensitive), admin.Body.String())
++	}
 +}
 diff --git a/internal/handler/nextcloud_source_pairing.go b/internal/handler/nextcloud_source_pairing.go
 new file mode 100644
@@ -25379,10 +26316,10 @@ index 6ea042b1..5dd1097c 100644
  	}
  }
 diff --git a/internal/router/routes_infra.go b/internal/router/routes_infra.go
-index 4fb5c4b9..838554b7 100644
+index 4fb5c4b9..ecc93402 100644
 --- a/internal/router/routes_infra.go
 +++ b/internal/router/routes_infra.go
-@@ -335,6 +335,48 @@ func RegisterDataSourceRoutes(
+@@ -335,6 +335,49 @@ func RegisterDataSourceRoutes(
  	}
  }
  
@@ -25409,6 +26346,7 @@ index 4fb5c4b9..838554b7 100644
 +	ds := r.Group("/datasource")
 +	ds.POST("/nextcloud-source-pairings", g.Admin(), h.Pair)
 +	ds.GET("/nextcloud-source-pairings/:operation_id", g.Admin(), h.Status)
++	ds.GET("/nextcloud-source-pairings/:operation_id/health", g.Admin(), h.Health)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/retry", g.Admin(), h.Retry)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/abort", g.Admin(), h.Abort)
 +	ds.GET("/nextcloud-source-pairings/:operation_id/decommission", g.Admin(), h.DecommissionStatus)

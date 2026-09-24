@@ -78,6 +78,45 @@ operator aborts Nextcloud first, WeKnora's signed abort can still complete
 its local cleanup using the original credential. In both cases, use a new
 operation UUID for replacement.
 
+## Paired source health
+
+`GET /api/v1/datasource/nextcloud-source-pairings/{operation_id}/health`
+requires a tenant administrator session and edit access to the paired
+knowledge base. Tenant API keys cannot call it. It returns `Cache-Control:
+no-store` and excludes machine credentials, source URLs, file paths, document
+content, and free-form error messages. A missing event connection is
+represented by `event_inbox: null`; it does not mean the shared task queue is
+empty. An aborted pair has no live source and returns HTTP 409.
+
+The `event_inbox` counters are scoped to the paired source's latest event
+connection. `unapplied_count` counts durable receipts above the verified
+applied watermark, including already dispatched receipts;
+`undispatched_count` counts receipts above the dispatch watermark. Its oldest
+age is measured from the oldest unapplied receipt. The three watermarks keep
+their distinct received, dispatched, and applied meanings. A received event
+does not prove that a source scan ran, and a dispatched event does not prove
+that a file is ready.
+
+`sync_logs.running_count` and `oldest_running_age_seconds` describe rows
+still marked running for this data source. `failed_last_24_hours` and
+`partial_last_24_hours` count retained logs whose scan started in the last
+24 hours. The background log retention policy can prune older rows;
+`latest_status` is `null` when no log remains. These values do not count
+the Redis/Asynq queue or any parser jobs that have not written a sync log.
+
+`current_versions` groups only the latest `nextcloud_source_versions` rows
+for this tenant, KB, and data source. Its parse counters inspect their
+currently referenced, non-deleted knowledge candidates.
+`missing_candidate_count` includes a staging or published row whose candidate
+is absent, soft-deleted, or outside the paired tenant/KB.
+`oldest_staging_age_seconds` is measured from the oldest current staging
+version's `updated_at`; it is not the parser task's queue wait. The source
+revision ledger and older knowledge rows are deliberately outside these
+current-version counts. Even `parse_completed_enabled_count` is not a
+per-file publication proof, an index completeness check, or permission to
+answer a question. Use the signed current-ETag file-status response and the
+query authorization path for those decisions.
+
 ## Active source-key rotation
 
 For an established pair, a Nextcloud administrator prepares a distinct UUID

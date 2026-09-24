@@ -9,7 +9,11 @@ submits source reconciliation jobs from committed inbox rows. The applied
 watermark advances only after WeKnora proves a complete publication run;
 HTTP `202` is never an application acknowledgement.
 
-Only an `active` connection row may receive events. The row fixes one
+Only an `active` connection row on an `active` data source may receive events.
+Pausing a source stops new durable receipts even when its connection remains
+active. Indexed source withdrawal revokes that connection and blocks dispatch
+in the same database transaction as the source pause; subsequent signed
+batches cannot receive HTTP `202`. The row fixes one
 Nextcloud instance and binding to one tenant, knowledge base, and Nextcloud
 data source. The data source must still select exactly that binding. Pairing
 and key provisioning use the administrator endpoints below. Installing the
@@ -60,13 +64,22 @@ Connection provisioning does not advance any event watermark.
 
 ## Background reconciliation and status
 
-The dispatcher polls due connections every 30 seconds. For each connection it
-claims the current committed receipt watermark under a database lease, then
-queues a forced full Nextcloud source scan. The scan reads the current
-Nextcloud manifest and binding authorization through the existing connector;
-an event hint is never used directly as a delete instruction. Repeated or
-coalesced hints can cause another full scan. A failed queue operation or
+The dispatcher polls due connections every 5 seconds by default. Set
+`WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL` to a Go duration from `1s` through
+`1m` to tune this at process startup; an empty or invalid value uses `5s`.
+For each connection it claims the current committed receipt watermark under a
+database lease, then
+queues an incremental source reconciliation. The connector validates the
+complete current Nextcloud manifest and binding authorization before it
+downloads touched files. Broad hints, an absent or expired changes cursor,
+and the periodic content audit re-download all current files. An event hint
+is never used directly as a delete instruction. A failed queue operation or
 partial/failed/canceled sync remains retryable with exponential backoff.
+Each sweep examines at most 32 due connections and runs them sequentially;
+the poll interval alone is not an event-to-queue latency guarantee. The
+Nextcloud sender cadence, network, database load, and queue admission also
+affect that latency. Short intervals can increase reconciliation work under
+bursty edits, so measure the pilot workload before claiming the PRD's P95 target.
 Source configuration drift blocks dispatch; revoke blocks further claims and
 cancels queued event tasks when they start. A running event task checks the
 pinned connection and its running sync log before each knowledge item, and
@@ -107,13 +120,19 @@ syncs use the same baseline check. A live instance change fails the sync and
 requires manual repair or re-pairing; until repaired, the dispatch state is
 `retry` with `sync_not_successful` and may retry on its normal backoff.
 
-Each event dispatch currently requests a true full scan, including content
-downloads. The connector accumulates fetched content in memory before applying
-it, so the current implementation cannot safely meet the 10,000-file / 100 GB
-performance target. The dispatcher polls every 30 seconds, so it also cannot
-meet the PRD's event-to-durable-job P95 target of 10 seconds. Neither target
-has been accepted. ETag is a change hint, not a content hash, so skipping an
-unchanged ETag is not proof of content equivalence.
+Each event reconciliation validates and buffers the complete metadata manifest,
+then emits one downloaded file at a time to the importer. Ordinary scoped
+hints re-download only touched files. A separate content-audit deadline
+defaults to 24 hours and forces a full content refresh even if other hinted
+scans ran; opaque ETags and metadata cannot prove that an unhinted write did
+not happen. The current file is held in memory as a byte slice (up to the
+64 MiB download limit), and the manifest, old inventory, and new inventory
+are proportional to file count. The source cursor advances only after the
+whole scan and every emitted item have been processed successfully. An
+interrupted scan therefore repeats its downloads. The 10,000-file / 100 GB
+pilot target remains unaccepted; there is no resumable mid-scan checkpoint.
+The five-second default dispatcher interval alone does not prove the PRD's
+event-to-durable-job P95 target of 10 seconds.
 
 ## Request contract
 
@@ -172,6 +191,33 @@ Hints remain non-authoritative. The dispatcher re-reads the current Nextcloud
 manifest, authorization state, and file version before publication or deletion.
 Outbox retention must not treat `202` or `dispatched_through_event_id` as an
 applied checkpoint.
+
+When parsing completes, WeKnora checks the candidate's original paired source
+again with a signed `POST /bindings/{binding}/files/{file}/publication-check`.
+The signed body fixes the imported instance ID, ETag, and path. Nextcloud
+returns `204` only while the binding is active, the file remains readable in
+that binding, its ETag and path still match, and the file is eligible for
+publication. WeKnora compares the candidate, source config, and active pair
+again under its database lock before setting the publication ETag, then probes
+Nextcloud once more. A failed probe leaves or returns the candidate to staging
+with an empty publication ETag. The source request has a five-second timeout.
+These checks cannot form one transaction across the two services. A change
+after the final probe is denied by the live source authorization check on
+retrieval and is reconciled by later source scans.
+
+There is also a visibility interval **between the local publication commit and
+the final source probe**: the SQL publication ETag can briefly be present even
+when Nextcloud has just withdrawn the file or advanced its ETag. If that probe
+fails, WeKnora clears the exact candidate's marker and returns publication
+failure; the repository race test injects both changes and verifies this
+cleanup. The test deliberately observes the transient marker. A raw SQL or
+vector consumer that bypasses the live source publication guard is therefore
+unsafe. Human-facing reads and retrieval must reauthorize against Nextcloud
+and compare the current source ETag before exposing source-derived content.
+This two-probe protocol does not promise zero transient local visibility or
+atomic revocation across the two services. A source change after an individual
+read's live authorization but before that response is emitted is also outside
+this protocol's atomicity guarantee.
 
 ## Signed applied status and Nextcloud retention
 
