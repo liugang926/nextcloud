@@ -15,10 +15,10 @@ index e18b1ae9..8df286cd 100644
  # I. 可观测性（Langfuse，可选）
 diff --git a/docs/nextcloud-content-leases.md b/docs/nextcloud-content-leases.md
 new file mode 100644
-index 00000000..0f6fe632
+index 00000000..967ddc60
 --- /dev/null
 +++ b/docs/nextcloud-content-leases.md
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,93 @@
 +# Nextcloud content lease foundation
 +
 +This repository layer supplies a durable barrier between Nextcloud content
@@ -86,8 +86,32 @@ index 00000000..0f6fe632
 +
 +The repository does not make authorization decisions. Callers still need the
 +live Nextcloud publication guard before and during source exposure, and the
-+source version must be retired before physical deletion. This patch adds no
-+callers or coverage marker writer, so it cannot change current GC behavior.
++source version must be retired before physical deletion.
++
++## Partial HTTP reader integration
++
++The direct HTTP handlers for knowledge detail, span detail, knowledge batch,
++chunk detail, chunk list, chunk revision list, file preview, single-file
++download, and batch ZIP download now acquire exact read leases after their
++existing KB and live publication checks. They renew during long requests,
++release after the synchronous response finishes, and reject lease failures.
++Publication is checked again after acquisition and before the first output.
++File reads check it after each blocking `Read`, and a response writer checks
++it before each body `Write` or `WriteString`. A ZIP is built under the leases
++and all included documents are checked again for every response write.
++
++The HTTP integration does not yet cover `ListKnowledge`,
++`ListKnowledgeFolders`, route-guard preflight reads, KB-wide search/RAG,
++Agent, MCP, FAQ, Wiki, graph, or background builders. No coverage
++marker is inserted, and physical derived deletion remains blocked. Completed
++lease rows are retained for one hour, then pruned by database time in batches
++of at most 1,000 rows using release/expiry indexes; active rows are preserved.
++
++The response writer rechecks Nextcloud publication while sending bytes, but
++does not recheck WeKnora KB, organization, shared-agent or group grants after
++their initial route authorization. Thus it is not the full stream revocation
++barrier. The current per-read and per-write remote publication checks also
++make large downloads expensive; throughput must be measured before a pilot.
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
 index 00000000..27927704
@@ -513,6 +537,196 @@ index 00000000..1e628ee6
 +plan, and this GC store. The current implementation does not yet reclaim
 +cloud-backed source files or derived indexes, enforce the one-old-original
 +cap, purge 90-day history metadata, or run a two-pass orphan scan.
+diff --git a/docs/nextcloud-indexed-decommission-completion.md b/docs/nextcloud-indexed-decommission-completion.md
+new file mode 100644
+index 00000000..6039a9d9
+--- /dev/null
++++ b/docs/nextcloud-indexed-decommission-completion.md
+@@ -0,0 +1,184 @@
++# Indexed-source decommission: completion design and release gates
++
++Status: implementation plan only. **No indexed-source cleanup ACK is enabled.**
++This plan applies PRD §7.5 and §7.7 to a source that has already entered the
++PostgreSQL logical-withdrawal stage documented in the patched WeKnora
++`docs/nextcloud-indexed-withdrawal.md`. The current withdrawal permanently
++blocks publication and records observed SQL identities, but returns
++`inventory_complete: false`. Keep the Nextcloud binding stopped and retain its
++pairing and signing key until the completion protocol below is implemented and
++verified.
++
++## Current boundary
++
++- `nextcloud_indexed_withdrawals` is an immutable source fence. Its
++  `nextcloud_indexed_withdrawal_items` table is append-only observation, not a
++  complete resource list: `nextcloud_source_versions` retains only a latest
++  candidate; a prior hard-deleted knowledge row or a former vector backend may
++  leave no local row to scan. `unverified_external_index` is deliberately
++  permanent in today's inventory.
++- `nextcloud_gc_jobs` and `nextcloud_gc_items` have exact known local entries,
++  but `derived_index` remains blocked. The current local-object deletion path
++  accepts only a persisted `resource://` handle resolving to an exact local
++  backend-scoped path and does not verify remote storage release.
++- The general `DeleteKnowledge` path groups vector deletion using the KB's
++  *current* `vector_store_id`, model and type; those values do not prove where
++  an older generation was indexed. It also has best-effort file and Wiki
++  cleanup paths. It cannot be the ACK implementation.
++- PostgreSQL migration `000125` rejects writes to withdrawn knowledge,
++  chunks and embeddings. Future cleanup must add a narrowly scoped deletion
++  path; silently bypassing this fence would also admit stale builders.
++- Nextcloud `SourceDecommissionService::acknowledge` currently accepts only
++  the SHA-256 of an empty inventory. Preserve that path for genuinely empty
++  sources. An indexed source needs a distinct endpoint and proof format.
++
++## Persist exact lineage before enabling cleanup
++
++Add durable tables rather than widening the immutable withdrawal row:
++
++| Entity | Required immutable fields | Purpose |
++| --- | --- | --- |
++| `nextcloud_source_artifacts` | tenant, KB, datasource, external ID, knowledge ID, publication generation, artifact kind, backend kind and **instance ID**, collection/bucket identity, exact object ID and provider version if available, write intent ID, created time | One row per possible physical or derived write, persisted **before** its external side effect. A crash after the write leaves a discoverable pending intent. Never reuse an ID for a new generation. |
++| `nextcloud_source_artifact_refs` | artifact ID, owner type/ID, tenant, generation, relation, creation and release times | Protect a shared image or attachment while any legitimate owner exists. Add/release/GC claim serialize on the artifact row; a nontransactional `COUNT(*) = 0` is insufficient. |
++| `nextcloud_source_backend_history` | tenant, KB, backend instance ID, provider, collection identity, first/last write watermarks, manifest revision | Retain every vector, graph and storage destination used by the source, including after a KB setting changes. The current KB setting never substitutes for this history. |
++| `nextcloud_source_cleanup_runs/items` | exact withdrawal operation, immutable inventory generation, snapshot watermark, artifact ID, kind, not-before, state, attempt, lease token/expiry, provider delete receipt, later absence receipt | Persist the whole deletion plan before deleting business rows. Each item moves independently and idempotently through claimed, deletion requested, absence verified and collected. |
++| `nextcloud_source_cleanup_blockers` | operation, typed code, scope, first/last observed time, resolution evidence ID | Durable fail-closed reasons, including unknown history, unsupported provider, malformed metadata, active leases, missing ownership or an incomplete restore ledger. |
++
++Store provider locators and credentials only in private server-side tables. A
++public status returns counts, state and typed blocker codes, never object paths
++or secret error bodies. Protect resource accounting from double decrement: a
++delete receipt is keyed by `(operation, artifact ID, backend instance ID,
++provider version)` and confirmed bytes are credited once, only when the
++backend can actually confirm release. Snapshot/versioned backend capacity is
++reported separately.
++
++For **new** writes, create a prepared artifact intent with the final stable
++provider ID while holding the source/KB and generation fence, then perform the
++external write under a renewable build lease. Mark the intent committed only
++after the provider responds and verify the generation again before publishing.
++A retry must reuse the same external ID or inventory both IDs. A task that
++lost its lease may not create a new object or publish. This applies to parse,
++summary, question, multimodal, graph, Wiki, clone/reparse and delayed task
++retries, including legacy `Attempt=0` jobs. The content-lease schema alone is
++inert until every such path and every read path is wired and old workers and
++streams are drained.
++
++## Provider cleanup contract
++
++Use a typed adapter for each concrete backend **instance**, not a generic
++`DeleteKnowledge` call or a path prefix:
++
++1. Resolve the persisted instance and collection/bucket; reject any mismatch
++   with the source tuple and artifact ID. A changed backend configuration is
++   a blocker until the historical instance can be reached.
++2. Enumerate exact owned IDs with a provider cursor or stable snapshot, and
++   reconcile the result with artifact intents and current SQL rows. A provider
++   that cannot enumerate or verify absence stays unsupported. A whole
++   collection delete is permitted only when its durable ownership record proves
++   that collection was dedicated to this source for its entire lifetime.
++3. `DeleteExact` uses the pinned object ID and provider version/ETag where
++   supported, with an idempotency key. A timeout has an unknown outcome and
++   triggers `VerifyAbsent`, never an assumed success. For eventually consistent
++   services, verify again after the provider's documented settling interval.
++4. Save a redacted provider request/receipt digest, verified absence time and
++   backend identity. A missing object can complete an item with zero newly
++   credited bytes only after matching the exact identity and proving no current
++   owner. Errors and unsupported operations leave the item blocked.
++
++Implement and test adapters separately for local PostgreSQL embeddings and
++chunks, every enabled remote vector store (for example Qdrant, Milvus,
++Weaviate, Tencent VectorDB, Doris, Elasticsearch/OpenSearch), graph namespaces,
++Wiki pages/references, local and cloud objects, and generated/attached copies.
++An adapter's mere availability does not certify a historical backend was
++unused. Historical chat and agent answers also need the §7.7 authorization
++barrier; persisted source-derived attachments or exports require their own
++owner/ref inventory or a blocker. Do not promise removal of bytes in backups:
++the deletion ledger and restore checkpoint must keep restored content hidden
++until replay and reconciliation finish.
++
++## Completion transaction and ACK
++
++The existing withdrawal tombstone remains immutable. A new cleanup run may
++progress only while the exact Nextcloud decommission intent is still stopped
++and its source tuple, publication epoch and key match. Lock the KB/source and
++cleanup run in a fixed order. Close build acquisition, cancel queued tasks,
++wait for bounded read/build leases, and require a recorded rollout watermark
++proving pre-lease workers have drained. Withdrawal does not extend any user's
++read permission. The PostgreSQL `000125` write guard must permit **only** an
++exact cleanup item in a claimed run to mutate its pinned rows under a dedicated
++database procedure/role and the same KB lock; it must continue rejecting
++ordinary SQL writes and moved rows on both old and new scopes. Do not use a
++caller-set session flag as a general bypass.
++
++For legacy history, a current empty query is never proof. Require an immutable
++backend history plus provider-side scoped enumeration reaching a stable
++watermark, or a dedicated backend namespace whose complete lifetime ownership
++and deletion are proven. Old hard-deleted rows, unrecorded backend changes,
++unattributed resources, unenumerable shared collections, and unknown external
++writes remain `unknown_history` blockers. A human note or two empty SQL scans
++cannot clear them. An operator may quarantine and replace a dedicated backend
++instance, but the run needs the backend's exact destruction/absence receipt and
++a restore-ledger checkpoint. Out-of-band provider write credentials must also
++be revoked or proven scoped away from this source before a final scan can be
++trusted. If this cannot be established, leave the source
++withdrawn and credentials retained; no indexed ACK exists for that history.
++
++This first indexed ACK deliberately has a stricter threshold than an inventory
++receipt: all source-exclusive copies must have verified deletion receipts, and
++legitimately retained shared/history references must have owner and revocation
++proof. This avoids retiring the only recovery credential while unsupported
++external copies remain. A later two-stage ACK protocol would need a separately
++specified, durable responsibility transfer.
++
++Only after all item receipts, shared-reference checks, graph/Wiki scans,
++provider absence checks, lease coverage, two separated orphan scans and
++restore-ledger checks pass may the run become `ready_to_ack`. Freeze its
++canonical inventory generation. Compute `SHA-256` over a versioned,
++length-prefixed UTF-8 record stream sorted by `(kind, backend instance ID,
++artifact ID, provider version)`; include operation/pair/source tuple,
++publication epoch, snapshot and coverage watermarks, every item state and
++receipt digest, and the blocker set (which must be empty). The record format
++and digest must be independently testable and never depend on map iteration or
++locale. Later discoveries invalidate the run and demand a new generation.
++
++The final predicate is the conjunction of: exact stopped source identity;
++withdrawal and write fence active; no live or unaccounted legacy workers or
++readers; every historical backend proven enumerable or destroyed; all
++source-exclusive items `verified_deleted`; every retained shared item backed
++by a live owner and revoked source access; zero blockers; two matching orphan
++scans; and a restore-ledger replay checkpoint. A zero row count satisfies none
++of these predicates by itself.
++
++The WeKnora sender durably records this digest and an exact signed outbound
++ACK before network delivery. Add a separate indexed ACK handler to Nextcloud:
++verify the machine HMAC, exact stopped intent, pair/source tuple, epoch,
++inventory generation/digest and no previous conflicting ACK. Record the ACK
++idempotently in `weknora_src_decom`; do not relax its empty-source hash check.
++WeKnora marks remote acknowledgement only after reading the exact committed
++response. Nextcloud then finalizes the binding/key removal by its existing
++transactional mechanism; uncertain HTTP outcomes retry the same operation and
++digest. Immutable audit/tombstone and restore ledger outlive key retirement.
++
++## Required acceptance before any ACK route is exposed
++
++- Build V2 fails while V1 remains hidden; V2/V3 out-of-order completions and
++  late legacy tasks cannot write or republish after the withdrawal fence.
++- Concurrent read/build lease versus GC claim is tested with two PostgreSQL
++  connections; revocation stops output even while a lease is still valid.
++- Failure is injected before and after every provider deletion and receipt
++  commit. Retries neither lose objects nor double-credit released bytes.
++- Two generations sharing one image preserve the remaining owner; concurrent
++  new binding versus delete claim cannot create a dangling reference.
++- The backend changes after a previous generation was indexed, a knowledge
++  row was hard-deleted, a cloud object is versioned, or an external store is
++  unavailable: every case blocks ACK until independently reconciled.
++- Graph/Wiki/history access after withdrawal denies source content; backup
++  restoration before the deletion event stays closed until ledger replay.
++- Indexed ACK with an empty-source digest, mismatched tuple/epoch, stale
++  generation, unresolved blocker, changed digest or lost HTTP response is
++  rejected or retried idempotently as appropriate. Empty-source ACK remains
++  limited to the old no-history protocol.
++
++Until these tests pass in disposable PostgreSQL and all configured provider
++fixtures, report `logical_withdrawn: true`, `inventory_complete: false` and
++leave the Nextcloud decommission operation in `prepared`.
 diff --git a/docs/nextcloud-indexed-withdrawal.md b/docs/nextcloud-indexed-withdrawal.md
 new file mode 100644
 index 00000000..8229f8a4
@@ -581,10 +795,10 @@ index 00000000..8229f8a4
 +ACK Nextcloud or release credentials.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
-index 00000000..6b5c2c5e
+index 00000000..c6cb4a6c
 --- /dev/null
 +++ b/docs/nextcloud-source-pairing.md
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,223 @@
 +# Nextcloud source pairing
 +
 +The source pairing is separate from the optional event-inbox connection. A
@@ -804,7 +1018,10 @@ index 00000000..6b5c2c5e
 +deletion of the WeKnora pair or general indexed-content cleanup. An indexed
 +source can enter the separate, non-final withdrawal stage described in
 +[nextcloud-indexed-withdrawal.md](nextcloud-indexed-withdrawal.md); it cannot
-+receive an empty-inventory ACK.
++receive an empty-inventory ACK or retire its Nextcloud credential yet. The
++[indexed decommission completion plan](nextcloud-indexed-decommission-completion.md)
++defines the missing exact inventory, provider receipts and fail-closed release
++gates; it is a design, not an enabled ACK path.
 diff --git a/docs/nextcloud-source-provenance.md b/docs/nextcloud-source-provenance.md
 new file mode 100644
 index 00000000..eedc64e0
@@ -2313,10 +2530,10 @@ index 0a35e402..4bf221f5 100644
      indexing_strategy TEXT,
 diff --git a/internal/application/repository/nextcloud_content_leases.go b/internal/application/repository/nextcloud_content_leases.go
 new file mode 100644
-index 00000000..dd898382
+index 00000000..7acc8417
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_content_leases.go
-@@ -0,0 +1,711 @@
+@@ -0,0 +1,768 @@
 +package repository
 +
 +import (
@@ -2330,6 +2547,8 @@ index 00000000..dd898382
 +)
 +
 +const NextcloudContentLeaseMaxTTL = 5 * time.Minute
++
++const nextcloudContentLeasePruneMaxBatch = 1000
 +
 +var (
 +	ErrNextcloudContentLeaseInvalid = errors.New("invalid Nextcloud content lease request")
@@ -2732,6 +2951,61 @@ index 00000000..dd898382
 +			SET released_at_ms = ?, updated_at_ms = ?
 +			WHERE lease_id = ? AND released_at_ms IS NULL`, nowMS, nowMS, id).Error
 +	})
++}
++
++// PruneFinishedLeases bounds lease-table growth without touching a live lease.
++// A released row is terminal; an unreleased row is eligible only after its
++// expiry has been past retention. Both timestamps are compared with the
++// database clock so app-node clock skew cannot shorten the retention period.
++func (s *NextcloudContentLeaseStore) PruneFinishedLeases(ctx context.Context,
++	retention time.Duration, limit int,
++) (int64, error) {
++	if retention <= 0 || retention.Milliseconds() == 0 || limit <= 0 {
++		return 0, ErrNextcloudContentLeaseInvalid
++	}
++	if limit > nextcloudContentLeasePruneMaxBatch {
++		limit = nextcloudContentLeasePruneMaxBatch
++	}
++	var pruned int64
++	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		nowMS, err := nextcloudLeaseNowMS(tx)
++		if err != nil {
++			return err
++		}
++		cutoffMS := nowMS - retention.Milliseconds()
++		// The outer predicate matters if another transaction changes a row
++		// selected by the bounded subquery before DELETE obtains its lock.
++		released := tx.Exec(`DELETE FROM nextcloud_content_leases
++			WHERE lease_id IN (
++				SELECT lease_id FROM nextcloud_content_leases
++				WHERE released_at_ms IS NOT NULL AND released_at_ms < ?
++				ORDER BY released_at_ms, lease_id LIMIT ?
++			) AND released_at_ms IS NOT NULL AND released_at_ms < ?`,
++			cutoffMS, limit, cutoffMS)
++		if released.Error != nil {
++			return released.Error
++		}
++		pruned = released.RowsAffected
++		if pruned >= int64(limit) {
++			return nil
++		}
++		expired := tx.Exec(`DELETE FROM nextcloud_content_leases
++			WHERE lease_id IN (
++				SELECT lease_id FROM nextcloud_content_leases
++				WHERE released_at_ms IS NULL AND expires_at_ms < ?
++				ORDER BY expires_at_ms, lease_id LIMIT ?
++			) AND released_at_ms IS NULL AND expires_at_ms < ?`,
++			cutoffMS, limit-int(pruned), cutoffMS)
++		if expired.Error != nil {
++			return expired.Error
++		}
++		pruned += expired.RowsAffected
++		return nil
++	})
++	if err != nil {
++		return 0, err
++	}
++	return pruned, nil
 +}
 +
 +func (s *NextcloudContentLeaseStore) RetireKnowledge(ctx context.Context,
@@ -3211,10 +3485,10 @@ index 00000000..35e1b99a
 +}
 diff --git a/internal/application/repository/nextcloud_content_leases_test.go b/internal/application/repository/nextcloud_content_leases_test.go
 new file mode 100644
-index 00000000..4b8d4550
+index 00000000..6e857c47
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_content_leases_test.go
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,330 @@
 +package repository
 +
 +import (
@@ -3486,6 +3760,64 @@ index 00000000..4b8d4550
 +		"tenant_id = ? AND knowledge_base_id = ? AND knowledge_id = ?",
 +		scope.TenantID, scope.KnowledgeBaseID, scope.KnowledgeID).Count(&count).Error)
 +	require.Zero(t, count)
++}
++
++func TestNextcloudContentLeaseSQLitePruneFinishedInBoundedBatches(t *testing.T) {
++	db := leaseTestSQLite(t)
++	store := NewNextcloudContentLeaseStore(db)
++	ctx := context.Background()
++	scope := leaseTestScope("prune-file")
++	acquire := func(owner string) NextcloudContentLease {
++		t.Helper()
++		lease, err := store.AcquireKnowledge(ctx, scope, NextcloudContentReadLease,
++			owner, time.Minute)
++		require.NoError(t, err)
++		return lease
++	}
++	oldReleasedA := acquire("old-released-a")
++	oldReleasedB := acquire("old-released-b")
++	oldExpired := acquire("old-expired")
++	recentReleased := acquire("recent-released")
++	recentExpired := acquire("recent-expired")
++	active := acquire("active")
++
++	nowMS, err := nextcloudLeaseNowMS(db)
++	require.NoError(t, err)
++	for _, lease := range []NextcloudContentLease{oldReleasedA, oldReleasedB} {
++		require.NoError(t, store.ReleaseLease(ctx, lease.ID))
++		require.NoError(t, db.Exec(`UPDATE nextcloud_content_leases
++			SET released_at_ms = ? WHERE lease_id = ?`,
++			nowMS-int64((2*time.Hour).Milliseconds()), lease.ID).Error)
++	}
++	require.NoError(t, store.ReleaseLease(ctx, recentReleased.ID))
++	require.NoError(t, db.Exec(`UPDATE nextcloud_content_leases
++		SET expires_at_ms = ? WHERE lease_id = ?`,
++		nowMS-int64((2*time.Hour).Milliseconds()), oldExpired.ID).Error)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_content_leases
++		SET expires_at_ms = ? WHERE lease_id = ?`,
++		nowMS-int64((30*time.Minute).Milliseconds()), recentExpired.ID).Error)
++
++	_, err = store.PruneFinishedLeases(ctx, 0, 1)
++	require.ErrorIs(t, err, ErrNextcloudContentLeaseInvalid)
++	_, err = store.PruneFinishedLeases(ctx, time.Hour, 0)
++	require.ErrorIs(t, err, ErrNextcloudContentLeaseInvalid)
++
++	pruned, err := store.PruneFinishedLeases(ctx, time.Hour, 2)
++	require.NoError(t, err)
++	require.EqualValues(t, 2, pruned)
++	pruned, err = store.PruneFinishedLeases(ctx, time.Hour, 2)
++	require.NoError(t, err)
++	require.EqualValues(t, 1, pruned)
++	pruned, err = store.PruneFinishedLeases(ctx, time.Hour, 2)
++	require.NoError(t, err)
++	require.Zero(t, pruned)
++
++	var remaining []string
++	require.NoError(t, db.Table("nextcloud_content_leases").
++		Pluck("lease_id", &remaining).Error)
++	require.ElementsMatch(t, []string{recentReleased.ID, recentExpired.ID, active.ID}, remaining)
++	_, err = store.RenewLease(ctx, active.ID, time.Minute)
++	require.NoError(t, err)
 +}
 diff --git a/internal/application/repository/nextcloud_credential_endpoint_test.go b/internal/application/repository/nextcloud_credential_endpoint_test.go
 new file mode 100644
@@ -16137,7 +16469,7 @@ index 83fb0990..af50dbf7 100644
  }
  
 diff --git a/internal/container/container.go b/internal/container/container.go
-index c27d12d1..d19b75c8 100644
+index c27d12d1..944afc01 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -34,6 +34,7 @@ import (
@@ -16171,18 +16503,20 @@ index c27d12d1..d19b75c8 100644
  	must(container.Provide(repository.NewSyncLogRepository))
  	must(container.Provide(repository.NewWikiPageRepository))
  	must(container.Provide(repository.NewMemoryRepository))
-@@ -471,7 +481,10 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -471,7 +481,12 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Provide(initConnectorRegistry))
  	must(container.Provide(datasource.NewScheduler))
  	must(container.Provide(service.NewDataSourceService))
 +	must(container.Provide(service.NewNextcloudEventDispatcher))
 +	must(container.Provide(repository.NewNextcloudGCStore))
++	must(container.Provide(repository.NewNextcloudContentLeaseStore))
  	must(container.Invoke(startDataSourceScheduler))
 +	must(container.Invoke(startNextcloudGC))
++	must(container.Invoke(startNextcloudContentLeasePruner))
  	logger.Debugf(ctx, "[Container] Data source sync framework registered")
  	must(container.Invoke(startAuditLogRetention))
  	logger.Debugf(ctx, "[Container] Audit log retention runner registered")
-@@ -582,6 +595,10 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -582,6 +597,10 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Provide(handler.NewModelCredentialsHandler))
  	must(container.Provide(handler.NewWebSearchProviderCredentialsHandler))
  	must(container.Provide(handler.NewDataSourceCredentialsHandler))
@@ -16193,7 +16527,7 @@ index c27d12d1..d19b75c8 100644
  	must(container.Invoke(handler.ConfigureDataSourceCredentialsGroupAccess))
  	must(container.Provide(handler.NewWebSearchHandler))
  	must(container.Provide(handler.NewWebSearchProviderHandler))
-@@ -633,6 +650,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -633,6 +652,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	// persistence succeeded immediately before trigger enqueue failed). Re-arm
  	// them only after the matching handlers are ready.
  	must(container.Invoke(recoverPendingWikiTasks))
@@ -16201,7 +16535,7 @@ index c27d12d1..d19b75c8 100644
  
  	logger.Infof(ctx, "[Container] Container initialization completed successfully")
  	return container
-@@ -1137,12 +1155,15 @@ func syncSequences(db *gorm.DB) {
+@@ -1137,12 +1157,15 @@ func syncSequences(db *gorm.DB) {
  // Returns:
  //   - Configured file service implementation
  //   - Error if initialization fails
@@ -16219,7 +16553,7 @@ index c27d12d1..d19b75c8 100644
  }
  
  func initRawFileService(_ *config.Config) (interfaces.FileService, error) {
-@@ -1879,6 +1900,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
+@@ -1879,6 +1902,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
  	if err := registry.Register(gitlabConnector.NewConnector()); err != nil {
  		errs = errors.Join(errs, fmt.Errorf("register gitlab connector: %w", err))
  	}
@@ -16229,7 +16563,7 @@ index c27d12d1..d19b75c8 100644
  
  	// Future connectors will be registered here:
  	// if err := registry.Register(githubConnector.NewConnector()); err != nil { ... }
-@@ -1901,6 +1925,81 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
+@@ -1901,6 +1927,121 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
  	})
  }
  
@@ -16304,6 +16638,46 @@ index c27d12d1..d19b75c8 100644
 +	dispatcher.Start()
 +	cleaner.RegisterWithName("NextcloudEventDispatcher", func() error {
 +		dispatcher.Stop()
++		return nil
++	})
++}
++
++// Completed lease rows are useful briefly for debugging, but an active HTTP
++// reader creates one durable row per request. Prune only rows whose release or
++// expiry is beyond the retention window, in bounded batches.
++func startNextcloudContentLeasePruner(store *repository.NextcloudContentLeaseStore,
++	cleaner interfaces.ResourceCleaner,
++) {
++	stop := make(chan struct{})
++	run := func() {
++		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++		defer cancel()
++		for i := 0; i < 10; i++ {
++			count, err := store.PruneFinishedLeases(ctx, time.Hour, 1000)
++			if err != nil {
++				logger.Warnf(ctx, "[NextcloudContentLease] prune failed: %v", err)
++				return
++			}
++			if count < 1000 {
++				return
++			}
++		}
++	}
++	go func() {
++		run()
++		ticker := time.NewTicker(time.Minute)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-ticker.C:
++				run()
++			case <-stop:
++				return
++			}
++		}
++	}()
++	cleaner.RegisterWithName("NextcloudContentLeasePruner", func() error {
++		close(stop)
 +		return nil
 +	})
 +}
@@ -21027,18 +21401,24 @@ index dbd35b46..d5de0de8 100644
  // Fake implementations for testing
  // ──────────────────────────────────────────────────────────────────────
 diff --git a/internal/handler/chunk.go b/internal/handler/chunk.go
-index 162bc952..4b55535b 100644
+index 162bc952..99f70df5 100644
 --- a/internal/handler/chunk.go
 +++ b/internal/handler/chunk.go
-@@ -4,6 +4,7 @@ import (
+@@ -1,9 +1,13 @@
+ package handler
+ 
+ import (
++	"context"
  	stderrors "errors"
  	"net/http"
++	"time"
  
 +	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
  	"github.com/Tencent/WeKnora/internal/application/service"
  	"github.com/Tencent/WeKnora/internal/errors"
  	"github.com/Tencent/WeKnora/internal/logger"
-@@ -28,8 +29,9 @@ import (
+@@ -28,8 +32,12 @@ import (
  // access — that lookup answers "is the caller the creator of THIS
  // resource", not "does the caller's tenant have access").
  type ChunkHandler struct {
@@ -21047,10 +21427,13 @@ index 162bc952..4b55535b 100644
 +	service          interfaces.ChunkService
 +	kgService        interfaces.KnowledgeService
 +	publicationGuard *access.NextcloudPublicationGuard
++	contentLeases    nextcloudHTTPReadLeaseStore
++	leaseHeartbeat   time.Duration
++	publicationCheck func(context.Context, *types.Knowledge) error // test seam
  }
  
  // NewChunkHandler creates a new chunk handler.
-@@ -37,6 +39,23 @@ func NewChunkHandler(service interfaces.ChunkService, kgService interfaces.Knowl
+@@ -37,6 +45,39 @@ func NewChunkHandler(service interfaces.ChunkService, kgService interfaces.Knowl
  	return &ChunkHandler{service: service, kgService: kgService}
  }
  
@@ -21060,43 +21443,119 @@ index 162bc952..4b55535b 100644
 +	}
 +}
 +
-+func (h *ChunkHandler) checkPublication(ctx *gin.Context, knowledgeID string) error {
++func ConfigureChunkHandlerContentLeaseStore(h *ChunkHandler, store *repository.NextcloudContentLeaseStore) {
++	if h != nil {
++		h.contentLeases = store
++	}
++}
++
++func (h *ChunkHandler) loadPublishedKnowledge(ctx context.Context, knowledgeID string) (*types.Knowledge, error) {
 +	if h.kgService == nil {
-+		return errors.NewServiceUnavailableError("Cannot verify knowledge source")
++		return nil, errors.NewServiceUnavailableError("Cannot verify knowledge source")
 +	}
-+	knowledge, err := h.kgService.GetKnowledgeByIDOnly(ctx.Request.Context(), knowledgeID)
++	knowledge, err := h.kgService.GetKnowledgeByIDOnly(ctx, knowledgeID)
 +	if err != nil || knowledge == nil {
-+		return errors.NewNotFoundError("Knowledge not found")
++		return nil, errors.NewNotFoundError("Knowledge not found")
 +	}
-+	return checkKnowledgePublication(ctx.Request.Context(), h.publicationGuard, knowledge)
++	if h.publicationCheck != nil {
++		err = h.publicationCheck(ctx, knowledge)
++	} else {
++		err = checkKnowledgePublication(ctx, h.publicationGuard, knowledge)
++	}
++	return knowledge, err
++}
++
++func (h *ChunkHandler) checkPublication(ctx *gin.Context, knowledgeID string) error {
++	_, err := h.loadPublishedKnowledge(ctx.Request.Context(), knowledgeID)
++	return err
 +}
 +
  // GetChunkByIDOnly godoc
  // @Summary      通过ID获取分块
  // @Description  仅通过分块ID获取分块详情（不需要knowledge_id）；支持共享知识库下的分块访问
-@@ -75,6 +94,10 @@ func (h *ChunkHandler) GetChunkByIDOnly(c *gin.Context) {
+@@ -75,6 +116,43 @@ func (h *ChunkHandler) GetChunkByIDOnly(c *gin.Context) {
  		c.Error(errors.NewInternalServerError(err.Error()))
  		return
  	}
-+	if err := h.checkPublication(c, chunk.KnowledgeID); err != nil {
++	if chunk == nil {
++		_ = c.Error(errors.NewNotFoundError("Chunk not found"))
++		return
++	}
++	knowledge, err := h.loadPublishedKnowledge(ctx, chunk.KnowledgeID)
++	if err != nil {
 +		_ = c.Error(err)
 +		return
 +	}
++	leases, err := h.beginNextcloudRead(c, ctx, knowledge)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	ctx = leases.Context(ctx)
++	if leases != nil {
++		// The first lookup identified the parent. Re-read content only while
++		// the exact generation is protected by its durable lease.
++		chunk, err = h.service.GetChunkByIDOnly(ctx, chunkID)
++		if err != nil || chunk == nil || chunk.KnowledgeID != knowledge.ID {
++			_ = c.Error(errors.NewNotFoundError("Chunk not found"))
++			return
++		}
++	}
++	if err := leases.Verify(); err != nil {
++		_ = c.Error(nextcloudHTTPLeaseError(err))
++		return
++	}
++	if _, err := h.loadPublishedKnowledge(ctx, chunk.KnowledgeID); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		_, err := h.loadPublishedKnowledge(checkCtx, chunk.KnowledgeID)
++		return err
++	})()
  
  	c.JSON(http.StatusOK, gin.H{
  		"success": true,
-@@ -106,6 +129,10 @@ func (h *ChunkHandler) ListKnowledgeChunks(c *gin.Context) {
+@@ -106,6 +184,18 @@ func (h *ChunkHandler) ListKnowledgeChunks(c *gin.Context) {
  		c.Error(errors.NewBadRequestError("Knowledge ID cannot be empty"))
  		return
  	}
-+	if err := h.checkPublication(c, knowledgeID); err != nil {
++	knowledge, err := h.loadPublishedKnowledge(ctx, knowledgeID)
++	if err != nil {
 +		_ = c.Error(err)
 +		return
 +	}
++	leases, err := h.beginNextcloudRead(c, ctx, knowledge)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	ctx = leases.Context(ctx)
  
  	// Parse pagination parameters
  	var pagination types.Pagination
-@@ -255,11 +282,15 @@ func (h *ChunkHandler) UpdateChunk(c *gin.Context) {
+@@ -141,6 +231,18 @@ func (h *ChunkHandler) ListKnowledgeChunks(c *gin.Context) {
+ 		c.Error(errors.NewInternalServerError(err.Error()))
+ 		return
+ 	}
++	if err := leases.Verify(); err != nil {
++		_ = c.Error(nextcloudHTTPLeaseError(err))
++		return
++	}
++	if _, err := h.loadPublishedKnowledge(ctx, knowledgeID); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		_, err := h.loadPublishedKnowledge(checkCtx, knowledgeID)
++		return err
++	})()
+ 
+ 	c.JSON(http.StatusOK, gin.H{
+ 		"success":   true,
+@@ -255,16 +357,40 @@ func (h *ChunkHandler) UpdateChunk(c *gin.Context) {
  }
  
  func (h *ChunkHandler) ListChunkRevisions(c *gin.Context) {
@@ -21106,13 +21565,39 @@ index 162bc952..4b55535b 100644
  		c.Error(err)
  		return
  	}
-+	if err := h.checkPublication(c, knowledgeID); err != nil {
+-	items, err := h.service.ListChunkRevisions(c.Request.Context(), chunk.ID)
++	knowledge, err := h.loadPublishedKnowledge(c.Request.Context(), knowledgeID)
++	if err != nil {
 +		_ = c.Error(err)
 +		return
 +	}
- 	items, err := h.service.ListChunkRevisions(c.Request.Context(), chunk.ID)
++	leases, err := h.beginNextcloudRead(c, c.Request.Context(), knowledge)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	ctx := leases.Context(c.Request.Context())
++	items, err := h.service.ListChunkRevisions(ctx, chunk.ID)
  	if err != nil {
  		c.Error(errors.NewInternalServerError(err.Error()))
+ 		return
+ 	}
++	if err := leases.Verify(); err != nil {
++		_ = c.Error(nextcloudHTTPLeaseError(err))
++		return
++	}
++	if _, err := h.loadPublishedKnowledge(ctx, knowledgeID); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		_, err := h.loadPublishedKnowledge(checkCtx, knowledgeID)
++		return err
++	})()
+ 	c.JSON(http.StatusOK, gin.H{"success": true, "data": items})
+ }
+ 
 diff --git a/internal/handler/datasource.go b/internal/handler/datasource.go
 index 1cd51dcb..e15757f6 100644
 --- a/internal/handler/datasource.go
@@ -21343,18 +21828,22 @@ index 7456ef1e..66b23c60 100644
  	cfg := types.DataSourceConfig{
  		Type: types.ConnectorTypeRSS,
 diff --git a/internal/handler/knowledge.go b/internal/handler/knowledge.go
-index 8c05828c..66fdf6c8 100644
+index 8c05828c..320bee0c 100644
 --- a/internal/handler/knowledge.go
 +++ b/internal/handler/knowledge.go
-@@ -34,6 +34,7 @@ type KnowledgeHandler struct {
+@@ -34,6 +34,11 @@ type KnowledgeHandler struct {
  	kbShareService    interfaces.KBShareService
  	agentShareService interfaces.AgentShareService
  	groupAccess       interfaces.GroupAccessService
 +	publicationGuard  *access.NextcloudPublicationGuard
++	contentLeases     nextcloudHTTPReadLeaseStore
++	leaseHeartbeat    time.Duration
++	leaseCheckpoint   time.Duration
++	publicationCheck  func(context.Context, *types.Knowledge) error // test seam; production uses publicationGuard
  	asynqClient       interfaces.TaskEnqueuer
  	spanRepo          repository.KnowledgeSpanRepository
  }
-@@ -46,6 +47,27 @@ func ConfigureKnowledgeHandlerGroupAccess(h *KnowledgeHandler, groupAccess inter
+@@ -46,6 +51,36 @@ func ConfigureKnowledgeHandlerGroupAccess(h *KnowledgeHandler, groupAccess inter
  	}
  }
  
@@ -21366,7 +21855,16 @@ index 8c05828c..66fdf6c8 100644
 +	}
 +}
 +
++func ConfigureKnowledgeHandlerContentLeaseStore(h *KnowledgeHandler, store *repository.NextcloudContentLeaseStore) {
++	if h != nil {
++		h.contentLeases = store
++	}
++}
++
 +func (h *KnowledgeHandler) checkPublication(ctx context.Context, knowledge *types.Knowledge) error {
++	if h.publicationCheck != nil {
++		return h.publicationCheck(ctx, knowledge)
++	}
 +	return checkKnowledgePublication(ctx, h.publicationGuard, knowledge)
 +}
 +
@@ -21382,7 +21880,7 @@ index 8c05828c..66fdf6c8 100644
  func (h *KnowledgeHandler) authorizeKBGroupAccess(
  	ctx context.Context,
  	kb *types.KnowledgeBase,
-@@ -672,6 +694,10 @@ func (h *KnowledgeHandler) GetKnowledge(c *gin.Context) {
+@@ -672,6 +707,23 @@ func (h *KnowledgeHandler) GetKnowledge(c *gin.Context) {
  		c.Error(errors.NewNotFoundError("Knowledge not found"))
  		return
  	}
@@ -21390,10 +21888,23 @@ index 8c05828c..66fdf6c8 100644
 +		_ = c.Error(err)
 +		return
 +	}
++	leases, err := h.beginNextcloudRead(c, effCtx, []*types.Knowledge{knowledge})
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	if err := h.verifyNextcloudRead(leases.Context(effCtx), leases, []*types.Knowledge{knowledge}); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		return h.checkPublication(checkCtx, knowledge)
++	})()
  
  	logger.Infof(ctx, "Knowledge retrieved successfully, ID: %s, title: %s",
  		secutils.SanitizeForLog(knowledge.ID), secutils.SanitizeForLog(knowledge.Title))
-@@ -710,6 +736,10 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
+@@ -710,6 +762,17 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
  		c.Error(err)
  		return
  	}
@@ -21401,10 +21912,31 @@ index 8c05828c..66fdf6c8 100644
 +		_ = c.Error(err)
 +		return
 +	}
++	leases, err := h.beginNextcloudRead(c, ctx, []*types.Knowledge{knowledge})
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	ctx = leases.Context(ctx)
  
  	// Pick attempt: explicit ?attempt=N wins; otherwise pull the
  	// latest attempt from the spans table. Lite-mode / fresh installs
-@@ -1053,6 +1083,16 @@ func (h *KnowledgeHandler) ListKnowledge(c *gin.Context) {
+@@ -777,6 +840,13 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
+ 	); lastError != nil {
+ 		resp["last_error"] = lastError
+ 	}
++	if err := h.verifyNextcloudRead(ctx, leases, []*types.Knowledge{knowledge}); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		return h.checkPublication(checkCtx, knowledge)
++	})()
+ 	c.JSON(http.StatusOK, gin.H{
+ 		"success": true,
+ 		"data":    resp,
+@@ -1053,6 +1123,16 @@ func (h *KnowledgeHandler) ListKnowledge(c *gin.Context) {
  		c.Error(errors.NewInternalServerError(err.Error()))
  		return
  	}
@@ -21421,7 +21953,7 @@ index 8c05828c..66fdf6c8 100644
  
  	logger.Infof(
  		ctx,
-@@ -1092,6 +1132,21 @@ func (h *KnowledgeHandler) ListKnowledgeFolders(c *gin.Context) {
+@@ -1092,6 +1172,21 @@ func (h *KnowledgeHandler) ListKnowledgeFolders(c *gin.Context) {
  		return
  	}
  	ctx = types.WithExecutionTenant(c.Request.Context(), effectiveTenantID)
@@ -21443,7 +21975,7 @@ index 8c05828c..66fdf6c8 100644
  
  	tree, err := h.kgService.ListKnowledgeFolderTree(ctx, kbID)
  	if err != nil {
-@@ -1580,11 +1635,15 @@ func (h *KnowledgeHandler) DownloadKnowledgeFile(c *gin.Context) {
+@@ -1580,19 +1675,44 @@ func (h *KnowledgeHandler) DownloadKnowledgeFile(c *gin.Context) {
  	// Keep a handler-level Editor check in addition to the route guard. The
  	// original file is more sensitive than parsed-content reads and must not
  	// be downloadable through a read-only organization share.
@@ -21458,9 +21990,38 @@ index 8c05828c..66fdf6c8 100644
 +		return
 +	}
  	logger.Infof(ctx, "Retrieving knowledge file, ID: %s", secutils.SanitizeForLog(id))
++	leases, err := h.beginNextcloudRead(c, effCtx, []*types.Knowledge{knowledge})
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	effCtx = leases.Context(effCtx)
  
  	file, filename, err := h.kgService.GetKnowledgeFile(effCtx, id)
-@@ -1624,11 +1683,15 @@ func (h *KnowledgeHandler) PreviewKnowledgeFile(c *gin.Context) {
+ 	if err != nil {
++		if leaseErr := leases.Err(); leaseErr != nil {
++			_ = c.Error(nextcloudHTTPLeaseError(leaseErr))
++			return
++		}
+ 		logger.ErrorWithFields(ctx, err, nil)
+ 		c.Error(errors.NewInternalServerError("Failed to retrieve file").WithDetails(err.Error()))
+ 		return
+ 	}
++	if err := h.verifyNextcloudRead(effCtx, leases, []*types.Knowledge{knowledge}); err != nil {
++		_ = file.Close()
++		_ = c.Error(err)
++		return
++	}
++	checkLive := func(checkCtx context.Context) error {
++		return h.checkPublication(checkCtx, knowledge)
++	}
++	file = wrapNextcloudLeasedFile(file, leases, checkLive, h.leaseCheckpoint)
++	defer guardNextcloudResponseWrites(c, leases, checkLive)()
+ 	c.Header("Content-Description", "File Transfer")
+ 	c.Header("Content-Transfer-Encoding", "binary")
+ 	c.Header("Expires", "0")
+@@ -1624,18 +1744,43 @@ func (h *KnowledgeHandler) PreviewKnowledgeFile(c *gin.Context) {
  		return
  	}
  
@@ -21474,10 +22035,38 @@ index 8c05828c..66fdf6c8 100644
 +		_ = c.Error(err)
 +		return
 +	}
++	leases, err := h.beginNextcloudRead(c, effCtx, []*types.Knowledge{knowledge})
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	effCtx = leases.Context(effCtx)
  
  	file, filename, err := h.kgService.GetKnowledgeFile(effCtx, id)
  	if err != nil {
-@@ -1788,6 +1851,10 @@ func (h *KnowledgeHandler) GetKnowledgeBatch(c *gin.Context) {
++		if leaseErr := leases.Err(); leaseErr != nil {
++			_ = c.Error(nextcloudHTTPLeaseError(leaseErr))
++			return
++		}
+ 		logger.ErrorWithFields(ctx, err, nil)
+ 		c.Error(errors.NewInternalServerError("Failed to retrieve file").WithDetails(err.Error()))
+ 		return
+ 	}
++	if err := h.verifyNextcloudRead(effCtx, leases, []*types.Knowledge{knowledge}); err != nil {
++		_ = file.Close()
++		_ = c.Error(err)
++		return
++	}
++	checkLive := func(checkCtx context.Context) error {
++		return h.checkPublication(checkCtx, knowledge)
++	}
++	file = wrapNextcloudLeasedFile(file, leases, checkLive, h.leaseCheckpoint)
++	defer guardNextcloudResponseWrites(c, leases, checkLive)()
+ 	if err := filetransport.Serve(c.Writer, c.Request, file, filetransport.Options{
+ 		Filename: filename, CacheControl: "private, no-store",
+ 	}); err != nil {
+@@ -1788,6 +1933,24 @@ func (h *KnowledgeHandler) GetKnowledgeBatch(c *gin.Context) {
  		}
  		knowledges = allowed
  	}
@@ -21485,10 +22074,24 @@ index 8c05828c..66fdf6c8 100644
 +		_ = c.Error(err)
 +		return
 +	}
++	leases, err := h.beginNextcloudRead(c, ctx, knowledges)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	ctx = leases.Context(ctx)
++	if err := h.verifyNextcloudRead(ctx, leases, knowledges); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		return h.checkPublicationList(checkCtx, knowledges)
++	})()
  
  	logger.Infof(ctx, "Batch knowledge retrieval successful, requested count: %d, returned count: %d",
  		len(req.IDs), len(knowledges))
-@@ -2355,6 +2422,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
+@@ -2355,6 +2518,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
  			c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
  			return
  		}
@@ -21499,7 +22102,7 @@ index 8c05828c..66fdf6c8 100644
  		c.JSON(http.StatusOK, gin.H{
  			"success":  true,
  			"data":     knowledges,
-@@ -2380,6 +2451,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
+@@ -2380,6 +2547,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
  			c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
  			return
  		}
@@ -21510,7 +22113,7 @@ index 8c05828c..66fdf6c8 100644
  		c.JSON(http.StatusOK, gin.H{
  			"success":  true,
  			"data":     knowledges,
-@@ -2396,6 +2471,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
+@@ -2396,6 +2567,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
  		c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
  		return
  	}
@@ -21522,7 +22125,7 @@ index 8c05828c..66fdf6c8 100644
  	c.JSON(http.StatusOK, gin.H{
  		"success":  true,
 diff --git a/internal/handler/knowledge_download.go b/internal/handler/knowledge_download.go
-index cf9ad0cd..b9b04579 100644
+index cf9ad0cd..7ff0d818 100644
 --- a/internal/handler/knowledge_download.go
 +++ b/internal/handler/knowledge_download.go
 @@ -99,6 +99,10 @@ func (h *KnowledgeHandler) BatchDownloadKnowledge(c *gin.Context) {
@@ -21536,6 +22139,66 @@ index cf9ad0cd..b9b04579 100644
  		if !item.IsManual() && item.FilePath == "" {
  			continue
  		}
+@@ -114,6 +118,17 @@ func (h *KnowledgeHandler) BatchDownloadKnowledge(c *gin.Context) {
+ 		return
+ 	}
+ 	defer releaseBatchDownloadSlot()
++	readItems := make([]*types.Knowledge, 0, len(entries))
++	for _, entry := range entries {
++		readItems = append(readItems, byID[entry.ID])
++	}
++	leases, err := h.beginNextcloudRead(c, ctx, readItems)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	ctx = leases.Context(ctx)
+ 
+ 	// 先在临时文件中完整生成压缩包，避免读取失败时向用户返回残缺 ZIP。
+ 	archive, err := os.CreateTemp("", "weknora-download-*.zip")
+@@ -126,9 +141,26 @@ func (h *KnowledgeHandler) BatchDownloadKnowledge(c *gin.Context) {
+ 		_ = archive.Close()
+ 		_ = os.Remove(archivePath)
+ 	}()
++	open := func(openCtx context.Context, id string) (io.ReadCloser, string, error) {
++		file, filename, err := h.kgService.GetKnowledgeFile(openCtx, id)
++		if err != nil {
++			return nil, "", err
++		}
++		return wrapNextcloudLeasedFile(file, leases, func(checkCtx context.Context) error {
++			return h.checkPublication(checkCtx, byID[id])
++		}, h.leaseCheckpoint), filename, nil
++	}
+ 	if err := writeKnowledgeDownloadArchive(
+-		ctx, archive, entries, h.kgService.GetKnowledgeFile, maxBatchDownloadBytes,
++		ctx, archive, entries, open, maxBatchDownloadBytes,
+ 	); err != nil {
++		if leaseErr := leases.Err(); leaseErr != nil {
++			if _, ok := errors.IsAppError(leaseErr); ok {
++				_ = c.Error(leaseErr)
++			} else {
++				_ = c.Error(nextcloudHTTPLeaseError(leaseErr))
++			}
++			return
++		}
+ 		mapped := mapKnowledgeDownloadError(err)
+ 		if appErr, ok := errors.IsAppError(mapped); !ok || appErr.HTTPCode >= 500 {
+ 			logger.ErrorWithFields(ctx, err, nil)
+@@ -140,6 +172,13 @@ func (h *KnowledgeHandler) BatchDownloadKnowledge(c *gin.Context) {
+ 		_ = c.Error(errors.NewInternalServerError("无法读取下载压缩包，请稍后重试"))
+ 		return
+ 	}
++	if err := h.verifyNextcloudRead(ctx, leases, readItems); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		return h.checkPublicationList(checkCtx, readItems)
++	})()
+ 	filename := "knowledge-files-" + time.Now().Format("20060102-150405") + ".zip"
+ 	if err := filetransport.Serve(c.Writer, c.Request, archive, filetransport.Options{
+ 		Filename: filename, Download: true, ContentType: "application/zip", CacheControl: "private, no-store",
 diff --git a/internal/handler/knowledge_folder_test.go b/internal/handler/knowledge_folder_test.go
 index 1510f89a..531de8df 100644
 --- a/internal/handler/knowledge_folder_test.go
@@ -24613,6 +25276,631 @@ index 00000000..0ec87e3b
 +	require.Equal(t, http.StatusForbidden, w.Code)
 +	require.Empty(t, svc.opened)
 +}
+diff --git a/internal/handler/nextcloud_read_lease_test.go b/internal/handler/nextcloud_read_lease_test.go
+new file mode 100644
+index 00000000..150c0951
+--- /dev/null
++++ b/internal/handler/nextcloud_read_lease_test.go
+@@ -0,0 +1,244 @@
++package handler
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	apperrors "github.com/Tencent/WeKnora/internal/errors"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++type leasePreviewService struct {
++	interfaces.KnowledgeService
++	knowledge *types.Knowledge
++	open      func(context.Context) (io.ReadCloser, error)
++}
++
++func (s *leasePreviewService) GetKnowledgeByIDOnly(context.Context, string) (*types.Knowledge, error) {
++	return s.knowledge, nil
++}
++
++func (s *leasePreviewService) GetKnowledgeFile(ctx context.Context, _ string) (io.ReadCloser, string, error) {
++	reader, err := s.open(ctx)
++	return reader, "source.txt", err
++}
++
++type twoPhaseSource struct {
++	step   int
++	second func()
++}
++
++type leaseAcquireHookStore struct {
++	*repository.NextcloudContentLeaseStore
++	onAcquire func()
++}
++
++func (s *leaseAcquireHookStore) AcquireKnowledge(ctx context.Context, scope repository.NextcloudContentScope,
++	kind repository.NextcloudContentLeaseKind, owner string, ttl time.Duration,
++) (repository.NextcloudContentLease, error) {
++	lease, err := s.NextcloudContentLeaseStore.AcquireKnowledge(ctx, scope, kind, owner, ttl)
++	if err == nil && s.onAcquire != nil {
++		s.onAcquire()
++	}
++	return lease, err
++}
++
++func (s *twoPhaseSource) Read(p []byte) (int, error) {
++	switch s.step {
++	case 0:
++		s.step++
++		return copy(p, "first"), nil
++	case 1:
++		s.step++
++		if s.second != nil {
++			s.second()
++		}
++		return copy(p, "second"), nil
++	default:
++		return 0, io.EOF
++	}
++}
++
++func (*twoPhaseSource) Close() error { return nil }
++
++func leaseHandlerDB(t *testing.T) *gorm.DB {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "handler-leases.db")
++	db, err := gorm.Open(sqlite.Open("file:"+path+"?_busy_timeout=5000&_journal_mode=WAL"), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(8)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	script, err := os.ReadFile("../../migrations/sqlite/000046_nextcloud_content_leases.up.sql")
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(string(script)).Error)
++	return db
++}
++
++func leaseHandlerKnowledge(t *testing.T) *types.Knowledge {
++	t.Helper()
++	metadata, err := json.Marshal(map[string]string{
++		"datasource_id": "source-1", "external_id": "nextcloud:instance:1",
++	})
++	require.NoError(t, err)
++	return &types.Knowledge{ID: "doc-1", TenantID: 7, KnowledgeBaseID: "kb-1",
++		Channel: types.ConnectorTypeNextcloud, Metadata: types.JSON(metadata)}
++}
++
++func assertLeaseReleased(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	var count, released int64
++	require.NoError(t, db.Table("nextcloud_content_leases").Count(&count).Error)
++	require.NoError(t, db.Table("nextcloud_content_leases").
++		Where("released_at_ms IS NOT NULL").Count(&released).Error)
++	require.EqualValues(t, 1, count)
++	require.EqualValues(t, 1, released)
++}
++
++func TestPreviewLeaseRetireDuringReadStopsLaterBytes(t *testing.T) {
++	db := leaseHandlerDB(t)
++	store := repository.NewNextcloudContentLeaseStore(db)
++	knowledge := leaseHandlerKnowledge(t)
++	var revoked atomic.Bool
++	var retiredErr error
++	svc := &leasePreviewService{knowledge: knowledge}
++	svc.open = func(context.Context) (io.ReadCloser, error) {
++		return &twoPhaseSource{second: func() {
++			retiredErr = store.RetireKnowledge(context.Background(), repository.NextcloudContentScope{
++				TenantID: 7, KnowledgeBaseID: "kb-1", KnowledgeID: "doc-1",
++				DataSourceID: "source-1", ExternalID: "nextcloud:instance:1",
++			})
++			revoked.Store(true)
++		}}, nil
++	}
++	h := &KnowledgeHandler{kgService: svc, contentLeases: store,
++		publicationCheck: func(context.Context, *types.Knowledge) error {
++			if revoked.Load() {
++				return apperrors.NewForbiddenError("source revoked")
++			}
++			return nil
++		},
++	}
++	r := documentHandlerRouter()
++	r.GET("/knowledge/:id/preview", h.PreviewKnowledgeFile)
++	w := httptest.NewRecorder()
++	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/knowledge/doc-1/preview", nil))
++	require.NoError(t, retiredErr)
++	require.Equal(t, "first", w.Body.String())
++	require.NotContains(t, w.Body.String(), "second")
++	assertLeaseReleased(t, db)
++}
++
++func TestPreviewLeaseAcquisitionRechecksPublicationBeforeFirstByte(t *testing.T) {
++	db := leaseHandlerDB(t)
++	store := repository.NewNextcloudContentLeaseStore(db)
++	knowledge := leaseHandlerKnowledge(t)
++	var revoked atomic.Bool
++	svc := &leasePreviewService{knowledge: knowledge,
++		open: func(context.Context) (io.ReadCloser, error) {
++			return io.NopCloser(strings.NewReader("secret")), nil
++		},
++	}
++	h := &KnowledgeHandler{kgService: svc,
++		contentLeases: &leaseAcquireHookStore{NextcloudContentLeaseStore: store,
++			onAcquire: func() { revoked.Store(true) }},
++		publicationCheck: func(context.Context, *types.Knowledge) error {
++			if revoked.Load() {
++				return apperrors.NewForbiddenError("source revoked")
++			}
++			return nil
++		},
++	}
++	r := documentHandlerRouter()
++	r.GET("/knowledge/:id/preview", h.PreviewKnowledgeFile)
++	w := httptest.NewRecorder()
++	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/knowledge/doc-1/preview", nil))
++	require.NotContains(t, w.Body.String(), "secret")
++	assertLeaseReleased(t, db)
++}
++
++func TestPreviewLeaseExpiryAndCancellationStopLaterBytes(t *testing.T) {
++	for _, mode := range []string{"expired", "canceled"} {
++		t.Run(mode, func(t *testing.T) {
++			db := leaseHandlerDB(t)
++			store := repository.NewNextcloudContentLeaseStore(db)
++			knowledge := leaseHandlerKnowledge(t)
++			var cancel context.CancelFunc
++			var updateErr error
++			svc := &leasePreviewService{knowledge: knowledge}
++			svc.open = func(context.Context) (io.ReadCloser, error) {
++				return &twoPhaseSource{second: func() {
++					if mode == "canceled" {
++						cancel()
++					} else {
++						updateErr = db.Exec(`UPDATE nextcloud_content_leases
++							SET expires_at_ms = 1 WHERE knowledge_id = 'doc-1'`).Error
++					}
++				}}, nil
++			}
++			h := &KnowledgeHandler{kgService: svc, contentLeases: store,
++				leaseCheckpoint:  time.Nanosecond,
++				publicationCheck: func(context.Context, *types.Knowledge) error { return nil },
++			}
++			r := documentHandlerRouter()
++			r.GET("/knowledge/:id/preview", h.PreviewKnowledgeFile)
++			base, stop := context.WithCancel(context.Background())
++			cancel = stop
++			defer stop()
++			w := httptest.NewRecorder()
++			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
++				"/knowledge/doc-1/preview", nil).WithContext(base))
++			require.NoError(t, updateErr)
++			require.Equal(t, "first", w.Body.String())
++			assertLeaseReleased(t, db)
++		})
++	}
++}
++
++func TestPreviewWriteBoundaryRejectsRevocationAfterRead(t *testing.T) {
++	db := leaseHandlerDB(t)
++	store := repository.NewNextcloudContentLeaseStore(db)
++	knowledge := leaseHandlerKnowledge(t)
++	leaselist, err := acquireNextcloudHTTPReadLeases(context.Background(), store,
++		[]*types.Knowledge{knowledge}, time.Minute)
++	require.NoError(t, err)
++	defer leaselist.Close()
++	file := wrapNextcloudLeasedFile(io.NopCloser(strings.NewReader("secret")),
++		leaselist, func(context.Context) error { return nil }, time.Minute)
++	buf := make([]byte, 32)
++	n, err := file.Read(buf)
++	require.NoError(t, err)
++	require.Equal(t, "secret", string(buf[:n]))
++	_ = file.Close()
++	var revoked atomic.Bool
++	revoked.Store(true) // source changed after Read and before Write
++	w := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(w)
++	guarded := &nextcloudAuthorizationWriter{ResponseWriter: c.Writer, leases: leaselist,
++		check: func(context.Context) error {
++			if revoked.Load() {
++				return apperrors.NewForbiddenError("source revoked")
++			}
++			return nil
++		}}
++	written, err := guarded.Write(buf[:n])
++	require.Error(t, err)
++	require.Zero(t, written)
++	require.Empty(t, w.Body.String())
++}
+diff --git a/internal/handler/nextcloud_read_leases.go b/internal/handler/nextcloud_read_leases.go
+new file mode 100644
+index 00000000..80cd45ff
+--- /dev/null
++++ b/internal/handler/nextcloud_read_leases.go
+@@ -0,0 +1,369 @@
++package handler
++
++import (
++	"context"
++	"encoding/json"
++	stderrors "errors"
++	"io"
++	"sync"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/errors"
++	"github.com/Tencent/WeKnora/internal/logger"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++)
++
++const (
++	nextcloudHTTPReadLeaseTTL       = 2 * time.Minute
++	nextcloudHTTPReadLeaseHeartbeat = 30 * time.Second
++	nextcloudHTTPReadCheckpoint     = 2 * time.Second
++)
++
++// Kept narrow so handler tests can force lease expiry/retirement without an
++// external source. Production wires the durable repository implementation.
++type nextcloudHTTPReadLeaseStore interface {
++	AcquireKnowledge(context.Context, repository.NextcloudContentScope,
++		repository.NextcloudContentLeaseKind, string, time.Duration) (repository.NextcloudContentLease, error)
++	RenewLease(context.Context, string, time.Duration) (repository.NextcloudContentLease, error)
++	ReleaseLease(context.Context, string) error
++}
++
++func nextcloudHTTPLeaseError(err error) error {
++	if stderrors.Is(err, repository.ErrNextcloudContentLeaseDenied) {
++		return errors.NewForbiddenError("Nextcloud content is no longer available")
++	}
++	return errors.NewServiceUnavailableError("Cannot verify current Nextcloud content lease")
++}
++
++func nextcloudHTTPLeaseScope(knowledge *types.Knowledge) (repository.NextcloudContentScope, bool, error) {
++	var scope repository.NextcloudContentScope
++	if knowledge == nil {
++		return scope, false, errors.NewNotFoundError("Knowledge not found")
++	}
++	if knowledge.Channel != types.ConnectorTypeNextcloud {
++		return scope, false, nil
++	}
++	var metadata struct {
++		DataSourceID string `json:"datasource_id"`
++		ExternalID   string `json:"external_id"`
++	}
++	if err := json.Unmarshal(knowledge.Metadata, &metadata); err != nil ||
++		knowledge.TenantID == 0 || knowledge.KnowledgeBaseID == "" ||
++		knowledge.ID == "" || metadata.DataSourceID == "" || metadata.ExternalID == "" {
++		return scope, true, errors.NewServiceUnavailableError("Cannot verify Nextcloud content identity")
++	}
++	return repository.NextcloudContentScope{
++		TenantID: knowledge.TenantID, KnowledgeBaseID: knowledge.KnowledgeBaseID,
++		KnowledgeID: knowledge.ID, DataSourceID: metadata.DataSourceID,
++		ExternalID: metadata.ExternalID,
++	}, true, nil
++}
++
++type nextcloudHTTPReadLeases struct {
++	store     nextcloudHTTPReadLeaseStore
++	ctx       context.Context
++	cancel    context.CancelFunc
++	rows      []repository.NextcloudContentLease
++	heartbeat time.Duration
++	stop      sync.WaitGroup
++	renewMu   sync.Mutex
++	errMu     sync.Mutex
++	err       error
++	closeOnce sync.Once
++}
++
++// acquireNextcloudHTTPReadLeases is called only after ordinary KB and live
++// source authorization. Acquisition never grants source access by itself.
++func acquireNextcloudHTTPReadLeases(ctx context.Context, store nextcloudHTTPReadLeaseStore,
++	knowledges []*types.Knowledge, heartbeat time.Duration,
++) (*nextcloudHTTPReadLeases, error) {
++	unique := make(map[repository.NextcloudContentScope]struct{}, len(knowledges))
++	scopes := make([]repository.NextcloudContentScope, 0, len(knowledges))
++	for _, knowledge := range knowledges {
++		scope, marked, err := nextcloudHTTPLeaseScope(knowledge)
++		if err != nil {
++			return nil, err
++		}
++		if !marked {
++			continue
++		}
++		if _, found := unique[scope]; found {
++			continue
++		}
++		unique[scope] = struct{}{}
++		scopes = append(scopes, scope)
++	}
++	if len(scopes) == 0 {
++		return nil, nil
++	}
++	if store == nil {
++		return nil, errors.NewServiceUnavailableError("Nextcloud content lease store unavailable")
++	}
++	if heartbeat <= 0 {
++		heartbeat = nextcloudHTTPReadLeaseHeartbeat
++	}
++	leaseCtx, cancel := context.WithCancel(ctx)
++	group := &nextcloudHTTPReadLeases{store: store, ctx: leaseCtx, cancel: cancel,
++		heartbeat: heartbeat, rows: make([]repository.NextcloudContentLease, 0, len(scopes))}
++	owner := uuid.NewString()
++	for _, scope := range scopes {
++		row, err := store.AcquireKnowledge(leaseCtx, scope, repository.NextcloudContentReadLease,
++			owner, nextcloudHTTPReadLeaseTTL)
++		if err != nil {
++			group.Close()
++			return nil, nextcloudHTTPLeaseError(err)
++		}
++		group.rows = append(group.rows, row)
++	}
++	group.stop.Add(1)
++	go group.heartbeatLoop()
++	return group, nil
++}
++
++func (g *nextcloudHTTPReadLeases) Context(fallback context.Context) context.Context {
++	if g == nil {
++		return fallback
++	}
++	return g.ctx
++}
++
++func attachNextcloudLeasedRequest(c *gin.Context, leases *nextcloudHTTPReadLeases) {
++	if c != nil && leases != nil {
++		c.Request = c.Request.WithContext(leases.ctx)
++	}
++}
++
++func (h *KnowledgeHandler) beginNextcloudRead(c *gin.Context, ctx context.Context,
++	knowledges []*types.Knowledge,
++) (*nextcloudHTTPReadLeases, error) {
++	leases, err := acquireNextcloudHTTPReadLeases(ctx, h.contentLeases, knowledges, h.leaseHeartbeat)
++	if err != nil {
++		return nil, err
++	}
++	attachNextcloudLeasedRequest(c, leases)
++	return leases, nil
++}
++
++func (h *KnowledgeHandler) verifyNextcloudRead(ctx context.Context,
++	leases *nextcloudHTTPReadLeases, knowledges []*types.Knowledge,
++) error {
++	if err := leases.Verify(); err != nil {
++		return nextcloudHTTPLeaseError(err)
++	}
++	return h.checkPublicationList(ctx, knowledges)
++}
++
++func (h *ChunkHandler) beginNextcloudRead(c *gin.Context, ctx context.Context,
++	knowledge *types.Knowledge,
++) (*nextcloudHTTPReadLeases, error) {
++	leases, err := acquireNextcloudHTTPReadLeases(ctx, h.contentLeases,
++		[]*types.Knowledge{knowledge}, h.leaseHeartbeat)
++	if err != nil {
++		return nil, err
++	}
++	attachNextcloudLeasedRequest(c, leases)
++	return leases, nil
++}
++
++func (g *nextcloudHTTPReadLeases) fail(err error) error {
++	if g == nil || err == nil {
++		return err
++	}
++	g.errMu.Lock()
++	if g.err == nil {
++		g.err = err
++		g.cancel()
++	}
++	actual := g.err
++	g.errMu.Unlock()
++	return actual
++}
++
++func (g *nextcloudHTTPReadLeases) Err() error {
++	if g == nil {
++		return nil
++	}
++	g.errMu.Lock()
++	err := g.err
++	g.errMu.Unlock()
++	if err != nil {
++		return err
++	}
++	return g.ctx.Err()
++}
++
++// Verify renews all exact leases and fails closed if any generation retired,
++// the durable store failed, or the request was canceled.
++func (g *nextcloudHTTPReadLeases) Verify() error {
++	if g == nil {
++		return nil
++	}
++	g.renewMu.Lock()
++	defer g.renewMu.Unlock()
++	if err := g.Err(); err != nil {
++		return err
++	}
++	for _, row := range g.rows {
++		if _, err := g.store.RenewLease(g.ctx, row.ID, nextcloudHTTPReadLeaseTTL); err != nil {
++			return g.fail(err)
++		}
++	}
++	return g.Err()
++}
++
++func (g *nextcloudHTTPReadLeases) heartbeatLoop() {
++	defer g.stop.Done()
++	ticker := time.NewTicker(g.heartbeat)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-g.ctx.Done():
++			return
++		case <-ticker.C:
++			if err := g.Verify(); err != nil {
++				return
++			}
++		}
++	}
++}
++
++// Close waits for in-flight renewals, then releases with a detached bounded
++// context. A canceled HTTP request must not leave a lease live until TTL.
++func (g *nextcloudHTTPReadLeases) Close() {
++	if g == nil {
++		return
++	}
++	g.closeOnce.Do(func() {
++		g.cancel()
++		g.stop.Wait()
++		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		for i := len(g.rows) - 1; i >= 0; i-- {
++			if err := g.store.ReleaseLease(releaseCtx, g.rows[i].ID); err != nil {
++				logger.Warnf(releaseCtx, "[NextcloudHTTPReadLease] release failed: %v", err)
++			}
++		}
++	})
++}
++
++// nextcloudLeasedFile checks the durable fence and live publication at stream
++// checkpoints. It preserves Seek for Range/ServeContent while ensuring a
++// blocked backend read cannot return bytes after a failed checkpoint.
++type nextcloudLeasedFile struct {
++	file      io.ReadCloser
++	leases    *nextcloudHTTPReadLeases
++	check     func(context.Context) error
++	every     time.Duration
++	lastCheck time.Time
++}
++
++func (f *nextcloudLeasedFile) checkpoint(force bool) error {
++	if f == nil || f.leases == nil {
++		return nil
++	}
++	if err := f.leases.Err(); err != nil {
++		return err
++	}
++	if force || f.lastCheck.IsZero() || time.Since(f.lastCheck) >= f.every {
++		if err := f.leases.Verify(); err != nil {
++			return err
++		}
++		f.lastCheck = time.Now()
++	}
++	if f.check != nil {
++		if err := f.check(f.leases.ctx); err != nil {
++			return f.leases.fail(err)
++		}
++	}
++	return f.leases.Err()
++}
++
++func (f *nextcloudLeasedFile) Read(p []byte) (int, error) {
++	if err := f.checkpoint(false); err != nil {
++		return 0, err
++	}
++	n, err := f.file.Read(p)
++	if err2 := f.checkpoint(false); err2 != nil {
++		return 0, err2
++	}
++	return n, err
++}
++
++func (f *nextcloudLeasedFile) Close() error { return f.file.Close() }
++
++type nextcloudLeasedSeekFile struct{ *nextcloudLeasedFile }
++
++func (f *nextcloudLeasedSeekFile) Seek(offset int64, whence int) (int64, error) {
++	if err := f.checkpoint(false); err != nil {
++		return 0, err
++	}
++	return f.file.(io.Seeker).Seek(offset, whence)
++}
++
++func wrapNextcloudLeasedFile(file io.ReadCloser, leases *nextcloudHTTPReadLeases,
++	check func(context.Context) error, every time.Duration,
++) io.ReadCloser {
++	if leases == nil {
++		return file
++	}
++	if every <= 0 {
++		every = nextcloudHTTPReadCheckpoint
++	}
++	wrapped := &nextcloudLeasedFile{file: file, leases: leases, check: check, every: every}
++	if _, ok := file.(io.Seeker); ok {
++		return &nextcloudLeasedSeekFile{wrapped}
++	}
++	return wrapped
++}
++
++// Gin and net/http may buffer a successful Read before calling Write. Check
++// the live source again at the actual output boundary, including WriteString.
++// The embedded Gin writer preserves Flush/Hijack/CloseNotify behavior.
++type nextcloudAuthorizationWriter struct {
++	gin.ResponseWriter
++	leases *nextcloudHTTPReadLeases
++	check  func(context.Context) error
++}
++
++func (w *nextcloudAuthorizationWriter) beforeWrite() error {
++	if w.leases == nil {
++		return nil
++	}
++	if err := w.leases.Err(); err != nil {
++		return err
++	}
++	if w.check != nil {
++		if err := w.check(w.leases.ctx); err != nil {
++			return w.leases.fail(err)
++		}
++	}
++	return w.leases.Err()
++}
++
++func (w *nextcloudAuthorizationWriter) Write(p []byte) (int, error) {
++	if err := w.beforeWrite(); err != nil {
++		return 0, err
++	}
++	return w.ResponseWriter.Write(p)
++}
++
++func (w *nextcloudAuthorizationWriter) WriteString(s string) (int, error) {
++	if err := w.beforeWrite(); err != nil {
++		return 0, err
++	}
++	return w.ResponseWriter.WriteString(s)
++}
++
++func guardNextcloudResponseWrites(c *gin.Context, leases *nextcloudHTTPReadLeases,
++	check func(context.Context) error,
++) func() {
++	if leases == nil {
++		return func() {}
++	}
++	prior := c.Writer
++	c.Writer = &nextcloudAuthorizationWriter{ResponseWriter: prior, leases: leases, check: check}
++	return func() { c.Writer = prior }
++}
 diff --git a/internal/handler/nextcloud_source_decommission.go b/internal/handler/nextcloud_source_decommission.go
 new file mode 100644
 index 00000000..9fe89231
@@ -26966,18 +28254,19 @@ index bd4744b6..878ac2a4 100644
  			backendID, provider := parseStorageTarget(filePath)
  			fileSvc, resolvedProvider, err := resolveFileService(ctx, tenant, backendID, provider, absDir, storageResolver)
 diff --git a/internal/router/router.go b/internal/router/router.go
-index b5c85dfc..8ca5a05e 100644
+index b5c85dfc..a9f593dc 100644
 --- a/internal/router/router.go
 +++ b/internal/router/router.go
-@@ -13,6 +13,7 @@ import (
+@@ -13,6 +13,8 @@ import (
  	ginSwagger "github.com/swaggo/gin-swagger"
  	"go.uber.org/dig"
  
 +	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
  	"github.com/Tencent/WeKnora/internal/config"
  	"github.com/Tencent/WeKnora/internal/handler"
  	"github.com/Tencent/WeKnora/internal/handler/session"
-@@ -29,78 +30,85 @@ import (
+@@ -29,78 +31,88 @@ import (
  type RouterParams struct {
  	dig.In
  
@@ -27067,6 +28356,7 @@ index b5c85dfc..8ca5a05e 100644
 +	TenantMemberService             interfaces.TenantMemberService
 +	GroupAccessService              interfaces.GroupAccessService
 +	NextcloudPublicationGuard       *access.NextcloudPublicationGuard
++	NextcloudContentLeaseStore      *repository.NextcloudContentLeaseStore
 +	TenantMemberHandler             *handler.TenantMemberHandler
 +	TenantInvitationHandler         *handler.TenantInvitationHandler
 +	AuditLogHandler                 *handler.AuditLogHandler
@@ -27126,10 +28416,12 @@ index b5c85dfc..8ca5a05e 100644
  	r.ContextWithFallback = true
 +	handler.ConfigureKnowledgeHandlerPublicationGuard(params.KnowledgeHandler, params.NextcloudPublicationGuard)
 +	handler.ConfigureChunkHandlerPublicationGuard(params.ChunkHandler, params.NextcloudPublicationGuard)
++	handler.ConfigureKnowledgeHandlerContentLeaseStore(params.KnowledgeHandler, params.NextcloudContentLeaseStore)
++	handler.ConfigureChunkHandlerContentLeaseStore(params.ChunkHandler, params.NextcloudContentLeaseStore)
  
  	// Trusted proxies: gin defaults to trusting ALL proxies, which makes
  	// c.ClientIP() honor a client-supplied X-Forwarded-For. Public, unauthed
-@@ -172,6 +180,13 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -172,6 +184,13 @@ func NewRouter(params RouterParams) *gin.Engine {
  
  	// IM 回调路由（在认证中间件之前注册，使用各平台自身的签名验证）
  	RegisterIMRoutes(r, params.IMHandler)
@@ -27143,7 +28435,7 @@ index b5c85dfc..8ca5a05e 100644
  
  	// Web embed 公开路由（使用 publish token 鉴权，不走全局 Auth）
  	RegisterEmbedPublicRoutes(
-@@ -184,6 +199,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -184,6 +203,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.GroupAccessService,
  		params.ChunkService,
@@ -27151,7 +28443,7 @@ index b5c85dfc..8ca5a05e 100644
  		params.ResourceCatalog,
  	)
  
-@@ -200,6 +216,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -200,6 +220,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.FileService,
  		params.StorageBackendResolver,
  		params.GroupAccessService,
@@ -27159,7 +28451,7 @@ index b5c85dfc..8ca5a05e 100644
  	)
  
  	// Sandbox terminal WebSocket (self-authenticated via a short-lived
-@@ -216,7 +233,8 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -216,7 +237,8 @@ func NewRouter(params RouterParams) *gin.Engine {
  	r.Use(middleware.Auth(params.TenantService, params.UserService, params.TenantMemberService, params.TenantAPIKeyService, params.Config, params.GroupAccessService))
  
  	// 文件服务：统一代理本地/MinIO/COS/TOS存储后端（需要认证）
@@ -27169,7 +28461,7 @@ index b5c85dfc..8ca5a05e 100644
  
  	// Presigned file access: no auth required, signature-verified.
  	servePresignedFiles(
-@@ -225,10 +243,12 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -225,10 +247,12 @@ func NewRouter(params RouterParams) *gin.Engine {
  		params.StorageBackendResolver,
  		params.ResourceCatalog,
  		params.GroupAccessService,
@@ -27183,7 +28475,7 @@ index b5c85dfc..8ca5a05e 100644
  
  	// Langfuse observability — only active when LANGFUSE_* env vars are set.
  	// The middleware is registered unconditionally; when disabled it's a no-op.
-@@ -292,13 +312,14 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -292,13 +316,14 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// KB-scoped image proxy: lets tenants render images embedded in
  		// org-shared / agent-visible KB content, which the tenant-scoped
  		// /files route cannot serve because it enforces same-tenant paths.
@@ -27199,7 +28491,7 @@ index b5c85dfc..8ca5a05e 100644
  		)
  		// Message-scoped image proxy: shared-agent replies belong to the
  		// caller's session but may reference resources stored in the agent's
-@@ -306,7 +327,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -306,7 +331,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  		// never from a client-provided workspace ID. Replies produced by the
  		// caller's own agent over an org-shared KB fall back to the KB share
  		// relation instead (#3022).
@@ -27208,7 +28500,7 @@ index b5c85dfc..8ca5a05e 100644
  			v1,
  			rbacGuards,
  			params.MessageService,
-@@ -319,6 +340,7 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -319,6 +344,7 @@ func NewRouter(params RouterParams) *gin.Engine {
  			params.KBService,
  			params.KnowledgeService,
  			params.GroupAccessService,
@@ -27216,7 +28508,7 @@ index b5c85dfc..8ca5a05e 100644
  		)
  		RegisterKnowledgeTagRoutes(v1, params.TagHandler, rbacGuards)
  		RegisterKnowledgeRoutes(v1, params.KnowledgeHandler, rbacGuards)
-@@ -355,6 +377,15 @@ func NewRouter(params RouterParams) *gin.Engine {
+@@ -355,6 +381,15 @@ func NewRouter(params RouterParams) *gin.Engine {
  		RegisterEmbedChannelRoutes(v1, params.EmbedChannelHandler, rbacGuards)
  		RegisterMCPEndpointRoutes(v1, params.MCPEndpointHandler, rbacGuards)
  		RegisterDataSourceRoutes(v1, params.DataSourceHandler, params.DataSourceCredentialsHandler, rbacGuards)
@@ -29094,10 +30386,10 @@ index 00000000..f0308ad3
 +DROP TABLE nextcloud_content_fences;
 diff --git a/migrations/sqlite/000046_nextcloud_content_leases.up.sql b/migrations/sqlite/000046_nextcloud_content_leases.up.sql
 new file mode 100644
-index 00000000..1bf5b56b
+index 00000000..a2e987d8
 --- /dev/null
 +++ b/migrations/sqlite/000046_nextcloud_content_leases.up.sql
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,63 @@
 +-- A durable, monotone fence for one Nextcloud knowledge generation. The
 +-- knowledge_id='' row is the containing KB fence, acquired before exact rows.
 +-- The tables are deliberately inert until every reader and builder is wired.
@@ -29143,6 +30435,12 @@ index 00000000..1bf5b56b
 +CREATE INDEX idx_nextcloud_content_leases_live
 +    ON nextcloud_content_leases (tenant_id, knowledge_base_id, knowledge_id,
 +        kind, expires_at_ms) WHERE released_at_ms IS NULL;
++CREATE INDEX idx_nextcloud_content_leases_prune_released
++    ON nextcloud_content_leases (released_at_ms, lease_id)
++    WHERE released_at_ms IS NOT NULL;
++CREATE INDEX idx_nextcloud_content_leases_prune_expired
++    ON nextcloud_content_leases (expires_at_ms, lease_id)
++    WHERE released_at_ms IS NULL;
 +
 +-- An absent row blocks GC. It must only be inserted by a future rollout after
 +-- all read/build paths are covered and pre-rollout workers/streams are drained.
@@ -30564,10 +31862,10 @@ index 00000000..f0308ad3
 +DROP TABLE nextcloud_content_fences;
 diff --git a/migrations/versioned/000127_nextcloud_content_leases.up.sql b/migrations/versioned/000127_nextcloud_content_leases.up.sql
 new file mode 100644
-index 00000000..1bf5b56b
+index 00000000..a2e987d8
 --- /dev/null
 +++ b/migrations/versioned/000127_nextcloud_content_leases.up.sql
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,63 @@
 +-- A durable, monotone fence for one Nextcloud knowledge generation. The
 +-- knowledge_id='' row is the containing KB fence, acquired before exact rows.
 +-- The tables are deliberately inert until every reader and builder is wired.
@@ -30613,6 +31911,12 @@ index 00000000..1bf5b56b
 +CREATE INDEX idx_nextcloud_content_leases_live
 +    ON nextcloud_content_leases (tenant_id, knowledge_base_id, knowledge_id,
 +        kind, expires_at_ms) WHERE released_at_ms IS NULL;
++CREATE INDEX idx_nextcloud_content_leases_prune_released
++    ON nextcloud_content_leases (released_at_ms, lease_id)
++    WHERE released_at_ms IS NOT NULL;
++CREATE INDEX idx_nextcloud_content_leases_prune_expired
++    ON nextcloud_content_leases (expires_at_ms, lease_id)
++    WHERE released_at_ms IS NULL;
 +
 +-- An absent row blocks GC. It must only be inserted by a future rollout after
 +-- all read/build paths are covered and pre-rollout workers/streams are drained.

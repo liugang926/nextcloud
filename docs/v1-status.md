@@ -50,8 +50,17 @@ read/build lease and retirement fence foundation. Disposable PostgreSQL and
 SQLite tests cover acquire-versus-retire and GC-claim-versus-KB-read races;
 an active exact GC claim now rejects new KB-wide read leases until release or
 expiry. The coverage table is empty after migration, so GC claims are denied
-by default. No runtime reader, builder, old task drain or external index
-adapter uses this foundation yet; it does not authorize physical deletion.
+by default. Selected direct knowledge, chunk, preview and download HTTP
+handlers now acquire renewable exact read leases and recheck Nextcloud
+publication at response boundaries; handler/router/container tests and a
+repository lease-pruning test passed in isolated Docker. WeKnora KB/group/
+shared-agent grants are not rechecked during a stream, and frequent remote
+publication checks pose a large-download performance risk. Search/RAG/Agent,
+MCP, Wiki, graph, other reads, builders, old task drain and external index
+adapters remain uncovered. No coverage marker is written and this does not
+authorize physical deletion. The [content lease design](nextcloud-derived-gc-read-lease.md)
+tracks the remaining gates; the patched WeKnora docs describe the partial
+reader integration.
 
 ## Isolated synthetic LDAP acceptance
 
