@@ -58,7 +58,8 @@ Administrator endpoints (browser session and CSRF protected):
 
 - `GET /admin/bindings`: list full binding configuration.
 - `POST /admin/bindings`: create a binding or update its name with JSON fields `id`, `name`, `owner_uid`, `root_file_id`. The root must be a readable child folder of the owner. Overlapping roots are rejected, and an existing binding cannot silently change its owner or root. V1 configuration accepts bindings for one owner account only, because overlapping shared mounts across owners cannot yet be proved disjoint.
-- `DELETE /admin/bindings/{id}`: remove a binding and revoke all of its machine keys atomically. Its ID is permanently retired because publication and change history are keyed by that ID.
+- `DELETE /admin/bindings/{id}`: remove an unpaired binding and revoke all of its machine keys atomically. A paired binding continues to return 409. Its ID is permanently retired because publication and change history are keyed by that ID.
+- `POST /admin/bindings/{id}/decommission` and `GET` on the same path: stop publication and persist/read a retryable, exact-pair retirement intent. `POST /admin/bindings/{id}/decommission/finalize` retires the binding and credentials only after a signed empty-inventory acknowledgement from WeKnora. This path is limited to newly paired sources with no sync or indexed history; see [the protocol](../../docs/nextcloud-source-pairing.md).
 - `GET /admin/bindings/{id}/keys`: list key IDs and creation metadata, never token values or hashes.
 - `POST /admin/bindings/{id}/keys`: issue a unique key ID for this binding and return its token exactly once.
 - `DELETE /admin/bindings/{id}/keys/{keyId}`: revoke a key immediately. A second key ID can overlap on the same binding during rotation.

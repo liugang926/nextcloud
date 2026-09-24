@@ -128,6 +128,7 @@ final class MachineKeyRegistryService {
                 $result->closeCursor();
             }
             $binding = $this->requireConfiguredBinding($bindingId);
+            $this->bindings->requirePublicationActive($bindingId);
             $this->bindings->requireActiveRoot($bindingId);
             $token = rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '=');
             $inserted = $this->db->insertIgnoreConflict('weknora_machine_key', [

@@ -148,6 +148,20 @@ final class BindingRegistryService {
                     'publication_epoch' => $selected['publication_epoch'], 'changed' => false];
             }
             if ($state === 'active') {
+                // Once retirement has begun, a normal resume must never
+                // re-open source reads while the remote result is uncertain.
+                $decommission = $this->db->getQueryBuilder();
+                $decommissionResult = $decommission->select('operation_id')->from('weknora_src_decom')
+                    ->where($decommission->expr()->eq('binding_id',
+                        $decommission->createNamedParameter($id)))
+                    ->setMaxResults(1)->executeQuery();
+                try {
+                    if ($decommissionResult->fetchOne() !== false) {
+                        throw new \DomainException('Binding decommission has begun');
+                    }
+                } finally {
+                    $decommissionResult->closeCursor();
+                }
                 // A stopped binding cannot resume against a moved, missing,
                 // unreadable, or newly overlapping publication root.
                 $this->requireActiveRoot($id);
@@ -295,6 +309,18 @@ final class BindingRegistryService {
             }
 
             $bindings = $this->readCommittedBindings();
+            $decommission = $this->db->getQueryBuilder();
+            $decommissionResult = $decommission->select('operation_id')->from('weknora_src_decom')
+                ->where($decommission->expr()->eq('binding_id',
+                    $decommission->createNamedParameter($id)))
+                ->setMaxResults(1)->executeQuery();
+            try {
+                if ($decommissionResult->fetchOne() !== false) {
+                    throw new \DomainException('Decommissioning binding is immutable');
+                }
+            } finally {
+                $decommissionResult->closeCursor();
+            }
             $found = false;
             foreach ($bindings as &$binding) {
                 if ($binding['id'] === $id) {
@@ -351,8 +377,8 @@ final class BindingRegistryService {
         }
     }
 
-    /** Remove an unpaired binding and all of its machine and event credentials atomically. */
-    public function remove(string $id): ?int {
+    /** Remove an unpaired binding, or an exact remotely acknowledged empty pair. */
+    public function remove(string $id, ?string $decommissionOperationId = null): ?int {
         if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $id)) {
             throw new \InvalidArgumentException('Invalid binding ID');
         }
@@ -384,15 +410,51 @@ final class BindingRegistryService {
             // idempotent abort ACK. Keep the binding and all credentials until
             // a durable, exact remote decommission protocol exists.
             $pairQuery = $this->db->getQueryBuilder();
-            $pairResult = $pairQuery->select('id')->from('weknora_src_pair')
+            $pairResult = $pairQuery->select('*')->from('weknora_src_pair')
                 ->where($pairQuery->expr()->eq('binding_id', $pairQuery->createNamedParameter($id)))
-                ->setMaxResults(1)->executeQuery();
+                ->executeQuery();
             try {
-                if ($pairResult->fetchOne() !== false) {
+                $pairRows = $pairResult->fetchAllAssociative();
+                if ($pairRows !== [] && $decommissionOperationId === null) {
                     throw new \DomainException('Paired binding requires remote decommission');
                 }
             } finally {
                 $pairResult->closeCursor();
+            }
+            if ($decommissionOperationId !== null) {
+                $activePairs = array_values(array_filter($pairRows,
+                    static fn (array $row): bool => $row['state'] === 'active'));
+                $bindingIndex = array_search($id, array_column($bindings, 'id'), true);
+                if (count($activePairs) !== 1 || $decommissionOperationId === '' ||
+                    $bindingIndex === false ||
+                    $bindings[$bindingIndex]['publication_state'] !== 'stopped' ||
+                    $activePairs[0]['source_hash'] !== MachineKeyRegistryService::sourceHash($bindings[$bindingIndex])) {
+                    throw new \DomainException('Exact active pair and stopped publication are required');
+                }
+                $proofQuery = $this->db->getQueryBuilder();
+                $proofResult = $proofQuery->select('*')->from('weknora_src_decom')
+                    ->where($proofQuery->expr()->eq('operation_id',
+                        $proofQuery->createNamedParameter($decommissionOperationId)))
+                    ->andWhere($proofQuery->expr()->eq('binding_id',
+                        $proofQuery->createNamedParameter($id)))
+                    ->executeQuery();
+                try {
+                    $proof = $proofResult->fetchAssociative();
+                } finally {
+                    $proofResult->closeCursor();
+                }
+                $pair = $activePairs[0];
+                if ($proof === false || $proof['state'] !== 'acknowledged' ||
+                    $proof['inventory_sha256'] !== SourceDecommissionService::EMPTY_INVENTORY_SHA256 ||
+                    $proof['pair_operation_id'] !== $pair['operation_id'] ||
+                    $proof['instance_id'] !== $pair['instance_id'] ||
+                    (string)$proof['tenant_id'] !== (string)$pair['tenant_id'] ||
+                    $proof['knowledge_base_id'] !== $pair['knowledge_base_id'] ||
+                    $proof['data_source_id'] !== $pair['data_source_id'] ||
+                    $proof['key_id'] !== $pair['key_id'] ||
+                    (int)$proof['publication_epoch'] !== $bindings[$bindingIndex]['publication_epoch']) {
+                    throw new \DomainException('Exact remote withdrawal acknowledgement is required');
+                }
             }
             $retire = $this->db->getQueryBuilder();
             $retired = $retire->update('weknora_binding_id')
@@ -437,6 +499,18 @@ final class BindingRegistryService {
             ], $remaining);
             $this->config->setAppValue(self::APP_ID, 'bindings',
                 json_encode($storedRemaining, JSON_THROW_ON_ERROR));
+            if ($decommissionOperationId !== null) {
+                $complete = $this->db->getQueryBuilder();
+                if ($complete->update('weknora_src_decom')
+                    ->set('state', $complete->createNamedParameter('finalized'))
+                    ->set('updated_at', $complete->createNamedParameter(time()))
+                    ->where($complete->expr()->eq('operation_id',
+                        $complete->createNamedParameter($decommissionOperationId)))
+                    ->andWhere($complete->expr()->eq('state', $complete->createNamedParameter('acknowledged')))
+                    ->executeStatement() !== 1) {
+                    throw new \DomainException('Decommission acknowledgement changed concurrently');
+                }
+            }
             $this->db->commit();
             return $revoked;
         } catch (\Throwable $exception) {

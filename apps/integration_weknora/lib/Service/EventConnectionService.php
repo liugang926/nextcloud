@@ -77,6 +77,7 @@ final class EventConnectionService {
             } finally {
                 $locked->closeCursor();
             }
+            $this->bindings->requirePublicationActive($bindingId);
             $this->bindings->requireActiveRoot($bindingId);
             $existing = $this->row($bindingId, true);
             $now = time();

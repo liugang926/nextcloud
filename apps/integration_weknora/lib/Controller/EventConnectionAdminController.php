@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\IntegrationWeknora\Controller;
 
+use OCA\IntegrationWeknora\Service\BindingPublicationStoppedException;
 use OCA\IntegrationWeknora\Service\EventConnectionService;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http\JSONResponse;
@@ -63,6 +64,8 @@ final class EventConnectionAdminController extends Controller {
             return $this->json($configured['status'], $configured['created'] ? 201 : 200);
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'invalid_connection'], 400);
+        } catch (BindingPublicationStoppedException $exception) {
+            return $this->json(['error' => 'publication_stopped'], 423);
         } catch (\DomainException $exception) {
             return $this->json(['error' => 'connection_conflict'], 409);
         } catch (\UnexpectedValueException $exception) {

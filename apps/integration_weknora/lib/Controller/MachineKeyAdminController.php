@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\IntegrationWeknora\Controller;
 
+use OCA\IntegrationWeknora\Service\BindingPublicationStoppedException;
 use OCA\IntegrationWeknora\Service\MachineKeyRegistryService;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http\JSONResponse;
@@ -52,6 +53,8 @@ final class MachineKeyAdminController extends Controller {
             ], 201);
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'binding_not_found'], 404);
+        } catch (BindingPublicationStoppedException $exception) {
+            return $this->json(['error' => 'publication_stopped'], 423);
         } catch (\DomainException $exception) {
             return $this->json(['error' => 'key_id_conflict'], 409);
         } catch (\Throwable $exception) {

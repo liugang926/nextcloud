@@ -55,6 +55,36 @@ return [
         ['name' => 'binding_admin#index', 'url' => '/api/v1/admin/bindings', 'verb' => 'GET'],
         ['name' => 'binding_admin#save', 'url' => '/api/v1/admin/bindings', 'verb' => 'POST'],
         [
+            'name' => 'source_decommission#status',
+            'url' => '/api/v1/admin/bindings/{id}/decommission',
+            'verb' => 'GET',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_decommission#begin',
+            'url' => '/api/v1/admin/bindings/{id}/decommission',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_decommission#finalize',
+            'url' => '/api/v1/admin/bindings/{id}/decommission/finalize',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'source_decommission#intent',
+            'url' => '/api/v1/bindings/{id}/decommission/{operationId}',
+            'verb' => 'GET',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+', 'operationId' => '[A-Fa-f0-9-]+'],
+        ],
+        [
+            'name' => 'source_decommission#acknowledge',
+            'url' => '/api/v1/bindings/{id}/decommission/{operationId}/ack',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+', 'operationId' => '[A-Fa-f0-9-]+'],
+        ],
+        [
             'name' => 'source_pairing#show',
             'url' => '/api/v1/admin/bindings/{id}/source-pairing',
             'verb' => 'GET',

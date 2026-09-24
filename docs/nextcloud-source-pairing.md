@@ -139,13 +139,53 @@ independent evaluation-run and garbage-collection changes.
 
 ## Paired-binding decommission boundary
 
-There is no active-pair decommission endpoint yet. Stop closes new source
-reads but retains the WeKnora source and its indexed copies. Do not remove a
-paired binding by editing app configuration, deleting database rows, or
-revoking the machine credential. The deletion guard is a temporary safety
-boundary, not evidence that remote files or indexes were reclaimed.
+An active pair created **after** the empty-inventory migration can be
+decommissioned only if it has never admitted a sync, event connection,
+knowledge row, chunk or source version. Existing pairs have no durable
+never-touched proof and remain blocked even if their current KB looks empty:
+historical logs may have been pruned. Any first admission permanently burns
+the proof. This is an empty-source retirement path, not general GC.
 
-A complete decommission needs a durable operation ID tied to the exact pair
+1. A Nextcloud administrator calls `POST
+   /api/v1/admin/bindings/{id}/decommission` with a fresh UUID
+   `operation_id`. Nextcloud stops publication first, then records the exact
+   pair operation, instance, binding, tenant, KB, source, current key and
+   stopped publication epoch. A crash between those writes leaves publication
+   stopped and the key intact; repeat the same request. Normal Resume is
+   blocked once the intent is stored. `GET` on the same path shows nonsecret
+   status.
+2. A WeKnora tenant administrator with KB edit rights calls `POST
+   /api/v1/datasource/nextcloud-source-pairings/{pair_operation_id}/decommission`
+   with the same `operation_id`. WeKnora signs `GET
+   /api/v1/bindings/{id}/decommission/{operation_id}` using the current pair
+   key and compares every identity field. Under a KB lock it requires the
+   permanent never-touched proof and zero sync logs, event connections and
+   inbox/dispatch state, source versions, GC jobs, knowledge rows and chunks.
+   It then pauses the source and records its decommission operation in one
+   transaction. Database guards reject later source resume and content/event
+   admission. A signed, idempotent ACK to Nextcloud certifies a complete
+   **empty** inventory and zero visible/running work. HTTP 202 from WeKnora
+   means the remote ACK or local checkpoint is uncertain; retry the same UUID.
+   `GET` on the WeKnora decommission path reads its nonsecret checkpoint.
+3. Only after Nextcloud status says `acknowledged`, its administrator calls
+   `POST /api/v1/admin/bindings/{id}/decommission/finalize` with that UUID.
+   Nextcloud atomically retires the binding ID, pair, event connection and all
+   machine credentials. WeKnora retains its paused data-source and immutable
+   pair identity as a decommission tombstone; the separate decommission row
+   records `acknowledged` and the DB guards prevent resumption. Its historical
+   pair row still says `active`, which does not mean the source is runnable.
+   An exact Nextcloud repeat reports `finalized`. Ordinary
+   `DELETE /admin/bindings/{id}` retains its 409 guard throughout.
+
+An empty-inventory ACK cannot be used for a source with any indexed history;
+there is no physical-copy cleanup to claim in this path. This protocol retires
+the Nextcloud binding and durably disables the empty WeKnora source, but does
+not delete the WeKnora source or its historical pair metadata. Failed or uncertain
+remote steps retain the stopped binding and its credentials for retry. Neither
+side deletes Nextcloud originals. Do not edit app configuration, delete
+database rows or revoke the machine credential to bypass the protocol.
+
+A general decommission still needs a durable operation ID tied to the exact pair
 operation, instance, binding, tenant, knowledge base and data source. Nextcloud
 must first stop publication and keep credentials. WeKnora must then pause its
 source, reject new event/sync/parse writes, withdraw all source versions,

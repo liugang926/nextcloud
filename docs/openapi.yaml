@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Nextcloud WeKnora development API
-  version: 0.4.18
+  version: 0.4.19
   description: Local integration contract. Machine calls require a binding-scoped Bearer key and signed headers specified in docs/machine-request-signing.md. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API checks the mapped Nextcloud UID against a live AD objectGUID and returns the current file ETag for a guarded read. Source pairing is a durable intent and signed commit for one dedicated WeKnora knowledge base. Event sender watermarks attest durable receipt only, not WeKnora application. Same-AD integration, enterprise permission and publication acceptance remain outstanding.
 servers:
   - url: /index.php/apps/integration_weknora/api/v1
@@ -598,6 +598,97 @@ paths:
         '400': {description: Invalid binding or root folder}
         '403': {description: Administrator privileges required}
         '409': {description: Binding source conflict or overlapping roots}
+  /bindings/{bindingId}/decommission/{operationId}:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+      - name: operationId
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: getSignedSourceDecommissionIntent
+      description: Signed pair-key read of the exact stopped binding, pair, source and retirement operation. A different binding key cannot read it.
+      responses:
+        '200': {description: Nonsecret prepared or acknowledged intent}
+        '401': {description: Invalid signed machine credential}
+        '409': {description: Operation, key or publication state mismatch}
+  /bindings/{bindingId}/decommission/{operationId}/ack:
+    post:
+      operationId: acknowledgeEmptySourceDecommission
+      description: Signed pair-key, idempotent ACK of an exact, complete empty inventory. General source GC cannot use this endpoint.
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: operationId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200': {description: Exact empty inventory acknowledged}
+        '400': {description: Invalid or nonempty proof}
+        '401': {description: Invalid signed machine credential}
+        '409': {description: Operation, pair or publication epoch mismatch}
+  /admin/bindings/{bindingId}/decommission:
+    parameters:
+      - name: bindingId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getSourceDecommission
+      security:
+        - nextcloudSession: []
+      responses:
+        '200': {description: Nonsecret retry and cleanup status}
+        '404': {description: No retirement intent}
+    post:
+      operationId: beginSourceDecommission
+      description: Stop publication first and persist one exact-pair operation; normal resume is then blocked.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+      responses:
+        '200': {description: Prepared or idempotent retry}
+        '404': {description: Binding not found}
+        '409': {description: No exact active pair or conflicting rotation}
+  /admin/bindings/{bindingId}/decommission/finalize:
+    post:
+      operationId: finalizeSourceDecommission
+      description: Retire the binding and all credentials only after the durable exact-pair empty-inventory ACK.
+      security:
+        - nextcloudSession: []
+          csrfToken: []
+      parameters:
+        - name: bindingId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation_id]
+              properties:
+                operation_id: {type: string, format: uuid}
+      responses:
+        '200': {description: Finalized or identical retry}
+        '409': {description: Exact remote ACK has not been durably recorded}
   /admin/bindings/{bindingId}/source-pairing:
     parameters:
       - name: bindingId
