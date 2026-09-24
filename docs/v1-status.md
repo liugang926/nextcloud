@@ -68,6 +68,14 @@ administrator, 403 to a non-administrator and 401 anonymously. The source
 retained two published, parse-completed candidates. This is one scoped event
 case, not the PRD's 10,000-file/100-GB or P95 latency acceptance.
 
+The acceptance scripts now require a fresh, attribute-limited LDAP topology
+export before claiming a synthetic primary-group or nested-group case. A
+separate loopback-only probe checks GUID/UID mapping conflicts, and a watcher
+holds the original JWTs across a synthetic group-revocation drill. Their 15
+offline contracts and five WeKnora OpenLDAP network tests passed; the full
+cross-system primary-group, nested-group and LDAP Team-folder HTTP matrix has
+not yet been run.
+
 ## Consistency and release boundary
 
 The first manifest page scans the bound tree and stores a sorted list for ten minutes. Later pages read that list and reject a changed source or publication revision. A 207-file smoke covered pagination, a concurrent write and conditional content reads. This is not a transactional source snapshot; a change during traversal can invalidate a page, and large lists still need performance testing. The connector treats events as hints, recovers an expired cursor by full reconciliation and confirms absence twice. It cannot substitute for a durable publication state machine or a tested backup/recovery protocol.

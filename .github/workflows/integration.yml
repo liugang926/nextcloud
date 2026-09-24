@@ -34,6 +34,9 @@ jobs:
           node --check apps/integration_weknora/js/weknora-sidebar.js
           python3 -m compileall -q apps/integration_weknora/tests scripts
           python3 scripts/ops/test-ad-permission-acceptance.py
+          python3 scripts/ops/test-synthetic-ldap-topology.py
+          python3 scripts/ops/test-synthetic-identity-conflict-smoke.py
+          python3 scripts/ops/test-synthetic-ldap-revocation-watch.py
           python3 scripts/package-nextcloud-app.py
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
