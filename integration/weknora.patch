@@ -378,10 +378,10 @@ index 00000000..1e628ee6
 +cap, purge 90-day history metadata, or run a two-pass orphan scan.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
-index 00000000..65afb60c
+index 00000000..f7888b3d
 --- /dev/null
 +++ b/docs/nextcloud-source-pairing.md
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,151 @@
 +# Nextcloud source pairing
 +
 +The source pairing is separate from the optional event-inbox connection. A
@@ -497,10 +497,13 @@ index 00000000..65afb60c
 +## Retiring a paired, untouched source
 +
 +This narrow retirement protocol applies only to a pair created after the
-+virgin-source migration (PostgreSQL `000123`, SQLite `000042`) that has never
++virgin-proof lineage guard (PostgreSQL `000124`, SQLite `000043`) that has never
 +accepted a sync log, event connection, source version, knowledge, or chunk.
 +The durable virgin marker burns on the first such write, even if that write is
-+later deleted. An older pair has no marker and cannot claim an empty history.
++later deleted. The lineage guard invalidates all existing markers from
++`000123`/`000042` because an old pending pair could have been rebuilt with a
++false marker. Rebuilding any pair after the guard also burns its proof. An
++existing decommission operation blocks this migration for manual review.
 +The endpoint also checks current event inbox, dispatch intent, checkpoint,
 +GC jobs, content, source metadata, and pending source-key rotation.
 +
@@ -6016,14 +6019,15 @@ index 00000000..5c0a8235
 +}
 diff --git a/internal/application/repository/nextcloud_source_decommission_test.go b/internal/application/repository/nextcloud_source_decommission_test.go
 new file mode 100644
-index 00000000..6c2c7167
+index 00000000..1293a8b0
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_source_decommission_test.go
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,207 @@
 +package repository
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"os"
 +	"testing"
 +
@@ -6079,10 +6083,29 @@ index 00000000..6c2c7167
 +	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
 +	db := decommissionTestDB(t)
 +	old := decommissionPair(t, db, "kb-old", "82d62225-1eb6-47ad-9264-2759e33dfa03")
++	repo := NewNextcloudSourcePairingRepository(db)
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-old-pending', 7)`).Error)
++	oldPending, _, err := repo.PrepareSourcePairing(context.Background(), NextcloudSourcePairing{
++		OperationID: "d61cc09c-d73e-4479-a7d9-3287261bb34f", TenantID: 7,
++		KnowledgeBaseID: "kb-old-pending", InstanceID: "instance-1",
++		BindingID: "kb-old-pending", BaseURL: "https://nextcloud.example.test",
++		PublicationEpoch: 0, KeyID: "pair_d61cc09cd73e4479a7d93287261bb34f",
++	}, "old-pending-token")
++	require.NoError(t, err)
 +	script, err := os.ReadFile("../../../migrations/sqlite/000042_nextcloud_empty_decommission.up.sql")
 +	require.NoError(t, err)
 +	require.NoError(t, db.Exec(string(script)).Error)
-+	repo := NewNextcloudSourcePairingRepository(db)
++	fortyTwo := decommissionPair(t, db, "kb-v42", "5f458442-1560-4f2c-9d0c-1426aeeb0309")
++	var virgin bool
++	require.NoError(t, db.Raw(`SELECT ever_touched FROM nextcloud_source_virgin
++		WHERE pair_operation_id = ?`, fortyTwo.OperationID).Scan(&virgin).Error)
++	require.False(t, virgin)
++	script, err = os.ReadFile("../../../migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.up.sql")
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(string(script)).Error)
++	require.NoError(t, db.Raw(`SELECT ever_touched FROM nextcloud_source_virgin
++		WHERE pair_operation_id = ?`, fortyTwo.OperationID).Scan(&virgin).Error)
++	require.True(t, virgin, "a 42-era virgin marker cannot be trusted after the upgrade")
 +	proposed := func(pair NextcloudSourcePairing, operationID string) NextcloudSourceDecommission {
 +		return NextcloudSourceDecommission{OperationID: operationID,
 +			PairOperationID: pair.OperationID, TenantID: pair.TenantID,
@@ -6094,8 +6117,62 @@ index 00000000..6c2c7167
 +		proposed(old, "43c2678e-e5e5-4cf6-b975-18de9999cba9"))
 +	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict,
 +		"a pre-migration pair has no durable proof of never having been indexed")
++	_, err = repo.BeginEmptySourceDecommission(context.Background(), fortyTwo,
++		proposed(fortyTwo, "92a3d8f1-2c1d-4918-8d02-7a89772bda65"))
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict,
++		"a 42-era marker must be invalidated even when it currently says virgin")
++
++	// The old PostgreSQL JSONB digest repair deletes and reinserts a pending
++	// pairing. Simulate the same persisted-JSON mismatch on SQLite and require
++	// the recreated row to inherit its old, unproven lineage.
++	var oldSource types.DataSource
++	require.NoError(t, db.Where("id = ?", oldPending.DataSourceID).Take(&oldSource).Error)
++	var oldConfig types.DataSourceConfig
++	require.NoError(t, json.Unmarshal(oldSource.Config, &oldConfig))
++	compact, err := json.Marshal(&oldConfig)
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`,
++		string(append([]byte("  "), compact...)), oldPending.DataSourceID).Error)
++	require.NoError(t, repo.ActivateSourcePairing(context.Background(), oldPending))
++	require.NoError(t, db.Raw(`SELECT ever_touched FROM nextcloud_source_virgin
++		WHERE pair_operation_id = ?`, oldPending.OperationID).Scan(&virgin).Error)
++	require.True(t, virgin, "pair reconstruction must not mint a false virgin proof")
++	_, err = repo.BeginEmptySourceDecommission(context.Background(), oldPending,
++		proposed(oldPending, "0ea06c83-1112-4858-8931-4ac5c1351981"))
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++
++	// Even a pair first created after 43 loses its virgin proof if the same
++	// operation ID is ever deleted and rebuilt.
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-new-pending', 7)`).Error)
++	newPending, _, err := repo.PrepareSourcePairing(context.Background(), NextcloudSourcePairing{
++		OperationID: "54f25b40-5fb9-4754-b29a-59c74eeb5e75", TenantID: 7,
++		KnowledgeBaseID: "kb-new-pending", InstanceID: "instance-1",
++		BindingID: "kb-new-pending", BaseURL: "https://nextcloud.example.test",
++		PublicationEpoch: 0, KeyID: "pair_54f25b405fb94754b29a59c74eeb5e75",
++	}, "new-pending-token")
++	require.NoError(t, err)
++	require.NoError(t, db.Raw(`SELECT ever_touched FROM nextcloud_source_virgin
++		WHERE pair_operation_id = ?`, newPending.OperationID).Scan(&virgin).Error)
++	require.False(t, virgin)
++	require.NoError(t, db.Where("operation_id = ?", newPending.OperationID).
++		Delete(&NextcloudSourcePairing{}).Error)
++	// The production FK cascades this row; the small SQLite test schema may
++	// run without foreign keys enabled, so remove any surviving test row.
++	require.NoError(t, db.Exec(`DELETE FROM nextcloud_source_virgin WHERE pair_operation_id = ?`,
++		newPending.OperationID).Error)
++	require.NoError(t, db.Create(&newPending).Error)
++	require.NoError(t, db.Raw(`SELECT ever_touched FROM nextcloud_source_virgin
++		WHERE pair_operation_id = ?`, newPending.OperationID).Scan(&virgin).Error)
++	require.True(t, virgin, "a rebuilt new pair must inherit nonvirgin lineage")
++	require.NoError(t, repo.ActivateSourcePairing(context.Background(), newPending))
++	_, err = repo.BeginEmptySourceDecommission(context.Background(), newPending,
++		proposed(newPending, "d4835dba-5b59-4c16-9190-72f9a5522f7b"))
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
 +
 +	fresh := decommissionPair(t, db, "kb-fresh", "1cf17b55-26a2-4c04-bc9a-9c47eaa561b7")
++	require.NoError(t, db.Raw(`SELECT ever_touched FROM nextcloud_source_virgin
++		WHERE pair_operation_id = ?`, fresh.OperationID).Scan(&virgin).Error)
++	require.False(t, virgin, "a truly new pair must still receive a virgin proof")
 +	intent := proposed(fresh, "be4c7f4d-5082-47fa-a54f-24ad09a05830")
 +	row, err := repo.BeginEmptySourceDecommission(context.Background(), fresh, intent)
 +	require.NoError(t, err)
@@ -6129,6 +6206,29 @@ index 00000000..6c2c7167
 +		proposed(touched, "e3efad37-7043-487f-8d6c-4ec75f108cad"))
 +	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict,
 +		"pruning a sync log must not restore the virgin proof")
++}
++
++func TestVirginRebuildMigrationRequiresReviewOfExistingDecommission(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	db := decommissionTestDB(t)
++	script, err := os.ReadFile("../../../migrations/sqlite/000042_nextcloud_empty_decommission.up.sql")
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(string(script)).Error)
++	pair := decommissionPair(t, db, "kb-review", "b751f64a-9105-45f9-b9fd-9d263a2487be")
++	repo := NewNextcloudSourcePairingRepository(db)
++	_, err = repo.BeginEmptySourceDecommission(context.Background(), pair,
++		NextcloudSourceDecommission{
++			OperationID:     "1dbdd888-eafc-41e1-b3cd-307e60d40180",
++			PairOperationID: pair.OperationID, TenantID: pair.TenantID,
++			KnowledgeBaseID: pair.KnowledgeBaseID, DataSourceID: pair.DataSourceID,
++			InstanceID: pair.InstanceID, BindingID: pair.BindingID,
++			KeyID: pair.KeyID, PublicationEpoch: 1,
++		})
++	require.NoError(t, err)
++	script, err = os.ReadFile("../../../migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.up.sql")
++	require.NoError(t, err)
++	require.ErrorContains(t, db.Exec(string(script)).Error, "CHECK constraint failed",
++		"a possibly false 42-era ACK must not be silently carried into 43")
 +}
 diff --git a/internal/application/repository/nextcloud_source_pairing.go b/internal/application/repository/nextcloud_source_pairing.go
 new file mode 100644
@@ -13002,8 +13102,40 @@ index 47d4c024..ed4dc245 100644
  func TestStuckKnowledgeParseQuery_ReuseAfterFindDoesNotBreakUpdate(t *testing.T) {
  	db := setupResetPendingDB(t)
  	stale := time.Now().Add(-2 * time.Hour)
+diff --git a/internal/database/migration.go b/internal/database/migration.go
+index 48620fad..c6fbfd4f 100644
+--- a/internal/database/migration.go
++++ b/internal/database/migration.go
+@@ -189,6 +189,27 @@ func RunMigrationsWithOptions(dsn string, opts MigrationOptions) error {
+ 			))
+ 		}
+ 	}
++	// An operation acknowledged under SQLite migration 42 may rely on a false
++	// virgin marker minted by a rebuilt old pair. Refuse the upgrade before
++	// golang-migrate marks 43 dirty, so an operator can review that operation
++	// without the generic dirty-state recovery retrying this safety check.
++	if opts.SQLiteDBPath != "" && !oldDirty && oldVersion == 42 {
++		preflightDB, err := sql.Open("sqlite3", opts.SQLiteDBPath)
++		if err != nil {
++			return captureMigrationFailure(m, fmt.Errorf("open SQLite decommission preflight: %w", err))
++		}
++		var existing int
++		err = preflightDB.QueryRow(`SELECT EXISTS (
++			SELECT 1 FROM nextcloud_source_decommissions)`).Scan(&existing)
++		_ = preflightDB.Close()
++		if err != nil {
++			return captureMigrationFailure(m, fmt.Errorf("check SQLite decommission preflight: %w", err))
++		}
++		if existing != 0 {
++			return captureMigrationFailure(m, fmt.Errorf(
++				"review existing Nextcloud decommissions before virgin-proof upgrade"))
++		}
++	}
+ 
+ 	// Run all pending migrations
+ 	logger.Infof(ctx, "Running pending migrations...")
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e515..7d5405cb 100644
+index 9cc4e515..01bbf806 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -13015,7 +13147,7 @@ index 9cc4e515..7d5405cb 100644
  var versionedSQLiteTables = []string{
  	"memory_extraction_sessions",
  	"task_pending_ops",
-@@ -39,6 +39,14 @@ var versionedSQLiteTables = []string{
+@@ -39,6 +39,15 @@ var versionedSQLiteTables = []string{
  	"resource_access_policies",
  	"resource_group_grants",
  	"directory_permission_versions",
@@ -13027,15 +13159,59 @@ index 9cc4e515..7d5405cb 100644
 +	"nextcloud_source_pairings",
 +	"nextcloud_source_rotations",
 +	"nextcloud_source_pairing_aborts",
++	"nextcloud_pair_rebuild_history",
  }
  
  // versionedSQLiteColumns maps each existing table to the columns that the
-@@ -63,7 +71,67 @@ var versionedSQLiteColumns = map[string][]string{
+@@ -63,7 +72,110 @@ var versionedSQLiteColumns = map[string][]string{
  	"directories":        {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 42
++const expectedSQLiteMigrationVersion = 43
++
++func TestSQLiteVirginProofUpgradeWithExistingDecommissionStaysCleanAt42(t *testing.T) {
++	repoRoot := sqliteRepoRoot(t)
++	legacyRoot := copySQLiteMigrationsThrough(t, repoRoot, 42)
++	chdirAndRestore(t, legacyRoot)
++	dbPath := filepath.Join(t.TempDir(), "decommission-review.db")
++	require.NoError(t, RunMigrationsWithOptions("sqlite3://unused", MigrationOptions{SQLiteDBPath: dbPath}))
++	db := openSQLiteDB(t, dbPath)
++	_, err := db.Exec(`INSERT INTO tenants (id, name, business) VALUES (7, 'paired', 'test')`)
++	require.NoError(t, err)
++	_, err = db.Exec(`INSERT INTO knowledge_bases
++		(id, name, tenant_id, embedding_model_id, summary_model_id)
++		VALUES ('kb-review', 'review', 7, 'embed', 'summary')`)
++	require.NoError(t, err)
++	_, err = db.Exec(`INSERT INTO data_sources
++		(id, tenant_id, knowledge_base_id, name, type, config, status)
++		VALUES ('ds-review', 7, 'kb-review', 'review', 'nextcloud', '{}', 'paused')`)
++	require.NoError(t, err)
++	_, err = db.Exec(`INSERT INTO nextcloud_source_pairings
++		(operation_id, tenant_id, knowledge_base_id, datasource_id,
++		nextcloud_instance_id, binding_id, datasource_base_url,
++		datasource_config_sha256, publication_epoch, key_id, state)
++		VALUES ('pair-review', 7, 'kb-review', 'ds-review', 'instance', 'binding',
++		'https://nextcloud.example', 'hash', 1, 'pair_key', 'pending')`)
++	require.NoError(t, err)
++	_, err = db.Exec(`INSERT INTO nextcloud_source_decommissions
++		(operation_id, pair_operation_id, tenant_id, knowledge_base_id,
++		datasource_id, nextcloud_instance_id, binding_id, publication_epoch,
++		key_id, state)
++		VALUES ('decommission-review', 'pair-review', 7, 'kb-review',
++		'ds-review', 'instance', 'binding', 1, 'pair_key', 'prepared')`)
++	require.NoError(t, err)
++
++	chdirAndRestore(t, repoRoot)
++	err = RunMigrationsWithOptions("sqlite3://unused", MigrationOptions{
++		SQLiteDBPath: dbPath, AutoRecoverDirty: true,
++	})
++	require.ErrorContains(t, err, "review existing Nextcloud decommissions")
++	version, dirty := sqliteMigrationState(t, db)
++	require.Equal(t, 42, version)
++	require.False(t, dirty)
++	require.False(t, sqliteTableExists(t, db, "nextcloud_pair_rebuild_history"))
++}
 +
 +func TestSQLiteNextcloudPairingGuardsPendingAndActiveKnowledgeBase(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -13099,7 +13275,7 @@ index 9cc4e515..7d5405cb 100644
  
  func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
  	repoRoot := sqliteRepoRoot(t)
-@@ -200,6 +268,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
+@@ -200,6 +312,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
  	require.True(t, sqliteColumnExists(t, db, "messages", "sandbox_checkpoint"))
  }
  
@@ -24842,6 +25018,71 @@ index 00000000..80a2eb18
 +WHEN NEW.pair_operation_id IS NOT OLD.pair_operation_id
 + OR (OLD.ever_touched = 1 AND NEW.ever_touched <> 1)
 +BEGIN SELECT RAISE(ABORT, 'nextcloud_virgin_proof_immutable'); END;
+diff --git a/migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.down.sql b/migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.down.sql
+new file mode 100644
+index 00000000..6a939b30
+--- /dev/null
++++ b/migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.down.sql
+@@ -0,0 +1,17 @@
++CREATE TEMP TABLE nextcloud_virgin_downgrade_guard (value INTEGER CHECK (value = 0));
++INSERT INTO nextcloud_virgin_downgrade_guard(value)
++    SELECT 1 FROM nextcloud_pair_rebuild_history LIMIT 1;
++INSERT INTO nextcloud_virgin_downgrade_guard(value)
++    SELECT 1 FROM nextcloud_source_pairings LIMIT 1;
++INSERT INTO nextcloud_virgin_downgrade_guard(value)
++    SELECT 1 FROM nextcloud_source_decommissions LIMIT 1;
++DROP TABLE nextcloud_virgin_downgrade_guard;
++DROP TRIGGER IF EXISTS nextcloud_pair_rebuild_history_guard_delete;
++DROP TRIGGER IF EXISTS nextcloud_pair_rebuild_history_guard_update;
++DROP TRIGGER IF EXISTS nextcloud_pair_rebuild_remember;
++DROP TRIGGER IF EXISTS nextcloud_virgin_pair_insert;
++CREATE TRIGGER nextcloud_virgin_pair_insert AFTER INSERT ON nextcloud_source_pairings
++BEGIN
++    INSERT INTO nextcloud_source_virgin(pair_operation_id) VALUES (NEW.operation_id);
++END;
++DROP TABLE nextcloud_pair_rebuild_history;
+diff --git a/migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.up.sql b/migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.up.sql
+new file mode 100644
+index 00000000..3b0b04ce
+--- /dev/null
++++ b/migrations/sqlite/000043_nextcloud_virgin_rebuild_guard.up.sql
+@@ -0,0 +1,36 @@
++-- A 42-era false virgin marker may belong to an old pending pair rebuilt by
++-- hash repair. Fail closed for all existing pairs; future new pairs can prove
++-- virgin status through the guarded trigger below.
++CREATE TEMP TABLE nextcloud_virgin_upgrade_guard (value INTEGER CHECK (value = 0));
++INSERT INTO nextcloud_virgin_upgrade_guard(value)
++    SELECT 1 FROM nextcloud_source_decommissions LIMIT 1;
++DROP TABLE nextcloud_virgin_upgrade_guard;
++
++CREATE TABLE nextcloud_pair_rebuild_history (operation_id TEXT PRIMARY KEY);
++INSERT INTO nextcloud_pair_rebuild_history (operation_id)
++    SELECT operation_id FROM nextcloud_source_pairings;
++UPDATE nextcloud_source_virgin SET ever_touched = 1 WHERE ever_touched = 0;
++
++CREATE TRIGGER nextcloud_pair_rebuild_remember
++BEFORE DELETE ON nextcloud_source_pairings
++BEGIN
++    INSERT OR IGNORE INTO nextcloud_pair_rebuild_history(operation_id)
++    VALUES (OLD.operation_id);
++END;
++
++DROP TRIGGER nextcloud_virgin_pair_insert;
++CREATE TRIGGER nextcloud_virgin_pair_insert AFTER INSERT ON nextcloud_source_pairings
++BEGIN
++    INSERT INTO nextcloud_source_virgin(pair_operation_id, ever_touched)
++    VALUES (NEW.operation_id, EXISTS (
++        SELECT 1 FROM nextcloud_pair_rebuild_history
++        WHERE operation_id = NEW.operation_id
++    ));
++END;
++
++CREATE TRIGGER nextcloud_pair_rebuild_history_guard_update
++BEFORE UPDATE ON nextcloud_pair_rebuild_history
++BEGIN SELECT RAISE(ABORT, 'nextcloud_pair_rebuild_history_immutable'); END;
++CREATE TRIGGER nextcloud_pair_rebuild_history_guard_delete
++BEFORE DELETE ON nextcloud_pair_rebuild_history
++BEGIN SELECT RAISE(ABORT, 'nextcloud_pair_rebuild_history_immutable'); END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -25814,3 +26055,94 @@ index 00000000..3e6f1715
 +CREATE TRIGGER nextcloud_virgin_row_guard
 +BEFORE UPDATE ON nextcloud_source_virgin FOR EACH ROW
 +EXECUTE FUNCTION nextcloud_virgin_row_guard();
+diff --git a/migrations/versioned/000124_nextcloud_virgin_rebuild_guard.down.sql b/migrations/versioned/000124_nextcloud_virgin_rebuild_guard.down.sql
+new file mode 100644
+index 00000000..bdefe438
+--- /dev/null
++++ b/migrations/versioned/000124_nextcloud_virgin_rebuild_guard.down.sql
+@@ -0,0 +1,21 @@
++-- Proof invalidation and pair lineage cannot be safely reversed once a pair
++-- has existed. Only an empty installation may downgrade this guard.
++DO $$ BEGIN
++    IF EXISTS (SELECT 1 FROM nextcloud_pair_rebuild_history)
++       OR EXISTS (SELECT 1 FROM nextcloud_source_pairings)
++       OR EXISTS (SELECT 1 FROM nextcloud_source_decommissions) THEN
++        RAISE EXCEPTION 'cannot downgrade Nextcloud virgin-proof lineage';
++    END IF;
++END $$;
++DROP TRIGGER IF EXISTS nextcloud_pair_rebuild_history_guard ON nextcloud_pair_rebuild_history;
++DROP FUNCTION IF EXISTS nextcloud_pair_rebuild_history_guard();
++DROP TRIGGER IF EXISTS nextcloud_pair_rebuild_remember ON nextcloud_source_pairings;
++DROP FUNCTION IF EXISTS nextcloud_pair_rebuild_remember();
++CREATE OR REPLACE FUNCTION nextcloud_virgin_pair_insert() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_virgin_pair$
++BEGIN
++    INSERT INTO nextcloud_source_virgin(pair_operation_id) VALUES (NEW.operation_id);
++    RETURN NEW;
++END
++$nextcloud_virgin_pair$;
++DROP TABLE nextcloud_pair_rebuild_history;
+diff --git a/migrations/versioned/000124_nextcloud_virgin_rebuild_guard.up.sql b/migrations/versioned/000124_nextcloud_virgin_rebuild_guard.up.sql
+new file mode 100644
+index 00000000..6ee6943e
+--- /dev/null
++++ b/migrations/versioned/000124_nextcloud_virgin_rebuild_guard.up.sql
+@@ -0,0 +1,58 @@
++-- Serialize the backfill with pair creation and JSONB repair. golang-migrate
++-- sends this migration as one PostgreSQL query, so this lock lasts through
++-- the trigger replacement and marker invalidation.
++LOCK TABLE nextcloud_source_pairings IN SHARE ROW EXCLUSIVE MODE;
++
++-- Migration 123 could not distinguish a newly created pair from an old pending
++-- pair rebuilt by the PostgreSQL JSONB hash repair. Any proof admitted before
++-- this migration is therefore unknown. A previously acknowledged withdrawal
++-- needs manual review before the safe state can be established.
++DO $$ BEGIN
++    IF EXISTS (SELECT 1 FROM nextcloud_source_decommissions) THEN
++        RAISE EXCEPTION 'review existing Nextcloud decommissions before virgin-proof upgrade';
++    END IF;
++END $$;
++
++CREATE TABLE nextcloud_pair_rebuild_history (
++    operation_id TEXT PRIMARY KEY
++);
++INSERT INTO nextcloud_pair_rebuild_history (operation_id)
++SELECT operation_id FROM nextcloud_source_pairings;
++UPDATE nextcloud_source_virgin SET ever_touched = TRUE WHERE NOT ever_touched;
++
++-- Keep lineage across a pending pair DELETE/INSERT repair. An operation ID
++-- seen before this migration or before a later deletion never regains virgin
++-- status just because its pairing row was recreated.
++CREATE FUNCTION nextcloud_pair_rebuild_remember() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_pair_rebuild_remember$
++BEGIN
++    INSERT INTO nextcloud_pair_rebuild_history (operation_id)
++    VALUES (OLD.operation_id) ON CONFLICT DO NOTHING;
++    RETURN OLD;
++END
++$nextcloud_pair_rebuild_remember$;
++CREATE TRIGGER nextcloud_pair_rebuild_remember
++BEFORE DELETE ON nextcloud_source_pairings FOR EACH ROW
++EXECUTE FUNCTION nextcloud_pair_rebuild_remember();
++
++CREATE OR REPLACE FUNCTION nextcloud_virgin_pair_insert() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_virgin_pair$
++BEGIN
++    INSERT INTO nextcloud_source_virgin(pair_operation_id, ever_touched)
++    VALUES (NEW.operation_id, EXISTS (
++        SELECT 1 FROM nextcloud_pair_rebuild_history
++        WHERE operation_id = NEW.operation_id
++    ));
++    RETURN NEW;
++END
++$nextcloud_virgin_pair$;
++
++CREATE FUNCTION nextcloud_pair_rebuild_history_guard() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_pair_rebuild_history_guard$
++BEGIN
++    RAISE EXCEPTION 'nextcloud_pair_rebuild_history_immutable' USING ERRCODE = '23514';
++END
++$nextcloud_pair_rebuild_history_guard$;
++CREATE TRIGGER nextcloud_pair_rebuild_history_guard
++BEFORE UPDATE OR DELETE ON nextcloud_pair_rebuild_history FOR EACH ROW
++EXECUTE FUNCTION nextcloud_pair_rebuild_history_guard();

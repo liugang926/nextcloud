@@ -146,6 +146,12 @@ never-touched proof and remain blocked even if their current KB looks empty:
 historical logs may have been pruned. Any first admission permanently burns
 the proof. This is an empty-source retirement path, not general GC.
 
+The follow-up WeKnora migration 124 / SQLite 43 invalidates every earlier
+virgin marker, including markers created under migration 123 / SQLite 42.
+Only pairs created after that follow-up migration can use this path. It also
+retains an operation-ID lineage across a pending pair deletion and rebuild,
+so repairing an older pending pair cannot mint a new empty-source proof.
+
 1. A Nextcloud administrator calls `POST
    /api/v1/admin/bindings/{id}/decommission` with a fresh UUID
    `operation_id`. Nextcloud stops publication first, then records the exact
