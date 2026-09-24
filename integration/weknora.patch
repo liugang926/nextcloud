@@ -1,9 +1,9 @@
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..fb2a5546
+index 00000000..a35cee55
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,208 @@
 +# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
@@ -198,6 +198,20 @@ index 00000000..fb2a5546
 +These checks cannot form one transaction across the two services. A change
 +after the final probe is denied by the live source authorization check on
 +retrieval and is reconciled by later source scans.
++
++There is also a visibility interval **between the local publication commit and
++the final source probe**: the SQL publication ETag can briefly be present even
++when Nextcloud has just withdrawn the file or advanced its ETag. If that probe
++fails, WeKnora clears the exact candidate's marker and returns publication
++failure; the repository race test injects both changes and verifies this
++cleanup. The test deliberately observes the transient marker. A raw SQL or
++vector consumer that bypasses the live source publication guard is therefore
++unsafe. Human-facing reads and retrieval must reauthorize against Nextcloud
++and compare the current source ETag before exposing source-derived content.
++This two-probe protocol does not promise zero transient local visibility or
++atomic revocation across the two services. A source change after an individual
++read's live authorization but before that response is emitted is also outside
++this protocol's atomicity guarantee.
 diff --git a/docs/nextcloud-file-status.md b/docs/nextcloud-file-status.md
 new file mode 100644
 index 00000000..5b0f41fd
@@ -259,16 +273,18 @@ index 00000000..5b0f41fd
 +WeKnora's separate live retrieval guard.
 diff --git a/docs/nextcloud-gc.md b/docs/nextcloud-gc.md
 new file mode 100644
-index 00000000..5993ac9f
+index 00000000..1e628ee6
 --- /dev/null
 +++ b/docs/nextcloud-gc.md
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,99 @@
 +# Nextcloud version GC safety boundary
 +
 +The hourly Nextcloud GC runner writes a durable inventory before attempting
 +cleanup. PostgreSQL migration `000119` and SQLite migration `000038` add
 +`nextcloud_gc_jobs` and `nextcloud_gc_items`; forward migrations `000121`
-+and `000040` add the durable object-deletion claim. Each job is unique by knowledge
++and `000040` add the durable object-deletion claim. Forward migrations `000122`
++and `000041` allow exact local derived-row IDs in the same durable item list.
++Each job is unique by knowledge
 +ID. It records the retired source identity, why the version retired, the
 +earliest derived cleanup time, the 7-day original-copy expiry, a retry cursor,
 +and machine-readable failure status. Items preserve exact source-file and
@@ -306,10 +322,23 @@ index 00000000..5993ac9f
 +resource size once. Filesystem snapshots or an open file descriptor can
 +still retain blocks, so volume usage must be measured separately.
 +
-+A retired terminal row with no source file, chunks, embedding model or
-+resource bindings can complete its resource inventory with zero released
-+bytes; the metadata row is retained for history policy. Jobs containing
-+derived indexes or cloud/legacy paths remain `blocked` and retry hourly.
++Every retired Nextcloud knowledge job keeps a `derived_index` blocker, even
++when the current row has no chunks, embedding model or local index rows.
++Historical graph, Wiki or external index output could still exist, and the
++current row is not proof that those artifacts were never created. A migration
++reopens previously `collected` jobs and adds this blocker so old false-complete
++statuses are not carried forward. A job can remain blocked after its local
++source file was successfully released; the file item retains its separately
++confirmed byte count. The knowledge metadata row remains for history policy.
++For a retired row, inventory stores each exact chunk ID and each observed
++PostgreSQL `embeddings.id` or SQLite `lite_embeddings.id`, scoped to the
++knowledge base and knowledge ID. A retry adds rows written after an earlier
++scan before it can consider the job complete. These rows are an audit and
++recovery prerequisite: the current worker does not delete them or claim
++their storage. In particular, a knowledge row with no chunks but a lingering
++local embedding cannot be marked `collected` merely because its model ID is
++empty. The knowledge-level `derived_index` item remains pending as the
++conservative barrier for external index backends and graph/wiki output.
 +Invalid image JSON is recorded as `invalid_image_inventory`; a later retry
 +rebuilds the image item list after the data is repaired. A row that becomes
 +the current candidate is blocked as `candidate_is_current`. The publication
@@ -326,14 +355,19 @@ index 00000000..5993ac9f
 +
 +The minimum protocol still needed for derived indexes and cloud storage is:
 +
-+1. Under a transaction, lock the source version, job, knowledge row and each
++1. Persist the index backend and collection identity at build time, including
++   every backend used by composite retrieval. Record or cancel build and read
++   leases. Historical knowledge rows currently have no such provenance;
++   the KB's current vector-store setting cannot prove where an older version
++   was indexed. Graph and Wiki references need explicit acknowledgements.
++2. Under a transaction, lock the source version, job, knowledge row and each
 +   stored resource. Recheck that the version is retired, the access barrier is
 +   active, no build/read lease exists, the original-copy deadline has passed,
 +   and the persisted object identity still matches the row and backend.
-+2. Add backend-specific acknowledgement for object stores. `DeleteObject`
++3. Add backend-specific acknowledgement for object stores. `DeleteObject`
 +   alone may create a delete marker while previous versions still consume
 +   capacity. Record logical unlink and confirmed physical capacity separately.
-+3. Delete vectors, graph, chunks, wiki references and knowledge metadata in
++4. Delete vectors, graph, chunks, wiki references and knowledge metadata in
 +   separate idempotent phases, each with a durable completion marker. Only
 +   mark a job `collected` after all items and phases are complete.
 +
@@ -344,10 +378,10 @@ index 00000000..5993ac9f
 +cap, purge 90-day history metadata, or run a two-pass orphan scan.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
-index 00000000..6e20933d
+index 00000000..65afb60c
 --- /dev/null
 +++ b/docs/nextcloud-source-pairing.md
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,148 @@
 +# Nextcloud source pairing
 +
 +The source pairing is separate from the optional event-inbox connection. A
@@ -459,6 +493,43 @@ index 00000000..6e20933d
 +
 +Migrations are PostgreSQL `000116`/`000117` and SQLite `000035`/`000036`. The intervening
 +numbers are intentionally reserved for independent evaluation-run changes.
++
++## Retiring a paired, untouched source
++
++This narrow retirement protocol applies only to a pair created after the
++virgin-source migration (PostgreSQL `000123`, SQLite `000042`) that has never
++accepted a sync log, event connection, source version, knowledge, or chunk.
++The durable virgin marker burns on the first such write, even if that write is
++later deleted. An older pair has no marker and cannot claim an empty history.
++The endpoint also checks current event inbox, dispatch intent, checkpoint,
++GC jobs, content, source metadata, and pending source-key rotation.
++
++The Nextcloud administrator first starts `POST
++/api/v1/admin/bindings/{binding_id}/decommission` with a fresh UUID. This
++persists Stop and the exact pair identity before WeKnora is contacted. The
++WeKnora tenant administrator then calls `POST
++/api/v1/datasource/nextcloud-source-pairings/{pair_operation_id}/decommission`
++with the same `operation_id`. WeKnora verifies the signed Nextcloud intent,
++pauses its data source transactionally, and records an immutable operation
++row. It signs a zero-item inventory acknowledgement back to Nextcloud. HTTP
++`202` means the acknowledgement is uncertain; retry the same operation ID on
++the same WeKnora route. Once Nextcloud records the acknowledgement, its
++administrator calls `POST
++/api/v1/admin/bindings/{binding_id}/decommission/finalize` with that
++operation ID to retire the binding and revoke its keys, after **both** sides
++report `acknowledged`. Status is available on both operation routes. A
++different operation ID or tuple cannot reuse the
++acknowledgement.
++
++Nextcloud Stop, the WeKnora paused state, and operation rows are durable
++before finalization. Errors leave the pair stopped with its credentials and
++409 delete protection intact; retry with the same ID after fixing a transient
++failure. An ineligible or older pair cannot resume through this protocol
++after Stop: it must wait for a future general GC/reconciliation procedure.
++The WeKnora pair row remains as an `active` historical identity, while its
++data source is permanently paused and protected by the decommission row.
++This is Nextcloud-side retirement of a proven empty source, not physical
++deletion of the WeKnora pair or general indexed-content cleanup.
 diff --git a/docs/nextcloud-source-provenance.md b/docs/nextcloud-source-provenance.md
 new file mode 100644
 index 00000000..eedc64e0
@@ -3947,16 +4018,17 @@ index 00000000..9512e78b
 +}
 diff --git a/internal/application/repository/nextcloud_gc.go b/internal/application/repository/nextcloud_gc.go
 new file mode 100644
-index 00000000..aff2e176
+index 00000000..6c799b1d
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc.go
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,534 @@
 +package repository
 +
 +import (
 +	"context"
 +	"encoding/json"
 +	"errors"
++	"strconv"
 +	"time"
 +
 +	"github.com/Tencent/WeKnora/internal/types"
@@ -3970,6 +4042,7 @@ index 00000000..aff2e176
 +	nextcloudGCFailedWindow   = 24 * time.Hour
 +	nextcloudGCOriginalWindow = 7 * 24 * time.Hour
 +	nextcloudGCRetryWindow    = time.Hour
++	nextcloudGCDerivedBatch   = 1000
 +)
 +
 +// nextcloudGCJob is an immutable inventory identity plus a retryable state.
@@ -4152,13 +4225,24 @@ index 00000000..aff2e176
 +			items = append(items, nextcloudGCItem{JobID: job.ID, Kind: "source_file", ObjectRef: current.FilePath,
 +				State: "pending", EstimatedBytes: current.StorageSize, CreatedAt: now, UpdatedAt: now})
 +		}
-+		var chunkRows []struct{ ImageInfo string }
-+		if err := tx.Table("chunks").Select("image_info").Where("tenant_id = ? AND knowledge_id = ?",
-+			current.TenantID, current.ID).Find(&chunkRows).Error; err != nil {
++		var chunkRows []struct {
++			ID        string
++			ImageInfo string
++		}
++		if err := tx.Table("chunks").Select("id, image_info").Where("tenant_id = ? AND knowledge_base_id = ? AND knowledge_id = ?",
++			current.TenantID, current.KnowledgeBaseID, current.ID).Find(&chunkRows).Error; err != nil {
 +			return err
 +		}
-+		if len(chunkRows) > 0 || current.EmbeddingModelID != "" {
-+			items = append(items, nextcloudGCItem{JobID: job.ID, Kind: "derived_index", ObjectRef: current.ID,
++		if err := appendNextcloudGCEmbeddingItems(tx, job, now, &items); err != nil {
++			return err
++		}
++		// A row with no local chunks or embeddings can still have a remote
++		// index, graph or Wiki reference. Historical backend and lease proof
++		// was never recorded, so every legacy version remains fail-closed.
++		items = append(items, nextcloudGCItem{JobID: job.ID, Kind: "derived_index", ObjectRef: current.ID,
++			State: "pending", CreatedAt: now, UpdatedAt: now})
++		for _, row := range chunkRows {
++			items = append(items, nextcloudGCItem{JobID: job.ID, Kind: "derived_chunk", ObjectRef: row.ID,
 +				State: "pending", CreatedAt: now, UpdatedAt: now})
 +		}
 +		images := make(map[string]bool)
@@ -4180,7 +4264,7 @@ index 00000000..aff2e176
 +				}
 +			}
 +		}
-+		if err := tx.Create(&items).Error; err != nil {
++		if err := tx.CreateInBatches(&items, 100).Error; err != nil {
 +			return err
 +		}
 +		if invalidInventory {
@@ -4195,9 +4279,10 @@ index 00000000..aff2e176
 +
 +// RunDue is intentionally fail-closed for all stored objects and indexes.
 +// The current generic delete path can lose cleanup failures and races a new
-+// resource binding. Only an inventory with no stored or derived objects can
-+// complete automatically; its metadata is retained for the separate 90-day
-+// history policy. Blocked jobs stay queryable and retry on each hourly pass.
++// resource binding. Even an empty local inventory cannot prove that historical
++// graph, Wiki or external index output is absent, so the job stays blocked
++// after any individually proven local resource deletion. Its metadata is
++// retained for the separate 90-day history policy.
 +func (s *NextcloudGCStore) RunDue(ctx context.Context, now time.Time, limit int) (int, error) {
 +	if limit <= 0 || limit > 200 {
 +		limit = 100
@@ -4242,6 +4327,12 @@ index 00000000..aff2e176
 +		if job.State == "collected" || now.Before(job.NotBefore) || now.Before(job.NextAttemptAt) {
 +			return nil
 +		}
++		// Existing inventories may predate exact derived IDs, and a late
++		// parser write may have appeared since the previous scan. Persist
++		// every observed ID before evaluating the terminal state.
++		if err := refreshNextcloudGCDerivedInventory(tx, job, now); err != nil {
++			return err
++		}
 +		if job.LastErrorCode == "invalid_image_inventory" {
 +			valid, err := refreshNextcloudGCImageInventory(tx, job, now)
 +			if err != nil {
@@ -4285,7 +4376,8 @@ index 00000000..aff2e176
 +			default:
 +				var pendingObjects int64
 +				if err := tx.Model(&nextcloudGCItem{}).
-+					Where("job_id = ? AND kind <> ? AND state <> ?", job.ID, "knowledge", "collected").
++					Where("job_id = ? AND kind NOT IN ? AND state <> ?", job.ID,
++						[]string{"knowledge", "derived_index"}, "collected").
 +					Count(&pendingObjects).Error; err != nil {
 +					return err
 +				}
@@ -4301,7 +4393,8 @@ index 00000000..aff2e176
 +					}
 +				}
 +				var chunks, bindings int64
-+				if err := tx.Table("chunks").Where("tenant_id = ? AND knowledge_id = ?", job.TenantID, job.KnowledgeID).
++				if err := tx.Table("chunks").Where("tenant_id = ? AND knowledge_base_id = ? AND knowledge_id = ?",
++					job.TenantID, job.KnowledgeBaseID, job.KnowledgeID).
 +					Count(&chunks).Error; err != nil {
 +					return err
 +				}
@@ -4312,16 +4405,7 @@ index 00000000..aff2e176
 +				if pendingObjects > 0 || chunks > 0 || bindings > 0 || row.EmbeddingModelID != "" {
 +					code = "safe_object_cleanup_unavailable"
 +				} else {
-+					// No physical bytes are claimed. The metadata row remains for
-+					// historical citation retention and will be purged separately.
-+					completed := now
-+					if err := tx.Model(&nextcloudGCItem{}).Where("job_id = ? AND kind = ?", job.ID, "knowledge").
-+						Updates(map[string]any{"state": "collected", "updated_at": now}).Error; err != nil {
-+						return err
-+					}
-+					return tx.Model(&nextcloudGCJob{}).Where("id = ?", job.ID).
-+						Updates(map[string]any{"state": "collected", "attempts": job.Attempts + 1,
-+							"last_error_code": "", "completed_at": &completed, "updated_at": now}).Error
++					code = "derived_provenance_unverified"
 +				}
 +			}
 +		}
@@ -4339,10 +4423,67 @@ index 00000000..aff2e176
 +	})
 +}
 +
++// appendNextcloudGCEmbeddingItems records only rows in the application's own
++// database. The knowledge-level derived_index item always remains pending
++// because historical external backends and build/read leases are not recorded.
++// These exact IDs are an inventory for a later backend-specific deletion
++// protocol, never authority to delete by a knowledge/path prefix.
++func appendNextcloudGCEmbeddingItems(tx *gorm.DB, job nextcloudGCJob, now time.Time, items *[]nextcloudGCItem) error {
++	var table, kind string
++	switch tx.Dialector.Name() {
++	case "postgres":
++		table, kind = "embeddings", "postgres_embedding"
++	case "sqlite":
++		table, kind = "lite_embeddings", "sqlite_embedding"
++	default:
++		return nil
++	}
++	if !tx.Migrator().HasTable(table) {
++		return nil
++	}
++	var rows []struct{ ID int64 }
++	if err := tx.Table(table+" AS e").Select("e.id").
++		Where("e.knowledge_base_id = ? AND e.knowledge_id = ?", job.KnowledgeBaseID, job.KnowledgeID).
++		Where("NOT EXISTS (SELECT 1 FROM nextcloud_gc_items AS i WHERE i.job_id = ? AND i.kind = ? AND i.object_ref = CAST(e.id AS TEXT))",
++			job.ID, kind).Order("e.id ASC").Limit(nextcloudGCDerivedBatch).Find(&rows).Error; err != nil {
++		return err
++	}
++	for _, row := range rows {
++		*items = append(*items, nextcloudGCItem{JobID: job.ID, Kind: kind,
++			ObjectRef: strconv.FormatInt(row.ID, 10), State: "pending", CreatedAt: now, UpdatedAt: now})
++	}
++	return nil
++}
++
++func refreshNextcloudGCDerivedInventory(tx *gorm.DB, job nextcloudGCJob, now time.Time) error {
++	items := make([]nextcloudGCItem, 0)
++	var rows []struct{ ID string }
++	if err := tx.Table("chunks AS c").Select("c.id").
++		Where("c.tenant_id = ? AND c.knowledge_base_id = ? AND c.knowledge_id = ?",
++			job.TenantID, job.KnowledgeBaseID, job.KnowledgeID).
++		Where("NOT EXISTS (SELECT 1 FROM nextcloud_gc_items AS i WHERE i.job_id = ? AND i.kind = ? AND i.object_ref = c.id)",
++			job.ID, "derived_chunk").Order("c.id ASC").Limit(nextcloudGCDerivedBatch).Find(&rows).Error; err != nil {
++		return err
++	}
++	for _, row := range rows {
++		items = append(items, nextcloudGCItem{JobID: job.ID, Kind: "derived_chunk",
++			ObjectRef: row.ID, State: "pending", CreatedAt: now, UpdatedAt: now})
++	}
++	if err := appendNextcloudGCEmbeddingItems(tx, job, now, &items); err != nil {
++		return err
++	}
++	items = append(items, nextcloudGCItem{JobID: job.ID, Kind: "derived_index",
++		ObjectRef: job.KnowledgeID, State: "pending", CreatedAt: now, UpdatedAt: now})
++	if len(items) == 0 {
++		return nil
++	}
++	return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(&items, 100).Error
++}
++
 +func refreshNextcloudGCImageInventory(tx *gorm.DB, job nextcloudGCJob, now time.Time) (bool, error) {
 +	var rows []struct{ ImageInfo string }
-+	if err := tx.Table("chunks").Select("image_info").Where("tenant_id = ? AND knowledge_id = ?",
-+		job.TenantID, job.KnowledgeID).Find(&rows).Error; err != nil {
++	if err := tx.Table("chunks").Select("image_info").Where("tenant_id = ? AND knowledge_base_id = ? AND knowledge_id = ?",
++		job.TenantID, job.KnowledgeBaseID, job.KnowledgeID).Find(&rows).Error; err != nil {
 +		return false, err
 +	}
 +	for _, row := range rows {
@@ -4868,10 +5009,10 @@ index 00000000..54b3790b
 +}
 diff --git a/internal/application/repository/nextcloud_gc_test.go b/internal/application/repository/nextcloud_gc_test.go
 new file mode 100644
-index 00000000..e1807965
+index 00000000..ff5d0f4c
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc_test.go
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,646 @@
 +package repository
 +
 +import (
@@ -4969,7 +5110,8 @@ index 00000000..e1807965
 +	require.Equal(t, 1, processed)
 +	status, err = store.ListStatus(ctx, 7, 100)
 +	require.NoError(t, err)
-+	require.Equal(t, "collected", status[0].State)
++	require.Equal(t, "blocked", status[0].State)
++	require.Equal(t, "derived_provenance_unverified", status[0].LastErrorCode)
 +	require.Equal(t, int64(23), status[0].ConfirmedReleasedBytes)
 +	require.Equal(t, 2, deletes, "a completed object cannot be deleted twice")
 +}
@@ -5227,11 +5369,12 @@ index 00000000..e1807965
 +	require.Zero(t, created)
 +	var items []nextcloudGCItem
 +	require.NoError(t, db.Order("kind").Find(&items).Error)
-+	require.Len(t, items, 4)
-+	require.Equal(t, []string{"derived_index", "extracted_image", "knowledge", "source_file"},
-+		[]string{items[0].Kind, items[1].Kind, items[2].Kind, items[3].Kind})
-+	require.Equal(t, "resource://opaque-image", items[1].ObjectRef)
-+	require.Equal(t, "resource://opaque-source", items[3].ObjectRef)
++	require.Len(t, items, 5)
++	require.Equal(t, []string{"derived_chunk", "derived_index", "extracted_image", "knowledge", "source_file"},
++		[]string{items[0].Kind, items[1].Kind, items[2].Kind, items[3].Kind, items[4].Kind})
++	require.Equal(t, "chunk", items[0].ObjectRef)
++	require.Equal(t, "resource://opaque-image", items[2].ObjectRef)
++	require.Equal(t, "resource://opaque-source", items[4].ObjectRef)
 +
 +	processed, err := store.RunDue(ctx, now, 100)
 +	require.NoError(t, err)
@@ -5245,7 +5388,7 @@ index 00000000..e1807965
 +	require.Equal(t, now.Add(-2*time.Hour).Add(7*24*time.Hour), status[0].OriginalNotBefore)
 +	require.Equal(t, int64(23), status[0].EstimatedBytes)
 +	require.Zero(t, status[0].ConfirmedReleasedBytes)
-+	require.Equal(t, int64(4), status[0].PendingItems)
++	require.Equal(t, int64(5), status[0].PendingItems)
 +	encoded, err := json.Marshal(status)
 +	require.NoError(t, err)
 +	require.NotContains(t, string(encoded), "resource://")
@@ -5308,7 +5451,7 @@ index 00000000..e1807965
 +	require.Equal(t, int64(0), status[0].ConfirmedReleasedBytes)
 +}
 +
-+func TestNextcloudGCMetadataOnlyCompletesWithoutDeletingRetainedHistory(t *testing.T) {
++func TestNextcloudGCEmptyLocalRowsStillBlockUnknownHistoricalDerivedOutput(t *testing.T) {
 +	ctx := context.Background()
 +	now := time.Now().UTC()
 +	store, db := nextcloudGCTestDB(t)
@@ -5321,9 +5464,14 @@ index 00000000..e1807965
 +	require.Equal(t, 1, processed)
 +	status, err := store.ListStatus(ctx, 7, 100)
 +	require.NoError(t, err)
-+	require.Equal(t, "collected", status[0].State)
-+	require.Zero(t, status[0].PendingItems)
++	require.Equal(t, "blocked", status[0].State)
++	require.Equal(t, "derived_provenance_unverified", status[0].LastErrorCode)
++	require.Equal(t, int64(2), status[0].PendingItems)
 +	require.Zero(t, status[0].ConfirmedReleasedBytes)
++	var blocker nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ? AND kind = ? AND object_ref = ?",
++		status[0].ID, "derived_index", "old").Take(&blocker).Error)
++	require.Equal(t, "blocked", blocker.State)
 +	var row types.Knowledge
 +	require.NoError(t, db.Where("id = ?", "old").Take(&row).Error)
 +}
@@ -5354,6 +5502,74 @@ index 00000000..e1807965
 +	var item nextcloudGCItem
 +	require.NoError(t, db.Where("kind = ?", "extracted_image").Take(&item).Error)
 +	require.Equal(t, "resource://recovered-image", item.ObjectRef)
++}
++
++func TestNextcloudGCInventoriesExactLocalIndexRowsAndLateWrites(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	require.NoError(t, db.Exec(`CREATE TABLE lite_embeddings
++		(id INTEGER PRIMARY KEY, knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL)`).Error)
++	nextcloudGCTestSource(t, db, "old", "", now.Add(-2*time.Hour))
++	require.NoError(t, db.Create(&types.Chunk{ID: "chunk-old", TenantID: 7,
++		KnowledgeBaseID: "kb", KnowledgeID: "old"}).Error)
++	require.NoError(t, db.Exec(`INSERT INTO lite_embeddings (id, knowledge_base_id, knowledge_id)
++		VALUES (11, 'kb', 'old'), (12, 'other-kb', 'old'), (13, 'kb', 'other')`).Error)
++	created, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, created)
++	var job nextcloudGCJob
++	require.NoError(t, db.Take(&job).Error)
++	var items []nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ?", job.ID).Order("kind, object_ref").Find(&items).Error)
++	require.Equal(t, []string{"derived_chunk:chunk-old", "derived_index:old", "knowledge:old", "sqlite_embedding:11"},
++		[]string{items[0].Kind + ":" + items[0].ObjectRef, items[1].Kind + ":" + items[1].ObjectRef,
++			items[2].Kind + ":" + items[2].ObjectRef, items[3].Kind + ":" + items[3].ObjectRef})
++
++	// A late row is inventoried on the retry, before the job can claim it is
++	// collected. Current code deliberately keeps derived rows blocked.
++	require.NoError(t, db.Exec(`INSERT INTO lite_embeddings (id, knowledge_base_id, knowledge_id)
++		VALUES (14, 'kb', 'old')`).Error)
++	processed, err := store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, processed)
++	require.NoError(t, db.Where("job_id = ? AND kind = ?", job.ID, "sqlite_embedding").
++		Order("object_ref").Find(&items).Error)
++	require.Len(t, items, 2)
++	require.Equal(t, "11", items[0].ObjectRef)
++	require.Equal(t, "14", items[1].ObjectRef)
++	var chunks, embeddings int64
++	require.NoError(t, db.Model(&types.Chunk{}).Where("id = ?", "chunk-old").Count(&chunks).Error)
++	require.NoError(t, db.Table("lite_embeddings").Where("knowledge_id = ? AND knowledge_base_id = ?", "old", "kb").Count(&embeddings).Error)
++	require.Equal(t, int64(1), chunks)
++	require.Equal(t, int64(2), embeddings)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, "blocked", status[0].State)
++	require.Zero(t, status[0].ConfirmedReleasedBytes)
++}
++
++func TestNextcloudGCEmbeddingWithoutChunkOrModelCannotComplete(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	require.NoError(t, db.Exec(`CREATE TABLE lite_embeddings
++		(id INTEGER PRIMARY KEY, knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL)`).Error)
++	nextcloudGCTestSource(t, db, "old", "", now.Add(-2*time.Hour))
++	require.NoError(t, db.Exec(`INSERT INTO lite_embeddings (id, knowledge_base_id, knowledge_id)
++		VALUES (41, 'kb', 'old')`).Error)
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	_, err = store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, "blocked", status[0].State)
++	require.Equal(t, "safe_object_cleanup_unavailable", status[0].LastErrorCode)
++	var items []nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ?", status[0].ID).Order("kind").Find(&items).Error)
++	require.Equal(t, []string{"derived_index", "knowledge", "sqlite_embedding"},
++		[]string{items[0].Kind, items[1].Kind, items[2].Kind})
 +}
 +
 +func TestNextcloudGCStepFailureIsDurableAndRetried(t *testing.T) {
@@ -5411,18 +5627,37 @@ index 00000000..e1807965
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_items
 +		(job_id, kind, object_ref, state, estimated_bytes)
 +		VALUES ('job', 'source_file', 'resource://original', 'blocked', 23)`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_jobs
++		(id, tenant_id, knowledge_base_id, datasource_id, external_id,
++		 knowledge_id, reason, state, not_before, original_not_before, next_attempt_at, completed_at)
++		VALUES ('previously-collected', 7, 'kb', 'ds', 'other', 'old-other', 'retired', 'collected',
++		 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).Error)
 +	applyScript("../../../migrations/sqlite/000040_nextcloud_gc_object_claim.up.sql")
++	applyScript("../../../migrations/sqlite/000041_nextcloud_gc_derived_inventory.up.sql")
++	var reopened nextcloudGCJob
++	require.NoError(t, db.Where("id = ?", "previously-collected").Take(&reopened).Error)
++	require.Equal(t, "blocked", reopened.State)
++	require.Nil(t, reopened.CompletedAt)
++	require.Equal(t, "derived_provenance_unverified", reopened.LastErrorCode)
++	var legacyBlocker nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ? AND kind = ? AND object_ref = ?",
++		"previously-collected", "derived_index", "old-other").Take(&legacyBlocker).Error)
++	require.Equal(t, "blocked", legacyBlocker.State)
 +	var item nextcloudGCItem
-+	require.NoError(t, db.Where("job_id = ?", "job").Take(&item).Error)
++	require.NoError(t, db.Where("job_id = ? AND kind = ?", "job", "source_file").Take(&item).Error)
 +	require.Equal(t, "blocked", item.State)
 +	require.Equal(t, int64(23), item.EstimatedBytes)
 +	require.Empty(t, item.LeaseToken)
 +	require.True(t, db.Migrator().HasColumn(&nextcloudGCItem{}, "lease_until"))
 +	require.NoError(t, db.Exec(`UPDATE nextcloud_gc_items
-+		SET state = 'deleting', lease_token = 'claim' WHERE job_id = 'job'`).Error)
-+	require.NoError(t, db.Where("job_id = ?", "job").Take(&item).Error)
++		SET state = 'deleting', lease_token = 'claim' WHERE job_id = 'job' AND kind = 'source_file'`).Error)
++	require.NoError(t, db.Where("job_id = ? AND kind = ?", "job", "source_file").Take(&item).Error)
 +	require.Equal(t, "deleting", item.State)
 +	require.Equal(t, "claim", item.LeaseToken)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_items (job_id, kind, object_ref, state)
++		VALUES ('job', 'derived_chunk', 'chunk-id', 'pending')`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_items (job_id, kind, object_ref, state)
++		VALUES ('job', 'sqlite_embedding', '123', 'pending')`).Error)
 +}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
@@ -5542,6 +5777,358 @@ index 00000000..35c5f3de
 +		require.Equal(t, want, got, id)
 +	}
 +	require.Error(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source = 0 WHERE id = 'source'").Error)
++}
+diff --git a/internal/application/repository/nextcloud_source_decommission.go b/internal/application/repository/nextcloud_source_decommission.go
+new file mode 100644
+index 00000000..5c0a8235
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_decommission.go
+@@ -0,0 +1,230 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++const EmptyNextcloudInventorySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++
++// A row is an immutable identity and a retry checkpoint, never a claim that
++// general source GC has completed. This protocol handles virgin sources only.
++type NextcloudSourceDecommission struct {
++	OperationID      string    `json:"operation_id" gorm:"column:operation_id;primaryKey"`
++	PairOperationID  string    `json:"pair_operation_id" gorm:"column:pair_operation_id"`
++	TenantID         uint64    `json:"-" gorm:"column:tenant_id"`
++	KnowledgeBaseID  string    `json:"knowledge_base_id" gorm:"column:knowledge_base_id"`
++	DataSourceID     string    `json:"data_source_id" gorm:"column:datasource_id"`
++	InstanceID       string    `json:"instance_id" gorm:"column:nextcloud_instance_id"`
++	BindingID        string    `json:"binding_id" gorm:"column:binding_id"`
++	PublicationEpoch int64     `json:"publication_epoch" gorm:"column:publication_epoch"`
++	KeyID            string    `json:"key_id" gorm:"column:key_id"`
++	State            string    `json:"state" gorm:"column:state"`
++	InventorySHA256  string    `json:"inventory_sha256" gorm:"column:inventory_sha256"`
++	CreatedAt        time.Time `json:"created_at" gorm:"column:created_at"`
++	UpdatedAt        time.Time `json:"updated_at" gorm:"column:updated_at"`
++}
++
++func (NextcloudSourceDecommission) TableName() string { return "nextcloud_source_decommissions" }
++
++type nextcloudSourceVirgin struct {
++	PairOperationID string `gorm:"column:pair_operation_id;primaryKey"`
++	EverTouched     bool   `gorm:"column:ever_touched"`
++}
++
++func (nextcloudSourceVirgin) TableName() string { return "nextcloud_source_virgin" }
++
++func sameSourceDecommission(a, b NextcloudSourceDecommission) bool {
++	return a.OperationID == b.OperationID && a.PairOperationID == b.PairOperationID &&
++		a.TenantID == b.TenantID && a.KnowledgeBaseID == b.KnowledgeBaseID &&
++		a.DataSourceID == b.DataSourceID && a.InstanceID == b.InstanceID &&
++		a.BindingID == b.BindingID && a.PublicationEpoch == b.PublicationEpoch && a.KeyID == b.KeyID
++}
++
++// BeginEmptySourceDecommission is a compare-and-swap against the exact pair.
++// The virgin marker is absent for pre-migration pairs and burns permanently on
++// first sync/event/content admission. Thus a pruned log cannot fabricate an
++// empty historical inventory. The database triggers serialize first writes
++// against this transaction and reject writes after its row is committed.
++func (r *NextcloudSourcePairingRepository) BeginEmptySourceDecommission(
++	ctx context.Context, pair NextcloudSourcePairing, proposed NextcloudSourceDecommission,
++) (NextcloudSourceDecommission, error) {
++	var result NextcloudSourceDecommission
++	if proposed.OperationID == "" || proposed.PairOperationID != pair.OperationID ||
++		proposed.TenantID != pair.TenantID || proposed.KnowledgeBaseID != pair.KnowledgeBaseID ||
++		proposed.DataSourceID != pair.DataSourceID || proposed.InstanceID != pair.InstanceID ||
++		proposed.BindingID != pair.BindingID || proposed.KeyID != pair.KeyID ||
++		proposed.PublicationEpoch < 0 {
++		return result, ErrNextcloudSourcePairingConflict
++	}
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		lock := tx.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = ever_had_nextcloud_source
++			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, pair.KnowledgeBaseID, pair.TenantID)
++		if lock.Error != nil {
++			return lock.Error
++		}
++		if lock.RowsAffected != 1 {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var current NextcloudSourcePairing
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("operation_id = ? AND tenant_id = ? AND state = 'active'", pair.OperationID, pair.TenantID).
++			Take(&current).Error; err != nil || current.DataSourceID != pair.DataSourceID ||
++			current.ConfigSHA != pair.ConfigSHA || current.KeyID != pair.KeyID ||
++			current.InstanceID != pair.InstanceID || current.BindingID != pair.BindingID ||
++			current.BaseURL != pair.BaseURL {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var existing NextcloudSourceDecommission
++		err := tx.Where("pair_operation_id = ?", pair.OperationID).Take(&existing).Error
++		if err == nil {
++			if !sameSourceDecommission(existing, proposed) {
++				return ErrNextcloudSourcePairingConflict
++			}
++			result = existing
++			return nil
++		}
++		if !errors.Is(err, gorm.ErrRecordNotFound) {
++			return err
++		}
++		var virgin nextcloudSourceVirgin
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("pair_operation_id = ?", pair.OperationID).Take(&virgin).Error; err != nil || virgin.EverTouched {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var liveRotation int64
++		if err := tx.Table("nextcloud_source_rotations").
++			Where("pair_operation_id = ? AND state IN ?", pair.OperationID,
++				[]string{"pending", "committed", "switched"}).
++			Count(&liveRotation).Error; err != nil || liveRotation != 0 {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var source types.DataSource
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND deleted_at IS NULL",
++				pair.DataSourceID, pair.TenantID, pair.KnowledgeBaseID).Take(&source).Error; err != nil {
++			return ErrNextcloudSourcePairingConflict
++		}
++		base, hash, binding, err := NextcloudEventDataSourceIdentity(source.Config)
++		if err != nil || source.Type != types.ConnectorTypeNextcloud ||
++			base != pair.BaseURL || hash != pair.ConfigSHA || binding != pair.BindingID ||
++			(source.Status != types.DataSourceStatusActive && source.Status != types.DataSourceStatusPaused) ||
++			source.LastSyncAt != nil || len(source.LastSyncCursor) != 0 || len(source.LastSyncResult) != 0 {
++			return ErrNextcloudSourcePairingConflict
++		}
++		config, err := source.ParseConfig()
++		if err != nil || config == nil || config.Credentials["key_id"] != pair.KeyID {
++			return ErrNextcloudSourcePairingConflict
++		}
++		checks := []struct {
++			table, where string
++			args         []any
++		}{
++			{"sync_logs", "data_source_id = ?", []any{pair.DataSourceID}},
++			{"nextcloud_event_connections", "datasource_id = ?", []any{pair.DataSourceID}},
++			{"nextcloud_source_versions", "datasource_id = ?", []any{pair.DataSourceID}},
++			{"nextcloud_gc_jobs", "datasource_id = ?", []any{pair.DataSourceID}},
++			{"knowledges", "knowledge_base_id = ?", []any{pair.KnowledgeBaseID}},
++			{"chunks", "knowledge_base_id = ?", []any{pair.KnowledgeBaseID}},
++		}
++		for _, check := range checks {
++			var count int64
++			if err := tx.Table(check.table).Where(check.where, check.args...).Count(&count).Error; err != nil {
++				return err
++			}
++			if count != 0 {
++				return ErrNextcloudSourcePairingConflict
++			}
++		}
++		// Explicitly inspect persisted event receipts, dispatch leases and
++		// checkpoints too. Their foreign keys make them impossible when the
++		// connection count above is zero; a failed join still fails closed.
++		for _, table := range []string{"nextcloud_event_inbox", "nextcloud_event_dispatch",
++			"nextcloud_event_checkpoint"} {
++			var count int64
++			if err := tx.Table(table+" AS item").Joins(
++				"JOIN nextcloud_event_connections AS connection ON connection.connection_id = item.connection_id").
++				Where("connection.datasource_id = ?", pair.DataSourceID).Count(&count).Error; err != nil {
++				return err
++			}
++			if count != 0 {
++				return ErrNextcloudSourcePairingConflict
++			}
++		}
++		// Manual and scheduled sync admission creates a sync log before
++		// enqueue; the virgin trigger burns the proof at that point.
++		if err := tx.Model(&types.DataSource{}).Where("id = ? AND status IN ?", source.ID,
++			[]string{types.DataSourceStatusActive, types.DataSourceStatusPaused}).
++			Update("status", types.DataSourceStatusPaused).Error; err != nil {
++			return err
++		}
++		proposed.State = "prepared"
++		proposed.InventorySHA256 = ""
++		proposed.CreatedAt = time.Now().UTC()
++		proposed.UpdatedAt = proposed.CreatedAt
++		if err := tx.Create(&proposed).Error; err != nil {
++			return err
++		}
++		result = proposed
++		return nil
++	})
++	if err != nil {
++		return NextcloudSourceDecommission{}, err
++	}
++	return result, nil
++}
++
++func (r *NextcloudSourcePairingRepository) SourceDecommission(
++	ctx context.Context, pair NextcloudSourcePairing,
++) (NextcloudSourceDecommission, error) {
++	var row NextcloudSourceDecommission
++	err := r.db.WithContext(ctx).Where("pair_operation_id = ? AND tenant_id = ?",
++		pair.OperationID, pair.TenantID).Take(&row).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return row, ErrNextcloudSourcePairingMissing
++	}
++	if err != nil {
++		return row, err
++	}
++	if row.KnowledgeBaseID != pair.KnowledgeBaseID || row.DataSourceID != pair.DataSourceID ||
++		row.InstanceID != pair.InstanceID || row.BindingID != pair.BindingID || row.KeyID != pair.KeyID {
++		return row, ErrNextcloudSourcePairingConflict
++	}
++	return row, nil
++}
++
++func (r *NextcloudSourcePairingRepository) RecordEmptyDecommissionAck(
++	ctx context.Context, row NextcloudSourceDecommission,
++) error {
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var current NextcloudSourceDecommission
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("operation_id = ? AND tenant_id = ?", row.OperationID, row.TenantID).
++			Take(&current).Error; err != nil || !sameSourceDecommission(current, row) {
++			return ErrNextcloudSourcePairingConflict
++		}
++		if current.State == "acknowledged" && current.InventorySHA256 == EmptyNextcloudInventorySHA256 {
++			return nil
++		}
++		if current.State != "prepared" {
++			return ErrNextcloudSourcePairingConflict
++		}
++		updated := tx.Model(&NextcloudSourceDecommission{}).
++			Where("operation_id = ? AND state = 'prepared'", row.OperationID).
++			Updates(map[string]any{"state": "acknowledged",
++				"inventory_sha256": EmptyNextcloudInventorySHA256,
++				"updated_at":       time.Now().UTC()})
++		if updated.Error != nil {
++			return updated.Error
++		}
++		if updated.RowsAffected != 1 {
++			return ErrNextcloudSourcePairingConflict
++		}
++		return nil
++	})
++}
+diff --git a/internal/application/repository/nextcloud_source_decommission_test.go b/internal/application/repository/nextcloud_source_decommission_test.go
+new file mode 100644
+index 00000000..6c2c7167
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_decommission_test.go
+@@ -0,0 +1,110 @@
++package repository
++
++import (
++	"context"
++	"os"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func decommissionTestDB(t *testing.T) *gorm.DB {
++	t.Helper()
++	db := provenanceTestDB(t)
++	for _, statement := range []string{
++		`CREATE TABLE sync_logs (id TEXT PRIMARY KEY, data_source_id TEXT, status TEXT)`,
++		`CREATE TABLE nextcloud_event_connections (connection_id TEXT PRIMARY KEY, datasource_id TEXT)`,
++		`CREATE TABLE nextcloud_event_inbox (connection_id TEXT, event_id INTEGER)`,
++		`CREATE TABLE nextcloud_event_dispatch (connection_id TEXT, state TEXT)`,
++		`CREATE TABLE nextcloud_event_checkpoint (connection_id TEXT, received_id INTEGER)`,
++		`CREATE TABLE nextcloud_source_versions (id TEXT PRIMARY KEY, datasource_id TEXT)`,
++		`CREATE TABLE nextcloud_gc_jobs (id TEXT PRIMARY KEY, datasource_id TEXT)`,
++		`CREATE TABLE chunks (id TEXT PRIMARY KEY, knowledge_base_id TEXT)`,
++		`CREATE TABLE nextcloud_source_rotations (operation_id TEXT PRIMARY KEY, pair_operation_id TEXT, state TEXT)`,
++	} {
++		require.NoError(t, db.Exec(statement).Error)
++	}
++	return db
++}
++
++func decommissionPair(t *testing.T, db *gorm.DB, kb, op string) NextcloudSourcePairing {
++	t.Helper()
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES (?, 7)`, kb).Error)
++	repo := NewNextcloudSourcePairingRepository(db)
++	pair, _, err := repo.PrepareSourcePairing(context.Background(), NextcloudSourcePairing{
++		OperationID: op, TenantID: 7, KnowledgeBaseID: kb, InstanceID: "instance-1",
++		BindingID: kb, BaseURL: "https://nextcloud.example.test", PublicationEpoch: 0,
++		KeyID: "pair_" + removeUUIDDashes(op),
++	}, "one-time-pairing-token")
++	require.NoError(t, err)
++	require.NoError(t, repo.ActivateSourcePairing(context.Background(), pair))
++	return pair
++}
++
++func removeUUIDDashes(value string) string {
++	result := make([]byte, 0, len(value))
++	for i := range value {
++		if value[i] != '-' {
++			result = append(result, value[i])
++		}
++	}
++	return string(result)
++}
++
++func TestEmptyDecommissionRequiresVirginPairAndFencesFutureWrites(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	db := decommissionTestDB(t)
++	old := decommissionPair(t, db, "kb-old", "82d62225-1eb6-47ad-9264-2759e33dfa03")
++	script, err := os.ReadFile("../../../migrations/sqlite/000042_nextcloud_empty_decommission.up.sql")
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(string(script)).Error)
++	repo := NewNextcloudSourcePairingRepository(db)
++	proposed := func(pair NextcloudSourcePairing, operationID string) NextcloudSourceDecommission {
++		return NextcloudSourceDecommission{OperationID: operationID,
++			PairOperationID: pair.OperationID, TenantID: pair.TenantID,
++			KnowledgeBaseID: pair.KnowledgeBaseID, DataSourceID: pair.DataSourceID,
++			InstanceID: pair.InstanceID, BindingID: pair.BindingID, KeyID: pair.KeyID,
++			PublicationEpoch: 1}
++	}
++	_, err = repo.BeginEmptySourceDecommission(context.Background(), old,
++		proposed(old, "43c2678e-e5e5-4cf6-b975-18de9999cba9"))
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict,
++		"a pre-migration pair has no durable proof of never having been indexed")
++
++	fresh := decommissionPair(t, db, "kb-fresh", "1cf17b55-26a2-4c04-bc9a-9c47eaa561b7")
++	intent := proposed(fresh, "be4c7f4d-5082-47fa-a54f-24ad09a05830")
++	row, err := repo.BeginEmptySourceDecommission(context.Background(), fresh, intent)
++	require.NoError(t, err)
++	require.Equal(t, "prepared", row.State)
++	var ds types.DataSource
++	require.NoError(t, db.Where("id = ?", fresh.DataSourceID).Take(&ds).Error)
++	require.Equal(t, types.DataSourceStatusPaused, ds.Status)
++	require.Error(t, db.Model(&types.DataSource{}).Where("id = ?", ds.ID).
++		Update("status", types.DataSourceStatusActive).Error,
++		"direct SQL resume must be rejected after decommission begins")
++	require.Error(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status) VALUES ('late', ?, 'running')`,
++		fresh.DataSourceID).Error)
++	require.Error(t, db.Exec(`INSERT INTO knowledges (id, tenant_id, knowledge_base_id) VALUES ('late', 7, ?)`,
++		fresh.KnowledgeBaseID).Error)
++	require.NoError(t, repo.RecordEmptyDecommissionAck(context.Background(), row))
++	retry, err := repo.BeginEmptySourceDecommission(context.Background(), fresh, intent)
++	require.NoError(t, err)
++	require.Equal(t, "acknowledged", retry.State)
++	require.Equal(t, EmptyNextcloudInventorySHA256, retry.InventorySHA256)
++	require.NoError(t, repo.RecordEmptyDecommissionAck(context.Background(), retry))
++	changed := intent
++	changed.OperationID = "74ca926b-981f-460f-b9f7-b8db38f1daf4"
++	_, err = repo.BeginEmptySourceDecommission(context.Background(), fresh, changed)
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++
++	touched := decommissionPair(t, db, "kb-touched", "6c391711-6425-4d11-8e6e-5ff693149996")
++	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status) VALUES ('first', ?, 'success')`,
++		touched.DataSourceID).Error)
++	require.NoError(t, db.Exec(`DELETE FROM sync_logs WHERE id = 'first'`).Error)
++	_, err = repo.BeginEmptySourceDecommission(context.Background(), touched,
++		proposed(touched, "e3efad37-7043-487f-8d6c-4ec75f108cad"))
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict,
++		"pruning a sync log must not restore the virgin proof")
 +}
 diff --git a/internal/application/repository/nextcloud_source_pairing.go b/internal/application/repository/nextcloud_source_pairing.go
 new file mode 100644
@@ -6742,10 +7329,10 @@ index 00000000..092c0ab5
 +}
 diff --git a/internal/application/repository/nextcloud_versions.go b/internal/application/repository/nextcloud_versions.go
 new file mode 100644
-index 00000000..2e595b56
+index 00000000..b7413e93
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions.go
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,596 @@
 +package repository
 +
 +import (
@@ -7237,8 +7824,9 @@ index 00000000..2e595b56
 +			if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
 +				return false, fmt.Errorf("publish candidate: %v; hide failed: %w", err, hideErr)
 +			}
++			return false, err
 +		}
-+		return published, err
++		return false, nil
 +	}
 +	if err := verify(); err != nil {
 +		if hideErr := r.unpublishIfCurrent(ctx, checked); hideErr != nil {
@@ -7343,20 +7931,25 @@ index 00000000..2e595b56
 +}
 diff --git a/internal/application/repository/nextcloud_versions_test.go b/internal/application/repository/nextcloud_versions_test.go
 new file mode 100644
-index 00000000..f094a21a
+index 00000000..657df5a5
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions_test.go
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,453 @@
 +package repository
 +
 +import (
 +	"context"
 +	"encoding/json"
 +	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
 +	"os"
 +	"strings"
++	"sync"
 +	"testing"
 +
++	nextcloudconnector "github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/google/uuid"
 +	"github.com/stretchr/testify/require"
@@ -7377,7 +7970,7 @@ index 00000000..f094a21a
 +		&types.DataSource{}, &NextcloudSourcePairing{}))
 +	config, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
 +		ResourceIDs: []string{"binding"},
-+		Settings: map[string]interface{}{"base_url": "https://nextcloud.example"},
++		Settings:    map[string]interface{}{"base_url": "https://nextcloud.example"},
 +		Credentials: map[string]interface{}{"token": "test-machine-token", "key_id": "pair_test"},
 +	}).ToJSON()
 +	require.NoError(t, err)
@@ -7393,7 +7986,9 @@ index 00000000..f094a21a
 +	}).Error)
 +	return &knowledgeRepository{db: db,
 +		nextcloudPublicationCheck: func(context.Context, *types.DataSourceConfig,
-+			string, string, int64, string, string) error { return nil }}, db
++			string, string, int64, string, string) error {
++			return nil
++		}}, db
 +}
 +
 +func insertNextcloudVersionTestKnowledge(t *testing.T, db *gorm.DB, id, etag, status, enabled string) *types.Knowledge {
@@ -7474,6 +8069,128 @@ index 00000000..f094a21a
 +	require.Equal(t, "staging", version.State)
 +}
 +
++// The source can change after the first remote check has succeeded but before
++// the local publication commit and its final remote check. Exercise the real
++// signed HTTP connector against a mutable source, then assert the repository
++// has not left either retained version visible or reported a successful publish.
++func TestNextcloudPublicationRejectsRemoteChangeBetweenChecks(t *testing.T) {
++	for _, tc := range []struct {
++		name      string
++		withdrawn bool
++		newETag   string
++	}{
++		{name: "publication withdrawn", withdrawn: true},
++		{name: "source etag advanced", newETag: "etag-2"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ctx := context.Background()
++			repo, db := newNextcloudVersionTestRepo(t)
++			var mu sync.Mutex
++			checks := 0
++			markerAtFinalProbe := false
++			publishedAtSource := true
++			currentETag := "etag-1"
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.Method != http.MethodPost || r.URL.Path !=
++					"/index.php/apps/integration_weknora/api/v1/bindings/binding/files/77/publication-check" ||
++					r.Header.Get("Authorization") != "Bearer test-machine-token" ||
++					r.Header.Get("X-WeKnora-Signature") == "" {
++					t.Errorf("unexpected publication request: %s %s", r.Method, r.URL.String())
++					w.WriteHeader(http.StatusForbidden)
++					return
++				}
++				body, err := io.ReadAll(r.Body)
++				if err != nil {
++					t.Errorf("read publication request: %v", err)
++					w.WriteHeader(http.StatusBadRequest)
++					return
++				}
++				var requested struct {
++					InstanceID string `json:"instance_id"`
++					ETag       string `json:"etag"`
++					Path       string `json:"path"`
++				}
++				if err := json.Unmarshal(body, &requested); err != nil || requested.InstanceID != "instance" ||
++					requested.ETag != "etag-1" || requested.Path != "file.md" {
++					t.Errorf("unexpected publication identity: %+v, %v", requested, err)
++					w.WriteHeader(http.StatusBadRequest)
++					return
++				}
++				mu.Lock()
++				defer mu.Unlock()
++				checks++
++				if checks == 2 {
++					// The local commit precedes this final source probe. Record the
++					// short-lived SQL marker explicitly; read paths must still use
++					// the independent live source publication guard.
++					var row types.Knowledge
++					if err := db.Where("id = ?", "candidate").Take(&row).Error; err != nil {
++						t.Errorf("load candidate during final source probe: %v", err)
++					} else {
++						markerAtFinalProbe = row.GetMetadata()["nextcloud_etag"] == "etag-1"
++					}
++				}
++				if !publishedAtSource || currentETag != requested.ETag {
++					w.WriteHeader(http.StatusConflict)
++					return
++				}
++				w.WriteHeader(http.StatusNoContent)
++				if checks == 1 {
++					// The first check has accepted the version; the remote source
++					// changes before the repository reaches its final check.
++					if tc.withdrawn {
++						publishedAtSource = false
++					} else {
++						currentETag = tc.newETag
++					}
++				}
++			}))
++			defer server.Close()
++			t.Setenv("WEKNORA_NEXTCLOUD_DEV_HTTP", "1")
++			t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", server.URL)
++			config, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++				ResourceIDs: []string{"binding"},
++				Settings:    map[string]interface{}{"base_url": server.URL},
++				Credentials: map[string]interface{}{"token": "test-machine-token", "key_id": "pair_test"},
++			}).ToJSON()
++			require.NoError(t, err)
++			require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++				Update("config", config).Error)
++			baseURL, configSHA, _, err := NextcloudEventDataSourceIdentity(config)
++			require.NoError(t, err)
++			require.NoError(t, db.Model(&NextcloudSourcePairing{}).Where("datasource_id = ?", "ds").
++				Updates(map[string]any{"datasource_base_url": baseURL, "datasource_config_sha256": configSHA}).Error)
++			repo.nextcloudPublicationCheck = nextcloudconnector.CheckCurrentPublication
++
++			old := insertNextcloudVersionTestKnowledge(t, db, "old", "old-etag",
++				types.ParseStatusCompleted, "enabled")
++			candidate := insertNextcloudVersionTestKnowledge(t, db, "candidate", "",
++				types.ParseStatusCompleted, "enabled")
++			require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds",
++				"nextcloud:instance:77", "etag-1", candidate.ID))
++			require.Empty(t, reloadedNextcloudETag(t, db, old.ID))
++			published, err := repo.PublishNextcloudVersion(ctx, candidate.ID)
++			require.ErrorContains(t, err, "source publication changed after commit")
++			require.False(t, published)
++			mu.Lock()
++			observedChecks, observedMarker := checks, markerAtFinalProbe
++			mu.Unlock()
++			require.Equal(t, 2, observedChecks, "both exact source checks must run")
++			t.Logf("transient SQL publication marker during final source probe: %t", observedMarker)
++			require.Empty(t, reloadedNextcloudETag(t, db, old.ID))
++			require.Empty(t, reloadedNextcloudETag(t, db, candidate.ID))
++			var version nextcloudSourceVersion
++			require.NoError(t, db.First(&version).Error)
++			require.Equal(t, "staging", version.State)
++			var visible int64
++			require.NoError(t, db.Model(&types.Knowledge{}).
++				Where("id IN ?", []string{old.ID, candidate.ID}).
++				Where("metadata->>'nextcloud_etag' != ''").Count(&visible).Error)
++			require.Zero(t, visible, "no retained source candidate may remain visible")
++		})
++	}
++}
++
 +func TestNextcloudPublicationFailsClosedBeforeCommit(t *testing.T) {
 +	ctx := context.Background()
 +	repo, db := newNextcloudVersionTestRepo(t)
@@ -7481,7 +8198,9 @@ index 00000000..f094a21a
 +	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds",
 +		"nextcloud:instance:77", "etag-1", candidate.ID))
 +	repo.nextcloudPublicationCheck = func(context.Context, *types.DataSourceConfig,
-+		string, string, int64, string, string) error { return errors.New("source unavailable") }
++		string, string, int64, string, string) error {
++		return errors.New("source unavailable")
++	}
 +	published, err := repo.PublishNextcloudVersion(ctx, candidate.ID)
 +	require.Error(t, err)
 +	require.False(t, published)
@@ -12284,7 +13003,7 @@ index 47d4c024..ed4dc245 100644
  	db := setupResetPendingDB(t)
  	stale := time.Now().Add(-2 * time.Hour)
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e515..eda61599 100644
+index 9cc4e515..7d5405cb 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -12316,7 +13035,7 @@ index 9cc4e515..eda61599 100644
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 40
++const expectedSQLiteMigrationVersion = 42
 +
 +func TestSQLiteNextcloudPairingGuardsPendingAndActiveKnowledgeBase(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -15406,6 +16125,235 @@ index 00000000..bedc6ea5
 +	if _, err := parseConfig(source); err == nil {
 +		t.Fatal("accepted malformed key ID")
 +	}
++}
+diff --git a/internal/datasource/connector/nextcloud/source_decommission.go b/internal/datasource/connector/nextcloud/source_decommission.go
+new file mode 100644
+index 00000000..1d50dddb
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/source_decommission.go
+@@ -0,0 +1,154 @@
++package nextcloud
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"strconv"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++const EmptyDecommissionInventorySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++
++type SourceDecommission struct {
++	OperationID      string `json:"operation_id"`
++	PairOperationID  string `json:"pair_operation_id"`
++	InstanceID       string `json:"instance_id"`
++	BindingID        string `json:"binding_id"`
++	TenantID         string `json:"tenant_id"`
++	KnowledgeBaseID  string `json:"knowledge_base_id"`
++	DataSourceID     string `json:"data_source_id"`
++	KeyID            string `json:"key_id"`
++	PublicationEpoch int64  `json:"publication_epoch"`
++	State            string `json:"state"`
++	InventorySHA256  string `json:"inventory_sha256"`
++}
++
++func (d SourceDecommission) sameIdentity(other SourceDecommission) bool {
++	return d.OperationID == other.OperationID && d.PairOperationID == other.PairOperationID &&
++		d.InstanceID == other.InstanceID && d.BindingID == other.BindingID &&
++		d.TenantID == other.TenantID && d.KnowledgeBaseID == other.KnowledgeBaseID &&
++		d.DataSourceID == other.DataSourceID && d.KeyID == other.KeyID &&
++		d.PublicationEpoch == other.PublicationEpoch
++}
++
++// ReadSourceDecommission verifies a stopped Nextcloud intent through the
++// exact source credential. A caller must compare every identity field.
++func ReadSourceDecommission(ctx context.Context, source *types.DataSourceConfig,
++	bindingID, operationID string) (SourceDecommission, error) {
++	var empty SourceDecommission
++	cfg, err := parseConfig(source)
++	if err != nil {
++		return empty, err
++	}
++	selected, err := selectedBindings(source.ResourceIDs)
++	if err != nil || selected[0] != bindingID || !validBindingID(bindingID) || operationID == "" {
++		return empty, fmt.Errorf("Nextcloud decommission binding mismatch")
++	}
++	cli := newClient(cfg)
++	endpoint := "/bindings/" + bindingID + "/decommission/" + operationID
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cli.endpointURL(endpoint, nil), nil)
++	if err != nil {
++		return empty, err
++	}
++	req.Header.Set("Accept", "application/json")
++	if err := signMachineRequest(req, cfg, nil); err != nil {
++		return empty, err
++	}
++	resp, err := cli.http.Do(req)
++	if err != nil {
++		return empty, fmt.Errorf("Nextcloud decommission intent outcome uncertain: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return empty, &SourcePairingRemoteError{StatusCode: resp.StatusCode}
++	}
++	var answer struct {
++		Decommission SourceDecommission `json:"decommission"`
++	}
++	if err := readDecommissionResponse(resp.Body, &answer); err != nil {
++		return empty, err
++	}
++	if answer.Decommission.OperationID != operationID || answer.Decommission.BindingID != bindingID ||
++		answer.Decommission.KeyID != cfg.keyID ||
++		(answer.Decommission.State != "prepared" && answer.Decommission.State != "acknowledged") {
++		return empty, fmt.Errorf("Nextcloud decommission intent tuple mismatch")
++	}
++	return answer.Decommission, nil
++}
++
++// AcknowledgeEmptySourceDecommission sends an empty-inventory proof only after
++// the repository has durably paused and fenced the never-touched source.
++func AcknowledgeEmptySourceDecommission(ctx context.Context, source *types.DataSourceConfig,
++	intent SourceDecommission) error {
++	cfg, err := parseConfig(source)
++	if err != nil {
++		return err
++	}
++	selected, err := selectedBindings(source.ResourceIDs)
++	if err != nil || selected[0] != intent.BindingID || cfg.keyID != intent.KeyID ||
++		!validBindingID(intent.BindingID) || intent.OperationID == "" || intent.PairOperationID == "" {
++		return fmt.Errorf("Nextcloud decommission credential mismatch")
++	}
++	payload := struct {
++		SourceDecommission
++		LogicalWithdrawn  bool `json:"logical_withdrawn"`
++		InventoryComplete bool `json:"inventory_complete"`
++		InventoryCount    int  `json:"inventory_count"`
++		VisibleCount      int  `json:"visible_count"`
++		RunningJobs       int  `json:"running_jobs"`
++	}{SourceDecommission: intent, LogicalWithdrawn: true, InventoryComplete: true}
++	payload.State = ""
++	payload.InventorySHA256 = EmptyDecommissionInventorySHA256
++	body, err := json.Marshal(payload)
++	if err != nil {
++		return err
++	}
++	cli := newClient(cfg)
++	endpoint := "/bindings/" + intent.BindingID + "/decommission/" + intent.OperationID + "/ack"
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cli.endpointURL(endpoint, nil), bytes.NewReader(body))
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Accept", "application/json")
++	if err := signMachineRequest(req, cfg, body); err != nil {
++		return err
++	}
++	resp, err := cli.http.Do(req)
++	if err != nil {
++		return fmt.Errorf("Nextcloud decommission ACK outcome uncertain: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return &SourcePairingRemoteError{StatusCode: resp.StatusCode}
++	}
++	var answer struct {
++		Decommission SourceDecommission `json:"decommission"`
++	}
++	if err := readDecommissionResponse(resp.Body, &answer); err != nil {
++		return err
++	}
++	if !answer.Decommission.sameIdentity(intent) || answer.Decommission.State != "acknowledged" ||
++		answer.Decommission.InventorySHA256 != EmptyDecommissionInventorySHA256 {
++		return fmt.Errorf("Nextcloud decommission ACK tuple mismatch")
++	}
++	return nil
++}
++
++func readDecommissionResponse(body io.Reader, out any) error {
++	data, err := io.ReadAll(io.LimitReader(body, (1<<20)+1))
++	if err != nil || len(data) > 1<<20 {
++		return fmt.Errorf("invalid Nextcloud decommission response")
++	}
++	if err := json.Unmarshal(data, out); err != nil {
++		return fmt.Errorf("invalid Nextcloud decommission response: %w", err)
++	}
++	return nil
++}
++
++func DecommissionTenantID(value uint64) string { return strconv.FormatUint(value, 10) }
+diff --git a/internal/datasource/connector/nextcloud/source_decommission_test.go b/internal/datasource/connector/nextcloud/source_decommission_test.go
+new file mode 100644
+index 00000000..96f098de
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/source_decommission_test.go
+@@ -0,0 +1,63 @@
++package nextcloud
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestEmptyDecommissionSignsAndRequiresExactAck(t *testing.T) {
++	operationID := "be4c7f4d-5082-47fa-a54f-24ad09a05830"
++	intent := SourceDecommission{OperationID: operationID,
++		PairOperationID: "1cf17b55-26a2-4c04-bc9a-9c47eaa561b7",
++		InstanceID:      "instance-1", BindingID: "dev-published", TenantID: "7",
++		KnowledgeBaseID: "kb-1", DataSourceID: "source-1",
++		KeyID:            "pair_1cf17b5526a24c04bc9a9c47eaa561b7",
++		PublicationEpoch: 1, State: "prepared"}
++	wrongAck := false
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		require.Equal(t, "Bearer pairing-token", r.Header.Get("Authorization"))
++		require.Equal(t, intent.KeyID, r.Header.Get("X-WeKnora-Key-Id"))
++		require.NotEmpty(t, r.Header.Get("X-WeKnora-Signature"))
++		path := apiPath + "/bindings/dev-published/decommission/" + operationID
++		switch r.Method {
++		case http.MethodGet:
++			require.Equal(t, path, r.URL.Path)
++			writeJSON(w, map[string]any{"decommission": intent})
++		case http.MethodPost:
++			require.Equal(t, path+"/ack", r.URL.Path)
++			var body map[string]any
++			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
++			require.Equal(t, true, body["logical_withdrawn"])
++			require.Equal(t, true, body["inventory_complete"])
++			require.Equal(t, float64(0), body["inventory_count"])
++			require.Equal(t, EmptyDecommissionInventorySHA256, body["inventory_sha256"])
++			response := intent
++			response.State = "acknowledged"
++			response.InventorySHA256 = EmptyDecommissionInventorySHA256
++			if wrongAck {
++				response.DataSourceID = "other-source"
++			}
++			writeJSON(w, map[string]any{"decommission": response})
++		default:
++			t.Fatalf("unexpected method %s", r.Method)
++		}
++	}))
++	defer server.Close()
++	allowHTTPTestOrigin(t, server.URL)
++	config := &types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		Settings:    map[string]interface{}{"base_url": server.URL},
++		Credentials: map[string]interface{}{"token": "pairing-token", "key_id": intent.KeyID},
++		ResourceIDs: []string{intent.BindingID}}
++	read, err := ReadSourceDecommission(context.Background(), config, intent.BindingID, operationID)
++	require.NoError(t, err)
++	require.True(t, read.sameIdentity(intent))
++	require.NoError(t, AcknowledgeEmptySourceDecommission(context.Background(), config, read))
++	wrongAck = true
++	require.ErrorContains(t, AcknowledgeEmptySourceDecommission(context.Background(), config, read), "tuple mismatch")
 +}
 diff --git a/internal/datasource/connector/nextcloud/source_pairing.go b/internal/datasource/connector/nextcloud/source_pairing.go
 new file mode 100644
@@ -19790,12 +20738,135 @@ index 00000000..0ec87e3b
 +	require.Equal(t, http.StatusForbidden, w.Code)
 +	require.Empty(t, svc.opened)
 +}
+diff --git a/internal/handler/nextcloud_source_decommission.go b/internal/handler/nextcloud_source_decommission.go
+new file mode 100644
+index 00000000..9fe89231
+--- /dev/null
++++ b/internal/handler/nextcloud_source_decommission.go
+@@ -0,0 +1,117 @@
++package handler
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++)
++
++type sourceDecommissionRequest struct {
++	OperationID string `json:"operation_id" binding:"required"`
++}
++
++// Decommission is deliberately limited to a newly paired source with a
++// permanent never-touched proof. A source with any sync or event history stays
++// paused in Nextcloud and returns 409 until full inventory GC is implemented.
++func (h *NextcloudSourcePairingHandler) Decommission(c *gin.Context) {
++	pair, ds, ok := h.authorizedPair(c)
++	if !ok {
++		return
++	}
++	if pair.State != "active" || ds == nil {
++		c.JSON(http.StatusConflict, gin.H{"error": "active_source_pairing_required"})
++		return
++	}
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
++	var req sourceDecommissionRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_decommission_request"})
++		return
++	}
++	operationID, err := uuid.Parse(req.OperationID)
++	if err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_decommission_request"})
++		return
++	}
++	req.OperationID = operationID.String()
++	config, err := ds.ParseConfig()
++	if err != nil || config == nil || config.Credentials["key_id"] != pair.KeyID {
++		c.JSON(http.StatusConflict, gin.H{"error": "paired_source_credential_unavailable"})
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
++	defer cancel()
++	intent, err := h.readDecommission(ctx, config, pair.BindingID, req.OperationID)
++	if err != nil {
++		decommissionRemoteFailure(c, err, "remote_intent")
++		return
++	}
++	if intent.PairOperationID != pair.OperationID || intent.InstanceID != pair.InstanceID ||
++		intent.BindingID != pair.BindingID || intent.TenantID != nextcloud.DecommissionTenantID(pair.TenantID) ||
++		intent.KnowledgeBaseID != pair.KnowledgeBaseID || intent.DataSourceID != pair.DataSourceID ||
++		intent.KeyID != pair.KeyID || intent.PublicationEpoch < 0 {
++		c.JSON(http.StatusConflict, gin.H{"error": "decommission_tuple_conflict"})
++		return
++	}
++	local, err := h.repo.BeginEmptySourceDecommission(c.Request.Context(), pair,
++		repository.NextcloudSourceDecommission{
++			OperationID: req.OperationID, PairOperationID: pair.OperationID,
++			TenantID: pair.TenantID, KnowledgeBaseID: pair.KnowledgeBaseID,
++			DataSourceID: pair.DataSourceID, InstanceID: pair.InstanceID,
++			BindingID: pair.BindingID, KeyID: pair.KeyID,
++			PublicationEpoch: intent.PublicationEpoch,
++		})
++	if err != nil {
++		sourcePairingError(c, err)
++		return
++	}
++	if local.State == "acknowledged" {
++		c.JSON(http.StatusOK, gin.H{"decommission": local})
++		return
++	}
++	if local.State != "prepared" {
++		c.JSON(http.StatusConflict, gin.H{"error": "decommission_state_conflict"})
++		return
++	}
++	if err := h.ackDecommission(ctx, config, intent); err != nil {
++		decommissionRemoteFailure(c, err, "remote_ack")
++		return
++	}
++	if err := h.repo.RecordEmptyDecommissionAck(c.Request.Context(), local); err != nil {
++		c.JSON(http.StatusAccepted, gin.H{"decommission": local, "error": "local_ack_pending"})
++		return
++	}
++	local.State = "acknowledged"
++	local.InventorySHA256 = repository.EmptyNextcloudInventorySHA256
++	c.JSON(http.StatusOK, gin.H{"decommission": local})
++}
++
++func (h *NextcloudSourcePairingHandler) DecommissionStatus(c *gin.Context) {
++	pair, _, ok := h.authorizedPair(c)
++	if !ok {
++		return
++	}
++	row, err := h.repo.SourceDecommission(c.Request.Context(), pair)
++	if err != nil {
++		sourcePairingError(c, err)
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"decommission": row})
++}
++
++func decommissionRemoteFailure(c *gin.Context, err error, stage string) {
++	var remote *nextcloud.SourcePairingRemoteError
++	if errors.As(err, &remote) && (remote.StatusCode == http.StatusConflict ||
++		remote.StatusCode == http.StatusUnauthorized || remote.StatusCode == http.StatusForbidden ||
++		remote.StatusCode == http.StatusNotFound) {
++		c.JSON(http.StatusConflict, gin.H{"error": stage + "_conflict"})
++		return
++	}
++	c.JSON(http.StatusAccepted, gin.H{"error": stage + "_uncertain"})
++}
 diff --git a/internal/handler/nextcloud_source_pairing.go b/internal/handler/nextcloud_source_pairing.go
 new file mode 100644
-index 00000000..8b2a0128
+index 00000000..0abd17d9
 --- /dev/null
 +++ b/internal/handler/nextcloud_source_pairing.go
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,286 @@
 +package handler
 +
 +import (
@@ -19817,14 +20888,16 @@ index 00000000..8b2a0128
 +var sourceRotationKeyPattern = regexp.MustCompile(`^rot_[0-9a-f]{32}$`)
 +
 +type NextcloudSourcePairingHandler struct {
-+	repo           *repository.NextcloudSourcePairingRepository
-+	dataSource     *DataSourceHandler
-+	inspect        func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error)
-+	commit         func(context.Context, *types.DataSourceConfig, nextcloud.SourcePairingCommit) error
-+	abort          func(context.Context, *types.DataSourceConfig, nextcloud.SourcePairingCommit) error
-+	rotateCommit   func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
-+	rotateFinalize func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
-+	rotateAbort    func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
++	repo             *repository.NextcloudSourcePairingRepository
++	dataSource       *DataSourceHandler
++	inspect          func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error)
++	commit           func(context.Context, *types.DataSourceConfig, nextcloud.SourcePairingCommit) error
++	abort            func(context.Context, *types.DataSourceConfig, nextcloud.SourcePairingCommit) error
++	rotateCommit     func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
++	rotateFinalize   func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
++	rotateAbort      func(context.Context, *types.DataSourceConfig, nextcloud.SourceRotation) error
++	readDecommission func(context.Context, *types.DataSourceConfig, string, string) (nextcloud.SourceDecommission, error)
++	ackDecommission  func(context.Context, *types.DataSourceConfig, nextcloud.SourceDecommission) error
 +}
 +
 +func NewNextcloudSourcePairingHandler(repo *repository.NextcloudSourcePairingRepository,
@@ -19833,7 +20906,9 @@ index 00000000..8b2a0128
 +		inspect: nextcloud.InspectPairing, commit: nextcloud.CommitSourcePairing,
 +		abort:        nextcloud.AbortSourcePairing,
 +		rotateCommit: nextcloud.CommitSourceRotation, rotateFinalize: nextcloud.FinalizeSourceRotation,
-+		rotateAbort: nextcloud.AbortSourceRotation}
++		rotateAbort:      nextcloud.AbortSourceRotation,
++		readDecommission: nextcloud.ReadSourceDecommission,
++		ackDecommission:  nextcloud.AcknowledgeEmptySourceDecommission}
 +}
 +
 +func (h *NextcloudSourcePairingHandler) admin(c *gin.Context) (uint64, bool) {
@@ -22500,10 +23575,10 @@ index 6ea042b1..5dd1097c 100644
  	}
  }
 diff --git a/internal/router/routes_infra.go b/internal/router/routes_infra.go
-index 4fb5c4b9..cce6f157 100644
+index 4fb5c4b9..3674a95d 100644
 --- a/internal/router/routes_infra.go
 +++ b/internal/router/routes_infra.go
-@@ -335,6 +335,44 @@ func RegisterDataSourceRoutes(
+@@ -335,6 +335,46 @@ func RegisterDataSourceRoutes(
  	}
  }
  
@@ -22532,6 +23607,8 @@ index 4fb5c4b9..cce6f157 100644
 +	ds.GET("/nextcloud-source-pairings/:operation_id", g.Admin(), h.Status)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/retry", g.Admin(), h.Retry)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/abort", g.Admin(), h.Abort)
++	ds.GET("/nextcloud-source-pairings/:operation_id/decommission", g.Admin(), h.DecommissionStatus)
++	ds.POST("/nextcloud-source-pairings/:operation_id/decommission", g.Admin(), h.Decommission)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/rotations", g.Admin(), h.Rotate)
 +	ds.GET("/nextcloud-source-pairings/:operation_id/rotations/:rotation_id", g.Admin(), h.RotationStatus)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/rotations/:rotation_id/retry", g.Admin(), h.RetryRotation)
@@ -23570,6 +24647,201 @@ index 00000000..93743bb9
 +
 +DROP TABLE nextcloud_gc_items;
 +ALTER TABLE nextcloud_gc_items_new RENAME TO nextcloud_gc_items;
+diff --git a/migrations/sqlite/000041_nextcloud_gc_derived_inventory.down.sql b/migrations/sqlite/000041_nextcloud_gc_derived_inventory.down.sql
+new file mode 100644
+index 00000000..67b2d06e
+--- /dev/null
++++ b/migrations/sqlite/000041_nextcloud_gc_derived_inventory.down.sql
+@@ -0,0 +1,24 @@
++-- The INSERT fails its CHECK rather than discarding durable derived IDs.
++CREATE TABLE nextcloud_gc_items_old (
++    job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,
++    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index')),
++    object_ref TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('pending', 'blocked', 'deleting', 'collected')),
++    estimated_bytes INTEGER NOT NULL DEFAULT 0,
++    confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,
++    lease_token TEXT NOT NULL DEFAULT '',
++    lease_until DATETIME,
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (job_id, kind, object_ref)
++);
++
++INSERT INTO nextcloud_gc_items_old
++    (job_id, kind, object_ref, state, estimated_bytes, confirmed_released_bytes,
++     lease_token, lease_until, created_at, updated_at)
++SELECT job_id, kind, object_ref, state, estimated_bytes, confirmed_released_bytes,
++       lease_token, lease_until, created_at, updated_at
++FROM nextcloud_gc_items;
++
++DROP TABLE nextcloud_gc_items;
++ALTER TABLE nextcloud_gc_items_old RENAME TO nextcloud_gc_items;
+diff --git a/migrations/sqlite/000041_nextcloud_gc_derived_inventory.up.sql b/migrations/sqlite/000041_nextcloud_gc_derived_inventory.up.sql
+new file mode 100644
+index 00000000..3ad7dd4a
+--- /dev/null
++++ b/migrations/sqlite/000041_nextcloud_gc_derived_inventory.up.sql
+@@ -0,0 +1,36 @@
++-- SQLite rebuilds the child table to expand its kind CHECK without dropping
++-- existing inventories or object-deletion claims.
++CREATE TABLE nextcloud_gc_items_new (
++    job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,
++    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index',
++                                      'derived_chunk', 'postgres_embedding', 'sqlite_embedding')),
++    object_ref TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('pending', 'blocked', 'deleting', 'collected')),
++    estimated_bytes INTEGER NOT NULL DEFAULT 0,
++    confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,
++    lease_token TEXT NOT NULL DEFAULT '',
++    lease_until DATETIME,
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (job_id, kind, object_ref)
++);
++
++INSERT INTO nextcloud_gc_items_new
++    (job_id, kind, object_ref, state, estimated_bytes, confirmed_released_bytes,
++     lease_token, lease_until, created_at, updated_at)
++SELECT job_id, kind, object_ref, state, estimated_bytes, confirmed_released_bytes,
++       lease_token, lease_until, created_at, updated_at
++FROM nextcloud_gc_items;
++
++DROP TABLE nextcloud_gc_items;
++ALTER TABLE nextcloud_gc_items_new RENAME TO nextcloud_gc_items;
++
++INSERT OR IGNORE INTO nextcloud_gc_items (job_id, kind, object_ref, state)
++SELECT id, 'derived_index', knowledge_id, 'blocked'
++FROM nextcloud_gc_jobs;
++
++UPDATE nextcloud_gc_jobs
++SET state = 'blocked', completed_at = NULL,
++    last_error_code = 'derived_provenance_unverified',
++    next_attempt_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
++WHERE state = 'collected';
+diff --git a/migrations/sqlite/000042_nextcloud_empty_decommission.down.sql b/migrations/sqlite/000042_nextcloud_empty_decommission.down.sql
+new file mode 100644
+index 00000000..91247fbc
+--- /dev/null
++++ b/migrations/sqlite/000042_nextcloud_empty_decommission.down.sql
+@@ -0,0 +1,16 @@
++CREATE TEMP TABLE nextcloud_decommission_rollback_guard (value INTEGER CHECK (value = 0));
++INSERT INTO nextcloud_decommission_rollback_guard(value)
++    SELECT 1 FROM nextcloud_source_decommissions LIMIT 1;
++DROP TABLE nextcloud_decommission_rollback_guard;
++DROP TRIGGER IF EXISTS nextcloud_virgin_row_guard;
++DROP TRIGGER IF EXISTS nextcloud_decommission_row_guard_delete;
++DROP TRIGGER IF EXISTS nextcloud_decommission_row_guard_update;
++DROP TRIGGER IF EXISTS nextcloud_decommission_resume_guard;
++DROP TRIGGER IF EXISTS nextcloud_virgin_event_connection;
++DROP TRIGGER IF EXISTS nextcloud_virgin_version;
++DROP TRIGGER IF EXISTS nextcloud_virgin_chunk;
++DROP TRIGGER IF EXISTS nextcloud_virgin_knowledge;
++DROP TRIGGER IF EXISTS nextcloud_virgin_sync_log;
++DROP TRIGGER IF EXISTS nextcloud_virgin_pair_insert;
++DROP TABLE IF EXISTS nextcloud_source_decommissions;
++DROP TABLE IF EXISTS nextcloud_source_virgin;
+diff --git a/migrations/sqlite/000042_nextcloud_empty_decommission.up.sql b/migrations/sqlite/000042_nextcloud_empty_decommission.up.sql
+new file mode 100644
+index 00000000..80a2eb18
+--- /dev/null
++++ b/migrations/sqlite/000042_nextcloud_empty_decommission.up.sql
+@@ -0,0 +1,95 @@
++-- Existing pairs have no virgin row and cannot claim an empty historical inventory.
++CREATE TABLE nextcloud_source_virgin (
++    pair_operation_id TEXT PRIMARY KEY REFERENCES nextcloud_source_pairings(operation_id) ON DELETE CASCADE,
++    ever_touched INTEGER NOT NULL DEFAULT 0 CHECK (ever_touched IN (0, 1))
++);
++CREATE TABLE nextcloud_source_decommissions (
++    operation_id TEXT PRIMARY KEY,
++    pair_operation_id TEXT NOT NULL UNIQUE REFERENCES nextcloud_source_pairings(operation_id) ON DELETE RESTRICT,
++    tenant_id INTEGER NOT NULL,
++    knowledge_base_id TEXT NOT NULL UNIQUE,
++    datasource_id TEXT NOT NULL UNIQUE,
++    nextcloud_instance_id TEXT NOT NULL,
++    binding_id TEXT NOT NULL,
++    publication_epoch INTEGER NOT NULL CHECK (publication_epoch >= 0),
++    key_id TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('prepared', 'acknowledged')),
++    inventory_sha256 TEXT NOT NULL DEFAULT '',
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    UNIQUE (nextcloud_instance_id, binding_id)
++);
++CREATE TRIGGER nextcloud_virgin_pair_insert AFTER INSERT ON nextcloud_source_pairings
++BEGIN
++    INSERT INTO nextcloud_source_virgin(pair_operation_id) VALUES (NEW.operation_id);
++END;
++
++CREATE TRIGGER nextcloud_virgin_sync_log BEFORE INSERT ON sync_logs
++BEGIN
++    SELECT RAISE(ABORT, 'nextcloud_source_decommissioned')
++    WHERE EXISTS (SELECT 1 FROM nextcloud_source_decommissions WHERE datasource_id = NEW.data_source_id);
++    UPDATE nextcloud_source_virgin SET ever_touched = 1
++    WHERE pair_operation_id = (SELECT operation_id FROM nextcloud_source_pairings
++        WHERE datasource_id = NEW.data_source_id);
++END;
++CREATE TRIGGER nextcloud_virgin_knowledge BEFORE INSERT ON knowledges
++BEGIN
++    SELECT RAISE(ABORT, 'nextcloud_source_decommissioned')
++    WHERE EXISTS (SELECT 1 FROM nextcloud_source_decommissions WHERE knowledge_base_id = NEW.knowledge_base_id);
++    UPDATE nextcloud_source_virgin SET ever_touched = 1
++    WHERE pair_operation_id = (SELECT operation_id FROM nextcloud_source_pairings
++        WHERE knowledge_base_id = NEW.knowledge_base_id);
++END;
++CREATE TRIGGER nextcloud_virgin_chunk BEFORE INSERT ON chunks
++BEGIN
++    SELECT RAISE(ABORT, 'nextcloud_source_decommissioned')
++    WHERE EXISTS (SELECT 1 FROM nextcloud_source_decommissions WHERE knowledge_base_id = NEW.knowledge_base_id);
++    UPDATE nextcloud_source_virgin SET ever_touched = 1
++    WHERE pair_operation_id = (SELECT operation_id FROM nextcloud_source_pairings
++        WHERE knowledge_base_id = NEW.knowledge_base_id);
++END;
++CREATE TRIGGER nextcloud_virgin_version BEFORE INSERT ON nextcloud_source_versions
++BEGIN
++    SELECT RAISE(ABORT, 'nextcloud_source_decommissioned')
++    WHERE EXISTS (SELECT 1 FROM nextcloud_source_decommissions WHERE datasource_id = NEW.datasource_id);
++    UPDATE nextcloud_source_virgin SET ever_touched = 1
++    WHERE pair_operation_id = (SELECT operation_id FROM nextcloud_source_pairings
++        WHERE datasource_id = NEW.datasource_id);
++END;
++CREATE TRIGGER nextcloud_virgin_event_connection BEFORE INSERT ON nextcloud_event_connections
++BEGIN
++    SELECT RAISE(ABORT, 'nextcloud_source_decommissioned')
++    WHERE EXISTS (SELECT 1 FROM nextcloud_source_decommissions WHERE datasource_id = NEW.datasource_id);
++    UPDATE nextcloud_source_virgin SET ever_touched = 1
++    WHERE pair_operation_id = (SELECT operation_id FROM nextcloud_source_pairings
++        WHERE datasource_id = NEW.datasource_id);
++END;
++CREATE TRIGGER nextcloud_decommission_resume_guard BEFORE UPDATE OF status ON data_sources
++WHEN NEW.status <> 'paused' AND EXISTS (
++    SELECT 1 FROM nextcloud_source_decommissions WHERE datasource_id = NEW.id)
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_decommissioned'); END;
++CREATE TRIGGER nextcloud_decommission_row_guard_update
++BEFORE UPDATE ON nextcloud_source_decommissions
++WHEN NEW.operation_id IS NOT OLD.operation_id
++ OR NEW.pair_operation_id IS NOT OLD.pair_operation_id
++ OR NEW.tenant_id IS NOT OLD.tenant_id
++ OR NEW.knowledge_base_id IS NOT OLD.knowledge_base_id
++ OR NEW.datasource_id IS NOT OLD.datasource_id
++ OR NEW.nextcloud_instance_id IS NOT OLD.nextcloud_instance_id
++ OR NEW.binding_id IS NOT OLD.binding_id
++ OR NEW.publication_epoch IS NOT OLD.publication_epoch
++ OR NEW.key_id IS NOT OLD.key_id
++ OR (OLD.state <> 'prepared' AND NEW.state IS NOT OLD.state)
++ OR (NEW.state = 'prepared' AND NEW.inventory_sha256 <> '')
++ OR (NEW.state = 'acknowledged' AND NEW.inventory_sha256 <>
++    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
++ OR (OLD.state = 'acknowledged' AND NEW.inventory_sha256 IS NOT OLD.inventory_sha256)
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_decommission_immutable'); END;
++CREATE TRIGGER nextcloud_decommission_row_guard_delete
++BEFORE DELETE ON nextcloud_source_decommissions
++BEGIN SELECT RAISE(ABORT, 'nextcloud_source_decommission_immutable'); END;
++CREATE TRIGGER nextcloud_virgin_row_guard
++BEFORE UPDATE ON nextcloud_source_virgin
++WHEN NEW.pair_operation_id IS NOT OLD.pair_operation_id
++ OR (OLD.ever_touched = 1 AND NEW.ever_touched <> 1)
++BEGIN SELECT RAISE(ABORT, 'nextcloud_virgin_proof_immutable'); END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -24325,3 +25597,220 @@ index 00000000..20115907
 +ALTER TABLE nextcloud_gc_items
 +    ADD CONSTRAINT nextcloud_gc_items_state_check
 +    CHECK (state IN ('pending', 'blocked', 'deleting', 'collected'));
+diff --git a/migrations/versioned/000122_nextcloud_gc_derived_inventory.down.sql b/migrations/versioned/000122_nextcloud_gc_derived_inventory.down.sql
+new file mode 100644
+index 00000000..ec48645e
+--- /dev/null
++++ b/migrations/versioned/000122_nextcloud_gc_derived_inventory.down.sql
+@@ -0,0 +1,14 @@
++-- An inventory with exact derived identities cannot be represented by 000121.
++DO $$
++BEGIN
++    IF EXISTS (SELECT 1 FROM nextcloud_gc_items
++               WHERE kind IN ('derived_chunk', 'postgres_embedding', 'sqlite_embedding')) THEN
++        RAISE EXCEPTION 'Nextcloud GC has durable derived-index inventory';
++    END IF;
++END $$;
++
++ALTER TABLE nextcloud_gc_items
++    DROP CONSTRAINT nextcloud_gc_items_kind_check;
++ALTER TABLE nextcloud_gc_items
++    ADD CONSTRAINT nextcloud_gc_items_kind_check
++    CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index'));
+diff --git a/migrations/versioned/000122_nextcloud_gc_derived_inventory.up.sql b/migrations/versioned/000122_nextcloud_gc_derived_inventory.up.sql
+new file mode 100644
+index 00000000..7013119a
+--- /dev/null
++++ b/migrations/versioned/000122_nextcloud_gc_derived_inventory.up.sql
+@@ -0,0 +1,21 @@
++-- Preserve exact local derived-row identities before any future index cleanup.
++ALTER TABLE nextcloud_gc_items
++    DROP CONSTRAINT nextcloud_gc_items_kind_check;
++ALTER TABLE nextcloud_gc_items
++    ADD CONSTRAINT nextcloud_gc_items_kind_check
++    CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index',
++                   'derived_chunk', 'postgres_embedding', 'sqlite_embedding'));
++
++-- Earlier workers could call an empty local-row inventory complete while a
++-- historical graph/Wiki or external index still existed. Reopen those jobs;
++-- resource items already acknowledged as collected remain idempotent.
++INSERT INTO nextcloud_gc_items (job_id, kind, object_ref, state)
++SELECT id, 'derived_index', knowledge_id, 'blocked'
++FROM nextcloud_gc_jobs
++ON CONFLICT (job_id, kind, object_ref) DO NOTHING;
++
++UPDATE nextcloud_gc_jobs
++SET state = 'blocked', completed_at = NULL,
++    last_error_code = 'derived_provenance_unverified',
++    next_attempt_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
++WHERE state = 'collected';
+diff --git a/migrations/versioned/000123_nextcloud_empty_decommission.down.sql b/migrations/versioned/000123_nextcloud_empty_decommission.down.sql
+new file mode 100644
+index 00000000..df309c90
+--- /dev/null
++++ b/migrations/versioned/000123_nextcloud_empty_decommission.down.sql
+@@ -0,0 +1,21 @@
++DO $$ BEGIN
++    IF EXISTS (SELECT 1 FROM nextcloud_source_decommissions) THEN
++        RAISE EXCEPTION 'cannot downgrade a retired Nextcloud source';
++    END IF;
++END $$;
++DROP TRIGGER IF EXISTS nextcloud_virgin_row_guard ON nextcloud_source_virgin;
++DROP FUNCTION IF EXISTS nextcloud_virgin_row_guard();
++DROP TRIGGER IF EXISTS nextcloud_decommission_row_guard ON nextcloud_source_decommissions;
++DROP FUNCTION IF EXISTS nextcloud_decommission_row_guard();
++DROP TRIGGER IF EXISTS nextcloud_decommission_resume_guard ON data_sources;
++DROP FUNCTION IF EXISTS nextcloud_decommission_resume_guard();
++DROP TRIGGER IF EXISTS nextcloud_virgin_event_connection ON nextcloud_event_connections;
++DROP TRIGGER IF EXISTS nextcloud_virgin_version ON nextcloud_source_versions;
++DROP TRIGGER IF EXISTS nextcloud_virgin_chunk ON chunks;
++DROP TRIGGER IF EXISTS nextcloud_virgin_knowledge ON knowledges;
++DROP TRIGGER IF EXISTS nextcloud_virgin_sync_log ON sync_logs;
++DROP FUNCTION IF EXISTS nextcloud_virgin_touch();
++DROP TRIGGER IF EXISTS nextcloud_virgin_pair_insert ON nextcloud_source_pairings;
++DROP FUNCTION IF EXISTS nextcloud_virgin_pair_insert();
++DROP TABLE IF EXISTS nextcloud_source_decommissions;
++DROP TABLE IF EXISTS nextcloud_source_virgin;
+diff --git a/migrations/versioned/000123_nextcloud_empty_decommission.up.sql b/migrations/versioned/000123_nextcloud_empty_decommission.up.sql
+new file mode 100644
+index 00000000..3e6f1715
+--- /dev/null
++++ b/migrations/versioned/000123_nextcloud_empty_decommission.up.sql
+@@ -0,0 +1,137 @@
++-- Only pairs created after this migration have a durable never-touched proof.
++-- Existing pairs are deliberately ineligible: historical sync logs may have
++-- been pruned, so an empty current KB does not prove no old derived copies.
++CREATE TABLE nextcloud_source_virgin (
++    pair_operation_id TEXT PRIMARY KEY REFERENCES nextcloud_source_pairings(operation_id) ON DELETE CASCADE,
++    ever_touched BOOLEAN NOT NULL DEFAULT FALSE
++);
++
++CREATE TABLE nextcloud_source_decommissions (
++    operation_id TEXT PRIMARY KEY,
++    pair_operation_id TEXT NOT NULL UNIQUE REFERENCES nextcloud_source_pairings(operation_id) ON DELETE RESTRICT,
++    tenant_id BIGINT NOT NULL,
++    knowledge_base_id TEXT NOT NULL UNIQUE,
++    datasource_id TEXT NOT NULL UNIQUE,
++    nextcloud_instance_id TEXT NOT NULL,
++    binding_id TEXT NOT NULL,
++    publication_epoch BIGINT NOT NULL CHECK (publication_epoch >= 0),
++    key_id TEXT NOT NULL,
++    state TEXT NOT NULL CHECK (state IN ('prepared', 'acknowledged')),
++    inventory_sha256 TEXT NOT NULL DEFAULT '',
++    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    UNIQUE (nextcloud_instance_id, binding_id)
++);
++
++CREATE FUNCTION nextcloud_virgin_pair_insert() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_virgin_pair$
++BEGIN
++    INSERT INTO nextcloud_source_virgin(pair_operation_id) VALUES (NEW.operation_id);
++    RETURN NEW;
++END
++$nextcloud_virgin_pair$;
++CREATE TRIGGER nextcloud_virgin_pair_insert
++AFTER INSERT ON nextcloud_source_pairings FOR EACH ROW
++EXECUTE FUNCTION nextcloud_virgin_pair_insert();
++
++-- Every legitimate first content or event-admission path burns the virgin
++-- proof in the same transaction. Locking the proof serializes each writer
++-- with the decommission compare-and-swap.
++CREATE FUNCTION nextcloud_virgin_touch() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_virgin_touch$
++DECLARE
++    pair_id TEXT;
++    touched BOOLEAN;
++BEGIN
++    IF TG_TABLE_NAME = 'sync_logs' THEN
++        SELECT operation_id INTO pair_id FROM nextcloud_source_pairings
++        WHERE datasource_id = NEW.data_source_id;
++    ELSIF TG_TABLE_NAME IN ('nextcloud_source_versions', 'nextcloud_event_connections') THEN
++        SELECT operation_id INTO pair_id FROM nextcloud_source_pairings
++        WHERE datasource_id = NEW.datasource_id;
++    ELSE
++        SELECT operation_id INTO pair_id FROM nextcloud_source_pairings
++        WHERE knowledge_base_id = NEW.knowledge_base_id;
++    END IF;
++    IF pair_id IS NULL THEN
++        RETURN NEW;
++    END IF;
++    SELECT ever_touched INTO touched FROM nextcloud_source_virgin
++    WHERE pair_operation_id = pair_id FOR UPDATE;
++    IF EXISTS (SELECT 1 FROM nextcloud_source_decommissions WHERE pair_operation_id = pair_id) THEN
++        RAISE EXCEPTION 'nextcloud_source_decommissioned' USING ERRCODE = '23514';
++    END IF;
++    IF touched IS NOT NULL THEN
++        UPDATE nextcloud_source_virgin SET ever_touched = TRUE WHERE pair_operation_id = pair_id;
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_virgin_touch$;
++CREATE TRIGGER nextcloud_virgin_sync_log
++BEFORE INSERT ON sync_logs FOR EACH ROW EXECUTE FUNCTION nextcloud_virgin_touch();
++CREATE TRIGGER nextcloud_virgin_knowledge
++BEFORE INSERT ON knowledges FOR EACH ROW EXECUTE FUNCTION nextcloud_virgin_touch();
++CREATE TRIGGER nextcloud_virgin_chunk
++BEFORE INSERT ON chunks FOR EACH ROW EXECUTE FUNCTION nextcloud_virgin_touch();
++CREATE TRIGGER nextcloud_virgin_version
++BEFORE INSERT ON nextcloud_source_versions FOR EACH ROW EXECUTE FUNCTION nextcloud_virgin_touch();
++CREATE TRIGGER nextcloud_virgin_event_connection
++BEFORE INSERT ON nextcloud_event_connections FOR EACH ROW EXECUTE FUNCTION nextcloud_virgin_touch();
++
++CREATE FUNCTION nextcloud_decommission_resume_guard() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_decommission_resume$
++BEGIN
++    IF NEW.status <> 'paused' AND EXISTS (
++        SELECT 1 FROM nextcloud_source_decommissions WHERE datasource_id = NEW.id
++    ) THEN
++        RAISE EXCEPTION 'nextcloud_source_decommissioned' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_decommission_resume$;
++CREATE TRIGGER nextcloud_decommission_resume_guard
++BEFORE UPDATE OF status ON data_sources FOR EACH ROW
++EXECUTE FUNCTION nextcloud_decommission_resume_guard();
++
++CREATE FUNCTION nextcloud_decommission_row_guard() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_decommission_row$
++BEGIN
++    IF TG_OP = 'DELETE' THEN
++        RAISE EXCEPTION 'nextcloud_source_decommission_immutable' USING ERRCODE = '23514';
++    END IF;
++    IF NEW.operation_id IS DISTINCT FROM OLD.operation_id
++       OR NEW.pair_operation_id IS DISTINCT FROM OLD.pair_operation_id
++       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
++       OR NEW.knowledge_base_id IS DISTINCT FROM OLD.knowledge_base_id
++       OR NEW.datasource_id IS DISTINCT FROM OLD.datasource_id
++       OR NEW.nextcloud_instance_id IS DISTINCT FROM OLD.nextcloud_instance_id
++       OR NEW.binding_id IS DISTINCT FROM OLD.binding_id
++       OR NEW.publication_epoch IS DISTINCT FROM OLD.publication_epoch
++       OR NEW.key_id IS DISTINCT FROM OLD.key_id
++       OR (OLD.state <> 'prepared' AND NEW.state IS DISTINCT FROM OLD.state)
++       OR (NEW.state = 'prepared' AND NEW.inventory_sha256 <> '')
++       OR (NEW.state = 'acknowledged'
++           AND NEW.inventory_sha256 <> 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
++       OR (OLD.state = 'acknowledged' AND NEW.inventory_sha256 IS DISTINCT FROM OLD.inventory_sha256) THEN
++        RAISE EXCEPTION 'nextcloud_source_decommission_immutable' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_decommission_row$;
++CREATE TRIGGER nextcloud_decommission_row_guard
++BEFORE UPDATE OR DELETE ON nextcloud_source_decommissions FOR EACH ROW
++EXECUTE FUNCTION nextcloud_decommission_row_guard();
++
++CREATE FUNCTION nextcloud_virgin_row_guard() RETURNS trigger
++LANGUAGE plpgsql AS $nextcloud_virgin_row$
++BEGIN
++    IF TG_OP = 'UPDATE' AND (NEW.pair_operation_id IS DISTINCT FROM OLD.pair_operation_id
++        OR (OLD.ever_touched AND NOT NEW.ever_touched)) THEN
++        RAISE EXCEPTION 'nextcloud_virgin_proof_immutable' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END
++$nextcloud_virgin_row$;
++CREATE TRIGGER nextcloud_virgin_row_guard
++BEFORE UPDATE ON nextcloud_source_virgin FOR EACH ROW
++EXECUTE FUNCTION nextcloud_virgin_row_guard();

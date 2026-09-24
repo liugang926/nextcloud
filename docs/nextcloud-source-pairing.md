@@ -167,7 +167,7 @@ the proof. This is an empty-source retirement path, not general GC.
    **empty** inventory and zero visible/running work. HTTP 202 from WeKnora
    means the remote ACK or local checkpoint is uncertain; retry the same UUID.
    `GET` on the WeKnora decommission path reads its nonsecret checkpoint.
-3. Only after Nextcloud status says `acknowledged`, its administrator calls
+3. Only after **both** Nextcloud and WeKnora status say `acknowledged`, its administrator calls
    `POST /api/v1/admin/bindings/{id}/decommission/finalize` with that UUID.
    Nextcloud atomically retires the binding ID, pair, event connection and all
    machine credentials. WeKnora retains its paused data-source and immutable
