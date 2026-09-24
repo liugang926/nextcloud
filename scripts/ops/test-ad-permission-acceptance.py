@@ -105,6 +105,18 @@ class ProbeContractTest(unittest.TestCase):
                 PROBE.knowledge_probe("https://localhost:443", "document-test", "jwt")
             with self.assertRaises(PROBE.ProbeError):
                 PROBE.search_probe("https://localhost:443", fixture_data(), "jwt")
+            with self.assertRaises(PROBE.ProbeError):
+                PROBE.direct_content_probe("https://localhost:443", "document-test", "jwt")
+
+    def test_old_jwt_direct_content_requires_both_chunk_and_preview_decisions(self):
+        good = json.dumps({"success": True, "data": [{"id": "chunk-test"}]}).encode()
+        with mock.patch.object(PROBE, "http", side_effect=[(200, good), (200, b"preview")]):
+            self.assertTrue(PROBE.direct_content_probe("https://localhost:443", "document-test", "jwt"))
+        with mock.patch.object(PROBE, "http", side_effect=[(403, b""), (404, b"")]):
+            self.assertFalse(PROBE.direct_content_probe("https://localhost:443", "document-test", "jwt"))
+        with mock.patch.object(PROBE, "http", side_effect=[(200, good), (403, b"")]):
+            with self.assertRaises(PROBE.ProbeError):
+                PROBE.direct_content_probe("https://localhost:443", "document-test", "jwt")
 
     def test_search_checks_kb_and_document_scopes_independently(self):
         scopes = []

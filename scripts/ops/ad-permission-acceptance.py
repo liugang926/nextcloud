@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / "apps/integration_weknora/tests"))
 from machine_auth import signed_headers  # noqa: E402
+from synthetic_ldap_topology import TopologyError, validate_topology  # noqa: E402
 
 GUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 BINDING = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -239,6 +240,32 @@ def knowledge_probe(wk_origin, knowledge_id, token):
     return True
 
 
+def direct_content_probe(wk_origin, knowledge_id, token):
+    """Check old-JWT chunk and preview routes for one synthetic document."""
+    checks = {}
+    for label, path in (("chunks", "/api/v1/chunks/" + knowledge_id),
+                        ("preview", "/api/v1/knowledge/" + knowledge_id + "/preview")):
+        status, body = http("GET", wk_origin + path,
+                            headers={"Authorization": "Bearer " + token})
+        if status in {403, 404}:
+            checks[label] = False
+            continue
+        if status != 200:
+            raise ProbeError(f"WeKnora {label} read returned HTTP {status}")
+        if label == "chunks":
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError as error:
+                raise ProbeError("WeKnora chunk list returned invalid JSON") from error
+            if result.get("success") is not True or not isinstance(result.get("data"), list) or \
+                    not result["data"]:
+                raise ProbeError("WeKnora chunk list returned invalid result")
+        checks[label] = True
+    if checks["chunks"] != checks["preview"]:
+        raise ProbeError("WeKnora chunk and preview access disagree")
+    return checks["chunks"]
+
+
 def search_probe(wk_origin, data, token):
     def run(scope):
         payload = json.dumps({"query": data["synthetic_query"], **scope}).encode()
@@ -278,8 +305,27 @@ def main():
     parser.add_argument("--weknora-origin", required=True)
     parser.add_argument("--allow-loopback-http", action="store_true")
     parser.add_argument("--allow-remote-test-environment", action="store_true")
+    parser.add_argument("--topology-ldif", type=Path,
+                        help="fresh, attribute-limited LDAP export for primary/nested cases")
+    parser.add_argument("--grant-group-guid", help="objectGUID of the group granting folder and KB access")
+    parser.add_argument("--child-group-guid", help="direct child group objectGUID for nested_group")
     args = parser.parse_args()
     data, expectations = fixture(args.fixture, args.case)
+    topology_result = None
+    if args.case in {"primary_group", "nested_group"}:
+        if args.topology_ldif is None or args.grant_group_guid is None:
+            raise ProbeError("primary/nested phases require --topology-ldif and --grant-group-guid")
+        if args.case == "nested_group" and args.child_group_guid is None:
+            raise ProbeError("nested_group also requires --child-group-guid")
+        try:
+            age_seconds = dt.datetime.now(dt.timezone.utc).timestamp() - args.topology_ldif.stat().st_mtime
+            if age_seconds < -5 or age_seconds > 120:
+                raise ProbeError("LDAP topology export must be captured within 120 seconds of this probe")
+            topology_result = validate_topology(
+                data, args.case, args.topology_ldif, args.grant_group_guid,
+                args.child_group_guid)
+        except TopologyError as error:
+            raise ProbeError("LDAP topology preflight failed: " + str(error)) from error
     nc_origin = origin(args.nextcloud_origin,
                        allow_remote_https=args.allow_remote_test_environment,
                        allow_loopback_http=args.allow_loopback_http)
@@ -290,6 +336,8 @@ def main():
 
     report = {"case": args.case, "checked_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
               "checks": {}}
+    if topology_result is not None:
+        report["ldap_topology"] = topology_result
     for label in ("a", "b"):
         account = data["accounts"][label]
         expected = expectations[label]

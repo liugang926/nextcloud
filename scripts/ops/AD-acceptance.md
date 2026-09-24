@@ -133,6 +133,14 @@ authorization chain could not be verified.
 | `group_removed` | Remove A from the sole authorized group | A denied after source and WeKnora propagation; B remains denied |
 | `user_disabled` | Disable A in AD without deleting its mapping | A's LDAP login, Nextcloud DAV root/file, source, knowledge and retrieval all denied after the measured propagation window; old WeKnora sessions/tokens need a separate recheck |
 
+For `primary_group` and `nested_group`, the probe now requires
+`--topology-ldif` plus `--grant-group-guid` and, for nesting,
+`--child-group-guid`. The export must be an attribute-limited snapshot from
+the isolated directory taken within 120 seconds of the HTTP matrix. It
+verifies the claimed group path and excludes B before testing access. The
+exact export command and the in-memory old-JWT revocation watcher are in
+[the synthetic LDAP runbook](../../docs/synthetic-ldap-acceptance.md).
+
 For the `user_disabled` case the script cannot obtain a new WeKnora JWT, so
 `knowledge=false` and `search=false` mean **no new JWT can be used**. Retain a
 pre-disable token only in a protected, separate test tool and verify that its

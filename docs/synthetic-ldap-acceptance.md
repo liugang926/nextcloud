@@ -50,6 +50,108 @@ python3 scripts/ops/ad-permission-acceptance.py \
   --allow-loopback-http
 ```
 
+### Repeatable primary-group and nested-group preflight
+
+The `primary_group` and `nested_group` matrix cases now require a fresh,
+attribute-limited LDAP export. This prevents a green access result from being
+credited to the intended group mechanism when the test user actually has a
+different grant path. Capture the export **after** each synthetic membership
+mutation and run the HTTP matrix within 120 seconds. The example assumes a
+temporary, loopback-only LDAPS debug port on the disposable directory;
+otherwise run `ldapsearch` inside that project's private network. Store the
+export under the private scratch directory and remove it during cleanup.
+
+```sh
+umask 077
+LDAPTLS_CACERT="$SCRATCH/certs/ca.crt" LDAPTLS_REQCERT=demand \
+  ldapsearch -x -LLL -o ldif-wrap=no \
+  -H ldaps://127.0.0.1:11636 \
+  -D "$LDAP_BIND_DN" -y "$SCRATCH/bind-password" \
+  -b 'dc=example,dc=test' \
+  '(|(objectClass=adTestUser)(objectClass=adTestGroup))' \
+  dn objectClass objectGUID objectSid primaryGroupID member uniqueMember \
+  > "$SCRATCH/topology.ldif"
+
+python3 scripts/ops/ad-permission-acceptance.py \
+  --fixture "$SCRATCH/fixture.json" --case primary_group \
+  --topology-ldif "$SCRATCH/topology.ldif" \
+  --grant-group-guid "$PRIMARY_GRANT_GROUP_GUID" \
+  --nextcloud-origin http://127.0.0.1:18192 \
+  --weknora-origin http://127.0.0.1:18193 --allow-loopback-http
+
+# Re-export after switching to the nested-group phase, then run:
+python3 scripts/ops/ad-permission-acceptance.py \
+  --fixture "$SCRATCH/fixture.json" --case nested_group \
+  --topology-ldif "$SCRATCH/topology.ldif" \
+  --grant-group-guid "$PARENT_GRANT_GROUP_GUID" \
+  --child-group-guid "$CHILD_GROUP_GUID" \
+  --nextcloud-origin http://127.0.0.1:18192 \
+  --weknora-origin http://127.0.0.1:18193 --allow-loopback-http
+```
+
+The preflight decodes AD binary GUID/SID values, checks the primary-group SID
+or direct child→parent edge, rejects alternate grants that would mask the
+intended path, excludes B, and rejects cycles. It handles simple synthetic DNs
+only. Compare WeKnora's synchronized effective groups and Nextcloud's LDAP
+group view separately; one LDIF export and boolean HTTP results cannot prove
+both services used the same directory snapshot or resolve enterprise AD's
+complex DN/ranged-membership behavior.
+
+The pre-existing `team_folder_acl_http_smoke.py` automates a Team folder's
+advanced file ACL deny, restoration, and group-removal checks on a disposable
+**local-account** fixture. For a synthetic LDAP Team folder, perform the same
+ACL transitions in the isolated stack and run the `team_acl_deny` and
+`baseline` cases with the LDAP-backed fixture. The local-account smoke does
+not establish LDAP-backed or production Team folder behavior.
+
+### Identity collisions and an old-JWT revocation window
+
+With A and B already mapped to their distinct live LDAP GUIDs, run the
+loopback-only identity probe using administrator credentials from the protected
+environment. It checks that the exact mapping is idempotent, cross GUID↔UID
+combinations, an unrelated GUID, wrong directory and an email-shaped identity
+are rejected, and the registry is unchanged. No mappings are provisioned by
+the probe.
+
+```sh
+export AD_ACCEPTANCE_TEST_ENV=isolated-test-accounts
+# Load AD_TEST_NEXTCLOUD_ADMIN_USER and AD_TEST_NEXTCLOUD_ADMIN_PASSWORD
+# through the protected process environment.
+python3 scripts/ops/synthetic-identity-conflict-smoke.py \
+  --fixture "$SCRATCH/fixture.json" \
+  --nextcloud-origin http://127.0.0.1:18192
+```
+
+To measure denial with **the same JWTs issued before revocation**, start the
+watch while the `baseline` fixture case passes. Wait for its
+`baseline_ready` line, then remove A's sole grant in the private directory in
+another terminal. The watcher keeps both tokens in memory and retries DAV,
+signed source authorization, direct knowledge/chunk/preview, and KB-scoped and
+document-scoped search until the `group_removed` fixture expectations all
+hold. A 503 is a failed poll and never counts as denial. Record the LDAP
+mutation time separately from the watcher's `target_observed` time.
+
+```sh
+python3 scripts/ops/synthetic-ldap-revocation-watch.py \
+  --fixture "$SCRATCH/fixture.json" --target-case group_removed \
+  --nextcloud-origin http://127.0.0.1:18192 \
+  --weknora-origin http://127.0.0.1:18193 \
+  --allow-loopback-http --timeout-seconds 120
+```
+
+The watch covers content grant revocation while both accounts remain enabled;
+it does not claim account-disablement or a live chat stream. Rerun the ordinary
+matrix after directory synchronization to prove fresh login behavior.
+
+The harness contracts can be rerun without Docker:
+
+```sh
+python3 scripts/ops/test-ad-permission-acceptance.py
+python3 scripts/ops/test-synthetic-ldap-topology.py
+python3 scripts/ops/test-synthetic-identity-conflict-smoke.py
+python3 scripts/ops/test-synthetic-ldap-revocation-watch.py
+```
+
 ## Sanitized observations (2026-09-24 UTC)
 
 Both users authenticated to Nextcloud's DAV root and WeKnora LDAP before and after the group change. The exact-source authorization decision agreed with the corresponding WebDAV file result.
@@ -90,7 +192,7 @@ docker compose -p "$PROJECT" --env-file "$SCRATCH/.env" \
 
 ## Limits and cleanup
 
-The fixture models GUID/SID and primary-group-shaped attributes, but OpenLDAP does not establish enterprise AD behavior for nested groups, primary group resolution, disabled-account propagation, Kerberos/SSO, or production folder ACLs. This drill covered the baseline and `group_removed` cases and old JWT direct read paths. It did not establish the full Q&A citation flow or every alternate retrieval entry point listed in [AD-acceptance.md](../scripts/ops/AD-acceptance.md). Run those independently before marking the broader AD acceptance complete.
+The fixture models GUID/SID and primary-group-shaped attributes, but OpenLDAP does not establish enterprise AD behavior for nested groups, primary group resolution, disabled-account propagation, Kerberos/SSO, or production folder ACLs. The recorded cross-system drill covered the baseline and `group_removed` cases and old JWT direct read paths. The new primary/nested preflight, identity-conflict probe, and revocation watcher have offline contracts; a fresh cross-system primary/nested/Team run has **not** yet been recorded. The patched WeKnora LDAP adapter's separate network integration suite passed its binary GUID/SID, primary/nested, disabled-account, LDAPS/StartTLS and failure-path tests in a disposable OpenLDAP project on 2026-09-24. It did not establish the full Q&A citation flow or every alternate retrieval entry point listed in [AD-acceptance.md](../scripts/ops/AD-acceptance.md). Run those independently before marking the broader AD acceptance complete.
 
 After saving only redacted results, remove **only this project** and its scratch credentials. Verify the project's containers and volumes are gone; do not prune global Docker resources or another development stack.
 
