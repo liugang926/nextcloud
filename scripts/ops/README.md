@@ -2,7 +2,7 @@
 
 ## Local Nextcloud source pairing
 
-Install Nextcloud app 0.4.19 and deploy the WeKnora patch before this probe.
+Install Nextcloud app 0.4.20 and deploy the WeKnora patch before this probe.
 Keep the selected Nextcloud binding active with its original root. As a
 WeKnora administrator, create an **empty, dedicated** knowledge base in the
 same tenant; record its ID and the canonical positive decimal tenant ID. A
@@ -188,7 +188,7 @@ document is indexed or satisfy the AD acceptance gate.
 
 ## Local Nextcloud to WeKnora delivery probe
 
-With both local stacks healthy, Nextcloud app 0.4.19 installed, and a new
+With both local stacks healthy, Nextcloud app 0.4.20 installed, and a new
 synthetic data source actively source-paired as above, set
 `WEKNORA_TEST_ADMIN_EMAIL` and `WEKNORA_TEST_ADMIN_PASSWORD` to the local
 WeKnora administrator credentials. The probe requires that neither side has
@@ -209,8 +209,8 @@ python3 scripts/ops/local-event-pipeline-smoke.py --data-source-id YOUR_SYNTHETI
 The probe refuses an already active WeKnora or Nextcloud event connection.
 It pairs the synthetic data source's event connection, saves the one-time event
 credential in Nextcloud,
-creates a temporary WebDAV file, executes the Nextcloud delivery job, and
-compares the durable receipt watermarks on both sides. It removes the file and
+creates a temporary WebDAV file, waits for the local sender worker or
+forces a bounded delivery pass, and compares the durable receipt watermarks on both sides. It removes the file and
 revokes both test connections on exit. An existing retained outbox can require
 several job executions to catch up. A matching watermark proves signed
 delivery and durable inbox receipt, **not** dispatch, parsing, publication, or

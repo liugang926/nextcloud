@@ -124,14 +124,18 @@ def verify_mount(compose, env, app_dir, port):
                volume.get("target") == "/var/www/html/custom_apps/integration_weknora"
                for volume in service["volumes"]):
         raise AssertionError("isolated app mount did not override live source")
-    if not any(str(item.get("published")) == str(port) for item in service["ports"]):
-        raise AssertionError("isolated HTTP port did not override live port")
+    if not any(str(item.get("published")) == str(port) and
+               item.get("host_ip") == "127.0.0.1" for item in service["ports"]):
+        raise AssertionError("isolated HTTP port is not bound to loopback")
 
 
 def run_case(case, values):
     project = "nc-upgrade-tombstone-" + secrets.token_hex(4)
     port = free_port()
-    env = {**os.environ, "NEXTCLOUD_HTTP_PORT": str(port)}
+    # The main development stack may opt into LAN access. Keep this
+    # disposable upgrade fixture bound to loopback only.
+    env = {**os.environ, "NEXTCLOUD_HTTP_PORT": str(port),
+           "NEXTCLOUD_HTTP_BIND_IP": "127.0.0.1", "NEXTCLOUD_LAN_HOST": ""}
     with tempfile.TemporaryDirectory(prefix="nc-upgrade-tombstone-") as tmp:
         temp = Path(tmp)
         archive = subprocess.run(
@@ -216,8 +220,8 @@ VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
             source = ROOT / "apps/integration_weknora"
             for name in ("appinfo", "lib", "css", "js", "templates"):
                 shutil.copytree(source / name, app_dir / name, dirs_exist_ok=True)
-            if "<version>0.4.19</version>" not in (app_dir / "appinfo/info.xml").read_text():
-                raise AssertionError("upgrade app is not version 0.4.19")
+            if "<version>0.4.20</version>" not in (app_dir / "appinfo/info.xml").read_text():
+                raise AssertionError("upgrade app is not version 0.4.20")
             occ("upgrade")
 
             if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_src_pair';") != "1":
@@ -293,7 +297,7 @@ WHERE k.key_id = 'default' AND k.binding_id = 'upgrade-current'
                              "FROM oc_weknora_binding_id WHERE binding_id = 'upgrade-fresh';")
             if fresh_gate != "active|0":
                 raise AssertionError(f"new binding gate was not active|0: {fresh_gate}")
-            print(f"{case}: direct 0.4.6→0.4.19 upgrade tombstone smoke passed")
+            print(f"{case}: direct 0.4.6→0.4.20 upgrade tombstone smoke passed")
         finally:
             # The project name is random and every volume belongs to this
             # disposable Compose instance; existing development volumes stay.

@@ -14,6 +14,7 @@ content = "\n".join([
     f"NEXTCLOUD_ADMIN_PASSWORD={token_urlsafe(24)}",
     f"NEXTCLOUD_DB_PASSWORD={token_urlsafe(24)}",
     f"WEKNORA_SERVICE_TOKEN={token_urlsafe(32)}",
+    "NEXTCLOUD_HTTP_BIND_IP=127.0.0.1",
     "NEXTCLOUD_HTTP_PORT=18082",
     "",
 ])

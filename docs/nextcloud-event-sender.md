@@ -101,16 +101,20 @@ checkpoint divergence, compare its durable connection status and the local
 outbox before re-pairing; a Nextcloud restore may require a new connection and
 full source scan.
 
-The job is registered with a 60-second interval, but the standard Compose
-cron container invokes Nextcloud jobs on its own schedule (typically about
-five minutes). This implementation has no measured P95 10-second delivery
-guarantee. Use a dedicated, monitored background worker and measure the
-end-to-end latency before claiming that PRD target.
+The job remains registered with a 60-second interval as a fallback under
+ordinary Nextcloud cron. The local Compose stack also runs `event-worker`,
+which calls the bounded `occ integration_weknora:deliver-events` pass every
+five seconds as the `www-data` user. A pass has a 90-second process timeout;
+the worker retries after failure, and the database sender row lock serializes
+it with ordinary cron. Production operators must schedule and monitor an
+equivalent worker. This implementation has no measured end-to-end P95
+10-second delivery guarantee.
 
 Local verification:
 
 ```sh
 python3 apps/integration_weknora/tests/event_delivery_http_smoke.py
+docker compose exec -T -u www-data nextcloud php occ integration_weknora:deliver-events
 docker compose exec -T -u www-data nextcloud php occ background-job:list \
   --class='OCA\IntegrationWeknora\BackgroundJob\EventDeliveryJob' --output=json
 ```

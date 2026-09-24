@@ -33,7 +33,7 @@ services:
   nextcloud:
     image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
     ports:
-      - "127.0.0.1:${NEXTCLOUD_HTTP_PORT:-18082}:80"
+      - "${NEXTCLOUD_HTTP_BIND_IP:-127.0.0.1}:${NEXTCLOUD_HTTP_PORT:-18082}:80"
     environment:
       POSTGRES_HOST: db
       POSTGRES_DB: nextcloud
@@ -41,7 +41,7 @@ services:
       POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
       NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:?set NEXTCLOUD_ADMIN_USER in .env}
       NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?set NEXTCLOUD_ADMIN_PASSWORD in .env}
-      NEXTCLOUD_TRUSTED_DOMAINS: localhost nextcloud host.docker.internal
+      NEXTCLOUD_TRUSTED_DOMAINS: "localhost nextcloud host.docker.internal ${NEXTCLOUD_LAN_HOST:-}"
       REDIS_HOST: redis
       # This Compose stack is a local development environment. The sender
       # will accept exactly this Docker-network WeKnora origin, not an
@@ -86,6 +86,29 @@ services:
     volumes:
       - nextcloud-html:/var/www/html
       - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+
+  event-worker:
+    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    user: www-data
+    entrypoint: ["/bin/sh", "/srv/weknora-event-worker.sh"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
+      REDIS_HOST: redis
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
+    volumes:
+      - nextcloud-html:/var/www/html
+      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ./scripts/weknora-event-worker.sh:/srv/weknora-event-worker.sh:ro
     depends_on:
       nextcloud:
         condition: service_healthy

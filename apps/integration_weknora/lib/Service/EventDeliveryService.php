@@ -88,7 +88,7 @@ final class EventDeliveryService {
         }
         if ($page['items'] === []) {
             // An empty sender must yield its position in the due queue.
-            $this->deferPoll($bindingId, 30, $snapshot);
+            $this->deferPoll($bindingId, 30, $snapshot, true);
             return false;
         }
 
@@ -285,7 +285,8 @@ final class EventDeliveryService {
     }
 
     /** @param array<string, mixed>|null $snapshot */
-    private function deferPoll(string $bindingId, int $seconds, ?array $snapshot = null): void {
+    private function deferPoll(string $bindingId, int $seconds, ?array $snapshot = null,
+        bool $onlyIfStillEmpty = false): void {
         $this->db->beginTransaction();
         try {
             $row = $this->connections->row($bindingId, true);
@@ -296,6 +297,29 @@ final class EventDeliveryService {
                     ($row['connection_id'] === $snapshot['connection_id'] &&
                     $row['key_id'] === $snapshot['key_id'] &&
                     (int)$row['received_id'] === (int)$snapshot['received_id']))) {
+                if ($onlyIfStillEmpty) {
+                    // The first empty page was read before this row lock.
+                    // An append may have committed and woken the sender in
+                    // between. Observe it under the row lock before deferring;
+                    // a later append will wake us again after this commit.
+                    $pending = $this->db->getQueryBuilder();
+                    $pending->select('id')->from('weknora_outbox')
+                        ->where($pending->expr()->eq('binding_id',
+                            $pending->createNamedParameter($bindingId)))
+                        ->andWhere($pending->expr()->gt('id',
+                            $pending->createNamedParameter((int)$row['received_id'])))
+                        ->setMaxResults(1);
+                    $pendingResult = $pending->executeQuery();
+                    try {
+                        $hasPending = $pendingResult->fetchOne() !== false;
+                    } finally {
+                        $pendingResult->closeCursor();
+                    }
+                    if ($hasPending) {
+                        $this->db->commit();
+                        return;
+                    }
+                }
                 $update = $this->db->getQueryBuilder();
                 $update->update('weknora_event_conn')
                     ->set('next_attempt_at', $update->createNamedParameter(time() + $seconds))

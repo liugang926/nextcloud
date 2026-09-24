@@ -169,6 +169,13 @@ def main():
     mock_container = None
     folder_created = binding_created = connection_created = False
     with tempfile.TemporaryDirectory(prefix="weknora-event-smoke-") as tmp:
+        # This smoke drives the sender one pass at a time to assert retry and
+        # fairness state. Restore the dedicated worker after the fixture is
+        # removed so its five-second loop cannot race these assertions.
+        worker_running = "event-worker" in compose(
+            "ps", "--status", "running", "--services", "event-worker").splitlines()
+        if worker_running:
+            compose("stop", "event-worker")
         state_dir = Path(tmp)
         (state_dir / "mode").write_text("503")
         (state_dir / "received").write_text("0")
@@ -332,6 +339,8 @@ def main():
 
             code, _ = dav_request(root_url + "/second.txt", "PUT", dav_headers, b"second event")
             assert code in (201, 204)
+            assert int(sql("SELECT next_attempt_at FROM oc_weknora_event_conn "
+                           f"WHERE binding_id = '{binding_id}'")) == 0, "new hint did not wake idle sender"
             (state_dir / "mode").write_text("redirect")
             run_job(identifier)
             redirected = status(admin, connection_url, csrf)
@@ -372,6 +381,26 @@ def main():
             assert final["status"] == "active"
             assert int(final["received_through_event_id"]) > int(received["received_through_event_id"])
             verify_signature(requests_seen(state_dir)[-1], secret)
+            if worker_running:
+                # Let the restarted worker take an empty pass, then verify
+                # that a later file hint wakes and reaches the receiver.
+                compose("start", "event-worker")
+                time.sleep(6)
+                code, _ = dav_request(root_url + "/worker.txt", "PUT", dav_headers,
+                                      b"event worker delivery")
+                assert code in (201, 204), f"create worker event HTTP {code}"
+                started = time.monotonic()
+                previous_id = int(final["received_through_event_id"])
+                deadline = started + 20
+                while time.monotonic() < deadline:
+                    observed = status(admin, connection_url, csrf)
+                    if int(observed["received_through_event_id"]) > previous_id:
+                        verify_signature(requests_seen(state_dir)[-1], secret)
+                        print(f"local event worker wake-to-receipt sample: {time.monotonic() - started:.2f}s")
+                        break
+                    time.sleep(0.25)
+                else:
+                    raise AssertionError("running event worker did not deliver a new file hint")
             code, _ = request(admin, f"{binding_url}/{binding_id}", "DELETE",
                               {"requesttoken": csrf})
             assert code == 200, f"delete fixture binding HTTP {code}"
@@ -391,6 +420,8 @@ def main():
             if mock_container:
                 subprocess.run(["docker", "stop", mock_container], cwd=PROJECT,
                                text=True, capture_output=True, check=False)
+            if worker_running:
+                compose("start", "event-worker")
 
 
 if __name__ == "__main__":
