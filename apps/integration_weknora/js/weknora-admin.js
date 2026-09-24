@@ -33,6 +33,7 @@
         const connectionOrigin = document.getElementById('weknora-connection-origin');
         const connectionCredential = document.getElementById('weknora-connection-credential');
         const saveConnection = document.getElementById('weknora-save-connection');
+        const retryConnection = document.getElementById('weknora-retry-connection');
         const revokeConnection = document.getElementById('weknora-revoke-connection');
         const cancelRevoke = document.getElementById('weknora-cancel-revoke');
         const publicationForm = document.getElementById('weknora-publication-form');
@@ -50,6 +51,7 @@
         let withdrawalArmed = false;
         let connectionBusy = false;
         let connectionConfigured = false;
+        let pausedConnection = null;
         let connectionRequestEpoch = 0;
         let pairingRequestEpoch = 0;
         let revokeArmed = false;
@@ -136,6 +138,10 @@
                     return 'The event credential or receiver address is invalid. Check the selected binding and approved WeKnora origin.';
                 case 'connection_conflict':
                     return 'The event connection conflicts with an existing connection or pruned change history. Revoke the old local connection before pairing a new ID; pruned history needs operator reconciliation.';
+                case 'connection_changed':
+                    return 'The event connection changed since it was inspected. Refresh its status before retrying.';
+                case 'publication_stopped':
+                    return 'Publication is stopped for this binding. Resume it before retrying event delivery.';
                 case 'binding_unavailable':
                     return 'The selected binding or its publication root is unavailable. Check the current folder, owner and overlap before resuming.';
                 case 'pairing_unavailable':
@@ -260,6 +266,7 @@
             pairingDetails.hidden = true;
             refreshPairing.disabled = !pairingBinding.value;
             connectionConfigured = false;
+            pausedConnection = null;
             connectionDetails.hidden = true;
             resetRevoke();
             setConnectionControls();
@@ -379,6 +386,8 @@
             connectionBinding.disabled = connectionBusy || bindings.length === 0;
             refreshConnection.disabled = connectionBusy || !hasBinding;
             saveConnection.disabled = connectionBusy || !hasBinding;
+            retryConnection.hidden = pausedConnection === null;
+            retryConnection.disabled = connectionBusy || !hasBinding || revokeArmed;
             revokeConnection.hidden = !connectionConfigured;
             revokeConnection.disabled = connectionBusy || !hasBinding;
             cancelRevoke.disabled = connectionBusy;
@@ -419,6 +428,11 @@
             document.getElementById('weknora-connection-error').textContent = data.last_error_code || 'None';
             connectionDetails.hidden = false;
             connectionConfigured = true;
+            pausedConnection = data.status === 'paused' ? {
+                connection_id: data.connection_id,
+                key_id: data.key_id,
+                received_through_event_id: data.received_through_event_id,
+            } : null;
             try {
                 connectionOrigin.value = new URL(data.receiver_url).origin;
             } catch (_) {
@@ -433,6 +447,7 @@
             connectionCredential.value = '';
             resetRevoke();
             connectionConfigured = false;
+            pausedConnection = null;
             connectionDetails.hidden = true;
             setConnectionControls();
             if (!binding) {
@@ -627,6 +642,32 @@
         pairingBinding.addEventListener('change', loadPairingStatus);
         refreshPairing.addEventListener('click', loadPairingStatus);
         refreshConnection.addEventListener('click', loadConnectionStatus);
+        retryConnection.addEventListener('click', async () => {
+            if (connectionBusy || pausedConnection === null) {
+                return;
+            }
+            const binding = connectionBinding.value;
+            const expected = pausedConnection;
+            connectionBusy = true;
+            ++connectionRequestEpoch;
+            setConnectionControls();
+            message(connectionMessage, 'Scheduling a retry of paused event delivery…', '');
+            try {
+                const data = await request('POST', connectionUrl(binding) + '/retry', expected);
+                renderConnection(data, binding);
+                message(connectionMessage,
+                    'Delivery retry is queued. The receipt cursor is unchanged; refresh after the next worker run to inspect the result.',
+                    'success');
+            } catch (error) {
+                message(connectionMessage, errorText(error), 'error');
+                if (error.status === 409 || error.status === 404) {
+                    pausedConnection = null;
+                }
+            } finally {
+                connectionBusy = false;
+                setConnectionControls();
+            }
+        });
         connectionForm.addEventListener('submit', async (event) => {
             event.preventDefault();
             if (connectionBusy) {
@@ -677,6 +718,7 @@
                 revokeArmed = true;
                 revokeConnection.textContent = 'Confirm local revocation';
                 cancelRevoke.hidden = false;
+                setConnectionControls();
                 message(connectionMessage,
                     `Confirm local revocation for ${binding}. Delivery will stop; revoke the paired connection in WeKnora separately.`,
                     'warning');
@@ -692,6 +734,7 @@
                     throw new Error('The server returned an invalid revocation response.');
                 }
                 connectionConfigured = false;
+                pausedConnection = null;
                 connectionDetails.hidden = true;
                 resetRevoke();
                 message(connectionMessage,
@@ -708,6 +751,7 @@
         cancelRevoke.addEventListener('click', () => {
             connectionCredential.value = '';
             resetRevoke();
+            setConnectionControls();
             message(connectionMessage, 'Local revocation cancelled.', '');
         });
 

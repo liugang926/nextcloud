@@ -122,11 +122,12 @@ style('integration_weknora', 'weknora-admin');
             <p id="weknora-connection-help">Use the exact WeKnora origin approved by the server administrator. Paste the full one-time JSON response into the hidden field. Its secret is cleared from this page immediately after submission; it cannot be retrieved later.</p>
             <div class="weknora-admin__actions">
                 <button type="submit" class="button primary" id="weknora-save-connection">Install credential</button>
+                <button type="button" class="button" id="weknora-retry-connection" hidden>Retry paused delivery</button>
                 <button type="button" class="button" id="weknora-revoke-connection" hidden>Revoke local connection</button>
                 <button type="button" class="button" id="weknora-cancel-revoke" hidden>Cancel</button>
             </div>
         </form>
-        <p>Received means durable inbox acceptance. Applied means the last signed WeKnora status verified by Nextcloud; it may lag while synchronization, parsing or deletion is unfinished. Rotation requires the same connection ID and receiver URL with a new key ID. Local revocation stops sending and removes the local credential; separately revoke the connection in WeKnora.</p>
+        <p>Received means durable inbox acceptance. Applied means the last signed WeKnora status verified by Nextcloud; it may lag while synchronization, parsing or deletion is unfinished. Inspect the error and correct its cause before retrying paused delivery. Retry retains the receipt cursor and attempts the next unsent event on the following worker run. Rotation requires the same connection ID and receiver URL with a new key ID. Local revocation stops sending and removes the local credential; separately revoke the connection in WeKnora.</p>
     </div>
 
     <div class="weknora-admin__panel">

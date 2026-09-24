@@ -236,11 +236,11 @@ def main():
             assert code == 201, f"create fixture folder HTTP {code}"
             folder_created = True
             root_id = file_id(root_url, dav_headers)
-            code, _ = post_json(admin, binding_url, {
+            code, body = post_json(admin, binding_url, {
                 "id": binding_id, "name": binding_id,
                 "owner_uid": admin_uid, "root_file_id": root_id,
             }, csrf)
-            assert code == 201, f"create fixture binding HTTP {code}"
+            assert code == 201, f"create fixture binding HTTP {code}: {body[:200]!r}"
             binding_created = True
 
             instance_id = compose("exec", "-T", "-u", "www-data", "nextcloud",
@@ -325,6 +325,30 @@ def main():
             run_job(identifier)
             assert len(requests_seen(state_dir)) == 3, "paused sender retried"
 
+            expected = {name: ahead[name] for name in (
+                "connection_id", "key_id", "received_through_event_id")}
+            code, _ = request(admin, connection_url + "/retry", "POST",
+                              {"Content-Type": "application/json"},
+                              json.dumps(expected).encode())
+            assert code in (401, 403, 412), f"retry without CSRF HTTP {code}"
+            code, _ = post_json(admin, connection_url + "/retry",
+                                {**expected, "received_through_event_id": "999"}, csrf)
+            assert code == 409, f"stale retry cursor HTTP {code}"
+            (state_dir / "mode").write_text("accept")
+            code, body = post_json(admin, connection_url + "/retry", expected, csrf)
+            assert code == 200, f"retry paused sender HTTP {code}: {body[:200]!r}"
+            retried = status(admin, connection_url, csrf)
+            assert retried["status"] == "active"
+            assert retried["received_through_event_id"] == ahead["received_through_event_id"]
+            assert retried["last_error_code"] == ahead["last_error_code"]
+            run_job(identifier)
+            recovered = status(admin, connection_url, csrf)
+            assert int(recovered["received_through_event_id"]) > 0
+            assert recovered["last_error_code"] == ""
+            code, _ = dav_request(root_url + "/after-retry.txt", "PUT", dav_headers,
+                                  b"event after manual retry")
+            assert code in (201, 204), f"create post-retry event HTTP {code}"
+
             secret = secrets.token_urlsafe(32)
             credential.update(secret=secret, key_id="evt_" + secrets.token_hex(16))
             code, body = post_json(admin, connection_url, credential, csrf)
@@ -336,6 +360,7 @@ def main():
             run_job(identifier)
             received = status(admin, connection_url, csrf)
             assert received["status"] == "active" and int(received["received_through_event_id"]) > 0
+            assert int(received["received_through_event_id"]) > int(recovered["received_through_event_id"])
             assert len(status_requests_seen(state_dir)) == status_count, (
                 "sender synchronously polled applied status")
             payload = verify_signature(requests_seen(state_dir)[-1], secret)

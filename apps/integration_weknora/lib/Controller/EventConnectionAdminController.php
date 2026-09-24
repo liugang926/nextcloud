@@ -90,6 +90,33 @@ final class EventConnectionAdminController extends Controller {
         }
     }
 
+    public function retry(string $id): JSONResponse {
+        if (!$this->isAdmin()) {
+            return $this->json(['error' => 'forbidden'], 403);
+        }
+        $connectionId = $this->request->getParam('connection_id');
+        $keyId = $this->request->getParam('key_id');
+        $receivedId = $this->request->getParam('received_through_event_id');
+        if (!is_string($connectionId) || !is_string($keyId) || !is_string($receivedId)) {
+            return $this->json(['error' => 'invalid_connection'], 400);
+        }
+        try {
+            return $this->json($this->connections->retryPaused($id, $connectionId, $keyId, $receivedId));
+        } catch (\InvalidArgumentException $exception) {
+            return $this->json(['error' => 'invalid_connection'], 400);
+        } catch (\OutOfBoundsException $exception) {
+            return $this->json(['error' => 'connection_not_found'], 404);
+        } catch (BindingPublicationStoppedException $exception) {
+            return $this->json(['error' => 'publication_stopped'], 423);
+        } catch (\DomainException $exception) {
+            return $this->json(['error' => 'connection_changed'], 409);
+        } catch (\UnexpectedValueException $exception) {
+            return $this->json(['error' => 'binding_unavailable'], 409);
+        } catch (\Throwable $exception) {
+            return $this->json(['error' => 'connection_unavailable'], 503);
+        }
+    }
+
     private function isAdmin(): bool {
         $user = $this->userSession->getUser();
         return $user !== null && $this->groupManager->isAdmin($user->getUID());

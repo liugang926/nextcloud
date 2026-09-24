@@ -196,6 +196,72 @@ final class EventConnectionService {
         }
     }
 
+    /**
+     * Queue one administrator-requested retry of a paused sender. The receipt
+     * cursor and failure history stay intact until a verified receipt arrives.
+     * The expected identity prevents a stale settings page from retrying a
+     * newly rotated or replaced connection.
+     *
+     * @return array<string, int|string>
+     */
+    public function retryPaused(string $bindingId, string $connectionId,
+        string $keyId, string $receivedId): array {
+        self::assertBindingId($bindingId);
+        if (!preg_match('/\A[A-Za-z0-9_-]{16,128}\z/D', $connectionId) ||
+            !preg_match('/\A[A-Za-z0-9._-]{1,64}\z/D', $keyId) ||
+            !preg_match('/\A(?:0|[1-9][0-9]{0,18})\z/D', $receivedId)) {
+            throw new \InvalidArgumentException('Invalid event connection identity');
+        }
+
+        $this->db->beginTransaction();
+        try {
+            // Keep the same lock order as configure(), publication Stop and
+            // binding removal before locking the sender row.
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
+            $lock = $this->db->getQueryBuilder();
+            $lock->select('id')->from('weknora_bind_lock')
+                ->where($lock->expr()->eq('id', $lock->createNamedParameter(1)))
+                ->forUpdate();
+            $locked = $lock->executeQuery();
+            try {
+                if ($locked->fetchOne() === false) {
+                    throw new \UnexpectedValueException('Binding lock unavailable');
+                }
+            } finally {
+                $locked->closeCursor();
+            }
+            $this->bindings->requirePublicationActive($bindingId);
+            $this->bindings->requireActiveRoot($bindingId);
+            $row = $this->row($bindingId, true);
+            if ($row === null) {
+                throw new \OutOfBoundsException('Event connection is not configured');
+            }
+            if ($row['status'] !== 'paused' ||
+                $row['connection_id'] !== $connectionId ||
+                $row['key_id'] !== $keyId ||
+                (string)$row['received_id'] !== $receivedId) {
+                throw new \DomainException('Event connection changed since inspection');
+            }
+            $this->policy->requireApproved((string)$row['receiver_url']);
+            $update = $this->db->getQueryBuilder();
+            $update->update('weknora_event_conn')
+                ->set('status', $update->createNamedParameter('active'))
+                ->set('next_attempt_at', $update->createNamedParameter(0))
+                ->set('updated_at', $update->createNamedParameter(time()))
+                ->where($update->expr()->eq('binding_id', $update->createNamedParameter($bindingId)))
+                ->executeStatement();
+            $current = $this->row($bindingId);
+            if ($current === null) {
+                throw new \UnexpectedValueException('Event connection retry failed');
+            }
+            $this->db->commit();
+            return self::publicStatus($current);
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
     /** @return array<string, mixed>|null */
     public function row(string $bindingId, bool $forUpdate = false): ?array {
         self::assertBindingId($bindingId);

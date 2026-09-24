@@ -205,6 +205,12 @@ return [
             'requirements' => ['id' => '[A-Za-z0-9_-]+'],
         ],
         [
+            'name' => 'event_connection_admin#retry',
+            'url' => '/api/v1/admin/bindings/{id}/event-connection/retry',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
             'name' => 'publication#withdraw',
             'url' => '/api/v1/admin/bindings/{id}/files/{fileId}/withdraw',
             'verb' => 'POST',
