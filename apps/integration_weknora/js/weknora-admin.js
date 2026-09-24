@@ -72,6 +72,11 @@
             return parsed;
         }
 
+        function decimalGreater(left, right) {
+            return left.length > right.length ||
+                (left.length === right.length && left > right);
+        }
+
         async function request(method, url, payload) {
             // These routes deliberately use the administrator's session, never a service token.
             const token = window.OC && window.OC.requestToken;
@@ -385,6 +390,11 @@
                 typeof data.status !== 'string' ||
                 typeof data.received_through_event_id !== 'string' ||
                 !/^(0|[1-9][0-9]*)$/.test(data.received_through_event_id) ||
+                typeof data.applied_through_event_id !== 'string' ||
+                !/^(0|[1-9][0-9]*)$/.test(data.applied_through_event_id) ||
+                decimalGreater(data.applied_through_event_id, data.received_through_event_id) ||
+                !Number.isSafeInteger(data.applied_checked_at) || data.applied_checked_at < 0 ||
+                typeof data.applied_error_code !== 'string' ||
                 !Number.isSafeInteger(data.attempt_count) || data.attempt_count < 0 ||
                 !Number.isSafeInteger(data.next_attempt_at) || data.next_attempt_at < 0 ||
                 typeof data.last_error_code !== 'string') {
@@ -396,6 +406,13 @@
             document.getElementById('weknora-connection-receiver').textContent = data.receiver_url;
             document.getElementById('weknora-connection-received').textContent =
                 data.received_through_event_id === '0' ? 'None yet (0)' : data.received_through_event_id;
+            document.getElementById('weknora-connection-applied').textContent =
+                data.applied_through_event_id === '0' ? 'None verified (0)' : data.applied_through_event_id;
+            document.getElementById('weknora-connection-applied-checked').textContent =
+                data.applied_checked_at === 0 ? 'Never' :
+                    new Date(data.applied_checked_at * 1000).toLocaleString();
+            document.getElementById('weknora-connection-applied-error').textContent =
+                data.applied_error_code || 'None';
             document.getElementById('weknora-connection-attempts').textContent = String(data.attempt_count);
             document.getElementById('weknora-connection-next-attempt').textContent =
                 data.next_attempt_at === 0 ? 'None scheduled' : new Date(data.next_attempt_at * 1000).toLocaleString();
@@ -429,10 +446,27 @@
                     return;
                 }
                 renderConnection(data, binding);
-                message(connectionMessage,
-                    data.status === 'paused' ? 'Local delivery is paused. Inspect the error code and repair the connection.' :
-                        'Local event connection loaded. A durable receipt is not a synchronization or indexing result.',
-                    data.status === 'paused' ? 'warning' : 'success');
+                if (data.status !== 'active') {
+                    message(connectionMessage,
+                        `Local delivery is ${data.status}. Inspect the error code and connection state.`, 'warning');
+                } else if (data.applied_checked_at === 0) {
+                    message(connectionMessage,
+                        'No signed applied status has been verified yet. A durable receipt is not proof of indexing.',
+                        'warning');
+                } else if (data.applied_error_code) {
+                    message(connectionMessage,
+                        'The latest applied-status check was not verified. Inspect its error code; received hints are not proof of indexing.',
+                        'warning');
+                } else if (decimalGreater(data.received_through_event_id,
+                    data.applied_through_event_id)) {
+                    message(connectionMessage,
+                        'The durable receipt is ahead of the last verified applied watermark. Synchronization or indexing may still be in progress.',
+                        'warning');
+                } else {
+                    message(connectionMessage,
+                        'The last verified applied watermark covers this connection\'s recorded receipt. Check each file status before treating it as ready.',
+                        'success');
+                }
             } catch (error) {
                 if (epoch !== connectionRequestEpoch || binding !== connectionBinding.value) {
                     return;

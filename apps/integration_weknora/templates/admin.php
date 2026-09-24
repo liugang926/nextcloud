@@ -13,7 +13,7 @@ style('integration_weknora', 'weknora-admin');
         <h3>Automatic publication scope</h3>
         <p>A binding covers readable files recursively inside the selected child folder, including new and updated files. Withdrawing a file ID excludes it from this app's manifest and content API until an administrator explicitly republishes it. A folder binding does not itself make content searchable in WeKnora.</p>
         <p>Stop publication closes the binding's source read and authorization gates without deleting its files, binding ID, machine keys, or file exclusions. Resume checks the current root and asks the connector to reconcile again. Existing WeKnora copies require its retrieval guard and later cleanup; this page cannot verify that cleanup.</p>
-        <p>Current limits: bindings must share one owner account and their roots cannot overlap. Source pairing uses an operator workflow; this page shows its local state and can configure local event delivery, but it does not show WeKnora synchronization, parsing, indexing, or cleanup progress. End-to-end audience and ACL enforcement and in-Nextcloud AI chat are not complete. Withdrawal immediately blocks this app's read API; removal of an already indexed WeKnora copy still requires connector reconciliation and WeKnora retrieval controls. Use a verified dedicated publication folder for pilot data only.</p>
+        <p>Current limits: bindings must share one owner account and their roots cannot overlap. Source pairing uses an operator workflow; this page shows its local state and can configure local event delivery. Its applied watermark is connection-wide, not per-file synchronization, parsing, indexing, or cleanup progress. End-to-end audience and ACL enforcement and in-Nextcloud AI chat are not complete. Withdrawal immediately blocks this app's read API; removal of an already indexed WeKnora copy still requires connector reconciliation and WeKnora retrieval controls. Use a verified dedicated publication folder for pilot data only.</p>
     </div>
 
     <div class="weknora-admin__panel">
@@ -84,7 +84,7 @@ style('integration_weknora', 'weknora-admin');
             <h3>Event delivery connection</h3>
             <button type="button" class="button" id="weknora-refresh-connection">Refresh status</button>
         </div>
-        <p>Select a binding to inspect its local sender. Pair the matching Nextcloud data source in WeKnora first, then install its one-time credential here. The status below covers delivery from Nextcloud to WeKnora's durable event inbox; it does not show WeKnora synchronization or indexing.</p>
+        <p>Select a binding to inspect its local sender. Pair the matching Nextcloud data source in WeKnora first, then install its one-time credential here. The received watermark covers durable inbox acceptance; the separately verified applied watermark covers completion of the connection's hints. Neither is a per-file ready result.</p>
         <div class="weknora-admin__fields">
             <label>Binding <select id="weknora-connection-binding"><option value="">Choose a binding</option></select></label>
         </div>
@@ -95,6 +95,9 @@ style('integration_weknora', 'weknora-admin');
             <dt>Key ID</dt><dd id="weknora-connection-key-id"></dd>
             <dt>Receiver URL</dt><dd id="weknora-connection-receiver"></dd>
             <dt>Durably received through event ID</dt><dd id="weknora-connection-received"></dd>
+            <dt>Verified applied through event ID</dt><dd id="weknora-connection-applied"></dd>
+            <dt>Last applied status check</dt><dd id="weknora-connection-applied-checked"></dd>
+            <dt>Applied status error code</dt><dd id="weknora-connection-applied-error"></dd>
             <dt>Local delivery attempts since last receipt</dt><dd id="weknora-connection-attempts"></dd>
             <dt>Next local delivery attempt</dt><dd id="weknora-connection-next-attempt"></dd>
             <dt>Last local delivery error code</dt><dd id="weknora-connection-error"></dd>
@@ -115,7 +118,7 @@ style('integration_weknora', 'weknora-admin');
                 <button type="button" class="button" id="weknora-cancel-revoke" hidden>Cancel</button>
             </div>
         </form>
-        <p>Rotation requires the same connection ID and receiver URL with a new key ID. Local revocation stops sending and removes the local credential; separately revoke the connection in WeKnora.</p>
+        <p>Received means durable inbox acceptance. Applied means the last signed WeKnora status verified by Nextcloud; it may lag while synchronization, parsing or deletion is unfinished. Rotation requires the same connection ID and receiver URL with a new key ID. Local revocation stops sending and removes the local credential; separately revoke the connection in WeKnora.</p>
     </div>
 
     <div class="weknora-admin__panel">
