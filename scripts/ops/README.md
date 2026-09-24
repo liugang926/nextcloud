@@ -152,6 +152,28 @@ source and immutable pair/decommission records remain as audit evidence in the
 `finally`, including on a failed assertion. It never operates on a
 previously paired source or uses database row deletion to bypass retirement.
 
+### Indexed source withdrawal: first stage
+
+For a paired source that has admitted content, an administrator can persist an
+exact stopped intent with Nextcloud `POST /admin/bindings/{bindingId}/decommission`
+using one operation UUID. With WeKnora PostgreSQL migration 125 installed, a
+WeKnora administrator may then call
+`POST /api/v1/datasource/nextcloud-source-pairings/{pairOperationId}/indexed-withdrawal`
+with `{"operation_id":"<same UUID>"}`. The endpoint checks the signed Nextcloud
+intent, pauses the paired source, revokes its event receiver and records the
+local copies it can observe. `GET` on the same WeKnora path reports the durable
+state and observed item count. A concurrent event receipt can return a
+retryable conflict; repeat only with the same UUID after inspecting both
+states.
+
+This stage always reports `inventory_complete: false`. It sends no ACK to
+Nextcloud. Keep the Nextcloud binding stopped, retain its source credentials,
+and do not call the empty-source finalize endpoint. Historical and external
+indexes still need separate inventory and physical deletion proofs. SQLite
+records the schema but does not admit indexed withdrawal. The patched WeKnora
+documentation describes the exact safety boundary in
+`docs/nextcloud-indexed-withdrawal.md` inside the fixed-baseline checkout.
+
 ### Rotate an active source credential
 
 Save the original pair UUID, then run:

@@ -157,8 +157,13 @@ jobs:
         working-directory: weknora
         env:
           NEXTCLOUD_EVENT_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_PAIRING_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_INDEXED_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
         run: |
           go test -p 2 ./internal/handler -run '^TestNextcloudEvent' -count=1
+          go test -p 2 ./internal/application/repository \
+            -run '^Test(PostgresNextcloud|NextcloudSourcePairingPostgres)' -count=1
           go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
 
   direct-upgrade:
