@@ -174,6 +174,35 @@ records the schema but does not admit indexed withdrawal. The patched WeKnora
 documentation describes the exact safety boundary in
 `docs/nextcloud-indexed-withdrawal.md` inside the fixed-baseline checkout.
 
+For an end-to-end synthetic check, create two new disposable Compose projects
+with their own PostgreSQL and file volumes. Connect only those projects to each
+other. Configure an embedding model in the isolated WeKnora project whose
+`base_url` is the isolated Nextcloud project's mock service at
+`http://mock-embedding:8000/v1` and whose dimension matches that mock's three
+component vectors. Pass that model's ID explicitly; the probe has no model
+default and never changes model configuration:
+
+```sh
+python3 scripts/ops/local-indexed-withdrawal-smoke.py \
+  --nextcloud-origin http://127.0.0.1:18093 \
+  --weknora-origin http://127.0.0.1:18091 \
+  --nextcloud-env-file /path/to/isolated-nextcloud.env \
+  --weknora-admin-env-file /path/to/isolated-weknora-admin.env \
+  --nextcloud-compose-project YOUR_DISPOSABLE_NEXTCLOUD_PROJECT \
+  --weknora-compose-project YOUR_DISPOSABLE_WEKNORA_PROJECT \
+  --weknora-app-service YOUR_DISPOSABLE_APP_SERVICE \
+  --weknora-db-service YOUR_DISPOSABLE_POSTGRES_SERVICE \
+  --embedding-model-id YOUR_ISOLATED_MOCK_MODEL_ID
+```
+
+The probe creates and indexes a unique synthetic text file, then verifies the
+stopped exact intent, HTTP 202 logical withdrawal, incomplete inventory,
+missing Nextcloud ACK, retained source key and binding, paused source, and
+rejected old event HMAC key. It leaves its stopped binding and paused source in
+the disposable projects as evidence. After recording the result, remove only
+those projects and their owned volumes. A failed check prints fixture IDs for
+inspection without exposing credentials.
+
 ### Rotate an active source credential
 
 Save the original pair UUID, then run:
