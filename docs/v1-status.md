@@ -92,9 +92,15 @@ The acceptance scripts now require a fresh, attribute-limited LDAP topology
 export before claiming a synthetic primary-group or nested-group case. A
 separate loopback-only probe checks GUID/UID mapping conflicts, and a watcher
 holds the original JWTs across a synthetic group-revocation drill. Their 15
-offline contracts and five WeKnora OpenLDAP network tests passed; the full
-cross-system primary-group, nested-group and LDAP Team-folder HTTP matrix has
-not yet been run.
+offline contracts and five WeKnora OpenLDAP network tests passed. A fresh,
+disposable dual-service stack then passed the six-field nested-only group
+HTTP matrix: Alice had file/source/knowledge/search access through
+Alice→Platform→Engineering, while Bob could log in but was denied all four
+content checks. Its one synthetic file had a ready chunk and embedding. The
+primary-only case failed across services: WeKnora recognized Alice's
+`primaryGroupID` membership, but Nextcloud `user_ldap` omitted Alice from
+Engineering and denied her file. The LDAP-backed Team-folder and enterprise
+AD matrices remain open; see [the disposable fixture](synthetic-ldap-compose.md).
 
 ## Consistency and release boundary
 
