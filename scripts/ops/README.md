@@ -22,6 +22,11 @@ operator-run permission matrix for isolated test accounts and synthetic files.
 Its read-only probe has offline contract tests; no real AD acceptance has been
 recorded in this development stack.
 
+The [disposable pilot load guide](PILOT-load.md) provisions private test
+credentials and measures full-source logical throughput, WeKnora process RSS,
+and event-to-durable-job P95. Its small synthetic result is diagnostic only;
+the PRD's 10,000-file/100-GB acceptance remains open.
+
 ## Local Nextcloud source pairing
 
 Install Nextcloud app 0.4.22 and deploy the WeKnora patch before this probe.
