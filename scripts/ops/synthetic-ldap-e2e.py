@@ -118,8 +118,9 @@ def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False):
     # employee citations must open the host's browser origin. Set the public
     # route before the first source sync so indexed metadata records it.
     occ(state, "config:system:set", "overwrite.cli.url", "--value=" + nc_base)
+    browser_port = state["ports"].get("weknora_ui", state["ports"]["weknora"])
     occ(state, "config:app:set", "integration_weknora", "weknora_web_url",
-        "--value=http://127.0.0.1:" + str(state["ports"]["weknora"]))
+        "--value=http://127.0.0.1:" + str(browser_port))
     config = occ(state, "ldap:create-empty-config")
     match = re.search(r"configID ['\"]?(s[0-9]+)", config)
     if not match:

@@ -34,9 +34,9 @@ handoff = runpy.run_path(str(HERE / "synthetic-ldap-ask-handoff.py"))
 matrix = runpy.run_path(str(HERE / "ad-permission-acceptance.py"))
 index = runpy.run_path(str(HERE / "local-indexed-withdrawal-smoke.py"))
 
-IMAGE = "weknora-ldap-app:nextcloud-rag-e5-anydoc"
+IMAGE = "weknora-ldap-app:nextcloud-rag-e5-anydoc-rebind"
 BASE = "e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e"
-PATCH_SHA = "a7d638ac36f2e64b5adf998cdd16a811c238de343a5ab8d001262fa8207c3961"
+PATCH_SHA = "ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03"
 PDF_NAME = "candidate-pdf.pdf"
 MARKER = "ORCHID-QUARTZ-2749"
 PDF_MARKER = "PDF-CANDIDATE-8734"

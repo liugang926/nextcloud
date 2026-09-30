@@ -197,10 +197,10 @@ index 00000000..22b74a2d
 +that API.
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..27927704
+index 00000000..94c1261f
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,293 @@
 +# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
@@ -224,8 +224,10 @@ index 00000000..27927704
 +random and stored only as `enc:v1:` ciphertext using `SYSTEM_AES_KEY`.
 +The connection also pins the normalized complete Nextcloud base URL and the
 +SHA-256 fingerprint of the data source's **committed, encrypted** configuration
-+bytes. An endpoint edit, credential clear/rotation/reprovision, or other
++bytes. An endpoint edit, credential clear/reprovision, or unrelated
 +configuration edit invalidates the old connection and requires re-pairing.
++A finalized, exact source machine-key rotation can instead rebind the existing
++connection through the administrator route below.
 +The receiver checks this identity inside the same locked transaction as the
 +inbox write; it does not hash or log a plaintext machine token.
 +
@@ -244,6 +246,7 @@ index 00000000..27927704
 +| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection` | Create one active connection; `201` once, then `409` on repeat. |
 +| `GET` | `/api/v1/datasource/:id/nextcloud-event-connection` | Read receipt, dispatch, and applied status; never returns a secret. |
 +| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Replace the only accepted key immediately; `200` returns the new secret once. |
++| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rebind` | After exact finalized source-key rotation, retain the connection, event key, inbox, and watermarks; `200` returns no secret. |
 +| `DELETE` | `/api/v1/datasource/:id/nextcloud-event-connection` | Revoke the active connection immediately; `204`. |
 +
 +A successful pair or rotation returns `connection_id`, `key_id`, a one-time
@@ -262,6 +265,32 @@ index 00000000..27927704
 +as `source_changed` by GET; revoke and then pair again after resolving the
 +source. Revocation does not require a live Nextcloud call, so it remains
 +possible after credentials are cleared or the endpoint changes.
++
++After both source-pairing sides report `finalized`, an administrator may send
++`{"operation_id":"<exact source rotation UUID>"}` to the `rebind` route.
++The live Nextcloud binding must be active and retain the pairing's exact
++publication epoch, tenant, dedicated knowledge base, source, instance, binding
++and normalized base URL. The local data source must also be active. WeKnora
++verifies that
++the stored old and new encrypted config fingerprints match the finalized
++rotation, that only the source machine token and key ID changed, and that the
++active pair uses the new fingerprint. A pending, aborted, unrelated or newer
++rotation cannot rebind the connection. The request is idempotent for the same
++rotation UUID; the response has `rebound:true` only on the first successful
++rewrite and contains the unchanged `connection_id`, `key_id`, and decimal
++received, dispatched and applied watermarks, plus the current dispatch state
++and error code. It never returns the HMAC secret.
++The Nextcloud event sender keeps its existing credentials.
++
++Rebinding requires a quiescent event dispatch row: `idle`, or `blocked` solely
++by `source_changed` after all previously dispatched hints were applied, with
++no live lease or running source sync log. A queued, leased, retrying, partially
++applied or differently blocked row returns `409`
++`event_dispatch_manual_review_required`; inspect the exact task/log before
++repairing it. Other identity mismatches return `409`
++`source_changed_repair_required`. Generic source edits and emergency event-key
++rotation remain separate operations. The operator command is
++`python3 scripts/ops/local-source-rotation.py rebind --binding BINDING --pair-operation-id PAIR_UUID --operation-id ROTATION_UUID`.
 +
 +Connection provisioning does not advance any event watermark.
 +
@@ -456,6 +485,15 @@ index 00000000..27927704
 +failed status endpoint preserves them until the status is repaired; a later
 +full manifest reconciliation remains necessary after any already-expired
 +cursor or cross-system restore.
++
++An owned, loopback-only synthetic LDAP dual-service exercise is available as
++`scripts/ops/isolated-event-rebind-smoke.py --scratch OWNED_FIXTURE`. It
++requires a bootstrapped fixture, creates e1 and e2 DAV files, runs both the
++Nextcloud delivery and applied-status jobs, and requires both services to
++report applied e1 before rotation and applied e2 after rebind. It verifies that
++the old sender pauses and its receipt watermark does not advance while the
++source config is stale. This is isolated integration evidence; it does not
++replace real AD, production Team Folder, or load acceptance.
 diff --git a/docs/nextcloud-file-status.md b/docs/nextcloud-file-status.md
 new file mode 100644
 index 00000000..5b0f41fd
@@ -878,10 +916,10 @@ index 00000000..8229f8a4
 +ACK Nextcloud or release credentials.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
-index 00000000..c6cb4a6c
+index 00000000..6984a00b
 --- /dev/null
 +++ b/docs/nextcloud-source-pairing.md
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,230 @@
 +# Nextcloud source pairing
 +
 +The source pairing is separate from the optional event-inbox connection. A
@@ -1040,9 +1078,16 @@ index 00000000..c6cb4a6c
 +aborting that pending Nextcloud operation and creating a fresh UUID.
 +
 +Source-key rotation changes the exact source config hash. An optional
-+WeKnora event-inbox connection pinned to the former hash must be re-paired
-+after rotation; it does not silently gain the new source credential. The
-+operator CLI is `scripts/ops/local-source-rotation.py`.
++WeKnora event-inbox connection pinned to the former hash stops accepting and
++dispatching hints until an administrator explicitly rebinds it to the exact
++finalized rotation UUID. A safe rebind retains its connection ID, HMAC key,
++inbox, and receipt/dispatch/applied watermarks; it neither reveals the HMAC
++secret nor grants a different source configuration. Pending or aborted
++rotations, unrelated edits, and uncertain in-flight dispatches are rejected.
++Use `scripts/ops/local-source-rotation.py rebind --binding BINDING
++--pair-operation-id PAIR_UUID --operation-id ROTATION_UUID` after both sides
++report `finalized`; see `docs/nextcloud-event-receiver.md` for the HTTP route
++and manual-review conditions.
 +
 +Nextcloud Stop blocks source reads. Resume does not change the paired tenant,
 +KB, binding, source ID, or credentials. A pending commit whose publication
@@ -1183,6 +1228,60 @@ index a1e59e67..a369ad87 100644
  }
  
  const handleGlobalOIDCCallback = async () => {
+diff --git a/frontend/src/api/chat/streame.test.ts b/frontend/src/api/chat/streame.test.ts
+index f0226024..1379a5df 100644
+--- a/frontend/src/api/chat/streame.test.ts
++++ b/frontend/src/api/chat/streame.test.ts
+@@ -63,3 +63,29 @@ for (const selected of [true, false, undefined]) {
+     } finally { stream.stopStream() }
+   })
+ }
++
++for (const agentEnabled of [false, true]) {
++  test(`SSE HTTP body ${agentEnabled ? 'keeps' : 'omits'} Agent scope in ${agentEnabled ? 'Agent' : 'quick-answer'} mode`, async () => {
++    let stream!: ReturnType<typeof useStream>
++    await renderToString(createSSRApp({ setup() { stream = useStream(); return () => null } }))
++    try {
++      await stream.startStream({
++        session_id: 'nextcloud-file-session', query: 'What is in this file?', method: 'POST',
++        url: agentEnabled ? '/api/v1/agent-chat' : '/api/v1/knowledge-chat',
++        agent_enabled: agentEnabled, agent_id: 'builtin-quick-answer',
++        agent_source_tenant_id: 10001, knowledge_ids: ['published-file-id'],
++      })
++      assert.equal(stream.error.value, null)
++      const request = transport.requests.at(-1)!
++      const body = JSON.parse(request.options.body)
++      assert.equal(body.agent_enabled, agentEnabled)
++      assert.deepEqual(body.knowledge_ids, ['published-file-id'])
++      assert.equal(Object.hasOwn(body, 'agent_id'), agentEnabled)
++      assert.equal(Object.hasOwn(body, 'agent_source_tenant_id'), agentEnabled)
++      if (agentEnabled) {
++        assert.equal(body.agent_id, 'builtin-quick-answer')
++        assert.equal(body.agent_source_tenant_id, 10001)
++      }
++    } finally { stream.stopStream() }
++  })
++}
+diff --git a/frontend/src/api/chat/streame.ts b/frontend/src/api/chat/streame.ts
+index eccd3b69..f34176ea 100644
+--- a/frontend/src/api/chat/streame.ts
++++ b/frontend/src/api/chat/streame.ts
+@@ -100,11 +100,12 @@ export function useStream() {
+       if (params.knowledge_ids !== undefined && params.knowledge_ids.length > 0) {
+         postBody.knowledge_ids = params.knowledge_ids;
+       }
+-      // Include agent_id if provided (backend resolves shared agent and tenant from share relation)
+-      if (params.agent_id) {
++      // A quick-answer request can still have a selected built-in Agent in the
++      // UI. Only Agent mode may send its identity and tenant scope.
++      if (postBody.agent_enabled && params.agent_id) {
+         postBody.agent_id = params.agent_id;
+       }
+-      if (params.agent_source_tenant_id) {
++      if (postBody.agent_enabled && params.agent_source_tenant_id) {
+         postBody.agent_source_tenant_id = Number(params.agent_source_tenant_id);
+       }
+       // Include web_search_enabled if provided
 diff --git a/frontend/src/components/ChatReferencesDrawer.vue b/frontend/src/components/ChatReferencesDrawer.vue
 index 39b98279..68150555 100644
 --- a/frontend/src/components/ChatReferencesDrawer.vue
@@ -6128,10 +6227,10 @@ index 00000000..75a2d1dc
 +}
 diff --git a/internal/application/repository/nextcloud_event_connections.go b/internal/application/repository/nextcloud_event_connections.go
 new file mode 100644
-index 00000000..a188f30e
+index 00000000..8be172ba
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_connections.go
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,370 @@
 +package repository
 +
 +import (
@@ -6164,6 +6263,8 @@ index 00000000..a188f30e
 +	BindingID           string
 +	DatasourceBaseURL   string
 +	DatasourceConfigSHA string
++	PublicationEpoch    int64
++	PublicationState    string
 +}
 +
 +// NextcloudEventConnectionCredential is returned only by a successful pair
@@ -6292,6 +6393,19 @@ index 00000000..a188f30e
 +		BindingID: identity.BindingID, KeyID: keyID, Secret: secret,
 +	}
 +	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		// An existing active row is a terminal Pair conflict. Check it before
++		// taking the KB writer lock: a concurrent receiver/rebind owns the
++		// connection row first and will next take that same KB lock. Waiting
++		// on the active unique index while holding KB would deadlock them.
++		var active int64
++		if err := tx.Table("nextcloud_event_connections").
++			Where("datasource_id = ? AND status = 'active'", identity.DatasourceID).
++			Count(&active).Error; err != nil {
++			return fmt.Errorf("check active Nextcloud event connection: %w", err)
++		}
++		if active != 0 {
++			return ErrNextcloudEventConnectionExists
++		}
 +		if err := checkNextcloudPairingSource(tx, identity); err != nil {
 +			return err
 +		}
@@ -7507,6 +7621,250 @@ index 00000000..79869631
 +func NextcloudEventPayloadHash(raw []byte) string {
 +	sum := sha256.Sum256(raw)
 +	return hex.EncodeToString(sum[:])
++}
+diff --git a/internal/application/repository/nextcloud_event_rebind.go b/internal/application/repository/nextcloud_event_rebind.go
+new file mode 100644
+index 00000000..4712ae86
+--- /dev/null
++++ b/internal/application/repository/nextcloud_event_rebind.go
+@@ -0,0 +1,195 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"reflect"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++// ErrNextcloudEventRebindUnsafe means a prior queue admission or a different
++// dispatch failure still needs operator review. Rebinding must not erase it.
++var ErrNextcloudEventRebindUnsafe = errors.New("Nextcloud event dispatch requires manual review before source rotation rebind")
++
++// RebindFinalizedSourceRotation keeps the event connection and its HMAC key,
++// inbox, nonces, and receipt/application watermarks after the exact source
++// machine-key rotation. The live source inspection is performed by the handler;
++// the transaction repeats every durable identity check under the connection
++// lock. A replay of the same completed operation is read-only.
++func (r *NextcloudEventInboxRepository) RebindFinalizedSourceRotation(
++	ctx context.Context, identity NextcloudEventPairingIdentity, rotationID string,
++) (bool, error) {
++	parsed, err := uuid.Parse(rotationID)
++	if err != nil || parsed.String() != rotationID || identity.TenantID == 0 ||
++		identity.DatasourceID == "" || identity.KnowledgeBaseID == "" ||
++		identity.PublicationState != "active" || identity.PublicationEpoch < 0 {
++		return false, ErrNextcloudEventScope
++	}
++	changed := false
++	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		// Ingest, dispatch, key rotation and revoke all lock the connection
++		// first. SQLite needs a real write before its first transactional read.
++		if tx.Dialector.Name() == "sqlite" {
++			lock := tx.Exec(`UPDATE nextcloud_event_connections SET status = status
++				WHERE tenant_id = ? AND datasource_id = ? AND status = 'active'`,
++				identity.TenantID, identity.DatasourceID)
++			if lock.Error != nil {
++				return fmt.Errorf("lock Nextcloud event connection: %w", lock.Error)
++			}
++			if lock.RowsAffected != 1 {
++				return ErrNextcloudEventConnectionMissing
++			}
++		}
++		var connection nextcloudEventConnection
++		if err := tx.Table("nextcloud_event_connections").Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("tenant_id = ? AND datasource_id = ? AND status = 'active'", identity.TenantID, identity.DatasourceID).
++			Take(&connection).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNextcloudEventConnectionMissing
++			}
++			return fmt.Errorf("read Nextcloud event connection: %w", err)
++		}
++		if connection.KnowledgeBaseID != identity.KnowledgeBaseID ||
++			connection.NextcloudInstanceID != identity.NextcloudInstanceID ||
++			connection.BindingID != identity.BindingID ||
++			connection.DatasourceBaseURL != identity.DatasourceBaseURL {
++			return ErrNextcloudEventScope
++		}
++		// This takes the KB serialization lock only after the connection lock.
++		// Source rotation takes the same KB lock when switching the config.
++		if err := checkNextcloudPairingSource(tx, identity); err != nil {
++			return err
++		}
++		var activeSources int64
++		if err := tx.Model(&types.DataSource{}).
++			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND status = ?",
++				identity.DatasourceID, identity.TenantID, identity.KnowledgeBaseID,
++				types.DataSourceStatusActive).Count(&activeSources).Error; err != nil {
++			return fmt.Errorf("check active Nextcloud rebind source: %w", err)
++		}
++		if activeSources != 1 {
++			return ErrNextcloudEventScope
++		}
++		var rotation NextcloudSourceRotation
++		if err := tx.Where("operation_id = ? AND tenant_id = ?", rotationID, identity.TenantID).
++			Take(&rotation).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNextcloudEventScope
++			}
++			return fmt.Errorf("read Nextcloud source rotation: %w", err)
++		}
++		if rotation.State != "finalized" || rotation.KnowledgeBaseID != identity.KnowledgeBaseID ||
++			rotation.DataSourceID != identity.DatasourceID || rotation.InstanceID != identity.NextcloudInstanceID ||
++			rotation.BindingID != identity.BindingID || rotation.OldConfigSHA == rotation.NewConfigSHA ||
++			rotation.NewConfigSHA != identity.DatasourceConfigSHA {
++			return ErrNextcloudEventScope
++		}
++		oldBase, oldHash, oldBinding, oldErr := NextcloudEventDataSourceIdentity(rotation.OldConfig)
++		newBase, newHash, newBinding, newErr := NextcloudEventDataSourceIdentity(rotation.NewConfig)
++		if oldErr != nil || newErr != nil || oldBase != identity.DatasourceBaseURL ||
++			newBase != identity.DatasourceBaseURL || oldBinding != identity.BindingID ||
++			newBinding != identity.BindingID || oldHash != rotation.OldConfigSHA ||
++			newHash != rotation.NewConfigSHA || !nextcloudRotationOnlyChangesMachineKey(rotation) {
++			return ErrNextcloudEventScope
++		}
++		var pair NextcloudSourcePairing
++		if err := tx.Where("operation_id = ? AND tenant_id = ? AND state = 'active'",
++			rotation.PairOperationID, identity.TenantID).Take(&pair).Error; err != nil {
++			return ErrNextcloudEventScope
++		}
++		if pair.KnowledgeBaseID != identity.KnowledgeBaseID || pair.DataSourceID != identity.DatasourceID ||
++			pair.InstanceID != identity.NextcloudInstanceID || pair.BindingID != identity.BindingID ||
++			pair.BaseURL != identity.DatasourceBaseURL || pair.ConfigSHA != rotation.NewConfigSHA ||
++			pair.KeyID != rotation.NewKeyID || pair.PublicationEpoch != identity.PublicationEpoch {
++			return ErrNextcloudEventScope
++		}
++		var unfinishedRotations int64
++		if err := tx.Model(&NextcloudSourceRotation{}).
++			Where("pair_operation_id = ? AND operation_id <> ? AND state IN ?", pair.OperationID,
++				rotation.OperationID, []string{"pending", "committed", "switched"}).
++			Count(&unfinishedRotations).Error; err != nil {
++			return fmt.Errorf("check other Nextcloud source rotations: %w", err)
++		}
++		if unfinishedRotations != 0 {
++			return ErrNextcloudEventScope
++		}
++		if connection.DatasourceConfigSHA256 == rotation.NewConfigSHA {
++			return nil // exact operation replay; never rewrite a live dispatch
++		}
++		if connection.DatasourceConfigSHA256 != rotation.OldConfigSHA {
++			return ErrNextcloudEventScope
++		}
++		var dispatch nextcloudEventDispatchRow
++		if err := tx.Table("nextcloud_event_dispatch").Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("connection_id = ?", connection.ConnectionID).Take(&dispatch).Error; err != nil {
++			return fmt.Errorf("read Nextcloud event dispatch: %w", err)
++		}
++		var checkpoint nextcloudEventCheckpoint
++		if err := tx.Table("nextcloud_event_checkpoint").Where("connection_id = ?", connection.ConnectionID).
++			Take(&checkpoint).Error; err != nil {
++			return fmt.Errorf("read Nextcloud event checkpoint: %w", err)
++		}
++		if checkpoint.ReceivedID < dispatch.DispatchedID || dispatch.DispatchedID != dispatch.AppliedID ||
++			dispatch.TargetEventID > dispatch.AppliedID || dispatch.LeaseToken != nil || dispatch.LeaseUntil != nil ||
++			(dispatch.State != "idle" && !(dispatch.State == "blocked" && dispatch.LastErrorCode == "source_changed")) {
++			return ErrNextcloudEventRebindUnsafe
++		}
++		// A running manual/scheduled task may still be writing this source even
++		// when the event dispatch row is idle. Do not guess its outcome.
++		var running int64
++		if err := tx.Table("sync_logs").Where("data_source_id = ? AND status = ?",
++			identity.DatasourceID, types.SyncLogStatusRunning).Count(&running).Error; err != nil {
++			return fmt.Errorf("check Nextcloud sync admission: %w", err)
++		}
++		if running != 0 {
++			return ErrNextcloudEventRebindUnsafe
++		}
++		updated := tx.Table("nextcloud_event_connections").Where("connection_id = ? AND status = 'active' AND datasource_config_sha256 = ?",
++			connection.ConnectionID, rotation.OldConfigSHA).
++			Updates(map[string]any{"datasource_config_sha256": rotation.NewConfigSHA, "updated_at": time.Now().UTC()})
++		if updated.Error != nil {
++			return fmt.Errorf("rebind Nextcloud event connection: %w", updated.Error)
++		}
++		if updated.RowsAffected != 1 {
++			return ErrNextcloudEventScope
++		}
++		if dispatch.State == "blocked" {
++			if err := tx.Table("nextcloud_event_dispatch").Where("connection_id = ? AND state = 'blocked' AND last_error_code = 'source_changed'",
++				connection.ConnectionID).Updates(map[string]any{"state": "idle", "last_error_code": "",
++				"next_attempt_at": time.Now().UTC(), "updated_at": time.Now().UTC()}).Error; err != nil {
++				return fmt.Errorf("resume Nextcloud event dispatch: %w", err)
++			}
++		}
++		changed = true
++		return nil
++	})
++	return changed, err
++}
++
++func nextcloudRotationOnlyChangesMachineKey(rotation NextcloudSourceRotation) bool {
++	oldSource := &types.DataSource{Config: rotation.OldConfig}
++	newSource := &types.DataSource{Config: rotation.NewConfig}
++	oldConfig, oldErr := oldSource.ParseConfig()
++	newConfig, newErr := newSource.ParseConfig()
++	if oldErr != nil || newErr != nil || oldConfig == nil || newConfig == nil ||
++		oldConfig.Credentials["key_id"] != rotation.OldKeyID ||
++		newConfig.Credentials["key_id"] != rotation.NewKeyID || rotation.OldKeyID == rotation.NewKeyID {
++		return false
++	}
++	oldToken, okOld := oldConfig.Credentials["token"].(string)
++	newToken, okNew := newConfig.Credentials["token"].(string)
++	if !okOld || !okNew || oldToken == "" || newToken == "" || oldToken == newToken {
++		return false
++	}
++	delete(oldConfig.Credentials, "token")
++	delete(oldConfig.Credentials, "key_id")
++	delete(newConfig.Credentials, "token")
++	delete(newConfig.Credentials, "key_id")
++	return reflect.DeepEqual(oldConfig, newConfig)
++}
+diff --git a/internal/application/repository/nextcloud_event_rebind_test.go b/internal/application/repository/nextcloud_event_rebind_test.go
+new file mode 100644
+index 00000000..cf9a8663
+--- /dev/null
++++ b/internal/application/repository/nextcloud_event_rebind_test.go
+@@ -0,0 +1,37 @@
++package repository
++
++import (
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestNextcloudRotationOnlyChangesMachineCredential(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	config := func(token, keyID string, extraSetting bool) types.JSON {
++		t.Helper()
++		settings := map[string]interface{}{"base_url": "https://nextcloud.example.test"}
++		if extraSetting {
++			settings["unrelated"] = true
++		}
++		value := &types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++			Credentials: map[string]interface{}{"token": token, "key_id": keyID},
++			ResourceIDs: []string{"binding-one"}, Settings: settings}
++		blob, err := value.ToJSON()
++		require.NoError(t, err)
++		return blob
++	}
++	old := config("old-machine-token", "pair_old", false)
++	new := config("new-machine-token", "rot_new", false)
++	rotation := NextcloudSourceRotation{OldKeyID: "pair_old", NewKeyID: "rot_new",
++		OldConfig: old, NewConfig: new}
++	require.True(t, nextcloudRotationOnlyChangesMachineKey(rotation))
++	rotation.NewConfig = config("new-machine-token", "rot_new", true)
++	require.False(t, nextcloudRotationOnlyChangesMachineKey(rotation), "unrelated settings edit cannot rebind")
++	rotation.NewConfig = config("old-machine-token", "rot_new", false)
++	require.False(t, nextcloudRotationOnlyChangesMachineKey(rotation), "same token cannot prove rotation")
++	rotation.NewConfig = new
++	rotation.NewKeyID = "rot_other"
++	require.False(t, nextcloudRotationOnlyChangesMachineKey(rotation), "new key ID must match the record")
 +}
 diff --git a/internal/application/repository/nextcloud_event_status.go b/internal/application/repository/nextcloud_event_status.go
 new file mode 100644
@@ -25652,16 +26010,18 @@ index 00000000..4239de12
 +}
 diff --git a/internal/handler/nextcloud_event_connections.go b/internal/handler/nextcloud_event_connections.go
 new file mode 100644
-index 00000000..a542d13e
+index 00000000..5fcf97eb
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_connections.go
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,263 @@
 +package handler
 +
 +import (
 +	"context"
 +	"errors"
 +	"net/http"
++
++	"github.com/google/uuid"
 +
 +	"github.com/Tencent/WeKnora/internal/application/repository"
 +	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
@@ -25744,7 +26104,8 @@ index 00000000..a542d13e
 +		TenantID: ds.TenantID, KnowledgeBaseID: ds.KnowledgeBaseID,
 +		DatasourceID: ds.ID, NextcloudInstanceID: inspected.InstanceID,
 +		BindingID: bindingID, DatasourceBaseURL: baseURL,
-+		DatasourceConfigSHA: hash,
++		DatasourceConfigSHA: hash, PublicationEpoch: inspected.PublicationEpoch,
++		PublicationState: inspected.PublicationState,
 +	}, true
 +}
 +
@@ -25793,6 +26154,8 @@ index 00000000..a542d13e
 +		c.JSON(http.StatusConflict, gin.H{"error": "connection_already_active"})
 +	case errors.Is(err, repository.ErrNextcloudEventConnectionMissing):
 +		c.JSON(http.StatusNotFound, gin.H{"error": "connection_not_active"})
++	case errors.Is(err, repository.ErrNextcloudEventRebindUnsafe):
++		c.JSON(http.StatusConflict, gin.H{"error": "event_dispatch_manual_review_required"})
 +	case errors.Is(err, repository.ErrNextcloudEventScope):
 +		c.JSON(http.StatusConflict, gin.H{"error": "source_changed_repair_required"})
 +	default:
@@ -25851,6 +26214,57 @@ index 00000000..a542d13e
 +	nextcloudConnectionIssued(c, http.StatusOK, credential)
 +}
 +
++// Rebind accepts only the exact finalized source machine-key rotation. It
++// never returns or changes the event HMAC secret, connection ID, or watermark.
++func (h *NextcloudEventConnectionHandler) Rebind(c *gin.Context) {
++	ds, ok := h.authorize(c)
++	if !ok {
++		return
++	}
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2<<10)
++	var request struct {
++		OperationID string `json:"operation_id" binding:"required"`
++	}
++	if err := c.ShouldBindJSON(&request); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_source_rotation_request"})
++		return
++	}
++	parsed, err := uuid.Parse(request.OperationID)
++	if err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_source_rotation_request"})
++		return
++	}
++	identity, ok := h.inspectCommitted(c, ds)
++	if !ok {
++		return
++	}
++	if identity.PublicationState != "active" || identity.PublicationEpoch < 0 {
++		c.JSON(http.StatusConflict, gin.H{"error": "nextcloud_paired_binding_unavailable"})
++		return
++	}
++	changed, err := h.inbox.RebindFinalizedSourceRotation(c.Request.Context(), identity, parsed.String())
++	if err != nil {
++		nextcloudConnectionError(c, err)
++		return
++	}
++	status, err := h.inbox.ConnectionStatus(c.Request.Context(), ds.TenantID, ds.ID)
++	if err != nil {
++		nextcloudConnectionError(c, err)
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{
++		"connection_id": status.ConnectionID,
++		"rotation_id":   parsed.String(), "rebound": changed,
++		"status":                      status.Status,
++		"key_id":                      status.KeyID,
++		"received_through_event_id":   status.ReceivedThroughEventID,
++		"dispatched_through_event_id": status.DispatchedThroughEventID,
++		"applied_through_event_id":    status.AppliedThroughEventID,
++		"dispatch_state":              status.DispatchState,
++		"last_error_code":             status.LastErrorCode,
++	})
++}
++
 +// Revoke requires no live Nextcloud read, so it works after credential drift.
 +func (h *NextcloudEventConnectionHandler) Revoke(c *gin.Context) {
 +	ds, ok := h.authorize(c)
@@ -25865,10 +26279,10 @@ index 00000000..a542d13e
 +}
 diff --git a/internal/handler/nextcloud_event_connections_test.go b/internal/handler/nextcloud_event_connections_test.go
 new file mode 100644
-index 00000000..18674663
+index 00000000..714789d8
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_connections_test.go
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,351 @@
 +package handler
 +
 +import (
@@ -25926,7 +26340,7 @@ index 00000000..18674663
 +	}}
 +	h := NewNextcloudEventConnectionHandler(repository.NewNextcloudEventInboxRepository(db), NewDataSourceHandler(service, kbService))
 +	h.inspect = func(context.Context, *types.DataSourceConfig) (nextcloud.PairingIdentity, error) {
-+		return nextcloud.PairingIdentity{InstanceID: testEventInstance, BindingID: testEventBinding, BaseURL: "https://nextcloud.example.test"}, nil
++		return nextcloud.PairingIdentity{InstanceID: testEventInstance, BindingID: testEventBinding, BaseURL: "https://nextcloud.example.test", PublicationState: "active", PublicationEpoch: 1}, nil
 +	}
 +	router.Use(func(c *gin.Context) {
 +		if tenantID, ok := c.Request.Context().Value(types.TenantIDContextKey).(uint64); ok {
@@ -25937,6 +26351,7 @@ index 00000000..18674663
 +	router.POST("/api/v1/datasource/:id/nextcloud-event-connection", h.Pair)
 +	router.GET("/api/v1/datasource/:id/nextcloud-event-connection", h.Status)
 +	router.POST("/api/v1/datasource/:id/nextcloud-event-connection/rotate", h.Rotate)
++	router.POST("/api/v1/datasource/:id/nextcloud-event-connection/rebind", h.Rebind)
 +	router.DELETE("/api/v1/datasource/:id/nextcloud-event-connection", h.Revoke)
 +	return h
 +}
@@ -27030,6 +27445,297 @@ index 00000000..d2ceee75
 +	}, 2*time.Second, 10*time.Millisecond)
 +	require.False(t, created)
 +}
+diff --git a/internal/handler/nextcloud_event_rebind_test.go b/internal/handler/nextcloud_event_rebind_test.go
+new file mode 100644
+index 00000000..12f34877
+--- /dev/null
++++ b/internal/handler/nextcloud_event_rebind_test.go
+@@ -0,0 +1,285 @@
++package handler
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++	"gorm.io/gorm/logger"
++)
++
++func setupManagedRebindTest(t *testing.T, dialect string) (*gorm.DB, *gin.Engine, *NextcloudEventConnectionHandler) {
++	t.Helper()
++	if dialect == "sqlite" {
++		db, router, h := setupManagedNextcloudConnection(t)
++		require.NoError(t, db.AutoMigrate(&repository.NextcloudSourceRotation{}))
++		return db, router, h
++	}
++	dsn := os.Getenv("NEXTCLOUD_EVENT_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set NEXTCLOUD_EVENT_TEST_POSTGRES_DSN for isolated PostgreSQL rebind test")
++	}
++	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	random := make([]byte, 6)
++	_, err = rand.Read(random)
++	require.NoError(t, err)
++	schema := "nextcloud_event_rebind_" + hex.EncodeToString(random)
++	require.NoError(t, db.Exec("CREATE SCHEMA "+schema).Error)
++	t.Cleanup(func() { _ = db.Exec("DROP SCHEMA " + schema + " CASCADE").Error })
++	require.NoError(t, db.Exec("SET search_path TO "+schema).Error)
++	db, router, _ := prepareNextcloudEventHTTPTest(t, db,
++		"../../migrations/versioned/000113_nextcloud_event_inbox.up.sql")
++	h := prepareManagedNextcloudConnection(t, db, router)
++	require.NoError(t, db.AutoMigrate(&repository.NextcloudSourceRotation{}))
++	return db, router, h
++}
++
++func managedRebindRequest(router *gin.Engine, rotationID string, tenantID uint64,
++	role types.TenantRole, apiKey bool) *httptest.ResponseRecorder {
++	body, _ := json.Marshal(map[string]string{"operation_id": rotationID})
++	req := httptest.NewRequest(http.MethodPost, testManagedEventPath+"/rebind", bytes.NewReader(body))
++	req.Header.Set("Content-Type", "application/json")
++	ctx := context.WithValue(req.Context(), types.TenantIDContextKey, tenantID)
++	ctx = context.WithValue(ctx, types.TenantRoleContextKey, role)
++	if apiKey {
++		ctx = types.WithTenantAPIKeyScope(ctx, types.TenantAPIKeyScope{FullAccess: true})
++	}
++	recorder := httptest.NewRecorder()
++	router.ServeHTTP(recorder, req.WithContext(ctx))
++	return recorder
++}
++
++func finalizeManagedEventSourceRotation(t *testing.T, db *gorm.DB) repository.NextcloudSourceRotation {
++	t.Helper()
++	var pair repository.NextcloudSourcePairing
++	require.NoError(t, db.Where("tenant_id = ? AND datasource_id = ?", 7, "ds-synthetic").Take(&pair).Error)
++	// The generic event fixture predates source rotation and names the old
++	// source key differently from its data-source config. Align that fixture.
++	require.NoError(t, db.Model(&pair).Update("key_id", "default").Error)
++	pair.KeyID = "default"
++	id := uuid.NewString()
++	proposed := repository.NextcloudSourceRotation{
++		OperationID: id, PairOperationID: pair.OperationID, TenantID: pair.TenantID,
++		KnowledgeBaseID: pair.KnowledgeBaseID, DataSourceID: pair.DataSourceID,
++		InstanceID: pair.InstanceID, BindingID: pair.BindingID,
++		NewKeyID: "rot_" + strings.ReplaceAll(id, "-", ""),
++	}
++	repo := repository.NewNextcloudSourcePairingRepository(db)
++	rotation, created, err := repo.PrepareSourceRotation(context.Background(), proposed, "rotated-source-machine-token")
++	require.NoError(t, err)
++	require.True(t, created)
++	require.NoError(t, repo.SwitchSourceRotation(context.Background(), rotation))
++	require.NoError(t, repo.FinalizeSourceRotation(context.Background(), rotation))
++	require.NoError(t, db.Where("operation_id = ?", rotation.OperationID).Take(&rotation).Error)
++	require.Equal(t, "finalized", rotation.State)
++	return rotation
++}
++
++func TestNextcloudEventRebindFinalizedRotationHTTPAndRepository(t *testing.T) {
++	for _, dialect := range []string{"sqlite", "postgres"} {
++		t.Run(dialect, func(t *testing.T) {
++			db, router, h := setupManagedRebindTest(t, dialect)
++			paired := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++			require.Equal(t, http.StatusCreated, paired.Code, paired.Body.String())
++			credential := issuedEventCredential(t, paired)
++			batch := sampleNextcloudEventBatch("0", "101")
++			batch.ConnectionID = credential.ConnectionID
++			require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
++				signedNextcloudEventRequestWithKey(t, credential.Secret, credential.KeyID,
++					batch, strings.Repeat("a", 32))).Code)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_dispatch SET dispatched_id = 101,
++				applied_id = 101, target_event_id = 101 WHERE connection_id = ?`, credential.ConnectionID).Error)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_inbox SET state = 'applied'
++				WHERE connection_id = ? AND event_id = 101`, credential.ConnectionID).Error)
++			var original struct {
++				KeyID      string `gorm:"column:current_key_id"`
++				Ciphertext string `gorm:"column:current_secret_ciphertext"`
++			}
++			require.NoError(t, db.Table("nextcloud_event_connections").Select("current_key_id, current_secret_ciphertext").
++				Where("connection_id = ?", credential.ConnectionID).Take(&original).Error)
++			pending := sampleNextcloudEventBatch("101", "102")
++			pending.ConnectionID = credential.ConnectionID
++			require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
++				signedNextcloudEventRequestWithKey(t, credential.Secret, credential.KeyID,
++					pending, strings.Repeat("d", 32))).Code)
++			rotation := finalizeManagedEventSourceRotation(t, db)
++			originalInspect := h.inspect
++			for _, live := range []struct {
++				name, state string
++				epoch       int64
++			}{
++				{"withdrawn", "withdrawn", 1},
++				{"new publication epoch", "active", 2},
++			} {
++				t.Run(live.name, func(t *testing.T) {
++					h.inspect = func(ctx context.Context, cfg *types.DataSourceConfig) (nextcloud.PairingIdentity, error) {
++						identity, err := originalInspect(ctx, cfg)
++						identity.PublicationState = live.state
++						identity.PublicationEpoch = live.epoch
++						return identity, err
++					}
++					response := managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++					require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
++				})
++			}
++			h.inspect = originalInspect
++			stale := sampleNextcloudEventBatch("102", "103")
++			stale.ConnectionID = credential.ConnectionID
++			require.Equal(t, http.StatusForbidden, postNextcloudEvent(router,
++				signedNextcloudEventRequestWithKey(t, credential.Secret, credential.KeyID,
++					stale, strings.Repeat("b", 32))).Code)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_dispatch SET state = 'blocked',
++				last_error_code = 'source_changed' WHERE connection_id = ?`, credential.ConnectionID).Error)
++			for _, invalid := range []struct {
++				name   string
++				id     string
++				tenant uint64
++				role   types.TenantRole
++				apiKey bool
++				status int
++			}{
++				{"viewer", rotation.OperationID, 7, types.TenantRoleViewer, false, http.StatusForbidden},
++				{"wrong tenant", rotation.OperationID, 8, types.TenantRoleAdmin, false, http.StatusForbidden},
++				{"api key", rotation.OperationID, 7, types.TenantRoleOwner, true, http.StatusForbidden},
++				{"wrong rotation", uuid.NewString(), 7, types.TenantRoleAdmin, false, http.StatusConflict},
++			} {
++				t.Run(invalid.name, func(t *testing.T) {
++					response := managedRebindRequest(router, invalid.id, invalid.tenant, invalid.role, invalid.apiKey)
++					require.Equal(t, invalid.status, response.Code, response.Body.String())
++				})
++			}
++			for _, state := range []string{"pending", "switched", "aborted"} {
++				require.NoError(t, db.Exec(`UPDATE nextcloud_source_rotations SET state = ? WHERE operation_id = ?`,
++					state, rotation.OperationID).Error)
++				response := managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++				require.Equal(t, http.StatusConflict, response.Code, state+": "+response.Body.String())
++			}
++			require.NoError(t, db.Exec(`UPDATE nextcloud_source_rotations SET state = 'finalized' WHERE operation_id = ?`,
++				rotation.OperationID).Error)
++			response := managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++			require.Contains(t, response.Body.String(), `"rebound":true`)
++			require.Contains(t, response.Body.String(), `"received_through_event_id":"102"`)
++			require.Contains(t, response.Body.String(), `"dispatched_through_event_id":"101"`)
++			require.Contains(t, response.Body.String(), `"applied_through_event_id":"101"`)
++			require.NotContains(t, response.Body.String(), credential.Secret)
++			var updated struct {
++				KeyID      string `gorm:"column:current_key_id"`
++				Ciphertext string `gorm:"column:current_secret_ciphertext"`
++			}
++			require.NoError(t, db.Table("nextcloud_event_connections").Select("current_key_id, current_secret_ciphertext").
++				Where("connection_id = ?", credential.ConnectionID).Take(&updated).Error)
++			require.Equal(t, original, updated)
++			again := managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++			require.Equal(t, http.StatusOK, again.Code, again.Body.String())
++			require.Contains(t, again.Body.String(), `"rebound":false`)
++			require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
++				signedNextcloudEventRequestWithKey(t, credential.Secret, credential.KeyID,
++					stale, strings.Repeat("c", 32))).Code)
++			var state string
++			require.NoError(t, db.Raw(`SELECT state FROM nextcloud_event_dispatch WHERE connection_id = ?`,
++				credential.ConnectionID).Scan(&state).Error)
++			require.Equal(t, "idle", state)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_dispatch SET state = 'blocked',
++					last_error_code = 'cursor_missing_manual_review' WHERE connection_id = ?`,
++				credential.ConnectionID).Error)
++			replayed := managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++			require.Equal(t, http.StatusOK, replayed.Code, replayed.Body.String())
++			require.Contains(t, replayed.Body.String(), `"rebound":false`)
++			require.Contains(t, replayed.Body.String(), `"dispatch_state":"blocked"`)
++			require.Contains(t, replayed.Body.String(), `"last_error_code":"cursor_missing_manual_review"`)
++		})
++	}
++}
++
++func TestNextcloudEventRebindRejectsUncertainDispatch(t *testing.T) {
++	for _, dialect := range []string{"sqlite", "postgres"} {
++		t.Run(dialect, func(t *testing.T) {
++			db, router, _ := setupManagedRebindTest(t, dialect)
++			paired := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
++			require.Equal(t, http.StatusCreated, paired.Code, paired.Body.String())
++			credential := issuedEventCredential(t, paired)
++			rotation := finalizeManagedEventSourceRotation(t, db)
++			for _, item := range []struct {
++				name, state, errorCode string
++				target                 int
++			}{
++				{"queued", "queued", "", 0},
++				{"leased", "leased", "", 0},
++				{"retry", "retry", "", 0},
++				{"other blocked reason", "blocked", "cursor_missing_manual_review", 0},
++				{"unfinished target", "blocked", "source_changed", 1},
++			} {
++				t.Run(item.name, func(t *testing.T) {
++					require.NoError(t, db.Exec(`UPDATE nextcloud_event_dispatch SET state = ?,
++						last_error_code = ?, target_event_id = ? WHERE connection_id = ?`,
++						item.state, item.errorCode, item.target, credential.ConnectionID).Error)
++					response := managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++					require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
++					require.Contains(t, response.Body.String(), "event_dispatch_manual_review_required")
++				})
++			}
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_dispatch SET state = 'idle',
++				last_error_code = '', target_event_id = 0 WHERE connection_id = ?`, credential.ConnectionID).Error)
++			require.NoError(t, db.Exec(`INSERT INTO sync_logs(id, data_source_id, status, started_at)
++				VALUES ('manual-running', 'ds-synthetic', 'running', CURRENT_TIMESTAMP)`).Error)
++			response := managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++			require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
++			require.Contains(t, response.Body.String(), "event_dispatch_manual_review_required")
++			require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success' WHERE id = 'manual-running'`).Error)
++
++			// A finalized record for the wrong tuple or a later unrelated
++			// source edit cannot authorize a connection rewrite.
++			for _, change := range []struct{ column, value string }{
++				{"pair_operation_id", uuid.NewString()},
++				{"binding_id", "other-binding"},
++				{"old_config_sha256", strings.Repeat("0", 64)},
++				{"new_config_sha256", strings.Repeat("f", 64)},
++			} {
++				var original string
++				require.NoError(t, db.Raw("SELECT "+change.column+" FROM nextcloud_source_rotations WHERE operation_id = ?",
++					rotation.OperationID).Scan(&original).Error)
++				require.NoError(t, db.Exec("UPDATE nextcloud_source_rotations SET "+change.column+" = ? WHERE operation_id = ?",
++					change.value, rotation.OperationID).Error)
++				response = managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++				require.Equal(t, http.StatusConflict, response.Code, change.column+": "+response.Body.String())
++				require.NoError(t, db.Exec("UPDATE nextcloud_source_rotations SET "+change.column+" = ? WHERE operation_id = ?",
++					original, rotation.OperationID).Error)
++			}
++			require.NoError(t, db.Exec(`UPDATE data_sources SET status = 'paused' WHERE id = ?`,
++				"ds-synthetic").Error)
++			response = managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++			require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
++			require.NoError(t, db.Exec(`UPDATE data_sources SET status = 'active' WHERE id = ?`,
++				"ds-synthetic").Error)
++			changed := syntheticNextcloudEventDataSourceConfig(t, "https://nextcloud.example.test", true)
++			require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`, string(changed), "ds-synthetic").Error)
++			response = managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++			require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
++			require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`,
++				string(rotation.NewConfig), "ds-synthetic").Error)
++			response = managedRebindRequest(router, rotation.OperationID, 7, types.TenantRoleAdmin, false)
++			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++		})
++	}
++}
 diff --git a/internal/handler/nextcloud_event_status.go b/internal/handler/nextcloud_event_status.go
 new file mode 100644
 index 00000000..2bdc69cc
@@ -27487,10 +28193,10 @@ index 00000000..f2df39a6
 +}
 diff --git a/internal/handler/nextcloud_events_test.go b/internal/handler/nextcloud_events_test.go
 new file mode 100644
-index 00000000..07b364ee
+index 00000000..072a04f0
 --- /dev/null
 +++ b/internal/handler/nextcloud_events_test.go
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,346 @@
 +package handler
 +
 +import (
@@ -27568,7 +28274,8 @@ index 00000000..07b364ee
 +	require.NoError(t, db.Exec(fmt.Sprintf(`CREATE TABLE data_sources (
 +		id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
 +		knowledge_base_id TEXT NOT NULL, type TEXT NOT NULL,
-+		config %s NOT NULL, status TEXT NOT NULL DEFAULT 'active', deleted_at TIMESTAMP
++		config %s NOT NULL, status TEXT NOT NULL DEFAULT 'active',
++		updated_at TIMESTAMP, deleted_at TIMESTAMP
 +	)`, configColumnType)).Error)
 +	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES (?, ?)`, "kb-synthetic", 7).Error)
 +	config := syntheticNextcloudEventDataSourceConfig(t, "https://nextcloud.example.test", true)
@@ -32727,10 +33434,10 @@ index b5c85dfc..ca7be5c7 100644
  		RegisterWikiPageRoutes(v1, params.WikiPageHandler, rbacGuards)
  		RegisterMemoryRoutes(v1, params.MemoryHandler, rbacGuards)
 diff --git a/internal/router/router_api_key_capabilities_test.go b/internal/router/router_api_key_capabilities_test.go
-index 713a0b5d..7d96e1da 100644
+index 713a0b5d..89621922 100644
 --- a/internal/router/router_api_key_capabilities_test.go
 +++ b/internal/router/router_api_key_capabilities_test.go
-@@ -391,6 +391,34 @@ func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
+@@ -391,6 +391,35 @@ func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
  	}
  }
  
@@ -32744,6 +33451,7 @@ index 713a0b5d..7d96e1da 100644
 +		{http.MethodGet, "/api/v1/datasource/:id/nextcloud-event-connection"},
 +		{http.MethodPost, "/api/v1/datasource/:id/nextcloud-event-connection"},
 +		{http.MethodPost, "/api/v1/datasource/:id/nextcloud-event-connection/rotate"},
++		{http.MethodPost, "/api/v1/datasource/:id/nextcloud-event-connection/rebind"},
 +		{http.MethodDelete, "/api/v1/datasource/:id/nextcloud-event-connection"},
 +	} {
 +		if _, ok := g.apiKeyAuthorizer.Lookup(item.method, item.path); ok {
@@ -33069,10 +33777,10 @@ index 6ea042b1..5dd1097c 100644
  	}
  }
 diff --git a/internal/router/routes_infra.go b/internal/router/routes_infra.go
-index 4fb5c4b9..ecc93402 100644
+index 4fb5c4b9..59635160 100644
 --- a/internal/router/routes_infra.go
 +++ b/internal/router/routes_infra.go
-@@ -335,6 +335,49 @@ func RegisterDataSourceRoutes(
+@@ -335,6 +335,50 @@ func RegisterDataSourceRoutes(
  	}
  }
  
@@ -33088,6 +33796,7 @@ index 4fb5c4b9..ecc93402 100644
 +	ds.GET("/:id/nextcloud-event-connection", g.Admin(), h.Status)
 +	ds.POST("/:id/nextcloud-event-connection", g.Admin(), h.Pair)
 +	ds.POST("/:id/nextcloud-event-connection/rotate", g.Admin(), h.Rotate)
++	ds.POST("/:id/nextcloud-event-connection/rebind", g.Admin(), h.Rebind)
 +	ds.DELETE("/:id/nextcloud-event-connection", g.Admin(), h.Revoke)
 +}
 +

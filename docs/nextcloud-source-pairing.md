@@ -156,9 +156,18 @@ complete recovery. A lost one-time token before WeKnora stores it requires
 aborting that pending Nextcloud operation and creating a fresh UUID.
 
 Source-key rotation changes the exact source config hash. An optional
-WeKnora event-inbox connection pinned to the former hash must be re-paired
-after rotation; it does not silently gain the new source credential. The
-operator CLI is `scripts/ops/local-source-rotation.py`.
+WeKnora event-inbox connection pinned to the former hash stops accepting and
+dispatching hints until an administrator explicitly rebinds it to the exact
+finalized rotation UUID. A safe rebind retains its connection ID, HMAC key,
+inbox, and receipt/dispatch/applied watermarks; it neither reveals the HMAC
+secret nor grants a different source configuration. Pending or aborted
+rotations, unrelated edits, and uncertain in-flight dispatches are rejected.
+Use `scripts/ops/local-source-rotation.py rebind --binding BINDING
+--pair-operation-id PAIR_UUID --operation-id ROTATION_UUID` after both sides
+report `finalized`. The command also resumes an exactly matching Nextcloud
+event sender paused by receiver authorization failure, using its admin
+compare-and-swap retry endpoint; other pauses require manual review. See
+`docs/nextcloud-event-receiver.md` for the HTTP route and conditions.
 
 Nextcloud Stop blocks source reads. Resume does not change the paired tenant,
 KB, binding, source ID, or credentials. A pending commit whose publication

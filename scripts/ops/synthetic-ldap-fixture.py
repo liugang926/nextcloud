@@ -9,6 +9,7 @@ docs/synthetic-ldap-compose.md.
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,12 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 MARKER = "nextcloud-weknora-synthetic-ldap-v1"
+OWNER_LABEL = "org.nextcloud.weknora.synthetic-fixture.owner"
+SERVICES = frozenset(("openldap", "cert-init", "nc-db", "nc-redis", "nextcloud",
+                      "wk-db", "wk-redis", "docreader", "mock-embedding", "wk-app"))
+VOLUMES = frozenset(("ldap-certs", "ldap-fixture", "nc-postgres", "nc-redis-data",
+                     "nc-html", "wk-postgres", "wk-data", "docreader-tmp"))
+SHORT_PRIMARY_ENV = {"DOCREADER_PDF_FORCE_SCANNED": "1"}
 LDAP_IMAGE = ("bitnamilegacy/openldap:2.6.10-debian-12-r4@"
               "sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93")
 NC_IMAGE = ("nextcloud:34.0.4-apache@"
@@ -171,7 +178,7 @@ def generate_certs(directory):
     (certs / "ca.crt").chmod(0o644)
 
 
-def compose_data(directory, project, ports, passwords, image):
+def compose_data(directory, project, ports, passwords, image, ui_image=None, *, owner_token):
     certs, schema, ldifs = directory / "certs", directory / "schema", directory / "ldif"
     base_env = {"POSTGRES_DB": "nextcloud", "POSTGRES_USER": "nextcloud",
                 "POSTGRES_PASSWORD": passwords["nc_db"]}
@@ -217,7 +224,7 @@ def compose_data(directory, project, ports, passwords, image):
         "LDAP_LOGIN_FILTER": "(&(objectClass=adTestUser)(|(sAMAccountName={login})(userPrincipalName={login})))",
         "LDAP_SYNC_INTERVAL": "15s", "LDAP_STALE_AFTER": "2m",
     }
-    return {
+    result = {
         "name": project,
         "services": {
             "openldap": {"image": LDAP_IMAGE, "hostname": "openldap", "environment": ldap_env,
@@ -287,26 +294,153 @@ def compose_data(directory, project, ports, passwords, image):
                        "healthcheck": {"test": ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"],
                                        "interval": "10s", "timeout": "5s", "retries": 40,
                                        "start_period": "60s"}},
+            **({"wk-ui": {
+                "image": ui_image,
+                "ports": [f"127.0.0.1:{ports['weknora_ui']}:80"],
+                "environment": {"APP_HOST": "wk-app", "APP_PORT": "8080",
+                                "APP_SCHEME": "http", "MAX_FILE_SIZE": "50M",
+                                "MAX_SKILL_BUNDLE_SIZE": "100M"},
+                "depends_on": {"wk-app": {"condition": "service_healthy"}},
+            }} if ui_image else {}),
         },
-        "volumes": {name: {} for name in
-                    ("ldap-certs", "ldap-fixture", "nc-postgres", "nc-redis-data", "nc-html",
-                     "wk-postgres", "wk-data", "docreader-tmp")},
+        "volumes": {name: {} for name in VOLUMES},
     }
+    for service in result["services"].values():
+        service["labels"] = {OWNER_LABEL: owner_token}
+    for volume in result["volumes"].values():
+        volume["labels"] = {OWNER_LABEL: owner_token}
+    result["networks"] = {"default": {"labels": {OWNER_LABEL: owner_token}}}
+    return result
 
 
-def prepare(image, mode):
+def compose_fingerprint(config):
+    """Allow the PDF drill's one controlled private DocReader override."""
+    normalized = json.loads(json.dumps(config))
+    docreader = normalized.get("services", {}).get("docreader", {})
+    if docreader.get("environment") == SHORT_PRIMARY_ENV:
+        del docreader["environment"]
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def docker_names(kind, project=None):
+    if kind == "container":
+        command = ["docker", "ps", "-a"]
+        template = "{{.Names}}"
+    elif kind == "volume":
+        command = ["docker", "volume", "ls"]
+        template = "{{.Name}}"
+    elif kind == "network":
+        command = ["docker", "network", "ls"]
+        template = "{{.Name}}"
+    else:
+        raise ValueError("unknown Docker resource type")
+    if project:
+        command.extend(["--filter", "label=com.docker.compose.project=" + project])
+    command.extend(["--format", template])
+    result = subprocess.run(command, check=True, text=True, capture_output=True)
+    return set(result.stdout.splitlines())
+
+
+def project_resources(project):
+    return {kind: docker_names(kind, project) for kind in
+            ("container", "volume", "network")}
+
+
+def assert_project_unoccupied(project):
+    if any(project_resources(project).values()):
+        return False
+    # A manually named or unlabeled resource can occupy a Compose name too.
+    prefixes = {"container": project + "-", "volume": project + "_",
+                "network": project + "_"}
+    return all(not any(name.startswith(prefix) for name in docker_names(kind))
+               for kind, prefix in prefixes.items())
+
+
+def docker_inspect(kind, name):
+    command = ["docker", kind, "inspect", name]
+    result = subprocess.run(command, check=True, text=True, capture_output=True)
+    items = json.loads(result.stdout)
+    if len(items) != 1:
+        raise RuntimeError("Docker resource inspection was ambiguous")
+    return items[0]
+
+
+def assert_owned_resources(directory, state, *, require_empty=False):
+    """Fail closed before Compose can modify a project or remove its volumes."""
+    project, token = state["project"], state["owner_token"]
+    services = SERVICES | ({"wk-ui"} if state.get("weknora_ui_image") else set())
+    expected_volumes = {project + "_" + name for name in VOLUMES}
+    expected_network = project + "_default"
+    resources = project_resources(project)
+    prefixes = {"container": project + "-", "volume": project + "_",
+                "network": project + "_"}
+    for kind, prefix in prefixes.items():
+        foreign = {name for name in docker_names(kind) if name.startswith(prefix)} - resources[kind]
+        if foreign:
+            raise RuntimeError("unlabeled resource occupies synthetic Compose project name")
+    if require_empty:
+        if any(resources.values()):
+            raise RuntimeError("synthetic Compose project still has resources")
+        return
+    for name in resources["container"]:
+        item = docker_inspect("container", name)
+        labels = item.get("Config", {}).get("Labels") or {}
+        service = labels.get("com.docker.compose.service")
+        if (labels.get("com.docker.compose.project") != project or
+                labels.get(OWNER_LABEL) != token or service not in services or
+                not re.fullmatch(re.escape(project + "-" + service) + r"-[1-9][0-9]*", name)):
+            raise RuntimeError("container does not belong to this synthetic fixture")
+        pinned_image = (state["weknora_image_id"] if service == "wk-app" else
+                        state.get("weknora_ui_image_id") if service == "wk-ui" else None)
+        if pinned_image and item.get("Image") != pinned_image:
+            raise RuntimeError("running WeKnora container image differs from fixture pin")
+    if not resources["volume"] <= expected_volumes:
+        raise RuntimeError("unexpected named volume in synthetic Compose project")
+    for name in resources["volume"]:
+        item = docker_inspect("volume", name)
+        labels = item.get("Labels") or {}
+        if (labels.get("com.docker.compose.project") != project or
+                labels.get("com.docker.compose.volume") != name[len(project) + 1:] or
+                labels.get(OWNER_LABEL) != token):
+            raise RuntimeError("volume does not belong to this synthetic fixture")
+    if not resources["network"] <= {expected_network}:
+        raise RuntimeError("unexpected network in synthetic Compose project")
+    for name in resources["network"]:
+        item = docker_inspect("network", name)
+        labels = item.get("Labels") or {}
+        if (labels.get("com.docker.compose.project") != project or
+                labels.get("com.docker.compose.network") != "default" or
+                labels.get(OWNER_LABEL) != token):
+            raise RuntimeError("network does not belong to this synthetic fixture")
+
+
+def prepare(image, mode, ui_image=None):
     inspected = subprocess.run(["docker", "image", "inspect", image, "--format", "{{.Id}}"],
                                check=True, text=True, capture_output=True)
     image_id = inspected.stdout.strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError("WeKnora image has no stable local image ID")
+    ui_image_id = None
+    if ui_image:
+        ui_inspected = subprocess.run(
+            ["docker", "image", "inspect", ui_image, "--format", "{{.Id}}"],
+            check=True, text=True, capture_output=True)
+        ui_image_id = ui_inspected.stdout.strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", ui_image_id):
+            raise RuntimeError("WeKnora UI image has no stable local image ID")
     directory = Path(tempfile.mkdtemp(prefix="nc-synthetic-ldap-"))
     directory.chmod(0o700)
     try:
         for name in ("schema", "ldif"):
             (directory / name).mkdir(mode=0o700)
-        suffix = secrets.token_hex(4)
-        project = "nc-synldap-" + suffix
+        for _ in range(16):
+            project = "nc-synldap-" + secrets.token_hex(4)
+            if assert_project_unoccupied(project):
+                break
+        else:
+            raise RuntimeError("could not allocate an unused synthetic Compose project")
+        owner_token = secrets.token_hex(16)
         # The WeKnora registration policy caps passwords at 32 characters
         # and requires letters plus a digit. This 31-character form also
         # avoids a leading '-' being parsed as an occ option by Nextcloud.
@@ -319,24 +453,32 @@ def prepare(image, mode):
         domain_parts = (21, secrets.randbelow(1000000) + 1000,
                         secrets.randbelow(1000000) + 1000,
                         secrets.randbelow(1000000) + 1000)
-        ports = {key: free_port() for key in ("nextcloud", "weknora", "ldap")}
+        port_names = ["nextcloud", "weknora", "ldap"]
+        if ui_image:
+            port_names.append("weknora_ui")
+        ports = {key: free_port() for key in port_names}
         if len(set(ports.values())) != len(ports):
             raise RuntimeError("ephemeral port collision; retry prepare")
         write_private(directory / "schema/ad-test.ldif", SCHEMA)
         write_private(directory / "ldif/01-directory.ldif",
                       make_ldif(mode, passwords, guids, domain_parts))
         generate_certs(directory)
+        config = compose_data(directory, project, ports, passwords, image,
+                              ui_image, owner_token=owner_token)
         state = {"marker": MARKER, "project": project, "mode": mode,
+                 "scratch_dir": str(directory.resolve()), "owner_token": owner_token,
+                 "compose_fingerprint": compose_fingerprint(config),
                  "source_commit": subprocess.check_output(
                      ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip(),
                  "weknora_image": image, "weknora_image_id": image_id,
                  "ports": ports, "guids": guids,
                  "directory_id": "synthetic-ad"}
+        if ui_image:
+            state.update({"weknora_ui_image": ui_image,
+                          "weknora_ui_image_id": ui_image_id})
         write_private(directory / "state.json", json.dumps(state, indent=2) + "\n")
         write_private(directory / "passwords.json", json.dumps(passwords, indent=2) + "\n")
-        write_private(directory / "compose.yaml",
-                      json.dumps(compose_data(directory, project, ports, passwords, image),
-                                 indent=2) + "\n")
+        write_private(directory / "compose.yaml", json.dumps(config, indent=2) + "\n")
         print(json.dumps({"scratch": str(directory), "project": project,
                           "mode": mode, "ports": ports}, separators=(",", ":")))
     except BaseException:
@@ -350,9 +492,63 @@ def owned_state(directory):
     if (state.get("marker") != MARKER or not
             str(directory).startswith(str(Path(tempfile.gettempdir()).resolve()) + os.sep) or
             not re.fullmatch(r"nc-synldap-[0-9a-f]{8}", state.get("project", "")) or
+            state.get("scratch_dir") != str(directory) or
+            not re.fullmatch(r"[0-9a-f]{32}", state.get("owner_token", "")) or
+            not re.fullmatch(r"[0-9a-f]{64}", state.get("compose_fingerprint", "")) or
             not (directory / "compose.yaml").is_file()):
         raise RuntimeError("not an owned synthetic LDAP fixture")
+    config = json.loads((directory / "compose.yaml").read_text())
+    if (config.get("name") != state["project"] or
+            set(config.get("services", {})) !=
+            SERVICES | ({"wk-ui"} if state.get("weknora_ui_image") else set()) or
+            set(config.get("volumes", {})) != VOLUMES or
+            compose_fingerprint(config) != state["compose_fingerprint"]):
+        raise RuntimeError("synthetic LDAP Compose configuration changed")
+    assert_state_matches_compose(state, config)
     return directory, state
+
+
+def assert_state_matches_compose(state, config):
+    """Keep downstream loopback targets and image pins tied to owned Compose."""
+    has_ui = "weknora_ui_image" in state
+    ports = state.get("ports")
+    expected_ports = {"nextcloud", "weknora", "ldap"}
+    if has_ui:
+        expected_ports.add("weknora_ui")
+    if (not isinstance(ports, dict) or set(ports) != expected_ports or
+            any(type(value) is not int or not 1024 < value <= 65535
+                for value in ports.values()) or
+            len(set(ports.values())) != len(ports)):
+        raise RuntimeError("synthetic LDAP port state is invalid")
+    image = state.get("weknora_image")
+    image_id = state.get("weknora_image_id")
+    if (not isinstance(image, str) or not image or
+            not isinstance(image_id, str) or
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)):
+        raise RuntimeError("synthetic WeKnora backend image state is invalid")
+    services = config["services"]
+    expected = {
+        "openldap": ("ldap", 1636),
+        "nextcloud": ("nextcloud", 80),
+        "wk-app": ("weknora", 8080),
+    }
+    if has_ui:
+        ui_image = state["weknora_ui_image"]
+        ui_image_id = state.get("weknora_ui_image_id")
+        if (not isinstance(ui_image, str) or not ui_image or
+                not isinstance(ui_image_id, str) or
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", ui_image_id)):
+            raise RuntimeError("synthetic WeKnora UI image state is invalid")
+        expected["wk-ui"] = ("weknora_ui", 80)
+    elif "weknora_ui_image_id" in state:
+        raise RuntimeError("synthetic WeKnora UI image state is unexpected")
+    if (services["wk-app"].get("image") != image or
+            (has_ui and services["wk-ui"].get("image") != ui_image)):
+        raise RuntimeError("synthetic WeKnora image differs from Compose")
+    for service, (port_name, container_port) in expected.items():
+        binding = f"127.0.0.1:{ports[port_name]}:{container_port}"
+        if services[service].get("ports") != [binding]:
+            raise RuntimeError("synthetic loopback port differs from Compose")
 
 
 def compose_command(directory, state, *args):
@@ -365,28 +561,40 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     create = commands.add_parser("prepare")
     create.add_argument("--weknora-image", required=True)
+    create.add_argument("--weknora-ui-image",
+                        help="optional locally built UI image for browser acceptance")
     create.add_argument("--mode", choices=("direct", "primary", "nested"), required=True)
     for name in ("up", "status", "destroy"):
         command = commands.add_parser(name)
         command.add_argument("--scratch", required=True, type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.weknora_image, args.mode)
+        prepare(args.weknora_image, args.mode, args.weknora_ui_image)
         return
     directory, state = owned_state(args.scratch)
     if args.action == "up":
+        assert_owned_resources(directory, state)
         inspected = subprocess.run(["docker", "image", "inspect", state["weknora_image"],
                                     "--format", "{{.Id}}"], check=True, text=True,
                                    capture_output=True)
         if inspected.stdout.strip() != state["weknora_image_id"]:
             raise RuntimeError("WeKnora image tag changed since fixture preparation")
+        if state.get("weknora_ui_image"):
+            ui_inspected = subprocess.run(
+                ["docker", "image", "inspect", state["weknora_ui_image"],
+                 "--format", "{{.Id}}"], check=True, text=True, capture_output=True)
+            if ui_inspected.stdout.strip() != state["weknora_ui_image_id"]:
+                raise RuntimeError("WeKnora UI image tag changed since fixture preparation")
         subprocess.run(compose_command(directory, state, "up", "-d", "--wait",
                                        "--wait-timeout", "600"), check=True)
+        assert_owned_resources(directory, state)
     elif args.action == "status":
         subprocess.run(compose_command(directory, state, "ps"), check=True)
     else:
+        assert_owned_resources(directory, state)
         subprocess.run(compose_command(directory, state, "down", "--volumes",
                                        "--remove-orphans"), check=True)
+        assert_owned_resources(directory, state, require_empty=True)
         shutil.rmtree(directory)
         print("owned synthetic LDAP fixture removed")
 

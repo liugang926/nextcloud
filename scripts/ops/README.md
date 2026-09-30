@@ -245,6 +245,7 @@ is lost, inspect and retry the same operation:
 ```sh
 python3 scripts/ops/local-source-rotation.py status --binding dev-published --pair-operation-id YOUR_ACTIVE_PAIR_UUID --operation-id YOUR_ROTATION_UUID
 python3 scripts/ops/local-source-rotation.py retry --binding dev-published --pair-operation-id YOUR_ACTIVE_PAIR_UUID --operation-id YOUR_ROTATION_UUID
+python3 scripts/ops/local-source-rotation.py rebind --binding dev-published --pair-operation-id YOUR_ACTIVE_PAIR_UUID --operation-id YOUR_ROTATION_UUID
 ```
 
 The old key expires at most 24 hours after remote commit even when
@@ -254,8 +255,14 @@ cannot be aborted. A pending rotation may be aborted with the same CLI and
 `abort`; this asks Nextcloud to revoke the new key while retaining the old
 one. If the token was lost before WeKnora stored it, the CLI aborts the
 Nextcloud-only pending operation. Start a new UUID afterward. Rotation
-changes the source config hash, so re-pair any optional event-inbox
-connection pinned to the old source config.
+changes the source config hash. If an optional event-inbox connection exists,
+run `rebind` after both sides finalize; it preserves the event key, connection
+ID, inbox, and watermarks. If the matching Nextcloud sender was paused by
+receiver authorization failure, the CLI checks both sides' identity and
+receipt cursor and safely queues its admin compare-and-swap retry. The JSON
+output reports `event_sender.action` as `resumed` or `already_active`. A
+different pause reason, cursor mismatch, blocked receiver dispatch, or
+uncertain in-flight dispatch requires manual review and is not auto-resumed.
 
 Source pairing is separate from the event-delivery connection. It establishes
 the intended binding, tenant, and dedicated knowledge base, but does not prove
@@ -361,6 +368,18 @@ synthetic LDAP project, then checks PDF indexing, file-scoped answer and
 original-file citation, and old-JWT denial after source-share removal. See the
 [observed run and limits](../../docs/isolated-pdf-candidate.md). It does not
 change the shared WeKnora stack.
+
+## Isolated Files browser handoff
+
+`isolated-browser-ask-smoke.py` starts a fresh loopback-only synthetic LDAP,
+Nextcloud, WeKnora backend and WeKnora UI project using local pinned image
+IDs. It runs `synthetic-ldap-browser-ask.js` with headless Playwright to click
+Files → file Details → WeKnora, log in, ask the indexed file, and open the
+original-file citation. It verifies the non-Agent request shape and answer
+marker, saves private screenshots, and removes its owned project and volumes.
+See the [browser drill](../../docs/synthetic-ldap-compose.md#files-browser-handoff-drill-2026-09-30-utc)
+for the command and observed result. The normal fixture flow does not require
+Playwright or a WeKnora UI image.
 
 ## Isolated backup and restore drill
 

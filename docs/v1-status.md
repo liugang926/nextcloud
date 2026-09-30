@@ -109,7 +109,7 @@ removed. This is local recovery evidence, not a production RPO/RTO promise,
 external vector/Wiki/object restore or a durable production replay ledger.
 See [the drill and its limits](isolated-dual-service-restore.md).
 
-The pinned RAG build now compiles the WeKnora app with `WITH_ANYDOC=1` and the
+An earlier pinned RAG build compiled the WeKnora app with `WITH_ANYDOC=1` and the
 `anydoc` Go build tag from source commit
 `e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e`; both candidate images carry
 the complete patch SHA-256
@@ -130,6 +130,45 @@ old-JWT revocation checks passed. This verifies the running fallback branch
 under controlled input, not natural PDF truncation or scanned-PDF OCR. The
 shared WeKnora LAN service still uses its prior image while the candidate is
 reviewed. See [the PDF candidate record](isolated-pdf-candidate.md).
+
+The current combined RAG candidate has complete patch SHA-256
+`ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03`,
+app image `sha256:d052febfcd39d3ea20e136a12a9dc10fda2389d14c118748764318f2d32f22dd`,
+and UI image `sha256:699f4ae751e57a838f875093bbd739ee0e1a64418d38bf00a56958b0b28e2b08`.
+Both normal and controlled short-primary PDF flows passed again against the
+current app. In the controlled flow DocReader supplied 46 searchable
+characters and the local AnyDoc recovery supplied 283; indexing, source-scoped
+answer, original-file citation, and old-JWT denial after source-share removal
+passed. A separate disposable real-browser flow used the current app and UI:
+Alice followed the Nextcloud Files sidebar handoff, signed in through LDAP,
+asked about the exact published file and received the synthetic marker with
+HTTP 200. The ordinary request omitted Agent identifiers. Clicking its
+citation opened the original Nextcloud `/f/92` route; the same browser session
+read the exact source file over WebDAV with HTTP 200. The browser check passed
+again after the fixture began checking that state ports and images exactly
+match its owned Compose configuration. All owned Compose projects were removed
+after their runs. These are synthetic local checks;
+there is no real AD/Team Folder acceptance, natural PDF truncation/OCR proof,
+or enterprise answer-quality evidence.
+
+The same current app image also passed the separate local BGE candidate
+smoke with its pinned source and patch labels: the built-in embedding returned
+512 dimensions, ReRank ranked the matching fictional clause first, one
+synthetic knowledge item completed parsing, and pure vector search returned
+one hit from one enabled 512-dimensional vector. That owned Docker project
+was removed. This checks model wiring and a tiny retrieval example, not
+answer quality on approved enterprise questions.
+
+The current RAG app image also passed a fresh owned, loopback-only dual-service
+event exercise in `nc-synldap-51dbd280`. Event e1 reached verified applied
+watermark 2 on both services. Finalizing an exact source machine-key rotation
+made the old event sender pause with `receiver_unauthorized`, without
+advancing its receipt. The operator rebind command retained the connection ID,
+HMAC key and inbox watermarks, resumed that sender through the scoped
+compare-and-swap retry, and returned `already_active` on an identical replay.
+Event e2 then reached verified applied watermark 4 on both services. The
+fixture's containers, volumes and network were removed. This is one synthetic
+rotation and continuation, not production fault-rate or latency acceptance.
 
 Both complete WeKnora patches were regenerated from their pinned fixed and RAG
 baselines and passed clean-apply checks. Selected direct HTTP reads,

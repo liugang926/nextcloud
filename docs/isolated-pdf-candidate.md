@@ -1,6 +1,6 @@
 # Isolated PDF candidate acceptance
 
-Build `weknora-ldap-app:nextcloud-rag-e5-anydoc` from the pinned RAG source and
+Build `weknora-ldap-app:nextcloud-rag-e5-anydoc-rebind` from the pinned RAG source and
 patch, then run:
 
 ```sh
@@ -99,3 +99,18 @@ This controlled run proves that the built candidate executes the AnyDoc
 recovery branch in a complete Nextcloud-to-WeKnora flow. The primary short
 result was induced by the fixture's DocReader setting, so a naturally truncated
 born-digital PDF and scanned-PDF OCR remain separate acceptance cases.
+
+## Combined browser and event-rebind candidate, 2026-09-30 UTC
+
+The current candidate uses RAG patch SHA-256
+`ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03`
+and app image
+`sha256:d052febfcd39d3ea20e136a12a9dc10fda2389d14c118748764318f2d32f22dd`.
+The normal driver exited 0 in owned project `nc-synldap-71cd7bce`:
+two ready PDF chunks and embeddings, protected text, Alice's exact scoped
+answer and original `/f/233` citation, Bob denied, and Alice's old JWT denied
+after source-share removal. The controlled short-primary driver exited 0 in
+owned project `nc-synldap-6de320ec`; primary searchable text was 46
+characters and AnyDoc recovered 283. The same indexing, answer, citation,
+old-JWT denial, and fixture-cleanup checks passed. These two runs do not
+establish natural PDF truncation recovery or scanned-PDF OCR.

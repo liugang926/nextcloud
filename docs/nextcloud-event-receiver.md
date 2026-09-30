@@ -21,8 +21,10 @@ receiver alone does not create an active connection. Connection secrets are
 random and stored only as `enc:v1:` ciphertext using `SYSTEM_AES_KEY`.
 The connection also pins the normalized complete Nextcloud base URL and the
 SHA-256 fingerprint of the data source's **committed, encrypted** configuration
-bytes. An endpoint edit, credential clear/rotation/reprovision, or other
+bytes. An endpoint edit, credential clear/reprovision, or unrelated
 configuration edit invalidates the old connection and requires re-pairing.
+A finalized, exact source machine-key rotation can instead rebind the existing
+connection through the administrator route below.
 The receiver checks this identity inside the same locked transaction as the
 inbox write; it does not hash or log a plaintext machine token.
 
@@ -41,6 +43,7 @@ under the database lock before committing the connection.
 | `POST` | `/api/v1/datasource/:id/nextcloud-event-connection` | Create one active connection; `201` once, then `409` on repeat. |
 | `GET` | `/api/v1/datasource/:id/nextcloud-event-connection` | Read receipt, dispatch, and applied status; never returns a secret. |
 | `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Replace the only accepted key immediately; `200` returns the new secret once. |
+| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rebind` | After exact finalized source-key rotation, retain the connection, event key, inbox, and watermarks; `200` returns no secret. |
 | `DELETE` | `/api/v1/datasource/:id/nextcloud-event-connection` | Revoke the active connection immediately; `204`. |
 
 A successful pair or rotation returns `connection_id`, `key_id`, a one-time
@@ -56,9 +59,47 @@ period, so the old key is rejected at commit. This does not yet provide the
 short dual-key overlap described in the PRD: delivery can pause with `401`
 between WeKnora rotation and installing the new key in Nextcloud. Keep the
 one-time response available while updating the sender. A changed source is reported
-as `source_changed` by GET; revoke and then pair again after resolving the
-source. Revocation does not require a live Nextcloud call, so it remains
+as `source_changed` by GET; an unrelated config edit requires revoke and pair
+after resolving the source. Revocation does not require a live Nextcloud call, so it remains
 possible after credentials are cleared or the endpoint changes.
+
+After both source-pairing sides report `finalized`, an administrator may send
+`{"operation_id":"<exact source rotation UUID>"}` to the `rebind` route.
+The live Nextcloud binding must be active and retain the pairing's exact
+publication epoch, tenant, dedicated knowledge base, source, instance, binding
+and normalized base URL. The local data source must also be active. WeKnora
+verifies that
+the stored old and new encrypted config fingerprints match the finalized
+rotation, that only the source machine token and key ID changed, and that the
+active pair uses the new fingerprint. A pending, aborted, unrelated or newer
+rotation cannot rebind the connection. The request is idempotent for the same
+rotation UUID; the response has `rebound:true` only on the first successful
+rewrite and contains the unchanged `connection_id`, `key_id`, and decimal
+received, dispatched and applied watermarks, plus the current dispatch state
+and error code. It never returns the HMAC secret.
+The Nextcloud event sender keeps its existing credentials.
+
+Rebinding requires a quiescent event dispatch row: `idle`, or `blocked` solely
+by `source_changed` after all previously dispatched hints were applied, with
+no live lease or running source sync log. A queued, leased, retrying, partially
+applied or differently blocked row returns `409`
+`event_dispatch_manual_review_required`; inspect the exact task/log before
+repairing it. Other identity mismatches return `409`
+`source_changed_repair_required`. Generic source edits and emergency event-key
+rotation remain separate operations. The operator command is
+`python3 scripts/ops/local-source-rotation.py rebind --binding BINDING --pair-operation-id PAIR_UUID --operation-id ROTATION_UUID`.
+The command checks that the Nextcloud sender and WeKnora receiver have the
+same binding, instance, connection ID, HMAC key ID, and exact receipt cursor
+before rebinding. It requires all three receiver watermarks to stay ordered
+and never decrease while rebind and background dispatch race. If the same
+sender is paused by `receiver_unauthorized` and receiver dispatch is not
+blocked, it uses
+Nextcloud's administrator `/event-connection/retry` compare-and-swap with that
+connection ID, key ID, and receipt cursor, then reports `event_sender.action:
+resumed`. An already active sender is reported as `already_active` without a
+retry. Different paused reasons, blocked dispatch (including an idempotent
+rebind replay), changed identity, or cursor divergence need manual review;
+the command exits nonzero rather than resuming them.
 
 Connection provisioning does not advance any event watermark.
 
@@ -253,3 +294,23 @@ check. A `202` receipt alone leaves the hints in the outbox. A missing or
 failed status endpoint preserves them until the status is repaired; a later
 full manifest reconciliation remains necessary after any already-expired
 cursor or cross-system restore.
+
+An owned, loopback-only synthetic LDAP dual-service exercise is available as
+`scripts/ops/isolated-event-rebind-smoke.py --scratch OWNED_FIXTURE`. It
+requires a bootstrapped fixture, creates e1 and e2 DAV files, runs both the
+Nextcloud delivery and applied-status jobs, and requires both services to
+report applied e1 before rotation and applied e2 after rebind. It verifies that
+the old sender pauses and its receipt watermark does not advance while the
+source config is stale, then drives the operator CLI's exact rebind and paused
+sender CAS retry, including an idempotent replay. This is isolated integration evidence; it does not
+replace real AD, production Team Folder, or load acceptance.
+
+On 2026-09-30, project `nc-synldap-51dbd280` used the final RAG app image
+`sha256:d052febfcd39d3ea20e136a12a9dc10fda2389d14c118748764318f2d32f22dd`.
+Event e1=`2` reached applied on both services. The old sender then paused with
+`receiver_unauthorized`; the operator CLI rebound the same connection and
+queued its exact CAS retry, and replay reported `already_active`. Event e2=`4`
+reached applied on both sides. The owned fixture, volumes, and network were
+removed. Later monotonic-watermark and blocked-dispatch race guards were
+covered by the CLI's focused mock tests; the full fixture was not rerun for
+those final read-only checks.

@@ -35,6 +35,8 @@ jobs:
           python3 -m compileall -q apps/integration_weknora/tests scripts
           python3 scripts/ops/test-ad-permission-acceptance.py
           python3 scripts/ops/test-synthetic-ldap-topology.py
+          python3 scripts/ops/test-synthetic-ldap-fixture-state.py
+          python3 scripts/ops/test_local_source_rotation_rebind.py
           python3 scripts/ops/test-synthetic-identity-conflict-smoke.py
           python3 scripts/ops/test-synthetic-ldap-revocation-watch.py
           python3 scripts/ops/test-pilot-load.py
@@ -138,6 +140,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
+          echo '2dbf99007f9d218d5d46279194821894621add2125c7fb79a6378b9bacab86f0  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -166,6 +169,20 @@ jobs:
             ./internal/container
           go test -p 2 ./internal/datasource/connector/nextcloud ./internal/application/service/chat_pipeline
           go test -p 2 ./internal/datasource -run Nextcloud -count=1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: weknora/frontend/package-lock.json
+
+      - name: Test and build patched browser SSE scope
+        working-directory: weknora/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm test -- src/api/chat/streame.test.ts
+          npm run type-check
+          VITE_IS_DOCKER=true npm run build
 
       - name: Verify event receipt and pairing in PostgreSQL and SQLite
         working-directory: weknora
@@ -200,7 +217,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'a7d638ac36f2e64b5adf998cdd16a811c238de343a5ab8d001262fa8207c3961  nextcloud/integration/weknora-rag-e5cc3e44.patch' | sha256sum --check --
+          echo 'ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03  nextcloud/integration/weknora-rag-e5cc3e44.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-e5cc3e44.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-e5cc3e44.patch
           git -C weknora-rag diff --check
@@ -233,6 +250,7 @@ jobs:
         working-directory: weknora-rag/frontend
         run: |
           npm ci --no-audit --no-fund
+          npm test -- src/api/chat/streame.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 

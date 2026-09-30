@@ -267,7 +267,9 @@ def run(scratch, revoke, revoke_source_share_only, deny_team_acl):
         nc_base, fixture, alice_account, runtime["key_id"], runtime["token"])
     require(alice_login and alice_dav and alice_source,
             "Alice's baseline DAV/source read was not authorized")
-    query = source_link(alice, wk_base, fixture)
+    browser_port = state["ports"].get("weknora_ui", state["ports"]["weknora"])
+    browser_base = f"http://127.0.0.1:{browser_port}"
+    query = source_link(alice, browser_base, fixture)
     alice_token = wait_ldap_login(wk_base, "alice", passwords["alice"])
     bob_token = wait_ldap_login(wk_base, "bob", passwords["bob"])
     require(alice_token and bob_token, "synthetic LDAP login did not issue both user tokens")

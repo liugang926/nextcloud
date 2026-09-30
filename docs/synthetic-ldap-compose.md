@@ -12,9 +12,10 @@ values and AD-shaped account attributes. `direct`, `primary`, and `nested`
 modes select the sole content-grant path for Alice. Bob stays outside
 `Engineering`. Both applications use the same directory and private CA over
 `ldaps://openldap:1636`; the in-container LDAP export used by the preflight
-reads the same server over its loopback listener. Only Nextcloud, WeKnora, and
-the debug LDAPS port are published, each on host `127.0.0.1` and on a random
-port. This isolated acceptance stack is intentionally not a LAN-facing demo.
+reads the same server over its loopback listener. Nextcloud, the WeKnora API,
+and the debug LDAPS port are published on random host `127.0.0.1` ports. The
+optional browser drill also publishes its WeKnora UI on loopback. This
+isolated acceptance stack is intentionally not a LAN-facing demo.
 
 ## Run a fresh nested-group matrix
 
@@ -43,6 +44,16 @@ python3 scripts/ops/synthetic-ldap-fixture.py destroy --scratch "$SCRATCH"
 `prepare` creates a unique project and scratch directory (`0700`); generated
 credentials, Compose config, TLS key, source token, LDIF, topology snapshot,
 and acceptance fixture are `0600`. `up` waits for every health check.
+Project allocation rejects existing Docker resources with the chosen Compose
+name. The fixture records a private owner token, scratch path, and Compose
+fingerprint; its services, volumes, and network carry that owner label.
+`up` and `destroy` reject mismatched resources, and verify the actual WeKnora
+backend/UI container image IDs against the prepared pins. State-recorded
+loopback ports and backend/UI image names must match Compose exactly before
+either command uses them. The PDF probe's
+single `DOCREADER_PDF_FORCE_SCANNED=1` override is allowed. Scratch directories
+created before these ownership fields were added require manual inspection
+before cleanup; the current script will not delete them automatically.
 `bootstrap` configures Nextcloud `user_ldap` with `objectGUID` as the expert
 user/group UUID attribute **before** user discovery, enables the repository's
 `integration_weknora` app, creates a synthetic DAV file and Engineering group
@@ -163,6 +174,57 @@ synthetic intervals, not an enterprise revocation SLA. The probe is an HTTP/API 
 browser handoff, not a browser click test. This OpenLDAP folder group share is
 not a production AD or Team Folder ACL test, and the deterministic mock model
 does not establish answer quality with a real LLM.
+
+## Files browser handoff drill, 2026-09-30 UTC
+
+`isolated-browser-ask-smoke.py` creates a new loopback-only `direct` fixture,
+boots both applications, drives a real headless Chromium session, and removes
+only its marker-owned Compose project and volumes in `finally`. It needs local
+backend and frontend WeKnora candidate images, an installed Playwright Node
+module, and Chromium. Image IDs are pinned when the fixture is prepared; the
+browser probe checks the UI image and owned Compose ports before login.
+
+```sh
+python3 scripts/ops/isolated-browser-ask-smoke.py \
+  --weknora-image YOUR_LOCAL_BACKEND_IMAGE \
+  --weknora-ui-image YOUR_LOCAL_FRONTEND_IMAGE \
+  --playwright-module /path/to/node_modules/playwright \
+  --browser-executable /path/to/chrome-headless-shell
+```
+
+The browser logs in as synthetic Alice, opens Files → Published → the file's
+Details → WeKnora, clicks **在知识库中提问此文件**, completes the WeKnora directory
+login, and submits a question. It checks that the chat request is limited to
+the indexed file, uses `agent_enabled: false`, and omits `agent_id` and
+`agent_source_tenant_id`. It then requires the deterministic answer marker,
+an original-file citation, and a logged-in open of that citation in Nextcloud.
+The same browser context must also read the exact synthetic original via
+Alice's authenticated WebDAV session; a Files app-shell response alone does
+not satisfy this assertion.
+Screenshots stay in a private `0700` evidence directory printed on success;
+the script does not print credentials, tokens, or answer text.
+
+A fresh run against the fixed UI candidate completed these checks with HTTP
+200 for the chat request and a citation to `/f/92`. It reported
+`fixture_cleaned: true` after verifying no owned containers, volumes, or
+network remained. The standalone frontend regression test
+`src/api/chat/streame.test.ts` passed all five cases, including the non-Agent
+request shape. The model and LDAP directory are synthetic, so this confirms
+the browser handoff path without establishing production answer quality or
+enterprise AD behavior.
+
+The same drill then exited 0 with the combined RAG/AnyDoc/event-rebind app
+and UI patch SHA-256
+`ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03`.
+In owned project `nc-synldap-14bdc529`, the chat request returned HTTP 200
+without an Agent ID, the answer contained the fictional marker, and the
+original `/f/92` citation opened. Alice's same browser session also read the
+exact original file via WebDAV with HTTP 200. The driver reported
+`fixture_cleaned: true`. This run exercised the current app and UI together;
+the directory and answer were still synthetic.
+After adding exact state-to-Compose port and image checks to the fixture, a
+fresh run in `nc-synldap-47834a82` passed the same browser, citation, exact
+WebDAV content, and cleanup assertions.
 
 ## Source-share-only revocation drill, 2026-09-30 UTC
 
