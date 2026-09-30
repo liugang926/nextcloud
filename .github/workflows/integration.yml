@@ -151,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo 'bb9f53e276fdd78a37e04267d233c609ba625a5c2eaafeeed7d07dad2879cb11  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '78cc54cbd483e345dcd7f97f57ac2057fd8255fb89a55ca43a2db23b58328881  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -249,7 +249,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'dd8217c84deba1d546accd15faed8e42bfbf54f1247680f871a086f0d3d76053  nextcloud/integration/weknora-rag-3f986f42.patch' | sha256sum --check --
+          echo '4f1b97559ae8e28b291856327af75b14f9a886c435fb237aaddacd57f21d12b7  nextcloud/integration/weknora-rag-3f986f42.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-3f986f42.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-3f986f42.patch
           git -C weknora-rag diff --check
@@ -262,14 +262,16 @@ jobs:
       - name: Test patched RAG authorization paths
         working-directory: weknora-rag
         run: |
-          go test -p 2 -run 'Test(Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
+          go test -p 2 -run 'Test(Nextcloud|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
             ./internal/application/service \
+            ./internal/datasource/connector/nextcloud \
             ./internal/agent/tools \
             ./internal/handler \
             ./internal/router \
+            ./internal/container \
             ./internal/mcpserver
 
       - name: Verify pgvector retirement races and exact-ID receipts
