@@ -114,3 +114,52 @@ allowed; Bob could log in to both services but all four content checks were
 denied. Both owned fixtures and their Docker volumes were removed. Fixture
 passwords now use 31-character values that satisfy WeKnora's registration
 length/character policy while remaining safe as Nextcloud installer arguments.
+
+## File-scoped ask and citation drill, 2026-09-30 UTC
+
+Build the RAG patch images with `bash scripts/build-weknora-rag.sh`, then run a
+fresh `direct` fixture with `weknora-ldap-app:nextcloud-rag`. After `bootstrap`
+and `matrix`, run the dedicated probe before destroying the owned project:
+
+```sh
+python3 scripts/ops/synthetic-ldap-ask-handoff.py --scratch "$SCRATCH" --revoke
+python3 scripts/ops/synthetic-ldap-fixture.py destroy --scratch "$SCRATCH"
+```
+
+The bootstrap sets `overwrite.cli.url` to the disposable Nextcloud browser
+origin before the first sync, and sets `weknora_web_url` to the disposable
+WeKnora browser origin. Its signed event/status connection lets the Files
+sidebar show `ready`. The local mock chat model emits the fixture answer
+marker only when that marker reaches its prompt. The probe asserts Alice's
+file-scoped question returns the marker and a reference whose
+`nextcloud_human_url` points to the original Files `/f/<file_id>` route on the
+browser origin. Source pairing and ingestion still use `http://nextcloud`
+inside the Compose network. The probe does not print credentials, tokens,
+source content, or SSE data.
+
+The run used Nextcloud integration app `0.4.27` at `0086699`, RAG patch
+SHA-256 `a7d638ac36f2e64b5adf998cdd16a811c238de343a5ab8d001262fa8207c3961`,
+and local backend image ID
+`sha256:3d5354deb5973e79446f8be3acf1d46dd72a2224ab07b1b6c37edf4b6837f2be`.
+The isolated source indexed two chunks and two embeddings. The six-field
+permission matrix passed. The handoff probe observed Alice Files status 200,
+Bob status 404, Alice ask-target 200, Bob ask-target 403, and stale-ETag
+ask-target 404. The file-scoped answer contained the synthetic marker and a
+citation to Alice's Nextcloud original. An unauthenticated visit to that route
+required login, and Alice's logged-in visit returned 200. A Files route may
+serve its browser shell to a logged-in user without proving file read access;
+the DAV, Files status, signed source, and WeKnora checks establish the actual
+per-user grants here.
+
+After removing Alice's only Engineering group membership, the same WeKnora
+JWT issued before revocation lost access: Files status 404, ask-target 403,
+direct knowledge 403, chunk/preview denied, KB- and document-scoped search
+empty, and prior-answer history omitted both the marker and citation URL;
+the same history contained both before the mutation. An initial run observed
+all denials by the seventh poll, about 31 seconds after mutation. A fresh
+reproduction with the stronger before/after history assertion observed all
+denials by the second poll, about 7 seconds after mutation. These are observed
+synthetic intervals, not an enterprise revocation SLA. The probe is an HTTP/API simulation of the
+browser handoff, not a browser click test. This OpenLDAP folder group share is
+not a production AD or Team Folder ACL test, and the deterministic mock model
+does not establish answer quality with a real LLM.

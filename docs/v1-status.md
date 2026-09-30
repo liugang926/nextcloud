@@ -29,6 +29,18 @@ knowledge-base, group, source and ETag checks. The manifest keeps separate
 machine content and browser Files URLs. Existing indexed files need reindexing
 to acquire the latter citation metadata.
 
+A fresh disposable direct-group OpenLDAP fixture paired and indexed one
+synthetic file, then exercised the Files question link as a mapped user.
+Alice received a file-scoped mock-model answer with a citation to her
+Nextcloud original; Bob and a stale ETag were denied. Before revocation,
+Alice's persisted history contained the answer marker and citation URL.
+After removing her only group grant, the same pre-revocation JWT received no
+direct document, chunk, preview, search or prior-answer content. The second
+isolated run observed all denials about seven seconds after the mutation.
+These are HTTP/API and synthetic-LDAP observations, not a browser-click test,
+real-model quality assessment, enterprise AD permission matrix or revocation
+SLA. The [fixture record](synthetic-ldap-compose.md) has the exact checks.
+
 Both complete WeKnora patches were regenerated from their pinned fixed and RAG
 baselines and passed clean-apply checks. Selected direct HTTP reads,
 HybridSearch, Agent read/list and live answer paths acquire renewable read

@@ -39,6 +39,7 @@ The first command creates patched local app and UI images from this exact
 patch. The second saves a PostgreSQL dump in ignored `dist/backups/` before
 switching the shared local app and frontend; its Compose overlays also join
 the Nextcloud development network and enable the local HTTP source route.
-Use synthetic local data. Live enterprise AD, Team Folder ACLs, full browser
-answer/citation acceptance and production load remain open until separately
-verified; see [V1 status](v1-status.md).
+Use synthetic local data. A disposable HTTP/API handoff, answer, citation and
+revocation drill passed with mock models; see [its record](synthetic-ldap-compose.md).
+Live enterprise AD, Team Folder ACLs, browser-click acceptance and production
+load remain open until separately verified; see [V1 status](v1-status.md).

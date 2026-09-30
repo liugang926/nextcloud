@@ -82,6 +82,12 @@ def http_json(base, method, path, payload=None, token=None):
 def nextcloud_setup(directory, state, passwords, nc_base):
     for app in ("user_ldap", "integration_weknora"):
         occ(state, "app:enable", app)
+    # The connector reaches Nextcloud over the private Compose network, while
+    # employee citations must open the host's browser origin. Set the public
+    # route before the first source sync so indexed metadata records it.
+    occ(state, "config:system:set", "overwrite.cli.url", "--value=" + nc_base)
+    occ(state, "config:app:set", "integration_weknora", "weknora_web_url",
+        "--value=http://127.0.0.1:" + str(state["ports"]["weknora"]))
     config = occ(state, "ldap:create-empty-config")
     match = re.search(r"configID ['\"]?(s[0-9]+)", config)
     if not match:
@@ -226,8 +232,15 @@ def weknora_setup(directory, state, passwords, nc_base, wk_base, runtime):
                        "embedding_parameters": {"dimension": 3}}}, token)
     need(status, {201}, "register isolated mock embedding model")
     model_id = model["data"]["id"]
+    status, chat_model = http_json(wk_base, "POST", "/api/v1/models", {
+        "name": "mock-chat-synthetic", "type": "KnowledgeQA", "source": "remote",
+        "parameters": {"base_url": "http://mock-embedding:8000/v1", "provider": "generic",
+                       "api_key": "synthetic-only"}}, token)
+    need(status, {201}, "register isolated mock chat model")
+    chat_model_id = chat_model["data"]["id"]
     status, kb = http_json(wk_base, "POST", "/api/v1/knowledge-bases", {
-        "name": "Synthetic LDAP ACL", "type": "document", "embedding_model_id": model_id}, token)
+        "name": "Synthetic LDAP ACL", "type": "document", "embedding_model_id": model_id,
+        "summary_model_id": chat_model_id}, token)
     need(status, {201}, "create synthetic knowledge base")
     kb_id = kb["data"]["id"]
     status, _ = http_json(wk_base, "PUT", "/api/v1/group-access/knowledge_base/" + kb_id, {
@@ -267,6 +280,7 @@ def weknora_setup(directory, state, passwords, nc_base, wk_base, runtime):
         time.sleep(.5)
     else:
         raise RuntimeError("synthetic source pair did not become active")
+    event_connection_setup(state, passwords, nc_base, wk_base, runtime, source_id, token)
     status, _ = wk_request(wk_base, token, "POST", f"/api/v1/datasource/{source_id}/sync")
     need(status, {200, 409}, "sync synthetic source")
     database = state["project"] + "-wk-db-1"
@@ -283,10 +297,29 @@ def weknora_setup(directory, state, passwords, nc_base, wk_base, runtime):
              f"WHERE v.datasource_id='{source_id}' "
              f"AND v.external_id LIKE '%:{runtime['file_id']}' AND v.state='published'")
     knowledge_id = sql_json(database, query)
-    return {"tenant_id": tenant, "model_id": model_id, "knowledge_base_id": kb_id,
+    return {"tenant_id": tenant, "model_id": model_id, "chat_model_id": chat_model_id,
+            "knowledge_base_id": kb_id,
             "knowledge_id": knowledge_id, "source_id": source_id,
             "operation_id": operation, "indexed_chunks": proof["chunks"],
             "indexed_embeddings": proof["embeddings"]}
+
+
+def event_connection_setup(state, passwords, nc_base, wk_base, runtime, source_id,
+                           weknora_admin_token):
+    """Pair the signed status/event channel inside this owned Compose stack."""
+    path = f"/api/v1/datasource/{source_id}/nextcloud-event-connection"
+    status, credential = wk_request(wk_base, weknora_admin_token, "POST", path)
+    need(status, {201}, "create synthetic signed event/status connection")
+    if not all(isinstance(credential.get(name), str) and credential[name]
+               for name in ("connection_id", "key_id", "secret", "receiver_url")):
+        raise RuntimeError("synthetic event credential was incomplete")
+    credential["receiver_url"] = (
+        "http://wk-app:8080/api/v1/integrations/nextcloud/events")
+    admin, csrf = login(nc_base, "devadmin", passwords["nc_admin"])
+    endpoint = (nc_base + "/index.php/apps/integration_weknora/api/v1/admin/bindings/" +
+                runtime["binding_id"] + "/event-connection")
+    status, _ = nc_request(admin, csrf, endpoint, "POST", credential)
+    need(status, {201}, "configure synthetic signed status sender")
 
 
 def make_fixture(state, runtime):
