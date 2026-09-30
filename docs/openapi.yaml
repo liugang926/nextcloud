@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Nextcloud WeKnora development API
-  version: 0.4.24
+  version: 0.4.25
   description: Local integration contract. Machine calls require a binding-scoped Bearer key and signed headers specified in docs/machine-request-signing.md. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API checks the mapped Nextcloud UID against a live AD objectGUID and returns the current file ETag for a guarded read. Source pairing is a durable intent and signed commit for one dedicated WeKnora knowledge base. Event sender watermarks attest durable receipt only, not WeKnora application. Same-AD integration, enterprise permission and publication acceptance remain outstanding.
 servers:
   - url: /index.php/apps/integration_weknora/api/v1
@@ -216,7 +216,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [file_id, source_modified_at, source_etag, source_state, knowledge_state, knowledge_ready_at, published_source_etag, qa_available, weknora_login_url]
+                required: [file_id, source_modified_at, source_etag, source_state, knowledge_state, knowledge_ready_at, published_source_etag, qa_available, weknora_login_url, weknora_ask_url]
                 properties:
                   file_id: {type: integer}
                   source_modified_at: {type: integer, description: Unix seconds}
@@ -229,6 +229,7 @@ paths:
                   published_source_etag: {type: string, nullable: true}
                   qa_available: {type: boolean, enum: [false]}
                   weknora_login_url: {type: string, nullable: true, description: Administrator-configured HTTPS or development loopback URL, without any token}
+                  weknora_ask_url: {type: string, nullable: true, description: Untrusted navigation URL for the current published file; WeKnora rechecks the authenticated user and source}
         '401': {description: A Nextcloud user session is required}
         '404': {description: File missing or not readable to this user; no binding details disclosed}
         '503': {description: The source-side status could not be checked}

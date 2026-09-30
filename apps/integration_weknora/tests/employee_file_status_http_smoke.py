@@ -31,7 +31,15 @@ def wait_login_url(opener, url, headers, expected):
     for attempt in range(20):
         status, body = request(opener, url, headers=headers)
         check(status, 200, "employee status after URL configuration")
-        if json.loads(body)["weknora_login_url"] == expected:
+        result = json.loads(body)
+        if result["weknora_login_url"] == expected:
+            if result["knowledge_state"] == "ready" and expected is not None:
+                target = urllib.parse.urlsplit(result["weknora_ask_url"])
+                configured = urllib.parse.urlsplit(expected)
+                assert (target.scheme, target.netloc, target.path) == (
+                    configured.scheme, configured.netloc, "/platform/nextcloud-ask"), target
+            else:
+                assert result["weknora_ask_url"] is None, result
             return
         if attempt < 19:
             time.sleep(0.2)
@@ -46,8 +54,15 @@ def check_knowledge_status(source):
         assert source["source_state"] == "in_scope", source
         assert source["published_source_etag"] == source["source_etag"], source
         assert isinstance(source["knowledge_ready_at"], int) and source["knowledge_ready_at"] > 0
+        if source["weknora_login_url"] and source["weknora_ask_url"]:
+            target = urllib.parse.urlsplit(source["weknora_ask_url"])
+            assert target.scheme in ("http", "https") and target.path == "/platform/nextcloud-ask", target
+            query = urllib.parse.parse_qs(target.query)
+            assert query.get("file_id") == [str(source["file_id"])], query
+            assert query.get("source_etag") == [source["source_etag"]], query
     else:
         assert source["knowledge_ready_at"] is None, source
+        assert source["weknora_ask_url"] is None, source
 
 
 def main():
@@ -137,6 +152,7 @@ def main():
         withdrawn = json.loads(body)
         assert withdrawn["source_state"] == "withdrawn"
         assert withdrawn["weknora_login_url"] is None and withdrawn["qa_available"] is False
+        assert withdrawn["weknora_ask_url"] is None
         assert withdrawn["knowledge_state"] == "unverified"
 
         status, _ = request(admin, f"{shares}/{share_id}", "DELETE", share_headers)

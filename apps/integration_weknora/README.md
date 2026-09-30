@@ -198,14 +198,23 @@ no machine credential, tenant ID or knowledge base ID. A status read does not
 claim that event delivery, queue admission or a sync cursor means parsing
 completed.
 
-An administrator may configure an ordinary WeKnora web login URL, for example
+An administrator may configure a WeKnora web URL, for example
 `php occ config:app:set integration_weknora weknora_web_url --value=https://weknora.example/login`.
-The sidebar then offers “Log in to WeKnora with your personal identity” for
-an in-scope file. The link contains no file ID, source contents, or service
-token. Only HTTPS URLs are accepted, except HTTP loopback URLs for local
-development. This is a login handoff, not a grant of knowledge access; WeKnora
-must enforce the user's own permissions after login. Leaving the setting empty
-removes the link. The app does not proxy AI questions through a shared account.
+For a signed current-ETag `ready` response, the sidebar offers “Ask about this
+file in the knowledge base”. It sends only public source identifiers and the
+ETag in a navigation URL to WeKnora. No machine token or answer request passes
+through the Nextcloud browser API. WeKnora requires a personal login, resolves
+the *current* published candidate, checks the KB grant, and calls Nextcloud's
+live source authorization before allowing the question. `qa_available` remains
+false in the Nextcloud status because a machine status cannot grant the user's
+WeKnora permission. The link is hidden after withdrawal, version change,
+publication Stop, or an unverified remote status. For an in-scope file that is
+not ready, the sidebar can still show the ordinary login link.
+
+Only HTTPS URLs are accepted, except HTTP loopback URLs for local development.
+The ask route needs the WeKnora web origin or `/login` as the configured path;
+other paths leave the scoped link hidden. Leaving the setting empty removes
+both links. See [the handoff contract](../../docs/nextcloud-ask-handoff.md).
 
 Build the Files tab after changing its source with `cd apps/integration_weknora
 && npm ci && npm run build`; the generated `js/weknora-sidebar.js` is included

@@ -151,13 +151,22 @@ class WeknoraFileSidebarTab extends HTMLElement {
         }
         section.append(explanation)
 
-        if (data.source_state === 'in_scope' && data.weknora_login_url) {
+        if (data.source_state === 'in_scope' && data.knowledge_state === 'ready'
+            && data.weknora_ask_url) {
+            const link = document.createElement('a')
+            link.className = 'weknora-sidebar__link'
+            link.href = data.weknora_ask_url
+            link.target = '_blank'
+            link.rel = 'noopener noreferrer'
+            link.textContent = '在知识库中提问此文件'
+            section.append(link)
+        } else if (data.source_state === 'in_scope' && data.weknora_login_url) {
             const link = document.createElement('a')
             link.className = 'weknora-sidebar__link'
             link.href = data.weknora_login_url
             link.target = '_blank'
             link.rel = 'noopener noreferrer'
-            link.textContent = '以个人身份登录 WeKnora 提问'
+            link.textContent = '以个人身份登录 WeKnora'
             section.append(link)
         }
         this.replaceChildren(section)

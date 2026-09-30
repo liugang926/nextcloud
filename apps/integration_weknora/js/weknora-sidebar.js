@@ -4579,13 +4579,21 @@ ${message.stack}`;
         explanation.textContent = "\u6B64\u6587\u4EF6\u6CA1\u6709\u901A\u8FC7\u5F53\u524D\u53EF\u8BBF\u95EE\u7684\u53D1\u5E03\u76EE\u5F55\u8FDB\u5165\u77E5\u8BC6\u5E93\u3002";
       }
       section.append(explanation);
-      if (data.source_state === "in_scope" && data.weknora_login_url) {
+      if (data.source_state === "in_scope" && data.knowledge_state === "ready" && data.weknora_ask_url) {
+        const link = document.createElement("a");
+        link.className = "weknora-sidebar__link";
+        link.href = data.weknora_ask_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "\u5728\u77E5\u8BC6\u5E93\u4E2D\u63D0\u95EE\u6B64\u6587\u4EF6";
+        section.append(link);
+      } else if (data.source_state === "in_scope" && data.weknora_login_url) {
         const link = document.createElement("a");
         link.className = "weknora-sidebar__link";
         link.href = data.weknora_login_url;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.textContent = "\u4EE5\u4E2A\u4EBA\u8EAB\u4EFD\u767B\u5F55 WeKnora \u63D0\u95EE";
+        link.textContent = "\u4EE5\u4E2A\u4EBA\u8EAB\u4EFD\u767B\u5F55 WeKnora";
         section.append(link);
       }
       this.replaceChildren(section);
