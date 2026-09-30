@@ -151,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo 'd7942a67a76f84ed1f0959d9a61c0b89d21d141b5a5cf6b64606c9fee5c1e8fb  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo 'f572633bf0d82546f517a136d3e5d0eee63d113869a2c470b90a8f985e986b2c  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -243,15 +243,15 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           repository: liugang926/WeKnora_ldapsa
-          ref: 3f986f424248333df0320fc7b4b9aad049e2abc7
+          ref: b8a34e0bae8fcf0d3c8273bba2e56414abed41e2
           path: weknora-rag
           persist-credentials: false
 
       - name: Apply and check RAG adaptation
         run: |
-          echo '428b766f83a24d7655550ff696882a2a83eac19a36f5b6b5f3d31b2d19d3ed9a  nextcloud/integration/weknora-rag-3f986f42.patch' | sha256sum --check --
-          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-3f986f42.patch
-          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-3f986f42.patch
+          echo '1bbeb4989ac21afb8c70754064f64aed5eb1d1d918ef9601b5afbe0728c6a1c8  nextcloud/integration/weknora-rag-b8a34e0b.patch' | sha256sum --check --
+          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-b8a34e0b.patch
+          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-b8a34e0b.patch
           git -C weknora-rag diff --check
 
       - uses: actions/setup-go@v7.0.0
@@ -262,7 +262,7 @@ jobs:
       - name: Test patched RAG authorization paths
         working-directory: weknora-rag
         run: |
-          go test -p 2 -run 'Test(Nextcloud|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
+          go test -p 2 -run 'Test(Nextcloud|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \

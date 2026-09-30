@@ -2,22 +2,22 @@
 
 `integration/weknora.patch` remains the reproducible patch for WeKnora commit
 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` used by the fixed-baseline
-Docker integration build. `integration/weknora-rag-3f986f42.patch` is a complete,
+Docker integration build. `integration/weknora-rag-b8a34e0b.patch` is a complete,
 separate patch for the RAG branch at commit
-`3f986f424248333df0320fc7b4b9aad049e2abc7`. Apply **one** patch to its
+`b8a34e0bae8fcf0d3c8273bba2e56414abed41e2`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`d7942a67a76f84ed1f0959d9a61c0b89d21d141b5a5cf6b64606c9fee5c1e8fb`.
+`f572633bf0d82546f517a136d3e5d0eee63d113869a2c470b90a8f985e986b2c`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
 ```sh
-git apply --check /path/to/nextcloud/integration/weknora-rag-3f986f42.patch
-git apply /path/to/nextcloud/integration/weknora-rag-3f986f42.patch
+git apply --check /path/to/nextcloud/integration/weknora-rag-b8a34e0b.patch
+git apply /path/to/nextcloud/integration/weknora-rag-b8a34e0b.patch
 ```
 
 The RAG patch SHA-256 is
-`428b766f83a24d7655550ff696882a2a83eac19a36f5b6b5f3d31b2d19d3ed9a`.
+`1bbeb4989ac21afb8c70754064f64aed5eb1d1d918ef9601b5afbe0728c6a1c8`.
 The build script and CI reject a different patch hash. On 2026-09-30 both
 baseline patches applied cleanly to fresh source archives. The RAG baseline
 retains the evaluated RAG runtime changes and is pinned to the tested source
@@ -48,11 +48,11 @@ recovery path linked into the backend. There is no local-image overlay path.
 To build a candidate without replacing the tags used by the shared stack:
 
 ```sh
-WEKNORA_RAG_TAG_SUFFIX=nextcloud-rag-3f-anydoc ./scripts/build-weknora-rag.sh
+WEKNORA_RAG_TAG_SUFFIX=nextcloud-rag-b8-anydoc ./scripts/build-weknora-rag.sh
 ```
 
-This creates `weknora-ldap-app:nextcloud-rag-3f-anydoc` and
-`weknora-ldap-ui:nextcloud-rag-3f-anydoc`. The build downloads browser-skill,
+This creates `weknora-ldap-app:nextcloud-rag-b8-anydoc` and
+`weknora-ldap-ui:nextcloud-rag-b8-anydoc`. The build downloads browser-skill,
 Rust, DuckDB and other dependencies and requires substantial time, disk and
 network access. Some upstream Dockerfile dependencies float, so this is a
 development build rather than a bit-for-bit reproducible production image.

@@ -15151,14 +15151,15 @@ index 00000000..cf0f3a2a
 +}
 diff --git a/internal/application/repository/nextcloud_versions_test.go b/internal/application/repository/nextcloud_versions_test.go
 new file mode 100644
-index 00000000..e0df6077
+index 00000000..83631b3b
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions_test.go
-@@ -0,0 +1,890 @@
+@@ -0,0 +1,979 @@
 +package repository
 +
 +import (
 +	"context"
++	"encoding/base64"
 +	"encoding/json"
 +	"errors"
 +	"io"
@@ -15441,6 +15442,94 @@ index 00000000..e0df6077
 +	require.NoError(t, db.First(&current).Error)
 +	require.Equal(t, newer.ID, current.CandidateKnowledgeID)
 +	require.Equal(t, "etag-b", current.DesiredETag)
++}
++
++func TestNextcloudEventAppliedAfterFreshManifestWithSettledChanges(t *testing.T) {
++	ctx := context.Background()
++	_, db := newNextcloudVersionTestRepo(t)
++	require.NoError(t, db.AutoMigrate(&types.SyncLog{}))
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases
++		(id TEXT PRIMARY KEY, tenant_id INTEGER, deleted_at DATETIME)`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb', 7)`).Error)
++	for _, name := range []string{"000032_nextcloud_event_inbox.up.sql", "000033_nextcloud_event_dispatch.up.sql"} {
++		schema, err := os.ReadFile("../../../migrations/sqlite/" + name)
++		require.NoError(t, err)
++		require.NoError(t, db.Exec(string(schema)).Error)
++	}
++	ready := insertNextcloudVersionTestKnowledge(t, db, "event-ready", "etag-v2",
++		types.ParseStatusCompleted, "enabled")
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", ready.ID).
++		Update("file_name", "file.md").Error)
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v2",
++		CandidateKnowledgeID: ready.ID, State: "published", UpdatedAt: time.Now().UTC()}).Error)
++	var source types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&source).Error)
++	baseURL, configSHA, bindingID, err := NextcloudEventDataSourceIdentity(source.Config)
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_connections
++		(connection_id, tenant_id, knowledge_base_id, datasource_id, nextcloud_instance_id,
++		 binding_id, datasource_base_url, datasource_config_sha256, status,
++		 current_key_id, current_secret_ciphertext)
++		 VALUES (?, 7, 'kb', 'ds', 'instance', ?, ?, ?, 'active', 'test-key', 'enc:v1:test')`,
++		"event-connection", bindingID, baseURL, configSHA).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_checkpoint (connection_id, received_id)
++		VALUES ('event-connection', 1)`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
++		(connection_id, event_id, payload_sha256, event_type, file_id, state)
++		VALUES ('event-connection', 1, ?, 'upsert', 77, 'dispatched')`, strings.Repeat("0", 64)).Error)
++	now := time.Now().UTC()
++	startedAt := now.Add(-time.Minute)
++	log := &types.SyncLog{ID: "event-log", DataSourceID: "ds", TenantID: 7,
++		Status: types.SyncLogStatusSuccess, StartedAt: startedAt}
++	require.NoError(t, db.Create(log).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_dispatch
++		(connection_id, dispatched_id, target_event_id, state, last_sync_log_id, next_attempt_at)
++		VALUES ('event-connection', 1, 1, 'queued', ?, ?)`,
++		log.ID, now.Add(-time.Second)).Error)
++	changeBytes, err := json.Marshal([]any{1, bindingID, "1", strings.Repeat("0", 64)})
++	require.NoError(t, err)
++	changeCursor := base64.RawURLEncoding.EncodeToString(changeBytes)
++	setCursor := func(reconciledAt int64) {
++		t.Helper()
++		cursor := &types.SyncCursor{LastSyncTime: now, ConnectorCursor: map[string]interface{}{
++			"instance_id": "instance", "last_reconcile_at": reconciledAt,
++			"changes": map[string]interface{}{bindingID: changeCursor},
++			"files": map[string]interface{}{bindingID: map[string]interface{}{
++				"77": map[string]string{"etag": "etag-v2", "name": "file.md", "path": "file.md"},
++			}},
++			"missing": map[string]interface{}{}, "tombstones": map[string]interface{}{},
++		}}
++		raw, err := cursor.ToJSON()
++		require.NoError(t, err)
++		require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++			Update("last_sync_cursor", raw).Error)
++	}
++	setCursor(startedAt.Add(-2 * time.Minute).Unix())
++	inbox := NewNextcloudEventInboxRepository(db)
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", now)
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	var dispatch nextcloudEventDispatchRow
++	require.NoError(t, db.Table("nextcloud_event_dispatch").Where("connection_id = ?", "event-connection").Take(&dispatch).Error)
++	require.Equal(t, "deletion_or_cursor_pending", dispatch.LastErrorCode)
++	require.Zero(t, dispatch.AppliedID)
++
++	// The same event and already-consumed changes cursor become applicable
++	// once this attempt records a complete, fresh metadata manifest.
++	setCursor(now.Unix())
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_dispatch
++		SET state = 'queued', next_attempt_at = ? WHERE connection_id = 'event-connection'`,
++		now.Add(-time.Second)).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now)
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	require.NoError(t, db.Table("nextcloud_event_dispatch").Where("connection_id = ?", "event-connection").Take(&dispatch).Error)
++	require.Equal(t, "idle", dispatch.State)
++	require.Equal(t, int64(1), dispatch.AppliedID)
++	var receipt nextcloudEventInboxRow
++	require.NoError(t, db.Table("nextcloud_event_inbox").Where("connection_id = ? AND event_id = 1", "event-connection").Take(&receipt).Error)
++	require.Equal(t, "applied", receipt.State)
 +}
 +
 +func TestNextcloudFailedFetchReclaimsWithoutPausingSource(t *testing.T) {
@@ -17194,7 +17283,7 @@ index b4087b96..60ad2a04 100644
  		ID:           "log-pending",
  		DataSourceID: ds.ID,
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241..bbde51b1 100644
+index c0b24241..d364bda1 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -14,6 +14,7 @@ import (
@@ -17834,7 +17923,7 @@ index c0b24241..bbde51b1 100644
  		case errors.As(err, &dupErr):
  			// Duplicate file/URL is not a failure — count as skipped.
  			logger.Infof(ctx, "item %q (external_id=%s) already exists, skipping", item.Title, item.ExternalID)
-@@ -993,11 +1294,112 @@ func streamStartCursor(ds *types.DataSource, forceFull bool, attempt int) (*type
+@@ -993,11 +1294,116 @@ func streamStartCursor(ds *types.DataSource, forceFull bool, attempt int) (*type
  // Emit ingests each item as it arrives (bounding memory) and Checkpoint persists
  // the connector cursor plus live progress counts at page boundaries.
  type streamSyncHandler struct {
@@ -17919,6 +18008,10 @@ index c0b24241..bbde51b1 100644
 +	return ""
 +}
 +
++func (h *streamSyncHandler) NextcloudRequireManifest() bool {
++	return h.payload.Trigger == "nextcloud_event"
++}
++
 +func (h *streamSyncHandler) checkNextcloudActive(ctx context.Context) error {
 +	if h.ds.Type != types.ConnectorTypeNextcloud {
 +		return nil
@@ -17952,7 +18045,7 @@ index c0b24241..bbde51b1 100644
  }
  
  // Emit ingests one streamed item. A canceled context aborts the stream so the
-@@ -1008,8 +1410,34 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1008,8 +1414,34 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  	if err := ctx.Err(); err != nil {
  		return err
  	}
@@ -17988,7 +18081,7 @@ index c0b24241..bbde51b1 100644
  	return nil
  }
  
-@@ -1017,6 +1445,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1017,6 +1449,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  // running counts into the sync log so progress survives a crash and the UI can
  // reflect a long sync mid-flight instead of jumping from 0 to done.
  func (h *streamSyncHandler) Checkpoint(ctx context.Context, cursor *types.SyncCursor) error {
@@ -18001,7 +18094,7 @@ index c0b24241..bbde51b1 100644
  	if cursor == nil {
  		return nil
  	}
-@@ -1070,6 +1504,9 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1070,6 +1508,9 @@ func (s *DataSourceService) processSyncStreaming(
  	ds *types.DataSource, syncLog *types.SyncLog,
  	config *types.DataSourceConfig, payload types.DataSourceSyncPayload, wasPaused bool,
  ) error {
@@ -18011,7 +18104,7 @@ index c0b24241..bbde51b1 100644
  	// Tenant + auto-tag setup must precede fetching because the stream ingests
  	// each item on the fly.
  	ctx = context.WithValue(ctx, types.TenantIDContextKey, ds.TenantID)
-@@ -1095,7 +1532,8 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1095,7 +1536,8 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	result := &types.SyncResult{}
@@ -18021,7 +18114,7 @@ index c0b24241..bbde51b1 100644
  
  	fullBaseline := startCursor
  	if forceFull {
-@@ -1112,6 +1550,12 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1112,6 +1554,12 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	nextCursor, fetchErr := streamingFetch(ctx, sc, config, forceFull, startCursor, fullBaseline, handler)
@@ -18034,7 +18127,7 @@ index c0b24241..bbde51b1 100644
  	if fetchErr != nil {
  		// Progress so far is already checkpointed onto ds.LastSyncCursor; leave
  		// it in place so the Asynq retry resumes from there. Persist counts.
-@@ -1121,6 +1565,25 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1121,6 +1569,25 @@ func (s *DataSourceService) processSyncStreaming(
  			types.SyncLogStatusFailed, fmt.Sprintf("Fetch failed: %v", fetchErr), wasPaused)
  		return fetchErr
  	}
@@ -18060,7 +18153,7 @@ index c0b24241..bbde51b1 100644
  
  	resultJSON, _ := result.ToJSON()
  	if err := allFetchedItemsFailedError(result); err != nil {
-@@ -1129,13 +1592,11 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1129,13 +1596,11 @@ func (s *DataSourceService) processSyncStreaming(
  		return err
  	}
  
@@ -18078,7 +18171,7 @@ index c0b24241..bbde51b1 100644
  
  	// Surface per-document failures as a partial sync (not silent success), so
  	// the sync-log drawer's failure detail explains which docs didn't make it —
-@@ -1159,6 +1620,26 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1159,6 +1624,26 @@ func (s *DataSourceService) processSyncStreaming(
  	return nil
  }
  
@@ -18105,7 +18198,7 @@ index c0b24241..bbde51b1 100644
  func (s *DataSourceService) updateSyncRunResult(
  	ctx context.Context,
  	ds *types.DataSource,
-@@ -1179,8 +1660,21 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1179,8 +1664,21 @@ func (s *DataSourceService) updateSyncRunResult(
  	syncLog.FinishedAt = timePtr(time.Now().UTC())
  	syncLog.ErrorMessage = errorMessage
  	syncLog.Result = resultJSON
@@ -18129,7 +18222,7 @@ index c0b24241..bbde51b1 100644
  	}
  
  	if status == types.SyncLogStatusFailed {
-@@ -1196,6 +1690,16 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1196,6 +1694,16 @@ func (s *DataSourceService) updateSyncRunResult(
  	ds.LastSyncResult = resultJSON
  	if err := s.dsRepo.UpdateSyncState(ctx, ds); err != nil {
  		logger.Errorf(ctx, "failed to update data source: %v", err)
@@ -18146,7 +18239,7 @@ index c0b24241..bbde51b1 100644
  	}
  	action := types.AuditActionDataSourceSyncCompleted
  	outcome := types.AuditOutcomeSuccess
-@@ -1285,7 +1789,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1285,7 +1793,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	// "unknown" for the raw ds.Type "feishu_drive"). Fall back to ds.Type so
  	// connectors that don't set metadata.channel still get a meaningful label.
  	channel := ds.Type // e.g. "feishu", "notion"
@@ -18158,7 +18251,7 @@ index c0b24241..bbde51b1 100644
  		if mc, ok := item.Metadata["channel"]; ok && mc != "" {
  			channel = mc
  		}
-@@ -1308,6 +1815,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1308,6 +1819,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	for k, v := range item.Metadata {
  		metadata[k] = v
  	}
@@ -18172,7 +18265,7 @@ index c0b24241..bbde51b1 100644
  
  	// Check if a knowledge item with this external_id already exists → delete it first (update)
  	isUpdate := false
-@@ -1318,14 +1832,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1318,14 +1836,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  		// other during updates.
  		existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
  		if err != nil {
@@ -18196,7 +18289,7 @@ index c0b24241..bbde51b1 100644
  					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
  				}
  				isUpdate = true
-@@ -1407,6 +1930,76 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1407,6 +1934,76 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	return isUpdate, fmt.Errorf("item has neither content nor URL")
  }
  
@@ -22566,7 +22659,7 @@ index ca9fa532..4c236fcf 100644
  }
  
 -const expectedSQLiteMigrationVersion = 34
-+const expectedSQLiteMigrationVersion = 47
++const expectedSQLiteMigrationVersion = 46
 +
 +func TestSQLiteNextcloudRevisionUpgradeFrom43PreservesUnknownHistory(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -24036,10 +24129,10 @@ index 00000000..25b82781
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
 new file mode 100644
-index 00000000..04cd2ef1
+index 00000000..c32ffa6a
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector.go
-@@ -0,0 +1,535 @@
+@@ -0,0 +1,546 @@
 +// Package nextcloud imports files exposed by the integration_weknora Nextcloud app.
 +package nextcloud
 +
@@ -24079,6 +24172,13 @@ index 00000000..04cd2ef1
 +// an unrelated changed file from failing or delaying that retry.
 +type candidateRetryTargetStreamHandler interface {
 +	NextcloudRetryExternalID() string
++}
++
++// Event dispatch needs proof that its own sync completed a full manifest.
++// A settled changes feed alone cannot advance the reconciliation timestamp
++// required for the event's applied acknowledgement.
++type eventManifestStreamHandler interface {
++	NextcloudRequireManifest() bool
 +}
 +
 +type Connector struct{}
@@ -24318,6 +24418,10 @@ index 00000000..04cd2ef1
 +	if retry, ok := h.(candidateRetryTargetStreamHandler); ok {
 +		retryExternalID = retry.NextcloudRetryExternalID()
 +	}
++	requireManifest := false
++	if event, ok := h.(eventManifestStreamHandler); ok {
++		requireManifest = event.NextcloudRequireManifest()
++	}
 +	policy := fmt.Sprintf("v1:multimodal=%t", ds.MultimodalEnabled)
 +	// Hints are read before the authoritative manifest. If a file changes
 +	// between these two reads, its hint is still pending on the next run.
@@ -24329,7 +24433,7 @@ index 00000000..04cd2ef1
 +		previous.LastContentAuditAt > now.Unix() ||
 +		now.Sub(time.Unix(previous.LastContentAuditAt, 0)) >= cfg.reconcileInterval
 +	forceAllContent := forceContentAudit
-+	forceManifest := len(failedCandidates) > 0 || forceContentAudit || previous.LastReconcileAt <= 0 ||
++	forceManifest := requireManifest || len(failedCandidates) > 0 || forceContentAudit || previous.LastReconcileAt <= 0 ||
 +		previous.LastReconcileAt > now.Unix() ||
 +		now.Sub(time.Unix(previous.LastReconcileAt, 0)) >= cfg.reconcileInterval ||
 +		previous.ImportPolicy != policy
@@ -24577,10 +24681,10 @@ index 00000000..04cd2ef1
 +}
 diff --git a/internal/datasource/connector/nextcloud/connector_stream_test.go b/internal/datasource/connector/nextcloud/connector_stream_test.go
 new file mode 100644
-index 00000000..d42ac25d
+index 00000000..ef7a63e4
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/connector_stream_test.go
-@@ -0,0 +1,382 @@
+@@ -0,0 +1,442 @@
 +package nextcloud
 +
 +import (
@@ -24590,6 +24694,7 @@ index 00000000..d42ac25d
 +	"net/http/httptest"
 +	"sync/atomic"
 +	"testing"
++	"time"
 +
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/stretchr/testify/require"
@@ -24605,6 +24710,7 @@ index 00000000..d42ac25d
 +	emitted         *atomic.Int32
 +	failed          map[string]string
 +	retryExternalID string
++	requireManifest bool
 +}
 +
 +func (h *nextcloudCaptureStream) FailedNextcloudCandidateETags() map[string]string {
@@ -24613,6 +24719,10 @@ index 00000000..d42ac25d
 +
 +func (h *nextcloudCaptureStream) NextcloudRetryExternalID() string {
 +	return h.retryExternalID
++}
++
++func (h *nextcloudCaptureStream) NextcloudRequireManifest() bool {
++	return h.requireManifest
 +}
 +
 +func (h *nextcloudCaptureStream) ObserveNextcloudIdentity(_ context.Context, instanceID, bindingID string) error {
@@ -24764,6 +24874,60 @@ index 00000000..d42ac25d
 +	require.NoError(t, err)
 +	require.Len(t, ordinary.items, 1)
 +	require.Equal(t, "42", ordinary.items[0].Metadata["nextcloud_file_id"])
++}
++
++func TestFetchStreamEventRetryProvesFreshManifestAfterSettledChanges(t *testing.T) {
++	manifestCalls, contentCalls := 0, 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case apiPath + "/capabilities":
++			writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++		case apiPath + "/bindings":
++			writeJSON(w, streamBindingResponse())
++		case apiPath + "/bindings/dev-published/changes":
++			writeJSON(w, testChangesPage("c1", nil, false))
++		case apiPath + "/bindings/dev-published/manifest":
++			manifestCalls++
++			writeJSON(w, testManifest("etag-a"))
++		case apiPath + "/bindings/dev-published/files/41/content":
++			contentCalls++
++			w.Header().Set("ETag", "etag-a")
++			_, _ = w.Write([]byte("candidate A"))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	connector, config := NewConnector(), testConfig(t, server.URL)
++	cursor, err := connector.FetchStream(context.Background(), config, nil, &nextcloudCaptureStream{})
++	require.NoError(t, err)
++	require.Equal(t, 1, manifestCalls)
++	require.Equal(t, 1, contentCalls)
++	state, err := decodeCursor(cursor)
++	require.NoError(t, err)
++	state.LastReconcileAt = time.Now().UTC().Add(-5 * time.Minute).Unix()
++	state.LastContentAuditAt = time.Now().UTC().Unix()
++	cursor, err = encodeSyncCursor(state)
++	require.NoError(t, err)
++
++	// A normal sync may skip the fresh manifest when the changes cursor was
++	// already consumed; an event retry must produce proof from this sync run.
++	_, err = connector.FetchStream(context.Background(), config, cursor, &nextcloudCaptureStream{})
++	require.NoError(t, err)
++	require.Equal(t, 1, manifestCalls)
++	startedAt := time.Now().UTC()
++	event := &nextcloudCaptureStream{requireManifest: true}
++	confirmed, err := connector.FetchStream(context.Background(), config, cursor, event)
++	require.NoError(t, err)
++	require.Empty(t, event.items, "unchanged content need not be downloaded")
++	require.Equal(t, 2, manifestCalls)
++	require.Equal(t, 1, contentCalls)
++	confirmedState, err := decodeCursor(confirmed)
++	require.NoError(t, err)
++	require.False(t, time.Unix(confirmedState.LastReconcileAt, 0).Before(startedAt.Add(-time.Second)),
++		"event reconciliation must satisfy applied cursor proof")
++	require.False(t, confirmed.LastSyncTime.Before(startedAt))
 +}
 +
 +func TestFetchStreamEmitsOneContentAtATimeAfterCompleteManifest(t *testing.T) {

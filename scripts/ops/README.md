@@ -405,6 +405,29 @@ For diagnosis against a fixture you created with
 paths; destroy the owned fixture afterward with
 `synthetic-ldap-fixture.py destroy --scratch PATH`.
 
+## Isolated failed-candidate automatic retry probe
+
+`isolated-failed-candidate-retry-smoke.py` creates a loopback-only synthetic
+LDAP, Nextcloud and WeKnora project. It publishes V1, stops only its own mock
+embedding service, and overwrites the same file with V2. It requires a disabled
+`staging/failed` candidate while the V1 recovery copy stays stored, then
+restarts the mock service. The project, volumes and private credentials are
+removed on success or failure.
+
+```sh
+python3 scripts/ops/isolated-failed-candidate-retry-smoke.py \
+  --weknora-image weknora-ldap-app:YOUR_CANDIDATE_TAG --phase full
+```
+
+Full mode observes the exact failed candidate through the administrator retry
+status endpoint without requesting a manual retry. It verifies that the old
+file target and direct document access are denied, then waits up to 15 minutes
+for a different V2 candidate to publish automatically. It checks the current
+ETag, ready chunks and embeddings, both event-applied watermarks, an authorized
+file-scoped answer with the original-file citation, and Bob's denial. Use
+`--phase inject-only` to validate only the controlled failure on an older image
+without an automatic retry worker.
+
 ## Isolated Files browser handoff
 
 `isolated-browser-ask-smoke.py` starts a fresh loopback-only synthetic LDAP,

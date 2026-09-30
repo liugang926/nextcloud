@@ -4,9 +4,9 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_dir="$(cd "$project_dir/.." && pwd)"
 source_dir="$workspace_dir/WeKnora-ldap-ad"
-patch_file="$project_dir/integration/weknora-rag-3f986f42.patch"
-base_commit="3f986f424248333df0320fc7b4b9aad049e2abc7"
-expected_patch_sha="428b766f83a24d7655550ff696882a2a83eac19a36f5b6b5f3d31b2d19d3ed9a"
+patch_file="$project_dir/integration/weknora-rag-b8a34e0b.patch"
+base_commit="b8a34e0bae8fcf0d3c8273bba2e56414abed41e2"
+expected_patch_sha="1bbeb4989ac21afb8c70754064f64aed5eb1d1d918ef9601b5afbe0728c6a1c8"
 
 # An alternate suffix lets an operator verify a candidate without replacing
 # the image tags used by the shared local WeKnora stack.
