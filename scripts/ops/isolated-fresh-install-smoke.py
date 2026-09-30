@@ -164,15 +164,58 @@ def main() -> None:
                 "/tmp/app.tar.gz", "-C", "/var/www/html/custom_apps")
             run(*compose, "exec", "-T", "nextcloud", "chown", "-R",
                 "www-data:www-data", "/var/www/html/custom_apps/integration_weknora")
-            run(*compose, "exec", "-T", "-u", "www-data", "nextcloud",
-                "php", "occ", "app:enable", "integration_weknora", timeout=180)
+            def occ(*args: str) -> str:
+                return run(*compose, "exec", "-T", "-u", "www-data", "nextcloud",
+                           "php", "occ", *args, timeout=180)
 
-            installed = run(*compose, "exec", "-T", "-u", "www-data", "nextcloud",
-                            "php", "occ", "config:app:get", "integration_weknora", "installed_version")
+            def assert_app_enabled(expected: bool) -> None:
+                apps = json.loads(occ("app:list", "--output=json"))
+                section = "enabled" if expected else "disabled"
+                entry = apps.get(section, {}).get("integration_weknora")
+                other = apps.get("disabled" if expected else "enabled", {}).get(
+                    "integration_weknora")
+                # Nextcloud adds "(installed x.y.z)" to disabled app versions.
+                matches = entry == version if expected else (
+                    isinstance(entry, str) and entry.split(" ", 1)[0] == version)
+                if not matches or other is not None:
+                    raise AssertionError(
+                        f"app is not listed as {section}: "
+                        f"enabled={apps.get('enabled', {}).get('integration_weknora')!r}, "
+                        f"disabled={apps.get('disabled', {}).get('integration_weknora')!r}")
+
+            auth = base64.b64encode(f"{user}:{password}".encode()).decode()
+            dav_headers = {"Authorization": "Basic " + auth}
+            file_url = (f"http://127.0.0.1:{port}/remote.php/dav/files/{user}/"
+                        f"lifecycle-{secrets.token_hex(8)}.txt")
+
+            def assert_dav() -> None:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/remote.php/dav/files/{user}/",
+                    method="PROPFIND", headers={**dav_headers, "Depth": "0"})
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    if response.status != 207:
+                        raise AssertionError(f"WebDAV status {response.status}")
+
+            def write_file(content: bytes) -> None:
+                request = urllib.request.Request(file_url, data=content, method="PUT",
+                                                 headers=dav_headers)
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    if response.status not in (201, 204):
+                        raise AssertionError(f"WebDAV PUT status {response.status}")
+
+            def assert_file(content: bytes) -> None:
+                request = urllib.request.Request(file_url, headers=dav_headers)
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    if response.status != 200 or response.read() != content:
+                        raise AssertionError("WebDAV file content changed")
+
+            occ("app:enable", "integration_weknora")
+
+            installed = occ("config:app:get", "integration_weknora", "installed_version")
             if installed != version:
                 raise AssertionError(f"installed version {installed!r} != package {version!r}")
-            status = json.loads(run(*compose, "exec", "-T", "-u", "www-data", "nextcloud",
-                                    "php", "occ", "status", "--output=json"))
+            assert_app_enabled(True)
+            status = json.loads(occ("status", "--output=json"))
             if not status.get("installed") or status.get("maintenance"):
                 raise AssertionError("fresh Nextcloud app is not ready")
             for table in ("oc_weknora_binding_id", "oc_weknora_src_pair",
@@ -183,14 +226,41 @@ def main() -> None:
                 if count != "1":
                     raise AssertionError(f"fresh migration did not create {table}")
 
-            auth = base64.b64encode(f"{user}:{password}".encode()).decode()
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{port}/remote.php/dav/files/{user}/",
-                method="PROPFIND", headers={"Authorization": "Basic " + auth, "Depth": "0"})
-            with urllib.request.urlopen(request, timeout=20) as response:
-                if response.status != 207:
-                    raise AssertionError(f"fresh WebDAV status {response.status}")
-            print(f"fresh install passed: app {version}, migrations, authenticated DAV 207")
+            assert_dav()
+            before_disable = b"before-disable-" + secrets.token_bytes(16)
+            while_disabled = b"while-disabled-" + secrets.token_bytes(16)
+            write_file(before_disable)
+            assert_file(before_disable)
+
+            # Disabling the integration must leave core file access and its
+            # persisted app configuration intact. Use this fixture's private
+            # database so no shared installation is affected.
+            probe = secrets.token_hex(16)
+            occ("config:app:set", "integration_weknora", "lifecycle_smoke_probe",
+                "--value=" + probe)
+            occ("app:disable", "integration_weknora")
+            assert_app_enabled(False)
+            assert_dav()
+            assert_file(before_disable)
+            write_file(while_disabled)
+            assert_file(while_disabled)
+            occ("app:enable", "integration_weknora")
+            assert_app_enabled(True)
+            if occ("config:app:get", "integration_weknora", "lifecycle_smoke_probe") != probe:
+                raise AssertionError("app configuration was lost after disable and enable")
+            if occ("config:app:get", "integration_weknora", "installed_version") != version:
+                raise AssertionError("installed app version changed after re-enable")
+
+            run(*compose, "restart", "nextcloud", timeout=120)
+            run(*compose, "up", "-d", "--wait", "--wait-timeout", "180",
+                "nextcloud", timeout=240)
+            assert_app_enabled(True)
+            if occ("config:app:get", "integration_weknora", "lifecycle_smoke_probe") != probe:
+                raise AssertionError("app configuration was lost after restart")
+            assert_dav()
+            assert_file(while_disabled)
+            print(f"fresh install passed: app {version}, migrations, disable/enable, "
+                  "restart, authenticated DAV read/write")
         finally:
             if started:
                 run(*compose, "down", "--volumes", "--remove-orphans", timeout=180)

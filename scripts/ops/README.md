@@ -10,8 +10,10 @@ python3 scripts/package-nextcloud-app.py
 python3 scripts/ops/isolated-fresh-install-smoke.py
 ```
 
-The smoke verifies the packaged version, fresh migration tables, and an
-authenticated DAV request. It generates its own credentials, listens only on
+The smoke verifies the packaged version, fresh migration tables, app disable
+and re-enable, persistence of an app configuration value across both steps and
+a container restart, and authenticated DAV file reads and writes during the
+lifecycle changes. It generates its own credentials, listens only on
 loopback, and removes only its uniquely named Compose project and volumes in
 `finally`. It never mounts this repository's app source or uses the shared
 development database. This is a clean-install check; rollback and coordinated
