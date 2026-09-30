@@ -339,6 +339,54 @@ volumes, network, and private scratch directory were removed. The
 [reproducible probe](../scripts/ops/README.md) covers a synthetic direct share,
 not production Team Folder or enterprise AD behavior.
 
+## Failed-candidate recovery
+
+The two pinned WeKnora patches now store a per-file failed-candidate retry
+intent. A five-second dispatcher scans active paired Nextcloud sources, using
+keyset pages rather than a fixed first page, and claims one exact failed
+generation for a bounded 24-hour automatic window. Retry delay grows from one
+minute with stable jitter. Each task carries the source ETag, failed candidate,
+pair operation and epoch, source config hash and one-use lease token. The worker
+rechecks these selectors before reading source bytes and before Stage; a stale
+queued task cannot replace a newer candidate. The administrator-only API can
+inspect the exact file's retry state and restart an exhausted window with a
+compare-and-swap request. No parser error text or source credential is exposed
+through that status response.
+
+A retry of an unchanged ETag downloads only the failed file after a complete
+metadata preflight. A separate event retry still refreshes the full metadata
+manifest when its changes page has become empty; this advances the source's
+reconcile timestamp so a completed event can reach the verified applied
+watermark without re-downloading unchanged file bodies. Fixed and RAG focused
+Go tests cover the retry claim, same-ETag staging, stale task denial and event
+timestamp transition. Both pinned patches apply to clean source archives and
+the SQLite migration-47 upgrade tests pass. The RAG baseline is now pinned to
+`b8a34e0bae8fcf0d3c8273bba2e56414abed41e2`; its evaluation-cost Go tests
+and frontend typecheck also pass. The isolated candidate built from the final
+RAG patch has app image
+`sha256:35dbcdf20a01fe22998da6dbd141bc1375722af1c3f8b3aaa5dbeb1ce37dd727`
+and UI image
+`sha256:2c093023f7522f92614f921af4bc12d6f44760192e856a170344308fd03a1a25`.
+Both carry the pinned source and full patch SHA-256 labels; neither replaced
+the shared WeKnora service.
+
+The final loopback-only `--phase full` fault drill used this app image and the
+packaged 0.4.29 Nextcloud app. After a new, same-file V2 WebDAV overwrite
+created outbox upsert event 1, its first candidate failed while only the
+fixture's embedding service was stopped. The V1 recovery copy remained stored
+but its old target, direct document and answer/citation were inaccessible.
+The durable retry job recorded one automatic attempt and a sync-log ID; after
+the model service returned, a distinct V2 candidate published with a current
+ETag, one visible copy, ready chunk and embedding. Alice's file-scoped answer
+cited the original Nextcloud file. Bob's target and direct document returned
+403, and his selected search and answer stream exposed no content or citation.
+The old V1 target, document, selected search and stream remained denied after
+V2 publication. Both services' verified applied watermarks reached the new
+event. The fixture's containers, volumes, network and private scratch data
+were removed. This synthetic direct-share run does not verify enterprise AD,
+production Team Folder ACLs or a performance SLA; reproduce it with the
+[isolated fault probe](../scripts/ops/README.md).
+
 ## Consistency and release boundary
 
 The pinned fixed and RAG WeKnora patches now fence PostgreSQL pgvector

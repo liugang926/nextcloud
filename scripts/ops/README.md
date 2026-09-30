@@ -423,8 +423,10 @@ Full mode observes the exact failed candidate through the administrator retry
 status endpoint without requesting a manual retry. It verifies that the old
 file target and direct document access are denied, then waits up to 15 minutes
 for a different V2 candidate to publish automatically. It checks the current
-ETag, ready chunks and embeddings, both event-applied watermarks, an authorized
-file-scoped answer with the original-file citation, and Bob's denial. Use
+ETag, one visible copy, ready chunks and embeddings, an exact-file persisted
+retry claim, and a new post-overwrite event applied on both sides. It checks
+Alice's file-scoped answer with the original-file citation, Bob's ask,
+document, search and answer denial, and continued V1 denial after V2 publishes. Use
 `--phase inject-only` to validate only the controlled failure on an older image
 without an automatic retry worker.
 
