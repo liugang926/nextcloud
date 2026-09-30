@@ -155,6 +155,9 @@ jobs:
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
+      - name: Check WeKnora Nextcloud OpenAPI contract
+        run: python3 nextcloud/scripts/ops/check-weknora-openapi-contract.py weknora
+
       - name: Set up Go
         uses: actions/setup-go@v7.0.0
         with:
@@ -253,6 +256,9 @@ jobs:
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
+
+      - name: Check RAG WeKnora Nextcloud OpenAPI contract
+        run: python3 nextcloud/scripts/ops/check-weknora-openapi-contract.py weknora-rag
 
       - uses: actions/setup-go@v7.0.0
         with:
