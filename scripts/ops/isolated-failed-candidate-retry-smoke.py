@@ -102,6 +102,17 @@ def retry_job(database, source_id, file_number, failed_id):
     return index["sql_json"](database, query)
 
 
+def outbox_cursor(state, binding_id):
+    require(re.fullmatch(r"[A-Za-z0-9._-]{1,128}", binding_id) is not None,
+            "invalid isolated outbox binding")
+    query = ("SELECT COALESCE(MAX(id),0) FROM oc_weknora_outbox "
+             f"WHERE binding_id='{binding_id}'")
+    value = command("docker", "exec", state["project"] + "-nc-db-1", "psql",
+                    "-U", "nextcloud", "-d", "nextcloud", "-Atc", query).strip()
+    require(value.isdecimal(), "isolated outbox cursor is invalid")
+    return int(value)
+
+
 def wait_failed_candidate(state, runtime, event_id, delivery_job):
     database = state["project"] + "-wk-db-1"
     container = state["project"] + "-nextcloud-1"
@@ -357,8 +368,7 @@ def drill(directory, state, *, phase):
         r"OCA\IntegrationWeknora\BackgroundJob\EventDeliveryJob")
     applied_job = events["background_job"](nextcloud_container,
         r"OCA\IntegrationWeknora\BackgroundJob\EventAppliedStatusJob")
-    before_event = version_probe["event_id"](
-        state, runtime["binding_id"], runtime["file_id"], "upsert")
+    before_event = outbox_cursor(state, runtime["binding_id"])
     embedding_stopped = False
     try:
         owned_compose(directory, state, "stop", "mock-embedding")
