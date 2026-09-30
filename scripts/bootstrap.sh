@@ -32,6 +32,7 @@ if [[ "$installed" != true ]]; then
 fi
 
 "${occ[@]}" app:enable integration_weknora
+"${occ[@]}" config:system:set overwrite.cli.url --value="$base_url" >/dev/null
 
 folder_url="$base_url/remote.php/dav/files/$NEXTCLOUD_ADMIN_USER/Published"
 status="$(curl -sS -o /dev/null -w '%{http_code}' -u "$NEXTCLOUD_ADMIN_USER:$NEXTCLOUD_ADMIN_PASSWORD" -X MKCOL "$folder_url")"

@@ -1,6 +1,6 @@
 # V1 implementation status
 
-This repository implements a local development slice of the [PRD](development-plan.md), not a V1 enterprise release. The PRD describes requirements; the evidence below describes code and tests available as of 2026-09-24. Only synthetic local data has been used for cross-system testing.
+This repository implements a local development slice of the [PRD](development-plan.md), not a V1 enterprise release. The PRD describes requirements; the table records the historical implementation and tests through 2026-09-24, with a newer addendum below. Only synthetic local data has been used for cross-system testing.
 
 | PRD area | Implemented and checked locally | Remaining before V1 |
 | --- | --- | --- |
@@ -16,6 +16,33 @@ It reports scoped event inbox watermarks and backlog, retained sync-log states,
 and current candidate parsing counts. SQLite, PostgreSQL, handler authorization,
 and router tests pass. These database observations do not count the shared
 Redis task queue or prove that a file is indexed, published, or readable.
+
+## 2026-09-30 integration update
+
+Nextcloud app 0.4.27 was packaged as a runtime archive and upgraded in the
+shared local Docker stack. Its LAN listener is `http://10.106.105.128:18082`;
+`scripts/allow-lan-access.sh` sets the browser origin used for original-file
+citations. The Files sidebar shows a question handoff only for a readable,
+current, signed `ready` file. WeKnora's browser route and interactive
+`ask-target` endpoint resolve that exact paired file after current personal
+knowledge-base, group, source and ETag checks. The manifest keeps separate
+machine content and browser Files URLs. Existing indexed files need reindexing
+to acquire the latter citation metadata.
+
+Both complete WeKnora patches were regenerated from their pinned fixed and RAG
+baselines and passed clean-apply checks. Selected direct HTTP reads,
+HybridSearch, Agent read/list and live answer paths acquire renewable read
+leases and recheck current source and user grants at output. Enumerated
+Asynq/Lite document build workers acquire build leases; same-transaction
+chunk, knowledge and version writes are fenced. MCP machine read routes reject
+Nextcloud source documents. Focused fixed and RAG Go suites, including
+revocation-during-hydration and HTTP-write tests, passed locally.
+
+The coverage marker remains absent, so physical derived-copy GC stays denied.
+External vector, graph and object writes, Wiki and other read paths, old task
+drain, coordinated restore, production alert routing and the 10,000-file /
+100-GB performance target remain open. The same-directory LDAP fixture is
+synthetic; a real AD and Team Folder permission matrix is not yet available.
 
 ## Local cross-system evidence
 
@@ -50,17 +77,15 @@ read/build lease and retirement fence foundation. Disposable PostgreSQL and
 SQLite tests cover acquire-versus-retire and GC-claim-versus-KB-read races;
 an active exact GC claim now rejects new KB-wide read leases until release or
 expiry. The coverage table is empty after migration, so GC claims are denied
-by default. Selected direct knowledge, chunk, preview and download HTTP
-handlers now acquire renewable exact read leases and recheck Nextcloud
-publication at response boundaries; handler/router/container tests and a
-repository lease-pruning test passed in isolated Docker. WeKnora KB/group/
-shared-agent grants are not rechecked during a stream, and frequent remote
-publication checks pose a large-download performance risk. Search/RAG/Agent,
-MCP, Wiki, graph, other reads, builders, old task drain and external index
-adapters remain uncovered. No coverage marker is written and this does not
-authorize physical deletion. The [content lease design](nextcloud-derived-gc-read-lease.md)
-tracks the remaining gates; the patched WeKnora docs describe the partial
-reader integration.
+by default. Direct knowledge, chunk, preview and download HTTP handlers now
+acquire renewable exact read leases and recheck publication and reader grants
+at bounded response writes; handler/router/container and repository tests
+passed in isolated Docker. The 2026-09-30 update above adds selected search,
+Agent, MCP and build paths. Frequent remote publication checks still need
+large-download performance measurement. Wiki, graph, other readers, old task
+drain and external index adapters remain uncovered. No coverage marker is
+written and this does not authorize physical deletion. The [content lease
+design](nextcloud-derived-gc-read-lease.md) tracks the remaining gates.
 
 ## Isolated synthetic LDAP acceptance
 

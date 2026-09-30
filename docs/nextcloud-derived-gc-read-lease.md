@@ -5,7 +5,7 @@ disabled until every listed read and build path uses the durable fence.
 
 ## Decision
 
-Do not merge or enable the experimental exact-ID local derived-row deletion patch yet. The prototype proves exact local row ownership, leased retry and atomic database receipts, but the PRD §7.4 also requires **no active build or read lease** before deleting retired chunks/indexes. The current repository has no durable per-knowledge build/read lease covering all Nextcloud paths. A terminal `parse_status`, `pending_subtasks_count = 0`, and a one-hour delay do not prove this condition. The `derived_index` blocker prevents a false completed job, but does not make premature local-row deletion safe.
+Do not merge or enable the experimental exact-ID local derived-row deletion patch yet. The prototype proves exact local row ownership, leased retry and atomic database receipts, but the PRD §7.4 also requires **no active build or read lease** before deleting retired chunks/indexes. The repository now has a durable lease and fence foundation with partial read and worker coverage, but it does not cover every Nextcloud path or external write. A terminal `parse_status`, `pending_subtasks_count = 0`, and a one-hour delay do not prove this condition. The `derived_index` blocker prevents a false completed job, but does not make premature local-row deletion safe.
 
 ## Read paths that need coverage
 
@@ -20,11 +20,23 @@ Do not merge or enable the experimental exact-ID local derived-row deletion patc
 
 The publication guard (`internal/application/access/nextcloud_publication.go:60`) checks live source access at exposure points, but does not count in-flight readers. Existing tests of deny paths do not establish a zero-reader proof for GC.
 
+As of 2026-09-30, selected direct HTTP reads and downloads, HybridSearch,
+Agent document tools and answer output hold renewable read leases and recheck
+publication and grants at output. MCP list/read reject machine retrieval of
+Nextcloud source rows; current MCP server exposes no file resource endpoint.
+The table remains the full coverage checklist: Wiki, graph, other raw reads,
+historical hydration and external adapters still need enumeration and tests.
+
 ## Build/write paths that need coverage
 
 The Asynq registrations in `internal/router/task.go:264-305` include document parse (`ProcessDocument`, `knowledge_process.go:3380`), manual update (`:3269`), summary (`:1164`), question generation (`:1555`), image multimodal (`image_multimodal.go:151`), post-process fanout (`knowledge_post_process.go:83`), chunk extract/data-table summary, Wiki ingest/finalize, and clone/move/reparse dispatch. The direct/manual passage path in `knowledge_create.go` also calls `processChunks` (`knowledge_process.go:326`). All paths that can write chunks, embeddings, image references, summaries, graph or Wiki output need a source-scoped build lease or must be proven unable to run for Nextcloud knowledge.
 
 Queued tasks must acquire a lease at worker start, before reading or writing. Registration at enqueue alone is insufficient because a queued/retried task can start after retirement. Each DB/index write must verify its lease token and fence epoch; a worker whose heartbeat expired or was cancelled must stop before the write. This is especially important for legacy `Attempt=0`: `attemptSuperseded` in `knowledge.go:245` returns false for such tasks. `pending_subtasks_count` helps track fanout, but is not an authoritative active-worker ledger and cannot fence late retries or external writes.
+
+Selected Asynq/Lite document workers now acquire and renew build leases, and
+chunk, knowledge and source-version SQL writes validate the lease inside their
+transaction. External vector, graph, object and Wiki writes remain outside
+this fence. No coverage activation marker is written, so GC stays denied.
 
 ## Proposed durable protocol
 

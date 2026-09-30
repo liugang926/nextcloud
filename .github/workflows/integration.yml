@@ -149,6 +149,7 @@ jobs:
         run: |
           go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile' \
             ./internal/application/access \
+            ./internal/application/readlease \
             ./internal/application/repository \
             ./internal/application/service \
             ./internal/application/service/file \
@@ -176,6 +177,60 @@ jobs:
           go test -p 2 ./internal/application/repository \
             -run '^Test(PostgresNextcloud|NextcloudSourcePairingPostgres)' -count=1
           go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
+
+  weknora-rag-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out integration repository
+        uses: actions/checkout@v7.0.1
+        with:
+          path: nextcloud
+
+      - name: Check out the pinned WeKnora RAG baseline
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: 06792ba5d88ed8fd0ddb9cf77f927c6cb9ae29fc
+          path: weknora-rag
+          persist-credentials: false
+
+      - name: Apply and check RAG adaptation
+        run: |
+          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-06792ba5.patch
+          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-06792ba5.patch
+          git -C weknora-rag diff --check
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora-rag/go.mod
+          cache-dependency-path: weknora-rag/go.sum
+
+      - name: Test patched RAG authorization paths
+        working-directory: weknora-rag
+        run: |
+          go test -p 2 -run 'Test(Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments)' -count=1 \
+            ./internal/application/access \
+            ./internal/application/readlease \
+            ./internal/application/repository \
+            ./internal/application/service \
+            ./internal/agent/tools \
+            ./internal/handler \
+            ./internal/router \
+            ./internal/mcpserver
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: weknora-rag/frontend/package-lock.json
+
+      - name: Typecheck and build RAG browser UI
+        working-directory: weknora-rag/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run type-check
+          VITE_IS_DOCKER=true npm run build
 
   direct-upgrade:
     runs-on: ubuntu-latest

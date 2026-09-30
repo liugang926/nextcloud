@@ -179,6 +179,8 @@ def main():
         ).strip()
         public = urllib.parse.urlsplit(public_url)
         assert (human.scheme, human.netloc) == (public.scheme, public.netloc)
+        status, _ = request(admin, item["human_url"])
+        check(status, 200, "employee-facing Files citation route")
         status, body = request(reader, f"{api}/capabilities", headers=bearer)
         check(status, 200, "source capabilities for publication check")
         instance_id = json.loads(body)["instance_id"]
