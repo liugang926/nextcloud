@@ -98,6 +98,10 @@ repeating an unchanged warning more often than hourly. Ordinary Nextcloud
 cron determines its actual cadence; production log monitoring must route these
 warnings to an operator. A local sender alert does not establish WeKnora's
 queue, parsing, indexing, or per-file publication health.
+Key rotation clears the previously signed applied-status proof while retaining
+the connection's original creation time. Until a new signed status poll
+succeeds, the monitor may emit `applied_status_unverified` immediately; this
+means the new key has not yet verified a consumer watermark.
 Outbox retention cannot remove unsent hints while a sender exists, including
 while paused. It may prune hints already durably received after the configured
 minimum retention period; this still does not mean they were applied.
