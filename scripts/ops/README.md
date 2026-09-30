@@ -379,6 +379,32 @@ original-file citation, and old-JWT denial after source-share removal. See the
 [observed run and limits](../../docs/isolated-pdf-candidate.md). It does not
 change the shared WeKnora stack.
 
+## Isolated move, trash, and restore event probe
+
+Run this command to create and destroy a unique, loopback-only synthetic
+LDAP/Nextcloud/WeKnora project:
+
+```sh
+python3 scripts/ops/isolated-move-trash-restore-smoke.py --weknora-image YOUR_LOCAL_CANDIDATE_IMAGE
+```
+
+The probe creates a UUID-scoped document, renames it in the binding, moves its
+folder out and back, immediately moves it out and back again before delivery,
+sends the file to trash, then restores it. At each transition it checks the
+exact durable outbox event and both services' applied watermarks. It also checks the
+published candidate, current ETag, ready chunks and embeddings, source bytes,
+the renamed citation path, immediate source denial when withdrawn, and a new
+candidate after restoration. Withdrawal may require the connector's second
+complete scan before the applied watermark advances. This is a synthetic
+direct group-share fixture; it does not exercise a real AD server or Team
+Folder ACLs. Credentials stay in the fixture's private scratch directory.
+
+For diagnosis against a fixture you created with
+`synthetic-ldap-fixture.py prepare/up` and `synthetic-ldap-e2e.py bootstrap`, use
+`--scratch PATH` instead. That mode deletes only this probe's UUID-scoped DAV
+paths; destroy the owned fixture afterward with
+`synthetic-ldap-fixture.py destroy --scratch PATH`.
+
 ## Isolated Files browser handoff
 
 `isolated-browser-ask-smoke.py` starts a fresh loopback-only synthetic LDAP,

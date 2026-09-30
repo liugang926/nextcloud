@@ -323,6 +323,22 @@ fresh topology/login matrix confirmed the removal by 08:03:20 UTC. This is a
 synthetic AD-like query simulation; real AD primary groups and LDAP-backed
 Team-folder ACLs remain unverified. See [the disposable fixture](synthetic-ldap-compose.md).
 
+A fresh direct-group fixture also exercised the complete file-path lifecycle
+against candidate image
+`sha256:b75fbae3386625c213d7ae49f701c69d34884508aec0951f70928236e7a24056`.
+The same Nextcloud file ID 242 was created (event 21), renamed (22), moved out
+of the binding (23), moved back (24), moved out and back before delivery
+(final event 26), sent to trash (27), and restored (28). Both services'
+applied watermarks reached every target event. Rename updated the indexed
+path/name without replacing its candidate; each confirmed withdrawal became
+a tombstone with zero visible candidates after the connector's second full
+scan. Move-back and restore created new candidates, and rapid movement ended
+with the currently authorized source published. Source bytes and Alice/Bob
+allow/deny checks passed after restoration. The isolated project's containers,
+volumes, network, and private scratch directory were removed. The
+[reproducible probe](../scripts/ops/README.md) covers a synthetic direct share,
+not production Team Folder or enterprise AD behavior.
+
 ## Consistency and release boundary
 
 The pinned fixed and RAG WeKnora patches now fence PostgreSQL pgvector
