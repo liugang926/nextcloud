@@ -67,8 +67,10 @@ olcAttributeTypes: ( 1.3.6.1.4.1.4203.666.11.9.3 NAME 'sAMAccountName' EQUALITY 
 olcAttributeTypes: ( 1.3.6.1.4.1.4203.666.11.9.4 NAME 'userPrincipalName' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
 olcAttributeTypes: ( 1.3.6.1.4.1.4203.666.11.9.5 NAME 'userAccountControl' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
 olcAttributeTypes: ( 1.3.6.1.4.1.4203.666.11.9.6 NAME 'primaryGroupID' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+olcAttributeTypes: ( 1.3.6.1.4.1.4203.666.11.9.7 NAME 'primaryGroupToken' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
 olcObjectClasses: ( 1.3.6.1.4.1.4203.666.11.9.20 NAME 'adTestUser' SUP top AUXILIARY MUST ( objectGUID $ objectSid $ sAMAccountName $ userPrincipalName $ userAccountControl $ primaryGroupID ) )
-olcObjectClasses: ( 1.3.6.1.4.1.4203.666.11.9.21 NAME 'adTestGroup' SUP top AUXILIARY MUST ( objectGUID $ objectSid ) MAY ( sAMAccountName $ displayName $ mail ) )
+olcObjectClasses: ( 1.3.6.1.4.1.4203.666.11.9.21 NAME 'adTestGroup' SUP top AUXILIARY MUST ( objectGUID $ objectSid $ primaryGroupToken ) MAY ( sAMAccountName $ displayName $ mail ) )
+olcObjectClasses: ( 1.3.6.1.4.1.4203.666.11.9.22 NAME 'adTestDomain' SUP top AUXILIARY MUST objectSid )
 """
 
 
@@ -83,8 +85,8 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def sid(domain_parts, rid):
-    parts = domain_parts + (rid,)
+def sid(domain_parts, rid=None):
+    parts = domain_parts if rid is None else domain_parts + (rid,)
     return bytes((1, len(parts))) + (5).to_bytes(6, "big") + b"".join(
         part.to_bytes(4, "little") for part in parts)
 
@@ -119,7 +121,8 @@ def group(dn, name, guid, object_sid, members, *, unique=False):
         "displayName: " + name, "sAMAccountName: " + name,
         *(member_attr + ": " + member for member in members),
         "objectGUID:: " + binary(uuid.UUID(guid).bytes_le),
-        "objectSid:: " + binary(object_sid), "", "",
+        "objectSid:: " + binary(object_sid),
+        "primaryGroupToken: " + str(int.from_bytes(object_sid[-4:], "little")), "", "",
     ])
 
 
@@ -128,7 +131,9 @@ def make_ldif(mode, passwords, guids, domain_parts):
     grant_members = ([A_DN] if mode == "direct" else
                      [CHILD_DN] if mode == "nested" else [DISABLED_DN])
     rows = [
-        "dn: " + BASE + "\nobjectClass: top\nobjectClass: domain\ndc: example\n\n",
+        "dn: " + BASE + "\nobjectClass: top\nobjectClass: domain\n"
+        "objectClass: adTestDomain\ndc: example\nobjectSid:: " +
+        binary(sid(domain_parts)) + "\n\n",
         *("dn: " + dn + "\nobjectClass: top\nobjectClass: organizationalUnit\nou: " +
           dn.split(",", 1)[0].split("=", 1)[1] + "\n\n"
           for dn in (SERVICE, PEOPLE, GROUPS)),
@@ -556,6 +561,112 @@ def compose_command(directory, state, *args):
             "-f", str(directory / "compose.yaml"), *args]
 
 
+def ldap_config_command(state, operation, payload=None):
+    command = ["docker", "exec", *( ["-i"] if payload is not None else []),
+               state["project"] + "-openldap-1",
+               "/opt/bitnami/openldap/bin/" + operation,
+               "-Q", "-Y", "EXTERNAL", "-H", "ldapi:///"]
+    return subprocess.run(command, input=payload, text=True, capture_output=True,
+                          check=True, timeout=30).stdout
+
+
+def ldap_search(state, base, scope, ldap_filter, *attributes):
+    command = ["docker", "exec", state["project"] + "-openldap-1",
+               "/opt/bitnami/openldap/bin/ldapsearch", "-Q", "-Y", "EXTERNAL",
+               "-H", "ldapi:///", "-LLL", "-o", "ldif-wrap=no",
+               "-b", base, "-s", scope, ldap_filter, *attributes]
+    return subprocess.run(command, text=True, capture_output=True, check=True,
+                          timeout=30).stdout
+
+
+def ldap_binary_sid(state, dn):
+    data = ldap_search(state, dn, "base", "(objectClass=*)", "objectSid")
+    if not any(line.casefold() == "dn: " + dn.casefold()
+               for line in data.splitlines()):
+        raise RuntimeError("synthetic SID owner is missing from LDAP")
+    values = re.findall(r"^objectSid:: ([A-Za-z0-9+/=]+)$", data, re.M)
+    if len(values) != 1:
+        raise RuntimeError("synthetic LDAP SID is missing or ambiguous")
+    raw = base64.b64decode(values[0], validate=True)
+    if (len(raw) < 8 or len(raw) != 8 + 4 * raw[1] or
+            raw[0] != 1 or raw[2:8] != (5).to_bytes(6, "big")):
+        raise RuntimeError("synthetic LDAP SID is malformed")
+    return raw
+
+
+def ldap_sid_text(raw):
+    return ("S-1-5" + "".join("-" + str(int.from_bytes(raw[i:i + 4], "little"))
+                             for i in range(8, len(raw), 4)))
+
+
+def exact_group_sids(state, ldap_filter):
+    data = ldap_search(state, GROUPS, "sub", ldap_filter, "dn")
+    return {line[4:].casefold() for line in data.splitlines()
+            if line.startswith("dn: ")}
+
+
+def configure_primary_sid_match(state):
+    """Make the disposable OpenLDAP accept AD's textual objectSid assertion.
+
+    Nextcloud user_ldap searches for a textual SID while the group and domain
+    expose binary objectSid values. AD handles that assertion; plain OpenLDAP
+    octetStringMatch does not. This exact rewrite keeps Nextcloud's own primary
+    group lookup and both applications' binary directory identity in use.
+    """
+    domain_sid = ldap_binary_sid(state, BASE)
+    group_sid = ldap_binary_sid(state, GRANT_DN)
+    if (len(group_sid) != len(domain_sid) + 4 or
+            group_sid[:2] != bytes((1, domain_sid[1] + 1)) or
+            group_sid[2:-4] != domain_sid[2:] or
+            int.from_bytes(group_sid[-4:], "little") != 2000):
+        raise RuntimeError("synthetic primary group SID does not belong to the domain")
+    sid_label = ldap_sid_text(group_sid)
+    binary_filter = "(objectSid=" + "".join("\\%02x" % byte for byte in group_sid) + ")"
+    text_filter = "(objectSid=" + sid_label + ")"
+    wrong_filter = "(objectSid=" + ldap_sid_text(group_sid[:-4] +
+                    (2002).to_bytes(4, "little")) + ")"
+    expected = {GRANT_DN.casefold()}
+    if exact_group_sids(state, binary_filter) != expected:
+        raise RuntimeError("synthetic primary group binary SID lookup failed")
+    module_path = "/opt/bitnami/openldap/lib/openldap/rwm.so"
+    modules = ldap_search(state, "cn=module{0},cn=config", "base",
+                          "(objectClass=*)", "olcModuleLoad")
+    if module_path not in modules:
+        if re.search(r"^olcModuleLoad: .*rwm", modules, re.M):
+            raise RuntimeError("synthetic LDAP has an unexpected rewrite module")
+        ldap_config_command(state, "ldapmodify",
+                            "dn: cn=module{0},cn=config\nchangetype: modify\n"
+                            "add: olcModuleLoad\nolcModuleLoad: " + module_path + "\n\n")
+    # The rule matches only this domain/group SID and requires the closing
+    # filter parenthesis. A changed RID or a wrong-domain SID cannot match.
+    escaped_binary = "".join("\\%02x" % byte for byte in group_sid)
+    rule = (f'rwm-rewriteRule "^(.*)objectsid={sid_label}([)].*)$" '
+            f'"$1objectsid={escaped_binary}$2" ":@"')
+    overlay_base = "olcDatabase={-1}frontend,cn=config"
+    overlays = ldap_search(state, overlay_base, "one", "(olcOverlay=rwm)",
+                           "olcRwmRewrite")
+    if not overlays.strip():
+        if exact_group_sids(state, text_filter):
+            raise RuntimeError("text SID already resolves without the expected adapter")
+        ldap_config_command(state, "ldapadd",
+                            "dn: olcOverlay=rwm," + overlay_base + "\n"
+                            "objectClass: olcOverlayConfig\n"
+                            "objectClass: olcRwmConfig\nolcOverlay: rwm\n"
+                            "olcRwmRewrite: rwm-rewriteEngine on\n"
+                            "olcRwmRewrite: rwm-rewriteContext searchFilter\n"
+                            "olcRwmRewrite: " + rule + "\n\n")
+        overlays = ldap_search(state, overlay_base, "one", "(olcOverlay=rwm)",
+                               "olcRwmRewrite")
+    actual_rules = [re.sub(r"^\{[0-9]+\}", "", line.split(": ", 1)[1])
+                    for line in overlays.splitlines()
+                    if line.startswith("olcRwmRewrite: ")]
+    if actual_rules != ["rwm-rewriteEngine on", "rwm-rewriteContext searchFilter", rule]:
+        raise RuntimeError("synthetic LDAP SID rewrite differs from the exact adapter")
+    if (exact_group_sids(state, text_filter) != expected or
+            exact_group_sids(state, wrong_filter)):
+        raise RuntimeError("synthetic AD-compatible textual SID lookup failed closed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
@@ -588,6 +699,8 @@ def main():
         subprocess.run(compose_command(directory, state, "up", "-d", "--wait",
                                        "--wait-timeout", "600"), check=True)
         assert_owned_resources(directory, state)
+        if state["mode"] == "primary":
+            configure_primary_sid_match(state)
     elif args.action == "status":
         subprocess.run(compose_command(directory, state, "ps"), check=True)
     else:

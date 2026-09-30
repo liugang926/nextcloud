@@ -146,8 +146,9 @@ def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False):
     if not {"alice", "bob"}.issubset(users):
         raise RuntimeError("Nextcloud did not discover both synthetic LDAP accounts")
     groups = json.loads(occ(state, "group:list", "--output=json"))
-    if state["mode"] != "primary" and "alice" not in groups.get("Engineering", []):
-        raise RuntimeError("Nextcloud did not resolve the synthetic group membership")
+    if ("alice" not in groups.get("Engineering", []) or
+            "bob" in groups.get("Engineering", [])):
+        raise RuntimeError("Nextcloud did not resolve the exact synthetic group membership")
     if "Engineering" not in groups:
         raise RuntimeError("Nextcloud did not discover the synthetic group")
     occ(state, "config:app:set", "integration_weknora", "ad_directory_id",
@@ -275,11 +276,18 @@ def weknora_setup(directory, state, passwords, nc_base, wk_base, runtime):
               for item in catalog["data"]["groups"]}
     if not {"Engineering", "Domain Users"}.issubset(groups):
         raise RuntimeError("synthetic LDAP groups are missing from WeKnora")
-    status, _ = http_json(wk_base, "POST", f"/api/v1/tenants/{tenant}/directory-groups",
-                          {"directory_id": state["directory_id"],
-                           "directory_group_id": groups["Domain Users"],
-                           "role": "viewer"}, token)
-    need(status, {201}, "grant both users workspace viewer")
+    # Alice's sole primary group in primary mode is Engineering, so a Domain
+    # Users workspace role would allow Bob to log in but leave Alice outside
+    # the workspace. Link Engineering as a viewer without adding any LDAP
+    # membership or changing the KB/source read policy.
+    workspace_groups = ["Domain Users"]
+    if state["mode"] == "primary":
+        workspace_groups.append("Engineering")
+    for name in workspace_groups:
+        status, _ = http_json(wk_base, "POST", f"/api/v1/tenants/{tenant}/directory-groups",
+                              {"directory_id": state["directory_id"],
+                               "directory_group_id": groups[name], "role": "viewer"}, token)
+        need(status, {201}, "grant synthetic workspace viewer to " + name)
     status, model = http_json(wk_base, "POST", "/api/v1/models", {
         "name": "mock-embed-synthetic", "type": "embedding", "source": "remote",
         "parameters": {"base_url": "http://mock-embedding:8000/v1", "provider": "generic",
@@ -381,6 +389,10 @@ def make_fixture(state, runtime):
                    knowledge=True, search=True)
     denied = dict(nextcloud_login=True, ldap_login=True, dav=False, source=False,
                   knowledge=False, search=False)
+    cases = {state["mode"] + "_group" if state["mode"] != "direct" else "baseline":
+             {"a": allowed, "b": denied}}
+    if state["mode"] == "primary":
+        cases["primary_group_removed"] = {"a": denied, "b": denied}
     return {"schema_version": 1, "synthetic_fixture": True,
             "binding_id": runtime["binding_id"], "directory_id": state["directory_id"],
             "file_id": runtime["file_id"],
@@ -392,8 +404,7 @@ def make_fixture(state, runtime):
                         "dav_path": "Published/acl-note.txt",
                         "object_guid": state["guids"][user]}
                 for label, user in (("a", "alice"), ("b", "bob"))},
-            "cases": {state["mode"] + "_group" if state["mode"] != "direct" else "baseline":
-                      {"a": allowed, "b": denied}}}
+            "cases": cases}
 
 
 def bootstrap(directory, state, team_folder=False):
@@ -412,18 +423,21 @@ def bootstrap(directory, state, team_folder=False):
                       "indexed_embeddings": runtime["indexed_embeddings"]}))
 
 
-def matrix(directory, state):
+def matrix(directory, state, case_override=None):
     if not (directory / "fixture.json").is_file():
         raise RuntimeError("bootstrap the owned fixture before running the matrix")
     passwords = json.loads((directory / "passwords.json").read_text())
     runtime = json.loads((directory / "runtime.json").read_text())
-    case = state["mode"] if state["mode"] != "direct" else "baseline"
+    case = case_override or (state["mode"] if state["mode"] != "direct" else "baseline")
+    if case_override is not None and (state["mode"] != "primary" or
+                                      case_override != "primary_group_removed"):
+        raise RuntimeError("only a primary fixture accepts the removed-primary-group case")
     command = [sys.executable, str(Path(__file__).with_name("ad-permission-acceptance.py")),
                "--fixture", str(directory / "fixture.json"), "--case", case,
                "--nextcloud-origin", f"http://127.0.0.1:{state['ports']['nextcloud']}",
                "--weknora-origin", f"http://127.0.0.1:{state['ports']['weknora']}",
                "--allow-loopback-http"]
-    if case in ("primary", "nested"):
+    if case in ("primary", "nested", "primary_group_removed"):
         export = directory / "topology.ldif"
         with export.open("wb") as output:
             result = subprocess.run([
@@ -441,7 +455,8 @@ def matrix(directory, state):
                     state["guids"]["grant"]]
         if case == "nested":
             command += ["--child-group-guid", state["guids"]["child"]]
-        command[command.index("--case") + 1] = case + "_group"
+        if case != "primary_group_removed":
+            command[command.index("--case") + 1] = case + "_group"
     env = os.environ.copy()
     env.update({"AD_ACCEPTANCE_TEST_ENV": "isolated-test-accounts",
                 "AD_TEST_A_PASSWORD": passwords["alice"],
@@ -462,6 +477,8 @@ def main():
     parser.add_argument("--scratch", required=True, type=Path)
     parser.add_argument("--team-folder", action="store_true",
                         help="bootstrap a real groupfolders 22.0.6 publication root")
+    parser.add_argument("--case", choices=("primary_group_removed",),
+                        help="verify fresh denials after Alice's primaryGroupID changes")
     args = parser.parse_args()
     directory, state = owned_state(args.scratch)
     if args.action == "bootstrap":
@@ -469,7 +486,7 @@ def main():
     else:
         if args.team_folder:
             raise RuntimeError("--team-folder is only valid during bootstrap")
-        matrix(directory, state)
+        matrix(directory, state, args.case)
 
 
 if __name__ == "__main__":

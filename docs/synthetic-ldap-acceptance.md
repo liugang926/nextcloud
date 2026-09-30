@@ -10,7 +10,7 @@ Use a unique Docker Compose project, private scratch directory, and dedicated vo
 
 The directory contains two distinct enabled users, A/Alice and B/Bob, with binary `objectGUID` and `objectSid`, plus an enabled service bind account and an unused disabled user. Configure Nextcloud `user_ldap` and WeKnora Directory against the **same** LDAPS endpoint and CA. Set the Nextcloud user and group UUID attributes to `objectGUID`, register the exact GUID↔Nextcloud UID mappings, and keep `WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY=0`. Verify both users can authenticate before testing content access.
 
-The isolated source contains a dedicated synthetic file under a Nextcloud publication root shared only with `Engineering`. Initially only A belongs to `Engineering`; B does not. Grant both users a WeKnora workspace viewer role through `Domain Users`, which keeps login possible after content access is revoked. Restrict the dedicated knowledge base to `Engineering` read access. Pair the exact Nextcloud binding with that knowledge base and wait for one published source version, a ready chunk, and an embedding. The unique answer marker belongs in the file content but **not** in the search query.
+The isolated source contains a dedicated synthetic file under a Nextcloud publication root shared only with `Engineering`. Initially only A belongs to `Engineering`; B does not. Grant both users a WeKnora workspace viewer role through `Domain Users`, except in the primary-only fixture where A's sole primary group is `Engineering`: there, also grant `Engineering` a workspace viewer role so A can log in without adding an LDAP member edge. Restrict the dedicated knowledge base to `Engineering` read access. Pair the exact Nextcloud binding with that knowledge base and wait for one published source version, a ready chunk, and an embedding. The unique answer marker belongs in the file content but **not** in the search query.
 
 The private fixture JSON follows the `schema_version: 1` example in [AD-acceptance.md](../scripts/ops/AD-acceptance.md). It records only IDs, GUIDs, file paths, query, and six expected booleans per user and case. Keep passwords and the binding machine key exclusively in the protected process environment. The test used separate loopback origins; the acceptance probe refuses HTTP to a LAN address because it transmits test account passwords and a machine token.
 
@@ -98,6 +98,11 @@ only. Compare WeKnora's synchronized effective groups and Nextcloud's LDAP
 group view separately; one LDIF export and boolean HTTP results cannot prove
 both services used the same directory snapshot or resolve enterprise AD's
 complex DN/ranged-membership behavior.
+
+The generated primary-only fixture uses a narrowly scoped OpenLDAP SID filter
+adapter; see [the exact adapter and revocation drill](synthetic-ldap-compose.md).
+It demonstrates the Nextcloud native primary-group lookup against that
+synthetic directory, not a real AD primary-group acceptance result.
 
 The pre-existing `team_folder_acl_http_smoke.py` automates a Team folder's
 advanced file ACL deny, restoration, and group-removal checks on a disposable

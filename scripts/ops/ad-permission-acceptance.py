@@ -312,7 +312,7 @@ def main():
     args = parser.parse_args()
     data, expectations = fixture(args.fixture, args.case)
     topology_result = None
-    if args.case in {"primary_group", "nested_group"}:
+    if args.case in {"primary_group", "primary_group_removed", "nested_group"}:
         if args.topology_ldif is None or args.grant_group_guid is None:
             raise ProbeError("primary/nested phases require --topology-ldif and --grant-group-guid")
         if args.case == "nested_group" and args.child_group_guid is None:

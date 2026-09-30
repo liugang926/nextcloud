@@ -190,8 +190,8 @@ def topology(path):
 def validate_topology(data, case, path, grant_guid, child_guid=None):
     if data.get("synthetic_fixture") is not True:
         raise TopologyError("topology requires an explicitly synthetic fixture")
-    if case not in {"primary_group", "nested_group"}:
-        raise TopologyError("topology phase must be primary_group or nested_group")
+    if case not in {"primary_group", "primary_group_removed", "nested_group"}:
+        raise TopologyError("unknown synthetic topology phase")
     if not GUID.fullmatch(grant_guid) or (child_guid is not None and not GUID.fullmatch(child_guid)):
         raise TopologyError("group GUIDs must be canonical UUIDs")
     grant_guid = grant_guid.lower()
@@ -206,8 +206,18 @@ def validate_topology(data, case, path, grant_guid, child_guid=None):
         raise TopologyError("fixture account/group types are inconsistent")
     if grant_guid in effective(b_guid):
         raise TopologyError("account B is a member of the grant group")
-    if grant_guid not in effective(a_guid):
+    if case != "primary_group_removed" and grant_guid not in effective(a_guid):
         raise TopologyError("account A is not an effective member of the grant group")
+    if case == "primary_group_removed":
+        if grant_guid in effective(a_guid):
+            raise TopologyError("A still has an effective grant after primary-group removal")
+        if not any(node["is_group"] and
+                   node["sid"] == by_guid[a_guid]["primary_sid"]
+                   for node in by_guid.values()):
+            raise TopologyError("A's replacement primaryGroupID does not resolve")
+        return {"case": case, "grant_group_guid": grant_guid,
+                "a_effective": False, "b_effective": False,
+                "primary_grant_removed": True}
     if case == "primary_group":
         if by_guid[a_guid]["primary_sid"] != by_guid[grant_guid]["sid"]:
             raise TopologyError("A's primaryGroupID does not resolve to the grant group")

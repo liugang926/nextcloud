@@ -93,6 +93,7 @@ def watch(data, initial, target, nc_origin, wk_origin, passwords, machine,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", required=True, type=Path)
+    parser.add_argument("--initial-case", default="baseline")
     parser.add_argument("--target-case", default="group_removed")
     parser.add_argument("--nextcloud-origin", required=True)
     parser.add_argument("--weknora-origin", required=True)
@@ -102,7 +103,7 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.timeout_seconds <= 600 or not 0.5 <= args.interval_seconds <= 10:
         raise PROBE.ProbeError("watch timeout/interval is outside the synthetic test bounds")
-    data, initial = PROBE.fixture(args.fixture, "baseline")
+    data, initial = PROBE.fixture(args.fixture, args.initial_case)
     _, target = PROBE.fixture(args.fixture, args.target_case)
     for label in ("a", "b"):
         if not initial[label]["ldap_login"] or not initial[label]["nextcloud_login"]:

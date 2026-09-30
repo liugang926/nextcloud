@@ -14,11 +14,13 @@ A_GUID = "11111111-2222-3333-4444-555555555555"
 B_GUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 GRANT_GUID = "22222222-3333-4444-5555-666666666666"
 CHILD_GUID = "33333333-4444-5555-6666-777777777777"
+DOMAIN_GUID = "44444444-5555-6666-7777-888888888888"
 BASE = "dc=example,dc=test"
 A_DN = "cn=Alice,ou=people," + BASE
 B_DN = "cn=Bob,ou=people," + BASE
 GRANT_DN = "cn=Grant,ou=groups," + BASE
 CHILD_DN = "cn=Child,ou=groups," + BASE
+DOMAIN_DN = "cn=Domain Users,ou=groups," + BASE
 DOMAIN_SID = (21, 1000, 2000, 3000)
 
 
@@ -74,6 +76,19 @@ class SyntheticTopologyTest(unittest.TestCase):
         self.assertTrue(report["sole_primary_path"])
         with self.assertRaisesRegex(TopologyError, "alternate"):
             self.validate(snapshot(mode="primary", direct_grant=True), "primary_group")
+
+    def test_removed_primary_group_has_no_remaining_grant_path(self):
+        domain = entry(DOMAIN_DN, "adTestGroup", DOMAIN_GUID, 513)
+        removed = snapshot(mode="primary").replace("primaryGroupID: 2000",
+                                                   "primaryGroupID: 513", 1) + domain
+        result = self.validate(removed, "primary_group_removed")
+        self.assertTrue(result["primary_grant_removed"])
+        with self.assertRaisesRegex(TopologyError, "still has an effective grant"):
+            self.validate(snapshot(mode="primary") + domain, "primary_group_removed")
+        with self.assertRaisesRegex(TopologyError, "still has an effective grant"):
+            alternate = snapshot(mode="primary", direct_grant=True).replace(
+                "primaryGroupID: 2000", "primaryGroupID: 513", 1) + domain
+            self.validate(alternate, "primary_group_removed")
 
     def test_nested_group_requires_child_edge_and_excludes_b(self):
         report = self.validate(snapshot(), "nested_group", CHILD_GUID)

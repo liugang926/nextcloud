@@ -60,8 +60,9 @@ user/group UUID attribute **before** user discovery, enables the repository's
 share, and requires Alice's authenticated DAV access before creating a binding
 or source pair. It maps the two exact identities and issues a binding key. It registers
 only a synthetic WeKnora local administrator, synchronizes the same LDAPS
-directory, grants both users workspace viewer via Domain Users, restricts the
-dedicated KB to Engineering, pairs the source, and waits for one published
+directory, grants workspace viewer through Domain Users (and Engineering for
+Alice in primary mode), restricts the dedicated KB to Engineering, pairs the
+source, and waits for one published
 indexed document with a ready chunk and embedding. `matrix` re-exports a
 fresh attribute-limited LDAP snapshot and invokes the six-field HTTP probe.
 It prints no passwords, source key, or JWT. A failed bootstrap leaves this
@@ -71,9 +72,37 @@ one. Do not retry bootstrap against a partly configured stack.
 For a direct-member baseline, select `--mode direct`; `matrix` runs
 `baseline`. For the primary-group case, select `--mode primary`; the generated
 topology grants Alice only through `primaryGroupID=2000`. The DAV preflight
-currently stops before pairing because Nextcloud cannot read Alice's group
-share in this synthetic setup. After using any mode, `destroy` removes
-only the marker-verified project, its volumes/network, and that run's private
+uses the actual Nextcloud group share. The domain root and groups retain
+binary `objectSid`, and groups expose `primaryGroupToken` as AD does. In this
+mode only, `up` installs an exact OpenLDAP frontend `rwm` rule translating
+Nextcloud's textual assertion for the generated Engineering SID into the
+LDAP escaped bytes of that **same** SID. It checks binary lookup, converted
+text lookup and wrong-SID denial before bootstrap. Neither application gets
+an extra group member edge or a changed identity mapping. This narrow
+adapter simulates one AD query behavior in the synthetic directory; it does
+not validate Microsoft AD itself.
+
+After primary-mode `bootstrap`, run the primary-group revocation script. It
+first checks the positive six-field matrix, holds Alice's original WeKnora
+JWT, and changes only her LDAP `primaryGroupID` from Engineering (2000) to
+Domain Users (513). It requires direct WeKnora knowledge and search denial
+with the old JWT, while separately checking Basic-auth DAV and signed-source
+denial. It also checks WeKnora's directory membership and a
+fresh LDAP topology/login matrix after the change. Use a new fixture:
+
+```sh
+IMAGE=weknora-ldap-app:nextcloud-rag-e5-anydoc-rebind
+SCRATCH="$(python3 scripts/ops/synthetic-ldap-fixture.py prepare \
+  --weknora-image "$IMAGE" --mode primary |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["scratch"])')"
+python3 scripts/ops/synthetic-ldap-fixture.py up --scratch "$SCRATCH"
+python3 scripts/ops/synthetic-ldap-e2e.py bootstrap --scratch "$SCRATCH"
+python3 scripts/ops/synthetic-ldap-primary-revocation.py --scratch "$SCRATCH"
+python3 scripts/ops/synthetic-ldap-fixture.py destroy --scratch "$SCRATCH"
+```
+
+After using any mode, `destroy` removes only the marker-verified project, its
+volumes/network, and that run's private
 scratch directory. It never prunes global Docker resources.
 
 ## Observed result, 2026-09-24 UTC
@@ -95,7 +124,7 @@ bindings, and the scratch directory/files had the modes above. A separate
 manual nested run on the same candidate also passed all six HTTP fields at
 `06:09:28Z`.
 
-The primary-only mutation in that manual stack passed the LDAP preflight and
+The primary-only mutation in that earlier manual stack passed the LDAP preflight and
 WeKnora reported Alice in Engineering with `origin=primary`. Nextcloud
 `user_ldap` listed Engineering's direct disabled test member, omitted Alice,
 and returned DAV 404 for Alice's shared file; Bob also received 404. This is
@@ -105,8 +134,39 @@ denial. The full primary KB/search matrix was not run. Nextcloud 34.0.4's
 filter, whereas this fixture stores `objectSid` with binary
 `octetStringMatch`; the textual lookup returned no group. This identifies a
 synthetic-directory mismatch and does not establish how a real AD server
-would answer. The bootstrap now stops before pairing when Alice's actual DAV
-grant is absent. Test a real AD primary group before claiming that case complete.
+would answer. The bootstrap still stops before pairing when Alice's actual DAV
+grant is absent.
+
+## Primary-only synthetic result, 2026-09-30 UTC
+
+A fresh Compose project `nc-synldap-81cc285e` used Nextcloud 34.0.4, the
+repository integration app at `17b8255`, and candidate WeKnora image
+`sha256:d052febfcd39d3ea20e136a12a9dc10fda2389d14c118748764318f2d32f22dd`.
+The exact SID adapter was active only on its private OpenLDAP frontend. At
+08:03:03 UTC, the `primary_group` HTTP matrix passed: Alice's Nextcloud DAV,
+signed source, WeKnora knowledge and both search scopes allowed her; Bob
+could log in but all four content checks denied him. The fresh LDAP export
+proved that Alice's **only** Engineering path was `primaryGroupID=2000`.
+Nextcloud's reverse group list showed Alice in Engineering. The indexed
+synthetic file had two ready chunks and embeddings.
+
+The revocation script then changed Alice's primary group to Domain Users and
+kept her original WeKnora JWT for knowledge and search probes. It separately
+checked Basic-auth DAV and signed-source access. Four complete polls observed
+all content entries denied by 08:03:18 UTC, with zero transient probe errors; Bob stayed
+denied. WeKnora's directory membership table no longer linked Alice to
+Engineering, and Nextcloud's reverse group list showed Alice only in Domain
+Users. At 08:03:20 UTC, a fresh `primary_group_removed` topology and six-field
+HTTP matrix passed for both users. Repeating `up` on the owned project was
+idempotent. The project and all of its owned volumes/network were removed.
+An additional fresh `nested_group` project `nc-synldap-9df4e1d1` passed its
+six-field Alice/Bob matrix at 08:12:02 UTC after the shared synthetic schema
+change; its owned resources and scratch directory were also removed.
+
+The adapter covers one generated SID and one primary-group transition. It
+does not prove how a real AD server handles textual SID filters, production
+directory caching, LDAP-backed Team-folder ACLs, or enterprise revocation
+windows. Real AD primary-group acceptance remains open.
 
 This OpenLDAP schema models selected AD attributes. It does not prove
 enterprise AD behavior, Kerberos/SSO, Team folder ACLs, account disablement,
