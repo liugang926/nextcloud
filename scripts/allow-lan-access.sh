@@ -108,6 +108,8 @@ else:
 PY
 )"
 url="http://$lan_host:$port"
+docker compose --env-file .env exec -T -u www-data nextcloud \
+  php occ config:system:set overwrite.cli.url --value="$url" >/dev/null
 status="$(curl --noproxy '*' -sS --max-time 15 -o /dev/null -w '%{http_code}' "$url/login")"
 if [[ "$status" != 200 ]]; then
   echo "LAN endpoint returned HTTP $status: $url/login" >&2

@@ -377,7 +377,7 @@ final class ApiController extends Controller {
         return [$userFolder, null];
     }
 
-    /** @return list<array{file_id: int, etag: string, name: string, path: string, mime_type: string, size: int, mtime: int, url: string}> */
+    /** @return list<array{file_id: int, etag: string, name: string, path: string, mime_type: string, size: int, mtime: int, url: string, human_url: string}> */
     private function collectFiles(array $binding, Folder $userFolder, Folder $bindingRoot): array {
         $items = [];
         $pending = [$bindingRoot];
@@ -435,14 +435,33 @@ final class ApiController extends Controller {
                     // A separate browser link keeps the machine content URL
                     // out of citations. Files checks the visitor's own login
                     // and share permissions when this route is opened.
-                    'human_url' => $this->urlGenerator->linkToRouteAbsolute(
-                        'files.View.showFile', ['fileid' => $node->getId()],
-                    ),
+                    'human_url' => $this->humanFileUrl($node->getId()),
                 ];
             }
         }
 
         return $items;
+    }
+
+    private function humanFileUrl(int $fileId): string {
+        $route = $this->urlGenerator->linkToRoute('files.View.showFile', ['fileid' => $fileId]);
+        $publicUrl = $this->config->getSystemValueString('overwrite.cli.url');
+        $parts = parse_url($publicUrl);
+        if (is_array($parts) && in_array($parts['scheme'] ?? '', ['http', 'https'], true) &&
+            isset($parts['host']) && $parts['host'] !== '' &&
+            !isset($parts['user']) && !isset($parts['pass']) &&
+            !isset($parts['query']) && !isset($parts['fragment'])) {
+            $host = str_contains($parts['host'], ':') ? '[' . $parts['host'] . ']' : $parts['host'];
+            $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+            $path = '/' . ltrim($route, '/');
+            $basePath = rtrim($parts['path'] ?? '', '/');
+            if ($basePath !== '' && $path !== $basePath &&
+                !str_starts_with($path, $basePath . '/')) {
+                $path = $basePath . $path;
+            }
+            return $parts['scheme'] . '://' . $host . $port . $path;
+        }
+        return $this->urlGenerator->linkToRouteAbsolute('files.View.showFile', ['fileid' => $fileId]);
     }
 
     private function encodeManifestCursor(string $snapshotId, int $offset): string {

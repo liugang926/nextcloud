@@ -172,6 +172,13 @@ def main():
         assert human.scheme in ("http", "https") and human.netloc
         assert human.path.endswith(f"/f/{args.file_id}") and not human.query and not human.fragment
         assert item["human_url"] != item["url"]
+        public_url = subprocess.check_output(
+            ["docker", "compose", "exec", "-T", "-u", "www-data", "nextcloud",
+             "php", "occ", "config:system:get", "overwrite.cli.url"],
+            cwd=PROJECT, text=True,
+        ).strip()
+        public = urllib.parse.urlsplit(public_url)
+        assert (human.scheme, human.netloc) == (public.scheme, public.netloc)
         status, body = request(reader, f"{api}/capabilities", headers=bearer)
         check(status, 200, "source capabilities for publication check")
         instance_id = json.loads(body)["instance_id"]
