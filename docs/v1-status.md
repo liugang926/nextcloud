@@ -334,6 +334,11 @@ PostgreSQL tests cover write versus retirement, Stage versus Tombstone,
 stale Publish, late exact-ID GC inventory, a failed transaction and a Lite
 worker that starts before Stage. Both patches apply to their pinned source
 commits and passed the focused repository, pgvector and router suites.
+The RAG patch was also built into separate backend and frontend Docker images;
+the backend image `sha256:b75fbae3386625c213d7ae49f701c69d34884508aec0951f70928236e7a24056`
+passed a fresh, isolated six-field synthetic primary-group matrix and
+old-JWT revocation drill on 2026-09-30. The drill's containers and volumes
+were removed; [the exact result](synthetic-ldap-compose.md) records its scope.
 The exact-vector delete helper remains dormant and the `derived_index` GC
 blocker remains active because external writers and all readers are not yet
 covered. See [the lease gate](nextcloud-derived-gc-read-lease.md).

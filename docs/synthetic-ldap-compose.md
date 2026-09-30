@@ -163,6 +163,22 @@ An additional fresh `nested_group` project `nc-synldap-9df4e1d1` passed its
 six-field Alice/Bob matrix at 08:12:02 UTC after the shared synthetic schema
 change; its owned resources and scratch directory were also removed.
 
+The pinned RAG image rebuilt from commit `e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e`
+with Nextcloud patch SHA-256
+`dd8217c84deba1d546accd15faed8e42bfbf54f1247680f871a086f0d3d76053`
+had image ID `sha256:b75fbae3386625c213d7ae49f701c69d34884508aec0951f70928236e7a24056`.
+A new isolated primary fixture `nc-synldap-cf3b5dcd` completed bootstrap with
+two ready chunks and embeddings. At 09:50:55 UTC, the six-field matrix allowed
+Alice's DAV, signed source, knowledge and search access via her sole primary
+Engineering grant, while denying Bob's content access. After changing Alice's
+primary group to Domain Users, the watcher held her original WeKnora JWT and
+observed DAV, source, direct content, knowledge and search denial by 09:51:07
+UTC in three polls with zero transient errors. The WeKnora Engineering
+membership disappeared, and the fresh `primary_group_removed` matrix passed
+for both users at 09:51:09 UTC. The fixture and all owned Docker resources
+were removed. This verifies that the image containing the pgvector write
+fences also preserves the synthetic primary-group authorization behavior.
+
 The adapter covers one generated SID and one primary-group transition. It
 does not prove how a real AD server handles textual SID filters, production
 directory caching, LDAP-backed Team-folder ACLs, or enterprise revocation
