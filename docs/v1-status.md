@@ -539,9 +539,16 @@ owned Nextcloud-only Team Folder smoke checked normal child-file publication,
 the 409 creation/update/resume denials, the exact stop audit and epoch, denied
 content and authorization, diagnostics, and recovery; its resources were
 removed. A separate synthetic LDAP/WeKnora drill had already verified an
-indexed uniform Team Folder and the same stop path. Nested-mount rejection
-has static review but no runtime fixture. This policy does not establish
-enterprise AD or arbitrary external-storage ACL parity; see
+indexed uniform Team Folder and the same stop path. A later disposable
+Nextcloud 34.0.4 fixture enabled `files_external` and mounted local storage
+inside both an active Team Folder binding and an unbound local folder.
+`files:mount:list` and DAV PROPFIND confirmed the nested files were readable.
+New binding creation returned `409 unsupported_source_acl`; the active
+binding's manifest failed closed and persistently stopped it with epoch 1,
+an audit entry and diagnostics. Resume returned 409 until the mount was
+removed; then resume reached epoch 2 and the manifest returned 200. The
+fixture's containers, volumes and temporary files were removed. This policy
+does not establish enterprise AD or arbitrary external-storage ACL parity; see
 [synthetic scope](synthetic-ldap-compose.md). The 0.4.30 runtime package
 contains 75 files and has SHA-256
 `8e8a7355f6a127f4ecf7620d4ffc18e98c64685672306d15c778b1f77f69ec8b`.
@@ -579,6 +586,29 @@ and volumes were removed. This is local synthetic recovery evidence, not the
 PRD's production RPO/RTO, external-backend recovery or complete historical
 publication ledger; see [restore drill](isolated-dual-service-restore.md).
 
+A further fixed c6 / RAG77 patch revision has SHA-256
+`dd7e09a9df65085d31e99737220dd3a60ff8b2dabfe823f6cc75fabace1b73ee`
+and `f627d20af4edd053163d5f8594f8e75fc55393395d2135701073a1a75df0d475`.
+It adds a read lease and output-boundary source check to global
+`/knowledge/search`; focused tests on both baselines show a live lease blocks
+a GC claim after retirement and a revoked result's title is not sent. Derived
+GC remains disabled because other paths lack coverage. New manual and scheduled
+Nextcloud syncs also derive a stable queue task ID from the persisted log ID.
+If enqueue outcome is uncertain, a static redacted status and task identity
+are available to administrators while the running admission slot stays
+occupied. Two queue fault-injection cases and a repeated cron tick passed on
+both baselines. There is still no automatic recovery for an uncertain enqueue,
+because a missing Asynq task entry is not proof that a task never ran. Older
+ambiguous logs predate stable task IDs and require manual investigation.
+The new RAG77 AnyDoc backend image is
+`sha256:9880ab2b915f0f2ac6a40650370f7698945a540043afed4602cb6823edb6f3ab`;
+the UI image is
+`sha256:f7d1671dcd6c1010f59b5072795cae380327fe4046beadabd643755ecdb7145a`.
+Both carry the pinned source and new patch SHA-256 labels. An owned disposable
+Nextcloud/WeKnora/LDAP Compose fixture booted them, both HTTP health endpoints
+returned 200, and its containers, volumes and network were removed. This is a
+fresh-image startup check, not a repeated answer/revocation or restore drill.
+
 ## Consistency and release boundary
 
 The pinned fixed and RAG WeKnora patches now fence PostgreSQL pgvector
@@ -599,6 +629,12 @@ The exact-vector delete helper remains dormant and the `derived_index` GC
 blocker remains active because external writers and all readers are not yet
 covered. See [the lease gate](nextcloud-derived-gc-read-lease.md).
 
-The first manifest page scans the bound tree and stores a sorted list for ten minutes. Later pages read that list and reject a changed source or publication revision. A 207-file smoke covered pagination, a concurrent write and conditional content reads. This is not a transactional source snapshot; a change during traversal can invalidate a page, and large lists still need performance testing. The connector treats events as hints, recovers an expired cursor by full reconciliation and confirms absence twice. It cannot substitute for a durable publication state machine or a tested backup/recovery protocol.
+The first manifest page scans the bound tree and stores a sorted list for ten minutes. Later pages read that list and reject a changed source or publication revision. A final publication-revision check now also covers a withdrawal that commits after page selection or snapshot persistence. A 207-file smoke covered pagination, a concurrent write, withdrawal between pages without an ETag change, and conditional content reads. This is not a transactional source snapshot; a change during traversal can invalidate a page, and large lists still need performance testing. The connector treats events as hints, recovers an expired cursor by full reconciliation and confirms absence twice. It cannot substitute for a durable publication state machine or a tested backup/recovery protocol.
+
+The Nextcloud app was upgraded in the shared local stack to 0.4.31 and Apache
+restarted after the bind-mounted PHP change. The local API smoke, LAN login
+HTTP 200, authenticated LAN DAV PROPFIND 207, and WeKnora LAN root HTTP 200
+passed. The reproducible 0.4.31 app archive contains 75 runtime files and has
+SHA-256 `110e4b9814c808f2f39f9121f77588ac96f9b114a4d36f913770308226b75876`.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.

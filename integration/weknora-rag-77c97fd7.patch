@@ -18677,7 +18677,7 @@ index b4087b96..60ad2a04 100644
  		ID:           "log-pending",
  		DataSourceID: ds.ID,
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241..d364bda1 100644
+index c0b24241..7508884e 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -14,6 +14,7 @@ import (
@@ -18835,22 +18835,30 @@ index c0b24241..d364bda1 100644
  
  	if ds.Status != types.DataSourceStatusActive &&
  		ds.Status != types.DataSourceStatusError &&
-@@ -496,6 +540,14 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
- 	info, err := s.taskEnqueuer.Enqueue(task)
+@@ -493,9 +537,21 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
+ 	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON,
+ 		asynq.Queue(types.QueueSync), asynq.MaxRetry(5), asynq.Timeout(2*time.Hour))
+ 
+-	info, err := s.taskEnqueuer.Enqueue(task)
++	options := []asynq.Option{}
++	if ds.Type == types.ConnectorTypeNextcloud {
++		options = append(options, asynq.TaskID(datasource.NextcloudSyncTaskID(syncLog.ID)))
++	}
++	info, err := s.taskEnqueuer.Enqueue(task, options...)
  	if err != nil {
  		logger.Errorf(ctx, "failed to enqueue sync task: %v", err)
 +		if ds.Type == types.ConnectorTypeNextcloud {
 +			// A queue may accept the task and lose its reply. Preserve the
 +			// running admission slot until that task terminates or an operator
 +			// establishes it never started.
-+			syncLog.ErrorMessage = "Nextcloud sync enqueue outcome uncertain; review before retry"
++			syncLog.ErrorMessage = datasource.NextcloudSyncEnqueueUncertain
 +			_ = s.syncLogRepo.Update(ctx, syncLog)
-+			return nil, datasource.ErrSyncEnqueueUncertain
++			return syncLog, datasource.ErrSyncEnqueueUncertain
 +		}
  		syncLog.Status = types.SyncLogStatusFailed
  		syncLog.FinishedAt = timePtr(time.Now().UTC())
  		syncLog.ErrorMessage = err.Error()
-@@ -549,6 +601,15 @@ func (s *DataSourceService) ResumeDataSource(ctx context.Context, id string) err
+@@ -549,6 +605,15 @@ func (s *DataSourceService) ResumeDataSource(ctx context.Context, id string) err
  	if err != nil {
  		return err
  	}
@@ -18866,7 +18874,7 @@ index c0b24241..d364bda1 100644
  
  	ds.Status = types.DataSourceStatusActive
  	if err := s.dsRepo.Update(ctx, ds); err != nil {
-@@ -586,6 +647,33 @@ func (s *DataSourceService) GetSyncLog(ctx context.Context, syncLogID string) (*
+@@ -586,6 +651,33 @@ func (s *DataSourceService) GetSyncLog(ctx context.Context, syncLogID string) (*
  	return log, nil
  }
  
@@ -18900,7 +18908,7 @@ index c0b24241..d364bda1 100644
  // ProcessSync handles the actual sync operation (called by asynq task)
  func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) error {
  	var payload types.DataSourceSyncPayload
-@@ -593,6 +681,47 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -593,6 +685,47 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  		logger.Errorf(ctx, "failed to unmarshal sync payload: %v", err)
  		return err
  	}
@@ -18948,7 +18956,7 @@ index c0b24241..d364bda1 100644
  	ctx = payload.Initiator.Apply(ctx)
  	taskID, _ := asynq.GetTaskID(ctx)
  	ctx = withKBActivityTask(ctx, taskID, payload.Trigger)
-@@ -618,6 +747,27 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -618,6 +751,27 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  		logger.Errorf(ctx, "failed to get sync log: %v", err)
  		return nil
  	}
@@ -18976,7 +18984,7 @@ index c0b24241..d364bda1 100644
  
  	kb, kbErr := s.kbService.GetKnowledgeBaseByID(ctx, ds.KnowledgeBaseID)
  	if kbErr != nil {
-@@ -640,15 +790,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -640,15 +794,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	connector, err := s.connectorRegistry.Get(ds.Type)
  	if err != nil {
  		logger.Errorf(ctx, "connector not found: type=%s", ds.Type)
@@ -18993,7 +19001,7 @@ index c0b24241..d364bda1 100644
  		return err
  	}
  
-@@ -656,20 +798,22 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -656,20 +802,22 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	config, err := ds.ParseConfig()
  	if err != nil {
  		logger.Errorf(ctx, "failed to parse config: %v", err)
@@ -19025,7 +19033,7 @@ index c0b24241..d364bda1 100644
  
  	// Streaming path: connectors that support it interleave fetch→ingest→
  	// checkpoint so a large sync bounds memory and resumes after a timeout
-@@ -685,16 +829,24 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -685,16 +833,24 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  
  	if payload.ForceFull || ds.SyncMode == types.SyncModeFull {
  		if full, ok := connector.(datasource.FullSyncWithCursor); ok {
@@ -19054,7 +19062,7 @@ index c0b24241..d364bda1 100644
  		logger.Infof(ctx, "incremental sync fetched %d items", len(items))
  	}
  
-@@ -708,7 +860,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -708,7 +864,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	if fetchErr != nil {
  		// Persist connector cursor even when fetch failed so transient outages
  		// (e.g. RSS feed downtime) do not force a full re-ingest on recovery.
@@ -19063,7 +19071,7 @@ index c0b24241..d364bda1 100644
  			if cursorJSON, cerr := nextCursor.ToJSON(); cerr == nil {
  				ds.LastSyncCursor = cursorJSON
  				if uerr := s.dsRepo.UpdateSyncState(ctx, ds); uerr != nil {
-@@ -717,17 +869,19 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -717,17 +873,19 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  			}
  		}
  		logger.Errorf(ctx, "fetch operation failed: %v", fetchErr)
@@ -19092,7 +19100,7 @@ index c0b24241..d364bda1 100644
  
  	// Process fetched items and write to knowledge base
  	result := &types.SyncResult{
-@@ -740,15 +894,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -740,15 +898,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	tenant, err := s.tenantRepo.GetTenantByID(ctx, ds.TenantID)
  	if err != nil {
  		logger.Errorf(ctx, "failed to get tenant info: %v", err)
@@ -19109,7 +19117,7 @@ index c0b24241..d364bda1 100644
  		return err
  	}
  	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
-@@ -757,9 +903,21 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -757,9 +907,21 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	autoTagIDs := s.resolveAutoTagIDs(ctx, ds)
  
  	for _, item := range items {
@@ -19131,7 +19139,7 @@ index c0b24241..d364bda1 100644
  
  	resultJSON, _ := result.ToJSON()
  	if err := allFetchedItemsFailedError(result); err != nil {
-@@ -768,8 +926,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -768,8 +930,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  		return err
  	}
  
@@ -19146,7 +19154,7 @@ index c0b24241..d364bda1 100644
  		cursorJSON, _ := nextCursor.ToJSON()
  		ds.LastSyncCursor = cursorJSON
  	}
-@@ -807,6 +969,122 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -807,6 +973,122 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	return nil
  }
  
@@ -19269,7 +19277,7 @@ index c0b24241..d364bda1 100644
  // resolveAutoTagIDs finds or creates the per-data-source tag applied to every
  // synced item so results are identifiable in the KB. A tag failure is
  // non-fatal: the sync proceeds untagged.
-@@ -866,8 +1144,9 @@ func (s *DataSourceService) applyFetchedItem(
+@@ -866,8 +1148,9 @@ func (s *DataSourceService) applyFetchedItem(
  	tagIDs []string, result *types.SyncResult,
  ) {
  	if item.IsDeleted {
@@ -19281,7 +19289,7 @@ index c0b24241..d364bda1 100644
  			return
  		}
  		if item.ExternalID == "" {
-@@ -875,6 +1154,24 @@ func (s *DataSourceService) applyFetchedItem(
+@@ -875,6 +1158,24 @@ func (s *DataSourceService) applyFetchedItem(
  			result.Skipped++
  			return
  		}
@@ -19306,7 +19314,7 @@ index c0b24241..d364bda1 100644
  		// Perform real KB deletion, scoped to items owned by this data source
  		// so identical external IDs from different data sources cannot collide.
  		repo := s.knowledgeService.GetRepository()
-@@ -947,6 +1244,10 @@ func (s *DataSourceService) applyFetchedItem(
+@@ -947,6 +1248,10 @@ func (s *DataSourceService) applyFetchedItem(
  	if err != nil {
  		var dupErr *types.DuplicateKnowledgeError
  		switch {
@@ -19317,7 +19325,7 @@ index c0b24241..d364bda1 100644
  		case errors.As(err, &dupErr):
  			// Duplicate file/URL is not a failure — count as skipped.
  			logger.Infof(ctx, "item %q (external_id=%s) already exists, skipping", item.Title, item.ExternalID)
-@@ -993,11 +1294,116 @@ func streamStartCursor(ds *types.DataSource, forceFull bool, attempt int) (*type
+@@ -993,11 +1298,116 @@ func streamStartCursor(ds *types.DataSource, forceFull bool, attempt int) (*type
  // Emit ingests each item as it arrives (bounding memory) and Checkpoint persists
  // the connector cursor plus live progress counts at page boundaries.
  type streamSyncHandler struct {
@@ -19439,7 +19447,7 @@ index c0b24241..d364bda1 100644
  }
  
  // Emit ingests one streamed item. A canceled context aborts the stream so the
-@@ -1008,8 +1414,34 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1008,8 +1418,34 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  	if err := ctx.Err(); err != nil {
  		return err
  	}
@@ -19475,7 +19483,7 @@ index c0b24241..d364bda1 100644
  	return nil
  }
  
-@@ -1017,6 +1449,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1017,6 +1453,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  // running counts into the sync log so progress survives a crash and the UI can
  // reflect a long sync mid-flight instead of jumping from 0 to done.
  func (h *streamSyncHandler) Checkpoint(ctx context.Context, cursor *types.SyncCursor) error {
@@ -19488,7 +19496,7 @@ index c0b24241..d364bda1 100644
  	if cursor == nil {
  		return nil
  	}
-@@ -1070,6 +1508,9 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1070,6 +1512,9 @@ func (s *DataSourceService) processSyncStreaming(
  	ds *types.DataSource, syncLog *types.SyncLog,
  	config *types.DataSourceConfig, payload types.DataSourceSyncPayload, wasPaused bool,
  ) error {
@@ -19498,7 +19506,7 @@ index c0b24241..d364bda1 100644
  	// Tenant + auto-tag setup must precede fetching because the stream ingests
  	// each item on the fly.
  	ctx = context.WithValue(ctx, types.TenantIDContextKey, ds.TenantID)
-@@ -1095,7 +1536,8 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1095,7 +1540,8 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	result := &types.SyncResult{}
@@ -19508,7 +19516,7 @@ index c0b24241..d364bda1 100644
  
  	fullBaseline := startCursor
  	if forceFull {
-@@ -1112,6 +1554,12 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1112,6 +1558,12 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	nextCursor, fetchErr := streamingFetch(ctx, sc, config, forceFull, startCursor, fullBaseline, handler)
@@ -19521,7 +19529,7 @@ index c0b24241..d364bda1 100644
  	if fetchErr != nil {
  		// Progress so far is already checkpointed onto ds.LastSyncCursor; leave
  		// it in place so the Asynq retry resumes from there. Persist counts.
-@@ -1121,6 +1569,25 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1121,6 +1573,25 @@ func (s *DataSourceService) processSyncStreaming(
  			types.SyncLogStatusFailed, fmt.Sprintf("Fetch failed: %v", fetchErr), wasPaused)
  		return fetchErr
  	}
@@ -19547,7 +19555,7 @@ index c0b24241..d364bda1 100644
  
  	resultJSON, _ := result.ToJSON()
  	if err := allFetchedItemsFailedError(result); err != nil {
-@@ -1129,13 +1596,11 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1129,13 +1600,11 @@ func (s *DataSourceService) processSyncStreaming(
  		return err
  	}
  
@@ -19565,7 +19573,7 @@ index c0b24241..d364bda1 100644
  
  	// Surface per-document failures as a partial sync (not silent success), so
  	// the sync-log drawer's failure detail explains which docs didn't make it —
-@@ -1159,6 +1624,26 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1159,6 +1628,26 @@ func (s *DataSourceService) processSyncStreaming(
  	return nil
  }
  
@@ -19592,7 +19600,7 @@ index c0b24241..d364bda1 100644
  func (s *DataSourceService) updateSyncRunResult(
  	ctx context.Context,
  	ds *types.DataSource,
-@@ -1179,8 +1664,21 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1179,8 +1668,21 @@ func (s *DataSourceService) updateSyncRunResult(
  	syncLog.FinishedAt = timePtr(time.Now().UTC())
  	syncLog.ErrorMessage = errorMessage
  	syncLog.Result = resultJSON
@@ -19616,7 +19624,7 @@ index c0b24241..d364bda1 100644
  	}
  
  	if status == types.SyncLogStatusFailed {
-@@ -1196,6 +1694,16 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1196,6 +1698,16 @@ func (s *DataSourceService) updateSyncRunResult(
  	ds.LastSyncResult = resultJSON
  	if err := s.dsRepo.UpdateSyncState(ctx, ds); err != nil {
  		logger.Errorf(ctx, "failed to update data source: %v", err)
@@ -19633,7 +19641,7 @@ index c0b24241..d364bda1 100644
  	}
  	action := types.AuditActionDataSourceSyncCompleted
  	outcome := types.AuditOutcomeSuccess
-@@ -1285,7 +1793,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1285,7 +1797,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	// "unknown" for the raw ds.Type "feishu_drive"). Fall back to ds.Type so
  	// connectors that don't set metadata.channel still get a meaningful label.
  	channel := ds.Type // e.g. "feishu", "notion"
@@ -19645,7 +19653,7 @@ index c0b24241..d364bda1 100644
  		if mc, ok := item.Metadata["channel"]; ok && mc != "" {
  			channel = mc
  		}
-@@ -1308,6 +1819,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1308,6 +1823,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	for k, v := range item.Metadata {
  		metadata[k] = v
  	}
@@ -19659,7 +19667,7 @@ index c0b24241..d364bda1 100644
  
  	// Check if a knowledge item with this external_id already exists → delete it first (update)
  	isUpdate := false
-@@ -1318,14 +1836,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1318,14 +1840,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  		// other during updates.
  		existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
  		if err != nil {
@@ -19683,7 +19691,7 @@ index c0b24241..d364bda1 100644
  					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
  				}
  				isUpdate = true
-@@ -1407,6 +1934,76 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1407,6 +1938,76 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	return isUpdate, fmt.Errorf("item has neither content nor URL")
  }
  
@@ -19761,10 +19769,10 @@ index c0b24241..d364bda1 100644
  // exists in the KB *under this item's own external_id* — i.e. a content-dedup hit
  // against this same node, so reconciling its subtree is safe. File deduplication
 diff --git a/internal/application/service/datasource_service_test.go b/internal/application/service/datasource_service_test.go
-index bc90b995..5d2e8bb5 100644
+index bc90b995..9289069f 100644
 --- a/internal/application/service/datasource_service_test.go
 +++ b/internal/application/service/datasource_service_test.go
-@@ -4,19 +4,43 @@ import (
+@@ -4,19 +4,44 @@ import (
  	"context"
  	"encoding/json"
  	"errors"
@@ -19779,6 +19787,7 @@ index bc90b995..5d2e8bb5 100644
 +	nextcloudconnector "github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
  	"github.com/Tencent/WeKnora/internal/types"
  	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
  	"github.com/hibiken/asynq"
  	"github.com/stretchr/testify/assert"
  	"github.com/stretchr/testify/require"
@@ -19808,29 +19817,63 @@ index bc90b995..5d2e8bb5 100644
  func TestProcessSyncCancelsWhenKnowledgeBaseDeleted(t *testing.T) {
  	ds := &types.DataSource{
  		ID:              "ds-1",
-@@ -131,6 +155,140 @@ type processSyncSyncLogRepo struct {
- 	logs map[string]*types.SyncLog
- }
+@@ -128,10 +153,180 @@ func (s *processSyncKBService) ProcessKBDelete(context.Context, *asynq.Task) err
+ var _ interfaces.KnowledgeBaseService = (*processSyncKBService)(nil)
  
-+type nextcloudUncertainTestQueue struct{}
+ type processSyncSyncLogRepo struct {
+-	logs map[string]*types.SyncLog
++	logs   map[string]*types.SyncLog
++	nextID string
++}
 +
-+func (nextcloudUncertainTestQueue) Enqueue(*asynq.Task, ...asynq.Option) (*asynq.TaskInfo, error) {
++type nextcloudUncertainTestQueue struct {
++	taskID            string
++	acceptedTaskID    string
++	acceptBeforeError bool
++}
++
++func (q *nextcloudUncertainTestQueue) Enqueue(_ *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
++	for _, opt := range opts {
++		if opt.Type() == asynq.TaskIDOpt {
++			q.taskID, _ = opt.Value().(string)
++		}
++	}
++	if q.acceptBeforeError {
++		q.acceptedTaskID = q.taskID
++	}
 +	return nil, errors.New("synthetic enqueue response lost")
 +}
 +
 +func TestManualNextcloudSyncUncertainEnqueueRetainsAdmission(t *testing.T) {
-+	ds := &types.DataSource{ID: "nextcloud-manual", TenantID: 1,
-+		KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud,
-+		Status: types.DataSourceStatusActive}
-+	logs := &processSyncSyncLogRepo{logs: make(map[string]*types.SyncLog)}
-+	svc := &DataSourceService{dsRepo: newKBDeleteDSRepo("kb-1", ds),
-+		syncLogRepo: logs, taskEnqueuer: nextcloudUncertainTestQueue{}}
-+	_, err := svc.ManualSync(context.Background(), ds.ID)
-+	require.ErrorIs(t, err, datasource.ErrSyncEnqueueUncertain)
-+	require.Len(t, logs.logs, 1)
-+	for _, log := range logs.logs {
-+		require.Equal(t, types.SyncLogStatusRunning, log.Status)
-+		require.Contains(t, log.ErrorMessage, "outcome uncertain")
++	for _, tc := range []struct {
++		name              string
++		acceptBeforeError bool
++	}{
++		{"failed_before_accept", false},
++		{"accepted_reply_lost", true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ds := &types.DataSource{ID: "nextcloud-manual", TenantID: 1,
++				KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud,
++				Status: types.DataSourceStatusActive}
++			logs := &processSyncSyncLogRepo{logs: make(map[string]*types.SyncLog), nextID: "stable-manual-log"}
++			queue := &nextcloudUncertainTestQueue{acceptBeforeError: tc.acceptBeforeError}
++			svc := &DataSourceService{dsRepo: newKBDeleteDSRepo("kb-1", ds),
++				syncLogRepo: logs, taskEnqueuer: queue}
++			admitted, err := svc.ManualSync(context.Background(), ds.ID)
++			require.ErrorIs(t, err, datasource.ErrSyncEnqueueUncertain)
++			require.Len(t, logs.logs, 1)
++			require.NotNil(t, admitted)
++			require.Equal(t, "stable-manual-log", admitted.ID)
++			require.Equal(t, "dssync:stable-manual-log", queue.taskID)
++			if tc.acceptBeforeError {
++				require.Equal(t, queue.taskID, queue.acceptedTaskID)
++			} else {
++				require.Empty(t, queue.acceptedTaskID)
++			}
++			require.Equal(t, types.SyncLogStatusRunning, admitted.Status)
++			require.Equal(t, datasource.NextcloudSyncEnqueueUncertain, admitted.ErrorMessage)
++		})
 +	}
 +}
 +
@@ -19944,12 +19987,19 @@ index bc90b995..5d2e8bb5 100644
 +			require.Empty(t, ds.LastSyncCursor)
 +		})
 +	}
-+}
-+
+ }
+ 
  func (r *processSyncSyncLogRepo) Create(_ context.Context, log *types.SyncLog) error {
++	if log.ID == "" {
++		log.ID = r.nextID
++		if log.ID == "" {
++			log.ID = uuid.NewString()
++		}
++	}
  	r.logs[log.ID] = log
  	return nil
-@@ -278,6 +436,36 @@ type deletionLookupKnowledgeRepo struct {
+ }
+@@ -278,6 +473,36 @@ type deletionLookupKnowledgeRepo struct {
  	knowledgeBaseID   string
  	dataSourceID      string
  	externalID        string
@@ -19986,7 +20036,7 @@ index bc90b995..5d2e8bb5 100644
  }
  
  func (r *deletionLookupKnowledgeRepo) UpdateKnowledge(_ context.Context, knowledge *types.Knowledge) error {
-@@ -356,6 +544,27 @@ type keyedDeletionRepo struct {
+@@ -356,6 +581,27 @@ type keyedDeletionRepo struct {
  	items         map[string]*types.Knowledge
  	hardDeleted   []string
  	hardDeleteErr error
@@ -20014,7 +20064,7 @@ index bc90b995..5d2e8bb5 100644
  }
  
  func (r *keyedDeletionRepo) FindByDataSourceExternalID(
-@@ -687,6 +896,78 @@ func (mixedSyncConnector) FetchIncremental(
+@@ -687,6 +933,78 @@ func (mixedSyncConnector) FetchIncremental(
  	return items, nil, err
  }
  
@@ -20093,7 +20143,7 @@ index bc90b995..5d2e8bb5 100644
  func TestProcessSync_SyncDeletionsPartialWhenMixedResults(t *testing.T) {
  	configJSON, err := (&types.DataSourceConfig{Type: "test-sync-mixed"}).ToJSON()
  	require.NoError(t, err)
-@@ -748,3 +1029,95 @@ func TestIngestItem_URLCreationMetadataAttachFailure(t *testing.T) {
+@@ -748,3 +1066,95 @@ func TestIngestItem_URLCreationMetadataAttachFailure(t *testing.T) {
  	require.Error(t, err)
  	assert.Contains(t, err.Error(), "attach datasource metadata")
  }
@@ -28778,8 +28828,26 @@ index 426c71ec..38384b3c 100644
  
  	// Knowledge base errors
  	ErrKnowledgeBaseNotFound = errors.New("knowledge base not found")
+diff --git a/internal/datasource/nextcloud_sync_admission.go b/internal/datasource/nextcloud_sync_admission.go
+new file mode 100644
+index 00000000..e947ae63
+--- /dev/null
++++ b/internal/datasource/nextcloud_sync_admission.go
+@@ -0,0 +1,12 @@
++package datasource
++
++// NextcloudSyncEnqueueUncertain is a safe, source-independent status for a
++// running sync log whose queue enqueue reply was lost. The log remains the
++// admission lock until a worker completes or an operator has stronger proof.
++const NextcloudSyncEnqueueUncertain = "sync_enqueue_uncertain_review_required"
++
++// NextcloudSyncTaskID is stable for the lifetime of one admitted sync log.
++// The log ID is generated before enqueue and survives a lost queue reply.
++func NextcloudSyncTaskID(syncLogID string) string {
++	return "dssync:" + syncLogID
++}
 diff --git a/internal/datasource/scheduler.go b/internal/datasource/scheduler.go
-index 196327fe..1a416608 100644
+index 196327fe..ea38c29c 100644
 --- a/internal/datasource/scheduler.go
 +++ b/internal/datasource/scheduler.go
 @@ -3,6 +3,7 @@ package datasource
@@ -28790,7 +28858,30 @@ index 196327fe..1a416608 100644
  	"fmt"
  	"sync"
  	"time"
-@@ -159,6 +160,10 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+@@ -22,8 +23,8 @@ import (
+ // instances will fire at the same moment. Dedup is handled by two layers:
+ //
+ //  1. HasRunningSync — if a previous sync is still running, skip (prevent overlap).
+-//  2. asynq.TaskID  — deterministic ID per (dataSourceID, minute). Redis ensures
+-//     only one task with a given ID is enqueued. Losers get ErrTaskIDConflict.
++//  2. asynq.TaskID  — deterministic ID per admitted Nextcloud sync log, or per
++//     (dataSourceID, minute) for other connectors. Redis rejects duplicate IDs.
+ type Scheduler struct {
+ 	cron         *cron.Cron
+ 	dsRepo       interfaces.DataSourceRepository
+@@ -134,9 +135,8 @@ func (s *Scheduler) addEntryLocked(ds *types.DataSource) error {
+ // Layer 1 — DB: if a previous sync is still running, skip. This prevents
+ // overlap when a sync takes longer than the cron interval.
+ //
+-// Layer 2 — Redis: deterministic asynq.TaskID = "dssync:<dsID>:<minute>".
+-// Since robfig/cron fires at absolute wall-clock times, all instances trigger
+-// at the same minute. The first Enqueue wins; others get ErrTaskIDConflict.
++// Layer 2 — Redis: an exact, durable log ID for Nextcloud; other connectors
++// retain the minute-based ID. The first Enqueue wins for a given ID.
+ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+ 	ctx := context.Background()
+ 
+@@ -159,6 +159,10 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
  		StartedAt:    time.Now().UTC(),
  	}
  	if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
@@ -28801,14 +28892,29 @@ index 196327fe..1a416608 100644
  		logger.Errorf(ctx, "[Scheduler] failed to create sync log for ds=%s: %v", dataSourceID, err)
  		return
  	}
-@@ -194,6 +199,13 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+@@ -174,8 +178,12 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+ 	payloadJSON, _ := json.Marshal(payload)
+ 	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON)
+ 
+-	// Layer 2: deterministic TaskID — all instances in the same minute produce the same ID
+-	taskID := fmt.Sprintf("dssync:%s:%s", dataSourceID, time.Now().UTC().Truncate(time.Minute).Format("200601021504"))
++	// The database admits exactly one Nextcloud running log per source. Tie
++	// the queue identity to that durable log so a lost reply can be inspected.
++	taskID := NextcloudSyncTaskID(syncLog.ID)
++	if ds.Type != types.ConnectorTypeNextcloud {
++		taskID = fmt.Sprintf("dssync:%s:%s", dataSourceID, time.Now().UTC().Truncate(time.Minute).Format("200601021504"))
++	}
+ 
+ 	_, err = s.taskEnqueuer.Enqueue(task,
+ 		asynq.Queue(types.QueueSync),
+@@ -194,6 +202,13 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
  			return
  		}
  		logger.Errorf(ctx, "[Scheduler] failed to enqueue sync task for ds=%s: %v", dataSourceID, err)
 +		if ds.Type == types.ConnectorTypeNextcloud {
 +			// Keep the admission slot: enqueue may have succeeded even though
 +			// its response was lost. Startup reset excludes this source type.
-+			syncLog.ErrorMessage = "Nextcloud sync enqueue outcome uncertain; review before retry"
++			syncLog.ErrorMessage = NextcloudSyncEnqueueUncertain
 +			_ = s.syncLogRepo.Update(ctx, syncLog)
 +			return
 +		}
@@ -28816,7 +28922,7 @@ index 196327fe..1a416608 100644
  		now := time.Now().UTC()
  		syncLog.FinishedAt = &now
 diff --git a/internal/datasource/scheduler_test.go b/internal/datasource/scheduler_test.go
-index dbd35b46..d5de0de8 100644
+index dbd35b46..7726a959 100644
 --- a/internal/datasource/scheduler_test.go
 +++ b/internal/datasource/scheduler_test.go
 @@ -2,6 +2,7 @@ package datasource
@@ -28827,7 +28933,7 @@ index dbd35b46..d5de0de8 100644
  	"sync"
  	"sync/atomic"
  	"testing"
-@@ -11,6 +12,56 @@ import (
+@@ -11,6 +12,91 @@ import (
  	"github.com/hibiken/asynq"
  )
  
@@ -28837,10 +28943,23 @@ index dbd35b46..d5de0de8 100644
 +	return ErrSyncAlreadyRunning
 +}
 +
-+type nextcloudUncertainScheduleQueue struct{ count atomic.Int64 }
++type nextcloudUncertainScheduleQueue struct {
++	count             atomic.Int64
++	taskID            string
++	acceptedTaskID    string
++	acceptBeforeError bool
++}
 +
-+func (q *nextcloudUncertainScheduleQueue) Enqueue(*asynq.Task, ...asynq.Option) (*asynq.TaskInfo, error) {
++func (q *nextcloudUncertainScheduleQueue) Enqueue(_ *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
 +	q.count.Add(1)
++	for _, opt := range opts {
++		if opt.Type() == asynq.TaskIDOpt {
++			q.taskID, _ = opt.Value().(string)
++		}
++	}
++	if q.acceptBeforeError {
++		q.acceptedTaskID = q.taskID
++	}
 +	return nil, errors.New("synthetic lost enqueue reply")
 +}
 +
@@ -28858,32 +28977,78 @@ index dbd35b46..d5de0de8 100644
 +}
 +
 +func TestNextcloudEventSchedulerUncertainEnqueueRetainsRunningLog(t *testing.T) {
-+	ds := &types.DataSource{ID: "nextcloud-scheduled", TenantID: 1,
-+		Type: types.ConnectorTypeNextcloud, Status: types.DataSourceStatusActive}
-+	dsRepo := newFakeDataSourceRepo()
-+	_ = dsRepo.Create(context.Background(), ds)
-+	logs := newFakeSyncLogRepo()
-+	queue := &nextcloudUncertainScheduleQueue{}
-+	s := NewScheduler(dsRepo, logs, queue)
-+	s.triggerSync(ds.ID, ds.TenantID)
-+	if queue.count.Load() != 1 {
-+		t.Fatal("scheduler did not try to enqueue admitted task")
-+	}
-+	logs.mu.Lock()
-+	defer logs.mu.Unlock()
-+	if len(logs.logs) != 1 {
-+		t.Fatalf("sync log count = %d, want 1", len(logs.logs))
-+	}
-+	for _, log := range logs.logs {
-+		if log.Status != types.SyncLogStatusRunning || log.ErrorMessage == "" {
-+			t.Fatalf("uncertain enqueue must retain running admission: %+v", log)
-+		}
++	for _, tc := range []struct {
++		name              string
++		acceptBeforeError bool
++	}{
++		{"failed_before_accept", false},
++		{"accepted_reply_lost", true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ds := &types.DataSource{ID: "nextcloud-scheduled", TenantID: 1,
++				Type: types.ConnectorTypeNextcloud, Status: types.DataSourceStatusActive}
++			dsRepo := newFakeDataSourceRepo()
++			_ = dsRepo.Create(context.Background(), ds)
++			logs := newFakeSyncLogRepo()
++			logs.nextID = "stable-scheduled-log"
++			queue := &nextcloudUncertainScheduleQueue{acceptBeforeError: tc.acceptBeforeError}
++			s := NewScheduler(dsRepo, logs, queue)
++			s.triggerSync(ds.ID, ds.TenantID)
++			if queue.count.Load() != 1 || queue.taskID != "dssync:stable-scheduled-log" {
++				t.Fatalf("scheduler task identity = %q, attempts = %d", queue.taskID, queue.count.Load())
++			}
++			if tc.acceptBeforeError && queue.acceptedTaskID != queue.taskID {
++				t.Fatal("accepted task lost its stable identity")
++			}
++			if !tc.acceptBeforeError && queue.acceptedTaskID != "" {
++				t.Fatal("pre-accept failure unexpectedly recorded queue acceptance")
++			}
++			// A later cron tick cannot bypass an ambiguous enqueue.
++			s.triggerSync(ds.ID, ds.TenantID)
++			if queue.count.Load() != 1 {
++				t.Fatal("scheduler retried while the uncertain log still held admission")
++			}
++			logs.mu.Lock()
++			defer logs.mu.Unlock()
++			if len(logs.logs) != 1 {
++				t.Fatalf("sync log count = %d, want 1", len(logs.logs))
++			}
++			log := logs.logs["stable-scheduled-log"]
++			if log == nil || log.Status != types.SyncLogStatusRunning ||
++				log.ErrorMessage != NextcloudSyncEnqueueUncertain {
++				t.Fatalf("uncertain enqueue must retain running admission: %+v", log)
++			}
++		})
 +	}
 +}
 +
  // ──────────────────────────────────────────────────────────────────────
  // Fake implementations for testing
  // ──────────────────────────────────────────────────────────────────────
+@@ -78,8 +164,9 @@ func (r *fakeDataSourceRepo) FindActive(_ context.Context) ([]*types.DataSource,
+ 
+ // fakeSyncLogRepo is an in-memory SyncLogRepository.
+ type fakeSyncLogRepo struct {
+-	mu   sync.Mutex
+-	logs map[string]*types.SyncLog
++	mu     sync.Mutex
++	logs   map[string]*types.SyncLog
++	nextID string
+ }
+ 
+ func newFakeSyncLogRepo() *fakeSyncLogRepo {
+@@ -90,7 +177,10 @@ func (r *fakeSyncLogRepo) Create(_ context.Context, log *types.SyncLog) error {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+ 	if log.ID == "" {
+-		log.ID = "log-" + time.Now().Format("150405.000")
++		log.ID = r.nextID
++		if log.ID == "" {
++			log.ID = "log-" + time.Now().Format("150405.000")
++		}
+ 	}
+ 	r.logs[log.ID] = log
+ 	return nil
 diff --git a/internal/handler/chunk.go b/internal/handler/chunk.go
 index 162bc952..99f70df5 100644
 --- a/internal/handler/chunk.go
@@ -29083,7 +29248,7 @@ index 162bc952..99f70df5 100644
  }
  
 diff --git a/internal/handler/datasource.go b/internal/handler/datasource.go
-index 1cd51dcb..e15757f6 100644
+index 1cd51dcb..980e8945 100644
 --- a/internal/handler/datasource.go
 +++ b/internal/handler/datasource.go
 @@ -2,6 +2,7 @@ package handler
@@ -29094,7 +29259,7 @@ index 1cd51dcb..e15757f6 100644
  	"net/http"
  	"strconv"
  	"time"
-@@ -471,6 +472,14 @@ func (h *DataSourceHandler) ManualSync(c *gin.Context) {
+@@ -471,6 +472,19 @@ func (h *DataSourceHandler) ManualSync(c *gin.Context) {
  
  	syncLog, err := h.service.ManualSync(ctx, id)
  	if err != nil {
@@ -29103,13 +29268,18 @@ index 1cd51dcb..e15757f6 100644
 +			return
 +		}
 +		if errors.Is(err, datasource.ErrSyncEnqueueUncertain) {
-+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "sync_enqueue_uncertain_review_required"})
++			body := gin.H{"error": datasource.NextcloudSyncEnqueueUncertain}
++			if syncLog != nil && syncLog.ID != "" {
++				body["sync_log_id"] = syncLog.ID
++				body["queue_task_id"] = datasource.NextcloudSyncTaskID(syncLog.ID)
++			}
++			c.JSON(http.StatusServiceUnavailable, body)
 +			return
 +		}
  		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
  		return
  	}
-@@ -527,7 +536,7 @@ func (h *DataSourceHandler) ResumeDataSource(c *gin.Context) {
+@@ -527,7 +541,7 @@ func (h *DataSourceHandler) ResumeDataSource(c *gin.Context) {
  
  	id := c.Param("id")
  
@@ -29118,7 +29288,7 @@ index 1cd51dcb..e15757f6 100644
  		c.JSON(status, gin.H{"error": msg})
  		return
  	}
-@@ -561,7 +570,8 @@ func (h *DataSourceHandler) GetSyncLogs(c *gin.Context) {
+@@ -561,7 +575,8 @@ func (h *DataSourceHandler) GetSyncLogs(c *gin.Context) {
  
  	id := c.Param("id")
  
@@ -29128,7 +29298,7 @@ index 1cd51dcb..e15757f6 100644
  		c.JSON(status, gin.H{"error": msg})
  		return
  	}
-@@ -593,6 +603,9 @@ func (h *DataSourceHandler) GetSyncLogs(c *gin.Context) {
+@@ -593,6 +608,9 @@ func (h *DataSourceHandler) GetSyncLogs(c *gin.Context) {
  	if logs == nil {
  		logs = make([]*types.SyncLog, 0)
  	}
@@ -29138,7 +29308,7 @@ index 1cd51dcb..e15757f6 100644
  	c.JSON(http.StatusOK, logs)
  }
  
-@@ -621,12 +634,15 @@ func (h *DataSourceHandler) GetSyncLog(c *gin.Context) {
+@@ -621,12 +639,15 @@ func (h *DataSourceHandler) GetSyncLog(c *gin.Context) {
  		return
  	}
  
@@ -29156,7 +29326,7 @@ index 1cd51dcb..e15757f6 100644
  }
  
 diff --git a/internal/handler/datasource_test.go b/internal/handler/datasource_test.go
-index 03949410..023f078a 100644
+index 03949410..6841b039 100644
 --- a/internal/handler/datasource_test.go
 +++ b/internal/handler/datasource_test.go
 @@ -5,8 +5,10 @@ import (
@@ -29178,7 +29348,7 @@ index 03949410..023f078a 100644
  }
  
  func (s *stubDataSourceService) GetSyncLogs(ctx context.Context, dsID string, limit int, offset int) ([]*types.SyncLog, error) {
-@@ -32,6 +35,48 @@ func (s *stubDataSourceService) GetDataSource(ctx context.Context, id string) (*
+@@ -32,6 +35,59 @@ func (s *stubDataSourceService) GetDataSource(ctx context.Context, id string) (*
  	return nil, nil
  }
  
@@ -29204,7 +29374,12 @@ index 03949410..023f078a 100644
 +				getDataSource: func(context.Context, string) (*types.DataSource, error) {
 +					return &types.DataSource{ID: "ds1", KnowledgeBaseID: "kb1"}, nil
 +				},
-+				manualSync: func(context.Context, string) (*types.SyncLog, error) { return nil, tc.err },
++				manualSync: func(context.Context, string) (*types.SyncLog, error) {
++					if tc.err == datasource.ErrSyncEnqueueUncertain {
++						return &types.SyncLog{ID: "synthetic-log"}, tc.err
++					}
++					return nil, tc.err
++				},
 +			}
 +			kbSvc := &stubKBServiceForDS{getByID: func(context.Context, string) (*types.KnowledgeBase, error) {
 +				return &types.KnowledgeBase{ID: "kb1", TenantID: 1}, nil
@@ -29220,6 +29395,12 @@ index 03949410..023f078a 100644
 +			if response.Code != tc.status || !strings.Contains(response.Body.String(), tc.code) {
 +				t.Fatalf("response = %d %q, want %d %s", response.Code, response.Body.String(), tc.status, tc.code)
 +			}
++			if tc.err == datasource.ErrSyncEnqueueUncertain {
++				if !strings.Contains(response.Body.String(), `"sync_log_id":"synthetic-log"`) ||
++					!strings.Contains(response.Body.String(), `"queue_task_id":"dssync:synthetic-log"`) {
++					t.Fatalf("uncertain enqueue response lost stable task identity: %q", response.Body.String())
++				}
++			}
 +		})
 +	}
 +}
@@ -29228,10 +29409,18 @@ index 03949410..023f078a 100644
  	interfaces.KnowledgeBaseService
  	getByID func(ctx context.Context, id string) (*types.KnowledgeBase, error)
 diff --git a/internal/handler/dto/datasource.go b/internal/handler/dto/datasource.go
-index a3e4f520..acd05721 100644
+index a3e4f520..9489c74c 100644
 --- a/internal/handler/dto/datasource.go
 +++ b/internal/handler/dto/datasource.go
-@@ -69,7 +69,7 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
+@@ -5,6 +5,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/Tencent/WeKnora/internal/datasource"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ )
+ 
+@@ -69,7 +70,7 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
  		enrichRSSFeedURLsInSettings(ds.Type, parsed, cfgDTO)
  		configured = parsed.HasConfiguredCredentials(ds.Type)
  	}
@@ -29240,7 +29429,7 @@ index a3e4f520..acd05721 100644
  		ID:                   ds.ID,
  		TenantID:             ds.TenantID,
  		KnowledgeBaseID:      ds.KnowledgeBaseID,
-@@ -94,6 +94,35 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
+@@ -94,6 +95,42 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
  			"credentials": {Configured: configured},
  		},
  	}
@@ -29262,7 +29451,14 @@ index a3e4f520..acd05721 100644
 +		return nil
 +	}
 +	copy := *log
-+	copy.ErrorMessage = ""
++	// This exact static code contains no file name or path. Preserve it so an
++	// operator can identify a blocked admission from the redacted log list.
++	if copy.ErrorMessage != datasource.NextcloudSyncEnqueueUncertain {
++		copy.ErrorMessage = ""
++		copy.QueueTaskID = ""
++	} else {
++		copy.QueueTaskID = datasource.NextcloudSyncTaskID(copy.ID)
++	}
 +	copy.Result = nil
 +	return &copy
 +}
@@ -29277,10 +29473,18 @@ index a3e4f520..acd05721 100644
  
  // enrichRSSFeedURLsInSettings copies feed_urls from credentials into settings
 diff --git a/internal/handler/dto/datasource_test.go b/internal/handler/dto/datasource_test.go
-index 7456ef1e..66b23c60 100644
+index 7456ef1e..165f5ac5 100644
 --- a/internal/handler/dto/datasource_test.go
 +++ b/internal/handler/dto/datasource_test.go
-@@ -53,6 +53,30 @@ func TestDataSourceResponse_NilSafe(t *testing.T) {
+@@ -4,6 +4,7 @@ import (
+ 	"encoding/json"
+ 	"testing"
+ 
++	"github.com/Tencent/WeKnora/internal/datasource"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/stretchr/testify/assert"
+ )
+@@ -53,6 +54,46 @@ func TestDataSourceResponse_NilSafe(t *testing.T) {
  	assert.Equal(t, []*DataSourceResponse{}, NewDataSourceResponses(nil))
  }
  
@@ -29306,6 +29510,22 @@ index 7456ef1e..66b23c60 100644
 +	logs, err := json.Marshal(RedactNextcloudSyncLogs([]*types.SyncLog{log}))
 +	assert.NoError(t, err)
 +	assert.NotContains(t, string(logs), secretName)
++}
++
++func TestNextcloudUncertainEnqueueStatusIsStaticAndRedacted(t *testing.T) {
++	log := &types.SyncLog{ID: "synthetic-log", Status: types.SyncLogStatusRunning,
++		ErrorMessage: datasource.NextcloudSyncEnqueueUncertain,
++		Result:       types.JSON(`{"private_path":"department/restricted.txt"}`)}
++	redacted := RedactNextcloudSyncLog(log)
++	assert.Equal(t, datasource.NextcloudSyncEnqueueUncertain, redacted.ErrorMessage)
++	assert.Equal(t, "dssync:synthetic-log", redacted.QueueTaskID)
++	assert.Empty(t, redacted.Result)
++	assert.Equal(t, datasource.NextcloudSyncEnqueueUncertain, log.ErrorMessage)
++
++	log.ErrorMessage = "department/restricted.txt"
++	redacted = RedactNextcloudSyncLog(log)
++	assert.Empty(t, redacted.ErrorMessage)
++	assert.Empty(t, redacted.QueueTaskID)
 +}
 +
  func TestDataSourceResponse_RSSFeedURLsFromCredentials(t *testing.T) {
@@ -29608,7 +29828,7 @@ index 00000000..1a1d5ded
 +	}
 +}
 diff --git a/internal/handler/knowledge.go b/internal/handler/knowledge.go
-index 8c05828c..84a72645 100644
+index 8c05828c..fa5e5f3d 100644
 --- a/internal/handler/knowledge.go
 +++ b/internal/handler/knowledge.go
 @@ -34,6 +34,12 @@ type KnowledgeHandler struct {
@@ -29921,39 +30141,49 @@ index 8c05828c..84a72645 100644
  
  	logger.Infof(ctx, "Batch knowledge retrieval successful, requested count: %d, returned count: %d",
  		len(req.IDs), len(knowledges))
-@@ -2355,6 +2553,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
+@@ -2355,12 +2553,7 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
  			c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
  			return
  		}
-+		if err := h.checkPublicationList(ctx, knowledges); err != nil {
-+			_ = c.Error(err)
-+			return
-+		}
- 		c.JSON(http.StatusOK, gin.H{
- 			"success":  true,
- 			"data":     knowledges,
-@@ -2380,6 +2582,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
+-		c.JSON(http.StatusOK, gin.H{
+-			"success":  true,
+-			"data":     knowledges,
+-			"has_more": hasMore,
+-			"total":    total,
+-		})
++		h.respondKnowledgeSearch(c, ctx, knowledges, hasMore, total)
+ 		return
+ 	}
+ 
+@@ -2380,12 +2573,7 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
  			c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
  			return
  		}
-+		if err := h.checkPublicationList(ctx, knowledges); err != nil {
-+			_ = c.Error(err)
-+			return
-+		}
- 		c.JSON(http.StatusOK, gin.H{
- 			"success":  true,
- 			"data":     knowledges,
-@@ -2396,6 +2602,10 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
+-		c.JSON(http.StatusOK, gin.H{
+-			"success":  true,
+-			"data":     knowledges,
+-			"has_more": hasMore,
+-			"total":    total,
+-		})
++		h.respondKnowledgeSearch(c, ctx, knowledges, hasMore, total)
+ 		return
+ 	}
+ 
+@@ -2396,13 +2584,7 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
  		c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
  		return
  	}
-+	if err := h.checkPublicationList(ctx, knowledges); err != nil {
-+		_ = c.Error(err)
-+		return
-+	}
+-
+-	c.JSON(http.StatusOK, gin.H{
+-		"success":  true,
+-		"data":     knowledges,
+-		"has_more": hasMore,
+-		"total":    total,
+-	})
++	h.respondKnowledgeSearch(c, ctx, knowledges, hasMore, total)
+ }
  
- 	c.JSON(http.StatusOK, gin.H{
- 		"success":  true,
+ // MoveKnowledgeRequest defines the request for moving knowledge items
 diff --git a/internal/handler/knowledge_download.go b/internal/handler/knowledge_download.go
 index cf9ad0cd..7d888486 100644
 --- a/internal/handler/knowledge_download.go
@@ -34294,10 +34524,10 @@ index 00000000..0ec87e3b
 +}
 diff --git a/internal/handler/nextcloud_read_lease_test.go b/internal/handler/nextcloud_read_lease_test.go
 new file mode 100644
-index 00000000..fc46b8e9
+index 00000000..be63b1ba
 --- /dev/null
 +++ b/internal/handler/nextcloud_read_lease_test.go
-@@ -0,0 +1,412 @@
+@@ -0,0 +1,517 @@
 +package handler
 +
 +import (
@@ -34315,6 +34545,7 @@ index 00000000..fc46b8e9
 +
 +	"github.com/Tencent/WeKnora/internal/application/repository"
 +	apperrors "github.com/Tencent/WeKnora/internal/errors"
++	"github.com/Tencent/WeKnora/internal/middleware"
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/Tencent/WeKnora/internal/types/interfaces"
 +	"github.com/gin-gonic/gin"
@@ -34327,6 +34558,29 @@ index 00000000..fc46b8e9
 +	interfaces.KnowledgeService
 +	knowledge *types.Knowledge
 +	open      func(context.Context) (io.ReadCloser, error)
++}
++
++type leaseSearchService struct {
++	interfaces.KnowledgeService
++	rows []*types.Knowledge
++}
++
++func (s *leaseSearchService) SearchKnowledge(context.Context, string, int, int,
++	[]string,
++) ([]*types.Knowledge, bool, int64, error) {
++	return s.rows, false, int64(len(s.rows)), nil
++}
++
++func leaseSearchRouter(h *KnowledgeHandler) *gin.Engine {
++	gin.SetMode(gin.TestMode)
++	r := gin.New()
++	r.Use(middleware.ErrorHandler(), func(c *gin.Context) {
++		c.Set(types.TenantIDContextKey.String(), uint64(7))
++		c.Set(types.UserIDContextKey.String(), "test-user")
++		c.Next()
++	})
++	r.GET("/knowledge/search", h.SearchKnowledge)
++	return r
 +}
 +
 +func (s *leasePreviewService) GetKnowledgeByIDOnly(context.Context, string) (*types.Knowledge, error) {
@@ -34427,6 +34681,87 @@ index 00000000..fc46b8e9
 +		Where("released_at_ms IS NOT NULL").Count(&released).Error)
 +	require.EqualValues(t, 1, count)
 +	require.EqualValues(t, 1, released)
++}
++
++func TestGlobalKnowledgeSearchRetirementBlocksGCAndSourceOutput(t *testing.T) {
++	db := leaseHandlerDB(t)
++	store := repository.NewNextcloudContentLeaseStore(db)
++	row := leaseHandlerKnowledge(t)
++	row.Title = "private source title"
++	nowMS := time.Now().UnixMilli()
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_content_lease_coverage
++		(tenant_id, knowledge_base_id, activated_at_ms, legacy_drained_at_ms,
++		 reader_revision, builder_revision)
++		VALUES (7, 'kb-1', ?, ?, 'test-reader', 'test-builder')`, nowMS-1000, nowMS-1000).Error)
++	scope := repository.NextcloudContentScope{TenantID: 7, KnowledgeBaseID: "kb-1",
++		KnowledgeID: row.ID, DataSourceID: "source-1", ExternalID: "nextcloud:instance:1"}
++	var retired atomic.Bool
++	var retireErr, claimErr error
++	h := &KnowledgeHandler{kgService: &leaseSearchService{rows: []*types.Knowledge{row}},
++		contentLeases: &leaseAcquireHookStore{NextcloudContentLeaseStore: store,
++			onAcquire: func() {
++				retireErr = store.RetireKnowledge(context.Background(), scope)
++				if retireErr != nil {
++					return
++				}
++				retired.Store(true)
++				var retiredAtMS int64
++				claimErr = db.Table("nextcloud_content_fences").Select("retired_at_ms").
++					Where("tenant_id = 7 AND knowledge_base_id = 'kb-1' AND knowledge_id = ?", row.ID).
++					Row().Scan(&retiredAtMS)
++				if claimErr == nil {
++					_, claimErr = store.ClaimKnowledgeGC(context.Background(), scope,
++						time.UnixMilli(retiredAtMS), time.Minute)
++				}
++			}},
++		publicationCheck: func(context.Context, *types.Knowledge) error {
++			if retired.Load() {
++				return apperrors.NewForbiddenError("source revoked")
++			}
++			return nil
++		},
++	}
++	w := httptest.NewRecorder()
++	leaseSearchRouter(h).ServeHTTP(w,
++		httptest.NewRequest(http.MethodGet, "/knowledge/search?keyword=private", nil))
++	require.NoError(t, retireErr)
++	require.ErrorIs(t, claimErr, repository.ErrNextcloudContentGCBusy,
++		"the active exact read lease must block a GC claim after retirement")
++	require.Equal(t, http.StatusForbidden, w.Code)
++	require.NotContains(t, w.Body.String(), row.Title)
++	assertLeaseReleased(t, db)
++	var retiredAtMS int64
++	require.NoError(t, db.Table("nextcloud_content_fences").Select("retired_at_ms").
++		Where("tenant_id = 7 AND knowledge_base_id = 'kb-1' AND knowledge_id = ?", row.ID).
++		Row().Scan(&retiredAtMS))
++	claim, err := store.ClaimKnowledgeGC(context.Background(), scope,
++		time.UnixMilli(retiredAtMS), time.Minute)
++	require.NoError(t, err, "the test-only coverage marker permits a claim after release")
++	require.NoError(t, store.FinishGCClaim(context.Background(), claim, false))
++}
++
++func TestGlobalKnowledgeSearchRechecksPublicationAtJSONWrite(t *testing.T) {
++	db := leaseHandlerDB(t)
++	store := repository.NewNextcloudContentLeaseStore(db)
++	row := leaseHandlerKnowledge(t)
++	row.Title = "private source title"
++	var checks atomic.Int32
++	h := &KnowledgeHandler{kgService: &leaseSearchService{rows: []*types.Knowledge{row}},
++		contentLeases: store,
++		publicationCheck: func(context.Context, *types.Knowledge) error {
++			if checks.Add(1) >= 3 {
++				return apperrors.NewForbiddenError("source revoked before response write")
++			}
++			return nil
++		},
++	}
++	w := httptest.NewRecorder()
++	leaseSearchRouter(h).ServeHTTP(w,
++		httptest.NewRequest(http.MethodGet, "/knowledge/search?keyword=private", nil))
++	require.GreaterOrEqual(t, checks.Load(), int32(3))
++	require.Equal(t, http.StatusForbidden, w.Code)
++	require.NotContains(t, w.Body.String(), row.Title)
++	assertLeaseReleased(t, db)
 +}
 +
 +func TestPreviewLeaseRetireDuringReadStopsLaterBytes(t *testing.T) {
@@ -34712,10 +35047,10 @@ index 00000000..fc46b8e9
 +}
 diff --git a/internal/handler/nextcloud_read_leases.go b/internal/handler/nextcloud_read_leases.go
 new file mode 100644
-index 00000000..4f9c14d1
+index 00000000..dfd15444
 --- /dev/null
 +++ b/internal/handler/nextcloud_read_leases.go
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,517 @@
 +package handler
 +
 +import (
@@ -34877,6 +35212,39 @@ index 00000000..4f9c14d1
 +		return nextcloudHTTPLeaseError(err)
 +	}
 +	return h.checkPublicationList(ctx, knowledges)
++}
++
++// A global knowledge search may span several KBs. The service has already
++// narrowed its results to the caller's allowed scopes; each returned source
++// generation is then pinned before its title, description or metadata leaves
++// the process. The write boundary rechecks publication after JSON rendering.
++func (h *KnowledgeHandler) respondKnowledgeSearch(c *gin.Context, ctx context.Context,
++	knowledges []*types.Knowledge, hasMore bool, total int64,
++) {
++	if err := h.checkPublicationList(ctx, knowledges); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	leases, err := h.beginNextcloudRead(c, ctx, knowledges)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer leases.Close()
++	ctx = leases.Context(ctx)
++	if err := h.verifyNextcloudRead(ctx, leases, knowledges); err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer guardNextcloudResponseWrites(c, leases, func(checkCtx context.Context) error {
++		return h.checkPublicationList(checkCtx, knowledges)
++	})()
++	c.JSON(http.StatusOK, gin.H{
++		"success":  true,
++		"data":     knowledges,
++		"has_more": hasMore,
++		"total":    total,
++	})
 +}
 +
 +// Re-resolve the live KB/share/group grant at the output boundary. A route
@@ -39182,7 +39550,7 @@ index fe0e240f..be563336 100644
  
  	// Register data source sync handler
 diff --git a/internal/types/datasource.go b/internal/types/datasource.go
-index 5130b931..2425cb2e 100644
+index 5130b931..b7289f6e 100644
 --- a/internal/types/datasource.go
 +++ b/internal/types/datasource.go
 @@ -38,6 +38,7 @@ const (
@@ -39193,7 +39561,18 @@ index 5130b931..2425cb2e 100644
  
  	// Sync modes
  	SyncModeIncremental = "incremental"
-@@ -498,6 +499,21 @@ type DataSourceSyncPayload struct {
+@@ -182,6 +183,10 @@ type SyncLog struct {
+ 	// Error details if status is "failed"
+ 	ErrorMessage string `json:"error_message"`
+ 
++	// QueueTaskID is a response-only operator reference for uncertain Nextcloud
++	// admission. It is not a database column or evidence of task execution.
++	QueueTaskID string `json:"queue_task_id,omitempty" gorm:"-"`
++
+ 	// Detailed sync result (JSON-encoded)
+ 	Result JSON `json:"result" gorm:"type:jsonb"`
+ 
+@@ -498,6 +503,21 @@ type DataSourceSyncPayload struct {
  	Initiator TaskInitiator `json:"initiator,omitempty"`
  	// Trigger distinguishes a user-requested run from a scheduler-created run.
  	Trigger string `json:"trigger,omitempty"`

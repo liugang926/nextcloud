@@ -151,8 +151,14 @@ must investigate the source task and repair or re-pair the connection; the
 dispatcher does not start a second task that might write concurrently.
 Manual and scheduled Nextcloud syncs share the running-log admission slot.
 If their queue enqueue result is uncertain, the running log keeps that slot;
-if the queue did not actually accept the task, an administrator must verify
-the queue and repair the log before another sync can start. These non-event
+new tasks use the stable Asynq ID `dssync:<sync_log_id>`. The manual 503
+response contains both IDs, and the redacted administrator sync-log list
+shows the static `sync_enqueue_uncertain_review_required` state and queue ID.
+If the queue did not actually accept the task, an administrator must verify
+the queue and repair the log before another sync can start. A missing queue
+entry alone does not prove the task never ran, so the service does not
+automatically release the slot. Logs created before stable task IDs were
+introduced still require a separate manual investigation. These non-event
 logs do not use the event dispatcher's 150-minute blocked transition.
 `applied_through_event_id` does not advance. Source deletion still follows
 the connector's two-complete-scan rule, so an absent file is not treated as

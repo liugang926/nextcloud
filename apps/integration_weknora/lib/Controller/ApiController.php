@@ -140,6 +140,7 @@ final class ApiController extends Controller {
                 }
                 $items = $stored['items'];
                 $generation = $stored['generation'];
+                $publicationRevision = $stored['publication_revision'];
             }
             if ($offset > count($items)) {
                 return $this->json(['error' => 'invalid_cursor'], 400);
@@ -148,11 +149,16 @@ final class ApiController extends Controller {
             $nextOffset = $offset + count($page);
             $complete = $nextOffset >= count($items);
 
-            // Stop/resume can commit while a tree is being scanned or while
-            // a stored page is read. Never return that old page after the
-            // newly committed gate is visible to this request.
+            // Stop/resume or a per-file withdrawal can commit while a tree
+            // is scanned, a snapshot is saved, or a stored page is read.
+            // Check both gates after selecting the page so neither an old
+            // snapshot nor this request's publication-state cache can return
+            // a file withdrawn before this final check.
             $this->bindingRegistry->requireActiveRoot($id);
             if ($this->bindingRegistry->requirePublicationActive($id) !== $bindingEpoch) {
+                return $this->json(['error' => 'manifest_changed'], 409);
+            }
+            if ($this->manifestSnapshots->publicationRevision($id) !== $publicationRevision) {
                 return $this->json(['error' => 'manifest_changed'], 409);
             }
 

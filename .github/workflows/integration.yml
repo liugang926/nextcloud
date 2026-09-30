@@ -151,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '4f976461f099da9ba6a53ce637b1ae7f285f46b0177ad95fc8bcee6a23b76792  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo 'dd7e09a9df65085d31e99737220dd3a60ff8b2dabfe823f6cc75fabace1b73ee  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -167,12 +167,13 @@ jobs:
       - name: Compile and test Nextcloud integration paths
         working-directory: weknora
         run: |
-          go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
+          go test -p 2 -run 'Nextcloud|GlobalKnowledgeSearch|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
             ./internal/application/service \
             ./internal/application/service/file \
+            ./internal/datasource \
             ./internal/agent/tools \
             ./internal/handler \
             ./internal/handler/dto \
@@ -252,7 +253,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'cc6325eac6cb5ef128e32a803cf5610f2a627ab5a6c7119849efda055744214c  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo 'f627d20af4edd053163d5f8594f8e75fc55393395d2135701073a1a75df0d475  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -268,14 +269,16 @@ jobs:
       - name: Test patched RAG authorization paths
         working-directory: weknora-rag
         run: |
-          go test -p 2 -run 'Test(Nextcloud|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
+          go test -p 2 -run 'Test(Nextcloud|ManualNextcloud|GlobalKnowledgeSearch|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
             ./internal/application/service \
+            ./internal/datasource \
             ./internal/datasource/connector/nextcloud \
             ./internal/agent/tools \
             ./internal/handler \
+            ./internal/handler/dto \
             ./internal/router \
             ./internal/container \
             ./internal/mcpserver
