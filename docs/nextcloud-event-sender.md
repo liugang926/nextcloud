@@ -86,8 +86,18 @@ exponential backoff. `401`, `403`, redirects, receiver checkpoint conflicts,
 and a valid but divergent receipt pause delivery for administrator review.
 `GET /index.php/apps/integration_weknora/api/v1/admin/bindings/{id}/event-connection`
 shows that status. Rotation with a fresh WeKnora key resumes a paused sender.
-The app does not yet emit an active alert for a paused sender; operators must
-monitor this status.
+The `EventHealthJob` checks the local sender and signed applied-status
+checkpoints through the administrator diagnostics service. It writes a
+structured Nextcloud warning when a sender pauses, a pending hint is at least
+five minutes old, an applied-status check fails, remains unverified for five
+minutes after pairing, or becomes five minutes stale, or a configured root
+cannot be resolved. It logs a recovery when all alarms clear. Alert identities
+contain only binding IDs and fixed error codes, never
+credentials, receiver URLs, file paths, or raw exception text. The job avoids
+repeating an unchanged warning more often than hourly. Ordinary Nextcloud
+cron determines its actual cadence; production log monitoring must route these
+warnings to an operator. A local sender alert does not establish WeKnora's
+queue, parsing, indexing, or per-file publication health.
 Outbox retention cannot remove unsent hints while a sender exists, including
 while paused. It may prune hints already durably received after the configured
 minimum retention period; this still does not mean they were applied.

@@ -62,7 +62,7 @@ final class OperationalStatusService {
         // List only non-sensitive sender state. Never select the encrypted
         // credential, receiver URL or file/path fields for diagnostics.
         $connectionsQuery = $this->db->getQueryBuilder();
-        $connectionsQuery->select('binding_id', 'status', 'received_id', 'applied_id',
+        $connectionsQuery->select('binding_id', 'created_at', 'status', 'received_id', 'applied_id',
                 'applied_checked_at', 'applied_error_code', 'attempt_count',
                 'next_attempt_at', 'last_error_code')
             ->from('weknora_event_conn')->orderBy('binding_id', 'ASC');
@@ -119,6 +119,7 @@ final class OperationalStatusService {
                  (string)$row['applied_error_code'] === '');
             $connectionStatuses[] = [
                 'binding_id' => $bindingId,
+                'connection_created_at' => (int)$row['created_at'],
                 'status' => (string)$row['status'],
                 'received_through_event_id' => (string)$row['received_id'],
                 'applied_through_event_id' => (string)$row['applied_id'],

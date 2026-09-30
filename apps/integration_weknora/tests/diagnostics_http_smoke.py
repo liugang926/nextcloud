@@ -47,13 +47,14 @@ def main():
         assert data["oldest_outbox_pending_delivery_age_seconds"] == max(ages), data
     else:
         assert data["oldest_outbox_pending_delivery_age_seconds"] is None, data
-    safe_fields = {"binding_id", "status", "received_through_event_id",
+    safe_fields = {"binding_id", "connection_created_at", "status", "received_through_event_id",
                    "applied_through_event_id", "applied_checked_at", "applied_error_code",
                    "attempt_count", "next_attempt_at", "last_error_code",
                    "outbox_pending_delivery_hints",
                    "oldest_outbox_pending_delivery_age_seconds"}
     for row in data["event_connections"]:
         assert set(row) == safe_fields, row
+        assert isinstance(row["connection_created_at"], int) and row["connection_created_at"] > 0, row
         assert row["received_through_event_id"].isdigit(), row
         assert row["applied_through_event_id"].isdigit(), row
         if row["outbox_pending_delivery_hints"]:

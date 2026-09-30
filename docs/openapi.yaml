@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Nextcloud WeKnora development API
-  version: 0.4.23
+  version: 0.4.24
   description: Local integration contract. Machine calls require a binding-scoped Bearer key and signed headers specified in docs/machine-request-signing.md. Multi-page manifests use a short-lived stored list, but source changes can still invalidate it. The source authorization API checks the mapped Nextcloud UID against a live AD objectGUID and returns the current file ETag for a guarded read. Source pairing is a durable intent and signed commit for one dedicated WeKnora knowledge base. Event sender watermarks attest durable receipt only, not WeKnora application. Same-AD integration, enterprise permission and publication acceptance remain outstanding.
 servers:
   - url: /index.php/apps/integration_weknora/api/v1
@@ -182,9 +182,10 @@ paths:
                     description: Non-sensitive local delivery state; no credential, receiver URL, file path or content is included
                     items:
                       type: object
-                      required: [binding_id, status, received_through_event_id, applied_through_event_id, applied_checked_at, applied_error_code, attempt_count, next_attempt_at, last_error_code, outbox_pending_delivery_hints, oldest_outbox_pending_delivery_age_seconds]
+                      required: [binding_id, connection_created_at, status, received_through_event_id, applied_through_event_id, applied_checked_at, applied_error_code, attempt_count, next_attempt_at, last_error_code, outbox_pending_delivery_hints, oldest_outbox_pending_delivery_age_seconds]
                       properties:
                         binding_id: {type: string}
+                        connection_created_at: {type: integer, minimum: 1, description: Unix seconds; used to detect a status check that never ran after pairing}
                         status: {type: string, enum: [active, paused]}
                         received_through_event_id: {type: string, pattern: '^[0-9]+$', description: Durable WeKnora inbox receipt watermark}
                         applied_through_event_id: {type: string, pattern: '^[0-9]+$', description: Last separately verified signed applied watermark}
