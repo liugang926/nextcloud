@@ -84,13 +84,15 @@ def outbox_event(state, binding, file_number):
 def wk_status(wk_base, token, source_id):
     code, body = wk_request(wk_base, token, "GET",
                             f"/api/v1/datasource/{source_id}/nextcloud-event-connection")
-    require(code == 200 and isinstance(body, dict), "read isolated receiver status failed")
+    require(code == 200 and isinstance(body, dict),
+            f"read isolated receiver status failed: HTTP {code}")
     return body
 
 
 def nc_status(admin, csrf, url):
     code, body = nc_request(admin, csrf, url, "GET")
-    require(code == 200 and isinstance(body, dict), "read isolated sender status failed")
+    require(code == 200 and isinstance(body, dict),
+            f"read isolated sender status failed: HTTP {code}")
     return body
 
 

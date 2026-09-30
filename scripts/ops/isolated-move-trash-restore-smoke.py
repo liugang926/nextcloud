@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Exercise move, rename, trash, and restore against an owned paired fixture.
+"""Exercise file and nested folder moves, trash, and restore in owned fixtures.
 
 The default invocation prepares, bootstraps, probes, and destroys a unique
-loopback-only synthetic LDAP Compose project. ``--scratch`` reuses an already
-bootstrapped owned fixture and removes only this probe's uniquely named files.
+loopback-only synthetic LDAP Compose project, including a second non-overlapping
+binding with its own knowledge base. ``--scratch`` reuses an already bootstrapped
+owned fixture and removes only this probe's uniquely named files.
+``--cross-bindings-only`` starts a fresh fixture and runs that folder drill
+without the earlier single-binding move/trash/restore sequence.
 No shared development Compose project, credentials, or remote URL is accepted.
 """
 
@@ -31,6 +34,8 @@ from publication_http_smoke import login  # noqa: E402
 owner = runpy.run_path(str(HERE / "synthetic-ldap-fixture.py"))
 event = runpy.run_path(str(HERE / "isolated-event-rebind-smoke.py"))
 index = runpy.run_path(str(HERE / "local-indexed-withdrawal-smoke.py"))
+synthetic = runpy.run_path(str(HERE / "synthetic-ldap-e2e.py"))
+handoff = runpy.run_path(str(HERE / "synthetic-ldap-ask-handoff.py"))
 owned_state = owner["owned_state"]
 sql_json = index["sql_json"]
 
@@ -69,6 +74,29 @@ def event_id(state, binding, file_number, event_type, after=0):
                 "nextcloud", "-d", "nextcloud", "-Atc", sql).strip()
     require(value.isdecimal() and int(value) > after,
             f"{event_type} did not persist a new outbox event")
+    return int(value)
+
+
+def binding_cursor(state, binding):
+    require(re.fullmatch(r"[A-Za-z0-9._-]{1,128}", binding) is not None,
+            "invalid fixture binding")
+    sql = ("SELECT COALESCE(MAX(id),0) FROM oc_weknora_outbox "
+           f"WHERE binding_id='{binding}'")
+    value = run("docker", "exec", state["project"] + "-nc-db-1", "psql", "-U",
+                "nextcloud", "-d", "nextcloud", "-Atc", sql).strip()
+    require(value.isdecimal(), "invalid binding outbox cursor")
+    return int(value)
+
+
+def deletion_hints_after(state, binding, after):
+    require(re.fullmatch(r"[A-Za-z0-9._-]{1,128}", binding) is not None and
+            type(after) is int and after >= 0, "invalid deletion hint scope")
+    sql = ("SELECT COUNT(*) FROM oc_weknora_outbox "
+           f"WHERE binding_id='{binding}' AND id>{after} "
+           "AND event_type IN ('delete','subtree_deleted')")
+    value = run("docker", "exec", state["project"] + "-nc-db-1", "psql", "-U",
+                "nextcloud", "-d", "nextcloud", "-Atc", sql).strip()
+    require(value.isdecimal(), "invalid deletion hint count")
     return int(value)
 
 
@@ -157,7 +185,314 @@ def trash_entry(nc_base, headers, filename, expected_location):
     return matches[0]
 
 
-def smoke(scratch):
+def second_binding(state, runtime, passwords, nc_base, wk_base, nc_admin, csrf,
+                   wk_token, admin_headers, suffix):
+    """Pair a fresh sibling root to a second dedicated KB in the owned stack."""
+    name = "Published-cross-" + suffix
+    binding = "synthetic-cross-" + suffix
+    folder = nc_base + "/remote.php/dav/files/devadmin/" + name
+    dav(folder, "MKCOL", admin_headers, expected=(201,))
+    root_id = file_id(folder, admin_headers)
+    require(root_id != runtime["root_file_id"], "second binding overlaps the first root")
+    share = urllib.parse.urlencode({"path": "/" + name, "shareType": 1,
+                                   "shareWith": "Engineering", "permissions": 1}).encode()
+    share_url = nc_base + "/ocs/v2.php/apps/files_sharing/api/v1/shares"
+    for attempt in range(15):
+        code, raw = synthetic["request"](nc_admin, share_url, "POST", {
+            "requesttoken": csrf, "OCS-APIRequest": "true",
+            "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+            share)
+        if code == 200 and json.loads(raw)["ocs"]["meta"]["statuscode"] == 200:
+            break
+        require(code == 404 and attempt < 14,
+                f"second folder group share failed: HTTP {code}")
+        time.sleep(2)
+    alice_headers = {"Authorization": "Basic " + base64.b64encode(
+        ("alice:" + passwords["alice"]).encode()).decode(), "Depth": "0"}
+    alice_folder = nc_base + "/remote.php/dav/files/alice/" + name
+    require(dav_request(alice_folder, "PROPFIND", alice_headers)[0] == 207,
+            "Engineering did not receive the second folder share")
+
+    api = nc_base + "/index.php/apps/integration_weknora/api/v1"
+    nc_request = synthetic["nc_request"]
+    wk_request = synthetic["wk_request"]
+    code, body = nc_request(nc_admin, csrf, api + "/admin/bindings", "POST", {
+        "id": binding, "name": binding, "owner_uid": "devadmin", "root_file_id": root_id})
+    require(code == 201 and body.get("binding", {}).get("id") == binding,
+            f"second non-overlapping binding was rejected: HTTP {code}")
+    key_id = "cross-key-" + suffix
+    code, body = nc_request(nc_admin, csrf,
+                            api + "/admin/bindings/" + binding + "/keys", "POST",
+                            {"key_id": key_id})
+    machine_token = body.get("token") if isinstance(body, dict) else None
+    require(code == 201 and isinstance(machine_token, str) and machine_token,
+            "second binding machine key was not created")
+
+    tenant = runtime["tenant_id"]
+    code, groups = synthetic["http_json"](
+        wk_base, "GET", f"/api/v1/tenants/{tenant}/directory-groups?available=true",
+        token=wk_token)
+    catalog = groups.get("data", {}).get("groups") if isinstance(groups, dict) else None
+    engineering = [item.get("directory_group_id") for item in catalog
+                   if isinstance(item, dict) and item.get("display_name") == "Engineering"] \
+                  if isinstance(catalog, list) else []
+    require(code == 200 and len(engineering) == 1 and engineering[0],
+            "second source cannot resolve the synthetic Engineering group")
+    code, created = synthetic["http_json"](wk_base, "POST", "/api/v1/knowledge-bases", {
+        "name": name, "type": "document", "embedding_model_id": runtime["model_id"],
+        "summary_model_id": runtime["chat_model_id"]}, wk_token)
+    kb_id = created.get("data", {}).get("id") if isinstance(created, dict) else None
+    require(code == 201 and isinstance(kb_id, str) and kb_id,
+            "second dedicated knowledge base was not created")
+    code, _ = synthetic["http_json"](
+        wk_base, "PUT", "/api/v1/group-access/knowledge_base/" + kb_id, {
+            "mode": "restricted", "grants": [{"directory_id": state["directory_id"],
+                                               "directory_group_id": engineering[0],
+                                               "permission": "read"}]}, wk_token)
+    require(code == 200, "second knowledge base was not restricted to Engineering")
+
+    operation = str(uuid.uuid4())
+    pair_url = api + "/admin/bindings/" + binding + "/source-pairing"
+    code, prepared = nc_request(nc_admin, csrf, pair_url, "POST", {
+        "operation_id": operation, "tenant_id": str(tenant), "knowledge_base_id": kb_id})
+    pair = prepared.get("pairing") if isinstance(prepared, dict) else None
+    one_time = prepared.get("token") if isinstance(prepared, dict) else None
+    require(code == 201 and isinstance(pair, dict) and
+            pair.get("operation_id") == operation and
+            pair.get("binding_id") == binding and
+            isinstance(one_time, str) and one_time,
+            "second source pairing preparation failed")
+    code, _ = wk_request(wk_base, wk_token, "POST",
+                         "/api/v1/datasource/nextcloud-source-pairings", {
+        "knowledge_base_id": kb_id, "base_url": "http://nextcloud",
+        "binding_id": binding, "operation_id": operation,
+        "instance_id": pair["instance_id"],
+        "publication_epoch": pair["publication_epoch"],
+        "key_id": pair["key_id"], "token": one_time})
+    del one_time
+    require(code in {200, 201, 202},
+            f"second WeKnora source pairing failed: HTTP {code}")
+    for _ in range(8):
+        nc_code, nc_pair = nc_request(nc_admin, csrf, pair_url, "GET")
+        wk_code, wk_pair = wk_request(
+            wk_base, wk_token, "GET",
+            "/api/v1/datasource/nextcloud-source-pairings/" + operation)
+        if (nc_code == wk_code == 200 and
+                nc_pair.get("pairing", {}).get("state") == "active" and
+                wk_pair.get("pairing", {}).get("state") == "active"):
+            source_id = wk_pair["pairing"]["data_source_id"]
+            break
+        retry_code, _ = wk_request(
+            wk_base, wk_token, "POST",
+            "/api/v1/datasource/nextcloud-source-pairings/" + operation + "/retry")
+        require(retry_code in {200, 202},
+                "second source pairing retry was rejected")
+        time.sleep(.5)
+    else:
+        raise RuntimeError("second source pairing did not become active")
+    result = {"binding_id": binding, "source_id": source_id,
+              "operation_id": operation, "knowledge_base_id": kb_id,
+              "root_file_id": root_id, "key_id": key_id, "token": machine_token,
+              "folder_name": name, "folder_url": folder}
+    synthetic["event_connection_setup"](
+        state, passwords, nc_base, wk_base, result, source_id, wk_token)
+    return result
+
+
+def nested_cross_binding(state, runtime, passwords, nc_base, wk_base, nc_admin,
+                         csrf, wk_token, admin_headers, alice_basic, bob_basic,
+                         delivery, applied, suffix):
+    """Prove three descendants migrate between two paired sibling roots."""
+    other = second_binding(state, runtime, passwords, nc_base, wk_base,
+                           nc_admin, csrf, wk_token, admin_headers, suffix)
+    first_binding, first_source = runtime["binding_id"], runtime["source_id"]
+    nc_container = state["project"] + "-nextcloud-1"
+    wk_db = state["project"] + "-wk-db-1"
+    first_event_url = (nc_base + "/index.php/apps/integration_weknora/api/v1/admin/bindings/" +
+                       urllib.parse.quote(first_binding, safe="") + "/event-connection")
+    second_event_url = (nc_base + "/index.php/apps/integration_weknora/api/v1/admin/bindings/" +
+                        urllib.parse.quote(other["binding_id"], safe="") + "/event-connection")
+
+    def applied_for(source, event_url, target):
+        sent, received = event["wait_applied"](
+            state, nc_admin, csrf, event_url, wk_base, wk_token, source,
+            nc_container, delivery, applied, target)
+        return {"event_id": target,
+                "sender_applied": event["decimal"](sent, "applied_through_event_id"),
+                "receiver_applied": event["decimal"](received, "applied_through_event_id")}
+
+    tree = "cross-tree-" + suffix
+    first_root = nc_base + "/remote.php/dav/files/devadmin/Published/" + tree
+    second_root = other["folder_url"] + "/" + tree
+    alice_root_a = nc_base + "/remote.php/dav/files/alice/Published/" + tree
+    bob_root_a = nc_base + "/remote.php/dav/files/bob/Published/" + tree
+    alice_root_b = (nc_base + "/remote.php/dav/files/alice/" +
+                    other["folder_name"] + "/" + tree)
+    bob_root_b = (nc_base + "/remote.php/dav/files/bob/" +
+                  other["folder_name"] + "/" + tree)
+    alice_headers = {"Authorization": "Basic " + alice_basic}
+    bob_headers = {"Authorization": "Basic " + bob_basic}
+    alice_token = handoff["wait_ldap_login"](
+        wk_base, "alice", passwords["alice"])
+    bob_token = handoff["wait_ldap_login"](
+        wk_base, "bob", passwords["bob"])
+    documents = {
+        "top.txt": ("Synthetic cross-binding top " + suffix + "\n").encode(),
+        "level-one/middle.txt": ("Synthetic cross-binding middle " + suffix + "\n").encode(),
+        "level-one/level-two/deep.txt":
+            ("Synthetic cross-binding deep " + suffix + "\n").encode(),
+    }
+    evidence = {"first_binding": first_binding, "second_binding": other["binding_id"],
+                "first_source": first_source, "second_source": other["source_id"],
+                "first_root_id": runtime["root_file_id"],
+                "second_root_id": other["root_file_id"], "steps": {}}
+
+    def current(source, binding_runtime, root, alice_root, bob_root, prior_ids):
+        candidates = {}
+        for relative, content in documents.items():
+            source_url = root + "/" + relative
+            current_id = file_id(source_url, admin_headers)
+            require(current_id == file_ids[relative],
+                    "cross-binding MOVE changed a descendant file ID")
+            indexed = published(wk_db, source, current_id)
+            require(indexed["path"] == tree + "/" + relative and
+                    indexed["file_name"] == relative.rsplit("/", 1)[-1] and
+                    indexed["candidate_id"] not in prior_ids[relative],
+                    "current descendant has stale candidate or citation path")
+            source_content(nc_base, binding_runtime, current_id, {200}, content)
+            require(dav_request(alice_root + "/" + relative, "GET", alice_headers) ==
+                    (200, content), "Alice cannot read current descendant")
+            require(dav_request(bob_root + "/" + relative, "GET", bob_headers)[0]
+                    in {403, 404}, "Bob can read current descendant")
+            alice_code, alice_body = handoff["knowledge"](
+                wk_base, indexed["candidate_id"], alice_token)
+            bob_code, _ = handoff["knowledge"](
+                wk_base, indexed["candidate_id"], bob_token)
+            require(alice_code == 200 and bob_code in {403, 404} and
+                    alice_body.get("data", {}).get("id") == indexed["candidate_id"],
+                    "current WeKnora candidate does not enforce Alice/Bob ACL")
+            candidates[relative] = indexed["candidate_id"]
+        deep_id = file_ids["level-one/level-two/deep.txt"]
+        code, status = handoff["status_for"](
+            nc_base, {"file_id": deep_id}, passwords, "alice")
+        require(code == 200 and status.get("knowledge_state") == "ready",
+                "deep descendant has no ready Files answer target")
+        selector = handoff["source_link"](
+            status, wk_base, {"binding_id": binding_runtime["binding_id"],
+                              "file_id": deep_id})
+        alice_code, target = handoff["ask_target"](wk_base, selector, alice_token)
+        bob_code, _ = handoff["ask_target"](wk_base, selector, bob_token)
+        require(alice_code == 200 and bob_code in {403, 404} and
+                target.get("data", {}).get("knowledge_id") ==
+                candidates["level-one/level-two/deep.txt"],
+                "deep current answer target selected the wrong candidate or ACL")
+        return {"candidates": candidates, "alice_knowledge_http": 200,
+                "bob_knowledge_denied": True, "alice_ask_http": alice_code,
+                "bob_ask_http": bob_code}
+
+    def withdrawn(source, binding_runtime, prior_candidates):
+        for relative in documents:
+            current_id = file_ids[relative]
+            tombstone(wk_db, source, current_id)
+            source_content(nc_base, binding_runtime, current_id, {403, 404})
+            alice_code, _ = handoff["knowledge"](
+                wk_base, prior_candidates[relative], alice_token)
+            require(alice_code in {403, 404},
+                    "withdrawn descendant remained directly readable in WeKnora")
+
+    first_cursor = binding_cursor(state, first_binding)
+    second_cursor = binding_cursor(state, other["binding_id"])
+    file_ids = {}
+    try:
+        dav(first_root, "MKCOL", admin_headers, expected=(201,))
+        dav(first_root + "/level-one", "MKCOL", admin_headers, expected=(201,))
+        dav(first_root + "/level-one/level-two", "MKCOL", admin_headers,
+            expected=(201,))
+        folder_id = file_id(first_root, admin_headers)
+        for relative, content in documents.items():
+            url = first_root + "/" + relative
+            dav(url, "PUT", {**admin_headers, "Content-Type": "text/plain"},
+                content, expected=(201, 204))
+            file_ids[relative] = file_id(url, admin_headers)
+        events = [event_id(state, first_binding, number, "upsert", first_cursor)
+                  for number in file_ids.values()]
+        evidence["steps"]["create"] = applied_for(
+            first_source, first_event_url, max(events))
+        first = current(first_source, runtime, first_root, alice_root_a,
+                        bob_root_a, {name: set() for name in documents})
+        evidence["steps"]["create"].update(first)
+        evidence["file_ids"] = file_ids
+
+        # Alice has read-only group share access. A rejected DELETE must not
+        # enqueue a false tombstone or withdraw the still-current generation.
+        before_a = binding_cursor(state, first_binding)
+        before_b = binding_cursor(state, other["binding_id"])
+        deep = "level-one/level-two/deep.txt"
+        denied, _ = dav_request(alice_root_a + "/" + deep, "DELETE", alice_headers)
+        require(denied in {403, 404, 405} and
+                deletion_hints_after(state, first_binding, before_a) == 0 and
+                deletion_hints_after(state, other["binding_id"], before_b) == 0,
+                "rejected DAV DELETE enqueued a false deletion hint")
+        event["deliver"](nc_container, delivery)
+        event["deliver"](nc_container, applied)
+        retained = version(wk_db, first_source, file_ids[deep])
+        require(retained["state"] == "published" and
+                retained["candidate_id"] == first["candidates"][deep] and
+                dav_request(alice_root_a + "/" + deep, "GET", alice_headers) ==
+                (200, documents[deep]),
+                "rejected DAV DELETE withdrew the original candidate or file")
+        evidence["steps"]["rejected_delete"] = {
+            "http": denied, "false_deletion_hints": 0,
+            "current_candidate_retained": True, "alice_read_retained": True}
+
+        move(first_root, second_root, admin_headers)
+        require(file_id(second_root, admin_headers) == folder_id,
+                "cross-binding MOVE changed the folder identity")
+        out_event = event_id(state, first_binding, folder_id,
+                             "subtree_deleted", before_a)
+        in_event = event_id(state, other["binding_id"], folder_id,
+                            "subtree_scan", before_b)
+        for relative, number in file_ids.items():
+            source_content(nc_base, runtime, number, {403, 404})
+            source_content(nc_base, other, number, {200}, documents[relative])
+        out_applied = applied_for(first_source, first_event_url, out_event)
+        in_applied = applied_for(other["source_id"], second_event_url, in_event)
+        withdrawn(first_source, runtime, first["candidates"])
+        second = current(other["source_id"], other, second_root, alice_root_b,
+                         bob_root_b,
+                         {name: {first["candidates"][name]} for name in documents})
+        evidence["steps"]["first_to_second"] = {
+            "source_withdrawal": out_applied, "destination_ingest": in_applied,
+            **second, "source_tombstones": len(documents)}
+
+        before_a = binding_cursor(state, first_binding)
+        before_b = binding_cursor(state, other["binding_id"])
+        move(second_root, first_root, admin_headers)
+        require(file_id(first_root, admin_headers) == folder_id,
+                "reverse cross-binding MOVE changed the folder identity")
+        out_event = event_id(state, other["binding_id"], folder_id,
+                             "subtree_deleted", before_b)
+        in_event = event_id(state, first_binding, folder_id,
+                            "subtree_scan", before_a)
+        out_applied = applied_for(other["source_id"], second_event_url, out_event)
+        in_applied = applied_for(first_source, first_event_url, in_event)
+        withdrawn(other["source_id"], other, second["candidates"])
+        final = current(first_source, runtime, first_root, alice_root_a,
+                        bob_root_a,
+                        {name: {first["candidates"][name], second["candidates"][name]}
+                         for name in documents})
+        evidence["steps"]["second_to_first"] = {
+            "source_withdrawal": out_applied, "destination_ingest": in_applied,
+            **final, "source_tombstones": len(documents)}
+        return evidence
+    finally:
+        # Reuse mode does not invoke this drill; automatic mode destroys both
+        # paired bindings and the entire fixture after this owned path cleanup.
+        dav_request(first_root, "DELETE", admin_headers)
+        dav_request(second_root, "DELETE", admin_headers)
+
+
+def smoke(scratch, *, cross_bindings=False, cross_bindings_only=False):
     directory, state = owned_state(scratch)
     require((directory / "fixture.json").is_file() and (directory / "runtime.json").is_file(),
             "owned fixture must be bootstrapped")
@@ -192,6 +527,18 @@ def smoke(scratch):
     require(sender["status"] == receiver["status"] == "active" and
             sender["connection_id"] == receiver["connection_id"],
             "isolated signed event connection is inactive")
+
+    if cross_bindings_only:
+        suffix = uuid.uuid4().hex
+        basic = base64.b64encode(("devadmin:" + passwords["nc_admin"]).encode()).decode()
+        alice_basic = base64.b64encode(("alice:" + passwords["alice"]).encode()).decode()
+        bob_basic = base64.b64encode(("bob:" + passwords["bob"]).encode()).decode()
+        proof = nested_cross_binding(
+            state, runtime, passwords, nc_base, wk_base, nc_admin, csrf,
+            wk_token, {"Authorization": "Basic " + basic}, alice_basic,
+            bob_basic, delivery, applied, suffix)
+        return {"project": state["project"], "image_id": state["weknora_image_id"],
+                "steps": {"cross_binding": proof}}
 
     def applied_event(target):
         sent, received = event["wait_applied"](
@@ -311,6 +658,11 @@ def smoke(scratch):
                 in {403, 404}, "non-member can read restored source")
         evidence["steps"]["restore"].update({"file_id": restored_id,
                                                 "candidate_id": third["candidate_id"]})
+        if cross_bindings:
+            evidence["steps"]["cross_binding"] = nested_cross_binding(
+                state, runtime, passwords, nc_base, wk_base, nc_admin, csrf,
+                wk_token, admin_headers, alice_basic, bob_basic, delivery, applied,
+                suffix)
         return evidence
     finally:
         # Only the UUID-scoped probe paths are touched. The fixture owner
@@ -319,7 +671,7 @@ def smoke(scratch):
             dav_request(url, "DELETE", admin_headers)
 
 
-def isolated_run(image):
+def isolated_run(image, *, cross_bindings_only=False):
     prepared = run(sys.executable, str(HERE / "synthetic-ldap-fixture.py"), "prepare",
                    "--weknora-image", image, "--mode", "direct", timeout=90)
     scratch = Path(json.loads(prepared)["scratch"])
@@ -329,7 +681,8 @@ def isolated_run(image):
             "--scratch", str(scratch), timeout=900)
         run(sys.executable, str(HERE / "synthetic-ldap-e2e.py"), "bootstrap",
             "--scratch", str(scratch), timeout=900)
-        return smoke(scratch)
+        return smoke(scratch, cross_bindings=not cross_bindings_only,
+                     cross_bindings_only=cross_bindings_only)
     finally:
         cleanup = subprocess.run([sys.executable, str(HERE / "synthetic-ldap-fixture.py"),
                                   "destroy", "--scratch", str(scratch)],
@@ -344,8 +697,14 @@ def main():
     location.add_argument("--weknora-image", help="local candidate image for an automatic isolated run")
     location.add_argument("--scratch", type=Path,
                           help="already bootstrapped owned synthetic fixture")
+    parser.add_argument("--cross-bindings-only", action="store_true",
+                        help="run the three-descendant two-binding drill in a fresh fixture")
     args = parser.parse_args()
-    result = isolated_run(args.weknora_image) if args.weknora_image else smoke(args.scratch)
+    if args.cross_bindings_only and args.scratch:
+        parser.error("--cross-bindings-only requires a fresh --weknora-image fixture")
+    result = (isolated_run(args.weknora_image,
+                           cross_bindings_only=args.cross_bindings_only)
+              if args.weknora_image else smoke(args.scratch))
     print(json.dumps(result, separators=(",", ":")))
 
 
