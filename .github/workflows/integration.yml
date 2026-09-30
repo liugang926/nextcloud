@@ -48,6 +48,9 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             php apps/integration_weknora/tests/event_health_evaluator_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/browser_file_url_contract.php
 
       - name: Install packaged app on an empty isolated stack
         run: python3 scripts/ops/isolated-fresh-install-smoke.py
@@ -147,7 +150,7 @@ jobs:
       - name: Compile and test Nextcloud integration paths
         working-directory: weknora
         run: |
-          go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile' \
+          go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
@@ -209,7 +212,7 @@ jobs:
       - name: Test patched RAG authorization paths
         working-directory: weknora-rag
         run: |
-          go test -p 2 -run 'Test(Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments)' -count=1 \
+          go test -p 2 -run 'Test(Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \

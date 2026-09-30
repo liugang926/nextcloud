@@ -25,10 +25,7 @@ file-scoped question target. The fixed and RAG service and handler suites
 passed. The RAG frontend typecheck, citation/export tests and production build
 passed before the final authorization delta; CI rebuilds the final patch.
 
-For the existing local `weknora-ldap-local` stack, the local prerequisite
-images are `weknora-ldap-app:rag-pdf-builtin-59671fac`,
-`weknora-ldap-ui:rag-pr`, and `weknora-go-test:1.26-sqlite`. With those present,
-run:
+For the existing local `weknora-ldap-local` stack, run:
 
 ```sh
 ./scripts/build-weknora-rag.sh
@@ -36,9 +33,20 @@ run:
 ```
 
 The first command creates patched local app and UI images from this exact
-patch. The second saves a PostgreSQL dump in ignored `dist/backups/` before
+patch. If local `weknora-go-test:1.26-sqlite`,
+`weknora-ldap-app:rag-pdf-builtin-59671fac`, and `weknora-ldap-ui:rag-pr`
+images are present, it uses a fast overlay build. Otherwise it uses the
+patched source archive's upstream Dockerfiles with `WITH_ANYDOC=0`; that full
+build still downloads browser-skill/Rust, DuckDB and other dependencies and
+requires substantial time, disk and network access. The upstream Dockerfile
+contains floating build dependencies, so this fallback is a development
+build, not a bit-for-bit reproducible production image. The fast frontend
+build runs in a Node 24 container, so host `npm` is not required. The second command
+saves a PostgreSQL dump in ignored `dist/backups/` before
 switching the shared local app and frontend; its Compose overlays also join
 the Nextcloud development network and enable the local HTTP source route.
+Both build paths label their images with the fixed source commit and full patch
+SHA-256; the built backend reports the same source-plus-patch revision.
 Use synthetic local data. A disposable HTTP/API handoff, answer, citation and
 revocation drill passed with mock models; see [its record](synthetic-ldap-compose.md).
 Live enterprise AD, Team Folder ACLs, browser-click acceptance and production

@@ -19,7 +19,7 @@ Redis task queue or prove that a file is indexed, published, or readable.
 
 ## 2026-09-30 integration update
 
-Nextcloud app 0.4.27 was packaged as a runtime archive and upgraded in the
+Nextcloud app 0.4.28 was packaged as a runtime archive and upgraded in the
 shared local Docker stack. Its LAN listener is `http://10.106.105.128:18082`;
 `scripts/allow-lan-access.sh` sets the browser origin used for original-file
 citations. The Files sidebar shows a question handoff only for a readable,
@@ -27,7 +27,8 @@ current, signed `ready` file. WeKnora's browser route and interactive
 `ask-target` endpoint resolve that exact paired file after current personal
 knowledge-base, group, source and ETag checks. The manifest keeps separate
 machine content and browser Files URLs. Existing indexed files need reindexing
-to acquire the latter citation metadata.
+to acquire the latter citation metadata. A URL contract checks IPv4, bracketed
+IPv6 and reverse-proxy path handling for original-file links.
 
 A fresh disposable direct-group OpenLDAP fixture paired and indexed one
 synthetic file, then exercised the Files question link as a mapped user.

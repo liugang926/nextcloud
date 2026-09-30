@@ -19,6 +19,7 @@ use OCP\IURLGenerator;
 use OCA\IntegrationWeknora\Service\FilePublicationStateService;
 use OCA\IntegrationWeknora\Service\ManifestSnapshotService;
 use OCA\IntegrationWeknora\Service\BindingRegistryService;
+use OCA\IntegrationWeknora\Service\BrowserFileUrl;
 use OCA\IntegrationWeknora\Service\BindingPublicationStoppedException;
 use OCA\IntegrationWeknora\Service\PairedServiceToken;
 use OCP\Lock\ILockingProvider;
@@ -446,20 +447,9 @@ final class ApiController extends Controller {
     private function humanFileUrl(int $fileId): string {
         $route = $this->urlGenerator->linkToRoute('files.View.showFile', ['fileid' => $fileId]);
         $publicUrl = $this->config->getSystemValueString('overwrite.cli.url');
-        $parts = parse_url($publicUrl);
-        if (is_array($parts) && in_array($parts['scheme'] ?? '', ['http', 'https'], true) &&
-            isset($parts['host']) && $parts['host'] !== '' &&
-            !isset($parts['user']) && !isset($parts['pass']) &&
-            !isset($parts['query']) && !isset($parts['fragment'])) {
-            $host = str_contains($parts['host'], ':') ? '[' . $parts['host'] . ']' : $parts['host'];
-            $port = isset($parts['port']) ? ':' . $parts['port'] : '';
-            $path = '/' . ltrim($route, '/');
-            $basePath = rtrim($parts['path'] ?? '', '/');
-            if ($basePath !== '' && $path !== $basePath &&
-                !str_starts_with($path, $basePath . '/')) {
-                $path = $basePath . $path;
-            }
-            return $parts['scheme'] . '://' . $host . $port . $path;
+        $humanUrl = BrowserFileUrl::fromConfiguredBase($route, $publicUrl);
+        if ($humanUrl !== null) {
+            return $humanUrl;
         }
         return $this->urlGenerator->linkToRouteAbsolute('files.View.showFile', ['fileid' => $fileId]);
     }

@@ -240,11 +240,17 @@ VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                     "--value={invalid-json")
 
             source = ROOT / "apps/integration_weknora"
+            current_version = ET.parse(source / "appinfo/info.xml").getroot().findtext("version")
+            if not current_version or not re.fullmatch(r"\d+(?:\.\d+)+", current_version):
+                raise AssertionError("current app has an invalid version")
             for name in ("appinfo", "lib", "css", "js", "templates"):
                 shutil.copytree(source / name, app_dir / name, dirs_exist_ok=True)
-            if "<version>0.4.26</version>" not in (app_dir / "appinfo/info.xml").read_text():
-                raise AssertionError("upgrade app is not version 0.4.26")
+            copied_version = ET.parse(app_dir / "appinfo/info.xml").getroot().findtext("version")
+            if copied_version != current_version:
+                raise AssertionError("upgrade app version differs from the source tree")
             occ("upgrade")
+            if occ("config:app:get", "integration_weknora", "installed_version") != current_version:
+                raise AssertionError("Nextcloud did not install the current app version")
 
             if sql("SELECT COUNT(*) FROM pg_tables WHERE tablename = 'oc_weknora_src_pair';") != "1":
                 raise AssertionError("source pairing migration was not applied")
@@ -319,7 +325,7 @@ WHERE k.key_id = 'default' AND k.binding_id = 'upgrade-current'
                              "FROM oc_weknora_binding_id WHERE binding_id = 'upgrade-fresh';")
             if fresh_gate != "active|0":
                 raise AssertionError(f"new binding gate was not active|0: {fresh_gate}")
-            print(f"{case}: direct 0.4.6→0.4.26 upgrade tombstone smoke passed")
+            print(f"{case}: direct 0.4.6→{current_version} upgrade tombstone smoke passed")
         finally:
             # The project name is random and every volume belongs to this
             # disposable Compose instance; existing development volumes stay.
