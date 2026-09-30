@@ -88,6 +88,20 @@ def old_copy(database, knowledge_id):
     return index["sql_json"](database, query)
 
 
+def retry_job(database, source_id, file_number, failed_id):
+    require(re.fullmatch(r"[0-9a-fA-F-]{36}", source_id) is not None and
+            re.fullmatch(r"[0-9a-fA-F-]{36}", failed_id) is not None and
+            type(file_number) is int and file_number > 0,
+            "invalid exact retry job identity")
+    query = ("SELECT jsonb_build_object('attempt_count',attempt_count,"
+             "'state',state,'sync_log_id',sync_log_id,"
+             "'failed_candidate_id',failed_candidate_id) "
+             "FROM nextcloud_candidate_retry_jobs "
+             f"WHERE datasource_id='{source_id}' AND failed_candidate_id='{failed_id}' "
+             f"AND external_id LIKE '%:{file_number}'")
+    return index["sql_json"](database, query)
+
+
 def wait_failed_candidate(state, runtime, event_id, delivery_job):
     database = state["project"] + "-wk-db-1"
     container = state["project"] + "-nextcloud-1"
@@ -173,6 +187,45 @@ def strict_latest_denial(nc_base, wk_base, passwords, runtime, alice):
             "old_search_http": search_code, "old_answer_suppressed": True}
 
 
+def denied_content(wk_base, token, knowledge_id, model_id, label):
+    direct_code, _ = handoff["knowledge"](wk_base, knowledge_id, token)
+    require(direct_code in ACL_DENIED,
+            f"{label} direct document returned HTTP {direct_code}")
+    search_code, search = e2e["http_json"](
+        wk_base, "POST", "/api/v1/knowledge-search",
+        {"query": ANSWER, "knowledge_ids": [knowledge_id]}, token=token)
+    if search_code == 200:
+        require(search.get("success") is True and
+                isinstance(search.get("data"), list) and
+                not any(item.get("knowledge_id") == knowledge_id
+                        for item in search["data"]),
+                f"{label} search exposed a selected document")
+    else:
+        require(search_code in ACL_DENIED,
+                f"{label} search returned HTTP {search_code}")
+    session_code, created = e2e["http_json"](
+        wk_base, "POST", "/api/v1/sessions", {}, token=token)
+    require(session_code == 201 and isinstance(created.get("data", {}).get("id"), str),
+            f"{label} could not create an isolated answer session")
+    try:
+        streamed = handoff["sse"](
+            wk_base, created["data"]["id"], token, knowledge_id, model_id)
+    except RuntimeError as error:
+        match = re.fullmatch(r"question stream returned HTTP ([0-9]{3})", str(error))
+        require(match is not None and int(match.group(1)) in STALE_DENIED,
+                f"{label} answer stream failed unexpectedly")
+        streamed = []
+    require(not any(ANSWER in json.dumps(item, ensure_ascii=False)
+                    for item in streamed if item.get("response_type") == "answer") and
+            not any(ref.get("knowledge_id") == knowledge_id
+                    for item in streamed if item.get("response_type") == "references"
+                    for ref in ((item.get("data") or {}).get("references") or
+                                item.get("knowledge_references") or [])),
+            f"{label} streamed selected content or citation")
+    return {"direct_http": direct_code, "search_http": search_code,
+            "answer_suppressed": True}
+
+
 def wait_recovered(wk_base, token, state, runtime, failed_id):
     database = state["project"] + "-wk-db-1"
     deadline = time.monotonic() + 15 * 60
@@ -188,7 +241,8 @@ def wait_recovered(wk_base, token, state, runtime, failed_id):
                 current.get("desired_etag") == runtime["v2_etag"] and
                 current.get("visible_etag") == runtime["v2_etag"] and
                 current.get("ready_chunks", 0) >= 1 and
-                current.get("embeddings", 0) >= 1):
+                current.get("embeddings", 0) >= 1 and
+                current.get("visible_count") == 1):
             return current, max_attempts
         status = retry_status(wk_base, token, runtime, allow_processing=True)
         if status is None:
@@ -232,6 +286,14 @@ def answer_restored(nc_base, wk_base, passwords, state, runtime, alice, bob,
     require(ask_code == 200 and bob_code in ACL_DENIED and
             target.get("data", {}).get("knowledge_id") == published_id,
             "V2 file-scoped answer target did not recover with source ACL")
+    old_ask_code, _ = handoff["ask_target"](wk_base, runtime["v1_selector"], alice)
+    require(old_ask_code in STALE_DENIED,
+            f"V1 ask target reopened after V2 publication: HTTP {old_ask_code}")
+    old_denial = denied_content(
+        wk_base, alice, runtime["knowledge_id"], runtime["chat_model_id"],
+        "post-publication V1")
+    bob_denial = denied_content(
+        wk_base, bob, published_id, runtime["chat_model_id"], "Bob V2")
     database = state["project"] + "-wk-db-1"
     require(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", published_id) is not None and
             re.fullmatch(r"RETRY-V2-[0-9a-f]{16}", v2_marker) is not None,
@@ -247,6 +309,8 @@ def answer_restored(nc_base, wk_base, passwords, state, runtime, alice, bob,
         wk_base, alice, {"knowledge_id": published_id,
                          "chat_model_id": runtime["chat_model_id"]}, human)
     return {"alice_ask_http": ask_code, "bob_ask_http": bob_code,
+            "bob_content_denial": bob_denial,
+            "old_ask_http": old_ask_code, "old_content_denial": old_denial,
             "v2_chunk_marker": True, "answer_and_citation": True}
 
 
@@ -293,6 +357,8 @@ def drill(directory, state, *, phase):
         r"OCA\IntegrationWeknora\BackgroundJob\EventDeliveryJob")
     applied_job = events["background_job"](nextcloud_container,
         r"OCA\IntegrationWeknora\BackgroundJob\EventAppliedStatusJob")
+    before_event = version_probe["event_id"](
+        state, runtime["binding_id"], runtime["file_id"], "upsert")
     embedding_stopped = False
     try:
         owned_compose(directory, state, "stop", "mock-embedding")
@@ -302,7 +368,8 @@ def drill(directory, state, *, phase):
                 file_id(dav_url, dav_headers) == runtime["file_id"],
                 "V2 overwrite failed or changed source file ID")
         event_id = version_probe["event_id"](
-            state, runtime["binding_id"], runtime["file_id"], "upsert")
+            state, runtime["binding_id"], runtime["file_id"], "upsert",
+            before_event)
         failed = wait_failed_candidate(state, runtime, event_id, delivery_job)
         runtime["v2_etag"] = failed["desired_etag"]
         failed_id = failed["candidate_id"]
@@ -341,17 +408,27 @@ def drill(directory, state, *, phase):
     recovered, attempts = wait_recovered(wk_base, token, state, runtime, failed_id)
     require(recovered["candidate_id"] != runtime["knowledge_id"],
             "automatic retry republished the V1 recovery copy")
+    job = retry_job(database, runtime["source_id"], runtime["file_id"], failed_id)
+    require(isinstance(job, dict) and
+            job.get("failed_candidate_id") == failed_id and
+            type(job.get("attempt_count")) is int and job["attempt_count"] >= 1 and
+            isinstance(job.get("sync_log_id"), str) and job["sync_log_id"],
+            "V2 recovered without a durable exact failed-candidate retry claim")
     nc_admin, csrf = handoff["login"](nc_base, "devadmin", passwords["nc_admin"])
     event_url = (nc_base + "/index.php/apps/integration_weknora/api/v1/admin/bindings/" +
                  urllib.parse.quote(runtime["binding_id"], safe="") + "/event-connection")
+    answer = answer_restored(nc_base, wk_base, passwords, state, runtime,
+                             alice, bob, recovered["candidate_id"], v2_marker)
+    print("Restored V2 answer, original-file citation and Bob denial verified; "
+          "checking both applied watermarks", file=sys.stderr)
     sender, receiver = events["wait_applied"](
         state, nc_admin, csrf, event_url, wk_base, token, runtime["source_id"],
         nextcloud_container, delivery_job, applied_job, event_id)
-    answer = answer_restored(nc_base, wk_base, passwords, state, runtime,
-                             alice, bob, recovered["candidate_id"], v2_marker)
     return {"phase": phase, "project": state["project"],
             "image_id": state["weknora_image_id"], "fault": fault,
             "retry": {"automatic": True, "max_observed_attempt_count": attempts,
+                      "durable_attempt_count": job["attempt_count"],
+                      "retry_sync_log_id": job["sync_log_id"],
                       "initial_next_attempt_at": initial_retry["next_attempt_at"],
                       "published_candidate_id": recovered["candidate_id"],
                       "sender_applied": events["decimal"](
