@@ -399,6 +399,15 @@ complete scan before the applied watermark advances. This is a synthetic
 direct group-share fixture; it does not exercise a real AD server or Team
 Folder ACLs. Credentials stay in the fixture's private scratch directory.
 
+For the separate two-binding nested-directory acceptance, pass
+`--cross-bindings-only` with a local candidate image. This fresh owned fixture
+creates three descendants under binding A, checks that an unauthorized DAV
+DELETE leaves the file, candidate and outbox unchanged, moves the subtree to
+binding B and back, and verifies each source's tombstones, target's new
+candidates, applied event watermarks and Alice/Bob access. Each binding has a
+different dedicated knowledge base. The option is incompatible with
+`--scratch` so an existing fixture cannot be repurposed accidentally.
+
 For diagnosis against a fixture you created with
 `synthetic-ldap-fixture.py prepare/up` and `synthetic-ldap-e2e.py bootstrap`, use
 `--scratch PATH` instead. That mode deletes only this probe's UUID-scoped DAV

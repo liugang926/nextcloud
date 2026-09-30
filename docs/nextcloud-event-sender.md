@@ -64,10 +64,14 @@ the local ciphertext; revoke the connection in WeKnora separately. Deleting
 an unpaired Nextcloud binding removes its sender configuration in the binding's
 transaction, and the binding ID cannot be reused. A paired binding cannot be
 removed until a remote decommission protocol is available.
-WeKnora currently invalidates the old key immediately on rotation. Requests
-between WeKnora Rotate and the local `POST` may receive `401` and pause the
-sender; install the new one-time secret promptly. A short two-key grace window
-is not implemented.
+WeKnora accepts the immediately previous event HMAC key for up to two minutes
+after rotation while the new key is already active. Install the new one-time
+secret before that window expires; a later request signed with the old key
+receives `401` and pauses the sender. A second rotation discards the oldest
+key immediately, and revocation rejects both the current and previous keys.
+This event-key window is separate from source machine-key rotation: its old
+machine key has a maximum 24-hour overlap after commit and is removed by the
+final ACK. See [source pairing](nextcloud-source-pairing.md).
 
 ## Delivery and recovery
 

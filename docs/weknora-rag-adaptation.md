@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`5d089e3446645e809baf8d008833a963f184007cb5c9ce4fd4d16b163e5d2fe5`.
+`8fe4356d44155fb29a7dac11b461b9f7a32e0bf83fa1774c9fa85ad61a0a0e62`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`3aa31893bc0bdbd57cfe8bd1b39dd1fdac37f1bd3a802c4dfbd39ba5212e7fcd`.
+`45ee34fa56c508de9ae8cbc75e6637b72d120200556941c7b630e9bca4efed95`.
 The build script and CI reject a different patch hash. On 2026-10-01 both
 baseline patches applied cleanly to fresh source archives. The failed-file
 editor probe tests and frontend type checks passed for both patches. The RAG baseline

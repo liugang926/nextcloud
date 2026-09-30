@@ -42,7 +42,7 @@ under the database lock before committing the connection.
 | --- | --- | --- |
 | `POST` | `/api/v1/datasource/:id/nextcloud-event-connection` | Create one active connection; `201` once, then `409` on repeat. |
 | `GET` | `/api/v1/datasource/:id/nextcloud-event-connection` | Read receipt, dispatch, and applied status; never returns a secret. |
-| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Replace the only accepted key immediately; `200` returns the new secret once. |
+| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Activate a new event key and retain only the immediately previous key for up to two minutes; `200` returns the new secret once. |
 | `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rebind` | After exact finalized source-key rotation, retain the connection, event key, inbox, and watermarks; `200` returns no secret. |
 | `DELETE` | `/api/v1/datasource/:id/nextcloud-event-connection` | Revoke the active connection immediately; `204`. |
 
@@ -54,11 +54,13 @@ WeKnora origin reachable from the Nextcloud server. Store the returned
 connection ID, key ID, secret, instance ID, and binding ID in the Nextcloud
 sender configuration. No management read can retrieve the secret again. If
 the one-time response is lost, inspect status and rotate the key; repeating
-Pair will not reveal an existing key. Rotation clears any previous-key grace
-period, so the old key is rejected at commit. This does not yet provide the
-short dual-key overlap described in the PRD: delivery can pause with `401`
-between WeKnora rotation and installing the new key in Nextcloud. Keep the
-one-time response available while updating the sender. A changed source is reported
+Pair will not reveal an existing key. Rotation activates the new key and
+accepts the immediately previous event HMAC key for up to two minutes; a
+second rotation discards the oldest key instead of extending its window.
+Install the new one-time secret in Nextcloud before the previous key expires.
+Revocation rejects both keys immediately. This event-key window is distinct
+from source machine-key rotation, which permits an old machine key for at most
+24 hours after commit and removes it at the final ACK. A changed source is reported
 as `source_changed` by GET; an unrelated config edit requires revoke and pair
 after resolving the source. Revocation does not require a live Nextcloud call, so it remains
 possible after credentials are cleared or the endpoint changes.
@@ -215,9 +217,10 @@ without a trailing newline:
 8. connection ID header value
 9. key ID header value
 
-The receiver reads the committed connection key under a database lock. A
-previous key is accepted only while its explicit rotation window remains
-valid. An expired or revoked key fails closed, including when another web
+The receiver reads the committed connection key under a database lock. It
+accepts only the current event HMAC key or its immediate predecessor during
+that predecessor's two-minute rotation window. A second rotation drops the
+oldest key, and expiry or revocation fails closed, including when another web
 worker has a stale configuration cache.
 
 `after_event_id` must equal the receiver's `received_id` for a new batch.

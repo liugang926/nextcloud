@@ -47,9 +47,19 @@ requires completed parsing and fresh source checks.
 The administrator-only routes are:
 
 ```text
+GET  /api/v1/datasource/nextcloud-source-pairings/by-datasource/{datasource_id}/failed-candidates?limit=25&cursor=...
 GET  /api/v1/datasource/nextcloud-source-pairings/{operation_id}/candidates/{file_id}/retry
 POST /api/v1/datasource/nextcloud-source-pairings/{operation_id}/candidates/{file_id}/retry
 ```
+
+The WeKnora data source settings page offers a failed-file drawer for an
+active paired Nextcloud source. The first route discovers its operation ID and
+lists only current failed staging files from that exact tenant, knowledge
+base, data source, and active pairing. It returns at most 50 static-code rows
+per keyset page, with an opaque cursor. No file title, path, content, or
+credential is returned. Selecting a file calls the exact status `GET`; the
+page keeps its ETag and candidate ID in memory only and sends them unchanged
+to `POST`. A `409` clears that snapshot and reloads the list and status.
 
 `GET` returns the current failed candidate ID, ETag, retry state, attempts,
 next attempt, first staging time, and static reason code. `POST` accepts
@@ -72,5 +82,14 @@ candidate fencing, scan isolation beyond 64 invalid rows, a 24-hour cutoff
 and administrator restart, unchanged-ETag content refetch, pre-create skip for
 ordinary syncs, exact-file retry scope and unchanged shared cursor, transient
 fetch failure recovery, key-rotation revocation, a distinct second generation,
-and late completion of the old generation. Full LAN validation still requires an isolated source with
-an induced parser failure and a healthy subsequent parse.
+and late completion of the old generation. A loopback-only dual-service fault
+drill passed with an induced failed V2 parse, one exact administrator list
+entry, HTTP 403 for both ordinary users, an automatic fresh-candidate retry,
+an empty list after publication, Alice's restored answer and original-file
+citation, Bob's denial, and verified applied watermarks. A separate Chromium
+drill opened the administrator drawer against a failed candidate, showed the
+exact retry status, reloaded after a simulated stale-selection `409`, and
+received `202` from the real retry route. It also verified that a file-count
+probe `403` did not hide the entire knowledge-base editor, and that an ordinary
+user saw neither the settings entry nor the failed-candidate list. The [V1
+status](v1-status.md) records the candidate image and remaining scope.

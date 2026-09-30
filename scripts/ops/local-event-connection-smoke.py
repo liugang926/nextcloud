@@ -42,6 +42,14 @@ def expect(status, expected, label):
         raise AssertionError(f"{label}: HTTP {status}, expected {expected}")
 
 
+def expect_receipt(status, data, event_id, label):
+    expect(status, 202, label)
+    receipt = json.loads(data)
+    if receipt.get("received_through_event_id") != str(event_id) or \
+            receipt.get("durable_receipt_only") is not True:
+        raise AssertionError(f"{label}: missing durable-only event {event_id} receipt")
+
+
 def login(email, password):
     status, data = request("POST", "/api/v1/auth/login",
                            body={"email": email, "password": password})
@@ -110,34 +118,48 @@ def main():
         raise AssertionError("pair response did not return a one-time event secret")
     try:
         status, data, nonce = signed_event(credential, 0, 1)
-        expect(status, 202, "durable event receipt")
-        receipt = json.loads(data)
-        if receipt.get("received_through_event_id") != "1" or receipt.get("durable_receipt_only") is not True:
-            raise AssertionError("event receipt did not report durable-only watermark")
+        expect_receipt(status, data, 1, "durable event receipt")
         status, _, _ = signed_event(credential, 0, 1, nonce=nonce)
         expect(status, 401, "nonce replay")
-        status, _, _ = signed_event(credential, 0, 1)
-        expect(status, 202, "idempotent retry with fresh nonce")
+        status, data, _ = signed_event(credential, 0, 1)
+        expect_receipt(status, data, 1, "idempotent retry with fresh nonce")
 
         status, data = request("POST", path + "/rotate", token=admin)
         expect(status, 200, "rotate event key")
         replacement = json.loads(data)
         if replacement.get("connection_id") != credential["connection_id"] or \
+                replacement.get("key_id") == credential["key_id"] or \
                 replacement.get("secret") == credential["secret"]:
-            raise AssertionError("rotation did not replace the connection secret")
-        status, _, _ = signed_event(credential, 1, 2)
-        expect(status, 401, "old event key after rotation")
-        status, _, _ = signed_event(replacement, 1, 2)
-        expect(status, 202, "rotated event key")
+            raise AssertionError("rotation did not replace the event key")
+        status, data, _ = signed_event(credential, 1, 2)
+        expect_receipt(status, data, 2, "previous event key within two-minute grace")
+        status, data, _ = signed_event(replacement, 1, 2)
+        expect_receipt(status, data, 2, "new event key within two-minute grace")
+
+        status, data = request("POST", path + "/rotate", token=admin)
+        expect(status, 200, "rotate event key again")
+        newest = json.loads(data)
+        if newest.get("connection_id") != credential["connection_id"] or \
+                newest.get("key_id") in (credential["key_id"], replacement["key_id"]) or \
+                newest.get("secret") in (credential["secret"], replacement["secret"]):
+            raise AssertionError("second rotation did not replace the event key")
+        status, _, _ = signed_event(credential, 2, 3)
+        expect(status, 401, "oldest event key after second rotation")
+        status, data, _ = signed_event(replacement, 2, 3)
+        expect_receipt(status, data, 3, "previous event key after second rotation")
+        status, data, _ = signed_event(newest, 2, 3)
+        expect_receipt(status, data, 3, "newest event key after second rotation")
 
         status, _ = request("GET", path, token=admin)
         expect(status, 200, "connection status")
     finally:
         status, _ = request("DELETE", path, token=admin)
         expect(status, 204, "revoke synthetic event connection")
-    status, _, _ = signed_event(replacement, 2, 3)
-    expect(status, 401, "revoked event connection")
-    print("local event connection smoke passed: receipt, replay, rotation, status, revocation")
+    status, _, _ = signed_event(replacement, 3, 4)
+    expect(status, 401, "revoked previous event key")
+    status, _, _ = signed_event(newest, 3, 4)
+    expect(status, 401, "revoked current event key")
+    print("local event connection smoke passed: receipt, replay, two-minute key grace, second rotation, status, revocation")
 
 
 if __name__ == "__main__":

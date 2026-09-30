@@ -151,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '5d089e3446645e809baf8d008833a963f184007cb5c9ce4fd4d16b163e5d2fe5  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '8fe4356d44155fb29a7dac11b461b9f7a32e0bf83fa1774c9fa85ad61a0a0e62  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -167,7 +167,7 @@ jobs:
       - name: Compile and test Nextcloud integration paths
         working-directory: weknora
         run: |
-          go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
+          go test -p 2 -run 'Nextcloud|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
@@ -194,7 +194,7 @@ jobs:
         working-directory: weknora/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 
@@ -252,7 +252,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo '3aa31893bc0bdbd57cfe8bd1b39dd1fdac37f1bd3a802c4dfbd39ba5212e7fcd  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo '45ee34fa56c508de9ae8cbc75e6637b72d120200556941c7b630e9bca4efed95  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -268,7 +268,7 @@ jobs:
       - name: Test patched RAG authorization paths
         working-directory: weknora-rag
         run: |
-          go test -p 2 -run 'Test(Nextcloud|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
+          go test -p 2 -run 'Test(Nextcloud|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
@@ -300,7 +300,7 @@ jobs:
         working-directory: weknora-rag/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 

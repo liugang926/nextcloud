@@ -197,10 +197,10 @@ index 00000000..22b74a2d
 +that API.
 diff --git a/docs/nextcloud-event-receiver.md b/docs/nextcloud-event-receiver.md
 new file mode 100644
-index 00000000..94c1261f
+index 00000000..44b0c1f4
 --- /dev/null
 +++ b/docs/nextcloud-event-receiver.md
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,295 @@
 +# Nextcloud event receiver and connection provisioning
 +
 +`POST /api/v1/integrations/nextcloud/events` persists change hints in WeKnora.
@@ -245,7 +245,7 @@ index 00000000..94c1261f
 +| --- | --- | --- |
 +| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection` | Create one active connection; `201` once, then `409` on repeat. |
 +| `GET` | `/api/v1/datasource/:id/nextcloud-event-connection` | Read receipt, dispatch, and applied status; never returns a secret. |
-+| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Replace the only accepted key immediately; `200` returns the new secret once. |
++| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rotate` | Issue a new key; accept the previous key for two minutes; `200` returns the new secret once. |
 +| `POST` | `/api/v1/datasource/:id/nextcloud-event-connection/rebind` | After exact finalized source-key rotation, retain the connection, event key, inbox, and watermarks; `200` returns no secret. |
 +| `DELETE` | `/api/v1/datasource/:id/nextcloud-event-connection` | Revoke the active connection immediately; `204`. |
 +
@@ -257,12 +257,14 @@ index 00000000..94c1261f
 +connection ID, key ID, secret, instance ID, and binding ID in the Nextcloud
 +sender configuration. No management read can retrieve the secret again. If
 +the one-time response is lost, inspect status and rotate the key; repeating
-+Pair will not reveal an existing key. Rotation clears any previous-key grace
-+period, so the old key is rejected at commit. This does not yet provide the
-+short dual-key overlap described in the PRD: delivery can pause with `401`
-+between WeKnora rotation and installing the new key in Nextcloud. Keep the
-+one-time response available while updating the sender. A changed source is reported
-+as `source_changed` by GET; revoke and then pair again after resolving the
++Pair will not reveal an existing key. Rotation accepts the current and new
++keys for two minutes measured by the receiver's clock, so the Nextcloud
++sender can install the new one-time secret during that window. Another rotation
++replaces the previous key; only the two most recent keys can be accepted.
++After the window expires, the older key returns `401` and its sender may
++pause. Keep the one-time response available while updating the sender. For
++immediate credential termination, revoke the connection. A changed source is
++reported as `source_changed` by GET; revoke and then pair again after resolving the
 +source. Revocation does not require a live Nextcloud call, so it remains
 +possible after credentials are cleared or the endpoint changes.
 +
@@ -1976,6 +1978,32 @@ index 34e7d0ea..e3bf5ed6 100644
      flex-shrink: 0;
      display: flex;
      align-items: center;
+diff --git a/frontend/src/views/knowledge/settings/KBStorageSettings.vue b/frontend/src/views/knowledge/settings/KBStorageSettings.vue
+index d7fe992e..b3371585 100644
+--- a/frontend/src/views/knowledge/settings/KBStorageSettings.vue
++++ b/frontend/src/views/knowledge/settings/KBStorageSettings.vue
+@@ -34,6 +34,7 @@
+ import { computed, onMounted, ref, watch } from 'vue'
+ import { listStorageBackends, type StorageBackend } from '@/api/storage-backend'
+ import { useUIStore } from '@/stores/ui'
++import { resolveStorageInitialSelection } from './kbStorageInitialSelection'
+ 
+ const props = defineProps<{ storageBackendId?: string; storageProvider?: string; hasFiles?: boolean }>()
+ const emit = defineEmits<{
+@@ -54,8 +55,11 @@ async function load() {
+     const response = await listStorageBackends()
+     backends.value = (response.data || []).filter(item => item.status === 'active')
+     defaultID.value = response.default_storage_backend_id || ''
+-    if (!localID.value) localID.value = defaultID.value || backends.value[0]?.id || ''
+-    if (localID.value) handleChange()
++    const selection = resolveStorageInitialSelection(
++      localID.value, defaultID.value, backends.value.map(item => item.id), !!props.hasFiles,
++    )
++    localID.value = selection.displayID
++    if (selection.persistID) handleChange()
+   } finally { loading.value = false }
+ }
+ function goToSettings() { uiStore.closeKBEditor?.(); uiStore.openSettings?.('storage') }
 diff --git a/frontend/src/views/knowledge/settings/NextcloudFailedCandidates.vue b/frontend/src/views/knowledge/settings/NextcloudFailedCandidates.vue
 new file mode 100644
 index 00000000..a33065b3
@@ -2348,6 +2376,59 @@ index 00000000..989ae8a1
 +  }
 +  if (isCurrent()) await reload()
 +  return 'scheduled'
++}
+diff --git a/frontend/src/views/knowledge/settings/kbStorageInitialSelection.test.ts b/frontend/src/views/knowledge/settings/kbStorageInitialSelection.test.ts
+new file mode 100644
+index 00000000..5159b64d
+--- /dev/null
++++ b/frontend/src/views/knowledge/settings/kbStorageInitialSelection.test.ts
+@@ -0,0 +1,30 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { resolveStorageInitialSelection } from './kbStorageInitialSelection'
++
++test('a locked legacy KB displays the fallback without emitting a new binding', () => {
++  assert.deepEqual(resolveStorageInitialSelection('', 'current-default', ['current-default'], true), {
++    displayID: 'current-default', persistID: null,
++  })
++})
++
++test('a locked KB with an existing binding keeps it without emitting a change', () => {
++  assert.deepEqual(resolveStorageInitialSelection('original', 'current-default', ['current-default'], true), {
++    displayID: 'original', persistID: null,
++  })
++})
++
++test('an empty KB can adopt the configured default or first active backend', () => {
++  assert.deepEqual(resolveStorageInitialSelection('', 'current-default', ['first'], false), {
++    displayID: 'current-default', persistID: 'current-default',
++  })
++  assert.deepEqual(resolveStorageInitialSelection('', '', ['first'], false), {
++    displayID: 'first', persistID: 'first',
++  })
++})
++
++test('no active backend produces no binding', () => {
++  assert.deepEqual(resolveStorageInitialSelection('', '', [], false), {
++    displayID: '', persistID: null,
++  })
++})
+diff --git a/frontend/src/views/knowledge/settings/kbStorageInitialSelection.ts b/frontend/src/views/knowledge/settings/kbStorageInitialSelection.ts
+new file mode 100644
+index 00000000..c4086636
+--- /dev/null
++++ b/frontend/src/views/knowledge/settings/kbStorageInitialSelection.ts
+@@ -0,0 +1,11 @@
++export function resolveStorageInitialSelection(
++  currentID: string,
++  defaultID: string,
++  activeIDs: string[],
++  hasFiles: boolean,
++): { displayID: string; persistID: string | null } {
++  const displayID = currentID || defaultID || activeIDs[0] || ''
++  // A disabled picker may show a suggested default for legacy KBs, but must
++  // never silently bind that default when a KB may already contain files.
++  return { displayID, persistID: displayID && !hasFiles ? displayID : null }
 +}
 diff --git a/frontend/src/views/nextcloud/NextcloudAsk.vue b/frontend/src/views/nextcloud/NextcloudAsk.vue
 new file mode 100644
@@ -3833,10 +3914,10 @@ index 00000000..345e4807
 +}
 diff --git a/internal/application/readlease/nextcloud_content_read.go b/internal/application/readlease/nextcloud_content_read.go
 new file mode 100644
-index 00000000..bfdeb149
+index 00000000..3c80c44a
 --- /dev/null
 +++ b/internal/application/readlease/nextcloud_content_read.go
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,281 @@
 +package readlease
 +
 +import (
@@ -3878,6 +3959,7 @@ index 00000000..bfdeb149
 +// for GC, and avoids a gap while other result IDs are still being discovered.
 +type NextcloudReadGuard struct {
 +	store     NextcloudReadLeaseStore
++	parentCtx context.Context
 +	ctx       context.Context
 +	cancel    context.CancelFunc
 +	owner     string
@@ -3926,7 +4008,7 @@ index 00000000..bfdeb149
 +		return ordered[i].KBID < ordered[j].KBID
 +	})
 +	leaseCtx, cancel := context.WithCancel(ctx)
-+	g := &NextcloudReadGuard{store: store, ctx: leaseCtx, cancel: cancel,
++	g := &NextcloudReadGuard{store: store, parentCtx: ctx, ctx: leaseCtx, cancel: cancel,
 +		owner: uuid.NewString(), broad: make(map[NextcloudKBReadScope]string),
 +		exact: make(map[repository.NextcloudContentScope]bool),
 +		stop:  make(chan struct{}), stopped: make(chan struct{}), heartbeat: nextcloudReadHeartbeat}
@@ -4032,6 +4114,12 @@ index 00000000..bfdeb149
 +}
 +
 +func (g *NextcloudReadGuard) currentErrorLocked() error {
++	// The child context is also cancelled by failLocked and Close. Only the
++	// original request context can distinguish an external cancellation from
++	// an internal lease failure, whose concrete error must remain visible.
++	if err := g.parentCtx.Err(); err != nil {
++		return err
++	}
 +	if g.err != nil {
 +		return g.err
 +	}
@@ -4043,7 +4131,7 @@ index 00000000..bfdeb149
 +		g.err = err
 +		g.cancel()
 +	}
-+	return g.err
++	return g.currentErrorLocked()
 +}
 +
 +// Verify is a response checkpoint. A retirement, expiration, failed DB call,
@@ -4113,19 +4201,21 @@ index 00000000..bfdeb149
 +}
 diff --git a/internal/application/readlease/nextcloud_content_read_test.go b/internal/application/readlease/nextcloud_content_read_test.go
 new file mode 100644
-index 00000000..ae564e73
+index 00000000..3793cb1d
 --- /dev/null
 +++ b/internal/application/readlease/nextcloud_content_read_test.go
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,161 @@
 +package readlease
 +
 +import (
 +	"context"
++	"database/sql"
 +	"encoding/json"
 +	"os"
 +	"path/filepath"
 +	"sync"
 +	"testing"
++	"time"
 +
 +	"github.com/Tencent/WeKnora/internal/application/repository"
 +	"github.com/Tencent/WeKnora/internal/types"
@@ -4222,6 +4312,45 @@ index 00000000..ae564e73
 +	require.ErrorIs(t, guard.Verify(), context.Canceled)
 +	require.NoError(t, guard.Close())
 +	wg.Wait()
++}
++
++type nextcloudReadFailedRenewStore struct {
++	NextcloudReadLeaseStore
++	beforeReturn func()
++}
++
++func (s *nextcloudReadFailedRenewStore) RenewLease(
++	_ context.Context, _ string, _ time.Duration,
++) (repository.NextcloudContentLease, error) {
++	if s.beforeReturn != nil {
++		s.beforeReturn()
++	}
++	return repository.NextcloudContentLease{}, sql.ErrTxDone
++}
++
++func TestNextcloudKBReadCancelDuringFailedRenew(t *testing.T) {
++	t.Run("external cancellation wins", func(t *testing.T) {
++		store, _ := nextcloudReadTestStore(t)
++		base, cancel := context.WithCancel(context.Background())
++		fault := &nextcloudReadFailedRenewStore{NextcloudReadLeaseStore: store,
++			beforeReturn: cancel}
++		guard, err := BeginNextcloudKBRead(base, fault,
++			[]NextcloudKBReadScope{{TenantID: 7, KBID: "kb-1"}})
++		require.NoError(t, err)
++		require.ErrorIs(t, guard.Verify(), context.Canceled)
++		require.ErrorIs(t, guard.Verify(), context.Canceled)
++		require.NoError(t, guard.Close())
++	})
++	t.Run("internal lease failure stays concrete", func(t *testing.T) {
++		store, _ := nextcloudReadTestStore(t)
++		fault := &nextcloudReadFailedRenewStore{NextcloudReadLeaseStore: store}
++		guard, err := BeginNextcloudKBRead(context.Background(), fault,
++			[]NextcloudKBReadScope{{TenantID: 7, KBID: "kb-1"}})
++		require.NoError(t, err)
++		require.ErrorIs(t, guard.Verify(), sql.ErrTxDone)
++		require.ErrorIs(t, guard.Verify(), sql.ErrTxDone)
++		require.NoError(t, guard.Close())
++	})
 +}
 +
 +func TestNextcloudKnowledgeLeaseScopeRejectsMalformedMarker(t *testing.T) {
@@ -7882,10 +8011,10 @@ index 00000000..75a2d1dc
 +}
 diff --git a/internal/application/repository/nextcloud_event_connections.go b/internal/application/repository/nextcloud_event_connections.go
 new file mode 100644
-index 00000000..8be172ba
+index 00000000..27cdd3f5
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_connections.go
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,375 @@
 +package repository
 +
 +import (
@@ -7907,6 +8036,8 @@ index 00000000..8be172ba
 +
 +var ErrNextcloudEventConnectionExists = errors.New("Nextcloud event connection already exists")
 +var ErrNextcloudEventConnectionMissing = errors.New("Nextcloud event connection is not active")
++
++const nextcloudEventRotationGrace = 2 * time.Minute
 +
 +// NextcloudEventPairingIdentity is populated from a signed, live Nextcloud
 +// capabilities/bindings read and the corresponding committed data source.
@@ -8100,8 +8231,8 @@ index 00000000..8be172ba
 +	return result, nil
 +}
 +
-+// Rotate replaces the sole accepted key atomically. Previous-key grace is
-+// deliberately disabled for an administrator-initiated emergency rotation.
++// Rotate accepts the old and new keys for a short, server-clock grace period.
++// A second rotation replaces the previous key, so no more than two are valid.
 +func (r *NextcloudEventInboxRepository) Rotate(ctx context.Context, identity NextcloudEventPairingIdentity) (NextcloudEventConnectionCredential, error) {
 +	keyID, secret, ciphertext, err := newNextcloudEventCredential()
 +	if err != nil {
@@ -8141,10 +8272,13 @@ index 00000000..8be172ba
 +			connection.DatasourceConfigSHA256 != identity.DatasourceConfigSHA {
 +			return ErrNextcloudEventScope
 +		}
++		now := time.Now().UTC()
 +		updates := map[string]any{
 +			"current_key_id": keyID, "current_secret_ciphertext": ciphertext,
-+			"previous_key_id": nil, "previous_secret_ciphertext": nil,
-+			"previous_valid_until": nil, "updated_at": time.Now().UTC(),
++			"previous_key_id":            connection.CurrentKeyID,
++			"previous_secret_ciphertext": connection.CurrentSecretCiphertext,
++			"previous_valid_until":       now.Add(nextcloudEventRotationGrace),
++			"updated_at":                 now,
 +		}
 +		if err := tx.Table("nextcloud_event_connections").
 +			Where("connection_id = ? AND status = 'active'", connection.ConnectionID).
@@ -8909,7 +9043,7 @@ index 00000000..631442d1
 +}
 diff --git a/internal/application/repository/nextcloud_event_inbox.go b/internal/application/repository/nextcloud_event_inbox.go
 new file mode 100644
-index 00000000..79869631
+index 00000000..c660d0b1
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_inbox.go
 @@ -0,0 +1,364 @@
@@ -9158,7 +9292,7 @@ index 00000000..79869631
 +	case batch.KeyID == connection.CurrentKeyID:
 +		ciphertext = connection.CurrentSecretCiphertext
 +	case connection.PreviousKeyID != nil && batch.KeyID == *connection.PreviousKeyID &&
-+		connection.PreviousValidUntil != nil && batch.Now.Before(*connection.PreviousValidUntil) &&
++		connection.PreviousValidUntil != nil && time.Now().UTC().Before(*connection.PreviousValidUntil) &&
 +		connection.PreviousSecretCiphertext != nil:
 +		ciphertext = *connection.PreviousSecretCiphertext
 +	default:
@@ -9276,6 +9410,59 @@ index 00000000..79869631
 +func NextcloudEventPayloadHash(raw []byte) string {
 +	sum := sha256.Sum256(raw)
 +	return hex.EncodeToString(sum[:])
++}
+diff --git a/internal/application/repository/nextcloud_event_key_grace_test.go b/internal/application/repository/nextcloud_event_key_grace_test.go
+new file mode 100644
+index 00000000..6c5ad7f2
+--- /dev/null
++++ b/internal/application/repository/nextcloud_event_key_grace_test.go
+@@ -0,0 +1,47 @@
++package repository
++
++import (
++	"crypto/hmac"
++	"crypto/sha256"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++)
++
++func TestNextcloudEventPreviousKeyExpiryUsesValidationClock(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	oldSecret := strings.Repeat("o", 43)
++	newSecret := strings.Repeat("n", 43)
++	oldCiphertext, err := utils.EncryptAESGCM(oldSecret, utils.GetAESKey())
++	require.NoError(t, err)
++	newCiphertext, err := utils.EncryptAESGCM(newSecret, utils.GetAESKey())
++	require.NoError(t, err)
++	previousID := "old"
++	// The incoming request passed timestamp checks before waiting for the row
++	// lock. Its saved Now cannot extend the prior key after the lock is taken.
++	expired := time.Now().UTC().Add(-time.Second)
++	connection := nextcloudEventConnection{
++		CurrentKeyID: "new", CurrentSecretCiphertext: newCiphertext,
++		PreviousKeyID: &previousID, PreviousSecretCiphertext: &oldCiphertext,
++		PreviousValidUntil: &expired,
++	}
++	canonical := []byte("signed request")
++	signed := func(secret, keyID string) SignedNextcloudEventBatch {
++		mac := hmac.New(sha256.New, []byte(secret))
++		_, _ = mac.Write(canonical)
++		return SignedNextcloudEventBatch{
++			KeyID: keyID, CanonicalRequest: canonical, Signature: mac.Sum(nil),
++			Now: expired.Add(-time.Minute),
++		}
++	}
++	require.ErrorIs(t, verifyNextcloudEventSignature(connection, signed(oldSecret, "old")), ErrNextcloudEventUnauthorized)
++	_, err = nextcloudEventResponseSecret(connection, "old")
++	require.ErrorIs(t, err, ErrNextcloudEventUnauthorized)
++	require.NoError(t, verifyNextcloudEventSignature(connection, signed(newSecret, "new")))
++	responseSecret, err := nextcloudEventResponseSecret(connection, "new")
++	require.NoError(t, err)
++	require.Equal(t, newSecret, string(responseSecret))
 +}
 diff --git a/internal/application/repository/nextcloud_event_rebind.go b/internal/application/repository/nextcloud_event_rebind.go
 new file mode 100644
@@ -9812,7 +9999,7 @@ index 00000000..bb469db7
 +}
 diff --git a/internal/application/repository/nextcloud_file_status.go b/internal/application/repository/nextcloud_file_status.go
 new file mode 100644
-index 00000000..9512e78b
+index 00000000..3c8ada12
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_file_status.go
 @@ -0,0 +1,232 @@
@@ -9909,9 +10096,9 @@ index 00000000..9512e78b
 +		}
 +		nonce := map[string]any{
 +			"connection_id": request.ConnectionID,
-+			"key_id": request.KeyID,
-+			"nonce": request.Nonce,
-+			"expires_at": request.Now.Add(601 * time.Second),
++			"key_id":        request.KeyID,
++			"nonce":         request.Nonce,
++			"expires_at":    request.Now.Add(601 * time.Second),
 +		}
 +		insert := tx.Table("nextcloud_event_nonces").Clauses(clause.OnConflict{DoNothing: true}).Create(nonce)
 +		if insert.Error != nil {
@@ -9936,7 +10123,7 @@ index 00000000..9512e78b
 +		if err != nil {
 +			return err
 +		}
-+		secret, err := nextcloudEventResponseSecret(connection, request.KeyID, request.Now)
++		secret, err := nextcloudEventResponseSecret(connection, request.KeyID)
 +		if err != nil {
 +			return err
 +		}
@@ -10013,13 +10200,13 @@ index 00000000..9512e78b
 +	return nil
 +}
 +
-+func nextcloudEventResponseSecret(connection nextcloudEventConnection, keyID string, now time.Time) ([]byte, error) {
++func nextcloudEventResponseSecret(connection nextcloudEventConnection, keyID string) ([]byte, error) {
 +	var ciphertext string
 +	switch {
 +	case keyID == connection.CurrentKeyID:
 +		ciphertext = connection.CurrentSecretCiphertext
 +	case connection.PreviousKeyID != nil && keyID == *connection.PreviousKeyID &&
-+		connection.PreviousValidUntil != nil && now.Before(*connection.PreviousValidUntil) &&
++		connection.PreviousValidUntil != nil && time.Now().UTC().Before(*connection.PreviousValidUntil) &&
 +		connection.PreviousSecretCiphertext != nil:
 +		ciphertext = *connection.PreviousSecretCiphertext
 +	default:
@@ -28980,6 +29167,302 @@ index 7456ef1e..66b23c60 100644
  func TestDataSourceResponse_RSSFeedURLsFromCredentials(t *testing.T) {
  	cfg := types.DataSourceConfig{
  		Type: types.ConnectorTypeRSS,
+diff --git a/internal/handler/initialization.go b/internal/handler/initialization.go
+index 9bcb6c40..4f58247c 100644
+--- a/internal/handler/initialization.go
++++ b/internal/handler/initialization.go
+@@ -263,15 +263,14 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
+ 
+ 	// 检查Embedding模型是否可以修改
+ 	if kb.EmbeddingModelID != "" && req.EmbeddingModelID != "" && kb.EmbeddingModelID != req.EmbeddingModelID {
+-		// 检查是否已有文件
+-		knowledgeList, err := h.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx,
+-			kbIdStr, &types.Pagination{
+-				Page:     1,
+-				PageSize: 1,
+-			}, types.KnowledgeListFilter{})
+-		if err == nil && knowledgeList != nil && knowledgeList.Total > 0 {
++		hasFiles, countErr := h.kbHasFiles(ctx, kbIdStr)
++		if countErr != nil {
++			_ = c.Error(countErr)
++			return
++		}
++		if hasFiles {
+ 			logger.Error(ctx, "Cannot change embedding model when files exist")
+-			c.Error(errors.NewBadRequestError("知识库中已有文件，无法修改Embedding模型"))
++			_ = c.Error(errors.NewBadRequestError("知识库中已有文件，无法修改Embedding模型"))
+ 			return
+ 		}
+ 	}
+@@ -494,6 +493,28 @@ func kbStorageBindingChanged(kb *types.KnowledgeBase, backendID, provider string
+ 	return provider != "" && provider != currentProvider
+ }
+ 
++// kbHasFiles uses tenant-scoped knowledge service counts rather than the public
++// document-list handler, which can deny withdrawn publications. The ordinary
++// list excludes deleting rows, so count that status separately as well.
++// If either required count is unavailable, keep file-sensitive settings locked.
++func (h *InitializationHandler) kbHasFiles(ctx context.Context, kbID string) (bool, error) {
++	knowledgeList, err := h.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx,
++		kbID, &types.Pagination{Page: 1, PageSize: 1}, types.KnowledgeListFilter{})
++	if err != nil || knowledgeList == nil {
++		return false, errors.NewInternalServerError("Cannot verify whether the knowledge base contains files")
++	}
++	if knowledgeList.Total > 0 {
++		return true, nil
++	}
++	deletingList, err := h.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx,
++		kbID, &types.Pagination{Page: 1, PageSize: 1},
++		types.KnowledgeListFilter{ParseStatus: types.ParseStatusDeleting})
++	if err != nil || deletingList == nil {
++		return false, errors.NewInternalServerError("Cannot verify whether the knowledge base contains files")
++	}
++	return deletingList.Total > 0, nil
++}
++
+ // applyKBStorageBinding binds the owner's storage instance to the KB. The
+ // caller's workspace must own the KB: backends resolve against TenantInfo.
+ func (h *InitializationHandler) applyKBStorageBinding(
+@@ -501,25 +522,18 @@ func (h *InitializationHandler) applyKBStorageBinding(
+ ) error {
+ 	// Bind the concrete storage instance. Provider remains a compatibility
+ 	// projection for older clients and historical rows.
++	oldID := ""
++	if kb.StorageBackendID != nil {
++		oldID = strings.TrimSpace(*kb.StorageBackendID)
++	}
++	requestedID := strings.TrimSpace(req.StorageBackendID)
+ 	if strings.TrimSpace(req.StorageBackendID) != "" {
+ 		tenant, _ := types.TenantInfoFromContext(ctx)
+ 		backend, resolveErr := h.storageResolver.ResolveBackend(ctx, tenant, req.StorageBackendID, "")
+ 		if resolveErr != nil || backend == nil {
+ 			return errors.NewBadRequestError("Storage backend is unavailable")
+ 		}
+-		oldID := ""
+-		if kb.StorageBackendID != nil {
+-			oldID = *kb.StorageBackendID
+-		}
+-		if oldID != "" && oldID != backend.ID {
+-			knowledgeList, listErr := h.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx,
+-				kbID, &types.Pagination{Page: 1, PageSize: 1}, types.KnowledgeListFilter{})
+-			if listErr == nil && knowledgeList != nil && knowledgeList.Total > 0 {
+-				return errors.NewBadRequestError(
+-					"Storage backend cannot be changed while the knowledge base contains files; migrate storage first")
+-			}
+-		}
+-		kb.StorageBackendID = &backend.ID
++		requestedID = backend.ID
+ 		req.StorageProvider = backend.Provider
+ 	}
+ 	// Legacy provider projection.
+@@ -534,12 +548,21 @@ func (h *InitializationHandler) applyKBStorageBinding(
+ 	if oldProvider == "" {
+ 		oldProvider = "local"
+ 	}
+-	if oldProvider != provider {
+-		knowledgeList, err := h.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx,
+-			kbID, &types.Pagination{Page: 1, PageSize: 1}, types.KnowledgeListFilter{})
+-		if err == nil && knowledgeList != nil && knowledgeList.Total > 0 {
+-			logger.Warn(ctx, "Storage engine changed with existing files, old files may become inaccessible")
++	// A legacy KB can have files without a concrete backend ID. Treat any new
++	// binding as a change, and refuse it unless the unfiltered KB count is
++	// known to be empty. A count failure must not authorize a storage move.
++	if (requestedID != "" && oldID != requestedID) || oldProvider != provider {
++		hasFiles, err := h.kbHasFiles(ctx, kbID)
++		if err != nil {
++			return err
+ 		}
++		if hasFiles {
++			return errors.NewBadRequestError(
++				"Storage backend cannot be changed while the knowledge base contains files; migrate storage first")
++		}
++	}
++	if requestedID != "" {
++		kb.StorageBackendID = &requestedID
+ 	}
+ 	kb.SetStorageProvider(provider)
+ 	return nil
+diff --git a/internal/handler/initialization_storage_binding_test.go b/internal/handler/initialization_storage_binding_test.go
+new file mode 100644
+index 00000000..1a1d5ded
+--- /dev/null
++++ b/internal/handler/initialization_storage_binding_test.go
+@@ -0,0 +1,175 @@
++package handler
++
++import (
++	"context"
++	stderrors "errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	apperrors "github.com/Tencent/WeKnora/internal/errors"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++)
++
++type storageBindingTestResolver struct {
++	interfaces.StorageBackendResolver
++}
++
++func (storageBindingTestResolver) ResolveBackend(
++	_ context.Context, _ *types.Tenant, id, _ string,
++) (*types.StorageBackend, error) {
++	return &types.StorageBackend{ID: id, Provider: "local"}, nil
++}
++
++type storageBindingTestKnowledgeService struct {
++	interfaces.KnowledgeService
++	total         int64
++	deletingTotal int64
++	err           error
++	deletingErr   error
++	calls         int
++}
++
++func (s *storageBindingTestKnowledgeService) ListPagedKnowledgeByKnowledgeBaseID(
++	_ context.Context, _ string, _ *types.Pagination, filter types.KnowledgeListFilter,
++) (*types.PageResult, error) {
++	s.calls++
++	if filter.ParseStatus == types.ParseStatusDeleting {
++		if s.deletingErr != nil {
++			return nil, s.deletingErr
++		}
++		return &types.PageResult{Total: s.deletingTotal}, nil
++	}
++	if s.err != nil {
++		return nil, s.err
++	}
++	return &types.PageResult{Total: s.total}, nil
++}
++
++func TestKBStorageBindingRequiresVerifiedEmptyKB(t *testing.T) {
++	cases := []struct {
++		name            string
++		oldID           string
++		requestID       string
++		requestProvider string
++		total           int64
++		deletingTotal   int64
++		listErr         error
++		deletingErr     error
++		wantStatus      int
++		wantID          string
++		wantCalls       int
++	}{
++		{"legacy KB with files", "", "new", "local", 1, 0, nil, nil, http.StatusBadRequest, "", 1},
++		{"bound KB with files", "old", "new", "local", 1, 0, nil, nil, http.StatusBadRequest, "old", 1},
++		{"deleting-only legacy KB", "", "new", "local", 0, 1, nil, nil, http.StatusBadRequest, "", 2},
++		{"deleting count denied", "old", "new", "local", 0, 0, nil, stderrors.New("deleting count denied"), http.StatusInternalServerError, "old", 2},
++		{"legacy KB count denied", "", "new", "local", 0, 0, stderrors.New("count denied"), nil, http.StatusInternalServerError, "", 1},
++		{"bound KB count denied", "old", "new", "local", 0, 0, stderrors.New("count denied"), nil, http.StatusInternalServerError, "old", 1},
++		{"legacy provider change with files", "", "", "minio", 1, 0, nil, nil, http.StatusBadRequest, "", 1},
++		{"empty KB can bind", "", "new", "local", 0, 0, nil, nil, 0, "new", 2},
++		{"same binding needs no count", "old", "old", "local", 1, 0, stderrors.New("count denied"), nil, 0, "old", 0},
++		{"unchanged legacy KB needs no count", "", "", "local", 1, 0, stderrors.New("count denied"), nil, 0, "", 0},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			kb := &types.KnowledgeBase{}
++			if tc.oldID != "" {
++				id := tc.oldID
++				kb.StorageBackendID = &id
++			}
++			kb.SetStorageProvider("local")
++			knowledge := &storageBindingTestKnowledgeService{
++				total: tc.total, deletingTotal: tc.deletingTotal,
++				err: tc.listErr, deletingErr: tc.deletingErr,
++			}
++			h := &InitializationHandler{
++				storageResolver:  storageBindingTestResolver{},
++				knowledgeService: knowledge,
++			}
++			req := &KBModelConfigRequest{
++				StorageBackendID: tc.requestID,
++				StorageProvider:  tc.requestProvider,
++			}
++			ctx := context.WithValue(context.Background(), types.TenantInfoContextKey, &types.Tenant{ID: 42})
++			err := h.applyKBStorageBinding(ctx, kb, "kb-1", req)
++			if tc.wantStatus == 0 {
++				if err != nil {
++					t.Fatalf("unexpected error: %v", err)
++				}
++			} else {
++				var appErr *apperrors.AppError
++				if !stderrors.As(err, &appErr) || appErr.HTTPCode != tc.wantStatus {
++					t.Fatalf("error = %v, want HTTP %d", err, tc.wantStatus)
++				}
++			}
++			gotID := ""
++			if kb.StorageBackendID != nil {
++				gotID = *kb.StorageBackendID
++			}
++			if gotID != tc.wantID || kb.GetStorageProvider() != "local" {
++				t.Fatalf("binding mutated to id=%q provider=%q; want id=%q provider=local",
++					gotID, kb.GetStorageProvider(), tc.wantID)
++			}
++			if knowledge.calls != tc.wantCalls {
++				t.Fatalf("count calls = %d, want %d", knowledge.calls, tc.wantCalls)
++			}
++		})
++	}
++}
++
++func TestUpdateKBConfigEmbeddingChangeFailsClosedOnCountError(t *testing.T) {
++	for _, tc := range []struct {
++		name          string
++		total         int64
++		deletingTotal int64
++		listErr       error
++		deletingErr   error
++		wantStatus    int
++		wantCalls     int
++	}{
++		{"files exist", 1, 0, nil, nil, http.StatusBadRequest, 1},
++		{"deleting-only row", 0, 1, nil, nil, http.StatusBadRequest, 2},
++		{"count denied", 0, 0, stderrors.New("count denied"), nil, http.StatusInternalServerError, 1},
++		{"deleting count denied", 0, 0, nil, stderrors.New("deleting count denied"), http.StatusInternalServerError, 2},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			kb := &types.KnowledgeBase{ID: "kb-1", TenantID: 42, EmbeddingModelID: "old-model"}
++			knowledge := &storageBindingTestKnowledgeService{
++				total: tc.total, deletingTotal: tc.deletingTotal,
++				err: tc.listErr, deletingErr: tc.deletingErr,
++			}
++			h := &InitializationHandler{
++				kbService:        &stubInitializationKBService{kb: kb},
++				knowledgeService: knowledge,
++			}
++			gin.SetMode(gin.TestMode)
++			c, _ := gin.CreateTestContext(httptest.NewRecorder())
++			c.Params = gin.Params{{Key: "kbId", Value: "kb-1"}}
++			req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(
++				`{"llmModelId":"m-llm","embeddingModelId":"new-model"}`))
++			req.Header.Set("Content-Type", "application/json")
++			ctx := types.WithCaller(req.Context(), types.Caller{
++				TenantID: 42, UserID: "u", Role: types.TenantRoleAdmin,
++			})
++			c.Request = req.WithContext(ctx)
++
++			h.UpdateKBConfig(c)
++
++			if len(c.Errors) != 1 {
++				t.Fatalf("handler errors = %v, want one denial", c.Errors)
++			}
++			var appErr *apperrors.AppError
++			if !stderrors.As(c.Errors[0].Err, &appErr) || appErr.HTTPCode != tc.wantStatus {
++				t.Fatalf("error = %v, want HTTP %d", c.Errors[0].Err, tc.wantStatus)
++			}
++			if kb.EmbeddingModelID != "old-model" || knowledge.calls != tc.wantCalls {
++				t.Fatalf("embedding=%q count calls=%d; want old-model and %d count calls",
++					kb.EmbeddingModelID, knowledge.calls, tc.wantCalls)
++			}
++		})
++	}
++}
 diff --git a/internal/handler/knowledge.go b/internal/handler/knowledge.go
 index 8c05828c..84a72645 100644
 --- a/internal/handler/knowledge.go
@@ -30436,10 +30919,10 @@ index 00000000..5fcf97eb
 +}
 diff --git a/internal/handler/nextcloud_event_connections_test.go b/internal/handler/nextcloud_event_connections_test.go
 new file mode 100644
-index 00000000..714789d8
+index 00000000..4cf1f3aa
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_connections_test.go
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,402 @@
 +package handler
 +
 +import (
@@ -30453,6 +30936,7 @@ index 00000000..714789d8
 +	"os"
 +	"strings"
 +	"testing"
++	"time"
 +
 +	"github.com/Tencent/WeKnora/internal/application/repository"
 +	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
@@ -30603,6 +31087,11 @@ index 00000000..714789d8
 +	paired := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
 +	require.Equal(t, http.StatusCreated, paired.Code, paired.Body.String())
 +	first := issuedEventCredential(t, paired)
++	pairedBatch := func(after, eventID string) nextcloudEventRequest {
++		batch := sampleNextcloudEventBatch(after, eventID)
++		batch.ConnectionID = first.ConnectionID
++		return batch
++	}
 +	for _, operation := range []struct{ method, path string }{
 +		{http.MethodGet, testManagedEventPath},
 +		{http.MethodPost, testManagedEventPath + "/rotate"},
@@ -30633,28 +31122,73 @@ index 00000000..714789d8
 +	require.Equal(t, http.StatusConflict, repeat.Code, repeat.Body.String())
 +	require.NotContains(t, repeat.Body.String(), first.Secret)
 +
-+	batch := sampleNextcloudEventBatch("0", "1")
-+	batch.ConnectionID = first.ConnectionID
++	batch := pairedBatch("0", "1")
 +	response := postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, strings.Repeat("a", 32)))
 +	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++	rotatedAt := time.Now().UTC()
 +	rotated := managedConnectionRequest(router, http.MethodPost, testManagedEventPath+"/rotate", 7, types.TenantRoleAdmin)
 +	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
 +	second := issuedEventCredential(t, rotated)
 +	require.Equal(t, first.ConnectionID, second.ConnectionID)
 +	require.NotEqual(t, first.KeyID, second.KeyID)
 +	require.NotEqual(t, first.Secret, second.Secret)
-+	batch = sampleNextcloudEventBatch("1", "2")
-+	batch.ConnectionID = first.ConnectionID
-+	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, strings.Repeat("b", 32)))
++	var previous struct {
++		PreviousKeyID      string
++		PreviousValidUntil time.Time
++	}
++	require.NoError(t, db.Table("nextcloud_event_connections").
++		Select("previous_key_id, previous_valid_until").
++		Where("connection_id = ?", first.ConnectionID).Take(&previous).Error)
++	require.Equal(t, first.KeyID, previous.PreviousKeyID)
++	require.WithinDuration(t, rotatedAt.Add(2*time.Minute), previous.PreviousValidUntil, 2*time.Second)
++	batch = pairedBatch("1", "2")
++	oldNonce := strings.Repeat("b", 32)
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, oldNonce))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, oldNonce))
 +	require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
-+	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("c", 32)))
++	wrongScope := pairedBatch("2", "3")
++	wrongScope.BindingID = "other-binding"
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, wrongScope, strings.Repeat("c", 32)))
++	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
++	var originalConfig string
++	require.NoError(t, db.Raw(`SELECT config FROM data_sources WHERE id = ?`, "ds-synthetic").Scan(&originalConfig).Error)
++	changedConfig := syntheticNextcloudEventDataSourceConfig(t, "https://different.example.test", true)
++	require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`, string(changedConfig), "ds-synthetic").Error)
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID,
++		pairedBatch("2", "3"), strings.Repeat("5", 32)))
++	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
++	require.NoError(t, db.Exec(`UPDATE data_sources SET config = ? WHERE id = ?`, originalConfig, "ds-synthetic").Error)
++	batch = pairedBatch("2", "3")
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("d", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++
++	rotated = managedConnectionRequest(router, http.MethodPost, testManagedEventPath+"/rotate", 7, types.TenantRoleAdmin)
++	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
++	third := issuedEventCredential(t, rotated)
++	require.Equal(t, first.ConnectionID, third.ConnectionID)
++	batch = pairedBatch("3", "4")
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, strings.Repeat("e", 32)))
++	require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("f", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++	batch = pairedBatch("4", "5")
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, third.Secret, third.KeyID, batch, strings.Repeat("1", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
++
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_connections
++		SET previous_valid_until = ? WHERE connection_id = ?`,
++		time.Now().UTC().Add(-time.Minute), first.ConnectionID).Error)
++	batch = pairedBatch("5", "6")
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("2", 32)))
++	require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, third.Secret, third.KeyID, batch, strings.Repeat("3", 32)))
 +	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
 +
 +	revoked := managedConnectionRequest(router, http.MethodDelete, testManagedEventPath, 7, types.TenantRoleAdmin)
 +	require.Equal(t, http.StatusNoContent, revoked.Code, revoked.Body.String())
-+	batch = sampleNextcloudEventBatch("2", "3")
-+	batch.ConnectionID = first.ConnectionID
-+	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("d", 32)))
++	batch = pairedBatch("6", "7")
++	response = postNextcloudEvent(router, signedNextcloudEventRequestWithKey(t, third.Secret, third.KeyID, batch, strings.Repeat("4", 32)))
 +	require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
 +	newPair := managedConnectionRequest(router, http.MethodPost, testManagedEventPath, 7, types.TenantRoleAdmin)
 +	require.Equal(t, http.StatusCreated, newPair.Code, newPair.Body.String())
@@ -31892,6 +32426,114 @@ index 00000000..12f34877
 +			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 +		})
 +	}
++}
+diff --git a/internal/handler/nextcloud_event_rotation_grace_test.go b/internal/handler/nextcloud_event_rotation_grace_test.go
+new file mode 100644
+index 00000000..8ae80fed
+--- /dev/null
++++ b/internal/handler/nextcloud_event_rotation_grace_test.go
+@@ -0,0 +1,102 @@
++package handler
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestNextcloudEventRotationGraceStatusAndFileStatus(t *testing.T) {
++	db, router, oldSecret := setupNextcloudDispatchTest(t, false)
++	repo := repository.NewNextcloudEventInboxRepository(db)
++	handler := NewNextcloudEventHandler(repo)
++	router.GET(nextcloudEventStatusPath, handler.Status)
++	router.GET(nextcloudFileStatusPath, handler.FileStatus)
++	require.NoError(t, db.Exec(`ALTER TABLE knowledge_bases
++		ADD COLUMN ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT FALSE`).Error)
++	require.NoError(t, db.Exec(`UPDATE knowledge_bases SET ever_had_nextcloud_source = TRUE`).Error)
++	var source types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds-synthetic").Take(&source).Error)
++	baseURL, configSHA, bindingID, err := repository.NextcloudEventDataSourceIdentity(source.Config)
++	require.NoError(t, err)
++	identity := repository.NextcloudEventPairingIdentity{
++		TenantID: 7, KnowledgeBaseID: "kb-synthetic", DatasourceID: "ds-synthetic",
++		NextcloudInstanceID: testEventInstance, BindingID: bindingID,
++		DatasourceBaseURL: baseURL, DatasourceConfigSHA: configSHA,
++	}
++	signedGET := func(path, query, keyID, secret, nonce string,
++		canonical func(string, string, string, string, string) []byte) *http.Request {
++		timestamp := strconv.FormatInt(time.Now().UTC().Unix(), 10)
++		request := httptest.NewRequest(http.MethodGet, path+"?"+query, nil)
++		request.Header.Set("X-Nextcloud-Connection-Id", testEventConnection)
++		request.Header.Set("X-Nextcloud-Key-Id", keyID)
++		request.Header.Set("X-Nextcloud-Timestamp", timestamp)
++		request.Header.Set("X-Nextcloud-Nonce", nonce)
++		mac := hmac.New(sha256.New, []byte(secret))
++		_, _ = mac.Write(canonical(query, timestamp, nonce, testEventConnection, keyID))
++		request.Header.Set("X-Nextcloud-Signature", hex.EncodeToString(mac.Sum(nil)))
++		return request
++	}
++	statusRequest := func(keyID, secret, nonce string) *http.Request {
++		return signedGET(nextcloudEventStatusPath, "connection_id="+testEventConnection,
++			keyID, secret, nonce, nextcloudEventStatusCanonicalRequest)
++	}
++	fileRequest := func(keyID, secret, nonce string) *http.Request {
++		return signedGET(nextcloudFileStatusPath,
++			"connection_id="+testEventConnection+"&file_id=77&source_etag=etag-77",
++			keyID, secret, nonce, nextcloudFileStatusCanonicalRequest)
++	}
++	read := func(request *http.Request) *httptest.ResponseRecorder {
++		recorder := httptest.NewRecorder()
++		router.ServeHTTP(recorder, request)
++		return recorder
++	}
++	priorNonce := strings.Repeat("a", 32)
++	require.Equal(t, http.StatusOK, read(statusRequest("current", oldSecret, priorNonce)).Code)
++	replacement, err := repo.Rotate(context.Background(), identity)
++	require.NoError(t, err)
++	require.Equal(t, testEventConnection, replacement.ConnectionID)
++	require.Equal(t, http.StatusUnauthorized, read(statusRequest("current", oldSecret, priorNonce)).Code,
++		"rotation must retain the shared replay nonce table")
++	require.Equal(t, http.StatusOK, read(statusRequest("current", oldSecret, strings.Repeat("b", 32))).Code)
++	require.Equal(t, http.StatusOK, read(statusRequest(replacement.KeyID, replacement.Secret, strings.Repeat("c", 32))).Code)
++	oldFileNonce := strings.Repeat("d", 32)
++	oldFileRequest := fileRequest("current", oldSecret, oldFileNonce)
++	oldFileResponse := read(oldFileRequest)
++	require.Equal(t, http.StatusOK, oldFileResponse.Code, oldFileResponse.Body.String())
++	bodyHash := sha256.Sum256(oldFileResponse.Body.Bytes())
++	responseCanonical := "weknora-file-status-hmac-sha256-v1\n" +
++		oldFileRequest.Header.Get("X-Nextcloud-Signature") + "\n" +
++		hex.EncodeToString(bodyHash[:]) + "\n" + testEventConnection + "\ncurrent\n" + oldFileNonce
++	mac := hmac.New(sha256.New, []byte(oldSecret))
++	_, _ = mac.Write([]byte(responseCanonical))
++	require.Equal(t, hex.EncodeToString(mac.Sum(nil)), oldFileResponse.Header().Get("X-WeKnora-Status-Signature"))
++	require.Equal(t, http.StatusOK, read(fileRequest(replacement.KeyID, replacement.Secret, strings.Repeat("e", 32))).Code)
++
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_connections
++		SET previous_valid_until = ? WHERE connection_id = ?`,
++		time.Now().UTC().Add(-time.Second), testEventConnection).Error)
++	require.Equal(t, http.StatusUnauthorized, read(statusRequest("current", oldSecret, strings.Repeat("f", 32))).Code)
++	require.Equal(t, http.StatusUnauthorized, read(fileRequest("current", oldSecret, strings.Repeat("1", 32))).Code)
++	require.Equal(t, http.StatusOK, read(statusRequest(replacement.KeyID, replacement.Secret, strings.Repeat("2", 32))).Code)
++	require.Equal(t, http.StatusOK, read(fileRequest(replacement.KeyID, replacement.Secret, strings.Repeat("3", 32))).Code)
++	require.NoError(t, repo.Revoke(context.Background(), 7, "ds-synthetic"))
++	require.Equal(t, http.StatusUnauthorized, read(statusRequest(replacement.KeyID, replacement.Secret, strings.Repeat("4", 32))).Code)
++	require.Equal(t, http.StatusUnauthorized, read(fileRequest(replacement.KeyID, replacement.Secret, strings.Repeat("5", 32))).Code)
++	var previousCount int64
++	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM nextcloud_event_connections
++		WHERE connection_id = ? AND previous_key_id IS NOT NULL`, testEventConnection).
++		Scan(&previousCount).Error)
++	require.Zero(t, previousCount)
 +}
 diff --git a/internal/handler/nextcloud_event_status.go b/internal/handler/nextcloud_event_status.go
 new file mode 100644
