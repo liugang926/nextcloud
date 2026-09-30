@@ -5506,10 +5506,10 @@ index 00000000..df4a49bc
 +}
 diff --git a/internal/application/repository/nextcloud_candidate_retry_jobs.go b/internal/application/repository/nextcloud_candidate_retry_jobs.go
 new file mode 100644
-index 00000000..0762ae33
+index 00000000..9c98a142
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_candidate_retry_jobs.go
-@@ -0,0 +1,622 @@
+@@ -0,0 +1,626 @@
 +package repository
 +
 +import (
@@ -5521,6 +5521,7 @@ index 00000000..0762ae33
 +	"strconv"
 +	"strings"
 +	"time"
++	"unicode/utf8"
 +
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/google/uuid"
@@ -5609,17 +5610,17 @@ index 00000000..0762ae33
 +		return nil, "", ErrNextcloudSourcePairingConflict
 +	}
 +	prefix := "nextcloud:" + pair.InstanceID + ":"
-+	after := prefix
++	after := ""
 +	if cursor != "" {
 +		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
-+		if err != nil || len(decoded) > 256 || !strings.HasPrefix(string(decoded), prefix) ||
-+			string(decoded) >= prefix+"~" {
++		if err != nil || len(decoded) > 256 || !utf8.Valid(decoded) ||
++			!strings.HasPrefix(string(decoded), prefix) || len(decoded) <= len(prefix) {
 +			return nil, "", ErrNextcloudSourcePairingConflict
 +		}
 +		after = string(decoded)
 +	}
 +	var rows []nextcloudFailedCandidateListRow
-+	err := r.db.WithContext(ctx).Table("nextcloud_source_versions AS v").
++	query := r.db.WithContext(ctx).Table("nextcloud_source_versions AS v").
 +		Select(`v.external_id, v.desired_etag, v.candidate_knowledge_id,
 +			j.desired_etag AS job_desired_etag, j.failed_candidate_id AS job_candidate_id,
 +			j.state AS job_state, j.attempt_count AS job_attempt_count,
@@ -5635,11 +5636,14 @@ index 00000000..0762ae33
 +		Joins(`LEFT JOIN nextcloud_candidate_retry_jobs AS j ON j.tenant_id = v.tenant_id AND
 +			j.knowledge_base_id = v.knowledge_base_id AND j.datasource_id = v.datasource_id AND j.external_id = v.external_id`).
 +		Where(`v.tenant_id = ? AND v.knowledge_base_id = ? AND v.datasource_id = ? AND
-+			v.state = 'staging' AND v.external_id > ? AND v.external_id < ? AND
++			v.state = 'staging' AND SUBSTR(v.external_id, 1, ?) = ? AND
 +			k.channel = ? AND k.parse_status = ? AND k.deleted_at IS NULL`,
-+			pair.TenantID, pair.KnowledgeBaseID, pair.DataSourceID, after, prefix+"~",
-+			types.ConnectorTypeNextcloud, types.ParseStatusFailed).
-+		Order("v.external_id ASC").Limit(limit + 1).Scan(&rows).Error
++			pair.TenantID, pair.KnowledgeBaseID, pair.DataSourceID, utf8.RuneCountInString(prefix), prefix,
++			types.ConnectorTypeNextcloud, types.ParseStatusFailed)
++	if after != "" {
++		query = query.Where("v.external_id > ?", after)
++	}
++	err := query.Order("v.external_id ASC").Limit(limit + 1).Scan(&rows).Error
 +	if err != nil {
 +		return nil, "", err
 +	}
@@ -9518,12 +9522,58 @@ index 00000000..324cfb32
 +	})
 +	return status, err
 +}
+diff --git a/internal/application/repository/nextcloud_failed_candidates_pg_test.go b/internal/application/repository/nextcloud_failed_candidates_pg_test.go
+new file mode 100644
+index 00000000..f8986cdb
+--- /dev/null
++++ b/internal/application/repository/nextcloud_failed_candidates_pg_test.go
+@@ -0,0 +1,40 @@
++package repository
++
++import (
++	"context"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// The real stack can use a locale collation where '~' sorts before digits.
++// This test must run against PostgreSQL rather than SQLite's BINARY collation.
++func TestPostgresNextcloudFailedCandidateListUnderLocaleCollation(t *testing.T) {
++	knowledge, db := nextcloudVersionPGTestRepo(t)
++	require.NoError(t, db.AutoMigrate(&nextcloudCandidateRetryJob{}))
++	var oldUpperBoundIncludesFile bool
++	err := db.Raw(`SELECT 'nextcloud:instance:77' < 'nextcloud:instance:~' COLLATE "en-x-icu"`).
++		Scan(&oldUpperBoundIncludesFile).Error
++	if err != nil {
++		t.Skip("PostgreSQL en-x-icu collation is unavailable")
++	}
++	require.False(t, oldUpperBoundIncludesFile,
++		"this collation must reproduce the old upper-bound defect")
++	require.NoError(t, db.Exec(`ALTER TABLE nextcloud_source_versions
++		ALTER COLUMN external_id TYPE text COLLATE "en-x-icu"`).Error)
++	candidate := insertNextcloudVersionTestKnowledge(t, db, "failed-77", "",
++		types.ParseStatusPending, "disabled")
++	require.NoError(t, knowledge.StageNextcloudVersion(context.Background(), 7, "kb", "ds",
++		"nextcloud:instance:77", "etag-77", candidate.ID))
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", candidate.ID).
++		Update("parse_status", types.ParseStatusFailed).Error)
++	var pair NextcloudSourcePairing
++	require.NoError(t, db.Where("datasource_id = ?", "ds").Take(&pair).Error)
++	items, next, err := NewNextcloudSourcePairingRepository(db).
++		ListFailedCandidates(context.Background(), pair, 25, "")
++	require.NoError(t, err)
++	require.Empty(t, next)
++	require.Len(t, items, 1)
++	require.Equal(t, "77", items[0].FileID)
++}
 diff --git a/internal/application/repository/nextcloud_failed_candidates_test.go b/internal/application/repository/nextcloud_failed_candidates_test.go
 new file mode 100644
-index 00000000..b488288f
+index 00000000..bb469db7
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_failed_candidates_test.go
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,138 @@
 +package repository
 +
 +import (
@@ -9573,6 +9623,14 @@ index 00000000..b488288f
 +	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 8, KnowledgeBaseID: "kb",
 +		DataSourceID: "alien-ds", ExternalID: "nextcloud:instance:55", DesiredETag: "alien",
 +		CandidateKnowledgeID: "alien-candidate", State: "staging"}).Error)
++	// A malformed row may be the final raw row in a page. Its opaque cursor
++	// must still reach later valid files without exposing the malformed ID.
++	require.NoError(t, db.Create(&types.Knowledge{ID: "malformed-candidate", TenantID: 7,
++		KnowledgeBaseID: "kb", Channel: types.ConnectorTypeNextcloud,
++		ParseStatus: types.ParseStatusFailed}).Error)
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "ds", ExternalID: "nextcloud:instance:77x", DesiredETag: "bad",
++		CandidateKnowledgeID: "malformed-candidate", State: "staging"}).Error)
 +
 +	repo := NewNextcloudSourcePairingRepository(db)
 +	pair, _, err := repo.ActiveSourcePairingForDataSource(ctx, 7, "ds")
@@ -9581,18 +9639,25 @@ index 00000000..b488288f
 +	require.ErrorIs(t, err, ErrNextcloudSourcePairingMissing)
 +	var files []string
 +	cursor := ""
++	sawEmptyPageWithCursor := false
 +	for {
 +		page, next, err := repo.ListFailedCandidates(ctx, pair, 1, cursor)
 +		require.NoError(t, err)
-+		require.Len(t, page, 1)
-+		files = append(files, page[0].FileID)
-+		require.Equal(t, "parse_failed", page[0].LastErrorCode)
++		require.LessOrEqual(t, len(page), 1)
++		if len(page) == 0 && next != "" {
++			sawEmptyPageWithCursor = true
++		}
++		for _, item := range page {
++			files = append(files, item.FileID)
++			require.Equal(t, "parse_failed", item.LastErrorCode)
++		}
 +		if next == "" {
 +			break
 +		}
 +		cursor = next
 +	}
 +	require.Equal(t, []string{"77", "88", "99"}, files)
++	require.True(t, sawEmptyPageWithCursor)
 +	_, _, err = repo.ListFailedCandidates(ctx, pair, 51, "")
 +	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
 +	_, _, err = repo.ListFailedCandidates(ctx, pair, 1, "not-a-cursor")

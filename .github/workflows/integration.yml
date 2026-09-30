@@ -151,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '98a04cc7268a277c5d6654f7708d67301c4fd565a17d05f72595177bb6da9bc6  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '1d60b7db90ae67aefcf7f19f77f11291918dfd071a07fb58b87bdc5bac8bc78e  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -191,7 +191,7 @@ jobs:
         working-directory: weknora/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 
@@ -215,7 +215,7 @@ jobs:
           WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
           WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
         run: |
-          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone)' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
   weknora-rag-patch:
@@ -243,15 +243,15 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           repository: liugang926/WeKnora_ldapsa
-          ref: b8a34e0bae8fcf0d3c8273bba2e56414abed41e2
+          ref: 808ebc25773d32670674deb5bf31eb7fa07124e0
           path: weknora-rag
           persist-credentials: false
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'a75c670845b65c56428f5a06f4027161938ab015f61dcf5666081f3d10a61aef  nextcloud/integration/weknora-rag-b8a34e0b.patch' | sha256sum --check --
-          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-b8a34e0b.patch
-          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-b8a34e0b.patch
+          echo '2883e0d64518c3bb0da04d74136545677dbfc29f71d907d41065bc80e87901d5  nextcloud/integration/weknora-rag-808ebc25.patch' | sha256sum --check --
+          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-808ebc25.patch
+          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-808ebc25.patch
           git -C weknora-rag diff --check
 
       - uses: actions/setup-go@v7.0.0
@@ -281,7 +281,7 @@ jobs:
           WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
           WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
         run: |
-          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone)' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
       - uses: actions/setup-node@v4
@@ -294,7 +294,7 @@ jobs:
         working-directory: weknora-rag/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 

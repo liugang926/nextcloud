@@ -419,8 +419,12 @@ python3 scripts/ops/isolated-failed-candidate-retry-smoke.py \
   --weknora-image weknora-ldap-app:YOUR_CANDIDATE_TAG --phase full
 ```
 
-Full mode observes the exact failed candidate through the administrator retry
-status endpoint without requesting a manual retry. It verifies that the old
+Full mode observes the exact failed candidate through the administrator
+failed-candidate list and exact-file retry status endpoints without requesting
+a manual retry. The list check requires one current file, bounded static
+status fields, the active pairing operation ID, and HTTP 403 for ordinary
+Alice/Bob accounts. After publication, the file must disappear from the list.
+It verifies that the old
 file target and direct document access are denied, then waits up to 15 minutes
 for a different V2 candidate to publish automatically. It checks the current
 ETag, one visible copy, ready chunks and embeddings, an exact-file persisted
