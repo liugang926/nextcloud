@@ -2,9 +2,9 @@
 
 `integration/weknora.patch` remains the reproducible patch for WeKnora commit
 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` used by the fixed-baseline
-Docker integration build. `integration/weknora-rag-65ebc4d6.patch` is a complete,
+Docker integration build. `integration/weknora-rag-77c97fd7.patch` is a complete,
 separate patch for the RAG branch at commit
-`65ebc4d6f9314c3e1374253cf58324764b319327`. Apply **one** patch to its
+`77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
 `1d60b7db90ae67aefcf7f19f77f11291918dfd071a07fb58b87bdc5bac8bc78e`.
@@ -12,8 +12,8 @@ The fixed-baseline patch SHA-256 is
 From a clean WeKnora worktree at that exact RAG commit:
 
 ```sh
-git apply --check /path/to/nextcloud/integration/weknora-rag-65ebc4d6.patch
-git apply /path/to/nextcloud/integration/weknora-rag-65ebc4d6.patch
+git apply --check /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
+git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
@@ -48,11 +48,11 @@ recovery path linked into the backend. There is no local-image overlay path.
 To build a candidate without replacing the tags used by the shared stack:
 
 ```sh
-WEKNORA_RAG_TAG_SUFFIX=nextcloud-rag-65-anydoc ./scripts/build-weknora-rag.sh
+WEKNORA_RAG_TAG_SUFFIX=nextcloud-rag-77-anydoc ./scripts/build-weknora-rag.sh
 ```
 
-This creates `weknora-ldap-app:nextcloud-rag-65-anydoc` and
-`weknora-ldap-ui:nextcloud-rag-65-anydoc`. The build downloads browser-skill,
+This creates `weknora-ldap-app:nextcloud-rag-77-anydoc` and
+`weknora-ldap-ui:nextcloud-rag-77-anydoc`. The build downloads browser-skill,
 Rust, DuckDB and other dependencies and requires substantial time, disk and
 network access. Some upstream Dockerfile dependencies float, so this is a
 development build rather than a bit-for-bit reproducible production image.

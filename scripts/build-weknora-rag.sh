@@ -4,8 +4,8 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_dir="$(cd "$project_dir/.." && pwd)"
 source_dir="$workspace_dir/WeKnora-ldap-ad"
-patch_file="$project_dir/integration/weknora-rag-65ebc4d6.patch"
-base_commit="65ebc4d6f9314c3e1374253cf58324764b319327"
+patch_file="$project_dir/integration/weknora-rag-77c97fd7.patch"
+base_commit="77c97fd72f26e84435503d24eeed88cb5dfe1f01"
 expected_patch_sha="2883e0d64518c3bb0da04d74136545677dbfc29f71d907d41065bc80e87901d5"
 
 # An alternate suffix lets an operator verify a candidate without replacing
