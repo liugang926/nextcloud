@@ -111,7 +111,7 @@ jobs:
 
   weknora-patch:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
@@ -119,6 +119,17 @@ jobs:
           POSTGRES_PASSWORD: nextcloud-event-test-only
         ports:
           - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      pgvector:
+        image: paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2
+        env:
+          POSTGRES_PASSWORD: nextcloud-vector-test-only
+        ports:
+          - 5433:5432
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -140,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '2dbf99007f9d218d5d46279194821894621add2125c7fb79a6378b9bacab86f0  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo 'bb9f53e276fdd78a37e04267d233c609ba625a5c2eaafeeed7d07dad2879cb11  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -198,9 +209,30 @@ jobs:
             -run '^Test(PostgresNextcloud|NextcloudSourcePairingPostgres)' -count=1
           go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
 
+      - name: Verify pgvector retirement races and exact-ID receipts
+        working-directory: weknora
+        env:
+          WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+        run: |
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone)' -count=1
+          go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
+
   weknora-rag-patch:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
+    services:
+      pgvector:
+        image: paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2
+        env:
+          POSTGRES_PASSWORD: nextcloud-vector-test-only
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - name: Check out integration repository
         uses: actions/checkout@v7.0.1
@@ -217,7 +249,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03  nextcloud/integration/weknora-rag-e5cc3e44.patch' | sha256sum --check --
+          echo 'dd8217c84deba1d546accd15faed8e42bfbf54f1247680f871a086f0d3d76053  nextcloud/integration/weknora-rag-e5cc3e44.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-e5cc3e44.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-e5cc3e44.patch
           git -C weknora-rag diff --check
@@ -239,6 +271,15 @@ jobs:
             ./internal/handler \
             ./internal/router \
             ./internal/mcpserver
+
+      - name: Verify pgvector retirement races and exact-ID receipts
+        working-directory: weknora-rag
+        env:
+          WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+        run: |
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone)' -count=1
+          go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
       - uses: actions/setup-node@v4
         with:
@@ -281,3 +322,6 @@ jobs:
 
       - name: Verify historical binding tombstones on direct upgrade
         run: python3 scripts/ops/direct-upgrade-tombstone-smoke.py
+
+      - name: Recover from an isolated failed app upgrade
+        run: python3 scripts/ops/isolated-upgrade-failure-recovery.py

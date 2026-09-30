@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`2dbf99007f9d218d5d46279194821894621add2125c7fb79a6378b9bacab86f0`.
+`bb9f53e276fdd78a37e04267d233c609ba625a5c2eaafeeed7d07dad2879cb11`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-e5cc3e44.patch
 ```
 
 The RAG patch SHA-256 is
-`ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03`.
+`dd8217c84deba1d546accd15faed8e42bfbf54f1247680f871a086f0d3d76053`.
 The build script and CI reject a different patch hash. On 2026-09-30 both
 baseline patches applied cleanly to fresh source archives.
 Focused Docker Go tests passed for source publication, direct and RAG search
@@ -25,6 +25,11 @@ authorization, HTTP read leases, worker build admission, MCP denial, and the
 file-scoped question target. The fixed and RAG service and handler suites
 passed. The RAG frontend typecheck, citation/export tests and production build
 passed before the final authorization delta; CI rebuilds the final patch.
+Both patched baselines also passed disposable pgvector PostgreSQL tests for
+BatchSave versus source retirement, stale Publish after a new Stage, Stage
+versus Tombstone, queued parser admission before Stage, crash/retry of exact
+vector-ID receipts, and exact claimed deletion with retrieval checks. These
+checks do not enable global derived GC.
 
 For the existing local `weknora-ldap-local` stack, run:
 

@@ -38,6 +38,34 @@ points returned HTTP 200. A fresh disposable Nextcloud stack installed that
 archive, created migrations and returned authenticated DAV 207; it was cleaned
 afterward.
 
+Another isolated install used the packaged 0.4.29 app to verify an actual
+WebDAV file across app disable, re-enable and Nextcloud restart. The test
+read and overwrote the same file while the integration app was disabled,
+then read the new exact bytes after restart. Its private app configuration
+also survived the lifecycle. The disposable containers, volumes and network
+were removed; this establishes local core Files availability through those
+app operations, not behavior during an enterprise deployment.
+
+A separate disposable `0.4.6` to `0.4.29` Nextcloud upgrade-recovery drill
+failed deliberately in the final app migration (`occ upgrade` exit 5), after
+the late migration table existed while maintenance mode remained on. Its cold,
+matched PostgreSQL and HTML checkpoint restored the original instance ID,
+file ID and exact WebDAV bytes,
+binding configuration, publication-state row, enabled `0.4.6` app and live
+administrator binding route. The database and file were both changed after
+the checkpoint before restoring, proving the restored state replaced those
+changes. The successful run used project `nc-upgrade-recovery-8dcc3a45` and
+confirmed its containers, volumes and network were removed. Its checkpoint
+archive SHA-256 values were
+`62259c6fc67a98fde048f3ce6c3d37c3c41ee115c769a2a2186dad24c95fe8e5`
+(PostgreSQL) and
+`ef390b54cabb2012eae8e23d54f7f8537552c94307258084a72c7e948fd1aec5`
+(HTML); the recovered file SHA-256 was
+`366f8cde9b04c3fd66cd6004d0cd95836bb5dd3d6f63c1a41b112e3afc9bc55b`.
+This is an isolated same-image rollback exercise, not cross-service recovery,
+queued-event replay, a production migration rollback or an RPO/RTO result.
+See [the runbook](isolated-nextcloud-upgrade-recovery.md).
+
 The shared development stack's three configured binding roots were later found
 in the Nextcloud trashbin, making administrator diagnostics report unavailable
 roots. Before recovery, the Nextcloud database and its config/data volume were
@@ -274,18 +302,41 @@ see [pilot load runbook](../scripts/ops/PILOT-load.md).
 The acceptance scripts now require a fresh, attribute-limited LDAP topology
 export before claiming a synthetic primary-group or nested-group case. A
 separate loopback-only probe checks GUID/UID mapping conflicts, and a watcher
-holds the original JWTs across a synthetic group-revocation drill. Their 15
+holds the original JWTs across a synthetic group-revocation drill. Their 16
 offline contracts and five WeKnora OpenLDAP network tests passed. A fresh,
 disposable dual-service stack then passed the six-field nested-only group
 HTTP matrix: Alice had file/source/knowledge/search access through
 Alice→Platform→Engineering, while Bob could log in but was denied all four
 content checks. Its one synthetic file had a ready chunk and embedding. The
-primary-only case failed across services: WeKnora recognized Alice's
+earlier primary-only case failed across services: WeKnora recognized Alice's
 `primaryGroupID` membership, but Nextcloud `user_ldap` omitted Alice from
-Engineering and denied her file. The LDAP-backed Team-folder and enterprise
-AD matrices remain open; see [the disposable fixture](synthetic-ldap-compose.md).
+Engineering because raw OpenLDAP did not match its textual SID lookup against
+binary `objectSid`. A later fresh, loopback-only fixture added a narrow
+OpenLDAP frontend rule that converts only the generated Engineering SID
+assertion to binary. Neither application received an extra LDAP member edge.
+The six-field primary-group matrix then passed with Alice's sole Engineering
+grant through `primaryGroupID=2000` and Bob denied. After Alice's primary group
+changed to Domain Users, her original WeKnora JWT lost direct knowledge and
+search access by 08:03:18 UTC; separate DAV and signed-source checks also
+denied her. WeKnora's directory membership, Nextcloud's group view and a
+fresh topology/login matrix confirmed the removal by 08:03:20 UTC. This is a
+synthetic AD-like query simulation; real AD primary groups and LDAP-backed
+Team-folder ACLs remain unverified. See [the disposable fixture](synthetic-ldap-compose.md).
 
 ## Consistency and release boundary
+
+The pinned fixed and RAG WeKnora patches now fence PostgreSQL pgvector
+`Save` and `BatchSave` with the current Nextcloud build lease and source
+candidate in the same transaction as each embedding write. A candidate's
+early parse task waits for its committed Stage record before it enters the
+handler; a retired fence or absent Stage fails closed. Two-connection
+PostgreSQL tests cover write versus retirement, Stage versus Tombstone,
+stale Publish, late exact-ID GC inventory, a failed transaction and a Lite
+worker that starts before Stage. Both patches apply to their pinned source
+commits and passed the focused repository, pgvector and router suites.
+The exact-vector delete helper remains dormant and the `derived_index` GC
+blocker remains active because external writers and all readers are not yet
+covered. See [the lease gate](nextcloud-derived-gc-read-lease.md).
 
 The first manifest page scans the bound tree and stores a sorted list for ten minutes. Later pages read that list and reject a changed source or publication revision. A 207-file smoke covered pagination, a concurrent write and conditional content reads. This is not a transactional source snapshot; a change during traversal can invalidate a page, and large lists still need performance testing. The connector treats events as hints, recovers an expired cursor by full reconciliation and confirms absence twice. It cannot substitute for a durable publication state machine or a tested backup/recovery protocol.
 

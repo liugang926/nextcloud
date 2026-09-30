@@ -5,7 +5,7 @@ disabled until every listed read and build path uses the durable fence.
 
 ## Decision
 
-Do not merge or enable the experimental exact-ID local derived-row deletion patch yet. The prototype proves exact local row ownership, leased retry and atomic database receipts, but the PRD §7.4 also requires **no active build or read lease** before deleting retired chunks/indexes. The repository now has a durable lease and fence foundation with partial read and worker coverage, but it does not cover every Nextcloud path or external write. A terminal `parse_status`, `pending_subtasks_count = 0`, and a one-hour delay do not prove this condition. The `derived_index` blocker prevents a false completed job, but does not make premature local-row deletion safe.
+Do not enable general derived-row deletion. The patches contain a dormant, backend-specific PostgreSQL exact-vector-ID delete helper with claim validation and an atomic item receipt; the collector does not call it. The broader experimental local deletion prototype remains unmerged. PRD §7.4 requires **no active build or read lease** before deleting retired chunks/indexes. The repository has a durable lease and fence foundation with partial read and worker coverage, but it does not cover every Nextcloud path or external write. A terminal `parse_status`, `pending_subtasks_count = 0`, and a one-hour delay do not prove this condition. The `derived_index` blocker still prevents a false completed job.
 
 ## Read paths that need coverage
 
@@ -35,8 +35,20 @@ Queued tasks must acquire a lease at worker start, before reading or writing. Re
 
 Selected Asynq/Lite document workers now acquire and renew build leases, and
 chunk, knowledge and source-version SQL writes validate the lease inside their
-transaction. External vector, graph, object and Wiki writes remain outside
-this fence. No coverage activation marker is written, so GC stays denied.
+transaction. PostgreSQL pgvector `Save`/`BatchSave` now verify the exact build
+lease and current source-version candidate in the same transaction as their
+embedding write. If a GC job already exists, that transaction also inventories
+the actual embedding primary keys as `postgres_embedding` items; a failed
+receipt rolls back the vector write. Stage, publish and tombstone serialize
+with this writer on the KB and exact fences. A newly queued parser waits under
+its exact build lease until the matching source-version Stage commits before
+entering the handler; an absent Stage times out and a retired fence rejects
+immediately. The pinned fixed and RAG patches passed two-connection
+write/retirement, early-worker admission, stale-publication, tombstone-order,
+backend-disconnect/retry, and exact-delete/retrieval tests in a disposable
+pgvector PostgreSQL. External vector providers, graph, object and Wiki writes
+remain outside this fence. No coverage activation marker is written, so global
+derived GC stays denied.
 
 ## Proposed durable protocol
 
