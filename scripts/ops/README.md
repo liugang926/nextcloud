@@ -19,6 +19,14 @@ loopback, and removes only its uniquely named Compose project and volumes in
 development database. This is a clean-install check; rollback and coordinated
 application restore need separate acceptance.
 
+## Isolated failed-upgrade recovery
+
+Run `python3 scripts/ops/isolated-upgrade-failure-recovery.py` to exercise a
+deliberately failed `0.4.6` to current-app migration, then restore a matched
+cold PostgreSQL and Nextcloud HTML checkpoint into fresh disposable volumes.
+The [runbook](../../docs/isolated-nextcloud-upgrade-recovery.md) lists the
+ownership checks, WebDAV and plugin-state assertions, and recovery limits.
+
 The [two-account AD acceptance guide](AD-acceptance.md) defines the separate
 operator-run permission matrix for isolated test accounts and synthetic files.
 Its read-only probe has offline contract tests; no real AD acceptance has been
