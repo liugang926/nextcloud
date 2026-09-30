@@ -5,8 +5,8 @@ services:
       default:
       nextcloud-dev:
     environment:
-      # Exact hosts on the isolated local Docker network. This is test-only.
-      SSRF_WHITELIST_EXTRA: nextcloud,mock-embedding
+      # Preserve the base stack's local model host while adding isolated Nextcloud hosts.
+      SSRF_WHITELIST_EXTRA: host.docker.internal,nextcloud,mock-embedding,api.deepseek.com
 
 networks:
   nextcloud-dev:

@@ -19,7 +19,7 @@ Redis task queue or prove that a file is indexed, published, or readable.
 
 ## 2026-09-30 integration update
 
-Nextcloud app 0.4.28 was packaged as a runtime archive and upgraded in the
+Nextcloud app 0.4.29 was packaged as a runtime archive and upgraded in the
 shared local Docker stack. Its LAN listener is `http://10.106.105.128:18082`;
 `scripts/allow-lan-access.sh` sets the browser origin used for original-file
 citations. The Files sidebar shows a question handoff only for a readable,
@@ -29,6 +29,26 @@ knowledge-base, group, source and ETag checks. The manifest keeps separate
 machine content and browser Files URLs. Existing indexed files need reindexing
 to acquire the latter citation metadata. A URL contract checks IPv4, bracketed
 IPv6 and reverse-proxy path handling for original-file links.
+
+The 0.4.29 runtime archive has SHA-256
+`54f2de890d784b8f0296948209e8f9dfff0864be5b7fed2b199bb2e908947b5e`
+and 73 verified runtime files. `occ upgrade` completed on the shared stack;
+the installed app reports 0.4.29, maintenance mode is off, and both LAN entry
+points returned HTTP 200. A fresh disposable Nextcloud stack installed that
+archive, created migrations and returned authenticated DAV 207; it was cleaned
+afterward.
+
+The shared development stack's three configured binding roots were later found
+in the Nextcloud trashbin, making administrator diagnostics report unavailable
+roots. Before recovery, the Nextcloud database and its config/data volume were
+archived under ignored `dist/backups/` with mode `0600` and verified SHA-256
+digests. Restoring only those three exact trash items preserved file IDs 76,
+6718 and 6720. Diagnostics then reported all binding roots available; the
+`dev-published` signed manifest and its file 77 content returned HTTP 200.
+The shared WeKnora source records still include a paused historical pair and
+another missing data source, so this repair does not establish a fresh
+cross-system sync or user question flow. Disposable paired fixtures provide
+the isolated integration evidence below.
 
 A fresh disposable direct-group OpenLDAP fixture paired and indexed one
 synthetic file, then exercised the Files question link as a mapped user.
@@ -42,6 +62,70 @@ These are HTTP/API and synthetic-LDAP observations, not a browser-click test,
 real-model quality assessment, enterprise AD permission matrix or revocation
 SLA. The [fixture record](synthetic-ldap-compose.md) has the exact checks.
 
+A separate fresh fixture removed only the Nextcloud Engineering folder share
+after first recording an authorized answer and original-file citation. Alice
+remained in the LDAP Engineering group and WeKnora's Engineering knowledge-base
+grant remained active. Her pre-revocation JWT was then denied by Nextcloud
+DAV/source authorization and by WeKnora's ask target, direct content, preview,
+both search scopes and history display. The first synthetic poll observed the
+denials about three seconds after share removal. This isolates the source-side
+permission boundary; it is not a production Team Folder ACL or revocation SLA.
+
+A further disposable fixture installed pinned groupfolders 22.0.6 on
+Nextcloud 34.0.4 and paired a genuine Team Folder root. Alice and the owner
+initially resolved the same file ID; Bob was denied. An advanced `-read` ACL
+on only Alice's `acl-note.txt` then denied her original DAV file, signed source
+authorization, Files status, ask target, direct content, searches and earlier
+answer/citation through the old JWT. The first poll observed the denials about
+four seconds after the ACL mutation. Her LDAP group membership, Team Folder
+root access and WeKnora Engineering KB grant remained in place; the owner
+still read the same original file. This covers one isolated real groupfolders
+ACL path, not enterprise AD, production ACL configuration or an SLA.
+
+Source-side diagnostics now separate retained hints awaiting a durable receipt
+from those already received but still above the last verified applied watermark.
+The admin page shows both counts and oldest hint ages. A fresh, successful
+signed applied-status check plus a received-but-unapplied hint created at least
+five minutes ago produces a redacted `application_overdue` warning. The age is
+measured from hint creation, not receipt, and the counter does not prove an
+individual file is parsed or ready. The PHP alert contract and the shared-stack
+HTTP smoke passed, including anonymous, machine-token, administrator and
+ordinary-user access checks. CI additionally exercises the delivery watermark
+transitions and their diagnostics fields.
+
+A separate disposable dual-service restore drill stopped both apps, created
+PostgreSQL logical dumps and cold physical PostgreSQL/file-volume archives,
+and checked their hashes. After the live file was deleted and two full scans
+tombstoned it, the drill restored the older checkpoint while app ingress
+remained stopped. It verified the original Nextcloud instance ID, pair
+operation, root/file IDs and source ETag, then replayed the persisted
+post-checkpoint deletion journal on Nextcloud before starting WeKnora. The
+same old JWT still authenticated Alice but could not read stale document,
+chunk, preview or search content before or after two reconciliation scans;
+the final source row was a tombstone with no visible candidate. Checkpoint and
+restoration took 30.159 and 63.946 seconds for this small synthetic fixture.
+The script confirmed its own Compose containers, volumes and network were
+removed. This is local recovery evidence, not a production RPO/RTO promise,
+external vector/Wiki/object restore or a durable production replay ledger.
+See [the drill and its limits](isolated-dual-service-restore.md).
+
+The pinned RAG build now compiles the WeKnora app with `WITH_ANYDOC=1` and the
+`anydoc` Go build tag from source commit
+`e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e`; both candidate images carry
+the complete patch SHA-256
+`a7d638ac36f2e64b5adf998cdd16a811c238de343a5ab8d001262fa8207c3961`.
+An isolated, loopback-only dual-service fixture verified the candidate app
+image `sha256:c8e8b10b275bc0abfe8446278132e35e4b87d79338d4f55c331cf4f84e42e551`:
+AnyDoc was available, the synthetic PDF reached two ready chunks and two
+embeddings with its protected text, Alice received a file-scoped answer with
+an original Nextcloud `/f/<file_id>` citation, and Bob was denied. Removing
+only the source share made Alice's old JWT lose DAV, source, ask, direct,
+search and prior citation access on the first poll; LDAP membership, WeKnora
+grant and owner's PDF remained. The PDF had complete DocReader text, so this
+run did not trigger the short-text AnyDoc recovery branch or test scanned-PDF
+OCR. The shared WeKnora LAN service still uses its prior image while the
+candidate is reviewed. See [the PDF candidate record](isolated-pdf-candidate.md).
+
 Both complete WeKnora patches were regenerated from their pinned fixed and RAG
 baselines and passed clean-apply checks. Selected direct HTTP reads,
 HybridSearch, Agent read/list and live answer paths acquire renewable read
@@ -53,9 +137,9 @@ revocation-during-hydration and HTTP-write tests, passed locally.
 
 The coverage marker remains absent, so physical derived-copy GC stays denied.
 External vector, graph and object writes, Wiki and other read paths, old task
-drain, coordinated restore, production alert routing and the 10,000-file /
+drain, production coordinated restore, production alert routing and the 10,000-file /
 100-GB performance target remain open. The same-directory LDAP fixture is
-synthetic; a real AD and Team Folder permission matrix is not yet available.
+synthetic; a real AD and production Team Folder permission matrix is not yet available.
 
 ## Local cross-system evidence
 

@@ -352,6 +352,16 @@ revokes the created connection on exit. It refuses to replace an already active
 connection. HTTP 202 is a receipt, not an applied or published event. Use a
 synthetic data source only.
 
+## Isolated PDF candidate
+
+The pinned AnyDoc RAG candidate has a separate disposable PDF acceptance
+driver: `python3 scripts/ops/isolated-pdf-candidate-smoke.py`. It requires the
+candidate image tag and source/patch labels, creates its own loopback-only
+synthetic LDAP project, then checks PDF indexing, file-scoped answer and
+original-file citation, and old-JWT denial after source-share removal. See the
+[observed run and limits](../../docs/isolated-pdf-candidate.md). It does not
+change the shared WeKnora stack.
+
 ## Isolated backup and restore drill
 
 Run `./scripts/ops/isolated-restore-drill.sh` from this repository to rehearse a **synthetic data-level** backup and restore. The script creates new, uniquely named Docker volumes and two PostgreSQL containers on Docker's `none` network. It never accepts a Compose project, existing volume name, database address, or production credentials. It verifies labels before removing only the volumes and containers it created. Backup files and comparison results remain in a new private temporary directory printed at the end. Pass a path that does not exist to choose the output directory.
@@ -359,5 +369,14 @@ Run `./scripts/ops/isolated-restore-drill.sh` from this repository to rehearse a
 The drill writes representative synthetic Nextcloud configuration, file and plugin-state files; WeKnora original, index-checkpoint and key *fixtures*; and small Nextcloud and WeKnora PostgreSQL tables. It takes separate `pg_dump` archives and volume tar archives, restores them into newly created volumes and a second database container, then compares database rows and SHA-256 file manifests. It also records archive checksums and elapsed time. It does not read or modify the running `nextcloud-weknora-dev_*` or `weknora-ldap-local_*` volumes.
 
 This validates the backup tools, archive transport, isolated restore plumbing and simple data integrity checks. The WeKnora fixture uses plain PostgreSQL tables, so it does **not** validate ParadeDB/vector extension restore, application schema migrations, an application boot from the restored volumes, external object storage, LDAP identity, actual encryption keys, or the PRD's four-hour RTO. Redis queues are not restored in this drill. All data and keys are synthetic.
+
+For a real application boot and stale-backup withdrawal replay in a fresh,
+marker-owned synthetic Nextcloud/WeKnora Compose project, run
+`python3 scripts/ops/isolated-dual-service-restore.py`. The separate
+[dual-service restore runbook](../../docs/isolated-dual-service-restore.md)
+records its exact stop, checkpoint, restore, deny-before-reconcile and cleanup
+checks. It uses the same pinned images on both sides of a physical PostgreSQL
+volume restore and leaves a private evidence directory; it does not use the
+shared stack or establish a production RPO/RTO.
 
 For an eventual coordinated environment recovery, pause publication and synchronization, preserve a cross-service checkpoint, and back up Nextcloud database/config/data/plugin state together with WeKnora database/originals/required indexes/keys. Restore into a **new** environment with retrieval and synchronization closed. Reapply withdrawal and deletion records, reconcile the full source manifest, and confirm instance UUID, bindings, source versions, current permissions and index state before allowing retrieval. An older database dump can precede a withdrawal; restoring bytes alone must never reopen that content. Record actual RPO and RTO only after this application-level exercise succeeds. The current script does not implement or certify that release gate.

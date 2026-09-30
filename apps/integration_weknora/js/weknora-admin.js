@@ -562,6 +562,11 @@
                     (data.oldest_outbox_pending_delivery_age_seconds !== null &&
                         (!Number.isSafeInteger(data.oldest_outbox_pending_delivery_age_seconds) ||
                          data.oldest_outbox_pending_delivery_age_seconds < 0)) ||
+                    !Number.isSafeInteger(data.outbox_pending_application_hints) ||
+                    data.outbox_pending_application_hints < 0 ||
+                    (data.oldest_outbox_pending_application_age_seconds !== null &&
+                        (!Number.isSafeInteger(data.oldest_outbox_pending_application_age_seconds) ||
+                         data.oldest_outbox_pending_application_age_seconds < 0)) ||
                     !Array.isArray(data.event_connections) ||
                     data.event_connections.some((connection) =>
                         !connection || typeof connection.binding_id !== 'string' ||
@@ -570,6 +575,11 @@
                         !/^\d+$/.test(connection.applied_through_event_id) ||
                         !Number.isSafeInteger(connection.outbox_pending_delivery_hints) ||
                         connection.outbox_pending_delivery_hints < 0 ||
+                        !Number.isSafeInteger(connection.outbox_pending_application_hints) ||
+                        connection.outbox_pending_application_hints < 0 ||
+                        (connection.oldest_outbox_pending_application_age_seconds !== null &&
+                            (!Number.isSafeInteger(connection.oldest_outbox_pending_application_age_seconds) ||
+                             connection.oldest_outbox_pending_application_age_seconds < 0)) ||
                         typeof connection.last_error_code !== 'string' ||
                         typeof connection.applied_error_code !== 'string')) {
                     throw new Error('The server returned invalid source diagnostics.');
@@ -593,12 +603,16 @@
                     String(data.outbox_pending_delivery_hints);
                 document.getElementById('weknora-diagnostics-pending-oldest').textContent =
                     formatAge(data.oldest_outbox_pending_delivery_age_seconds, 'None pending');
+                document.getElementById('weknora-diagnostics-unapplied').textContent =
+                    String(data.outbox_pending_application_hints);
+                document.getElementById('weknora-diagnostics-unapplied-oldest').textContent =
+                    formatAge(data.oldest_outbox_pending_application_age_seconds, 'None pending');
                 const connectionRows = document.getElementById('weknora-diagnostics-connections');
                 connectionRows.textContent = '';
                 if (data.event_connections.length === 0) {
                     const row = document.createElement('tr');
                     const cell = document.createElement('td');
-                    cell.colSpan = 9;
+                    cell.colSpan = 11;
                     cell.textContent = 'No local event connection is configured.';
                     row.appendChild(cell);
                     connectionRows.appendChild(row);
@@ -609,6 +623,8 @@
                         connection.status,
                         String(connection.outbox_pending_delivery_hints),
                         formatAge(connection.oldest_outbox_pending_delivery_age_seconds, 'None pending'),
+                        String(connection.outbox_pending_application_hints),
+                        formatAge(connection.oldest_outbox_pending_application_age_seconds, 'None pending'),
                         connection.received_through_event_id,
                         connection.applied_through_event_id,
                         connection.applied_checked_at > 0

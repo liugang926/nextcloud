@@ -163,3 +163,93 @@ synthetic intervals, not an enterprise revocation SLA. The probe is an HTTP/API 
 browser handoff, not a browser click test. This OpenLDAP folder group share is
 not a production AD or Team Folder ACL test, and the deterministic mock model
 does not establish answer quality with a real LLM.
+
+## Source-share-only revocation drill, 2026-09-30 UTC
+
+The LDAP group-removal drill above withdraws both the Nextcloud folder grant
+and WeKnora's Engineering KB grant. To exercise the independent Nextcloud
+source-authorization boundary, create another fresh `direct` fixture using
+the same `prepare`, `up`, `bootstrap`, and `matrix` steps, then run:
+
+```sh
+python3 scripts/ops/synthetic-ldap-ask-handoff.py --scratch "$SCRATCH" --revoke-source-share
+python3 scripts/ops/synthetic-ldap-fixture.py destroy --scratch "$SCRATCH"
+```
+
+The handoff probe stores the ID returned by the fixture's OCS group-share
+creation. This mode deletes only that share through the disposable Nextcloud
+admin session. It leaves Alice's LDAP Engineering membership, WeKnora's
+restricted Engineering KB grant, the source binding, and the owner's original
+file in place. The probe verifies those remaining grants after the mutation.
+It checks both Alice's authenticated DAV file and the signed per-user source
+authorization endpoint, then repeats the old-JWT ask-target, direct knowledge,
+chunk/preview, KB- and document-scoped search, and prior-answer history checks.
+
+The fresh disposable fixture `nc-synldap-2f5367da` used app `0.4.28` at
+`4b8ab91` and `weknora-ldap-app:nextcloud-rag` image ID
+`sha256:095461a5632abd406b70f55fd18c757721475d3a2ab119cf5a206bd148d77e56`.
+The baseline six-field matrix passed with Alice authorized and Bob denied.
+After deleting the share at `03:47:49Z`, the first poll at `03:47:52Z` observed
+Alice's DAV and signed source reads denied, Files status 404, ask-target 403,
+direct knowledge 403, chunk/preview denied, both search scopes empty, and the
+prior answer and citation hidden. Alice could still log in to WeKnora through
+LDAP; Nextcloud still listed her in Engineering; the WeKnora administrator's
+policy view still listed the Engineering `read` grant; and the owner could
+still resolve the same file ID through DAV. This demonstrates a source-only
+denial in the synthetic group-share fixture. The approximately three-second
+interval is an observation, not a revocation SLA or proof of real Team Folder
+ACL behavior.
+The existing LDAP Engineering group-removal mode also passed again in a
+separate fresh disposable fixture after these probe changes.
+
+## Real Team Folder advanced ACL drill, 2026-09-30 UTC
+
+The pinned Nextcloud 34.0.4 image does not bundle Team Folders. The official
+[Nextcloud App Store](https://apps.nextcloud.com/apps/groupfolders/) lists
+groupfolders 22.0.6 for Nextcloud 34. Download that release package into a
+fresh disposable scratch directory before bootstrap. The script verifies its
+SHA-256 against the official release asset digest
+`bfff357b12bbd24257d8d127cf30e83a72256e7659f1cc3e32bd09fe647d2f9b`
+and installs it only inside the owned Nextcloud container. The container's
+`occ app:install groupfolders` failed on this host with GitHub TLS EOF, so the
+reproducible path downloads the pinned package on the host:
+
+```sh
+cd /path/to/nextcloud
+SCRATCH="$(python3 scripts/ops/synthetic-ldap-fixture.py prepare \
+  --weknora-image weknora-ldap-app:nextcloud-rag --mode direct |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["scratch"])')"
+gh release download v22.0.6 -R nextcloud-releases/groupfolders \
+  --pattern groupfolders-v22.0.6.tar.gz --dir "$SCRATCH"
+python3 scripts/ops/synthetic-ldap-fixture.py up --scratch "$SCRATCH"
+python3 scripts/ops/synthetic-ldap-e2e.py bootstrap --team-folder --scratch "$SCRATCH"
+python3 scripts/ops/synthetic-ldap-e2e.py matrix --scratch "$SCRATCH"
+python3 scripts/ops/synthetic-ldap-ask-handoff.py --scratch "$SCRATCH" --deny-team-acl
+python3 scripts/ops/synthetic-ldap-fixture.py destroy --scratch "$SCRATCH"
+```
+
+This mode creates an actual groupfolders Team Folder named `Published`, grants
+Engineering to Alice and a separate local publisher group to `devadmin`,
+binds the Team Folder root, and indexes `acl-note.txt` in WeKnora. The probe
+records a file-scoped answer and original Files citation before applying a
+real file-level advanced ACL `-read` rule to Alice. It then checks Alice's and
+Bob's authenticated DAV, signed per-user source authorization, Files status,
+old-JWT ask-target and WeKnora content paths. It also confirms that Alice
+retains access to the Team Folder root and LDAP Engineering membership, the
+WeKnora Engineering KB `read` grant remains, and the publisher can still
+resolve the same original file ID.
+
+Fresh fixture `nc-synldap-9951640c` passed the six-field baseline matrix:
+Alice was allowed and Bob was denied on content paths. It indexed two chunks
+and embeddings. The file-scoped mock answer included the synthetic marker and
+original Files citation. After setting the ACL at `04:19:08Z`, the first poll
+at `04:19:12Z` found Alice's DAV and signed source reads denied, Files status
+404, ask-target 403, knowledge 403, chunk/preview denied, both search scopes
+empty, and the prior answer and citation hidden. Bob stayed denied on DAV,
+signed source, ask-target and WeKnora content paths. The approximately
+four-second interval is one synthetic observation, not a revocation SLA.
+
+This verifies a real groupfolders 22.0.6 ACL in an AD-shaped OpenLDAP fixture.
+It does not prove enterprise AD behavior, production Team Folder configuration,
+browser interaction, or the V1 requirement to reject or pause publication of
+unsupported permission exceptions during configuration and synchronization.

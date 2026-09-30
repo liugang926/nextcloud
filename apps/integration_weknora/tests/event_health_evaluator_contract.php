@@ -22,6 +22,8 @@ $healthy = [
         'status' => 'active',
         'outbox_pending_delivery_hints' => 1,
         'oldest_outbox_pending_delivery_age_seconds' => 299,
+        'outbox_pending_application_hints' => 0,
+        'oldest_outbox_pending_application_age_seconds' => null,
         'applied_checked_at' => $now - 299,
         'applied_error_code' => '',
     ]],
@@ -34,6 +36,37 @@ $neverChecked['event_connections'][0]['connection_created_at'] = $now - 300;
 expectAlerts(EventHealthEvaluator::evaluate($neverChecked), [
     ['binding_id' => 'engineering', 'code' => 'applied_status_unverified'],
 ]);
+
+$applicationStuck = $healthy;
+$applicationStuck['event_connections'][0]['outbox_pending_delivery_hints'] = 0;
+$applicationStuck['event_connections'][0]['oldest_outbox_pending_delivery_age_seconds'] = null;
+$applicationStuck['event_connections'][0]['outbox_pending_application_hints'] = 2;
+$applicationStuck['event_connections'][0]['oldest_outbox_pending_application_age_seconds'] = 299;
+$applicationStuck['event_connections'][0]['receiver_url'] = 'https://private.example.invalid/source';
+$applicationStuck['event_connections'][0]['secret_ciphertext'] = 'never-log-this';
+expectAlerts(EventHealthEvaluator::evaluate($applicationStuck), []);
+$applicationStuck['event_connections'][0]['oldest_outbox_pending_application_age_seconds'] = 300;
+expectAlerts(EventHealthEvaluator::evaluate($applicationStuck), [
+    ['binding_id' => 'engineering', 'code' => 'application_overdue'],
+]);
+$applicationStuck['event_connections'][0]['applied_error_code'] = 'status_transport_error';
+expectAlerts(EventHealthEvaluator::evaluate($applicationStuck), [
+    ['binding_id' => 'engineering', 'code' => 'applied_status_failed'],
+]);
+$applicationStuck['event_connections'][0]['applied_error_code'] = '';
+$applicationStuck['event_connections'][0]['status'] = 'paused';
+expectAlerts(EventHealthEvaluator::evaluate($applicationStuck), [
+    ['binding_id' => 'engineering', 'code' => 'sender_paused'],
+]);
+$applicationStuck['event_connections'][0]['status'] = 'active';
+$applicationStuck['event_connections'][0]['applied_checked_at'] = $now - 300;
+expectAlerts(EventHealthEvaluator::evaluate($applicationStuck), [
+    ['binding_id' => 'engineering', 'code' => 'applied_status_stale'],
+]);
+$applicationStuck['event_connections'][0]['applied_checked_at'] = $now - 1;
+$applicationStuck['event_connections'][0]['outbox_pending_application_hints'] = 0;
+$applicationStuck['event_connections'][0]['oldest_outbox_pending_application_age_seconds'] = null;
+expectAlerts(EventHealthEvaluator::evaluate($applicationStuck), []);
 
 $unhealthy = $healthy;
 $unhealthy['binding_roots_available'] = false;

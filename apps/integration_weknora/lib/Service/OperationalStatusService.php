@@ -100,18 +100,55 @@ final class OperationalStatusService {
             $pendingByBinding[(string)$row['binding_id']] = $row;
         }
 
+        // A durable receipt only proves inbox acceptance. Count retained
+        // hints above the separately verified applied watermark but no higher
+        // than the sender's durable receipt. The binding/id outbox index also
+        // supports this bounded range for each configured connection.
+        $unappliedQuery = $this->db->getQueryBuilder();
+        $unappliedQuery->select('c.binding_id')
+            ->selectAlias($unappliedQuery->func()->count('o.id'), 'unapplied_count')
+            ->selectAlias($unappliedQuery->func()->min('o.created_at'), 'oldest_unapplied_at')
+            ->from('weknora_event_conn', 'c')
+            ->innerJoin('c', 'weknora_outbox', 'o',
+                $unappliedQuery->expr()->andX(
+                    $unappliedQuery->expr()->eq('o.binding_id', 'c.binding_id'),
+                    $unappliedQuery->expr()->gt('o.id', 'c.applied_id'),
+                    $unappliedQuery->expr()->lte('o.id', 'c.received_id'),
+                ))
+            ->groupBy('c.binding_id');
+        $unappliedResult = $unappliedQuery->executeQuery();
+        try {
+            $unappliedRows = $unappliedResult->fetchAllAssociative();
+        } finally {
+            $unappliedResult->closeCursor();
+        }
+        $unappliedByBinding = [];
+        foreach ($unappliedRows as $row) {
+            $unappliedByBinding[(string)$row['binding_id']] = $row;
+        }
+
         $ackAvailable = false;
         $pendingCount = 0;
         $oldestPendingAt = null;
+        $unappliedCount = 0;
+        $oldestUnappliedAt = null;
         $connectionStatuses = [];
         foreach ($connectionRows as $row) {
             $bindingId = (string)$row['binding_id'];
             $pending = $pendingByBinding[$bindingId] ?? null;
             $count = $pending === null ? 0 : (int)$pending['pending_count'];
             $pendingAt = $pending === null ? null : (int)$pending['oldest_pending_at'];
+            $unapplied = $unappliedByBinding[$bindingId] ?? null;
+            $applicationCount = $unapplied === null ? 0 : (int)$unapplied['unapplied_count'];
+            $applicationAt = $unapplied === null ? null : (int)$unapplied['oldest_unapplied_at'];
             $pendingCount += $count;
+            $unappliedCount += $applicationCount;
             if ($pendingAt !== null && ($oldestPendingAt === null || $pendingAt < $oldestPendingAt)) {
                 $oldestPendingAt = $pendingAt;
+            }
+            if ($applicationAt !== null &&
+                ($oldestUnappliedAt === null || $applicationAt < $oldestUnappliedAt)) {
+                $oldestUnappliedAt = $applicationAt;
             }
             $ackAvailable = $ackAvailable ||
                 ((string)$row['status'] === 'active' &&
@@ -131,6 +168,9 @@ final class OperationalStatusService {
                 'outbox_pending_delivery_hints' => $count,
                 'oldest_outbox_pending_delivery_age_seconds' => $pendingAt === null
                     ? null : max(0, $now - $pendingAt),
+                'outbox_pending_application_hints' => $applicationCount,
+                'oldest_outbox_pending_application_age_seconds' => $applicationAt === null
+                    ? null : max(0, $now - $applicationAt),
             ];
         }
 
@@ -148,6 +188,9 @@ final class OperationalStatusService {
             'outbox_pending_delivery_hints' => $pendingCount,
             'oldest_outbox_pending_delivery_age_seconds' => $oldestPendingAt === null
                 ? null : max(0, $now - $oldestPendingAt),
+            'outbox_pending_application_hints' => $unappliedCount,
+            'oldest_outbox_pending_application_age_seconds' => $oldestUnappliedAt === null
+                ? null : max(0, $now - $oldestUnappliedAt),
             'event_connections' => $connectionStatuses,
         ];
     }

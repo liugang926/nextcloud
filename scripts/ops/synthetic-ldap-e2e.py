@@ -8,6 +8,7 @@ never accepts an arbitrary Compose project or remote HTTP origin.
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import re
 import runpy
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.parse
@@ -35,6 +37,8 @@ nc_request = pair_helpers["nc_request"]
 wk_request = pair_helpers["wk_request"]
 index_proof = index_helpers["index_proof"]
 sql_json = index_helpers["sql_json"]
+GROUPFOLDERS_VERSION = "22.0.6"
+GROUPFOLDERS_SHA256 = "bfff357b12bbd24257d8d127cf30e83a72256e7659f1cc3e32bd09fe647d2f9b"
 
 
 def private_json(path, data):
@@ -79,9 +83,37 @@ def http_json(base, method, path, payload=None, token=None):
         return error.code, {}
 
 
-def nextcloud_setup(directory, state, passwords, nc_base):
+def install_groupfolders(directory, state):
+    package = directory / f"groupfolders-v{GROUPFOLDERS_VERSION}.tar.gz"
+    if not package.is_file() or hashlib.sha256(package.read_bytes()).hexdigest() != GROUPFOLDERS_SHA256:
+        raise RuntimeError("pinned groupfolders 22.0.6 package is absent or has a wrong SHA-256")
+    with tarfile.open(package, "r:gz") as archive:
+        members = archive.getmembers()
+        if not members or any(
+                item.issym() or item.islnk() or
+                not (item.name == "groupfolders" and item.isdir() or
+                     item.name.startswith("groupfolders/")) or
+                ".." in Path(item.name).parts for item in members):
+            raise RuntimeError("groupfolders package has an unsafe file layout")
+        archive.extractall(directory)
+    container = state["project"] + "-nextcloud-1"
+    subprocess.run(["docker", "cp", str(directory / "groupfolders"),
+                    container + ":/var/www/html/custom_apps/"], check=True,
+                   capture_output=True, timeout=60)
+    subprocess.run(["docker", "exec", container, "chown", "-R", "www-data:www-data",
+                    "/var/www/html/custom_apps/groupfolders"], check=True,
+                   capture_output=True, timeout=30)
+    occ(state, "app:enable", "groupfolders")
+    enabled = json.loads(occ(state, "app:list", "--output=json"))["enabled"]
+    if enabled.get("groupfolders") != GROUPFOLDERS_VERSION:
+        raise RuntimeError("disposable Team Folders app did not enable at the pinned version")
+
+
+def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False):
     for app in ("user_ldap", "integration_weknora"):
         occ(state, "app:enable", app)
+    if team_folder:
+        install_groupfolders(directory, state)
     # The connector reaches Nextcloud over the private Compose network, while
     # employee citations must open the host's browser origin. Set the public
     # route before the first source sync so indexed metadata records it.
@@ -126,28 +158,46 @@ def nextcloud_setup(directory, state, passwords, nc_base):
     document = folder + "/acl-note.txt"
     auth = base64.b64encode(("devadmin:" + passwords["nc_admin"]).encode()).decode()
     dav_headers = {"Authorization": "Basic " + auth}
-    status, _ = request(urllib.request.build_opener(), folder, "MKCOL", dav_headers)
-    need(status, {201}, "create synthetic folder")
+    team_folder_id = None
+    if team_folder:
+        occ(state, "group:add", "SyntheticPublisher")
+        occ(state, "group:adduser", "SyntheticPublisher", "devadmin")
+        team_folder_id = int(occ(state, "groupfolders:create", "--output=json",
+                                 "Published").strip())
+        if team_folder_id < 1:
+            raise RuntimeError("synthetic Team Folder ID is invalid")
+        for group in ("SyntheticPublisher", "Engineering"):
+            occ(state, "groupfolders:group", str(team_folder_id), group,
+                "read", "write", "share", "delete")
+    else:
+        status, _ = request(urllib.request.build_opener(), folder, "MKCOL", dav_headers)
+        need(status, {201}, "create synthetic folder")
     content = ("Which synthetic approval code is in this document? "
                "The synthetic approval code is ORCHID-QUARTZ-2749.\n").encode()
     status, _ = request(urllib.request.build_opener(), document, "PUT", dav_headers, content)
     need(status, {201}, "create synthetic document")
     root_id = file_id(folder, dav_headers)
     document_id = file_id(document, dav_headers)
-    share_body = urllib.parse.urlencode({"path": "/Published", "shareType": 1,
-                                         "shareWith": "Engineering", "permissions": 1}).encode()
-    for attempt in range(30):
-        status, raw = request(admin, nc_base + "/ocs/v2.php/apps/files_sharing/api/v1/shares",
-                              "POST", {"requesttoken": csrf, "OCS-APIRequest": "true",
-                                       "Accept": "application/json",
-                                       "Content-Type": "application/x-www-form-urlencoded"}, share_body)
-        if status == 200 and json.loads(raw)["ocs"]["meta"]["statuscode"] == 200:
-            break
-        # A fresh LDAP group can appear in occ before the sharing provider's
-        # own lookup catches up. Retry only the bounded, missing-group result.
-        if status != 404 or attempt == 29:
-            raise RuntimeError(f"share synthetic folder: HTTP {status}")
-        time.sleep(2)
+    share_id = None
+    if not team_folder:
+        share_body = urllib.parse.urlencode({"path": "/Published", "shareType": 1,
+                                             "shareWith": "Engineering", "permissions": 1}).encode()
+        for attempt in range(30):
+            status, raw = request(admin, nc_base + "/ocs/v2.php/apps/files_sharing/api/v1/shares",
+                                  "POST", {"requesttoken": csrf, "OCS-APIRequest": "true",
+                                           "Accept": "application/json",
+                                           "Content-Type": "application/x-www-form-urlencoded"}, share_body)
+            if status == 200 and json.loads(raw)["ocs"]["meta"]["statuscode"] == 200:
+                break
+            # A fresh LDAP group can appear in occ before the sharing provider's
+            # own lookup catches up. Retry only the bounded, missing-group result.
+            if status != 404 or attempt == 29:
+                raise RuntimeError(f"share synthetic folder: HTTP {status}")
+            time.sleep(2)
+        share_id = json.loads(raw)["ocs"]["data"].get("id")
+        if (isinstance(share_id, bool) or not isinstance(share_id, (int, str)) or
+                not re.fullmatch(r"[1-9][0-9]*", str(share_id))):
+            raise RuntimeError("synthetic group share response omitted its ID")
     # An LDAP topology path alone does not prove that Nextcloud grants the
     # mounted group share. Check the employee's actual DAV access before a
     # source pair can be created, including in primary-group mode.
@@ -181,6 +231,9 @@ def nextcloud_setup(directory, state, passwords, nc_base):
     if not isinstance(token, str) or not token:
         raise RuntimeError("synthetic source key was not returned")
     return {"root_file_id": root_id, "file_id": document_id,
+            "publication_root": "team_folder" if team_folder else "group_share",
+            "team_folder_id": team_folder_id,
+            "share_id": int(share_id) if share_id is not None else None,
             "binding_id": binding, "key_id": key_id, "token": token}
 
 
@@ -342,13 +395,13 @@ def make_fixture(state, runtime):
                       {"a": allowed, "b": denied}}}
 
 
-def bootstrap(directory, state):
+def bootstrap(directory, state, team_folder=False):
     if (directory / "fixture.json").exists():
         raise RuntimeError("fixture already bootstrapped; use matrix or create a fresh stack")
     passwords = json.loads((directory / "passwords.json").read_text())
     nc_base = f"http://127.0.0.1:{state['ports']['nextcloud']}"
     wk_base = f"http://127.0.0.1:{state['ports']['weknora']}"
-    runtime = nextcloud_setup(directory, state, passwords, nc_base)
+    runtime = nextcloud_setup(directory, state, passwords, nc_base, team_folder)
     private_json(directory / "runtime.json", runtime)
     runtime.update(weknora_setup(directory, state, passwords, nc_base, wk_base, runtime))
     private_json(directory / "runtime.json", runtime)
@@ -406,11 +459,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("bootstrap", "matrix"))
     parser.add_argument("--scratch", required=True, type=Path)
+    parser.add_argument("--team-folder", action="store_true",
+                        help="bootstrap a real groupfolders 22.0.6 publication root")
     args = parser.parse_args()
     directory, state = owned_state(args.scratch)
     if args.action == "bootstrap":
-        bootstrap(directory, state)
+        bootstrap(directory, state, args.team_folder)
     else:
+        if args.team_folder:
+            raise RuntimeError("--team-folder is only valid during bootstrap")
         matrix(directory, state)
 
 

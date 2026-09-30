@@ -88,10 +88,14 @@ and a valid but divergent receipt pause delivery for administrator review.
 shows that status. Rotation with a fresh WeKnora key resumes a paused sender.
 The `EventHealthJob` checks the local sender and signed applied-status
 checkpoints through the administrator diagnostics service. It writes a
-structured Nextcloud warning when a sender pauses, a pending hint is at least
-five minutes old, an applied-status check fails, remains unverified for five
-minutes after pairing, or becomes five minutes stale, or a configured root
-cannot be resolved. It logs a recovery when all alarms clear. Alert identities
+structured Nextcloud warning when a sender pauses, a pending delivery hint is
+at least five minutes old, an applied-status check fails, remains unverified
+for five minutes after pairing, or becomes five minutes stale, or a configured
+root cannot be resolved. It also warns with `application_overdue` when a
+retained hint created at least five minutes ago has been durably received but
+is still above the verified applied watermark while the signed status remains
+fresh and successful. The age is measured from hint creation, not from receipt.
+It logs a recovery when all alarms clear. Alert identities
 contain only binding IDs and fixed error codes, never
 credentials, receiver URLs, file paths, or raw exception text. The job avoids
 repeating an unchanged warning more often than hourly. Ordinary Nextcloud
@@ -102,16 +106,20 @@ Key rotation clears the previously signed applied-status proof while retaining
 the connection's original creation time. Until a new signed status poll
 succeeds, the monitor may emit `applied_status_unverified` immediately; this
 means the new key has not yet verified a consumer watermark.
-Outbox retention cannot remove unsent hints while a sender exists, including
-while paused. It may prune hints already durably received after the configured
-minimum retention period; this still does not mean they were applied.
+Outbox retention cannot remove unsent or unverified-unapplied hints while a
+sender exists, including while paused. It may prune hints at or below both the
+durable receipt and verified applied watermarks after the minimum retention
+period, provided the latest applied-status check has no error. The applied
+watermark does not prove any individual file is published and readable.
 
 The administrator-only Source diagnostics page and
 `GET /index.php/apps/integration_weknora/api/v1/admin/diagnostics` report the
 number and oldest age of local outbox hints whose IDs exceed each configured
-sender's durable `received_through_event_id`. Paused senders are included;
-bindings without an event connection and retained hints already received are
-excluded. The response also lists each sender's binding ID, state, receipt and
+sender's durable `received_through_event_id`. It separately reports retained
+hints with IDs above the last verified `applied_through_event_id` but no higher
+than the durable receipt, measuring the local received-but-unapplied backlog.
+Paused senders are included; bindings without an event connection are excluded.
+The response also lists each sender's binding ID, state, receipt and
 separately verified applied watermarks, check time, retry state, and
 non-sensitive error codes. It does not include receiver URLs, key IDs,
 credentials, file paths, ETags, or content. A zero local pending count does not

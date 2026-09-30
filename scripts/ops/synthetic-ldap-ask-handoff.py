@@ -7,6 +7,7 @@ only booleans, IDs and timing, never passwords, tokens, source text or SSE.
 """
 
 import argparse
+import base64
 import datetime as dt
 import json
 from pathlib import Path
@@ -183,11 +184,75 @@ def revoke_owned_grant(project):
     require(result.returncode == 0, "isolated LDAP grant mutation failed")
 
 
-def run(scratch, revoke):
+def revoke_source_share(nc_base, passwords, share_id):
+    require(type(share_id) is int and share_id > 0,
+            "isolated source share ID is invalid")
+    admin, csrf = login(nc_base, "devadmin", passwords["nc_admin"])
+    url = nc_base + "/ocs/v2.php/apps/files_sharing/api/v1/shares/" + str(share_id)
+    status, raw = request(admin, url, "DELETE", {
+        "requesttoken": csrf, "OCS-APIRequest": "true", "Accept": "application/json"})
+    try:
+        ocs = json.loads(raw)["ocs"]
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError("source share deletion returned invalid OCS JSON") from None
+    require(status == 200 and ocs.get("meta", {}).get("statuscode") == 200,
+            "isolated Nextcloud source share deletion failed")
+
+
+def deny_team_folder_file(state, team_folder_id):
+    require(type(team_folder_id) is int and team_folder_id > 0,
+            "isolated Team Folder ID is invalid")
+    e2e["occ"](state, "groupfolders:permissions", str(team_folder_id), "--enable")
+    e2e["occ"](state, "groupfolders:permissions", str(team_folder_id),
+               "--user=alice", "acl-note.txt", "--", "-read")
+
+
+def source_context_unchanged(state, nc_base, passwords, runtime, team_acl=False):
+    groups = json.loads(e2e["occ"](state, "group:list", "--output=json"))
+    require("alice" in groups.get("Engineering", []),
+            "source-only denial also lost Alice's Engineering membership")
+    wk_base = f"http://127.0.0.1:{state['ports']['weknora']}"
+    require(wait_ldap_login(wk_base, "alice", passwords["alice"]),
+        "source-only denial also disabled Alice's LDAP account")
+    admin_code, admin_login = e2e["http_json"](wk_base, "POST", "/api/v1/auth/login", {
+        "email": "synthetic-admin@example.test", "password": passwords["wk_admin"]})
+    admin_token = admin_login.get("token")
+    require(admin_code == 200 and isinstance(admin_token, str) and admin_token,
+            "source-only denial could not inspect the WeKnora KB grant")
+    policy_code, policy = e2e["http_json"](
+        wk_base, "GET", "/api/v1/group-access/knowledge_base/" +
+        runtime["knowledge_base_id"], token=admin_token)
+    access = policy.get("data", {})
+    require(policy_code == 200 and access.get("mode") == "restricted" and
+            any(grant.get("display_name") == "Engineering" and
+                grant.get("permission") == "read" and
+                grant.get("directory_id") == state["directory_id"]
+                for grant in access.get("grants", [])),
+            "source-only denial also lost the WeKnora Engineering KB grant")
+    owner_file = nc_base + "/remote.php/dav/files/devadmin/Published/acl-note.txt"
+    owner_auth = base64.b64encode(
+        ("devadmin:" + passwords["nc_admin"]).encode()).decode()
+    require(e2e["file_id"](owner_file, {"Authorization": "Basic " + owner_auth}) ==
+            runtime["file_id"], "source-only denial also removed the owner's file")
+    if team_acl:
+        alice_root = nc_base + "/remote.php/dav/files/alice/Published"
+        alice_auth = base64.b64encode(
+            ("alice:" + passwords["alice"]).encode()).decode()
+        require(e2e["file_id"](
+            alice_root, {"Authorization": "Basic " + alice_auth}) ==
+                runtime["root_file_id"],
+                "Team Folder ACL also removed Alice's root folder access")
+
+
+def run(scratch, revoke, revoke_source_share_only, deny_team_acl):
     directory, state = owner["owned_state"](scratch)
     require(state["mode"] == "direct", "handoff probe requires the direct synthetic grant")
     fixture = json.loads((directory / "fixture.json").read_text())
     runtime = json.loads((directory / "runtime.json").read_text())
+    root_kind = runtime.get("publication_root", "group_share")
+    require((deny_team_acl and root_kind == "team_folder") or
+            (not deny_team_acl and root_kind == "group_share"),
+            "revocation mode does not match the disposable publication root")
     passwords = json.loads((directory / "passwords.json").read_text())
     nc_base = f"http://127.0.0.1:{state['ports']['nextcloud']}"
     wk_base = f"http://127.0.0.1:{state['ports']['weknora']}"
@@ -195,6 +260,13 @@ def run(scratch, revoke):
     bob_status, _ = status_for(nc_base, runtime, passwords, "bob")
     require(alice_status == 200 and bob_status in {403, 404},
             "Files status did not follow the synthetic folder grant")
+    alice_account = fixture["accounts"]["a"]
+    alice_login, alice_dav = matrix["dav_probe"](
+        nc_base, alice_account, passwords["alice"], runtime["file_id"])
+    alice_source = matrix["source_probe"](
+        nc_base, fixture, alice_account, runtime["key_id"], runtime["token"])
+    require(alice_login and alice_dav and alice_source,
+            "Alice's baseline DAV/source read was not authorized")
     query = source_link(alice, wk_base, fixture)
     alice_token = wait_ldap_login(wk_base, "alice", passwords["alice"])
     bob_token = wait_ldap_login(wk_base, "bob", passwords["bob"])
@@ -234,9 +306,14 @@ def run(scratch, revoke):
               "alice_ask": allowed, "bob_ask": denied, "stale_ask": stale_code,
               "answer_marker": True, "citation_original": True, "session_id": session_id}
     print(json.dumps(result, separators=(",", ":")), flush=True)
-    if not revoke:
+    if not revoke and not revoke_source_share_only and not deny_team_acl:
         return
-    revoke_owned_grant(state["project"])
+    if deny_team_acl:
+        deny_team_folder_file(state, runtime["team_folder_id"])
+    elif revoke_source_share_only:
+        revoke_source_share(nc_base, passwords, runtime["share_id"])
+    else:
+        revoke_owned_grant(state["project"])
     mutation_at = dt.datetime.now(dt.timezone.utc).isoformat()
     deadline = time.monotonic() + 150
     attempts = 0
@@ -244,6 +321,10 @@ def run(scratch, revoke):
         attempts += 1
         try:
             current_status, _ = status_for(nc_base, runtime, passwords, "alice")
+            current_login, current_dav = matrix["dav_probe"](
+                nc_base, alice_account, passwords["alice"], runtime["file_id"])
+            current_source = matrix["source_probe"](
+                nc_base, fixture, alice_account, runtime["key_id"], runtime["token"])
             current_ask, _ = ask_target(wk_base, query, alice_token)
             current_knowledge, _ = knowledge(wk_base, runtime["knowledge_id"], alice_token)
             direct = matrix["direct_content_probe"](
@@ -252,8 +333,24 @@ def run(scratch, revoke):
         except (OSError, ValueError, RuntimeError, matrix["ProbeError"]):
             time.sleep(3)
             continue
-        if current_status in {403, 404} and current_ask in {403, 404} and \
+        if current_login and not current_dav and not current_source and \
+                current_status in {403, 404} and current_ask in {403, 404} and \
                 current_knowledge in {403, 404} and not direct and not search:
+            bob_status_after, _ = status_for(nc_base, runtime, passwords, "bob")
+            bob_account = fixture["accounts"]["b"]
+            bob_login, bob_dav = matrix["dav_probe"](
+                nc_base, bob_account, passwords["bob"], runtime["file_id"])
+            bob_source = matrix["source_probe"](
+                nc_base, fixture, bob_account, runtime["key_id"], runtime["token"])
+            bob_ask_after, _ = ask_target(wk_base, query, bob_token)
+            bob_knowledge, _ = knowledge(wk_base, runtime["knowledge_id"], bob_token)
+            bob_direct = matrix["direct_content_probe"](
+                wk_base, runtime["knowledge_id"], bob_token)
+            bob_search = matrix["search_probe"](wk_base, fixture, bob_token)
+            require(bob_login and not bob_dav and not bob_source and
+                    bob_status_after in {403, 404} and bob_ask_after in {403, 404} and
+                    bob_knowledge in {403, 404} and not bob_direct and not bob_search,
+                    "Bob gained a source or WeKnora read after Alice's revocation")
             history_code, history = e2e["http_json"](
                 wk_base, "GET", f"/api/v1/messages/{session_id}/load?limit=20",
                 token=alice_token)
@@ -261,11 +358,19 @@ def run(scratch, revoke):
                     (history_code != 200 or (MARKER not in json.dumps(history) and
                      human not in json.dumps(history))),
                     "revoked user still received the prior answer or citation")
-            print(json.dumps({"phase": "revoked", "mutated_at_utc": mutation_at,
+            if revoke_source_share_only or deny_team_acl:
+                source_context_unchanged(state, nc_base, passwords, runtime,
+                                         team_acl=deny_team_acl)
+            phase = ("team_acl_denied" if deny_team_acl else
+                     "source_share_revoked" if revoke_source_share_only else "revoked")
+            print(json.dumps({"phase": phase, "mutated_at_utc": mutation_at,
                               "observed_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
                               "polls": attempts, "alice_status": current_status,
+                              "alice_dav": current_dav, "alice_source": current_source,
                               "alice_ask": current_ask, "alice_knowledge": current_knowledge,
                               "alice_direct": False, "alice_search": False,
+                              "bob_dav": bob_dav, "bob_source": bob_source,
+                              "bob_ask": bob_ask_after, "bob_search": bob_search,
                               "history_redacted": True},
                              separators=(",", ":")))
             return
@@ -276,10 +381,17 @@ def run(scratch, revoke):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scratch", required=True, type=Path)
-    parser.add_argument("--revoke", action="store_true")
+    revocation = parser.add_mutually_exclusive_group()
+    revocation.add_argument("--revoke", action="store_true",
+                            help="remove Alice's sole synthetic LDAP group grant")
+    revocation.add_argument("--revoke-source-share", action="store_true",
+                            help="delete only the owned Nextcloud group share")
+    revocation.add_argument("--deny-team-acl", action="store_true",
+                            help="apply a real Team Folder file ACL deny to Alice")
     args = parser.parse_args()
     try:
-        run(args.scratch, args.revoke)
-    except (KeyError, OSError, ValueError, RuntimeError, matrix["ProbeError"]) as error:
+        run(args.scratch, args.revoke, args.revoke_source_share, args.deny_team_acl)
+    except (KeyError, OSError, ValueError, RuntimeError, subprocess.CalledProcessError,
+            matrix["ProbeError"]) as error:
         print("Synthetic ask handoff failed: " + str(error), file=sys.stderr)
         sys.exit(1)

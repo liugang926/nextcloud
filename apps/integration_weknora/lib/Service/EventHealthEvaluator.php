@@ -7,6 +7,7 @@ namespace OCA\IntegrationWeknora\Service;
 /** Converts source-side diagnostics into stable, non-sensitive alert identities. */
 final class EventHealthEvaluator {
     private const DELIVERY_AGE_SECONDS = 300;
+    private const APPLICATION_AGE_SECONDS = 300;
     private const STATUS_AGE_SECONDS = 300;
 
     /**
@@ -42,6 +43,13 @@ final class EventHealthEvaluator {
             if ($checkedAt > 0 &&
                 (int)$snapshot['checked_at'] - $checkedAt >= self::STATUS_AGE_SECONDS) {
                 $alerts[] = ['binding_id' => $bindingId, 'code' => 'applied_status_stale'];
+            }
+            if ($checkedAt > 0 &&
+                (string)$connection['applied_error_code'] === '' &&
+                (int)$snapshot['checked_at'] - $checkedAt < self::STATUS_AGE_SECONDS &&
+                (int)$connection['outbox_pending_application_hints'] > 0 &&
+                (int)$connection['oldest_outbox_pending_application_age_seconds'] >= self::APPLICATION_AGE_SECONDS) {
+                $alerts[] = ['binding_id' => $bindingId, 'code' => 'application_overdue'];
             }
         }
         return $alerts;

@@ -31,14 +31,16 @@ style('integration_weknora', 'weknora-admin');
             <p>Verified applied status from an active connection: <strong id="weknora-diagnostics-applied-ack"></strong></p>
             <p>Outbox hints awaiting a durable receipt: <strong id="weknora-diagnostics-pending"></strong></p>
             <p>Oldest hint awaiting a durable receipt: <strong id="weknora-diagnostics-pending-oldest"></strong></p>
+            <p>Received hints awaiting verified application: <strong id="weknora-diagnostics-unapplied"></strong></p>
+            <p>Oldest received hint awaiting verified application: <strong id="weknora-diagnostics-unapplied-oldest"></strong></p>
             <div class="weknora-admin__table-scroll">
                 <table class="weknora-admin__table" aria-label="Local event delivery by binding">
-                    <thead><tr><th>Binding</th><th>Sender</th><th>Pending hints</th><th>Oldest pending</th><th>Received through ID</th><th>Applied through ID</th><th>Applied check</th><th>Delivery error</th><th>Applied status error</th></tr></thead>
+                    <thead><tr><th>Binding</th><th>Sender</th><th>Awaiting receipt</th><th>Oldest awaiting receipt</th><th>Awaiting application</th><th>Oldest awaiting application</th><th>Received through ID</th><th>Applied through ID</th><th>Applied check</th><th>Delivery error</th><th>Applied status error</th></tr></thead>
                     <tbody id="weknora-diagnostics-connections"></tbody>
                 </table>
             </div>
         </div>
-        <p>Pending counts cover only configured local senders, including paused senders. They exclude bindings without an event connection and retained hints already acknowledged by a durable receipt. These source-side figures are not WeKnora's task queue, synchronization delay, parsing health, or per-file publication state. A received or applied watermark alone does not make a file ready.</p>
+        <p>Pending counts cover only configured local senders, including paused senders. Receipt counts exclude already received hints; application counts include only retained hints above the last verified applied watermark and at or below the durable receipt. Both exclude bindings without an event connection. These source-side figures are not WeKnora's task queue, synchronization delay, parsing health, or per-file publication state. A received or applied watermark alone does not make a file ready.</p>
     </div>
 
     <div class="weknora-admin__panel">

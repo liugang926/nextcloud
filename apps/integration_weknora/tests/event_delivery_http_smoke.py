@@ -64,6 +64,7 @@ def delivery_diagnostics(admin, api, csrf, binding_id, secret):
     row = matching[0]
     assert "secret_ciphertext" not in row and "receiver_url" not in row
     assert data["outbox_pending_delivery_hints"] >= row["outbox_pending_delivery_hints"]
+    assert data["outbox_pending_application_hints"] >= row["outbox_pending_application_hints"]
     return row
 
 
@@ -287,6 +288,8 @@ def main():
             assert pending_before["received_through_event_id"] == "0"
             assert pending_before["outbox_pending_delivery_hints"] == len(pending_ids) > 0
             assert pending_before["oldest_outbox_pending_delivery_age_seconds"] >= 0
+            assert pending_before["outbox_pending_application_hints"] == 0
+            assert pending_before["oldest_outbox_pending_application_age_seconds"] is None
             idle_ids = add_idle_rows(suffix)
             identifier = job_id()
             run_job(identifier)
@@ -369,6 +372,11 @@ def main():
             assert after_receipt["received_through_event_id"] == received["received_through_event_id"]
             assert after_receipt["outbox_pending_delivery_hints"] == 0
             assert after_receipt["oldest_outbox_pending_delivery_age_seconds"] is None
+            expected_unapplied = int(sql("SELECT COUNT(*) FROM oc_weknora_outbox "
+                f"WHERE binding_id = '{binding_id}' AND id > 0 AND id <= "
+                f"{received['received_through_event_id']}"))
+            assert after_receipt["outbox_pending_application_hints"] == expected_unapplied > 0
+            assert after_receipt["oldest_outbox_pending_application_age_seconds"] >= 0
 
             # The separate command and ordinary cron fallback still verify
             # signed applied watermarks without running inside delivery.
@@ -376,6 +384,9 @@ def main():
                     "integration_weknora:poll-event-status")
             assert len(status_requests_seen(state_dir)) == status_count + 1
             assert status(admin, connection_url, csrf)["applied_checked_at"] > 0
+            still_unapplied = delivery_diagnostics(admin, api, csrf, binding_id, secret)
+            assert still_unapplied["outbox_pending_application_hints"] == \
+                after_receipt["outbox_pending_application_hints"]
             force_status_due(binding_id)
             run_job(job_id(STATUS_JOB_CLASS))
             assert len(status_requests_seen(state_dir)) == status_count + 2
@@ -387,6 +398,9 @@ def main():
                 f" WHERE binding_id = '{binding_id}'")
             assert prune(binding_id) == 0
             assert received["applied_through_event_id"] == "0"
+            overdue = delivery_diagnostics(admin, api, csrf, binding_id, secret)
+            assert overdue["outbox_pending_application_hints"] > 0
+            assert overdue["oldest_outbox_pending_application_age_seconds"] >= 31 * 86400
             (state_dir / "applied").write_text(str(int(
                 received["received_through_event_id"]) + 1))
             force_status_due(binding_id)
@@ -404,6 +418,9 @@ def main():
             acknowledged = status(admin, connection_url, csrf)
             assert acknowledged["applied_through_event_id"] == received["received_through_event_id"]
             assert acknowledged["applied_error_code"] == ""
+            applied_diagnostics = delivery_diagnostics(admin, api, csrf, binding_id, secret)
+            assert applied_diagnostics["outbox_pending_application_hints"] == 0
+            assert applied_diagnostics["oldest_outbox_pending_application_age_seconds"] is None
             (state_dir / "applied").write_text("0")
             force_status_due(binding_id)
             assert not poll_status(binding_id)
@@ -433,6 +450,8 @@ def main():
             assert paused_diagnostics["applied_through_event_id"] == acknowledged["applied_through_event_id"]
             assert paused_diagnostics["outbox_pending_delivery_hints"] > 0
             assert paused_diagnostics["oldest_outbox_pending_delivery_age_seconds"] >= 0
+            assert paused_diagnostics["outbox_pending_application_hints"] == 0
+            assert paused_diagnostics["oldest_outbox_pending_application_age_seconds"] is None
 
             pending = sql("SELECT id FROM oc_weknora_outbox "
                           f"WHERE binding_id = '{binding_id}' AND id > "

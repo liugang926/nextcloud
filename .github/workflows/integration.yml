@@ -194,14 +194,15 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           repository: liugang926/WeKnora_ldapsa
-          ref: 06792ba5d88ed8fd0ddb9cf77f927c6cb9ae29fc
+          ref: e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e
           path: weknora-rag
           persist-credentials: false
 
       - name: Apply and check RAG adaptation
         run: |
-          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-06792ba5.patch
-          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-06792ba5.patch
+          echo 'a7d638ac36f2e64b5adf998cdd16a811c238de343a5ab8d001262fa8207c3961  nextcloud/integration/weknora-rag-e5cc3e44.patch' | sha256sum --check --
+          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-e5cc3e44.patch
+          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-e5cc3e44.patch
           git -C weknora-rag diff --check
 
       - uses: actions/setup-go@v7.0.0
