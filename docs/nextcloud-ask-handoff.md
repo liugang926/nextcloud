@@ -35,6 +35,10 @@ It resets previously selected KBs, files, tags, tools, agents and web search,
 then opens a new personal quick-answer session with exactly that document ID.
 The regular WeKnora retrieval path checks the user's current KB grant and
 Nextcloud publication before source content reaches the model or the answer.
+The manifest carries two distinct URLs: `url` remains the authenticated
+machine content endpoint, while `human_url` is Nextcloud's `/f/{fileid}` Files
+route. WeKnora stores the latter only for citations. Clicking the citation
+opens Nextcloud, where the visitor's own session and shares are checked again.
 The employee may later adjust a normal chat's scope in WeKnora; each resulting
 request continues to use WeKnora's authorization checks. The handoff does not
 provide Nextcloud SSO, an embedded chat, or a delegated token. Those are V1.1
@@ -48,3 +52,6 @@ WeKnora, asks a question and sees a citation that returns to the permitted
 Nextcloud original. A denied or revoked user must receive no target and no
 source text through direct API, chat history or alternate retrieval routes.
 Unit and contract tests alone do not establish that end-to-end result.
+Already indexed documents need one source reindex to acquire `human_url` in
+their citation metadata. The Nextcloud browser URL must resolve from employee
+machines on the LAN.

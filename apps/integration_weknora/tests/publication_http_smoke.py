@@ -168,6 +168,10 @@ def main():
         status, body = request(reader, f"{api}/bindings/{args.binding}/manifest", headers=bearer)
         check(status, 200, "manifest after republish")
         item = next(item for item in json.loads(body)["items"] if item["file_id"] == args.file_id)
+        human = urllib.parse.urlsplit(item["human_url"])
+        assert human.scheme in ("http", "https") and human.netloc
+        assert human.path.endswith(f"/f/{args.file_id}") and not human.query and not human.fragment
+        assert item["human_url"] != item["url"]
         status, body = request(reader, f"{api}/capabilities", headers=bearer)
         check(status, 200, "source capabilities for publication check")
         instance_id = json.loads(body)["instance_id"]

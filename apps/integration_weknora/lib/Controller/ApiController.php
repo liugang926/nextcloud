@@ -432,6 +432,12 @@ final class ApiController extends Controller {
                         self::APP_ID . '.api.content',
                         ['id' => $binding['id'], 'fileId' => $node->getId()],
                     ),
+                    // A separate browser link keeps the machine content URL
+                    // out of citations. Files checks the visitor's own login
+                    // and share permissions when this route is opened.
+                    'human_url' => $this->urlGenerator->linkToRouteAbsolute(
+                        'files.View.showFile', ['fileid' => $node->getId()],
+                    ),
                 ];
             }
         }
