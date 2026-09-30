@@ -7,6 +7,21 @@ patch, then run:
 python3 scripts/ops/isolated-pdf-candidate-smoke.py
 ```
 
+To exercise the short-text recovery branch in the same candidate binary, run
+the controlled variant separately:
+
+```sh
+python3 scripts/ops/isolated-pdf-candidate-smoke.py --force-short-primary
+```
+
+This variant adds `DOCREADER_PDF_FORCE_SCANNED=1` only to the newly generated,
+private fixture's DocReader service. It makes the primary result contain a page
+image and little searchable text while the unchanged born-digital PDF still
+has a complete local text layer. The run requires the application recovery log
+with primary and recovered character counts meeting the branch thresholds,
+then performs the same indexing, answer, citation, and revocation checks.
+It does not alter a shared Compose file or image.
+
 The smoke checks the candidate image's source and patch labels before it
 creates anything. It starts a fresh, uniquely named synthetic LDAP Compose
 project on random loopback ports, bootstraps an actual Nextcloud source pair,
@@ -29,7 +44,10 @@ that DocReader fully extracts never enters the short-text AnyDoc recovery
 branch; in that case the flag is `false` and the run establishes binary
 availability and PDF ingestion, not recovery of a truncated DocReader result.
 The focused Go test for that branch uses a controlled short primary result.
-Neither this smoke nor that unit test proves scanned-PDF OCR on the candidate.
+The `--force-short-primary` variant demonstrates the running candidate's
+recovery branch, but uses a deliberately rasterized primary result. Neither
+variant proves that an organically truncated PDF recovers, or that scanned-PDF
+OCR succeeds on the candidate.
 
 The fixture stores generated credentials and Compose files in a private 0700
 scratch directory. The smoke removes only its own marker-verified Compose
@@ -61,3 +79,23 @@ not trigger the short-text recovery branch
 runtime PDF text recovery when DocReader truncates its result. The marker-
 verified Compose containers and volumes were absent after the driver exited;
 the private scratch directory was removed by the driver.
+
+## Controlled short-primary run, 2026-09-30 UTC
+
+The `--force-short-primary` driver exited 0 against the same candidate
+app image `sha256:c8e8b10b275bc0abfe8446278132e35e4b87d79338d4f55c331cf4f84e42e551`
+in owned loopback project `nc-synldap-5c3140eb`. The candidate logged 46
+searchable characters from the primary DocReader result and 283 from AnyDoc,
+with its short-text recovery marker. The PDF reached published/completed state
+with two ready chunks and two embeddings; a ready chunk contained the protected
+marker. Alice's file-scoped answer contained the synthetic approval code and
+cited the original Nextcloud `/f/233` URL. Bob was denied. Removing only the
+source group share denied Alice's old JWT access to the source, ask target,
+direct content, search, and prior history citation on the first complete poll;
+her LDAP group membership and the owner's PDF remained. The owned Compose
+containers, volumes, and network were absent after cleanup.
+
+This controlled run proves that the built candidate executes the AnyDoc
+recovery branch in a complete Nextcloud-to-WeKnora flow. The primary short
+result was induced by the fixture's DocReader setting, so a naturally truncated
+born-digital PDF and scanned-PDF OCR remain separate acceptance cases.

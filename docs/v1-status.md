@@ -122,9 +122,14 @@ an original Nextcloud `/f/<file_id>` citation, and Bob was denied. Removing
 only the source share made Alice's old JWT lose DAV, source, ask, direct,
 search and prior citation access on the first poll; LDAP membership, WeKnora
 grant and owner's PDF remained. The PDF had complete DocReader text, so this
-run did not trigger the short-text AnyDoc recovery branch or test scanned-PDF
-OCR. The shared WeKnora LAN service still uses its prior image while the
-candidate is reviewed. See [the PDF candidate record](isolated-pdf-candidate.md).
+first run did not trigger the short-text AnyDoc recovery branch. A second
+independent fixture forced only its DocReader to rasterize the same PDF: the
+primary result had 46 searchable characters, the candidate logged AnyDoc
+recovery to 283 characters, and the same indexing, answer, citation and
+old-JWT revocation checks passed. This verifies the running fallback branch
+under controlled input, not natural PDF truncation or scanned-PDF OCR. The
+shared WeKnora LAN service still uses its prior image while the candidate is
+reviewed. See [the PDF candidate record](isolated-pdf-candidate.md).
 
 Both complete WeKnora patches were regenerated from their pinned fixed and RAG
 baselines and passed clean-apply checks. Selected direct HTTP reads,

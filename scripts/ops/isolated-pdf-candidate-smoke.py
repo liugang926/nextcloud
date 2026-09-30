@@ -10,6 +10,7 @@ import argparse
 import base64
 import datetime as dt
 import json
+import os
 from pathlib import Path
 import re
 import runpy
@@ -192,7 +193,7 @@ def source_denial(nc_base, wk_base, state, passwords, fixture, pdf_id,
     raise RuntimeError("old JWT PDF source, direct, search and citation denial did not converge")
 
 
-def run(scratch):
+def run(scratch, *, require_recovery=False):
     directory, state = owner["owned_state"](scratch)
     require(state["mode"] == "direct" and state["weknora_image"] == IMAGE,
             "PDF smoke requires its owned direct candidate fixture")
@@ -308,8 +309,20 @@ def run(scratch):
          state["project"] + "-wk-app-1"],
         text=True, capture_output=True, check=False, timeout=30)
     require(recovery.returncode == 0, "candidate PDF processing logs unavailable")
-    recovered = "[pdf] recovered incomplete text with anydoc" in (
+    recovery_matches = re.findall(
+        r"\[pdf\] recovered incomplete text with anydoc: "
+        r"primary_chars=(\d+) recovered_chars=(\d+)",
         recovery.stdout + recovery.stderr)
+    recovered = bool(recovery_matches)
+    if require_recovery:
+        require(recovered, "controlled short primary did not enter AnyDoc recovery")
+    recovery_counts = ([int(value) for value in recovery_matches[-1]]
+                       if recovered else None)
+    if require_recovery:
+        require(recovery_counts[0] < 120 and recovery_counts[1] >= 48 and
+                recovery_counts[1] >= recovery_counts[0] + 32 and
+                recovery_counts[1] >= recovery_counts[0] * 2,
+                "AnyDoc recovery log did not meet the branch thresholds")
     print(json.dumps({"phase": "pdf_published", "project": state["project"],
                       "file_id": pdf_id, "knowledge_id": knowledge_id,
                       "ready_chunks": proof["chunks"],
@@ -317,7 +330,11 @@ def run(scratch):
                       "anydoc_available": True, "docreader_connected": True,
                       "protected_text_indexed": True, "answer_marker": True,
                       "original_file_citation": True,
-                      "short_text_recovery_observed": recovered},
+                      "short_text_recovery_observed": recovered,
+                      "recovery_primary_chars": (recovery_counts[0]
+                                                 if recovered else None),
+                      "recovery_anydoc_chars": (recovery_counts[1]
+                                                if recovered else None)},
                      separators=(",", ":")), flush=True)
 
     handoff["revoke_source_share"](
@@ -347,11 +364,32 @@ def run(scratch):
                      separators=(",", ":")))
 
 
+def force_short_primary(scratch):
+    """Force rasterized primary output only in this owned private fixture."""
+    directory, state = owner["owned_state"](scratch)
+    require(state["mode"] == "direct" and state["weknora_image"] == IMAGE,
+            "short-primary injection requires an owned candidate fixture")
+    path = directory / "compose.yaml"
+    compose = json.loads(path.read_text())
+    service = compose["services"]["docreader"]
+    require(service["image"] == owner["DOCREADER_IMAGE"] and
+            "ports" not in service and "environment" not in service,
+            "owned DocReader configuration changed unexpectedly")
+    service["environment"] = {"DOCREADER_PDF_FORCE_SCANNED": "1"}
+    temporary = directory / "compose.short-primary.tmp"
+    temporary.write_text(json.dumps(compose, indent=2) + "\n")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", choices=(IMAGE,), default=IMAGE,
                         help="the pinned candidate tag; shared tags are rejected")
-    parser.parse_args()
+    parser.add_argument("--force-short-primary", action="store_true",
+                        help="in the owned fixture only, force DocReader to "
+                             "rasterize PDFs so the AnyDoc recovery branch is required")
+    args = parser.parse_args()
     candidate_image()
     prepared = subprocess.run(
         [sys.executable, str(HERE / "synthetic-ldap-fixture.py"),
@@ -359,6 +397,8 @@ def main():
         text=True, capture_output=True, check=True, timeout=45)
     scratch = Path(json.loads(prepared.stdout)["scratch"])
     try:
+        if args.force_short_primary:
+            force_short_primary(scratch)
         subprocess.run(
             [sys.executable, str(HERE / "synthetic-ldap-fixture.py"),
              "up", "--scratch", str(scratch)],
@@ -366,7 +406,7 @@ def main():
         directory, state = owner["owned_state"](scratch)
         e2e["bootstrap"](directory, state)
         e2e["matrix"](directory, state)
-        run(scratch)
+        run(scratch, require_recovery=args.force_short_primary)
     finally:
         removed = subprocess.run(
             [sys.executable, str(HERE / "synthetic-ldap-fixture.py"),
