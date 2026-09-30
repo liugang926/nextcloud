@@ -465,19 +465,20 @@ the live enterprise network and identity integration still need acceptance.
 ## 2026-10-01 candidate stabilization
 
 The current fixed c6 and RAG77 full patches have SHA-256 values
-`8fe4356d44155fb29a7dac11b461b9f7a32e0bf83fa1774c9fa85ad61a0a0e62`
-and `45ee34fa56c508de9ae8cbc75e6637b72d120200556941c7b630e9bca4efed95`.
+`5611d1c3b562410a5314f1dd82312fb485816d740f5ac603fa25253b619263a8`
+and `045ff1a17b244c90d1263f3e458fabfa0e142268e7b5df7f1f70cbae91a72852`.
 Both apply back to their pinned upstream commits. The combined Go tests for
 read-lease cancellation, knowledge-base settings, and event-key rotation pass
 on RAG77; the 27-route OpenAPI checker passes on both applied patches.
 The isolated RAG77 candidate backend image is
-`sha256:89288bfa8f615b0ba11c0822dd0636ec94a25bf1a183e85574bca207bb6b98c7`;
+`sha256:590d91c9d9e963c49c68cbd3b3dd93731d53df0e1eb302858fa1c28d2ff788e3`;
 its UI image is
-`sha256:14865c8ea7c699ff8e813515d9294de44acbe01f81b700e92cc84d9076d1265d`.
+`sha256:710bbe26743b809bad18302f1c1722363e781e6a3a257610979a6f86d0b91a21`.
 Both carry the exact RAG77 source revision and full patch hash as OCI labels;
-the shared WeKnora service still uses its earlier image.
-A fresh loopback-only `--phase full` probe with that exact backend image
-passed. File ID 92's V2 parse failed while its V1 recovery bytes stayed
+the shared WeKnora service still uses its earlier image. An immediately
+preceding candidate with identical runtime source, before a Go test-only
+PostgreSQL assertion correction, passed a fresh loopback-only `--phase full`
+probe. File ID 92's V2 parse failed while its V1 recovery bytes stayed
 stored; the administrator list showed one failed candidate, and Alice and Bob
 received `403` from that list. A durable retry with a new sync log published
 a distinct V2 candidate with ready chunk and embedding, and the list became
@@ -486,12 +487,23 @@ direct/ask routes denied access, and selected search and streamed answer
 suppressed its content. The old V1 direct/ask routes and answer remained
 denied. Both verified applied watermarks reached event 1. The probe removed
 its owned containers, volumes and network.
-A separate real Chromium run with the exact backend and UI images opened the
-failed-file drawer even when the editor's file-count probe returned `403`.
+A separate real Chromium run with that preceding backend and UI runtime
+opened the failed-file drawer even when the editor's file-count probe
+returned `403`.
 It showed file ID 92 and its exact manual-retry status, reloaded both list and
 exact status after an injected `409`, and received `202` from the real retry
 POST. Alice had no settings menu and the list API returned `403`. The browser
 fixture also removed its owned containers, volumes and network.
+The same backend runtime, before a test-only PostgreSQL rotation assertion
+was corrected, passed `--cross-bindings-only` with three nested files. A
+forbidden DAV DELETE returned `403` without a deletion hint or lost
+candidate. Moving the subtree A→B→A produced three source tombstones and
+three distinct destination candidates on each leg; event receipt and applied
+watermarks reached 12–16. Alice retained direct and file-scoped answer
+access, while Bob remained denied. This owned fixture was removed. The
+subsequent full-patch hash change touches only that Go test assertion.
+The corrected PostgreSQL event-connection lifecycle test passed against a
+separate PostgreSQL 16 container; its container and network were removed.
 
 A canceled read request now returns its parent context error even when a
 concurrent lease renewal observes a closed database transaction. The original

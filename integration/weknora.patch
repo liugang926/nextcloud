@@ -30919,7 +30919,7 @@ index 00000000..5fcf97eb
 +}
 diff --git a/internal/handler/nextcloud_event_connections_test.go b/internal/handler/nextcloud_event_connections_test.go
 new file mode 100644
-index 00000000..4cf1f3aa
+index 00000000..10a02818
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_connections_test.go
 @@ -0,0 +1,402 @@
@@ -31307,7 +31307,7 @@ index 00000000..4cf1f3aa
 +	require.NotEqual(t, first.KeyID, second.KeyID)
 +	batch := sampleNextcloudEventBatch("0", "101")
 +	batch.ConnectionID = second.ConnectionID
-+	require.Equal(t, http.StatusUnauthorized, postNextcloudEvent(router,
++	require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
 +		signedNextcloudEventRequestWithKey(t, first.Secret, first.KeyID, batch, strings.Repeat("1", 32))).Code)
 +	require.Equal(t, http.StatusAccepted, postNextcloudEvent(router,
 +		signedNextcloudEventRequestWithKey(t, second.Secret, second.KeyID, batch, strings.Repeat("2", 32))).Code)
