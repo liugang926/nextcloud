@@ -6,6 +6,7 @@ namespace OCA\IntegrationWeknora\Controller;
 
 use OCA\IntegrationWeknora\Service\BindingRegistryService;
 use OCA\IntegrationWeknora\Service\ChangeOutboxService;
+use OCA\IntegrationWeknora\Service\UnsupportedPublicationAclException;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\IGroupManager;
@@ -65,6 +66,8 @@ final class BindingAdminController extends Controller {
             ], $created ? 201 : 200);
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'invalid_binding'], 400);
+        } catch (UnsupportedPublicationAclException $exception) {
+            return $this->json(['error' => 'unsupported_source_acl'], 409);
         } catch (\DomainException $exception) {
             return $this->json(['error' => 'binding_conflict'], 409);
         } catch (\Throwable $exception) {
@@ -126,6 +129,8 @@ final class BindingAdminController extends Controller {
             ]);
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'invalid_binding'], 400);
+        } catch (UnsupportedPublicationAclException $exception) {
+            return $this->json(['error' => 'unsupported_source_acl'], 409);
         } catch (\DomainException $exception) {
             return $this->json(['error' => 'binding_unavailable'], 409);
         } catch (\UnexpectedValueException $exception) {

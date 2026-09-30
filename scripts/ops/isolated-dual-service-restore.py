@@ -41,6 +41,9 @@ VOLUMES = frozenset(("ldap-certs", "ldap-fixture", "nc-postgres", "nc-redis-data
                      "nc-html", "wk-postgres", "wk-data", "docreader-tmp"))
 SERVICES = frozenset(("openldap", "cert-init", "nc-db", "nc-redis", "nextcloud",
                       "wk-db", "wk-redis", "docreader", "mock-embedding", "wk-app"))
+CONTROL_FILES = {"state.json": "fixture-state.json",
+                 "compose.yaml": "fixture-compose.yaml",
+                 "passwords.json": "fixture-passwords.json"}
 
 
 def require(value, message):
@@ -196,6 +199,51 @@ def verify_archive(path, expected):
             "checkpoint archive failed SHA-256 verification")
 
 
+def copy_private(source, destination):
+    """Create a checkpoint copy with private permissions from the first byte."""
+    with source.open("rb") as original:
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as saved:
+            shutil.copyfileobj(original, saved)
+
+
+def restore_private(source, destination):
+    """Replace one fixture control file atomically with its verified backup."""
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".restore-",
+                                     delete=False) as saved:
+        temporary = Path(saved.name)
+        try:
+            with source.open("rb") as original:
+                shutil.copyfileobj(original, saved)
+            saved.flush()
+            os.fsync(saved.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    temporary.replace(destination)
+
+
+def fixture_weknora_keys(directory):
+    """Require the restored Compose keys to match the backed-up fixture secrets."""
+    passwords = json.loads((directory / "passwords.json").read_text())
+    compose_data = json.loads((directory / "compose.yaml").read_text())
+    require(isinstance(passwords, dict) and isinstance(compose_data, dict),
+            "restored fixture key files have invalid structure")
+    services = compose_data.get("services")
+    require(isinstance(services, dict) and isinstance(services.get("wk-app"), dict),
+            "restored WeKnora Compose service is missing")
+    environment = services["wk-app"].get("environment")
+    aes_key = passwords.get("aes")
+    require(isinstance(environment, dict) and
+            isinstance(passwords.get("jwt"), str) and passwords["jwt"] and
+            isinstance(aes_key, str) and
+            re.fullmatch(r"[0-9a-f]{32}", aes_key) is not None and
+            environment.get("JWT_SECRET") == passwords["jwt"] and
+            environment.get("SYSTEM_AES_KEY") == aes_key,
+            "restored WeKnora JWT or encryption key differs from checkpoint")
+    return passwords
+
+
 def pg_dump(container, user, database, destination):
     with destination.open("wb") as output:
         destination.chmod(0o600)
@@ -340,7 +388,7 @@ def drill(image, evidence):
         stages.append("live_dual_service_fixture")
         runtime = json.loads((directory / "runtime.json").read_text())
         fixture = json.loads((directory / "fixture.json").read_text())
-        passwords = json.loads((directory / "passwords.json").read_text())
+        passwords = fixture_weknora_keys(directory)
         nc_base = f"http://127.0.0.1:{state['ports']['nextcloud']}"
         wk_base = f"http://127.0.0.1:{state['ports']['weknora']}"
         old_jwt = matrix["weknora_login"](wk_base, "alice", passwords["alice"])
@@ -394,6 +442,10 @@ def drill(image, evidence):
             path = evidence / (role + ".tar")
             archive_volume(state, role, path)
             archives[path.name] = sha256(path)
+        for original, backup in CONTROL_FILES.items():
+            path = evidence / backup
+            copy_private(directory / original, path)
+            archives[path.name] = sha256(path)
         checkpoint_seconds = round(time.monotonic() - checkpoint_start, 3)
         private_json(evidence / "checkpoint.json", {
             "project": project, "instance_id": instance_id,
@@ -442,10 +494,6 @@ def drill(image, evidence):
         ids, names = owned_resources(directory, state, require_containers=False)
         require(not ids and not names, "old disposable project resources remain")
         restore_start = time.monotonic()
-        compose(directory, state, "create", "--no-build", timeout=180)
-        owned_resources(directory, state, require_containers=True)
-        app_stopped(state, "nextcloud")
-        app_stopped(state, "wk-app")
         saved_checkpoint = json.loads((evidence / "checkpoint.json").read_text())
         require(saved_checkpoint.get("project") == project and
                 saved_checkpoint.get("instance_id") == instance_id and
@@ -459,6 +507,26 @@ def drill(image, evidence):
         archives = saved_checkpoint["archive_sha256"]
         for name, expected in archives.items():
             verify_archive(evidence / name, expected)
+        # Rehydrate the generated Compose environment, ownership marker and
+        # secrets from the checkpoint before recreating any service. The
+        # original scratch copies are deliberately replaced, not reused.
+        for original, backup in CONTROL_FILES.items():
+            restore_private(evidence / backup, directory / original)
+            verify_archive(directory / original, archives[backup])
+        restored_directory, restored_state = owner["owned_state"](directory)
+        require(restored_directory == directory and
+                restored_state == {key: value for key, value in state.items()
+                                   if key != "_compose_sha256"},
+                "restored fixture ownership differs from checkpoint")
+        require(sha256(directory / "compose.yaml") == state["_compose_sha256"],
+                "restored Compose configuration differs from checkpoint")
+        passwords = fixture_weknora_keys(directory)
+        stages.append("fixture_keys_restored_from_checkpoint")
+
+        compose(directory, state, "create", "--no-build", timeout=180)
+        owned_resources(directory, state, require_containers=True)
+        app_stopped(state, "nextcloud")
+        app_stopped(state, "wk-app")
         for role in ("nc-postgres", "wk-postgres", "nc-html", "wk-data"):
             restore_volume(state, role, evidence / (role + ".tar"))
         for role, expected_owner in pg_volume_owners.items():
@@ -568,6 +636,7 @@ def drill(image, evidence):
                   "old_jwt_valid_but_source_denied_before_and_after_reconcile": True,
                   "restored_source_state": final["state"],
                   "restored_visible_candidates": final["visible"],
+                  "fixture_keys_restored_from_checkpoint": True,
                   "production_rpo_rto_or_external_backend_proven": False}
         owned_resources(directory, state, require_containers=True)
         compose(directory, state, "down", "--volumes", "--remove-orphans", timeout=180)

@@ -58,9 +58,12 @@ final class SourceAuthorizationService {
         $ownerRoot = $this->bindings->requireActiveRoot($bindingId);
         $ownerCanPublish = false;
         foreach ($ownerRoot->getById($fileId) as $ownerFile) {
-            if ($ownerFile instanceof File && $ownerFile->getId() === $fileId &&
-                $ownerRoot->isSubNode($ownerFile) &&
-                $this->readablePermissionChain($ownerFile, $ownerRoot) !== null) {
+            if (!$ownerFile instanceof File || $ownerFile->getId() !== $fileId ||
+                !$ownerRoot->isSubNode($ownerFile)) {
+                continue;
+            }
+            $this->bindings->assertNodeInSupportedMount($bindingId, $ownerRoot, $ownerFile);
+            if ($this->readablePermissionChain($ownerFile, $ownerRoot) !== null) {
                 $ownerCanPublish = true;
                 break;
             }
@@ -86,6 +89,7 @@ final class SourceAuthorizationService {
                     !$root->isSubNode($file) || !$userFolder->isSubNode($file)) {
                     continue;
                 }
+                $this->bindings->assertNodeInSupportedMount($bindingId, $root, $file);
                 $permissionChain = $this->readablePermissionChain($file, $root);
                 if ($permissionChain === null) {
                     continue;
@@ -98,6 +102,7 @@ final class SourceAuthorizationService {
                 ], JSON_THROW_ON_ERROR));
                 try {
                     $freshEpoch = $this->bindings->requirePublicationActive($bindingId);
+                    $this->bindings->requireActiveRoot($bindingId);
                 } catch (BindingPublicationStoppedException $exception) {
                     return $this->deny('publication_stopped');
                 }

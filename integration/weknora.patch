@@ -852,10 +852,10 @@ index 00000000..6039a9d9
 +leave the Nextcloud decommission operation in `prepared`.
 diff --git a/docs/nextcloud-indexed-withdrawal.md b/docs/nextcloud-indexed-withdrawal.md
 new file mode 100644
-index 00000000..8229f8a4
+index 00000000..2ae3c280
 --- /dev/null
 +++ b/docs/nextcloud-indexed-withdrawal.md
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,64 @@
 +# Indexed Nextcloud source withdrawal: first stage
 +
 +An indexed source cannot use the empty-source decommission ACK. Current source
@@ -899,12 +899,16 @@ index 00000000..8229f8a4
 +The private, append-only SQL inventory records exact observed identities for
 +knowledge rows (including soft-deleted rows), source files, extracted images,
 +chunks, PostgreSQL embedding rows, source versions, sync logs, and existing GC
-+jobs/items. It scans the whole dedicated KB for copies with a missing live
++jobs/items. It also records every row of the append-only source revision ledger,
++including a candidate identity whose knowledge row was later hard-deleted.
++It scans the whole dedicated KB for copies with a missing live
 +knowledge row, and keeps an original item even if later processing changes
 +state. Malformed image metadata and an absent PostgreSQL embeddings table
 +produce explicit blocker items. An external-index blocker is always present.
 +Refresh errors leave the withdrawal in force and require a retry.
-+The item count does not certify completeness. The migration does not assign a
++The item count does not certify completeness: a revision records a local source
++mutation, not every copy made from it, and pre-ledger history remains unknown.
++The migration does not assign a
 +historical index backend to an old version, discover an external copy, cancel
 +an already running external write, or confirm physical storage release.
 +
@@ -11923,10 +11927,10 @@ index 00000000..ff5d0f4c
 +}
 diff --git a/internal/application/repository/nextcloud_indexed_withdrawal.go b/internal/application/repository/nextcloud_indexed_withdrawal.go
 new file mode 100644
-index 00000000..d40af793
+index 00000000..a4ea190c
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_indexed_withdrawal.go
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,388 @@
 +package repository
 +
 +import (
@@ -12208,6 +12212,11 @@ index 00000000..d40af793
 +			{"gc_job", `SELECT id AS object_ref, knowledge_id FROM nextcloud_gc_jobs WHERE tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ?`, []any{row.TenantID, row.KnowledgeBaseID, row.DataSourceID}},
 +			{"gc_item", `SELECT i.job_id || ':' || i.kind || ':' || i.object_ref AS object_ref, j.knowledge_id FROM nextcloud_gc_items i JOIN nextcloud_gc_jobs j ON j.id = i.job_id WHERE j.tenant_id = ? AND j.knowledge_base_id = ? AND j.datasource_id = ?`, []any{row.TenantID, row.KnowledgeBaseID, row.DataSourceID}},
 +			{"source_version", `SELECT external_id AS object_ref, candidate_knowledge_id AS knowledge_id FROM nextcloud_source_versions WHERE tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ?`, []any{row.TenantID, row.KnowledgeBaseID, row.DataSourceID}},
++			// The mutable source-version row names only the latest candidate. Keep
++			// every later observed revision, including one whose knowledge row
++			// was already hard-deleted. This remains an incomplete copy inventory:
++			// pre-ledger history and external backends are still unknown.
++			{"source_revision", `SELECT jsonb_build_array(external_id, revision)::text AS object_ref, candidate_knowledge_id AS knowledge_id FROM nextcloud_source_revisions WHERE tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ?`, []any{row.TenantID, row.KnowledgeBaseID, row.DataSourceID}},
 +			{"sync_log", `SELECT id AS object_ref, '' AS knowledge_id FROM sync_logs WHERE data_source_id = ?`, []any{row.DataSourceID}},
 +		}
 +		for _, q := range queries {
@@ -12312,16 +12321,17 @@ index 00000000..d40af793
 +}
 diff --git a/internal/application/repository/nextcloud_indexed_withdrawal_pg_test.go b/internal/application/repository/nextcloud_indexed_withdrawal_pg_test.go
 new file mode 100644
-index 00000000..84e030ba
+index 00000000..6974c25e
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_indexed_withdrawal_pg_test.go
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,408 @@
 +package repository
 +
 +import (
 +	"context"
 +	"crypto/hmac"
 +	"crypto/sha256"
++	"encoding/json"
 +	"net/url"
 +	"os"
 +	"strings"
@@ -12441,6 +12451,35 @@ index 00000000..84e030ba
 +	script, err := os.ReadFile("../../../migrations/versioned/000125_nextcloud_indexed_withdrawal.up.sql")
 +	require.NoError(t, err)
 +	require.NoError(t, migrationDB.Exec(string(script)).Error)
++	for _, migration := range []string{
++		"000126_nextcloud_source_revisions.up.sql",
++		"000129_nextcloud_withdrawal_revision_inventory.up.sql",
++	} {
++		script, err := os.ReadFile("../../../migrations/versioned/" + migration)
++		require.NoError(t, err)
++		require.NoError(t, migrationDB.Exec(string(script)).Error, migration)
++	}
++	// A candidate can be hard-deleted before withdrawal. The append-only
++	// revision still names it even when neither the current source row nor
++	// the knowledge scan can discover that old generation.
++	oldKnowledge := *knowledge
++	oldKnowledge.ID = "old-hard-deleted"
++	oldKnowledge.FilePath = "resource://old-copy"
++	oldKnowledge.Metadata = types.JSON(`{"datasource_id":"` + ds.ID + `","nextcloud_etag":"etag-old","nextcloud_instance_id":"instance"}`)
++	require.NoError(t, db.Create(&oldKnowledge).Error)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_source_versions SET
++		desired_etag = 'etag-old', candidate_knowledge_id = 'old-hard-deleted'
++		WHERE datasource_id = ? AND external_id = 'nextcloud:instance:1'`, ds.ID).Error)
++	require.NoError(t, db.Unscoped().Delete(&oldKnowledge).Error)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_source_versions SET
++		desired_etag = 'etag-1', candidate_knowledge_id = 'file-1'
++		WHERE datasource_id = ? AND external_id = 'nextcloud:instance:1'`, ds.ID).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_source_revisions
++		(tenant_id, knowledge_base_id, datasource_id, external_id, revision,
++		 desired_etag, candidate_knowledge_id, state, source_updated_at,
++		 legacy_history_unknown)
++		VALUES (8, 'other-kb', 'other-ds', 'nextcloud:instance:1', 1,
++		 'other-etag', 'other-candidate', 'published', CURRENT_TIMESTAMP, FALSE)`).Error)
 +	repo := NewNextcloudSourcePairingRepository(db)
 +	signedBatch := func(afterID, eventID int64) SignedNextcloudEventBatch {
 +		canonical := []byte("canonical event withdrawal test")
@@ -12566,7 +12605,19 @@ index 00000000..84e030ba
 +	require.NoError(t, err)
 +	require.False(t, status.InventoryComplete)
 +	require.True(t, status.LogicalWithdrawn)
-+	require.EqualValues(t, 12, status.ObservedItems)
++	require.EqualValues(t, 15, status.ObservedItems)
++	var oldRevisionRef string
++	require.NoError(t, db.Table("nextcloud_indexed_withdrawal_items").
++		Select("object_ref").Where("operation_id = ? AND kind = ? AND knowledge_id = ?",
++		row.OperationID, "source_revision", oldKnowledge.ID).Row().Scan(&oldRevisionRef))
++	var revisionIdentity []any
++	require.NoError(t, json.Unmarshal([]byte(oldRevisionRef), &revisionIdentity))
++	require.Equal(t, []any{"nextcloud:instance:1", float64(2)}, revisionIdentity)
++	var otherRevision int64
++	require.NoError(t, db.Model(&nextcloudIndexedWithdrawalItem{}).
++		Where("operation_id = ? AND kind = ? AND knowledge_id = ?", row.OperationID,
++			"source_revision", "other-candidate").Count(&otherRevision).Error)
++	require.Zero(t, otherRevision, "another tenant/KB must not enter the withdrawal inventory")
 +	var invalid int64
 +	require.NoError(t, db.Model(&nextcloudIndexedWithdrawalItem{}).
 +		Where("operation_id = ? AND kind = ? AND object_ref = ?", row.OperationID,
@@ -12581,7 +12632,7 @@ index 00000000..84e030ba
 +	var count int64
 +	require.NoError(t, db.Model(&nextcloudIndexedWithdrawalItem{}).
 +		Where("operation_id = ?", row.OperationID).Count(&count).Error)
-+	require.EqualValues(t, 12, count, "retry must not double-count copies")
++	require.EqualValues(t, 15, count, "retry must not double-count copies")
 +	lateJob := nextcloudGCJob{ID: uuid.NewString(), TenantID: 7,
 +		KnowledgeBaseID: "kb", DataSourceID: ds.ID,
 +		ExternalID: "nextcloud:instance:1", KnowledgeID: "file-1",
@@ -12595,7 +12646,7 @@ index 00000000..84e030ba
 +	require.Equal(t, "source_withdrawal_gc_paused", claim.code)
 +	status, err = repo.RefreshIndexedWithdrawalInventory(ctx, row)
 +	require.NoError(t, err)
-+	require.EqualValues(t, 14, status.ObservedItems,
++	require.EqualValues(t, 17, status.ObservedItems,
 +		"a retry must capture a later GC job and exact item without authorizing deletion")
 +	_, err = repo.BeginIndexedSourceWithdrawal(ctx, pair, proposed)
 +	require.NoError(t, err)
@@ -12675,8 +12726,12 @@ index 00000000..84e030ba
 +	require.NoError(t, db.Exec(`DROP TABLE embeddings`).Error)
 +	status, err = repo.RefreshIndexedWithdrawalInventory(ctx, row)
 +	require.NoError(t, err, "missing optional local table must retain a blocker, not fail refresh")
-+	require.EqualValues(t, 15, status.ObservedItems)
++	require.EqualValues(t, 18, status.ObservedItems)
 +	require.False(t, status.InventoryComplete)
++	down, err := os.ReadFile("../../../migrations/versioned/000129_nextcloud_withdrawal_revision_inventory.down.sql")
++	require.NoError(t, err)
++	require.ErrorContains(t, migrationDB.Exec(string(down)).Error,
++		"nextcloud_withdrawal_revision_inventory_requires_audit_export")
 +}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
@@ -17383,6 +17438,95 @@ index 00000000..83631b3b
 +	second.CandidateKnowledgeID = ""
 +	second.State = "tombstone"
 +	require.NoError(t, db.Create(&second).Error)
++}
+diff --git a/internal/application/repository/nextcloud_withdrawal_revision_inventory_test.go b/internal/application/repository/nextcloud_withdrawal_revision_inventory_test.go
+new file mode 100644
+index 00000000..616761d1
+--- /dev/null
++++ b/internal/application/repository/nextcloud_withdrawal_revision_inventory_test.go
+@@ -0,0 +1,83 @@
++package repository
++
++import (
++	"database/sql"
++	"os"
++	"path/filepath"
++	"testing"
++
++	_ "github.com/mattn/go-sqlite3"
++	"github.com/stretchr/testify/require"
++)
++
++func nextcloudWithdrawalInventorySQLiteDB(t *testing.T) *sql.DB {
++	t.Helper()
++	db, err := sql.Open("sqlite3", "file:"+filepath.Join(t.TempDir(), "withdrawal.db")+"?_foreign_keys=on")
++	require.NoError(t, err)
++	db.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = db.Close() })
++	_, err = db.Exec(`CREATE TABLE nextcloud_source_pairings (operation_id TEXT PRIMARY KEY);
++		CREATE TABLE nextcloud_source_decommissions (pair_operation_id TEXT NOT NULL);
++		CREATE TABLE data_sources (id TEXT PRIMARY KEY, status TEXT NOT NULL);
++		INSERT INTO nextcloud_source_pairings (operation_id) VALUES ('pair');
++		INSERT INTO data_sources (id, status) VALUES ('ds', 'paused')`)
++	require.NoError(t, err)
++	script, err := os.ReadFile("../../../migrations/sqlite/000044_nextcloud_indexed_withdrawal.up.sql")
++	require.NoError(t, err)
++	_, err = db.Exec(string(script))
++	require.NoError(t, err)
++	_, err = db.Exec(`INSERT INTO nextcloud_indexed_withdrawals
++		(operation_id, pair_operation_id, tenant_id, knowledge_base_id,
++		 datasource_id, nextcloud_instance_id, binding_id, publication_epoch, key_id)
++		VALUES ('withdrawal', 'pair', 7, 'kb', 'ds', 'instance', 'binding', 1, 'key');
++		INSERT INTO nextcloud_indexed_withdrawal_items
++		(operation_id, kind, object_ref, knowledge_id)
++		VALUES ('withdrawal', 'source_version', 'source', 'current')`)
++	require.NoError(t, err)
++	return db
++}
++
++func TestSQLiteNextcloudWithdrawalRevisionInventoryMigration(t *testing.T) {
++	for _, keepRevision := range []bool{false, true} {
++		t.Run(map[bool]string{false: "reversible_empty", true: "retained_revision"}[keepRevision],
++			func(t *testing.T) {
++				db := nextcloudWithdrawalInventorySQLiteDB(t)
++				up, err := os.ReadFile("../../../migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.up.sql")
++				require.NoError(t, err)
++				_, err = db.Exec(string(up))
++				require.NoError(t, err)
++				var count int
++				require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM nextcloud_indexed_withdrawal_items
++					WHERE operation_id = 'withdrawal' AND kind = 'source_version'
++					AND object_ref = 'source' AND knowledge_id = 'current'`).Scan(&count))
++				require.Equal(t, 1, count, "the old inventory must survive the table rebuild")
++				_, err = db.Exec(`UPDATE nextcloud_indexed_withdrawal_items SET knowledge_id = 'forged'
++					WHERE operation_id = 'withdrawal'`)
++				require.ErrorContains(t, err, "nextcloud_indexed_withdrawal_item_immutable")
++				if keepRevision {
++					_, err = db.Exec(`INSERT INTO nextcloud_indexed_withdrawal_items
++						(operation_id, kind, object_ref, knowledge_id)
++						VALUES ('withdrawal', 'source_revision', '["source",2]', 'old-copy')`)
++					require.NoError(t, err)
++				}
++				down, err := os.ReadFile("../../../migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.down.sql")
++				require.NoError(t, err)
++				_, err = db.Exec(string(down))
++				if keepRevision {
++					require.Error(t, err, "observed revisions must block a destructive downgrade")
++					require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM nextcloud_indexed_withdrawal_items
++						WHERE kind = 'source_revision'`).Scan(&count))
++					require.Equal(t, 1, count)
++					return
++				}
++				require.NoError(t, err)
++				_, err = db.Exec(`INSERT INTO nextcloud_indexed_withdrawal_items
++					(operation_id, kind, object_ref, knowledge_id)
++					VALUES ('withdrawal', 'source_revision', '["source",2]', 'old-copy')`)
++				require.Error(t, err, "the old schema must reject the new inventory kind")
++				require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM nextcloud_indexed_withdrawal_items
++					WHERE kind = 'source_version'`).Scan(&count))
++				require.Equal(t, 1, count)
++			})
++	}
 +}
 diff --git a/internal/application/repository/resource.go b/internal/application/repository/resource.go
 index b3d724b7..d75865d8 100644
@@ -23875,7 +24019,7 @@ index 48620fad..c6fbfd4f 100644
  	// Run all pending migrations
  	logger.Infof(ctx, "Running pending migrations...")
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e515..8193fdd5 100644
+index 9cc4e515..665a79a9 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -23909,7 +24053,7 @@ index 9cc4e515..8193fdd5 100644
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 47
++const expectedSQLiteMigrationVersion = 48
 +
 +func TestSQLiteNextcloudRevisionUpgradeFrom43PreservesUnknownHistory(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -40628,6 +40772,79 @@ index 00000000..1216478b
 +    ON nextcloud_candidate_retry_jobs (state, next_attempt_at);
 +CREATE INDEX idx_nextcloud_candidate_retry_source
 +    ON nextcloud_candidate_retry_jobs (datasource_id, state, lease_until);
+diff --git a/migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.down.sql b/migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.down.sql
+new file mode 100644
+index 00000000..ba4f8dcb
+--- /dev/null
++++ b/migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.down.sql
+@@ -0,0 +1,32 @@
++-- Rollback is safe only before any revision identity has been recorded.
++CREATE TABLE nextcloud_withdrawal_revision_down_guard (id INTEGER CHECK (id = 0));
++INSERT INTO nextcloud_withdrawal_revision_down_guard
++SELECT 1 WHERE EXISTS (SELECT 1 FROM nextcloud_indexed_withdrawal_items
++                       WHERE kind = 'source_revision');
++DROP TABLE nextcloud_withdrawal_revision_down_guard;
++DROP TRIGGER nextcloud_indexed_withdrawal_item_immutable_delete;
++DROP TRIGGER nextcloud_indexed_withdrawal_item_immutable_update;
++CREATE TABLE nextcloud_indexed_withdrawal_items_old (
++    operation_id TEXT NOT NULL REFERENCES nextcloud_indexed_withdrawals(operation_id) ON DELETE RESTRICT,
++    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image',
++        'invalid_image_inventory', 'missing_local_embedding_table',
++        'unverified_external_index', 'chunk', 'postgres_embedding',
++        'gc_job', 'gc_item', 'source_version', 'sync_log')),
++    object_ref TEXT NOT NULL,
++    knowledge_id TEXT NOT NULL DEFAULT '',
++    observed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (operation_id, kind, object_ref)
++);
++INSERT INTO nextcloud_indexed_withdrawal_items_old
++    (operation_id, kind, object_ref, knowledge_id, observed_at)
++SELECT operation_id, kind, object_ref, knowledge_id, observed_at
++FROM nextcloud_indexed_withdrawal_items;
++DROP TABLE nextcloud_indexed_withdrawal_items;
++ALTER TABLE nextcloud_indexed_withdrawal_items_old
++    RENAME TO nextcloud_indexed_withdrawal_items;
++CREATE TRIGGER nextcloud_indexed_withdrawal_item_immutable_update
++BEFORE UPDATE ON nextcloud_indexed_withdrawal_items
++BEGIN SELECT RAISE(ABORT, 'nextcloud_indexed_withdrawal_item_immutable'); END;
++CREATE TRIGGER nextcloud_indexed_withdrawal_item_immutable_delete
++BEFORE DELETE ON nextcloud_indexed_withdrawal_items
++BEGIN SELECT RAISE(ABORT, 'nextcloud_indexed_withdrawal_item_immutable'); END;
+diff --git a/migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.up.sql b/migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.up.sql
+new file mode 100644
+index 00000000..1522bcb6
+--- /dev/null
++++ b/migrations/sqlite/000048_nextcloud_withdrawal_revision_inventory.up.sql
+@@ -0,0 +1,29 @@
++-- SQLite cannot admit indexed withdrawal yet, but preserve the same private
++-- inventory schema for a future fenced implementation. Rebuild the child table
++-- because SQLite cannot change an existing CHECK constraint in place.
++DROP TRIGGER nextcloud_indexed_withdrawal_item_immutable_delete;
++DROP TRIGGER nextcloud_indexed_withdrawal_item_immutable_update;
++CREATE TABLE nextcloud_indexed_withdrawal_items_new (
++    operation_id TEXT NOT NULL REFERENCES nextcloud_indexed_withdrawals(operation_id) ON DELETE RESTRICT,
++    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image',
++        'invalid_image_inventory', 'missing_local_embedding_table',
++        'unverified_external_index', 'chunk', 'postgres_embedding',
++        'gc_job', 'gc_item', 'source_version', 'source_revision', 'sync_log')),
++    object_ref TEXT NOT NULL,
++    knowledge_id TEXT NOT NULL DEFAULT '',
++    observed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (operation_id, kind, object_ref)
++);
++INSERT INTO nextcloud_indexed_withdrawal_items_new
++    (operation_id, kind, object_ref, knowledge_id, observed_at)
++SELECT operation_id, kind, object_ref, knowledge_id, observed_at
++FROM nextcloud_indexed_withdrawal_items;
++DROP TABLE nextcloud_indexed_withdrawal_items;
++ALTER TABLE nextcloud_indexed_withdrawal_items_new
++    RENAME TO nextcloud_indexed_withdrawal_items;
++CREATE TRIGGER nextcloud_indexed_withdrawal_item_immutable_update
++BEFORE UPDATE ON nextcloud_indexed_withdrawal_items
++BEGIN SELECT RAISE(ABORT, 'nextcloud_indexed_withdrawal_item_immutable'); END;
++CREATE TRIGGER nextcloud_indexed_withdrawal_item_immutable_delete
++BEFORE DELETE ON nextcloud_indexed_withdrawal_items
++BEGIN SELECT RAISE(ABORT, 'nextcloud_indexed_withdrawal_item_immutable'); END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -42145,3 +42362,44 @@ index 00000000..21f732d2
 +    ON nextcloud_candidate_retry_jobs (state, next_attempt_at);
 +CREATE INDEX idx_nextcloud_candidate_retry_source
 +    ON nextcloud_candidate_retry_jobs (datasource_id, state, lease_until);
+diff --git a/migrations/versioned/000129_nextcloud_withdrawal_revision_inventory.down.sql b/migrations/versioned/000129_nextcloud_withdrawal_revision_inventory.down.sql
+new file mode 100644
+index 00000000..9a73246b
+--- /dev/null
++++ b/migrations/versioned/000129_nextcloud_withdrawal_revision_inventory.down.sql
+@@ -0,0 +1,17 @@
++-- Never discard observed revision identities during a downgrade.
++DO $$
++BEGIN
++    IF EXISTS (SELECT 1 FROM nextcloud_indexed_withdrawal_items
++               WHERE kind = 'source_revision') THEN
++        RAISE EXCEPTION 'nextcloud_withdrawal_revision_inventory_requires_audit_export';
++    END IF;
++END
++$$;
++ALTER TABLE nextcloud_indexed_withdrawal_items
++    DROP CONSTRAINT nextcloud_indexed_withdrawal_items_kind_check;
++ALTER TABLE nextcloud_indexed_withdrawal_items
++    ADD CONSTRAINT nextcloud_indexed_withdrawal_items_kind_check
++    CHECK (kind IN ('knowledge', 'source_file', 'extracted_image',
++        'invalid_image_inventory', 'missing_local_embedding_table',
++        'unverified_external_index', 'chunk', 'postgres_embedding',
++        'gc_job', 'gc_item', 'source_version', 'sync_log'));
+diff --git a/migrations/versioned/000129_nextcloud_withdrawal_revision_inventory.up.sql b/migrations/versioned/000129_nextcloud_withdrawal_revision_inventory.up.sql
+new file mode 100644
+index 00000000..5261e713
+--- /dev/null
++++ b/migrations/versioned/000129_nextcloud_withdrawal_revision_inventory.up.sql
+@@ -0,0 +1,12 @@
++-- The first-stage indexed withdrawal observes the append-only local source
++-- revision ledger as well as the mutable current source-version row. This
++-- extends private evidence only; it does not make the inventory complete or
++-- authorize a retirement ACK or physical derived-index deletion.
++ALTER TABLE nextcloud_indexed_withdrawal_items
++    DROP CONSTRAINT nextcloud_indexed_withdrawal_items_kind_check;
++ALTER TABLE nextcloud_indexed_withdrawal_items
++    ADD CONSTRAINT nextcloud_indexed_withdrawal_items_kind_check
++    CHECK (kind IN ('knowledge', 'source_file', 'extracted_image',
++        'invalid_image_inventory', 'missing_local_embedding_table',
++        'unverified_external_index', 'chunk', 'postgres_embedding',
++        'gc_job', 'gc_item', 'source_version', 'source_revision', 'sync_log'));

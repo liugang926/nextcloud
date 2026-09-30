@@ -151,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '5611d1c3b562410a5314f1dd82312fb485816d740f5ac603fa25253b619263a8  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '4f976461f099da9ba6a53ce637b1ae7f285f46b0177ad95fc8bcee6a23b76792  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -252,7 +252,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo '045ff1a17b244c90d1263f3e458fabfa0e142268e7b5df7f1f70cbae91a72852  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo 'cc6325eac6cb5ef128e32a803cf5610f2a627ab5a6c7119849efda055744214c  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -286,8 +286,9 @@ jobs:
         env:
           WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
           WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+          WEKNORA_INDEXED_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
         run: |
-          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
       - uses: actions/setup-node@v4

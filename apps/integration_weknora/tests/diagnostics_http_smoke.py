@@ -31,6 +31,7 @@ def main():
     data = json.loads(body)
     assert data["binding_count"] >= 1, data
     assert data["binding_roots_available"] is True, data
+    assert data["bindings_with_unsupported_acl"] == [], data
     assert data["retained_change_hints"] >= 0, data
     assert data["explicit_withdrawal_count"] >= 0, data
     assert isinstance(data["consumer_acknowledgement_available"], bool), data

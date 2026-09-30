@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace OCA\IntegrationWeknora\Service;
 
 use OCP\Files\Folder;
+use OCP\Files\FileInfo;
 use OCP\Files\IRootFolder;
 use OCP\IConfig;
 use OCP\IDBConnection;
 use OCP\IUserManager;
+use Psr\Log\LoggerInterface;
 
 /** The local binding registry, currently backed by Nextcloud app config. */
 final class BindingRegistryService {
@@ -19,6 +21,9 @@ final class BindingRegistryService {
         private IRootFolder $rootFolder,
         private IUserManager $userManager,
         private IDBConnection $db,
+        private PublicationAclPolicyService $aclPolicy,
+        private ChangeOutboxService $outbox,
+        private LoggerInterface $logger,
     ) {
     }
 
@@ -164,7 +169,7 @@ final class BindingRegistryService {
                 }
                 // A stopped binding cannot resume against a moved, missing,
                 // unreadable, or newly overlapping publication root.
-                $this->requireActiveRoot($id);
+                $this->assertTreeSupported($id, $this->requireActiveRoot($id));
             }
             if ($selected['publication_epoch'] === PHP_INT_MAX) {
                 throw new \UnexpectedValueException('Publication epoch exhausted');
@@ -244,7 +249,53 @@ final class BindingRegistryService {
             !hash_equals((string)$pairedRootHash, SourcePairingRegistryService::rootHash($selected))) {
             throw new \UnexpectedValueException('Paired binding root has moved');
         }
+        try {
+            $this->aclPolicy->assertSupported($selected);
+        } catch (UnsupportedPublicationAclException $exception) {
+            $this->stopUnsafeBinding($bindingId);
+            throw $exception;
+        }
         return $selected;
+    }
+
+    public function assertNodeInSupportedMount(string $bindingId, Folder $root, FileInfo $node): void {
+        try {
+            $this->aclPolicy->assertSameMount($root, $node);
+        } catch (UnsupportedPublicationAclException $exception) {
+            $this->stopUnsafeBinding($bindingId);
+            throw $exception;
+        }
+    }
+
+    public function assertTreeSupported(string $bindingId, Folder $root): void {
+        try {
+            $this->aclPolicy->assertTreeSupported($root);
+        } catch (UnsupportedPublicationAclException $exception) {
+            $this->stopUnsafeBinding($bindingId);
+            throw $exception;
+        }
+    }
+
+    private function stopUnsafeBinding(string $bindingId): void {
+        // A newly enabled advanced ACL must close the source for every
+        // reader, including users not named by the rule. Nested callers
+        // (notably resume and source pairing) already hold a transaction;
+        // their caller fails closed and a later ordinary read can stop it.
+        if (!$this->db->inTransaction()) {
+            try {
+                $result = $this->setPublicationState($bindingId, 'stopped', 'acl-policy');
+                if ($result !== null && $result['changed']) {
+                    $this->outbox->append($bindingId, null, 'reconcile');
+                }
+            } catch (\Throwable $stopError) {
+                // Even if the database or outbox is unavailable, the
+                // current source request still cannot return content.
+                $this->logger->error('Unsafe publication ACL could not be fully stopped', [
+                    'binding_id' => $bindingId,
+                    'error_type' => get_class($stopError),
+                ]);
+            }
+        }
     }
 
     /** @return list<array{id: string, name: string, owner_uid: string, root_file_id: int}> */
@@ -287,6 +338,7 @@ final class BindingRegistryService {
             throw new \InvalidArgumentException('Invalid binding fields');
         }
         $root = $this->resolveRoot($ownerUid, $rootFileId);
+        $this->aclPolicy->assertTreeSupported($root);
         $this->db->beginTransaction();
         try {
             // Fresh app installs can create the lock table without running

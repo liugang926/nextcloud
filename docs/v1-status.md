@@ -464,7 +464,7 @@ the live enterprise network and identity integration still need acceptance.
 
 ## 2026-10-01 candidate stabilization
 
-The current fixed c6 and RAG77 full patches have SHA-256 values
+The preceding fixed c6 and RAG77 full patches had SHA-256 values
 `5611d1c3b562410a5314f1dd82312fb485816d740f5ac603fa25253b619263a8`
 and `045ff1a17b244c90d1263f3e458fabfa0e142268e7b5df7f1f70cbae91a72852`.
 Both apply back to their pinned upstream commits. The combined Go tests for
@@ -523,6 +523,61 @@ at signing. Focused Go tests on both baselines cover the old/new interval,
 expiry, second rotation, replay and scope, and the event smoke script now
 expects the same behavior. This two-minute event-key window is distinct from
 the source machine-key rotation protocol's maximum 24-hour overlap.
+
+## 2026-10-01 isolated follow-up candidate
+
+Nextcloud app 0.4.30 adds a narrow V1 publication ACL gate. A binding can use
+its publisher's local home directory or the verified Team Folders 22.0.6 base
+permission mount with advanced ACL disabled. Creation and resume check the
+publication tree; manifest scans and individual content, authorization and
+Files status reads reject a different nested mount. When an active Team Folder
+enables advanced ACL, an ordinary source read fails closed and persistently
+stops the binding with an audit entry, a new publication epoch and a
+reconciliation hint when the database and outbox are available. An
+administrator must disable that ACL mode and explicitly resume. A fresh,
+owned Nextcloud-only Team Folder smoke checked normal child-file publication,
+the 409 creation/update/resume denials, the exact stop audit and epoch, denied
+content and authorization, diagnostics, and recovery; its resources were
+removed. A separate synthetic LDAP/WeKnora drill had already verified an
+indexed uniform Team Folder and the same stop path. Nested-mount rejection
+has static review but no runtime fixture. This policy does not establish
+enterprise AD or arbitrary external-storage ACL parity; see
+[synthetic scope](synthetic-ldap-compose.md). The 0.4.30 runtime package
+contains 75 files and has SHA-256
+`8e8a7355f6a127f4ecf7620d4ffc18e98c64685672306d15c778b1f77f69ec8b`.
+
+The fixed c6 full patch now has SHA-256
+`4f976461f099da9ba6a53ce637b1ae7f285f46b0177ad95fc8bcee6a23b76792`;
+the RAG77 full patch has SHA-256
+`cc6325eac6cb5ef128e32a803cf5610f2a627ab5a6c7119849efda055744214c`.
+PostgreSQL migration 129 and SQLite migration 48 admit append-only source
+revision identities into the private indexed-withdrawal inventory. A hard
+deleted old knowledge row remains represented by its historical candidate
+revision. Fixed and RAG PostgreSQL focused tests, SQLite migration tests,
+exact patch reverse checks and both 27-route OpenAPI checks passed. This
+extends observed evidence only: pre-ledger and external copies are unknown,
+`inventory_complete` remains false, no Nextcloud retirement ACK is sent and
+derived-index physical GC stays disabled.
+
+The RAG77 candidate images were built with AnyDoc and the exact patch hash in
+their OCI labels: backend
+`sha256:c2b78f72f0c352949416b17f649b50271555c4eec2ecbad670264e783bec868c`
+and UI
+`sha256:770e0ed1048bbb7d71f848d481e68110de158a56493a4edfd6fbaab3eb884eec`.
+They are separate from the earlier images still used by the shared WeKnora
+stack. The previous end-to-end failed-candidate and two-binding drills used
+the earlier runtime; this follow-up changed inventory and Nextcloud ACL code,
+so those earlier drills are not claimed as tests of the final image labels.
+The final backend image then passed an owned dual-service physical backup and
+restore drill. Nine checkpoint files included the fixture's state, Compose
+configuration and WeKnora JWT/AES keys; their checksums and private modes were
+verified and those files were restored before container creation. A stale
+published file remained denied before and after two complete reconciliations;
+the source ended as `tombstone` with zero visible candidates. The observed
+checkpoint and restore durations were 31.828 and 64.234 seconds. The fixture
+and volumes were removed. This is local synthetic recovery evidence, not the
+PRD's production RPO/RTO, external-backend recovery or complete historical
+publication ledger; see [restore drill](isolated-dual-service-restore.md).
 
 ## Consistency and release boundary
 

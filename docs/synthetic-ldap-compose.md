@@ -387,7 +387,45 @@ empty, and the prior answer and citation hidden. Bob stayed denied on DAV,
 signed source, ask-target and WeKnora content paths. The approximately
 four-second interval is one synthetic observation, not a revocation SLA.
 
-This verifies a real groupfolders 22.0.6 ACL in an AD-shaped OpenLDAP fixture.
-It does not prove enterprise AD behavior, production Team Folder configuration,
-browser interaction, or the V1 requirement to reject or pause publication of
-unsupported permission exceptions during configuration and synchronization.
+That earlier drill verified a real groupfolders 22.0.6 ACL in an AD-shaped
+OpenLDAP fixture. On its own, it did not prove enterprise AD behavior,
+production Team Folder configuration, browser interaction, or the V1
+publication-policy gate tested below.
+
+## V1 publication ACL gate, 2026-09-30 UTC
+
+The newer V1 gate accepts a publisher-owned local home directory or a Team
+Folder on the pinned `groupfolders` 22.0.6 release with advanced permissions
+disabled. Base Team Folder group permissions remain usable. The app rejects
+other root mount types, nested mounts and an advanced Team Folder at binding
+creation or resume with `unsupported_source_acl` (HTTP 409). Binding creation
+and resume walk the publication tree to detect child mount boundaries; a
+regular file authorization checks only that file's mount and ancestors. Each
+source read checks the live Team Folder ACL mode. If an already active Team
+Folder switches to
+advanced permissions, the first observed read stops the binding, increments
+its publication epoch, writes an `acl-policy` stop audit entry, and emits a
+reconciliation hint. The current read fails, and subsequent manifest/content
+reads report stopped publication. Per-user source authorization denies the
+stopped binding. Administrator diagnostics identify bindings with an
+unsupported ACL. Disabling advanced permissions does not silently reopen a
+stopped binding; an administrator must resume it.
+
+`isolated-team-folder-policy-smoke.py` passed on an owned, disposable
+OpenLDAP + Nextcloud 34.0.4 + groupfolders 22.0.6 + WeKnora fixture. It
+checked a uniform Team Folder through published chunks and embeddings, denied
+creation/update and resume under advanced ACL, verified the automatic stop,
+audit, diagnostics and read denial, then recovered after disabling advanced
+permissions. The fixture's containers, network and volumes were removed.
+
+This is a deliberately narrow policy for dedicated publication directories.
+In an owner-local root, a child-only share cannot grant WeKnora access by
+itself because source authorization also requires the reader to resolve the
+bound root in their own mount view. The gate does not prove arbitrary sharing,
+external storage or enterprise ACL equivalence. The Team Folder adapter uses
+interfaces from the pinned groupfolders release; a different release is denied
+until its permission semantics are verified. Nested transactions fail closed
+without a recursive stop write; the next ordinary source read can persist the
+stop. A database or outbox failure may also prevent the audit or hint while
+the current read remains denied. Real AD and production Team Folder acceptance
+remain open.

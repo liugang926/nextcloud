@@ -151,6 +151,7 @@ final class ApiController extends Controller {
             // Stop/resume can commit while a tree is being scanned or while
             // a stored page is read. Never return that old page after the
             // newly committed gate is visible to this request.
+            $this->bindingRegistry->requireActiveRoot($id);
             if ($this->bindingRegistry->requirePublicationActive($id) !== $bindingEpoch) {
                 return $this->json(['error' => 'manifest_changed'], 409);
             }
@@ -199,8 +200,11 @@ final class ApiController extends Controller {
             // A file ID from another user's tree must never become a download URL.
             foreach ($bindingRoot->getById($fileId) as $node) {
                 if (!$node instanceof File || $node->getId() !== $fileId ||
-                    !$bindingRoot->isSubNode($node) || !$userFolder->isSubNode($node) ||
-                    !$node->isReadable() || $this->publicationState->isExcluded($id, $fileId)) {
+                    !$bindingRoot->isSubNode($node) || !$userFolder->isSubNode($node)) {
+                    continue;
+                }
+                $this->bindingRegistry->assertNodeInSupportedMount($id, $bindingRoot, $node);
+                if (!$node->isReadable() || $this->publicationState->isExcluded($id, $fileId)) {
                     continue;
                 }
 
@@ -239,7 +243,8 @@ final class ApiController extends Controller {
                     }
                     try {
                         $freshEpoch = $this->bindingRegistry->requirePublicationActive($id);
-                    } catch (BindingPublicationStoppedException $exception) {
+                        $this->bindingRegistry->requireActiveRoot($id);
+                    } catch (\Throwable $exception) {
                         fclose($buffer);
                         throw $exception;
                     }
@@ -309,8 +314,11 @@ final class ApiController extends Controller {
             }
             foreach ($bindingRoot->getById($fileId) as $node) {
                 if (!$node instanceof File || $node->getId() !== $fileId ||
-                    !$bindingRoot->isSubNode($node) || !$userFolder->isSubNode($node) ||
-                    !$node->isReadable()) {
+                    !$bindingRoot->isSubNode($node) || !$userFolder->isSubNode($node)) {
+                    continue;
+                }
+                $this->bindingRegistry->assertNodeInSupportedMount($id, $bindingRoot, $node);
+                if (!$node->isReadable()) {
                     continue;
                 }
                 $node->lock(ILockingProvider::LOCK_SHARED);
@@ -395,9 +403,10 @@ final class ApiController extends Controller {
             $visitedFolders[$folderId] = true;
 
             foreach ($folder->getDirectoryListing() as $node) {
+                $this->bindingRegistry->assertNodeInSupportedMount($binding['id'], $bindingRoot, $node);
                 if (!$folder->isSubNode($node) || !$bindingRoot->isSubNode($node) ||
                     !$userFolder->isSubNode($node)) {
-                    continue;
+                    throw new \UnexpectedValueException('Publication node escaped the bound root');
                 }
                 if ($node instanceof File && $this->publicationState->isExcluded($binding['id'], $node->getId())) {
                     continue;

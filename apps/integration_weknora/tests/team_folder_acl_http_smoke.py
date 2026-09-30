@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check source authorization against a temporary Team folder and its ACL.
+"""Check V1 publication policy against a temporary Team folder and its ACL.
 
 Requires an enabled groupfolders app in the local Compose stack. Creates a
 temporary user, group, Team folder, binding, file and identity mapping, then
@@ -118,16 +118,38 @@ def main():
         run_occ("groupfolders:permissions", str(team_folder_id), "--enable")
         run_occ("groupfolders:permissions", str(team_folder_id),
                 f"--user={guest_uid}", "team-note.txt", "--", "-read")
-        denied = decision()
-        assert denied["allow"] is False and denied["reason"] == "source_not_readable", denied
+        status, body = post_json(admin, binding_url, {
+            "id": binding_id, "name": folder_name,
+            "owner_uid": admin_uid, "root_file_id": root_id,
+        }, admin_headers)
+        check(status, 409, "reject advanced ACL on binding update")
+        assert json.loads(body)["error"] == "unsupported_source_acl"
+        status, _ = request(machine, f"{api}/bindings/{binding_id}/manifest",
+                            headers=machine_headers)
+        check(status, 503, "advanced ACL stops manifest publication")
+        status, body = post_json(machine, authorize_url, payload, machine_headers)
+        check(status, 200, "stopped advanced ACL source authorization")
+        assert json.loads(body)["allow"] is False
+        status, _ = request(machine, f"{api}/bindings/{binding_id}/files/{member_id}/content",
+                            headers=machine_headers)
+        check(status, 423, "stopped advanced ACL blocks machine content")
         status, _ = dav_request(guest_file_url, "GET", guest_dav_headers)
         assert status in (403, 404), f"advanced ACL WebDAV read returned {status}"
 
-        run_occ("groupfolders:permissions", str(team_folder_id),
-                f"--user={guest_uid}", "team-note.txt", "clear")
-        assert decision()["allow"] is True, "cleared ACL should restore read"
+        status, _ = request(admin, f"{binding_url}/{binding_id}/stop", "POST",
+                            admin_headers, b"")
+        check(status, 200, "stop unsafe Team Folder publication")
+        status, body = request(admin, f"{binding_url}/{binding_id}/resume", "POST",
+                               admin_headers, b"")
+        check(status, 409, "resume rejects advanced ACL")
+        assert json.loads(body)["error"] == "unsupported_source_acl"
+        run_occ("groupfolders:permissions", str(team_folder_id), "--disable")
+        status, _ = request(admin, f"{binding_url}/{binding_id}/resume", "POST",
+                            admin_headers, b"")
+        check(status, 200, "resume after advanced ACL mode disabled")
+        assert decision()["allow"] is True, "disabled ACL should restore read"
         status, _ = dav_request(guest_file_url, "GET", guest_dav_headers)
-        check(status, 200, "cleared ACL WebDAV read")
+        check(status, 200, "disabled ACL WebDAV read")
 
         run_occ("group:removeuser", group_id, guest_uid)
         assert decision()["allow"] is False, "removing Team folder group membership must deny"

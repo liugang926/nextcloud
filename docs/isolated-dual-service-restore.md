@@ -17,10 +17,11 @@ python3 scripts/ops/isolated-dual-service-restore.py \
 
 The command prints the private evidence directory. To choose one, pass a path
 that does not exist with `--evidence-dir`. The directory has mode `0700`; SQL
-dumps, volume archives and JSON files have mode `0600`. The archives include
-synthetic administrator credentials and application encryption keys. Keep them
-private and delete them when the evidence is no longer needed. On success the
-owned Compose project and its scratch credentials are removed. On failure it
+dumps, volume archives and private fixture control files have mode `0600`.
+These files include synthetic administrator credentials and application
+encryption keys. Keep them private and delete them when the evidence is no
+longer needed. On success the owned Compose project and its scratch credentials
+are removed. On failure it
 remains in place for inspection; `failure.json` records its exact scratch path.
 Only use `synthetic-ldap-fixture.py destroy --scratch <that path>` after checking
 the failure and its ownership marker.
@@ -37,7 +38,9 @@ the failure and its ownership marker.
    their complete physical data volumes. Physical volumes preserve the
    installation's database roles and grants, which a single-database dump
    omits. It also archives the actual Nextcloud HTML/config/data and WeKnora
-   local original volumes. SHA-256 digests, PostgreSQL volume owners, source
+   local original volumes. The private checkpoint copies the generated
+   Compose file, fixture ownership marker and password file containing the
+   WeKnora JWT and AES keys. SHA-256 digests, PostgreSQL volume owners, source
    identity and checkpoint duration are recorded in `checkpoint.json`. The
    fixture's vector index uses PostgreSQL (`RETRIEVE_DRIVER=postgres`), so its
    indexed rows are included. The logical dumps are separately format-checked
@@ -50,9 +53,12 @@ the failure and its ownership marker.
 4. After a second label check, only this disposable Compose project is
    destroyed and recreated. Both PostgreSQL data volumes and the file volumes
    are restored **before either database starts**; PostgreSQL UID, GID and
-   permissions must match the checkpoint. The application containers remain
-   stopped. Both databases must start, and the restored database must show the
-   old published knowledge, proving this was a stale backup.
+   permissions must match the checkpoint. Before container creation, the
+   fixture control files are replaced from their verified checkpoint copies;
+   the ownership marker, Compose digest and WeKnora keys must match. The
+   application containers remain stopped. Both databases must start, and the
+   restored database must show the old published knowledge, proving this was
+   a stale backup.
 5. Only Nextcloud starts. The script stops its binding, replays the exact file
    withdrawal, deletes the stale restored file, and resumes the binding. Before
    replay it verifies the restored instance UUID, exact pair operation and
@@ -64,10 +70,12 @@ the failure and its ownership marker.
    pass `/api/v1/auth/me` for Alice, while direct knowledge, chunk/preview and
    search checks deny the withdrawn file before reconciliation.
    Two complete scans must restore the tombstone and zero visible candidates;
-   the old JWT remains valid but denied for that file. `result.json` records
-   the observed recovery duration and these stage results without document
-   text or credentials. Successful cleanup is followed by an exact check that
-   the owned project has no remaining containers or volumes.
+   the old JWT remains valid but denied for that file. The old JWT and resumed
+   source sync exercise the restored JWT and AES key configuration.
+   `result.json` records the observed recovery duration and these stage
+   results without document text or credentials. Successful cleanup is
+   followed by an exact check that the owned project has no remaining
+   containers or volumes.
 
 This is a same-pinned-image local physical-volume recovery safety drill, not a
 portable PostgreSQL migration method or an RPO or RTO commitment. The replay
@@ -76,3 +84,13 @@ publication ledger. The drill does not restore or verify external Qdrant,
 Milvus, graph, Wiki, cloud object, email alert or production LDAP backends, and
 does not prove physical derived-index cleanup. Any failed replay or assertion
 stops before reporting success; the fixture publishes only loopback ports.
+
+The 2026-09-30 owned synthetic run with backend image
+`sha256:c2b78f72f0c352949416b17f649b50271555c4eec2ecbad670264e783bec868c`
+passed. Its nine checkpoint files included the three private fixture control
+files, with SHA-256 and mode checks. The observed checkpoint took 31.828
+seconds and restore took 64.234 seconds. The restored old JWT authenticated,
+but the withdrawn file stayed denied before and after two complete scans;
+the source ended at `tombstone` with zero visible candidates. The owned
+project's containers, volumes and network were removed. These are one
+synthetic run's observations, not pilot recovery targets.

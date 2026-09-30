@@ -19,10 +19,14 @@ final class OperationalStatusService {
         $now = time();
         $registry = $this->bindings->listBindings();
         $rootsAvailable = true;
-        if ($registry !== []) {
+        $unsupportedAclBindings = [];
+        foreach ($registry as $binding) {
             try {
-                // requireActiveRoot checks every configured root and overlap.
-                $this->bindings->requireActiveRoot($registry[0]['id']);
+                $root = $this->bindings->requireActiveRoot($binding['id']);
+                $this->bindings->assertTreeSupported($binding['id'], $root);
+            } catch (UnsupportedPublicationAclException $exception) {
+                $rootsAvailable = false;
+                $unsupportedAclBindings[] = $binding['id'];
             } catch (\Throwable $exception) {
                 $rootsAvailable = false;
             }
@@ -179,6 +183,7 @@ final class OperationalStatusService {
             'checked_at' => $now,
             'binding_count' => count($registry),
             'binding_roots_available' => $rootsAvailable,
+            'bindings_with_unsupported_acl' => $unsupportedAclBindings,
             'retained_change_hints' => (int)$events['retained_count'],
             'oldest_retained_hint_age_seconds' => $oldest === null ? null : max(0, $now - $oldest),
             'newest_change_hint_at' => $events['newest_at'] === null ? null : (int)$events['newest_at'],

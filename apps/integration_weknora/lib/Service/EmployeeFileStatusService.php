@@ -88,6 +88,7 @@ final class EmployeeFileStatusService {
             foreach ($ownerRoot->getById($fileId) as $node) {
                 if ($node instanceof File && $node->getId() === $fileId &&
                     $this->readableInside($node, $ownerRoot)) {
+                    $this->bindings->assertNodeInSupportedMount($binding['id'], $ownerRoot, $node);
                     $ownerFileReadable = true;
                     break;
                 }
@@ -105,6 +106,7 @@ final class EmployeeFileStatusService {
                         !$this->readableInside($userFile, $root)) {
                         continue;
                     }
+                    $this->bindings->assertNodeInSupportedMount($binding['id'], $root, $userFile);
                     $state = $this->publication->getState($binding['id'], $fileId);
                     $stopped = $binding['publication_state'] === 'stopped';
                     try {
