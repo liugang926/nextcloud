@@ -151,7 +151,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '1d60b7db90ae67aefcf7f19f77f11291918dfd071a07fb58b87bdc5bac8bc78e  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '5d089e3446645e809baf8d008833a963f184007cb5c9ce4fd4d16b163e5d2fe5  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -194,7 +194,7 @@ jobs:
         working-directory: weknora/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 
@@ -252,7 +252,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo '2883e0d64518c3bb0da04d74136545677dbfc29f71d907d41065bc80e87901d5  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo '3aa31893bc0bdbd57cfe8bd1b39dd1fdac37f1bd3a802c4dfbd39ba5212e7fcd  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -300,7 +300,7 @@ jobs:
         working-directory: weknora-rag/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 

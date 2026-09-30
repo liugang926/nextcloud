@@ -1750,6 +1750,104 @@ index d71154b3..cb500854 100644
      if (!group.knowledgeBaseId) return '';
      const query = {};
      if (group.knowledgeId) {
+diff --git a/frontend/src/views/knowledge/KnowledgeBaseEditorModal.vue b/frontend/src/views/knowledge/KnowledgeBaseEditorModal.vue
+index 1ae17961..6ea136e1 100644
+--- a/frontend/src/views/knowledge/KnowledgeBaseEditorModal.vue
++++ b/frontend/src/views/knowledge/KnowledgeBaseEditorModal.vue
+@@ -529,6 +529,7 @@ import GraphSettings from './settings/GraphSettings.vue'
+ import KBShareSettings from './settings/KBShareSettings.vue'
+ import ResourceGroupAccessSettings from '@/components/ResourceGroupAccessSettings.vue'
+ import DataSourceSettings from './settings/DataSourceSettings.vue'
++import { loadKBEditorReadiness } from './kbEditorFileProbe'
+ import KnowledgeBaseActivitySettings from './settings/KnowledgeBaseActivitySettings.vue'
+ import { useI18n } from 'vue-i18n'
+ 
+@@ -907,10 +908,10 @@ const loadKBData = async (
+   
+   loading.value = true
+   try {
+-    const [kbInfo, filesResult] = await Promise.all([
++    const { kbInfo, hasKnowledgeFiles } = await loadKBEditorReadiness(
+       getKnowledgeBaseById(kbId),
+-      listKnowledgeFiles(kbId, { page: 1, page_size: 1 })
+-    ])
++      listKnowledgeFiles(kbId, { page: 1, page_size: 1 }),
++    )
+ 
+     if (!isCurrentKBLoad(generation, kbId)) return
+     
+@@ -919,7 +920,10 @@ const loadKBData = async (
+     }
+ 
+     const kb = kbInfo.data
+-    hasFiles.value = (filesResult as any)?.total > 0
++    // A failed current Nextcloud generation can make the ordinary knowledge
++    // list return 403. Keep its edit protections locked while allowing the
++    // administrator to reach Data Sources and the exact failed-file retry.
++    hasFiles.value = hasKnowledgeFiles
+     generatedProfile.value = (kb as any).generated_profile || null
+     kbCreatorId.value = (kb as any).creator_id || ''
+     kbTenantId.value = Number((kb as any).tenant_id || 0)
+diff --git a/frontend/src/views/knowledge/kbEditorFileProbe.test.ts b/frontend/src/views/knowledge/kbEditorFileProbe.test.ts
+new file mode 100644
+index 00000000..b44f7e4a
+--- /dev/null
++++ b/frontend/src/views/knowledge/kbEditorFileProbe.test.ts
+@@ -0,0 +1,32 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { loadKBEditorReadiness } from './kbEditorFileProbe'
++
++test('a rejected file probe preserves KB details and locks file-sensitive edits', async () => {
++  const details = { data: { id: 'kb-1', name: 'Source settings' } }
++  const forbidden = Object.assign(new Error('publication unavailable'), { status: 403 })
++  const loaded = await loadKBEditorReadiness(
++    Promise.resolve(details), Promise.reject(forbidden),
++  )
++  assert.equal(loaded.kbInfo, details)
++  assert.equal(loaded.hasKnowledgeFiles, true)
++})
++
++test('a successful empty count unlocks file-sensitive edits', async () => {
++  const loaded = await loadKBEditorReadiness(Promise.resolve({ data: { id: 'kb-1' } }),
++    Promise.resolve({ total: 0 }))
++  assert.equal(loaded.hasKnowledgeFiles, false)
++})
++
++test('present or malformed counts keep file-sensitive edits locked', async () => {
++  for (const result of [{ total: 1 }, { total: Number.NaN }, {}]) {
++    const loaded = await loadKBEditorReadiness(Promise.resolve({ data: { id: 'kb-1' } }),
++      Promise.resolve(result))
++    assert.equal(loaded.hasKnowledgeFiles, true)
++  }
++})
++
++test('a KB details failure still rejects the editor load', async () => {
++  await assert.rejects(loadKBEditorReadiness(Promise.reject(new Error('KB unavailable')),
++    Promise.resolve({ total: 0 })), /KB unavailable/)
++})
+diff --git a/frontend/src/views/knowledge/kbEditorFileProbe.ts b/frontend/src/views/knowledge/kbEditorFileProbe.ts
+new file mode 100644
+index 00000000..9f9092e8
+--- /dev/null
++++ b/frontend/src/views/knowledge/kbEditorFileProbe.ts
+@@ -0,0 +1,16 @@
++// The editor needs KB details to render its Data Sources section. The
++// ordinary knowledge list can reject a stale published Nextcloud document
++// while its current replacement is failed. Treat a failed count probe as
++// "files exist" so any file-sensitive edits remain locked.
++export async function loadKBEditorReadiness<T>(
++  details: Promise<T>,
++  files: Promise<{ total?: number }>,
++): Promise<{ kbInfo: T; hasKnowledgeFiles: boolean }> {
++  const [kbInfo, hasKnowledgeFiles] = await Promise.all([
++    details,
++    files.then(page => typeof page?.total === 'number' &&
++      Number.isFinite(page.total) && page.total >= 0 ? page.total > 0 : true,
++    ).catch(() => true),
++  ])
++  return { kbInfo, hasKnowledgeFiles }
++}
 diff --git a/frontend/src/views/knowledge/settings/DataSourceSettings.vue b/frontend/src/views/knowledge/settings/DataSourceSettings.vue
 index 34e7d0ea..e3bf5ed6 100644
 --- a/frontend/src/views/knowledge/settings/DataSourceSettings.vue
