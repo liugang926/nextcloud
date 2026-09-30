@@ -149,6 +149,53 @@ def retry_status(wk_base, token, runtime, *, allow_processing=False):
     return body["retry"]
 
 
+def failed_candidate_listing(wk_base, admin, runtime, *, failed, users=()):
+    path = ("/api/v1/datasource/nextcloud-source-pairings/by-datasource/" +
+            urllib.parse.quote(runtime["source_id"], safe="") +
+            "/failed-candidates?limit=50")
+    code, body = e2e["http_json"](wk_base, "GET", path, token=admin)
+    require(code == 200 and isinstance(body, dict) and
+            set(body) == {"operation_id", "candidates", "next_cursor"} and
+            body.get("operation_id") == runtime["operation_id"] and
+            isinstance(body.get("candidates"), list) and
+            body.get("next_cursor") == "",
+            f"isolated administrator failed-candidate list unavailable: HTTP {code}")
+    candidates = body["candidates"]
+    if failed:
+        require(len(candidates) == 1 and isinstance(candidates[0], dict) and
+                candidates[0].get("file_id") == str(runtime["file_id"]),
+                "failed-candidate list lost exact V2 file or included another file")
+        item = candidates[0]
+        allowed = {"file_id", "state", "attempt_count", "next_attempt_at",
+                   "last_error_code"}
+        # The retry worker can lease a failed candidate during this read;
+        # that transient state clears the static error code until it settles.
+        require(set(item) <= allowed and
+                item.get("state") in {"retry", "leased", "manual"} and
+                type(item.get("attempt_count")) is int and
+                item["attempt_count"] >= 0 and
+                item.get("last_error_code") in {
+                    "parse_failed", "candidate_retry_exhausted",
+                    "sync_stale_manual_review", ""} and
+                (item.get("last_error_code") != "" or item["state"] == "leased") and
+                ("next_attempt_at" not in item or
+                 isinstance(item["next_attempt_at"], str)),
+                "failed-candidate list did not expose bounded static failure status")
+    else:
+        require(not any(isinstance(item, dict) and
+                        item.get("file_id") == str(runtime["file_id"])
+                        for item in candidates),
+                "published V2 remained in the failed-candidate list")
+    denials = {}
+    for label, user in users:
+        user_code, _ = e2e["http_json"](wk_base, "GET", path, token=user)
+        require(user_code == 403,
+                f"{label} accessed administrator failed-candidate list: HTTP {user_code}")
+        denials[label] = user_code
+    return {"item_count": len(candidates), "current_file_present": failed,
+            "ordinary_user_http": denials}
+
+
 def strict_latest_denial(nc_base, wk_base, passwords, runtime, alice):
     code, status = handoff["status_for"](
         nc_base, {"file_id": runtime["file_id"]}, passwords, "alice")
@@ -385,6 +432,10 @@ def drill(directory, state, *, phase):
         failed_id = failed["candidate_id"]
         require(failed.get("enabled") != "enabled",
                 "failed V2 candidate was enabled for retrieval")
+        if phase == "full":
+            failed_listing = failed_candidate_listing(
+                wk_base, token, runtime, failed=True,
+                users=(("Alice", alice), ("Bob", bob)))
         copy = old_copy(database, runtime["knowledge_id"])
         require(copy["exists"] and not copy["deleted"] and
                 copy["parse"] == "completed",
@@ -418,6 +469,8 @@ def drill(directory, state, *, phase):
     recovered, attempts = wait_recovered(wk_base, token, state, runtime, failed_id)
     require(recovered["candidate_id"] != runtime["knowledge_id"],
             "automatic retry republished the V1 recovery copy")
+    recovered_listing = failed_candidate_listing(
+        wk_base, token, runtime, failed=False)
     job = retry_job(database, runtime["source_id"], runtime["file_id"], failed_id)
     require(isinstance(job, dict) and
             job.get("failed_candidate_id") == failed_id and
@@ -446,6 +499,8 @@ def drill(directory, state, *, phase):
                       "receiver_applied": events["decimal"](
                           receiver, "applied_through_event_id")},
             "strict_latest": denial, "answer": answer,
+            "failed_candidate_list": {"while_failed": failed_listing,
+                                      "after_publication": recovered_listing},
             "embedding_restored": True}
 
 

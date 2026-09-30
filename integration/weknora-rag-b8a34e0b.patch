@@ -1282,6 +1282,59 @@ index eccd3b69..f34176ea 100644
          postBody.agent_source_tenant_id = Number(params.agent_source_tenant_id);
        }
        // Include web_search_enabled if provided
+diff --git a/frontend/src/api/datasource/index.ts b/frontend/src/api/datasource/index.ts
+index 1ac7ac6d..702dff6d 100644
+--- a/frontend/src/api/datasource/index.ts
++++ b/frontend/src/api/datasource/index.ts
+@@ -150,6 +150,48 @@ export function getSyncLogs(id: string, limit = 20, offset = 0) {
+   return get(`/api/v1/datasource/${id}/logs?limit=${limit}&offset=${offset}`)
+ }
+ 
++export interface NextcloudFailedCandidate {
++  file_id: string
++  state: string
++  attempt_count: number
++  next_attempt_at?: string
++  last_error_code: string
++}
++
++export interface NextcloudFailedCandidatePage {
++  operation_id: string
++  candidates: NextcloudFailedCandidate[]
++  next_cursor: string
++}
++
++export interface NextcloudFailedCandidateRetryStatus extends NextcloudFailedCandidate {
++  source_etag: string
++  candidate_id: string
++  first_staged_at: string
++  next_attempt_at: string
++}
++
++export function listNextcloudFailedCandidates(dataSourceId: string, cursor = '') {
++  const query = cursor ? `?limit=25&cursor=${encodeURIComponent(cursor)}` : '?limit=25'
++  return get<NextcloudFailedCandidatePage>(
++    `/api/v1/datasource/nextcloud-source-pairings/by-datasource/${encodeURIComponent(dataSourceId)}/failed-candidates${query}`,
++  )
++}
++
++export function getNextcloudFailedCandidateRetry(operationId: string, fileId: string) {
++  return get<{ retry: NextcloudFailedCandidateRetryStatus }>(
++    `/api/v1/datasource/nextcloud-source-pairings/${encodeURIComponent(operationId)}/candidates/${encodeURIComponent(fileId)}/retry`,
++  )
++}
++
++export function retryNextcloudFailedCandidate(operationId: string, fileId: string,
++  status: Pick<NextcloudFailedCandidateRetryStatus, 'source_etag' | 'candidate_id'>) {
++  return post(
++    `/api/v1/datasource/nextcloud-source-pairings/${encodeURIComponent(operationId)}/candidates/${encodeURIComponent(fileId)}/retry`,
++    { source_etag: status.source_etag, candidate_id: status.candidate_id },
++  )
++}
++
+ // ----------------------------------------------------------------------------
+ // Data source credential subresource. Unlike the other three resources,
+ // DataSource exposes a single logical field "credentials" because connector
 diff --git a/frontend/src/components/ChatReferencesDrawer.vue b/frontend/src/components/ChatReferencesDrawer.vue
 index 39b98279..68150555 100644
 --- a/frontend/src/components/ChatReferencesDrawer.vue
@@ -1303,6 +1356,74 @@ index 39b98279..68150555 100644
    if (!item.knowledgeBaseId) return ''
    const query: Record<string, string> = {}
    if (item.knowledgeId) query.knowledge_id = item.knowledgeId
+diff --git a/frontend/src/i18n/locales/en-US.ts b/frontend/src/i18n/locales/en-US.ts
+index f4873f09..fba08244 100755
+--- a/frontend/src/i18n/locales/en-US.ts
++++ b/frontend/src/i18n/locales/en-US.ts
+@@ -6488,6 +6488,29 @@ export default {
+     resumed: 'Resumed',
+     pauseFailed: 'Failed to pause',
+     logs: 'Logs',
++    actions: 'Actions',
++    failedCandidates: {
++      title: 'Failed Nextcloud files',
++      hint: 'Only failed files in this paired source appear here. A retry fetches the current source file again; it does not publish the failed copy.',
++      fileId: 'File ID {id}',
++      empty: 'No failed candidates',
++      refresh: 'Refresh',
++      more: 'Load more',
++      loadFailed: 'Failed to load failed candidates',
++      retry: 'Retry this file',
++      retryFailed: 'Failed to schedule retry',
++      scheduled: 'Retry scheduled',
++      changed: 'This file changed. The current status has been reloaded.',
++      attempts: 'Automatic attempts: {count}',
++      nextAttempt: 'Next automatic attempt: {time}',
++      state: { retry: 'Automatic retry', manual: 'Needs manual retry', leased: 'Retry running', other: 'Failed' },
++      reason: {
++        parse_failed: 'Parsing failed',
++        candidate_retry_exhausted: 'Automatic retry window exhausted',
++        sync_stale_manual_review: 'Retry task needs administrator review',
++        other: 'Processing failed',
++      },
++    },
+     syncModeLabel: 'Sync mode',
+     syncMode: {
+       incremental: 'Incremental',
+diff --git a/frontend/src/i18n/locales/zh-CN.ts b/frontend/src/i18n/locales/zh-CN.ts
+index 3f061f0b..386319bd 100755
+--- a/frontend/src/i18n/locales/zh-CN.ts
++++ b/frontend/src/i18n/locales/zh-CN.ts
+@@ -846,6 +846,29 @@ export default {
+     resumed: '已恢复',
+     pauseFailed: '暂停失败',
+     logs: '日志',
++    actions: '更多操作',
++    failedCandidates: {
++      title: 'Nextcloud 失败文件',
++      hint: '仅显示此配对数据源中处理失败的文件。重试会重新读取源文件，不会发布失败的旧版本。',
++      fileId: '文件 ID {id}',
++      empty: '暂无失败候选文件',
++      refresh: '刷新',
++      more: '加载更多',
++      loadFailed: '加载失败候选文件失败',
++      retry: '重试此文件',
++      retryFailed: '提交重试失败',
++      scheduled: '已安排重试',
++      changed: '文件状态已变化，已重新加载当前状态。',
++      attempts: '自动重试次数：{count}',
++      nextAttempt: '下次自动重试：{time}',
++      state: { retry: '自动重试中', manual: '需手动重试', leased: '重试任务运行中', other: '处理失败' },
++      reason: {
++        parse_failed: '解析失败',
++        candidate_retry_exhausted: '自动重试时间窗口已耗尽',
++        sync_stale_manual_review: '重试任务需管理员检查',
++        other: '处理失败',
++      },
++    },
+     syncModeLabel: '同步模式',
+     createTitle: '添加数据源',
+     editTitle: '编辑数据源',
 diff --git a/frontend/src/router/index.ts b/frontend/src/router/index.ts
 index 34dfcb42..6f07bedd 100644
 --- a/frontend/src/router/index.ts
@@ -1629,6 +1750,507 @@ index d71154b3..cb500854 100644
      if (!group.knowledgeBaseId) return '';
      const query = {};
      if (group.knowledgeId) {
+diff --git a/frontend/src/views/knowledge/settings/DataSourceSettings.vue b/frontend/src/views/knowledge/settings/DataSourceSettings.vue
+index 34e7d0ea..e3bf5ed6 100644
+--- a/frontend/src/views/knowledge/settings/DataSourceSettings.vue
++++ b/frontend/src/views/knowledge/settings/DataSourceSettings.vue
+@@ -13,6 +13,7 @@ import {
+ import { humanizeCron, relativeTime } from '@/utils/cronHumanize'
+ import DataSourceEditorDialog from './DataSourceEditorDialog.vue'
+ import DataSourceSyncLogs from './DataSourceSyncLogs.vue'
++import NextcloudFailedCandidates from './NextcloudFailedCandidates.vue'
+ import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
+ import { useAuthStore } from '@/stores/auth'
+ 
+@@ -33,6 +34,9 @@ const editingDs = ref<DataSource | null>(null)
+ const logsVisible = ref(false)
+ const logsDsId = ref('')
+ const logsDsName = ref('')
++const failedCandidatesVisible = ref(false)
++const failedCandidatesDsId = ref('')
++const failedCandidatesDsName = ref('')
+ const pollTimer = ref<number | null>(null)
+ 
+ function stopPolling() {
+@@ -85,6 +89,12 @@ function openLogs(ds: DataSource) {
+   logsVisible.value = true
+ }
+ 
++function openFailedCandidates(ds: DataSource) {
++  failedCandidatesDsId.value = ds.id
++  failedCandidatesDsName.value = ds.name
++  failedCandidatesVisible.value = true
++}
++
+ async function removeDataSource(ds: DataSource) {
+   try {
+     await deleteDataSource(ds.id)
+@@ -197,14 +207,14 @@ onBeforeUnmount(stopPolling)
+       </div>
+ 
+       <div v-else-if="!loading" class="ds-grid">
+-        <component
+-          :is="canManageDataSource ? 'button' : 'div'"
++        <div
+           v-for="ds in dataSources"
+           :key="ds.id"
+-          :type="canManageDataSource ? 'button' : undefined"
+           :class="['ds-card', `ds-card--${ds.type}`, { 'ds-card--clickable': canManageDataSource }]"
+-          @click="canManageDataSource ? openEdit(ds) : undefined"
+         >
++          <button v-if="canManageDataSource" type="button" class="ds-card__edit-target"
++            :aria-label="`${t('datasource.edit')}: ${ds.name}`"
++            :title="lastSyncFullTime(ds)" @click="openEdit(ds)" />
+           <div class="ds-card__badge">
+             <DataSourceTypeIcon :type="ds.type" variant="badge" />
+           </div>
+@@ -218,6 +228,7 @@ onBeforeUnmount(stopPolling)
+                     shape="square"
+                     size="small"
+                     class="ds-card__action-btn"
++                    :aria-label="`${t('datasource.actions')}: ${ds.name}`"
+                     @click.stop
+                   >
+                     <template #icon><t-icon name="ellipsis" /></template>
+@@ -238,6 +249,12 @@ onBeforeUnmount(stopPolling)
+                       <t-dropdown-item @click="openLogs(ds)">
+                         <t-icon name="root-list" /> {{ t('datasource.logs') }}
+                       </t-dropdown-item>
++                      <t-dropdown-item
++                        v-if="canManageDataSource && ds.type === 'nextcloud' && ds.status === 'active'"
++                        @click="openFailedCandidates(ds)"
++                      >
++                        <t-icon name="error-circle" /> {{ t('datasource.failedCandidates.title') }}
++                      </t-dropdown-item>
+                       <t-dropdown-item
+                         v-if="canManageDataSource && ds.status === 'active'"
+                         @click="handlePause(ds)"
+@@ -308,7 +325,7 @@ onBeforeUnmount(stopPolling)
+               <span>{{ ds.error_message }}</span>
+             </div>
+           </div>
+-        </component>
++        </div>
+ 
+         <button
+           v-if="canManageDataSource"
+@@ -336,6 +353,12 @@ onBeforeUnmount(stopPolling)
+       :data-source-id="logsDsId"
+       :data-source-name="logsDsName"
+     />
++
++    <NextcloudFailedCandidates
++      v-model:visible="failedCandidatesVisible"
++      :data-source-id="failedCandidatesDsId"
++      :data-source-name="failedCandidatesDsName"
++    />
+   </div>
+ </template>
+ 
+@@ -382,6 +405,21 @@ onBeforeUnmount(stopPolling)
+   }
+ }
+ 
++.ds-card__edit-target {
++  position: absolute;
++  inset: 0;
++  z-index: 1;
++  border: 0;
++  border-radius: inherit;
++  background: transparent;
++  cursor: pointer;
++}
++
++.ds-card__edit-target:focus-visible {
++  outline: 2px solid var(--td-brand-color);
++  outline-offset: 2px;
++}
++
+ .ds-card {
+   position: relative;
+   display: flex;
+@@ -584,6 +622,8 @@ onBeforeUnmount(stopPolling)
+   }
+ 
+   &__actions {
++    position: relative;
++    z-index: 2;
+     flex-shrink: 0;
+     display: flex;
+     align-items: center;
+diff --git a/frontend/src/views/knowledge/settings/NextcloudFailedCandidates.vue b/frontend/src/views/knowledge/settings/NextcloudFailedCandidates.vue
+new file mode 100644
+index 00000000..a33065b3
+--- /dev/null
++++ b/frontend/src/views/knowledge/settings/NextcloudFailedCandidates.vue
+@@ -0,0 +1,215 @@
++<script setup lang="ts">
++import { ref, watch } from 'vue'
++import { MessagePlugin } from 'tdesign-vue-next'
++import { useI18n } from 'vue-i18n'
++import {
++  getNextcloudFailedCandidateRetry,
++  listNextcloudFailedCandidates,
++  retryNextcloudFailedCandidate,
++  type NextcloudFailedCandidate,
++  type NextcloudFailedCandidateRetryStatus,
++} from '@/api/datasource'
++import { submitFailedCandidateRetry } from './failedCandidateRetryFlow'
++import { FailedCandidateRequestGate } from './failedCandidateRequestGate'
++
++const props = defineProps<{ dataSourceId: string; dataSourceName: string }>()
++const visible = defineModel<boolean>('visible', { default: false })
++const { t } = useI18n()
++
++const candidates = ref<NextcloudFailedCandidate[]>([])
++const operationId = ref('')
++const nextCursor = ref('')
++const selectedFileId = ref('')
++const exactStatus = ref<NextcloudFailedCandidateRetryStatus | null>(null)
++const loading = ref(false)
++const loadingMore = ref(false)
++const loadingStatus = ref(false)
++const saving = ref(false)
++const loadError = ref(false)
++const requestGate = new FailedCandidateRequestGate()
++
++function clearSelection() {
++  exactStatus.value = null
++  selectedFileId.value = ''
++  loadingStatus.value = false
++}
++
++async function loadPage(reset = true) {
++  if (!props.dataSourceId || (!reset && (!nextCursor.value || loadingMore.value))) return
++  const current = requestGate.beginList(reset)
++  if (reset) {
++    clearSelection()
++    candidates.value = []
++    operationId.value = ''
++    nextCursor.value = ''
++    loading.value = true
++  } else {
++    loadingMore.value = true
++  }
++  loadError.value = false
++  try {
++    const page = await listNextcloudFailedCandidates(props.dataSourceId, reset ? '' : nextCursor.value)
++    if (!requestGate.isCurrentList(current) || !visible.value) return
++    operationId.value = page.operation_id
++    candidates.value = reset ? page.candidates : [...candidates.value, ...page.candidates]
++    nextCursor.value = page.next_cursor
++  } catch {
++    if (requestGate.isCurrentList(current)) loadError.value = true
++  } finally {
++    if (requestGate.isCurrentList(current)) {
++      loading.value = false
++      loadingMore.value = false
++    }
++  }
++}
++
++async function selectCandidate(fileId: string) {
++  if (!operationId.value || saving.value) return
++  selectedFileId.value = fileId
++  exactStatus.value = null
++  const current = requestGate.beginDetail()
++  loadingStatus.value = true
++  try {
++    const response = await getNextcloudFailedCandidateRetry(operationId.value, fileId)
++    if (requestGate.isCurrentDetail(current) && visible.value && selectedFileId.value === fileId &&
++      response.retry.file_id === fileId) {
++      exactStatus.value = response.retry
++    }
++  } catch (error: any) {
++    if (!requestGate.isCurrentDetail(current)) return
++    if (error?.status === 409) {
++      await loadPage(true)
++    } else {
++      MessagePlugin.error(t('datasource.failedCandidates.loadFailed'))
++    }
++  } finally {
++    if (requestGate.isCurrentDetail(current)) loadingStatus.value = false
++  }
++}
++
++async function retrySelected() {
++  const snapshot = exactStatus.value
++  const fileId = selectedFileId.value
++  const pairing = operationId.value
++  const sourceId = props.dataSourceId
++  const context = requestGate.currentContext()
++  const isCurrent = () => visible.value && props.dataSourceId === sourceId &&
++    requestGate.isCurrentContext(context)
++  if (!snapshot || snapshot.file_id !== fileId || !pairing || saving.value) return
++  saving.value = true
++  try {
++    const result = await submitFailedCandidateRetry(snapshot,
++      () => { if (isCurrent()) exactStatus.value = null },
++      (current) => retryNextcloudFailedCandidate(pairing, fileId, current),
++      () => loadPage(true),
++      isCurrent,
++    )
++    if (!isCurrent()) return
++    if (result === 'changed') {
++      MessagePlugin.warning(t('datasource.failedCandidates.changed'))
++      if (candidates.value.some(candidate => candidate.file_id === fileId)) {
++        saving.value = false
++        await selectCandidate(fileId)
++      }
++    } else {
++      MessagePlugin.success(t('datasource.failedCandidates.scheduled'))
++    }
++  } catch {
++    if (isCurrent()) MessagePlugin.error(t('datasource.failedCandidates.retryFailed'))
++  } finally {
++    if (isCurrent()) saving.value = false
++  }
++}
++
++function reason(code: string) {
++  const known = ['parse_failed', 'candidate_retry_exhausted', 'sync_stale_manual_review']
++  return known.includes(code)
++    ? t(`datasource.failedCandidates.reason.${code}`)
++    : t('datasource.failedCandidates.reason.other')
++}
++
++function state(stateCode: string) {
++  const known = ['retry', 'manual', 'leased']
++  return known.includes(stateCode)
++    ? t(`datasource.failedCandidates.state.${stateCode}`)
++    : t('datasource.failedCandidates.state.other')
++}
++
++function time(value: string | undefined) {
++  if (!value) return ''
++  const date = new Date(value)
++  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString()
++}
++
++watch([visible, () => props.dataSourceId], ([isVisible]) => {
++  requestGate.invalidate()
++  saving.value = false
++  clearSelection()
++  candidates.value = []
++  operationId.value = ''
++  nextCursor.value = ''
++  if (isVisible) void loadPage(true)
++})
++</script>
++
++<template>
++  <t-drawer v-model:visible="visible" size="520px" destroy-on-close>
++    <template #header>
++      <span>{{ t('datasource.failedCandidates.title') }} · {{ dataSourceName }}</span>
++    </template>
++    <div class="failed-candidates">
++      <p class="failed-candidates__hint">{{ t('datasource.failedCandidates.hint') }}</p>
++      <div class="failed-candidates__toolbar">
++        <t-button size="small" variant="outline" :loading="loading" :disabled="saving" @click="loadPage(true)">
++          {{ t('datasource.failedCandidates.refresh') }}
++        </t-button>
++      </div>
++      <div v-if="loadError" role="alert" class="failed-candidates__error">
++        {{ t('datasource.failedCandidates.loadFailed') }}
++      </div>
++      <t-loading v-if="loading" size="small" />
++      <t-empty v-else-if="!loadError && candidates.length === 0 && !nextCursor"
++        :description="t('datasource.failedCandidates.empty')" />
++      <div v-else class="failed-candidates__list">
++        <button v-for="candidate in candidates" :key="candidate.file_id" type="button"
++          class="failed-candidates__item"
++          :class="{ 'failed-candidates__item--selected': selectedFileId === candidate.file_id }"
++          :aria-pressed="selectedFileId === candidate.file_id"
++          :disabled="saving"
++          @click="selectCandidate(candidate.file_id)">
++          <span class="failed-candidates__file">{{ t('datasource.failedCandidates.fileId', { id: candidate.file_id }) }}</span>
++          <span>{{ state(candidate.state) }} · {{ reason(candidate.last_error_code) }}</span>
++        </button>
++        <t-button v-if="nextCursor" block variant="outline" :loading="loadingMore" :disabled="saving"
++          @click="loadPage(false)">{{ t('datasource.failedCandidates.more') }}</t-button>
++      </div>
++      <div v-if="selectedFileId" class="failed-candidates__detail">
++        <t-loading v-if="loadingStatus" size="small" />
++        <template v-else-if="exactStatus">
++          <h3>{{ t('datasource.failedCandidates.fileId', { id: exactStatus.file_id }) }}</h3>
++          <p>{{ state(exactStatus.state) }} · {{ reason(exactStatus.last_error_code) }}</p>
++          <p>{{ t('datasource.failedCandidates.attempts', { count: exactStatus.attempt_count }) }}</p>
++          <p v-if="time(exactStatus.next_attempt_at)">{{ t('datasource.failedCandidates.nextAttempt', { time: time(exactStatus.next_attempt_at) }) }}</p>
++          <t-button theme="primary" :loading="saving" @click="retrySelected">
++            {{ t('datasource.failedCandidates.retry') }}
++          </t-button>
++        </template>
++      </div>
++    </div>
++  </t-drawer>
++</template>
++
++<style scoped>
++.failed-candidates { display: grid; gap: 12px; }
++.failed-candidates__hint { margin: 0; color: var(--td-text-color-secondary); line-height: 1.5; }
++.failed-candidates__toolbar { display: flex; justify-content: flex-end; }
++.failed-candidates__error { color: var(--td-error-color); }
++.failed-candidates__list { display: grid; gap: 8px; }
++.failed-candidates__item { display: grid; gap: 4px; width: 100%; padding: 10px; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: var(--td-bg-color-container); text-align: left; color: var(--td-text-color-secondary); cursor: pointer; }
++.failed-candidates__item--selected { border-color: var(--td-brand-color); }
++.failed-candidates__item:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: 2px; }
++.failed-candidates__file { color: var(--td-text-color-primary); font-weight: 600; }
++.failed-candidates__detail { padding: 12px; border: 1px solid var(--td-component-stroke); border-radius: 6px; }
++.failed-candidates__detail h3 { margin: 0 0 8px; }
++.failed-candidates__detail p { margin: 0 0 8px; }
++</style>
+diff --git a/frontend/src/views/knowledge/settings/failedCandidateRequestGate.test.ts b/frontend/src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+new file mode 100644
+index 00000000..bd81e836
+--- /dev/null
++++ b/frontend/src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+@@ -0,0 +1,25 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { FailedCandidateRequestGate } from './failedCandidateRequestGate'
++
++test('load more and selected-file GET can finish in either order', () => {
++  const gate = new FailedCandidateRequestGate()
++  const detail = gate.beginDetail()
++  const more = gate.beginList(false)
++  assert.equal(gate.isCurrentDetail(detail), true)
++  assert.equal(gate.isCurrentList(more), true)
++  const nextDetail = gate.beginDetail()
++  assert.equal(gate.isCurrentList(more), true)
++  assert.equal(gate.isCurrentDetail(detail), false)
++  assert.equal(gate.isCurrentDetail(nextDetail), true)
++})
++
++test('refresh and close invalidate old exact-file responses', () => {
++  const gate = new FailedCandidateRequestGate()
++  const detail = gate.beginDetail()
++  gate.beginList(true)
++  assert.equal(gate.isCurrentDetail(detail), false)
++  const list = gate.beginList(false)
++  gate.invalidate()
++  assert.equal(gate.isCurrentList(list), false)
++})
+diff --git a/frontend/src/views/knowledge/settings/failedCandidateRequestGate.ts b/frontend/src/views/knowledge/settings/failedCandidateRequestGate.ts
+new file mode 100644
+index 00000000..203c0cb4
+--- /dev/null
++++ b/frontend/src/views/knowledge/settings/failedCandidateRequestGate.ts
+@@ -0,0 +1,24 @@
++// List and selected-file status requests have independent lifetimes. Loading
++// another page must not invalidate an in-flight exact status GET, or vice versa.
++export class FailedCandidateRequestGate {
++  private listRevision = 0
++  private detailRevision = 0
++  private contextRevision = 0
++
++  beginList(reset: boolean) {
++    if (reset) this.detailRevision++
++    return ++this.listRevision
++  }
++
++  beginDetail() { return ++this.detailRevision }
++  isCurrentList(revision: number) { return revision === this.listRevision }
++  isCurrentDetail(revision: number) { return revision === this.detailRevision }
++  currentContext() { return this.contextRevision }
++  isCurrentContext(revision: number) { return revision === this.contextRevision }
++
++  invalidate() {
++    this.contextRevision++
++    this.listRevision++
++    this.detailRevision++
++  }
++}
+diff --git a/frontend/src/views/knowledge/settings/failedCandidateRetryFlow.test.ts b/frontend/src/views/knowledge/settings/failedCandidateRetryFlow.test.ts
+new file mode 100644
+index 00000000..1bf91c55
+--- /dev/null
++++ b/frontend/src/views/knowledge/settings/failedCandidateRetryFlow.test.ts
+@@ -0,0 +1,57 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { submitFailedCandidateRetry } from './failedCandidateRetryFlow'
++import { FailedCandidateRequestGate } from './failedCandidateRequestGate'
++import type { NextcloudFailedCandidateRetryStatus } from '@/api/datasource'
++
++const status = {
++  file_id: '77', source_etag: 'etag-77', candidate_id: 'candidate-77', state: 'manual',
++  attempt_count: 3, first_staged_at: '', next_attempt_at: '', last_error_code: 'candidate_retry_exhausted',
++} satisfies NextcloudFailedCandidateRetryStatus
++
++test('409 clears the exact snapshot before POST and reloads the list', async () => {
++  const calls: string[] = []
++  let snapshot: NextcloudFailedCandidateRetryStatus | null = status
++  const result = await submitFailedCandidateRetry(status,
++    () => { snapshot = null; calls.push('clear') },
++    async (submitted) => {
++      assert.equal(snapshot, null)
++      assert.equal(submitted.source_etag, 'etag-77')
++      assert.equal(submitted.candidate_id, 'candidate-77')
++      calls.push('post')
++      throw { status: 409 }
++    },
++    async () => { calls.push('reload') },
++  )
++  assert.equal(result, 'changed')
++  assert.deepEqual(calls, ['clear', 'post', 'reload'])
++})
++
++test('successful retry also clears the generation and reloads', async () => {
++  const calls: string[] = []
++  const result = await submitFailedCandidateRetry(status,
++    () => { calls.push('clear') },
++    async () => { calls.push('post') },
++    async () => { calls.push('reload') },
++  )
++  assert.equal(result, 'scheduled')
++  assert.deepEqual(calls, ['clear', 'post', 'reload'])
++})
++
++test('late 409 from a previous drawer source cannot refresh the new source', async () => {
++  const gate = new FailedCandidateRequestGate()
++  const context = gate.currentContext()
++  let finishPost!: () => void
++  const waiting = new Promise<void>(resolve => { finishPost = resolve })
++  const calls: string[] = []
++  const result = submitFailedCandidateRetry(status,
++    () => { calls.push('clear-old') },
++    async () => { calls.push('post-old'); await waiting; throw { status: 409 } },
++    async () => { calls.push('reload-new') },
++    () => gate.isCurrentContext(context),
++  )
++  gate.invalidate() // The drawer closed or switched data sources while POST was pending.
++  finishPost()
++  assert.equal(await result, 'changed')
++  assert.deepEqual(calls, ['clear-old', 'post-old'])
++})
+diff --git a/frontend/src/views/knowledge/settings/failedCandidateRetryFlow.ts b/frontend/src/views/knowledge/settings/failedCandidateRetryFlow.ts
+new file mode 100644
+index 00000000..989ae8a1
+--- /dev/null
++++ b/frontend/src/views/knowledge/settings/failedCandidateRetryFlow.ts
+@@ -0,0 +1,22 @@
++import type { NextcloudFailedCandidateRetryStatus } from '@/api/datasource'
++
++// Clear the in-memory generation before the POST. A 409 always reloads the
++// list, so a stale ETag/candidate ID cannot remain available for another click.
++export async function submitFailedCandidateRetry(
++  status: NextcloudFailedCandidateRetryStatus,
++  clear: () => void,
++  retry: (status: NextcloudFailedCandidateRetryStatus) => Promise<unknown>,
++  reload: () => Promise<unknown>,
++  isCurrent: () => boolean = () => true,
++): Promise<'scheduled' | 'changed'> {
++  clear()
++  try {
++    await retry(status)
++  } catch (error: any) {
++    if (error?.status !== 409) throw error
++    if (isCurrent()) await reload()
++    return 'changed'
++  }
++  if (isCurrent()) await reload()
++  return 'scheduled'
++}
 diff --git a/frontend/src/views/nextcloud/NextcloudAsk.vue b/frontend/src/views/nextcloud/NextcloudAsk.vue
 new file mode 100644
 index 00000000..54897669
@@ -4884,14 +5506,15 @@ index 00000000..df4a49bc
 +}
 diff --git a/internal/application/repository/nextcloud_candidate_retry_jobs.go b/internal/application/repository/nextcloud_candidate_retry_jobs.go
 new file mode 100644
-index 00000000..c5be8bcb
+index 00000000..0762ae33
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_candidate_retry_jobs.go
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,622 @@
 +package repository
 +
 +import (
 +	"context"
++	"encoding/base64"
 +	"errors"
 +	"fmt"
 +	"hash/fnv"
@@ -4952,6 +5575,103 @@ index 00000000..c5be8bcb
 +	FirstStagedAt time.Time `json:"first_staged_at"`
 +	NextAttemptAt time.Time `json:"next_attempt_at"`
 +	LastErrorCode string    `json:"last_error_code"`
++}
++
++// The list contains only stable identifiers and static retry codes. Exact
++// generation selectors are deliberately fetched by the per-file status API.
++type NextcloudFailedCandidateListItem struct {
++	FileID        string     `json:"file_id"`
++	State         string     `json:"state"`
++	AttemptCount  int        `json:"attempt_count"`
++	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
++	LastErrorCode string     `json:"last_error_code"`
++}
++
++type nextcloudFailedCandidateListRow struct {
++	ExternalID           string     `gorm:"column:external_id"`
++	DesiredETag          string     `gorm:"column:desired_etag"`
++	CandidateKnowledgeID string     `gorm:"column:candidate_knowledge_id"`
++	JobDesiredETag       *string    `gorm:"column:job_desired_etag"`
++	JobCandidateID       *string    `gorm:"column:job_candidate_id"`
++	JobState             *string    `gorm:"column:job_state"`
++	JobAttemptCount      *int       `gorm:"column:job_attempt_count"`
++	JobNextAttemptAt     *time.Time `gorm:"column:job_next_attempt_at"`
++	JobLastErrorCode     *string    `gorm:"column:job_last_error_code"`
++}
++
++// ListFailedCandidates uses a bounded keyset page over current failed staging
++// generations in one active pairing. The caller must have checked KB edit access.
++func (r *NextcloudSourcePairingRepository) ListFailedCandidates(ctx context.Context,
++	pair NextcloudSourcePairing, limit int, cursor string,
++) ([]NextcloudFailedCandidateListItem, string, error) {
++	if pair.State != "active" || pair.TenantID == 0 || pair.KnowledgeBaseID == "" ||
++		pair.DataSourceID == "" || pair.InstanceID == "" || limit < 1 || limit > 50 || len(cursor) > 512 {
++		return nil, "", ErrNextcloudSourcePairingConflict
++	}
++	prefix := "nextcloud:" + pair.InstanceID + ":"
++	after := prefix
++	if cursor != "" {
++		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
++		if err != nil || len(decoded) > 256 || !strings.HasPrefix(string(decoded), prefix) ||
++			string(decoded) >= prefix+"~" {
++			return nil, "", ErrNextcloudSourcePairingConflict
++		}
++		after = string(decoded)
++	}
++	var rows []nextcloudFailedCandidateListRow
++	err := r.db.WithContext(ctx).Table("nextcloud_source_versions AS v").
++		Select(`v.external_id, v.desired_etag, v.candidate_knowledge_id,
++			j.desired_etag AS job_desired_etag, j.failed_candidate_id AS job_candidate_id,
++			j.state AS job_state, j.attempt_count AS job_attempt_count,
++			j.next_attempt_at AS job_next_attempt_at, j.last_error_code AS job_last_error_code`).
++		Joins(`JOIN knowledges AS k ON k.id = v.candidate_knowledge_id AND
++			k.tenant_id = v.tenant_id AND k.knowledge_base_id = v.knowledge_base_id`).
++		Joins(`JOIN data_sources AS d ON d.id = v.datasource_id AND d.tenant_id = v.tenant_id AND
++			d.knowledge_base_id = v.knowledge_base_id AND d.type = ? AND d.status = ? AND d.deleted_at IS NULL`,
++			types.ConnectorTypeNextcloud, types.DataSourceStatusActive).
++		Joins(`JOIN nextcloud_source_pairings AS p ON p.tenant_id = v.tenant_id AND
++			p.knowledge_base_id = v.knowledge_base_id AND p.datasource_id = v.datasource_id AND
++			p.operation_id = ? AND p.state = 'active'`, pair.OperationID).
++		Joins(`LEFT JOIN nextcloud_candidate_retry_jobs AS j ON j.tenant_id = v.tenant_id AND
++			j.knowledge_base_id = v.knowledge_base_id AND j.datasource_id = v.datasource_id AND j.external_id = v.external_id`).
++		Where(`v.tenant_id = ? AND v.knowledge_base_id = ? AND v.datasource_id = ? AND
++			v.state = 'staging' AND v.external_id > ? AND v.external_id < ? AND
++			k.channel = ? AND k.parse_status = ? AND k.deleted_at IS NULL`,
++			pair.TenantID, pair.KnowledgeBaseID, pair.DataSourceID, after, prefix+"~",
++			types.ConnectorTypeNextcloud, types.ParseStatusFailed).
++		Order("v.external_id ASC").Limit(limit + 1).Scan(&rows).Error
++	if err != nil {
++		return nil, "", err
++	}
++	nextCursor := ""
++	if len(rows) > limit {
++		nextCursor = base64.RawURLEncoding.EncodeToString([]byte(rows[limit-1].ExternalID))
++		rows = rows[:limit]
++	}
++	items := make([]NextcloudFailedCandidateListItem, 0, len(rows))
++	for _, row := range rows {
++		fileID := strings.TrimPrefix(row.ExternalID, prefix)
++		parsed, parseErr := strconv.ParseInt(fileID, 10, 64)
++		if parseErr != nil || parsed < 1 || strconv.FormatInt(parsed, 10) != fileID {
++			continue
++		}
++		item := NextcloudFailedCandidateListItem{FileID: fileID, State: "retry", LastErrorCode: "parse_failed"}
++		if row.JobDesiredETag != nil && row.JobCandidateID != nil &&
++			*row.JobDesiredETag == row.DesiredETag && *row.JobCandidateID == row.CandidateKnowledgeID {
++			if row.JobState != nil {
++				item.State = *row.JobState
++			}
++			if row.JobAttemptCount != nil {
++				item.AttemptCount = *row.JobAttemptCount
++			}
++			item.NextAttemptAt = row.JobNextAttemptAt
++			if row.JobLastErrorCode != nil && *row.JobLastErrorCode != "" {
++				item.LastErrorCode = *row.JobLastErrorCode
++			}
++		}
++		items = append(items, item)
++	}
++	return items, nextCursor, nil
 +}
 +
 +type nextcloudCandidateFailure struct {
@@ -5279,8 +5999,10 @@ index 00000000..c5be8bcb
 +		var currentPair NextcloudSourcePairing
 +		if err := tx.Where("operation_id = ? AND tenant_id = ? AND state = 'active'",
 +			pair.OperationID, pair.TenantID).Take(&currentPair).Error; err != nil ||
++			currentPair.KnowledgeBaseID != pair.KnowledgeBaseID ||
 +			currentPair.DataSourceID != pair.DataSourceID || currentPair.InstanceID != pair.InstanceID ||
-+			currentPair.BindingID != pair.BindingID {
++			currentPair.BindingID != pair.BindingID || currentPair.BaseURL != pair.BaseURL ||
++			currentPair.ConfigSHA != pair.ConfigSHA {
 +			return ErrNextcloudSourcePairingConflict
 +		}
 +		var version nextcloudSourceVersion
@@ -5351,8 +6073,21 @@ index 00000000..c5be8bcb
 +		var currentPair NextcloudSourcePairing
 +		if err := tx.Where("operation_id = ? AND tenant_id = ? AND state = 'active'",
 +			pair.OperationID, pair.TenantID).Take(&currentPair).Error; err != nil ||
++			currentPair.KnowledgeBaseID != pair.KnowledgeBaseID ||
 +			currentPair.DataSourceID != pair.DataSourceID || currentPair.InstanceID != pair.InstanceID ||
-+			currentPair.BindingID != pair.BindingID {
++			currentPair.BindingID != pair.BindingID || currentPair.BaseURL != pair.BaseURL ||
++			currentPair.ConfigSHA != pair.ConfigSHA {
++			return ErrNextcloudSourcePairingConflict
++		}
++		var ds types.DataSource
++		if err := tx.Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND type = ? AND status = ? AND deleted_at IS NULL",
++			pair.DataSourceID, pair.TenantID, pair.KnowledgeBaseID,
++			types.ConnectorTypeNextcloud, types.DataSourceStatusActive).Take(&ds).Error; err != nil {
++			return ErrNextcloudSourcePairingConflict
++		}
++		base, hash, binding, err := NextcloudEventDataSourceIdentity(ds.Config)
++		if err != nil || base != currentPair.BaseURL || hash != currentPair.ConfigSHA ||
++			binding != currentPair.BindingID {
 +			return ErrNextcloudSourcePairingConflict
 +		}
 +		var version nextcloudSourceVersion
@@ -5366,12 +6101,21 @@ index 00000000..c5be8bcb
 +			types.ConnectorTypeNextcloud, types.ParseStatusFailed).Take(&candidate).Error; err != nil {
 +			return ErrNextcloudSourcePairingConflict
 +		}
++		metadata, err := nextcloudMetadata(&candidate)
++		if err != nil || nextcloudMetadataString(metadata, "datasource_id") != pair.DataSourceID ||
++			nextcloudMetadataString(metadata, "external_id") != externalID ||
++			nextcloudMetadataString(metadata, "nextcloud_instance_id") != pair.InstanceID ||
++			nextcloudMetadataString(metadata, "nextcloud_binding_id") != pair.BindingID ||
++			nextcloudMetadataString(metadata, "nextcloud_file_id") != status.FileID ||
++			nextcloudMetadataString(metadata, "nextcloud_target_etag") != version.DesiredETag {
++			return ErrNextcloudSourcePairingConflict
++		}
 +		status.SourceETag, status.CandidateID = version.DesiredETag, version.CandidateKnowledgeID
 +		status.FirstStagedAt = version.UpdatedAt
 +		status.NextAttemptAt = candidate.UpdatedAt.Add(candidateRetryDelay(externalID, version.CandidateKnowledgeID, 1))
 +		status.State, status.LastErrorCode = "retry", "parse_failed"
 +		var job nextcloudCandidateRetryJob
-+		err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND external_id = ?",
++		err = tx.Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND external_id = ?",
 +			pair.TenantID, pair.KnowledgeBaseID, pair.DataSourceID, externalID).Take(&job).Error
 +		if errors.Is(err, gorm.ErrRecordNotFound) {
 +			return nil
@@ -8773,6 +9517,135 @@ index 00000000..324cfb32
 +		return nil
 +	})
 +	return status, err
++}
+diff --git a/internal/application/repository/nextcloud_failed_candidates_test.go b/internal/application/repository/nextcloud_failed_candidates_test.go
+new file mode 100644
+index 00000000..b488288f
+--- /dev/null
++++ b/internal/application/repository/nextcloud_failed_candidates_test.go
+@@ -0,0 +1,123 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++)
++
++func TestNextcloudFailedCandidateListScopedKeyset(t *testing.T) {
++	ctx := context.Background()
++	knowledge, db := newNextcloudVersionTestRepo(t)
++	for _, fileID := range []string{"77", "88", "99"} {
++		candidate := insertNextcloudVersionTestKnowledge(t, db, "candidate-"+fileID, "",
++			types.ParseStatusPending, "disabled")
++		metadata := candidate.GetMetadata()
++		metadata["external_id"] = "nextcloud:instance:" + fileID
++		metadata["nextcloud_file_id"] = fileID
++		encoded, err := json.Marshal(metadata)
++		require.NoError(t, err)
++		require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", candidate.ID).
++			Update("metadata", types.JSON(encoded)).Error)
++		require.NoError(t, knowledge.StageNextcloudVersion(ctx, 7, "kb", "ds",
++			"nextcloud:instance:"+fileID, "etag-"+fileID, candidate.ID))
++		require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", candidate.ID).
++			Update("parse_status", types.ParseStatusFailed).Error)
++	}
++	// This failed candidate shares the instance and KB string but belongs to a
++	// different tenant and source. Its ID must never appear on tenant 7's page.
++	var original types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&original).Error)
++	alien := &types.DataSource{ID: "alien-ds", TenantID: 8, KnowledgeBaseID: "kb",
++		Type: types.ConnectorTypeNextcloud, Status: types.DataSourceStatusActive, Config: original.Config}
++	require.NoError(t, db.Create(alien).Error)
++	var originalPair NextcloudSourcePairing
++	require.NoError(t, db.Where("datasource_id = ?", "ds").Take(&originalPair).Error)
++	require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: uuid.NewString(), TenantID: 8,
++		KnowledgeBaseID: "kb", DataSourceID: "alien-ds", InstanceID: "instance",
++		BindingID: originalPair.BindingID, BaseURL: originalPair.BaseURL,
++		ConfigSHA: originalPair.ConfigSHA, State: "active"}).Error)
++	require.NoError(t, db.Create(&types.Knowledge{ID: "alien-candidate", TenantID: 8,
++		KnowledgeBaseID: "kb", Channel: types.ConnectorTypeNextcloud,
++		ParseStatus: types.ParseStatusFailed}).Error)
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 8, KnowledgeBaseID: "kb",
++		DataSourceID: "alien-ds", ExternalID: "nextcloud:instance:55", DesiredETag: "alien",
++		CandidateKnowledgeID: "alien-candidate", State: "staging"}).Error)
++
++	repo := NewNextcloudSourcePairingRepository(db)
++	pair, _, err := repo.ActiveSourcePairingForDataSource(ctx, 7, "ds")
++	require.NoError(t, err)
++	_, _, err = repo.ActiveSourcePairingForDataSource(ctx, 8, "ds")
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingMissing)
++	var files []string
++	cursor := ""
++	for {
++		page, next, err := repo.ListFailedCandidates(ctx, pair, 1, cursor)
++		require.NoError(t, err)
++		require.Len(t, page, 1)
++		files = append(files, page[0].FileID)
++		require.Equal(t, "parse_failed", page[0].LastErrorCode)
++		if next == "" {
++			break
++		}
++		cursor = next
++	}
++	require.Equal(t, []string{"77", "88", "99"}, files)
++	_, _, err = repo.ListFailedCandidates(ctx, pair, 51, "")
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++	_, _, err = repo.ListFailedCandidates(ctx, pair, 1, "not-a-cursor")
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++	require.NoError(t, db.Model(&NextcloudSourcePairing{}).
++		Where("operation_id = ?", pair.OperationID).Update("state", "decommissioned").Error)
++	page, _, err := repo.ListFailedCandidates(ctx, pair, 50, "")
++	require.NoError(t, err)
++	require.Empty(t, page, "closed pairing must no longer reveal a failure list")
++}
++
++func TestNextcloudFailedCandidateStatusRequiresCurrentActiveSourceIdentity(t *testing.T) {
++	ctx := context.Background()
++	knowledge, db := newNextcloudVersionTestRepo(t)
++	var originalSource types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&originalSource).Error)
++	candidate := insertNextcloudVersionTestKnowledge(t, db, "candidate-77", "",
++		types.ParseStatusPending, "disabled")
++	require.NoError(t, knowledge.StageNextcloudVersion(ctx, 7, "kb", "ds",
++		"nextcloud:instance:77", "etag-77", candidate.ID))
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", candidate.ID).
++		Update("parse_status", types.ParseStatusFailed).Error)
++	var pair NextcloudSourcePairing
++	require.NoError(t, db.Where("datasource_id = ?", "ds").Take(&pair).Error)
++	repo := NewNextcloudSourcePairingRepository(db)
++	_, err := repo.FailedCandidateRetryStatus(ctx, pair, 77)
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("status", types.DataSourceStatusPaused).Error)
++	_, err = repo.FailedCandidateRetryStatus(ctx, pair, 77)
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("status", types.DataSourceStatusActive).Error)
++	newConfig, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		ResourceIDs: []string{"binding"}, Settings: map[string]interface{}{"base_url": "https://nextcloud.example"},
++		Credentials: map[string]interface{}{"token": "different-token", "key_id": "pair_test"}}).ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("config", newConfig).Error)
++	_, err = repo.FailedCandidateRetryStatus(ctx, pair, 77)
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("config", originalSource.Config).Error)
++	var current types.Knowledge
++	require.NoError(t, db.Where("id = ?", candidate.ID).Take(&current).Error)
++	metadata := current.GetMetadata()
++	metadata["nextcloud_file_id"] = "88"
++	encoded, err := json.Marshal(metadata)
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", candidate.ID).
++		Update("metadata", types.JSON(encoded)).Error)
++	_, err = repo.FailedCandidateRetryStatus(ctx, pair, 77)
++	require.ErrorIs(t, err, ErrNextcloudSourcePairingConflict)
 +}
 diff --git a/internal/application/repository/nextcloud_file_status.go b/internal/application/repository/nextcloud_file_status.go
 new file mode 100644
@@ -12954,10 +13827,10 @@ index 00000000..fdbff91d
 +}
 diff --git a/internal/application/repository/nextcloud_source_pairing.go b/internal/application/repository/nextcloud_source_pairing.go
 new file mode 100644
-index 00000000..710594de
+index 00000000..80ec9a44
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_source_pairing.go
-@@ -0,0 +1,448 @@
+@@ -0,0 +1,475 @@
 +package repository
 +
 +import (
@@ -13153,6 +14026,33 @@ index 00000000..710594de
 +	}
 +	var ds types.DataSource
 +	if err := r.db.WithContext(ctx).Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", pair.DataSourceID, tenantID).Take(&ds).Error; err != nil {
++		return pair, nil, ErrNextcloudSourcePairingConflict
++	}
++	return pair, &ds, nil
++}
++
++// ActiveSourcePairingForDataSource lets the settings page discover only the
++// pairing for its selected source. No credential or cross-tenant lookup is used.
++func (r *NextcloudSourcePairingRepository) ActiveSourcePairingForDataSource(ctx context.Context,
++	tenantID uint64, datasourceID string,
++) (NextcloudSourcePairing, *types.DataSource, error) {
++	var pair NextcloudSourcePairing
++	err := r.db.WithContext(ctx).Where("tenant_id = ? AND datasource_id = ? AND state = 'active'",
++		tenantID, datasourceID).Take(&pair).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return pair, nil, ErrNextcloudSourcePairingMissing
++	}
++	if err != nil {
++		return pair, nil, err
++	}
++	var ds types.DataSource
++	err = r.db.WithContext(ctx).Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND type = ? AND status = ? AND deleted_at IS NULL",
++		datasourceID, tenantID, pair.KnowledgeBaseID, types.ConnectorTypeNextcloud, types.DataSourceStatusActive).Take(&ds).Error
++	if err != nil {
++		return pair, nil, ErrNextcloudSourcePairingConflict
++	}
++	base, hash, binding, err := NextcloudEventDataSourceIdentity(ds.Config)
++	if err != nil || base != pair.BaseURL || hash != pair.ConfigSHA || binding != pair.BindingID {
 +		return pair, nil, ErrNextcloudSourcePairingConflict
 +	}
 +	return pair, &ds, nil
@@ -22039,10 +22939,10 @@ index ebfe6542..ea7fc6ae 100644
  }
  
 diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
-index 30c1e384..16701608 100644
+index 068265c4..927f7222 100644
 --- a/internal/application/service/session_knowledge_qa.go
 +++ b/internal/application/service/session_knowledge_qa.go
-@@ -1198,6 +1198,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
+@@ -1202,6 +1202,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
  		if total >= maxDocuments {
  			break
  		}
@@ -22625,7 +23525,7 @@ index 48620fad..c6fbfd4f 100644
  	// Run all pending migrations
  	logger.Infof(ctx, "Running pending migrations...")
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index ca9fa532..4c236fcf 100644
+index ca9fa532..d8e80749 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -31637,6 +32537,83 @@ index 00000000..072a04f0
 +	require.Equal(t, int64(1), count)
 +	require.Equal(t, int64(101), received)
 +}
+diff --git a/internal/handler/nextcloud_failed_candidates_test.go b/internal/handler/nextcloud_failed_candidates_test.go
+new file mode 100644
+index 00000000..2e38f082
+--- /dev/null
++++ b/internal/handler/nextcloud_failed_candidates_test.go
+@@ -0,0 +1,71 @@
++package handler
++
++import (
++	"bytes"
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func TestNextcloudFailedCandidateAdminAndTenantBoundary(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
++	require.NoError(t, err)
++	require.NoError(t, db.AutoMigrate(&types.DataSource{}, &repository.NextcloudSourcePairing{},
++		&repository.NextcloudSourcePairingAbort{}))
++	config, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		ResourceIDs: []string{"binding"}, Settings: map[string]interface{}{"base_url": "https://nextcloud.example"},
++		Credentials: map[string]interface{}{"token": "secret", "key_id": "pair_test"}}).ToJSON()
++	require.NoError(t, err)
++	ds := &types.DataSource{ID: "ds", TenantID: 7, KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud,
++		Status: types.DataSourceStatusActive, Config: config}
++	require.NoError(t, db.Create(ds).Error)
++	base, hash, binding, err := repository.NextcloudEventDataSourceIdentity(ds.Config)
++	require.NoError(t, err)
++	op := uuid.NewString()
++	require.NoError(t, db.Create(&repository.NextcloudSourcePairing{OperationID: op, TenantID: 7,
++		KnowledgeBaseID: "kb", DataSourceID: "ds", InstanceID: "instance", BindingID: binding,
++		BaseURL: base, ConfigSHA: hash, State: "active"}).Error)
++	h := NewNextcloudSourcePairingHandler(repository.NewNextcloudSourcePairingRepository(db),
++		NewDataSourceHandler(&stubDataSourceService{}, &stubKBServiceForDS{getByID: func(_ context.Context, id string) (*types.KnowledgeBase, error) {
++			return &types.KnowledgeBase{ID: id, TenantID: 7}, nil
++		}}))
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(func(c *gin.Context) {
++		if tenant, ok := c.Request.Context().Value(types.TenantIDContextKey).(uint64); ok {
++			c.Set(types.TenantIDContextKey.String(), tenant)
++		}
++		c.Next()
++	})
++	listPath := "/api/v1/datasource/nextcloud-source-pairings/by-datasource/ds/failed-candidates"
++	retryPath := "/api/v1/datasource/nextcloud-source-pairings/" + op + "/candidates/77/retry"
++	router.GET("/api/v1/datasource/nextcloud-source-pairings/by-datasource/:id/failed-candidates", h.FailedCandidates)
++	router.POST("/api/v1/datasource/nextcloud-source-pairings/:operation_id/candidates/:file_id/retry", h.RetryFailedCandidate)
++	request := func(method, path string, tenant uint64, role types.TenantRole) *httptest.ResponseRecorder {
++		req := httptest.NewRequest(method, path, bytes.NewBufferString(`{"source_etag":"etag","candidate_id":"candidate"}`))
++		req.Header.Set("Content-Type", "application/json")
++		ctx := context.WithValue(req.Context(), types.TenantIDContextKey, tenant)
++		ctx = context.WithValue(ctx, types.TenantRoleContextKey, role)
++		rec := httptest.NewRecorder()
++		router.ServeHTTP(rec, req.WithContext(ctx))
++		return rec
++	}
++	for _, endpoint := range []struct{ method, path string }{{http.MethodGet, listPath}, {http.MethodPost, retryPath}} {
++		require.Equal(t, http.StatusForbidden,
++			request(endpoint.method, endpoint.path, 7, types.TenantRoleViewer).Code)
++		require.Equal(t, http.StatusNotFound,
++			request(endpoint.method, endpoint.path, 8, types.TenantRoleAdmin).Code)
++	}
++	require.Equal(t, http.StatusBadRequest,
++		request(http.MethodGet, listPath+"?limit=51", 7, types.TenantRoleAdmin).Code)
++}
 diff --git a/internal/handler/nextcloud_file_status.go b/internal/handler/nextcloud_file_status.go
 new file mode 100644
 index 00000000..68491819
@@ -33524,10 +34501,10 @@ index 00000000..be5bb5ce
 +}
 diff --git a/internal/handler/nextcloud_source_pairing.go b/internal/handler/nextcloud_source_pairing.go
 new file mode 100644
-index 00000000..76921239
+index 00000000..0d895a7d
 --- /dev/null
 +++ b/internal/handler/nextcloud_source_pairing.go
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,379 @@
 +package handler
 +
 +import (
@@ -33724,6 +34701,45 @@ index 00000000..76921239
 +type nextcloudFailedCandidateRetryRequest struct {
 +	SourceETag  string `json:"source_etag" binding:"required"`
 +	CandidateID string `json:"candidate_id" binding:"required"`
++}
++
++// FailedCandidates is the administrator's bounded entry point from one data
++// source card. It returns neither candidate content nor pairing credentials.
++func (h *NextcloudSourcePairingHandler) FailedCandidates(c *gin.Context) {
++	tenantID, ok := h.admin(c)
++	if !ok {
++		return
++	}
++	limit := 25
++	if raw := c.Query("limit"); raw != "" {
++		parsed, err := strconv.Atoi(raw)
++		if err != nil || parsed < 1 || parsed > 50 {
++			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_failed_candidate_page"})
++			return
++		}
++		limit = parsed
++	}
++	cursor := c.Query("cursor")
++	if len(cursor) > 512 || len(c.Param("id")) > 128 || c.Param("id") == "" {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_failed_candidate_page"})
++		return
++	}
++	pair, _, err := h.repo.ActiveSourcePairingForDataSource(c.Request.Context(), tenantID, c.Param("id"))
++	if err != nil {
++		sourcePairingError(c, err)
++		return
++	}
++	if _, status, message := h.dataSource.getOwnedKnowledgeBase(c.Request.Context(), tenantID,
++		pair.KnowledgeBaseID, types.ResourceActionEdit); status != http.StatusOK {
++		c.JSON(status, gin.H{"error": message})
++		return
++	}
++	items, nextCursor, err := h.repo.ListFailedCandidates(c.Request.Context(), pair, limit, cursor)
++	if err != nil {
++		sourcePairingError(c, err)
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"operation_id": pair.OperationID, "candidates": items, "next_cursor": nextCursor})
 +}
 +
 +func (h *NextcloudSourcePairingHandler) FailedCandidateRetryStatus(c *gin.Context) {
@@ -36685,10 +37701,10 @@ index 2753d920..96cf12ef 100644
  		RegisterWikiPageRoutes(v1, params.WikiPageHandler, rbacGuards)
  		RegisterMemoryRoutes(v1, params.MemoryHandler, rbacGuards)
 diff --git a/internal/router/router_api_key_capabilities_test.go b/internal/router/router_api_key_capabilities_test.go
-index 713a0b5d..89621922 100644
+index 05a1960c..c5c4f815 100644
 --- a/internal/router/router_api_key_capabilities_test.go
 +++ b/internal/router/router_api_key_capabilities_test.go
-@@ -391,6 +391,35 @@ func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
+@@ -401,6 +401,35 @@ func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
  	}
  }
  
@@ -37028,10 +38044,10 @@ index 33a5a6af..8898153a 100644
  	}
  }
 diff --git a/internal/router/routes_infra.go b/internal/router/routes_infra.go
-index 31100683..c9e45256 100644
+index b0690d90..37bef342 100644
 --- a/internal/router/routes_infra.go
 +++ b/internal/router/routes_infra.go
-@@ -451,6 +451,52 @@ func RegisterDataSourceRoutes(
+@@ -455,6 +455,53 @@ func RegisterDataSourceRoutes(
  	}
  }
  
@@ -37058,6 +38074,7 @@ index 31100683..c9e45256 100644
 +	h *handler.NextcloudSourcePairingHandler, g *rbacGuards) {
 +	ds := r.Group("/datasource")
 +	ds.POST("/nextcloud-source-pairings", g.Admin(), h.Pair)
++	ds.GET("/nextcloud-source-pairings/by-datasource/:id/failed-candidates", g.Admin(), h.FailedCandidates)
 +	ds.GET("/nextcloud-source-pairings/:operation_id", g.Admin(), h.Status)
 +	ds.GET("/nextcloud-source-pairings/:operation_id/health", g.Admin(), h.Health)
 +	ds.POST("/nextcloud-source-pairings/:operation_id/retry", g.Admin(), h.Retry)
