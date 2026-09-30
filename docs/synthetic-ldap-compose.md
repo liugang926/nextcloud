@@ -46,7 +46,8 @@ and acceptance fixture are `0600`. `up` waits for every health check.
 `bootstrap` configures Nextcloud `user_ldap` with `objectGUID` as the expert
 user/group UUID attribute **before** user discovery, enables the repository's
 `integration_weknora` app, creates a synthetic DAV file and Engineering group
-share, maps the two exact identities, and issues a binding key. It registers
+share, and requires Alice's authenticated DAV access before creating a binding
+or source pair. It maps the two exact identities and issues a binding key. It registers
 only a synthetic WeKnora local administrator, synchronizes the same LDAPS
 directory, grants both users workspace viewer via Domain Users, restricts the
 dedicated KB to Engineering, pairs the source, and waits for one published
@@ -58,9 +59,9 @@ one. Do not retry bootstrap against a partly configured stack.
 
 For a direct-member baseline, select `--mode direct`; `matrix` runs
 `baseline`. For the primary-group case, select `--mode primary`; the generated
-topology grants Alice only through `primaryGroupID=2000`. The expected
-permission probe is intentionally strict and will report the current
-Nextcloud mismatch described below. After using any mode, `destroy` removes
+topology grants Alice only through `primaryGroupID=2000`. The DAV preflight
+currently stops before pairing because Nextcloud cannot read Alice's group
+share in this synthetic setup. After using any mode, `destroy` removes
 only the marker-verified project, its volumes/network, and that run's private
 scratch directory. It never prunes global Docker resources.
 
@@ -88,8 +89,13 @@ WeKnora reported Alice in Engineering with `origin=primary`. Nextcloud
 `user_ldap` listed Engineering's direct disabled test member, omitted Alice,
 and returned DAV 404 for Alice's shared file; Bob also received 404. This is
 a **failed** cross-system primary-group permission case, not an accepted
-denial. The full primary KB/search matrix was not run. Investigate Nextcloud
-primary-group resolution before claiming that AD case complete.
+denial. The full primary KB/search matrix was not run. Nextcloud 34.0.4's
+`Group_LDAP::primaryGroupID2Name` constructs a textual `objectsid=S-...-RID`
+filter, whereas this fixture stores `objectSid` with binary
+`octetStringMatch`; the textual lookup returned no group. This identifies a
+synthetic-directory mismatch and does not establish how a real AD server
+would answer. The bootstrap now stops before pairing when Alice's actual DAV
+grant is absent. Test a real AD primary group before claiming that case complete.
 
 This OpenLDAP schema models selected AD attributes. It does not prove
 enterprise AD behavior, Kerberos/SSO, Team folder ACLs, account disablement,
@@ -97,3 +103,14 @@ long-lived revocation, citation generation, or production scale. The
 WeKnora image used here was a locally loaded candidate image; for another
 host, build the intended WeKnora commit and record its image ID alongside
 the output.
+
+## Regression check, 2026-09-30 UTC
+
+The fresh `primary` fixture stopped during bootstrap with Alice's authenticated
+DAV `PROPFIND` returning 404. No source pair was created. The fresh `direct`
+fixture passed that preflight, indexed one chunk and embedding, then passed the
+six-field HTTP matrix: Alice's login, DAV, source, knowledge and search were
+allowed; Bob could log in to both services but all four content checks were
+denied. Both owned fixtures and their Docker volumes were removed. Fixture
+passwords now use 31-character values that satisfy WeKnora's registration
+length/character policy while remaining safe as Nextcloud installer arguments.

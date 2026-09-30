@@ -107,7 +107,7 @@ def nextcloud_setup(directory, state, passwords, nc_base):
     if not {"alice", "bob"}.issubset(users):
         raise RuntimeError("Nextcloud did not discover both synthetic LDAP accounts")
     groups = json.loads(occ(state, "group:list", "--output=json"))
-    if "alice" not in groups.get("Engineering", []) and state["mode"] != "primary":
+    if state["mode"] != "primary" and "alice" not in groups.get("Engineering", []):
         raise RuntimeError("Nextcloud did not resolve the synthetic group membership")
     if "Engineering" not in groups:
         raise RuntimeError("Nextcloud did not discover the synthetic group")
@@ -141,6 +141,20 @@ def nextcloud_setup(directory, state, passwords, nc_base):
         # own lookup catches up. Retry only the bounded, missing-group result.
         if status != 404 or attempt == 29:
             raise RuntimeError(f"share synthetic folder: HTTP {status}")
+        time.sleep(2)
+    # An LDAP topology path alone does not prove that Nextcloud grants the
+    # mounted group share. Check the employee's actual DAV access before a
+    # source pair can be created, including in primary-group mode.
+    alice_auth = base64.b64encode(("alice:" + passwords["alice"]).encode()).decode()
+    alice_document = nc_base + "/remote.php/dav/files/alice/Published/acl-note.txt"
+    for attempt in range(15):
+        status, _ = request(urllib.request.build_opener(), alice_document, "PROPFIND",
+                            {"Authorization": "Basic " + alice_auth, "Depth": "0"})
+        if status == 207:
+            break
+        if status not in {403, 404} or attempt == 14:
+            raise RuntimeError(
+                f"Nextcloud LDAP grant preflight failed for {state['mode']}: DAV HTTP {status}")
         time.sleep(2)
     binding = "synthetic-published"
     status, body = nc_request(admin, csrf, api + "/admin/bindings", "POST", {

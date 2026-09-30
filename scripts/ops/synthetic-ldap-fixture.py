@@ -307,7 +307,10 @@ def prepare(image, mode):
             (directory / name).mkdir(mode=0o700)
         suffix = secrets.token_hex(4)
         project = "nc-synldap-" + suffix
-        passwords = {key: "x" + secrets.token_urlsafe(24) for key in
+        # The WeKnora registration policy caps passwords at 32 characters
+        # and requires letters plus a digit. This 31-character form also
+        # avoids a leading '-' being parsed as an occ option by Nextcloud.
+        passwords = {key: "xA1_" + secrets.token_urlsafe(20) for key in
                      ("ldap_admin", "ldap_bind", "alice", "bob", "charlie",
                       "nc_admin", "nc_db", "wk_admin", "wk_db", "jwt")}
         passwords["aes"] = secrets.token_hex(16)
