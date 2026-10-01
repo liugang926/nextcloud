@@ -1,0 +1,67 @@
+{
+  "test": "isolated_same_file_signed_event_parser_overlap",
+  "observed_at_utc": "2026-10-01T22:36:23Z",
+  "fixture": "nc-synldap-2a48b56d",
+  "image_id": "sha256:e0b2b932dca4d988930ac1972ec582ad883e155f4c044f00d9230baa592804f7",
+  "source_id": "fab0aec2-f9ad-4c52-a30d-1619e6bfd882",
+  "file_id": 92,
+  "pause_method": "docker pause on this fixture's mock-embedding container, then docker unpause",
+  "baseline": {
+    "candidate_id": "ddc2c60b-80e5-4de7-aa26-4d57b57ac756",
+    "etag": "69e16a6f64c46a22bc9820a51866a5c7",
+    "state": "published"
+  },
+  "v1": {
+    "event_id": 1,
+    "candidate_id": "01b55854-2144-4450-9b71-12115cf063a5",
+    "etag": "31d5fe29b80ca6ab72581fead7aa0182",
+    "state_at_v2_write": "staging",
+    "parse_at_v2_write": "processing",
+    "parse_when_v2_dispatched": "processing"
+  },
+  "v2": {
+    "event_id": 2,
+    "outbox_relative_path": "acl-note.txt",
+    "outbox_has_etag": true,
+    "inbox_relative_path": "acl-note.txt",
+    "inbox_has_etag": true,
+    "during_v1_parse": {
+      "receiver_received": 2,
+      "receiver_dispatched": 2,
+      "receiver_applied": 0,
+      "sender_received": 2,
+      "sender_applied": 0
+    },
+    "final": {
+      "candidate_id": "3711efd9-8118-44dc-8bf9-24839d0b99f4",
+      "etag": "41a4c1c8f675e0b1aecfe5fe3997a738",
+      "visible_etag_matches": true,
+      "state": "published",
+      "parse": "completed",
+      "ready_chunks": 2,
+      "enabled_embeddings": 2,
+      "visible_candidate_count": 1,
+      "receiver_applied": 2,
+      "sender_applied": 2
+    }
+  },
+  "alice_retrieval_after_v2": {
+    "baseline_knowledge_http": 403,
+    "baseline_selected_search_hits": 0,
+    "v1_knowledge_http": 403,
+    "v1_selected_search_hits": 0,
+    "v2_knowledge_http": 200,
+    "v2_selected_search_hits": 2
+  },
+  "stale_v1_row_after_v2": {
+    "parse": "processing",
+    "enabled": "enabled",
+    "metadata_etag": "",
+    "enabled_chunk_count": 1,
+    "enabled_embedding_count": 1,
+    "alice_knowledge_http": 403,
+    "alice_selected_search_hits": 0
+  },
+  "result": "passed",
+  "scope": "One synthetic same-file overlap; retrieval denial was observed for stale rows, but physical derived-index garbage collection remains unproven. No P95, scale, or real AD claim."
+}
