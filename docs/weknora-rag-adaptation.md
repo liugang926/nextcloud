@@ -116,6 +116,10 @@ from `primaryGroupID`; changing it to Domain Users caused her existing login
 to lose DAV, signed-source, knowledge, direct-content and search access, and
 the directory membership disappeared. The nested case verified the sole
 nested group edge and the same allow/deny matrix. All three owned fixtures
-were destroyed. This compatibility run does not change the pinned baseline or
-claim the PDF
+were destroyed. A fourth disposable fixture installed Team Folders 22.0.6,
+bound its root and checked a file-scoped answer with its original Files
+citation. A file-level `-read` ACL for Alice then denied DAV, signed source,
+Files status, ask-target, knowledge, direct content and search; historical
+content was redacted. All owned resources were removed. This compatibility
+run does not change the pinned baseline or claim the PDF
 recovery, real AD or production performance acceptance above.

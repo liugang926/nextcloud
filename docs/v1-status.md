@@ -689,6 +689,17 @@ seven polls, 25.5 seconds after the baseline checkpoint in this fixture.
 `nc-synldap-521230a5` verified a sole nested-group edge and passed the same
 Alice/Bob six-field allow/deny matrix. Each fixture indexed two chunks and
 embeddings, and all owned containers, volumes and networks were destroyed.
+An additional direct-group fixture (`nc-synldap-ce9c73be`) installed the
+digest-checked Team Folders 22.0.6 app inside its owned Nextcloud container,
+paired a real Team Folder root, and indexed two chunks and embeddings. Its
+file-scoped baseline answer carried the synthetic marker and original Files
+citation. After a file-level advanced ACL `-read` rule for Alice, her Files
+status became 404, DAV and signed-source reads failed, ask-target returned
+403, knowledge and direct-content reads failed, search returned no content,
+and the prior history was redacted; Bob remained denied. The first denial was
+observed 8.2 seconds after the ACL mutation in this fixture. Its owned
+containers, volumes and network were destroyed. This is a synthetic Team
+Folder result, not a production revocation SLA.
 This checks the patch against a newer RAG source head, not a runtime image
 built from the repository's pinned `77c97fd7` baseline; it does not prove PDF recovery,
 enterprise AD permissions or the PRD load target.
