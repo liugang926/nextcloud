@@ -85,6 +85,7 @@ def main():
     _, cursor = drain(api_url, machine_headers)
     suffix = secrets.token_hex(8)
     file_url = f"{dav_base}/changes-{suffix}.txt"
+    renamed_url = f"{dav_base}/changes-renamed-{suffix}.txt"
     folder_url = f"{dav_base}/changes-folder-{suffix}"
     child_url = f"{folder_url}/child.txt"
     outside_url = (f"{base}/remote.php/dav/files/"
@@ -97,12 +98,14 @@ def main():
         assert status in (201, 204), (status, body[:300])
         new_id = file_id(file_url, dav_headers)
         events, cursor = drain(api_url, machine_headers, cursor)
-        assert any(e["type"] == "upsert" and e["file_id"] == new_id for e in events), events
+        assert any(e["type"] == "upsert" and e["file_id"] == new_id and
+                   e["relative_path"] == f"changes-{suffix}.txt" for e in events), events
 
         status, body = request(file_url, "PUT", dav_headers, b"second version\n")
         assert status in (201, 204), (status, body[:300])
         events, cursor = drain(api_url, machine_headers, cursor)
-        assert any(e["type"] == "upsert" and e["file_id"] == new_id for e in events), events
+        assert any(e["type"] == "upsert" and e["file_id"] == new_id and
+                   e["relative_path"] == f"changes-{suffix}.txt" for e in events), events
 
         status, body = request(file_url, "DELETE", dav_headers)
         assert status == 204, (status, body[:300])
@@ -119,9 +122,18 @@ def main():
         replacement_id = file_id(file_url, dav_headers)
         assert replacement_id != new_id, "re-upload must have a new source identity"
         events, cursor = drain(api_url, machine_headers, cursor)
-        assert any(e["type"] == "upsert" and e["file_id"] == replacement_id for e in events), events
+        assert any(e["type"] == "upsert" and e["file_id"] == replacement_id and
+                   e["relative_path"] == f"changes-{suffix}.txt" for e in events), events
         assert not any(e["type"] == "upsert" and e["file_id"] == new_id for e in events), events
-        status, body = request(file_url, "DELETE", dav_headers)
+        status, body = request(file_url, "MOVE", {
+            **dav_headers, "Destination": renamed_url,
+        })
+        assert status in (201, 204), (status, body[:300])
+        events, cursor = drain(api_url, machine_headers, cursor)
+        assert any(e["type"] == "metadata" and e["file_id"] == replacement_id and
+                   e["relative_path"] == f"changes-renamed-{suffix}.txt"
+                   for e in events), events
+        status, body = request(renamed_url, "DELETE", dav_headers)
         assert status == 204, (status, body[:300])
         _, cursor = drain(api_url, machine_headers, cursor)
 
@@ -145,7 +157,10 @@ def main():
         status, body = request(child_url, "PUT", dav_headers, b"folder member\n")
         assert status in (201, 204), (status, body[:300])
         child_id = file_id(child_url, dav_headers)
-        _, cursor = drain(api_url, machine_headers, cursor)
+        events, cursor = drain(api_url, machine_headers, cursor)
+        assert any(e["type"] == "upsert" and e["file_id"] == child_id and
+                   e["relative_path"] == f"changes-folder-{suffix}/child.txt"
+                   for e in events), events
         status, body = request(folder_url, "MOVE", {
             **dav_headers, "Destination": moved_folder_url,
         })
@@ -186,6 +201,7 @@ def main():
         print("changes HTTP smoke passed")
     finally:
         request(file_url, "DELETE", dav_headers)
+        request(renamed_url, "DELETE", dav_headers)
         request(moving_url, "DELETE", dav_headers)
         request(outside_url, "DELETE", dav_headers)
         request(folder_url, "DELETE", dav_headers)

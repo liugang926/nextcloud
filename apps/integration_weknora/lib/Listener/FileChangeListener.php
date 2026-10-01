@@ -127,7 +127,8 @@ final class FileChangeListener implements IEventListener {
         if ($this->isFolder($node)) {
             $this->outbox->append($bindingId, $fileId, 'subtree_scan', null, $path);
         } elseif ($node instanceof File && $fileId !== null) {
-            $this->outbox->append($bindingId, $fileId, 'upsert', null, $path, $this->nodeEtag($node));
+            $this->outbox->append($bindingId, $fileId, 'upsert', null, $path,
+                $this->nodeEtag($node), $this->relativePath($rootPath, $path));
         } else {
             $this->outbox->append($bindingId, $fileId, 'reconcile', null, $path);
         }
@@ -175,10 +176,10 @@ final class FileChangeListener implements IEventListener {
             $this->outbox->append($bindingId, $sourceId ?? $targetId, $type, $oldPath, $newPath);
         } elseif ($wasInside && $isInside) {
             $this->outbox->append($bindingId, $targetId, $targetId === null ? 'reconcile' : 'metadata',
-                $oldPath, $newPath, $this->nodeEtag($target));
+                $oldPath, $newPath, $this->nodeEtag($target), $this->relativePath($rootPath, $newPath));
         } elseif ($isInside) {
             $this->outbox->append($bindingId, $targetId, $targetId === null ? 'reconcile' : 'upsert',
-                $oldPath, $newPath, $this->nodeEtag($target));
+                $oldPath, $newPath, $this->nodeEtag($target), $this->relativePath($rootPath, $newPath));
         } else {
             // The source ID captured before the operation is safe to withdraw
             // only now that its post-rename event confirms success. If an
@@ -194,6 +195,23 @@ final class FileChangeListener implements IEventListener {
         }
         return $rootPath !== null && $path !== null &&
             ($path === $rootPath || str_starts_with($path, $rootPath . '/'));
+    }
+
+    private function relativePath(?string $rootPath, ?string $path): ?string {
+        if ($rootPath === null || $path === null || !str_starts_with($path, $rootPath . '/')) {
+            return null;
+        }
+        $relative = substr($path, strlen($rootPath) + 1);
+        if ($relative === '' || strlen($relative) > 4096 || str_contains($relative, '\\') ||
+            str_contains($relative, "\r") || str_contains($relative, "\n")) {
+            return null;
+        }
+        foreach (explode('/', $relative) as $part) {
+            if ($part === '' || $part === '.' || $part === '..') {
+                return null;
+            }
+        }
+        return $relative;
     }
 
     private function nodePath(Node $node): ?string {

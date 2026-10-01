@@ -38,6 +38,7 @@ final class ChangeOutboxService {
         ?string $oldPath = null,
         ?string $path = null,
         ?string $etag = null,
+        ?string $relativePath = null,
     ): int {
         self::assertBindingId($bindingId);
         if ($fileId !== null && $fileId < 1) {
@@ -48,6 +49,14 @@ final class ChangeOutboxService {
         }
         if ($etag !== null && strlen($etag) > 255) {
             throw new \InvalidArgumentException('ETag is too long');
+        }
+        if ($relativePath !== null && ($relativePath === '' || strlen($relativePath) > 4096 ||
+            str_starts_with($relativePath, '/') || str_contains($relativePath, '\\') ||
+            str_contains($relativePath, "\r") || str_contains($relativePath, "\n") ||
+            in_array('', explode('/', $relativePath), true) ||
+            in_array('.', explode('/', $relativePath), true) ||
+            in_array('..', explode('/', $relativePath), true))) {
+            throw new \InvalidArgumentException('Invalid binding-relative path');
         }
 
         $this->db->beginTransaction();
@@ -62,6 +71,7 @@ final class ChangeOutboxService {
                 'old_path' => $insert->createNamedParameter($oldPath),
                 'path' => $insert->createNamedParameter($path),
                 'etag' => $insert->createNamedParameter($etag),
+                'relative_path' => $insert->createNamedParameter($relativePath),
                 'created_at' => $insert->createNamedParameter(time()),
             ]);
             $insert->executeStatement();
@@ -264,7 +274,7 @@ final class ChangeOutboxService {
         }
 
         $query = $this->db->getQueryBuilder();
-        $query->select('id', 'file_id', 'event_type', 'old_path', 'path', 'etag', 'created_at')
+        $query->select('id', 'file_id', 'event_type', 'old_path', 'path', 'etag', 'relative_path', 'created_at')
             ->from('weknora_outbox')
             ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
             ->andWhere($query->expr()->gt('id', $query->createNamedParameter($afterId)))
@@ -291,6 +301,7 @@ final class ChangeOutboxService {
                 'old_path' => $row['old_path'],
                 'path' => $row['path'],
                 'etag' => $row['etag'],
+                'relative_path' => $row['relative_path'],
                 'created_at' => (int)$row['created_at'],
             ];
         }
