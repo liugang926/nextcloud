@@ -191,15 +191,17 @@ def main():
     mock_container = None
     folder_created = binding_created = connection_created = False
     with tempfile.TemporaryDirectory(prefix="weknora-event-smoke-") as tmp:
-        # Drive both independent loops one pass at a time. Restore the status
-        # worker only after cleanup so it cannot race watermark assertions.
+        # Drive both independent loops one pass at a time. Nextcloud's cron
+        # can also execute the delivery job, so stop it before creating the
+        # binding and restore it only after the fault assertions and cleanup.
         running_workers = set(compose(
             "ps", "--status", "running", "--services").splitlines())
         worker_running = "event-worker" in running_workers
         status_worker_running = "event-status-worker" in running_workers
+        cron_running = "cron" in running_workers
         stopped_workers = []
         try:
-            for worker in ("event-worker", "event-status-worker"):
+            for worker in ("cron", "event-worker", "event-status-worker"):
                 if worker in running_workers:
                     compose("stop", worker)
                     stopped_workers.append(worker)
@@ -532,8 +534,12 @@ def main():
                     if worker_running:
                         compose("start", "event-worker")
                 finally:
-                    if status_worker_running:
-                        compose("start", "event-status-worker")
+                    try:
+                        if status_worker_running:
+                            compose("start", "event-status-worker")
+                    finally:
+                        if cron_running:
+                            compose("start", "cron")
 
 
 if __name__ == "__main__":
