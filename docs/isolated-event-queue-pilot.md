@@ -1,0 +1,62 @@
+# Isolated event queue pilot
+
+On 2026-10-01, a disposable, loopback-only Nextcloud and WeKnora pair ran
+`scripts/ops/pilot-load.py` with two 256-byte synthetic files and three
+`post-accept` event samples. Nextcloud used app 0.4.32. WeKnora used the
+`3ad3b31` RAG candidate with patch SHA-256
+`251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611`
+and image ID
+`sha256:2ec7e6b31463e6764130973cc1d636d2f65c83268376943cbae59713b7156f9e`.
+The complete noncredential [JSON report](evidence/event-queue-pilot-2026-10-01.json)
+has SHA-256 `868e4e35717a6f1d7f1ff061371e2cb4643c78885d6b92fac523149a2ffec1ee`.
+
+| Measurement | Result |
+| --- | ---: |
+| Initial two-file source sync | 0.753 seconds; 2 files created |
+| Event-to-durable-job upper bounds | 10,080.9 ms; 5,402.3 ms; 74,838.0 ms |
+| Three-sample nearest-rank P95 | 74,838.0 ms |
+
+Each event sample starts immediately before a WebDAV PUT and ends when the
+WeKnora administrator status first reports a matching dispatched watermark.
+The upper bound includes WebDAV and status polling. A preceding event was
+already accepted into the queue, so each measured event exercises same-source
+serialization. Between samples, the script waits for complete applied proof.
+
+The third sample's status changed from `received=7, dispatched=6, applied=5`
+at 20:35:44 to `publication_unproven` retry at 20:35:48; it dispatched event
+7 at 20:36:53. Its scan finished successfully at 20:36:54.539 and its source
+version published at 20:36:54.759. The applied watermark reached 7 at
+20:37:58. Earlier successful scans also took about 65 seconds to advance
+their applied watermark. This timing is consistent with the tested
+candidate's one-minute proof checks, including its retry after publication
+had not yet appeared when the scan completed. It does not establish that
+this was the only source of event latency.
+
+The run used a mock embedding model and a tiny local fixture. These numbers
+are neither the PRD's 10,000-file/100-GB load acceptance nor a sustained
+10-second P95 result. WeKnora's applied watermark is distinct from
+Nextcloud's later signed status poll, which currently has a 30-second
+per-connection interval. The pilot's owned containers, volumes and network
+were removed after inspection; the shared LAN stacks were untouched.
+
+## Five-second proof-poll candidate
+
+A second disposable run used a Go backend built from RAG source `3ad3b31`
+with patch SHA-256
+`2c7da9519fc38d98b37a71660d8bb873d02c00af3d286984394dc70d32b6909c`.
+For this event-only check, the new binary was layered on the preceding
+runtime image without rebuilding AnyDoc or the UI; its image ID was
+`sha256:a4b57893884cde2aee333fca7914e138331ae2eca83ec1471547a99ce6510bc0`.
+The noncredential [JSON report](evidence/event-queue-pilot-2026-10-01-fastpoll.json)
+has SHA-256 `4ae872412fab74c7d28d3c466aae8a96c0ad39538447d5650a65b5f6c6fb514a`.
+
+The same reduced `post-accept` pattern measured 10,199.0, 80,049.6, and
+4,944.2 ms; nearest-rank P95 was 80,049.6 ms. The event immediately before
+the slow sample completed its source scan at 21:32:17.475. The next WebDAV
+write arrived at 21:32:18.348 and changed the same file while the earlier
+candidate was still parsing. Its final source publication check returned
+HTTP 409 for the superseded ETag. The dispatcher kept the previous event
+unapplied, then entered `publication_unproven` retry after 15 seconds and
+waited one minute before dispatching the newer receipt. This preserves
+authorization but still misses the proposed queue-latency target in this
+small run. The second fixture and its private credentials were destroyed.

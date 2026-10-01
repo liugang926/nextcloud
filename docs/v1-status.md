@@ -639,6 +639,15 @@ SHA-256 `110e4b9814c808f2f39f9121f77588ac96f9b114a4d36f913770308226b75876`.
 
 ## 2026-10-01 follow-up
 
+A disposable `post-accept` queue pilot found a 74.8-second event-to-dispatch
+sample in the preceding RAG image. An event-only five-second proof-poll
+candidate shortened ordinary applied checks but still measured an 80.0-second
+sample when a second WebDAV write superseded a candidate that was still
+parsing. Both runs used two 256-byte files and three measured events; neither
+is a sustained P95 acceptance. Their exact image IDs, sample values and
+watermark transitions are in the [isolated event queue pilot](isolated-event-queue-pilot.md).
+The PRD's ten-second event-to-task target remains unaccepted.
+
 Nextcloud 0.4.32 accepts a signed, allowlisted
 `failure_code=no_retrievable_content` for a failed current file. The Files
 sidebar shows a specific no-content message and does not create a question
