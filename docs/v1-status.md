@@ -831,4 +831,29 @@ request. A stop/resume or withdraw/republish transition cannot reuse an old
 pass. Real enterprise AD accounts, sustained 10,000-file/100-GB and P95 load,
 complete parser-overlap admission, and physical derived-index GC remain open.
 
+## 2026-10-02 optional LAN HTTPS entry
+
+The optional Nextcloud Nginx gateway is running on the host's private LAN
+interface at `https://10.106.105.128:18482` with the existing WeKnora LAN
+certificate. The certificate chain and IP SAN verified against
+`../weknora-ldap-local/certs/weknora-lan-ca.crt`. Nextcloud trusts the exact
+gateway container IP, and its CLI browser origin is the HTTPS URL. The stock
+Nextcloud Apache image rewrites `REMOTE_ADDR` from `X-Real-IP`, so the gateway
+explicitly clears that caller-controlled header and sends a reset
+`X-Forwarded-For` chain; Nextcloud can then validate its trusted proxy and
+`X-Forwarded-Proto`. A spoofed forwarded-host, protocol and real-IP request
+still redirected to the configured HTTPS origin.
+
+CA-verified requests returned 200 for the HTTPS login and status endpoints,
+301 with relative `Location` for CardDAV/CalDAV discovery, 401 for anonymous
+WebDAV and 207 for an authenticated WebDAV `PROPFIND`. The login page's
+generated absolute canonical and icon URLs were HTTPS, its CSS and JavaScript
+resources returned 200, and its cookies carried `Secure`. The original
+`http://10.106.105.128:18082` login remained 200 with HTTP canonical URLs.
+The address is assigned to an active host interface, Docker Desktop listens
+on that exact address and port, and the host application firewall is disabled.
+These are local requests to the bound LAN interface; a second physical LAN
+client and a trusted-CA browser have not yet been tested. Existing indexed
+citations retain their old HTTP origin until the documents are reindexed.
+
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.
