@@ -197,10 +197,17 @@ a batch; gaps are expected because Nextcloud allocates IDs across bindings.
   "binding_id": "example-binding",
   "after_event_id": "0",
   "events": [
-    {"event_id": "41", "file_id": 123, "type": "upsert", "etag": "example-etag"}
+    {"event_id": "41", "file_id": 123, "type": "upsert", "etag": "example-etag", "relative_path": "reports/example.md"}
   ]
 }
 ```
+
+For new file `upsert` and `metadata` hints, `relative_path` is captured at
+the time of the file event, relative to the binding root, and covered by the
+batch signature. The receiver compares it with the complete manifest's path
+before advancing an applied watermark. Rows created before Nextcloud 0.4.33
+have a null `relative_path` and require explicit review if the receiver cannot
+prove them. File `delete` and broad reconciliation hints can leave it null.
 
 Send one value each for `X-Nextcloud-Connection-Id`, `X-Nextcloud-Key-Id`,
 `X-Nextcloud-Timestamp` (Unix seconds), `X-Nextcloud-Nonce` (32 lowercase hex
