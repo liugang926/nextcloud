@@ -209,6 +209,21 @@ before advancing an applied watermark. Rows created before Nextcloud 0.4.33
 have a null `relative_path` and require explicit review if the receiver cannot
 prove them. File `delete` and broad reconciliation hints can leave it null.
 
+### Upgrade order for the relative path field
+
+The older receiver rejects unknown JSON fields, and its sender treats that
+rejection as a paused connection. Do not roll out Nextcloud 0.4.33 to a
+connected older WeKnora receiver while delivery is running. Before changing
+either side, stop new file writes for the affected bindings, let the old
+sender and receiver drain, and verify that the applied watermark covers each
+binding's current outbox maximum. Stop delivery jobs, upgrade the WeKnora
+database and receiver, then upgrade the Nextcloud app and run `occ upgrade`.
+Restart both applications and delivery jobs, and check that received and
+applied watermarks advance. If old file hints remain unapplied, resolve them
+before rollout; the new receiver cannot prove their missing `relative_path`
+and reports `hint_unbound_manual_review`. A folder-wide hint uses a separate
+complete-manifest confirmation path.
+
 Send one value each for `X-Nextcloud-Connection-Id`, `X-Nextcloud-Key-Id`,
 `X-Nextcloud-Timestamp` (Unix seconds), `X-Nextcloud-Nonce` (32 lowercase hex
 characters), and `X-Nextcloud-Signature` (64 lowercase hex characters).
