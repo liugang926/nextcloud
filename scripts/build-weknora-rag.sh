@@ -18,6 +18,47 @@ fi
 app_image="weknora-ldap-app:$tag_suffix"
 ui_image="weknora-ldap-ui:$tag_suffix"
 
+min_free_gib="${WEKNORA_RAG_MIN_FREE_GIB-16}"
+if [[ ! "$min_free_gib" =~ ^[1-9][0-9]{0,3}$ ]] || (( min_free_gib > 1024 )); then
+  echo "Invalid WEKNORA_RAG_MIN_FREE_GIB: use an integer from 1 to 1024" >&2
+  exit 1
+fi
+
+# The source archive and Docker Desktop's sparse disk image can both grow
+# substantially during a cold AnyDoc build. Check their host filesystems before
+# creating the archive or starting either Docker build.
+python3 - "$workspace_dir" "$min_free_gib" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+workspace = Path(sys.argv[1])
+minimum = int(sys.argv[2]) * 1024**3
+locations = [workspace]
+docker_raw = Path.home() / "Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+if docker_raw.is_file():
+    locations.append(docker_raw.parent)
+
+checked_devices = set()
+for location in locations:
+    device = location.stat().st_dev
+    if device in checked_devices:
+        continue
+    checked_devices.add(device)
+    filesystem = os.statvfs(location)
+    available = filesystem.f_bavail * filesystem.f_frsize
+    if available < minimum:
+        print(
+            f"WeKnora RAG build needs at least {minimum / 1024**3:g} GiB free "
+            f"on the host filesystem containing {location}; "
+            f"only {available / 1024**3:.1f} GiB is available. "
+            "Free space or explicitly set WEKNORA_RAG_MIN_FREE_GIB after "
+            "checking capacity.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+PY
+
 if ! git -C "$source_dir" cat-file -e "$base_commit^{commit}"; then
   echo "WeKnora RAG baseline commit $base_commit is unavailable" >&2
   exit 1

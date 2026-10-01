@@ -82,8 +82,14 @@ WEKNORA_RAG_TAG_SUFFIX=nextcloud-rag-77-anydoc ./scripts/build-weknora-rag.sh
 This creates `weknora-ldap-app:nextcloud-rag-77-anydoc` and
 `weknora-ldap-ui:nextcloud-rag-77-anydoc`. The build downloads browser-skill,
 Rust, DuckDB and other dependencies and requires substantial time, disk and
-network access. Some upstream Dockerfile dependencies float, so this is a
-development build rather than a bit-for-bit reproducible production image.
+network access. The script requires at least 16 GiB of host free space on the
+source workspace filesystem and, when present, the default Docker Desktop
+disk-image filesystem before it starts. Inspect free space again while building;
+the preflight cannot predict total cache growth. An operator with verified
+capacity or warm build caches can explicitly set `WEKNORA_RAG_MIN_FREE_GIB` to
+an integer from 1 to 1024 to change this threshold. Some upstream Dockerfile
+dependencies float, so this is a development build rather than a bit-for-bit
+reproducible production image.
 For hosts where the default package endpoints fail, the build script accepts
 optional `WEKNORA_RAG_APT_MIRROR`, `WEKNORA_RAG_GOPROXY`,
 `WEKNORA_RAG_NPM_REGISTRY`,
