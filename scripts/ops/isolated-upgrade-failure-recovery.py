@@ -208,7 +208,7 @@ def replace_app(source: Path, target: Path) -> None:
 
 
 def inject_failure(app_dir: Path) -> None:
-    migration = app_dir / "lib/Migration/Version0019Date20260924000000.php"
+    migration = app_dir / "lib/Migration/Version0020Date20261001000000.php"
     latest = sorted((app_dir / "lib/Migration").glob("Version*.php"))[-1]
     require(latest == migration,
             "the final app migration changed; update the failure injection")
