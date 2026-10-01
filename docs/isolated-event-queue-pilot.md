@@ -113,3 +113,13 @@ unfinished, even if V1 is marked failed while its build lease is still live.
 The fixed and RAG source trees passed their Nextcloud repository, service and
 handler Go tests. No new runtime image or latency pilot was run for this fix;
 the measured results above belong to the preceding patch revision.
+
+Subsequently, the full pinned RAG77 app and UI images were built with the
+overlap patch. An owned, loopback-only synthetic LDAP fixture exercised signed
+same-file V1/V2 events with the V1 parser held in progress: V2 dispatched
+without an early applied ACK, then became the only retrievable candidate after
+its own parse and publication proof. The
+[redacted evidence](evidence/rag77-parser-overlap-2026-10-02.json) is one
+functional observation, separate from the three-sample timing pilot above.
+The new images were then installed in the shared LAN stack. This does not add a
+new latency sample or prove stale derived-row physical collection.

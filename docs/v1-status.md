@@ -877,7 +877,31 @@ third generation waits until a slot is genuinely released. Focused race tests
 prove prompt V2 queue admission, denial of late V1 publication and writes,
 no applied ACK during V2 parsing, and ACK only after V2's exact publication
 proof. This narrows the parser wait observed in the earlier three-sample pilot.
-The shared WeKnora image has **not** been rebuilt or deployed with this latest
-patch, and no new latency or scale acceptance run has been made.
+The full pinned arm64 app and UI images were subsequently rebuilt with this
+patch and exercised in an owned, loopback-only synthetic LDAP fixture. The
+[redacted overlap evidence](evidence/rag77-parser-overlap-2026-10-02.json)
+records signed same-file V1 and V2 events: while V1 was still parsing, V2
+reached the receiver dispatched watermark, but neither side advanced its
+applied watermark. After release, V2 alone became visible with two ready
+chunks and embeddings, and both sides applied event #2. Alice's direct
+knowledge read and selected search denied the baseline and stale V1 candidate.
+The old V1 still had one chunk and embedding in the fixture database at the
+final read, so physical derived-index GC remains unproved. The owned fixture,
+its volumes, network and temporary credentials were destroyed. This one-file
+probe is not a latency, scale or real AD acceptance run.
+
+The shared LAN stack now runs the same full app and UI image IDs,
+`sha256:e0b2b932dca4d988930ac1972ec582ad883e155f4c044f00d9230baa592804f7`
+and `sha256:e9d606d5115dc5c93f2328f671d0fe2c12c8cdc1126ca7c73cd0f64c8d1cd458`.
+Before switching, the receiver had zero active or unknown event connections
+and Nextcloud had zero sender rows. The previous running images remain under
+`pre-overlap-20261002` tags. The verified, mode-600 shared database backup is
+`dist/backups/weknora-before-rag-20261001T225001Z.dump`. The new containers
+are running and healthy, schema remains `130/false`, both LAN HTTPS entries
+return 200 with the local CA, the WeKnora application health endpoint returns
+200, the original Nextcloud HTTP login returns 200, and an authenticated
+Nextcloud HTTPS WebDAV `PROPFIND` returns 207. All eight PR checks passed at
+`5664b6b`. No fresh shared-service parser-overlap, second physical LAN-client,
+sustained latency or scale acceptance run has been made.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.

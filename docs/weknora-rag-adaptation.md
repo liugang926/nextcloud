@@ -27,7 +27,7 @@ Focused Docker Go tests passed for source publication, direct and RAG search
 authorization, HTTP read leases, worker build admission, MCP denial, and the
 file-scoped question target. The fixed and RAG service and handler suites
 passed. The RAG frontend typecheck, citation/export tests and production build
-passed before the final authorization delta; CI rebuilds the final patch.
+passed, and CI rebuilt the final patch at `5664b6b`.
 Both patched baselines also passed disposable pgvector PostgreSQL tests for
 BatchSave versus source retirement, stale Publish after a new Stage, Stage
 versus Tombstone, queued parser admission before Stage, crash/retry of exact
@@ -63,8 +63,14 @@ build lease is released. Staging the newer candidate retires the older fence;
 the applied watermark stays unchanged until a newer complete source cursor and
 exact publication proof pass. Both pinned source trees passed the focused
 overlap race and Nextcloud repository, service and handler tests in the local
-Go test image. This patch revision has not been rebuilt into the shared RAG
-runtime image or measured under sustained load.
+Go test image. A full pinned app/UI build with this exact patch was exercised
+in an isolated synthetic LDAP fixture, then installed on the shared LAN stack.
+Its image IDs and the one-file signed V1/V2 overlap results are recorded in
+[V1 status](v1-status.md) and the
+[redacted acceptance report](evidence/rag77-parser-overlap-2026-10-02.json).
+The stale V1 was denied by guarded retrieval, but retained a chunk and
+embedding at the final database read. Sustained load and physical derived-index
+collection remain unverified.
 
 The latest patch also refreshes retired chunk image references on every
 due GC retry. A newly malformed `image_info` blocks the local provider
