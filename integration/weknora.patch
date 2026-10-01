@@ -31867,10 +31867,10 @@ index 00000000..5fcf97eb
 +}
 diff --git a/internal/handler/nextcloud_event_connections_test.go b/internal/handler/nextcloud_event_connections_test.go
 new file mode 100644
-index 00000000..10a02818
+index 00000000..cbde1beb
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_connections_test.go
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,405 @@
 +package handler
 +
 +import (
@@ -31949,7 +31949,10 @@ index 00000000..10a02818
 +	t.Helper()
 +	require.NoError(t, db.Exec(`CREATE TABLE sync_logs (
 +		id TEXT PRIMARY KEY, data_source_id TEXT NOT NULL,
-+		status TEXT NOT NULL, started_at TIMESTAMP NOT NULL
++		-- All callers of this fixture use the synthetic tenant 7.
++		tenant_id BIGINT NOT NULL DEFAULT 7,
++		status TEXT NOT NULL, started_at TIMESTAMP NOT NULL,
++		finished_at TIMESTAMP
 +	)`).Error)
 +}
 +

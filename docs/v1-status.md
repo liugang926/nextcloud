@@ -649,9 +649,9 @@ reproducible runtime archive has 75 files and SHA-256
 `df9fb1c261453197183aa2ffbf57b5936ea2e494f3deca45e304ff6e660e5f07`.
 
 The fixed c6 full patch SHA-256 is
-`595f2eed668d1b756aca717bb65384df4f38d6455897f53ececa251b64c660fc`;
+`5da6f751906b938db68c014607f2adc22feb151f6d012f527c1400f10608f6e7`;
 the RAG77 patch SHA-256 is
-`f7fbc90036cf6ce9caeee2d89c13555f9f962ec74d766c27d1930d05a67e6d7f`.
+`251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611`.
 Both applied to clean pinned source archives and passed the 27-route,
 26-response-shape, 11-Go-struct OpenAPI contract. Focused Docker Go tests
 passed on both baselines for zero-text publication/status/ask-target denial,
