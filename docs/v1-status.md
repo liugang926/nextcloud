@@ -852,6 +852,9 @@ resources returned 200, and its cookies carried `Secure`. The original
 `http://10.106.105.128:18082` login remained 200 with HTTP canonical URLs.
 The address is assigned to an active host interface, Docker Desktop listens
 on that exact address and port, and the host application firewall is disabled.
+The repeatable HTTPS helper passed nine focused offline cases and two live
+idempotent runs, retaining only the exact current gateway IP in
+`trusted_proxies` and a mode-600 local state file for later recreation.
 These are local requests to the bound LAN interface; a second physical LAN
 client and a trusted-CA browser have not yet been tested. Existing indexed
 citations retain their old HTTP origin until the documents are reindexed.
