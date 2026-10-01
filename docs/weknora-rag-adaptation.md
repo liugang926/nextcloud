@@ -102,6 +102,13 @@ before switching the shared local app and frontend; it consumes only the
 default `nextcloud-rag` tags. The images carry the pinned source commit and
 full patch SHA-256 labels, and the backend reports their source-plus-patch
 revision.
+Before making the dump or recreating containers, the upgrade script requires
+healthy WeKnora and Nextcloud database containers, zero active WeKnora event
+connections, and zero installed Nextcloud event sender rows. A paused sender
+still blocks the upgrade. Drain and revoke connections through the application
+workflow, and review the [receiver upgrade order](nextcloud-event-receiver.md#upgrade-order-for-the-relative-path-field)
+before retrying. This preflight is a snapshot; keep event pairing and writes
+stopped during the upgrade.
 
 Before switching the shared stack, exercise the candidate app image in a
 disposable WeKnora fixture with its docreader service:
