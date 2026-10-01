@@ -670,6 +670,21 @@ browser-skill and Go backend stages compiled, but two final image attempts
 ended on different Debian mirror single-package HTTP 502 responses. The shared
 WeKnora stack still uses an older image.
 
+A separate candidate used the newer WeKnora RAG head
+`3ad3b31f2b3e6409c6a9c196bbab70e2eac6c666` with the same RAG patch SHA
+`251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611`.
+Using a different Debian mirror, its AnyDoc backend and UI built as
+`sha256:2ec7e6b31463e6764130973cc1d636d2f65c83268376943cbae59713b7156f9e`
+and `sha256:5d9272403683d4fafc0d48c07543ba10c9918041d4d3ece922c4952fb9a21075`.
+Both images carry that exact source and patch in their OCI labels. A fresh
+isolated direct-group LDAP fixture (`nc-synldap-bc78b1d4`) started backend and
+UI healthy; UI returned HTTP 200, bootstrap indexed two chunks and embeddings,
+and the Alice/Bob six-field matrix passed with the same allow/deny pattern.
+The fixture's containers, volumes and network were destroyed. This checks the
+patch against a newer RAG source head, not a runtime image built from the
+repository's pinned `77c97fd7` baseline; it does not prove PDF recovery,
+enterprise AD permissions or the PRD load target.
+
 The pilot harness now has a `post-accept` event pattern that times an update
 sent just after a previous event enters the queue. Its offline schedule test
 passed, but no new Docker load run or PRD 10,000-file/100-GB/P95 acceptance

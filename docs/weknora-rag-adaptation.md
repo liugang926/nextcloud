@@ -40,8 +40,8 @@ completed prior sync when a new hint exists, and fences knowledge-list and
 raw-search output with read leases and current authorization. Focused Go tests
 in the repository and both handler packages passed for both pinned baselines;
 the 27-route OpenAPI checker passed after applying each patch to a clean
-source archive. The full suite and a new RAG runtime image have not yet been
-verified for this patch revision.
+source archive. The full suite and an exact pinned-`77c97fd7` RAG runtime
+image have not yet been verified for this patch revision.
 
 For the existing local `weknora-ldap-local` stack, run:
 
@@ -100,3 +100,16 @@ Use synthetic local data. A disposable HTTP/API handoff, answer, citation and
 revocation drill passed with mock models; see [its record](synthetic-ldap-compose.md).
 Live enterprise AD, Team Folder ACLs, browser-click acceptance and production
 load remain open until separately verified; see [V1 status](v1-status.md).
+
+On 2026-10-01, the same patch SHA-256 also applied to newer RAG source head
+`3ad3b31f2b3e6409c6a9c196bbab70e2eac6c666`. An isolated build using an
+alternate Debian mirror produced the AnyDoc backend image
+`sha256:2ec7e6b31463e6764130973cc1d636d2f65c83268376943cbae59713b7156f9e`
+and UI image
+`sha256:5d9272403683d4fafc0d48c07543ba10c9918041d4d3ece922c4952fb9a21075`.
+The OCI labels on both images identify that source head and this exact patch.
+A new direct-group synthetic LDAP stack started both images healthy, served
+the UI with HTTP 200, indexed two chunks and embeddings, and passed the
+six-field Alice/Bob permission matrix. The owned fixture was destroyed. This
+compatibility run does not change the pinned baseline or claim the PDF
+recovery, real AD or production performance acceptance above.
