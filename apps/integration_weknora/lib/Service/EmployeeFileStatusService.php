@@ -14,6 +14,7 @@ final class EmployeeFileStatusService {
     public function __construct(
         private BindingRegistryService $bindings,
         private FilePublicationStateService $publication,
+        private ManifestSnapshotService $manifestSnapshots,
         private IRootFolder $rootFolder,
         private IConfig $config,
         private RemoteFileStatusService $remote,
@@ -29,7 +30,8 @@ final class EmployeeFileStatusService {
             return null;
         }
         if ($before['source_state'] !== 'in_scope') {
-            unset($before['_binding_id']);
+            unset($before['_binding_id'], $before['_publication_epoch'],
+                $before['_publication_revision']);
             return $before;
         }
         $remote = $this->remote->status((string)$before['_binding_id'], $fileId,
@@ -40,17 +42,26 @@ final class EmployeeFileStatusService {
         if ($after === null) {
             return null;
         }
-        if ($remote !== null && $after['source_state'] === 'in_scope' &&
-            $after['_binding_id'] === $before['_binding_id'] &&
-            $after['source_etag'] === $before['source_etag']) {
+        if ($remote !== null && self::sameRemoteObservation($before, $after)) {
             $after = array_merge($after, $remote);
             if ($remote['knowledge_state'] === 'ready') {
                 $after['weknora_ask_url'] = $this->askUrl(
                     (string)$after['_binding_id'], $fileId, (string)$after['source_etag']);
             }
         }
-        unset($after['_binding_id']);
+        unset($after['_binding_id'], $after['_publication_epoch'],
+            $after['_publication_revision']);
         return $after;
+    }
+
+    /** Publication changes can invalidate a status despite an unchanged ETag. */
+    private static function sameRemoteObservation(array $before, array $after): bool {
+        return $before['source_state'] === 'in_scope' &&
+            $after['source_state'] === 'in_scope' &&
+            $before['_binding_id'] === $after['_binding_id'] &&
+            $before['_publication_epoch'] === $after['_publication_epoch'] &&
+            $before['_publication_revision'] === $after['_publication_revision'] &&
+            $before['source_etag'] === $after['source_etag'];
     }
 
     /** @return array<string, mixed>|null */
@@ -108,6 +119,7 @@ final class EmployeeFileStatusService {
                         continue;
                     }
                     $this->bindings->assertNodeInSupportedMount($binding['id'], $root, $userFile);
+                    $revisionBefore = $this->manifestSnapshots->publicationRevision($binding['id']);
                     $state = $this->publication->getState($binding['id'], $fileId);
                     $stopped = $binding['publication_state'] === 'stopped';
                     try {
@@ -118,10 +130,16 @@ final class EmployeeFileStatusService {
                     } catch (BindingPublicationStoppedException $exception) {
                         $stopped = true;
                     }
+                    $revisionAfter = $this->manifestSnapshots->publicationRevision($binding['id']);
+                    if ($revisionBefore !== $revisionAfter) {
+                        throw new \UnexpectedValueException('Publication changed during status read');
+                    }
                     return array_merge($base, [
                         'source_state' => $stopped ? 'publication_stopped' :
                             ($state === 'withdrawn' ? 'withdrawn' : 'in_scope'),
                         '_binding_id' => $binding['id'],
+                        '_publication_epoch' => $binding['publication_epoch'],
+                        '_publication_revision' => $revisionAfter,
                         'file_withdrawn' => $state === 'withdrawn',
                         'binding_name' => $binding['name'],
                         'weknora_login_url' => $stopped || $state === 'withdrawn' ? null : $this->loginUrl(),

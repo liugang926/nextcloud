@@ -111,6 +111,7 @@ def main():
         check(status, 200, "owner status")
         source = json.loads(body)
         assert source["source_state"] == "in_scope" and source["binding_name"]
+        assert not any(key.startswith("_") for key in source), source
         check_knowledge_status(source)
         assert isinstance(source["source_modified_at"], int)
 
@@ -144,6 +145,7 @@ def main():
         check(status, 200, "shared file status")
         shared = json.loads(body)
         assert shared["source_state"] == "in_scope"
+        assert not any(key.startswith("_") for key in shared), shared
         check_knowledge_status(shared)
         assert shared["weknora_login_url"] == "https://weknora.example/login"
 
