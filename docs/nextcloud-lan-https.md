@@ -16,44 +16,42 @@ that root on each LAN test device before browser testing. Keep the private key
 on the Docker host. Set `NEXTCLOUD_HTTPS_CERT_FILE` and
 `NEXTCLOUD_HTTPS_KEY_FILE` to other absolute paths if the files live elsewhere;
 the replacement certificate must include the chosen `NEXTCLOUD_LAN_HOST` in
-its SAN. `NEXTCLOUD_HTTPS_PORT` defaults to `18482`.
+its SAN. `NEXTCLOUD_HTTPS_PORT` defaults to `18482`. Pass `--ca-file` to the
+helper if the replacement certificate has a different trust root.
 
 ## Start and configure
 
 First run `scripts/allow-lan-access.sh 10.106.105.128` if LAN access has not
 already been enabled. It records `NEXTCLOUD_LAN_HOST` and adds that IP to
-`trusted_domains`. Then, from this repository, use the same Compose file list
-for all HTTPS gateway operations:
+`trusted_domains`. Then run the operator helper from this repository:
 
 ```bash
-dc=(docker compose --env-file .env \
-  -f compose.yaml -f integration/nextcloud.lan.yaml \
-  -f integration/nextcloud.https.yaml --profile lan-https)
-"${dc[@]}" config --quiet
-"${dc[@]}" up -d --no-deps nextcloud-https
-gateway_id="$("${dc[@]}" ps -q nextcloud-https)"
-gateway_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$gateway_id")"
-printf 'Nextcloud HTTPS proxy IP: %s\n' "$gateway_ip"
+python3 scripts/enable-lan-https.py --check-only
+python3 scripts/enable-lan-https.py
 ```
 
-The gateway has one Docker network. Nextcloud must trust **only this exact
-container IP** to use its `X-Forwarded-Proto: https` and forwarded Host;
-trusting the whole Docker subnet would also trust other containers. On the
-provided stack, `trusted_proxies` is initially empty:
+The first command validates the private bind address, Compose configuration,
+certificate SAN, trust chain, and matching key without contacting Docker. The
+second starts only `nextcloud-https`, reads its single Docker network IP,
+preserves other `trusted_proxies` entries, and writes the gateway's **exact
+container IP**. It also sets `overwrite.cli.url` to the HTTPS origin and
+checks CA-verified HTTPS login HTML, spoofed forwarding headers, and the
+parallel HTTP login HTML. It records its managed IP under ignored
+`dist/nextcloud-https-gateway.json`, so a repeat run after container
+recreation removes the stale IP while preserving unrelated proxies. Keep this
+state file with the development stack. Trusting the whole Docker subnet would
+also trust other containers.
 
-```bash
-"${dc[@]}" exec -T -u www-data nextcloud \
-  php occ config:system:set trusted_proxies 0 --value="$gateway_ip"
-"${dc[@]}" exec -T -u www-data nextcloud \
-  php occ config:system:set overwrite.cli.url \
-  --value="https://10.106.105.128:18482"
-```
+The gateway passes the original `Host` including port, resets caller-supplied
+forwarding headers, and sends `X-Forwarded-Proto: https`. The Nextcloud Apache
+image enables `mod_remoteip` and may trust the Docker subnet for `X-Real-IP`.
+If Nginx forwards the client address in that header, Apache rewrites PHP's
+`REMOTE_ADDR` to the client IP and Nextcloud no longer recognizes the gateway's
+exact `trusted_proxies` entry. The gateway explicitly strips `X-Real-IP`; it
+keeps the connection's gateway IP as `REMOTE_ADDR` and resets
+`X-Forwarded-For` to the actual client address. Do not add a broad Docker
+subnet to `trusted_proxies` to work around this.
 
-If `trusted_proxies` already has entries, append this IP at the next free
-numeric index instead of replacing them. If the gateway is recreated and its
-IP changes, replace its old entry with the new exact IP before accepting LAN
-traffic. The gateway passes the original `Host` including port, resets
-caller-supplied forwarding headers, and sends `X-Forwarded-Proto: https`.
 Do not set a global `overwriteprotocol` or `overwritehost`: they would also
 change URLs for the existing direct HTTP listener. Nextcloud's
 `overwrite.cli.url` **does** need the HTTPS browser origin because the
@@ -82,6 +80,9 @@ curl --noproxy '*' --cacert "$ca" -I \
 curl --noproxy '*' --cacert "$ca" -i -X PROPFIND -H 'Depth: 0' \
   https://10.106.105.128:18482/remote.php/dav/files/devadmin/
 curl --noproxy '*' -I http://10.106.105.128:18082/login
+dc=(docker compose --env-file .env \
+  -f compose.yaml -f integration/nextcloud.lan.yaml \
+  -f integration/nextcloud.https.yaml --profile lan-https)
 "${dc[@]}" exec -T -u www-data nextcloud \
   php occ config:system:get trusted_proxies --output=json
 "${dc[@]}" exec -T -u www-data nextcloud \
@@ -95,6 +96,10 @@ redirect with `Location: /remote.php/dav/`, and anonymous DAV to return 401.
 With a private test-account netrc file, repeat the DAV `PROPFIND`
 using `curl --netrc-file <file>` and expect 207. The old HTTP `/login` must
 still return 200. Check any `Location` header stays on
-`https://10.106.105.128:18482`, then open the HTTPS Files UI and a newly
+`https://10.106.105.128:18482`. Check the HTTPS `/login` HTML contains only
+`https://10.106.105.128:18482` for its own canonical and icon URLs, while
+the HTTP `/login` HTML still uses `http://10.106.105.128:18082`. A request
+with spoofed `X-Real-IP` and `X-Forwarded-Proto` headers must still produce
+HTTPS origin URLs at the gateway. Then open the HTTPS Files UI and a newly
 indexed citation in a trusted-CA browser. Its scripts, API requests, Files
 link, and citation should remain HTTPS with no mixed-content warning.
