@@ -859,4 +859,25 @@ These are local requests to the bound LAN interface; a second physical LAN
 client and a trusted-CA browser have not yet been tested. Existing indexed
 citations retain their old HTTP origin until the documents are reindexed.
 
+## 2026-10-02 bounded parser-overlap code follow-up
+
+The current fixed-c6 and RAG77 patch SHA-256 values are
+`a7cd69f12332f9f881999038f84df6f6bc7a41141cce875fe3e6ef3499b73fad`
+and `84afeffc37040b2a85c2c795c05600817ea738b7862decc22f0310b4a0b23a2f`.
+The earlier hashes above remain the exact versions used for the measured pilot
+and the currently running shared RAG77 images. Both new patches apply to clean
+pinned source bases and pass their Nextcloud repository, service and handler
+Go tests.
+
+The dispatcher may now admit a newer signed, importable upsert for the same
+file while an older version is parsing, after the older source scan completes.
+It requires a changed ETag and binding-relative path and allows only one
+unfinished parser generation or live build lease before the replacement. A
+third generation waits until a slot is genuinely released. Focused race tests
+prove prompt V2 queue admission, denial of late V1 publication and writes,
+no applied ACK during V2 parsing, and ACK only after V2's exact publication
+proof. This narrows the parser wait observed in the earlier three-sample pilot.
+The shared WeKnora image has **not** been rebuilt or deployed with this latest
+patch, and no new latency or scale acceptance run has been made.
+
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.
