@@ -5757,7 +5757,7 @@ index 00000000..df4a49bc
 +}
 diff --git a/internal/application/repository/nextcloud_candidate_retry_jobs.go b/internal/application/repository/nextcloud_candidate_retry_jobs.go
 new file mode 100644
-index 00000000..9c98a142
+index 00000000..53783ba8
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_candidate_retry_jobs.go
 @@ -0,0 +1,626 @@
@@ -6118,7 +6118,7 @@ index 00000000..9c98a142
 +			return nil
 +		}
 +		if job.State == "leased" && job.SyncLogID != nil {
-+			status, started, err := nextcloudDispatchSyncStatus(tx, job.SyncLogID)
++			status, started, _, err := nextcloudDispatchSyncStatus(tx, job.SyncLogID)
 +			if err != nil {
 +				return err
 +			}
@@ -7814,20 +7814,22 @@ index 00000000..b8ccb615
 +}
 diff --git a/internal/application/repository/nextcloud_event_applied.go b/internal/application/repository/nextcloud_event_applied.go
 new file mode 100644
-index 00000000..75a2d1dc
+index 00000000..42651d9d
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_applied.go
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,423 @@
 +package repository
 +
 +import (
 +	"encoding/base64"
 +	"encoding/hex"
 +	"encoding/json"
++	"path"
 +	"strconv"
 +	"strings"
 +	"time"
 +
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"gorm.io/gorm"
 +)
@@ -7904,7 +7906,7 @@ index 00000000..75a2d1dc
 +	return id, err == nil && id >= 0
 +}
 +
-+func nextcloudDispatchPublicationProof(tx *gorm.DB, connection nextcloudEventConnection, targetEventID int64, syncStartedAt time.Time) (nextcloudApplyProof, error) {
++func nextcloudDispatchPublicationProof(tx *gorm.DB, connection nextcloudEventConnection, appliedEventID, targetEventID int64, syncStartedAt time.Time) (nextcloudApplyProof, error) {
 +	var source types.DataSource
 +	if err := tx.Select("last_sync_cursor").Where("id = ?", connection.DatasourceID).Take(&source).Error; err != nil {
 +		return nextcloudApplyRetry, err
@@ -8031,7 +8033,213 @@ index 00000000..75a2d1dc
 +			return nextcloudApplyRetry, nil
 +		}
 +	}
++	barriersMatch, err := nextcloudLatestHintBarriers(tx, connection, appliedEventID,
++		targetEventID, files, tombstones, byExternalID)
++	if err != nil || !barriersMatch {
++		return nextcloudApplyRetry, err
++	}
 +	return nextcloudApplyComplete, nil
++}
++
++// Check the latest signed event for each file in the unapplied range. A
++// changes cursor alone does not prove that a newly captured manifest saw the
++// corresponding file version. Unsupported files have no source-version row;
++// their ordinary manifest reconciliation remains the fallback.
++func nextcloudLatestHintBarriers(tx *gorm.DB, connection nextcloudEventConnection,
++	appliedEventID, targetEventID int64, files map[string]nextcloudApplyFile,
++	tombstones map[string]json.RawMessage,
++	versions map[string]nextcloudSourceVersion,
++) (bool, error) {
++	var unscoped int64
++	if err := tx.Table("nextcloud_event_inbox").Where(
++		"connection_id = ? AND event_id > ? AND event_id <= ? AND file_id IS NULL AND event_type NOT IN ?",
++		connection.ConnectionID, appliedEventID, targetEventID,
++		[]string{"subtree_scan", "subtree_moved", "subtree_deleted", "reconcile"}).Count(&unscoped).Error; err != nil {
++		return false, err
++	}
++	if unscoped != 0 {
++		// A broad hint has no file identity with which to bind a manifest
++		// observation. Do not turn an advanced changes cursor into an ACK.
++		return false, nil
++	}
++	var kb types.KnowledgeBase
++	if err := tx.Where("id = ? AND tenant_id = ?", connection.KnowledgeBaseID, connection.TenantID).
++		Take(&kb).Error; err != nil {
++		return false, err
++	}
++	var latest []struct {
++		FileID       int64   `gorm:"column:file_id"`
++		EventType    string  `gorm:"column:event_type"`
++		ETag         *string `gorm:"column:etag"`
++		Path         *string `gorm:"column:path"`
++		RelativePath *string `gorm:"column:relative_path"`
++	}
++	err := tx.Raw(`SELECT i.file_id, i.event_type, i.etag, i.path, i.relative_path
++		FROM nextcloud_event_inbox AS i
++		JOIN (SELECT file_id, MAX(event_id) AS event_id
++			FROM nextcloud_event_inbox
++			WHERE connection_id = ? AND event_id > ? AND event_id <= ?
++				AND file_id IS NOT NULL
++			GROUP BY file_id) AS latest
++			ON latest.file_id = i.file_id AND latest.event_id = i.event_id
++		WHERE i.connection_id = ?`, connection.ConnectionID,
++		appliedEventID, targetEventID, connection.ConnectionID).Scan(&latest).Error
++	if err != nil {
++		return false, err
++	}
++	prefix := "nextcloud:" + connection.NextcloudInstanceID + ":"
++	for _, hint := range latest {
++		fileID := strconv.FormatInt(hint.FileID, 10)
++		file, present := files[fileID]
++		version, indexed := versions[prefix+fileID]
++		switch hint.EventType {
++		case "upsert", "metadata":
++			if hint.ETag == nil || strings.TrimSpace(*hint.ETag) == "" ||
++				hint.RelativePath == nil || strings.TrimSpace(*hint.RelativePath) == "" {
++				return false, nil
++			}
++			// The signed binding-relative path is directly comparable to the
++			// manifest path. It also distinguishes an importable new file from
++			// an unsupported extension omitted from the inventory.
++			importable := nextcloud.ImportableFileName(path.Base(*hint.RelativePath), kb.IsMultimodalEnabled())
++			if importable {
++				if present && (file.ETag != *hint.ETag || file.Path != *hint.RelativePath) {
++					return false, nil
++				}
++				if !present && indexed && (version.State != "tombstone" || len(tombstones[fileID]) == 0) {
++					return false, nil
++				}
++			} else if present || (indexed && (version.State != "tombstone" || len(tombstones[fileID]) == 0)) {
++				return false, nil
++			}
++		case "delete":
++			if present || (indexed && (version.State != "tombstone" || len(tombstones[fileID]) == 0)) {
++				return false, nil
++			}
++		case "subtree_scan", "subtree_moved", "subtree_deleted", "reconcile":
++			// A second complete scan is required by the dispatch state machine.
++		default:
++			return false, nil
++		}
++	}
++	return true, nil
++}
++
++// These hint shapes cannot be bound to a concrete manifest observation with
++// the current signed payload. Report them for manual review after the short
++// parser handoff window instead of retrying an impossible proof forever.
++func nextcloudHintRangeUnprovable(tx *gorm.DB, connectionID string,
++	appliedEventID, targetEventID int64) (bool, error) {
++	var broad int64
++	if err := tx.Table("nextcloud_event_inbox").Where(
++		"connection_id = ? AND event_id > ? AND event_id <= ? AND file_id IS NULL AND event_type NOT IN ?",
++		connectionID, appliedEventID, targetEventID,
++		[]string{"subtree_scan", "subtree_moved", "subtree_deleted", "reconcile"}).Count(&broad).Error; err != nil {
++		return false, err
++	}
++	if broad != 0 {
++		return true, nil
++	}
++	var latest []struct {
++		EventType    string  `gorm:"column:event_type"`
++		ETag         *string `gorm:"column:etag"`
++		Path         *string `gorm:"column:path"`
++		RelativePath *string `gorm:"column:relative_path"`
++	}
++	if err := tx.Raw(`SELECT i.event_type, i.etag, i.path, i.relative_path
++		FROM nextcloud_event_inbox AS i
++		JOIN (SELECT file_id, MAX(event_id) AS event_id
++			FROM nextcloud_event_inbox
++			WHERE connection_id = ? AND event_id > ? AND event_id <= ?
++				AND file_id IS NOT NULL
++			GROUP BY file_id) AS latest
++			ON latest.file_id = i.file_id AND latest.event_id = i.event_id
++		WHERE i.connection_id = ?`, connectionID, appliedEventID,
++		targetEventID, connectionID).Scan(&latest).Error; err != nil {
++		return false, err
++	}
++	for _, hint := range latest {
++		switch hint.EventType {
++		case "upsert", "metadata":
++			if hint.ETag == nil || strings.TrimSpace(*hint.ETag) == "" ||
++				hint.RelativePath == nil || strings.TrimSpace(*hint.RelativePath) == "" {
++				return true, nil
++			}
++		case "delete":
++			// File identity and two-scan tombstone evidence can prove this.
++		case "subtree_scan", "subtree_moved", "subtree_deleted", "reconcile":
++			// Dispatch requires a second complete scan for this broad hint.
++		default:
++			return true, nil
++		}
++	}
++	return false, nil
++}
++
++func nextcloudHintRangeNeedsTwoScans(tx *gorm.DB, connection nextcloudEventConnection,
++	appliedEventID, targetEventID int64) (bool, error) {
++	var count int64
++	if err := tx.Table("nextcloud_event_inbox").Where(
++		"connection_id = ? AND event_id > ? AND event_id <= ? AND event_type IN ?",
++		connection.ConnectionID, appliedEventID, targetEventID,
++		[]string{"subtree_scan", "subtree_moved", "subtree_deleted", "reconcile"}).Count(&count).Error; err != nil {
++		return false, err
++	}
++	if count != 0 {
++		return true, nil
++	}
++	var source types.DataSource
++	if err := tx.Select("last_sync_cursor").Where("id = ?", connection.DatasourceID).
++		Take(&source).Error; err != nil {
++		return false, err
++	}
++	cursor, err := source.ParseSyncCursor()
++	if err != nil || cursor == nil || cursor.ConnectorCursor == nil {
++		return false, err
++	}
++	raw, err := json.Marshal(cursor.ConnectorCursor)
++	if err != nil {
++		return false, err
++	}
++	var snapshot nextcloudApplyCursor
++	if json.Unmarshal(raw, &snapshot) != nil || snapshot.InstanceID != connection.NextcloudInstanceID ||
++		snapshot.Files[connection.BindingID] == nil {
++		return false, nil
++	}
++	var kb types.KnowledgeBase
++	if err := tx.Where("id = ? AND tenant_id = ?", connection.KnowledgeBaseID,
++		connection.TenantID).Take(&kb).Error; err != nil {
++		return false, err
++	}
++	var latest []struct {
++		FileID       int64   `gorm:"column:file_id"`
++		RelativePath *string `gorm:"column:relative_path"`
++	}
++	if err := tx.Raw(`SELECT i.file_id, i.relative_path
++		FROM nextcloud_event_inbox AS i
++		JOIN (SELECT file_id, MAX(event_id) AS event_id
++			FROM nextcloud_event_inbox
++			WHERE connection_id = ? AND event_id > ? AND event_id <= ?
++				AND file_id IS NOT NULL GROUP BY file_id) AS latest
++			ON latest.file_id = i.file_id AND latest.event_id = i.event_id
++		WHERE i.connection_id = ? AND i.event_type IN ('upsert', 'metadata')`,
++		connection.ConnectionID, appliedEventID, targetEventID,
++		connection.ConnectionID).Scan(&latest).Error; err != nil {
++		return false, err
++	}
++	for _, hint := range latest {
++		if hint.RelativePath == nil ||
++			!nextcloud.ImportableFileName(path.Base(*hint.RelativePath), kb.IsMultimodalEnabled()) {
++			continue
++		}
++		if _, present := snapshot.Files[connection.BindingID][strconv.FormatInt(hint.FileID, 10)]; !present {
++			// An explicit publication exclusion or a later move out of the
++			// binding can make an event-time upsert absent from the current
++			// authoritative manifest. Two complete scans bound this fallback.
++			return true, nil
++		}
++	}
++	return false, nil
 +}
 diff --git a/internal/application/repository/nextcloud_event_connections.go b/internal/application/repository/nextcloud_event_connections.go
 new file mode 100644
@@ -8416,10 +8624,10 @@ index 00000000..27cdd3f5
 +}
 diff --git a/internal/application/repository/nextcloud_event_dispatch.go b/internal/application/repository/nextcloud_event_dispatch.go
 new file mode 100644
-index 00000000..aa16edbc
+index 00000000..07f12477
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_dispatch.go
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,861 @@
 +package repository
 +
 +import (
@@ -8427,10 +8635,12 @@ index 00000000..aa16edbc
 +	"encoding/json"
 +	"errors"
 +	"fmt"
++	"path"
 +	"strconv"
 +	"strings"
 +	"time"
 +
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/google/uuid"
 +	"gorm.io/gorm"
@@ -8450,6 +8660,12 @@ index 00000000..aa16edbc
 +	NextAttemptAt time.Time  `gorm:"column:next_attempt_at"`
 +	LastErrorCode string     `gorm:"column:last_error_code"`
 +}
++
++const (
++	nextcloudQueuedPollInterval        = 5 * time.Second
++	nextcloudPublicationFastPollWindow = time.Minute
++	nextcloudPublicationRetryGrace     = 15 * time.Second
++)
 +
 +// NextcloudEventDispatchClaim is a short-lived, DB-fenced right to enqueue a
 +// source reconciliation. It is never an applied acknowledgement.
@@ -8475,6 +8691,13 @@ index 00000000..aa16edbc
 +			OR (d.state IN ('queued', 'retry') AND d.next_attempt_at <= ?)
 +			OR (d.state = 'queued' AND d.last_error_code = ''
 +				AND p.received_id > d.dispatched_id
++				AND EXISTS (SELECT 1 FROM sync_logs AS s
++					WHERE s.id = d.last_sync_log_id
++					AND s.data_source_id = c.datasource_id
++					AND s.tenant_id = c.tenant_id
++					AND s.status = 'success' AND s.finished_at IS NOT NULL))
++			OR (d.state = 'retry' AND d.last_error_code = 'publication_unproven'
++				AND p.received_id > d.target_event_id
 +				AND EXISTS (SELECT 1 FROM sync_logs AS s
 +					WHERE s.id = d.last_sync_log_id
 +					AND s.data_source_id = c.datasource_id
@@ -8536,19 +8759,24 @@ index 00000000..aa16edbc
 +			return nil
 +		}
 +		if dispatch.State == "queued" {
-+			status, startedAt, err := nextcloudDispatchSyncStatus(tx, dispatch.LastSyncLogID)
++			coalescing := false
++			status, startedAt, finishedAt, err := nextcloudDispatchSyncStatus(tx, dispatch.LastSyncLogID)
 +			if err != nil {
 +				return err
 +			}
 +			if status == "running" {
 +				if now.Sub(startedAt) < 150*time.Minute {
 +					return tx.Table("nextcloud_event_dispatch").Where("connection_id = ?", connectionID).
-+						Updates(map[string]any{"next_attempt_at": now.Add(time.Minute), "updated_at": now}).Error
++						Updates(map[string]any{"next_attempt_at": now.Add(nextcloudQueuedPollInterval), "updated_at": now}).Error
 +				}
 +				return setNextcloudDispatchState(tx, connectionID, "blocked",
 +					"sync_stale_manual_review", now, dispatch.AttemptCount)
 +			}
-+			if status != "success" {
++			matching, err := nextcloudDispatchMatchingSync(tx, connection, dispatch.LastSyncLogID)
++			if err != nil {
++				return err
++			}
++			if status != "success" || finishedAt == nil || !matching {
 +				return setNextcloudDispatchState(tx, connectionID, "retry", "sync_not_successful", now.Add(nextcloudDispatchBackoff(dispatch.AttemptCount+1)), dispatch.AttemptCount+1)
 +			}
 +			confirmed, err := nextcloudDispatchCursorComplete(tx, connection, startedAt)
@@ -8559,7 +8787,8 @@ index 00000000..aa16edbc
 +				return setNextcloudDispatchState(tx, connectionID, "retry", "deletion_or_cursor_pending",
 +					now.Add(nextcloudDispatchBackoff(dispatch.AttemptCount+1)), dispatch.AttemptCount+1)
 +			}
-+			proof, err := nextcloudDispatchPublicationProof(tx, connection, dispatch.TargetEventID, startedAt)
++			proof, err := nextcloudDispatchPublicationProof(tx, connection, dispatch.AppliedID,
++				dispatch.TargetEventID, startedAt)
 +			if err != nil {
 +				return err
 +			}
@@ -8569,14 +8798,64 @@ index 00000000..aa16edbc
 +				// Preserve the exact log/range and poll without launching another
 +				// scan that could replace an in-flight candidate.
 +				return tx.Table("nextcloud_event_dispatch").Where("connection_id = ?", connectionID).
-+					Updates(map[string]any{"next_attempt_at": now.Add(time.Minute),
-+						"last_error_code": "publication_pending", "updated_at": now}).Error
++					Updates(map[string]any{"next_attempt_at": now.Add(nextcloudPublicationPollDelay(now, finishedAt)),
++						"last_error_code": nextcloudPublicationPendingCode(dispatch.LastErrorCode), "updated_at": now}).Error
 +			case nextcloudApplyRetry:
++				// A newer durable hint can supersede an old candidate that the
++				// source no longer permits to publish (for example, an ETag
++				// changed during asynchronous parsing). Reconcile the latest
++				// manifest now, but leave the old range unapplied until that
++				// newer run obtains its own complete publication proof.
++				var latest nextcloudEventCheckpoint
++				if err := tx.Table("nextcloud_event_checkpoint").Where("connection_id = ?", connectionID).
++					Take(&latest).Error; err != nil {
++					return err
++				}
++				if latest.ReceivedID > dispatch.TargetEventID {
++					coalescing, err = nextcloudCanCoalesceUnproven(tx, connection,
++						dispatch.TargetEventID, latest.ReceivedID)
++					if err != nil {
++						return err
++					}
++					if coalescing {
++						break
++					}
++				}
++				// Sync completion can precede asynchronous candidate registration.
++				// Allow that short handoff to settle before requesting another scan;
++				// never acknowledge without a complete publication proof.
++				if finishedAt != nil && now.Before(finishedAt.Add(nextcloudPublicationRetryGrace)) {
++					return tx.Table("nextcloud_event_dispatch").Where("connection_id = ?", connectionID).
++						Updates(map[string]any{"next_attempt_at": now.Add(nextcloudQueuedPollInterval),
++							"last_error_code": nextcloudPublicationPendingCode(dispatch.LastErrorCode), "updated_at": now}).Error
++				}
++				unprovable, err := nextcloudHintRangeUnprovable(tx, connectionID,
++					dispatch.AppliedID, dispatch.TargetEventID)
++				if err != nil {
++					return err
++				}
++				if unprovable {
++					return setNextcloudDispatchState(tx, connectionID, "blocked",
++						"hint_unbound_manual_review", now, dispatch.AttemptCount)
++				}
 +				return setNextcloudDispatchState(tx, connectionID, "retry", "publication_unproven",
 +					now.Add(nextcloudDispatchBackoff(dispatch.AttemptCount+1)), dispatch.AttemptCount+1)
 +			case nextcloudApplyComplete:
 +				if dispatch.TargetEventID <= dispatch.AppliedID || dispatch.TargetEventID > dispatch.DispatchedID {
 +					return ErrNextcloudEventConflict
++				}
++				broad, err := nextcloudHintRangeNeedsTwoScans(tx, connection,
++					dispatch.AppliedID, dispatch.TargetEventID)
++				if err != nil {
++					return err
++				}
++				marker := nextcloudBroadConfirmationCode(dispatch.TargetEventID)
++				if broad && dispatch.LastErrorCode != marker {
++					// A subtree hint does not identify all affected files. Require
++					// a second complete inventory and publication pass for this
++					// exact receipt range before advancing applied_id.
++					return setNextcloudDispatchState(tx, connectionID, "retry", marker,
++						now.Add(nextcloudQueuedPollInterval), dispatch.AttemptCount)
 +				}
 +				if err := tx.Table("nextcloud_event_inbox").
 +					Where("connection_id = ? AND event_id <= ?", connectionID, dispatch.TargetEventID).
@@ -8592,16 +8871,48 @@ index 00000000..aa16edbc
 +			default:
 +				return ErrNextcloudEventConflict
 +			}
-+			dispatch.State = "idle"
-+			dispatch.AppliedID = dispatch.TargetEventID
++			if !coalescing {
++				dispatch.State = "idle"
++				dispatch.AppliedID = dispatch.TargetEventID
++			}
 +		}
 +		if dispatch.State == "retry" && now.Before(dispatch.NextAttemptAt) {
-+			return nil
++			if dispatch.LastErrorCode != "publication_unproven" {
++				return nil
++			}
++			var latest nextcloudEventCheckpoint
++			if err := tx.Table("nextcloud_event_checkpoint").Where("connection_id = ?", connectionID).
++				Take(&latest).Error; err != nil {
++				return err
++			}
++			if latest.ReceivedID <= dispatch.TargetEventID {
++				return nil
++			}
++			status, startedAt, finishedAt, err := nextcloudDispatchSyncStatus(tx, dispatch.LastSyncLogID)
++			if err != nil {
++				return err
++			}
++			matching, err := nextcloudDispatchMatchingSync(tx, connection, dispatch.LastSyncLogID)
++			if err != nil {
++				return err
++			}
++			if status != "success" || finishedAt == nil || !matching {
++				return nil
++			}
++			complete, err := nextcloudDispatchCursorComplete(tx, connection, startedAt)
++			if err != nil || !complete {
++				return err
++			}
++			coalescible, err := nextcloudCanCoalesceUnproven(tx, connection,
++				dispatch.TargetEventID, latest.ReceivedID)
++			if err != nil || !coalescible {
++				return err
++			}
 +		}
 +		if dispatch.State == "leased" && dispatch.LeaseUntil != nil && !now.Before(*dispatch.LeaseUntil) {
 +			// The log ID is persisted before the log and queue task are created.
 +			// Recover an uncertain enqueue by watching that exact event-owned log.
-+			status, startedAt, err := nextcloudDispatchSyncStatus(tx, dispatch.LastSyncLogID)
++			status, startedAt, _, err := nextcloudDispatchSyncStatus(tx, dispatch.LastSyncLogID)
 +			if err != nil {
 +				return err
 +			}
@@ -8868,21 +9179,126 @@ index 00000000..aa16edbc
 +	return true, nil
 +}
 +
-+func nextcloudDispatchSyncStatus(tx *gorm.DB, syncLogID *string) (string, time.Time, error) {
++func nextcloudDispatchSyncStatus(tx *gorm.DB, syncLogID *string) (string, time.Time, *time.Time, error) {
 +	if syncLogID == nil || *syncLogID == "" {
-+		return "missing", time.Time{}, nil
++		return "missing", time.Time{}, nil, nil
 +	}
 +	var row struct {
-+		Status    string    `gorm:"column:status"`
-+		StartedAt time.Time `gorm:"column:started_at"`
++		Status     string     `gorm:"column:status"`
++		StartedAt  time.Time  `gorm:"column:started_at"`
++		FinishedAt *time.Time `gorm:"column:finished_at"`
 +	}
-+	if err := tx.Table("sync_logs").Select("status", "started_at").Where("id = ?", *syncLogID).Take(&row).Error; err != nil {
++	if err := tx.Table("sync_logs").Select("status", "started_at", "finished_at").Where("id = ?", *syncLogID).Take(&row).Error; err != nil {
 +		if errors.Is(err, gorm.ErrRecordNotFound) {
-+			return "missing", time.Time{}, nil
++			return "missing", time.Time{}, nil, nil
 +		}
-+		return "", time.Time{}, err
++		return "", time.Time{}, nil, err
 +	}
-+	return row.Status, row.StartedAt, nil
++	return row.Status, row.StartedAt, row.FinishedAt, nil
++}
++
++func nextcloudDispatchMatchingSync(tx *gorm.DB, connection nextcloudEventConnection,
++	syncLogID *string) (bool, error) {
++	if syncLogID == nil || *syncLogID == "" {
++		return false, nil
++	}
++	var count int64
++	err := tx.Table("sync_logs").Where("id = ? AND data_source_id = ? AND tenant_id = ?",
++		*syncLogID, connection.DatasourceID, connection.TenantID).Count(&count).Error
++	return count == 1, err
++}
++
++// Only a small, signed, file-scoped receipt range can replace an old
++// publication-unproven scan. The replacement still needs its own complete
++// manifest and publication proof before any applied watermark advances.
++func nextcloudCanCoalesceUnproven(tx *gorm.DB, connection nextcloudEventConnection,
++	oldTargetID, newReceivedID int64) (bool, error) {
++	if newReceivedID <= oldTargetID {
++		return false, nil
++	}
++	var hints []nextcloudEventInboxRow
++	if err := tx.Table("nextcloud_event_inbox").
++		Where("connection_id = ? AND event_id > ? AND event_id <= ?",
++			connection.ConnectionID, oldTargetID, newReceivedID).
++		Order("event_id ASC").Limit(201).Find(&hints).Error; err != nil {
++		return false, err
++	}
++	if len(hints) == 0 || len(hints) > 200 || hints[len(hints)-1].EventID != newReceivedID {
++		return false, nil
++	}
++	var source types.DataSource
++	if err := tx.Select("last_sync_cursor").Where("id = ?", connection.DatasourceID).
++		Take(&source).Error; err != nil {
++		return false, err
++	}
++	cursor, err := source.ParseSyncCursor()
++	if err != nil || cursor == nil || cursor.ConnectorCursor == nil {
++		return false, err
++	}
++	raw, err := json.Marshal(cursor.ConnectorCursor)
++	if err != nil {
++		return false, err
++	}
++	var snapshot nextcloudApplyCursor
++	if json.Unmarshal(raw, &snapshot) != nil ||
++		snapshot.InstanceID != connection.NextcloudInstanceID ||
++		snapshot.Files[connection.BindingID] == nil {
++		return false, nil
++	}
++	observedID, valid := nextcloudChangeCursorID(snapshot.Changes[connection.BindingID], connection.BindingID)
++	if !valid || observedID < oldTargetID {
++		return false, nil
++	}
++	var kb types.KnowledgeBase
++	if err := tx.Where("id = ? AND tenant_id = ?", connection.KnowledgeBaseID,
++		connection.TenantID).Take(&kb).Error; err != nil {
++		return false, err
++	}
++	for _, hint := range hints {
++		if hint.FileID == nil || *hint.FileID <= 0 {
++			return false, nil
++		}
++		fileID := strconv.FormatInt(*hint.FileID, 10)
++		switch hint.EventType {
++		case "upsert":
++			if hint.ETag == nil || strings.TrimSpace(*hint.ETag) == "" ||
++				hint.RelativePath == nil || !nextcloud.ImportableFileName(path.Base(*hint.RelativePath), kb.IsMultimodalEnabled()) {
++				return false, nil
++			}
++		case "delete":
++			if _, present := snapshot.Files[connection.BindingID][fileID]; !present {
++				return false, nil
++			}
++		default:
++			return false, nil
++		}
++	}
++	return true, nil
++}
++
++func nextcloudBroadConfirmationCode(targetEventID int64) string {
++	return "broad_confirm:" + strconv.FormatInt(targetEventID, 10)
++}
++
++func nextcloudBroadMarker(code string) string {
++	if strings.HasPrefix(code, "broad_confirm:") {
++		return code
++	}
++	return ""
++}
++
++func nextcloudPublicationPendingCode(code string) string {
++	if marker := nextcloudBroadMarker(code); marker != "" {
++		return marker
++	}
++	return "publication_pending"
++}
++
++func nextcloudPublicationPollDelay(now time.Time, finishedAt *time.Time) time.Duration {
++	if finishedAt != nil && now.Before(finishedAt.Add(nextcloudPublicationFastPollWindow)) {
++		return nextcloudQueuedPollInterval
++	}
++	return time.Minute
 +}
 +
 +func nextcloudDispatchBackoff(attempt int) time.Duration {
@@ -8994,7 +9410,8 @@ index 00000000..aa16edbc
 +		return tx.Table("nextcloud_event_dispatch").Where("connection_id = ?", claim.ConnectionID).
 +			Updates(map[string]any{"dispatched_id": claim.TargetEventID, "state": "queued",
 +				"lease_token": nil, "lease_until": nil, "last_sync_log_id": syncLogID,
-+				"next_attempt_at": now.Add(time.Minute), "last_error_code": "", "updated_at": now}).Error
++				"next_attempt_at": now.Add(nextcloudQueuedPollInterval),
++				"last_error_code": nextcloudBroadMarker(dispatch.LastErrorCode), "updated_at": now}).Error
 +	})
 +}
 +
@@ -9074,10 +9491,10 @@ index 00000000..aa16edbc
 +}
 diff --git a/internal/application/repository/nextcloud_event_dispatch_wake_test.go b/internal/application/repository/nextcloud_event_dispatch_wake_test.go
 new file mode 100644
-index 00000000..bdecc4d4
+index 00000000..56530f63
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_dispatch_wake_test.go
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,129 @@
 +package repository
 +
 +import (
@@ -9100,7 +9517,7 @@ index 00000000..bdecc4d4
 +	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases
 +		(id TEXT PRIMARY KEY, tenant_id INTEGER, deleted_at DATETIME)`).Error)
 +	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb', 7)`).Error)
-+	for _, name := range []string{"000032_nextcloud_event_inbox.up.sql", "000033_nextcloud_event_dispatch.up.sql"} {
++	for _, name := range []string{"000032_nextcloud_event_inbox.up.sql", "000033_nextcloud_event_dispatch.up.sql", "000049_nextcloud_event_hint_etag.up.sql"} {
 +		schema, err := os.ReadFile("../../../migrations/sqlite/" + name)
 +		require.NoError(t, err)
 +		require.NoError(t, db.Exec(string(schema)).Error)
@@ -9126,8 +9543,8 @@ index 00000000..bdecc4d4
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_checkpoint (connection_id, received_id)
 +		VALUES ('event-connection', 1)`).Error)
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
-+		(connection_id, event_id, payload_sha256, event_type, file_id, state)
-+		VALUES ('event-connection', 1, ?, 'upsert', 77, 'dispatched')`, strings.Repeat("0", 64)).Error)
++		(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++		VALUES ('event-connection', 1, ?, 'upsert', 77, 'etag-v1', '/Published/file.md', 'file.md', 'dispatched')`, strings.Repeat("0", 64)).Error)
 +
 +	now := time.Now().UTC().Truncate(time.Second)
 +	startedAt := now.Add(-time.Minute)
@@ -9156,8 +9573,8 @@ index 00000000..bdecc4d4
 +	require.NoError(t, err)
 +	require.Empty(t, candidates, "a completed scan alone must not queue duplicate work")
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
-+		(connection_id, event_id, payload_sha256, event_type, file_id, state)
-+		VALUES ('event-connection', 2, ?, 'upsert', 77, 'pending')`, strings.Repeat("1", 64)).Error)
++		(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++		VALUES ('event-connection', 2, ?, 'upsert', 77, 'etag-v2', '/Published/file.md', 'file.md', 'pending')`, strings.Repeat("1", 64)).Error)
 +	require.NoError(t, db.Exec(`UPDATE nextcloud_event_checkpoint SET received_id = 2
 +		WHERE connection_id = 'event-connection'`).Error)
 +	candidates, err = inbox.DispatchCandidates(ctx, now)
@@ -9198,13 +9615,21 @@ index 00000000..bdecc4d4
 +	require.Equal(t, int64(1), dispatch.AppliedID,
 +		"the first event must receive a complete publication proof before the second is claimed")
 +	require.Equal(t, "leased", dispatch.State)
++	require.NoError(t, inbox.PrepareDispatch(ctx, *claim, "second-event-log", now))
++	require.NoError(t, inbox.FinishDispatch(ctx, *claim, "second-event-log", now))
++	require.NoError(t, db.Table("nextcloud_event_dispatch").Where("connection_id = ?", "event-connection").
++		Take(&dispatch).Error)
++	require.Equal(t, "queued", dispatch.State)
++	require.Equal(t, int64(2), dispatch.DispatchedID)
++	require.Equal(t, int64(1), dispatch.AppliedID)
++	require.Equal(t, now.Add(nextcloudQueuedPollInterval), dispatch.NextAttemptAt)
 +}
 diff --git a/internal/application/repository/nextcloud_event_inbox.go b/internal/application/repository/nextcloud_event_inbox.go
 new file mode 100644
-index 00000000..c660d0b1
+index 00000000..642255a5
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_inbox.go
-@@ -0,0 +1,364 @@
+@@ -0,0 +1,376 @@
 +package repository
 +
 +import (
@@ -9238,6 +9663,9 @@ index 00000000..c660d0b1
 +	PayloadSHA256 string
 +	EventType     string
 +	FileID        *int64
++	ETag          *string
++	Path          *string
++	RelativePath  *string
 +}
 +
 +type SignedNextcloudEventBatch struct {
@@ -9287,6 +9715,9 @@ index 00000000..c660d0b1
 +	PayloadSHA256 string    `gorm:"column:payload_sha256"`
 +	EventType     string    `gorm:"column:event_type"`
 +	FileID        *int64    `gorm:"column:file_id"`
++	ETag          *string   `gorm:"column:etag"`
++	Path          *string   `gorm:"column:path"`
++	RelativePath  *string   `gorm:"column:relative_path"`
 +	ReceivedAt    time.Time `gorm:"column:received_at"`
 +	State         string    `gorm:"column:state"`
 +}
@@ -9301,7 +9732,10 @@ index 00000000..c660d0b1
 +	}
 +	previousID := batch.AfterEventID
 +	for _, event := range batch.Events {
-+		if event.EventID <= previousID || len(event.PayloadSHA256) != 64 {
++		if event.EventID <= previousID || len(event.PayloadSHA256) != 64 ||
++			(event.ETag != nil && len(*event.ETag) > 255) ||
++			(event.Path != nil && len(*event.Path) > 4096) ||
++			(event.RelativePath != nil && len(*event.RelativePath) > 4096) {
 +			return 0, ErrNextcloudEventConflict
 +		}
 +		previousID = event.EventID
@@ -9409,6 +9843,9 @@ index 00000000..c660d0b1
 +				PayloadSHA256: hint.PayloadSHA256,
 +				EventType:     hint.EventType,
 +				FileID:        hint.FileID,
++				ETag:          hint.ETag,
++				Path:          hint.Path,
++				RelativePath:  hint.RelativePath,
 +				ReceivedAt:    batch.Now,
 +				State:         "pending",
 +			}
@@ -9621,6 +10058,562 @@ index 00000000..6c5ad7f2
 +	responseSecret, err := nextcloudEventResponseSecret(connection, "new")
 +	require.NoError(t, err)
 +	require.Equal(t, newSecret, string(responseSecret))
++}
+diff --git a/internal/application/repository/nextcloud_event_publication_poll_test.go b/internal/application/repository/nextcloud_event_publication_poll_test.go
+new file mode 100644
+index 00000000..70178756
+--- /dev/null
++++ b/internal/application/repository/nextcloud_event_publication_poll_test.go
+@@ -0,0 +1,550 @@
++package repository
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// The sync log can finish before the asynchronous version and parser records
++// are visible. A fresh, incomplete proof must retain the exact queued task.
++func newNextcloudQueuedPublicationTest(t *testing.T) (*gorm.DB, *NextcloudEventInboxRepository, time.Time, string) {
++	t.Helper()
++	_, db := newNextcloudVersionTestRepo(t)
++	require.NoError(t, db.AutoMigrate(&types.SyncLog{}))
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases
++		(id TEXT PRIMARY KEY, tenant_id INTEGER, deleted_at DATETIME)`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb', 7)`).Error)
++	for _, name := range []string{"000032_nextcloud_event_inbox.up.sql", "000033_nextcloud_event_dispatch.up.sql", "000049_nextcloud_event_hint_etag.up.sql"} {
++		schema, err := os.ReadFile("../../../migrations/sqlite/" + name)
++		require.NoError(t, err)
++		require.NoError(t, db.Exec(string(schema)).Error)
++	}
++	var source types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&source).Error)
++	baseURL, configSHA, bindingID, err := NextcloudEventDataSourceIdentity(source.Config)
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_connections
++		(connection_id, tenant_id, knowledge_base_id, datasource_id, nextcloud_instance_id,
++		 binding_id, datasource_base_url, datasource_config_sha256, status,
++		 current_key_id, current_secret_ciphertext)
++		VALUES ('event-connection', 7, 'kb', 'ds', 'instance', ?, ?, ?, 'active', 'test-key', 'enc:v1:test')`,
++		bindingID, baseURL, configSHA).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_checkpoint (connection_id, received_id)
++		VALUES ('event-connection', 1)`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
++		(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++		VALUES ('event-connection', 1, ?, 'upsert', 77, 'etag-v1', '/Published/file.md', 'file.md', 'dispatched')`, strings.Repeat("0", 64)).Error)
++	now := time.Now().UTC().Truncate(time.Second)
++	require.NoError(t, db.Create(&types.SyncLog{ID: "event-log", DataSourceID: "ds",
++		TenantID: 7, Status: types.SyncLogStatusRunning, StartedAt: now.Add(-time.Minute)}).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_dispatch
++		(connection_id, dispatched_id, target_event_id, state, last_sync_log_id, next_attempt_at)
++		VALUES ('event-connection', 1, 1, 'queued', 'event-log', ?)`, now).Error)
++	changeBytes, err := json.Marshal([]any{1, bindingID, "1", strings.Repeat("0", 64)})
++	require.NoError(t, err)
++	cursor := &types.SyncCursor{LastSyncTime: now, ConnectorCursor: map[string]interface{}{
++		"instance_id": "instance", "last_reconcile_at": now.Unix(),
++		"changes": map[string]interface{}{bindingID: base64.RawURLEncoding.EncodeToString(changeBytes)},
++		"files": map[string]interface{}{bindingID: map[string]interface{}{
++			"77": map[string]string{"etag": "etag-v1", "name": "file.md", "path": "file.md"},
++		}},
++		"missing": map[string]interface{}{}, "tombstones": map[string]interface{}{},
++	}}
++	rawCursor, err := cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", rawCursor).Error)
++	return db, NewNextcloudEventInboxRepository(db), now, bindingID
++}
++
++func publicationDispatchRow(t *testing.T, db *gorm.DB) nextcloudEventDispatchRow {
++	t.Helper()
++	var row nextcloudEventDispatchRow
++	require.NoError(t, db.Table("nextcloud_event_dispatch").
++		Where("connection_id = 'event-connection'").Take(&row).Error)
++	return row
++}
++
++func TestNextcloudQueuedPublicationWaitsForBriefRegistrationGap(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, _ := newNextcloudQueuedPublicationTest(t)
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", now)
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row := publicationDispatchRow(t, db)
++	require.Equal(t, "queued", row.State)
++	require.Equal(t, now.Add(nextcloudQueuedPollInterval), row.NextAttemptAt)
++	require.Zero(t, row.AppliedID)
++
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(nextcloudQueuedPollInterval))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "queued", row.State)
++	require.Equal(t, "publication_pending", row.LastErrorCode)
++	require.Equal(t, now.Add(2*nextcloudQueuedPollInterval), row.NextAttemptAt)
++	require.Zero(t, row.AppliedID)
++
++	ready := insertNextcloudVersionTestKnowledge(t, db, "published-after-sync", "etag-v1",
++		types.ParseStatusCompleted, "enabled")
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", ready.ID).
++		Update("file_name", "file.md").Error)
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v1",
++		CandidateKnowledgeID: ready.ID, State: "published", UpdatedAt: now}).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(2*nextcloudQueuedPollInterval))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "idle", row.State)
++	require.Equal(t, int64(1), row.AppliedID)
++}
++
++func TestNextcloudQueuedPublicationUnprovenAfterGraceRetriesWithoutAck(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, _ := newNextcloudQueuedPublicationTest(t)
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	checkAt := now.Add(nextcloudPublicationRetryGrace + time.Second)
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", checkAt)
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row := publicationDispatchRow(t, db)
++	require.Equal(t, "retry", row.State)
++	require.Equal(t, "publication_unproven", row.LastErrorCode)
++	require.Equal(t, checkAt.Add(time.Minute), row.NextAttemptAt)
++	require.Zero(t, row.AppliedID)
++}
++
++func TestNextcloudQueuedPublicationWaitsForParserWithoutAck(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, _ := newNextcloudQueuedPublicationTest(t)
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	pending := insertNextcloudVersionTestKnowledge(t, db, "pending-after-sync", "",
++		types.ParseStatusPending, "disabled")
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v1",
++		CandidateKnowledgeID: pending.ID, State: "staging", UpdatedAt: now}).Error)
++	for _, checkAt := range []time.Time{now.Add(5 * time.Second), now.Add(nextcloudPublicationFastPollWindow + time.Second)} {
++		claim, err := inbox.ClaimDispatch(ctx, "event-connection", checkAt)
++		require.NoError(t, err)
++		require.Nil(t, claim)
++		row := publicationDispatchRow(t, db)
++		require.Equal(t, "queued", row.State)
++		require.Equal(t, "publication_pending", row.LastErrorCode)
++		require.Zero(t, row.AppliedID)
++		wantDelay := nextcloudQueuedPollInterval
++		if checkAt.Sub(now) >= nextcloudPublicationFastPollWindow {
++			wantDelay = time.Minute
++		}
++		require.Equal(t, checkAt.Add(wantDelay), row.NextAttemptAt)
++	}
++}
++
++func TestNextcloudQueuedPublicationSupersededByNewReceipt(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, bindingID := newNextcloudQueuedPublicationTest(t)
++	// The old candidate completed parsing, but a 409 from the source left it
++	// unpublished. Its proof cannot become complete after the file changes.
++	stale := insertNextcloudVersionTestKnowledge(t, db, "stale-candidate", "",
++		types.ParseStatusCompleted, "disabled")
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v1",
++		CandidateKnowledgeID: stale.ID, State: "staging", UpdatedAt: now}).Error)
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
++		(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++		VALUES ('event-connection', 2, ?, 'upsert', 77, 'etag-v2', '/Published/file.md', 'file.md', 'pending')`, strings.Repeat("1", 64)).Error)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_checkpoint SET received_id = 2
++		WHERE connection_id = 'event-connection'`).Error)
++
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", now.Add(time.Second))
++	require.NoError(t, err)
++	require.NotNil(t, claim)
++	require.Equal(t, int64(2), claim.TargetEventID)
++	row := publicationDispatchRow(t, db)
++	require.Equal(t, "leased", row.State)
++	require.Equal(t, int64(1), row.DispatchedID)
++	require.Zero(t, row.AppliedID, "superseded content must not be acknowledged")
++	require.NoError(t, inbox.PrepareDispatch(ctx, *claim, "new-event-log", now.Add(time.Second)))
++	require.NoError(t, inbox.FinishDispatch(ctx, *claim, "new-event-log", now.Add(time.Second)))
++
++	finished := now.Add(3 * time.Second)
++	require.NoError(t, db.Create(&types.SyncLog{ID: "new-event-log", DataSourceID: "ds",
++		TenantID: 7, Status: types.SyncLogStatusSuccess,
++		StartedAt: now.Add(2 * time.Second), FinishedAt: &finished}).Error)
++	oldReady := insertNextcloudVersionTestKnowledge(t, db, "old-published", "etag-v1",
++		types.ParseStatusCompleted, "enabled")
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", oldReady.ID).
++		Update("file_name", "file.md").Error)
++	require.NoError(t, db.Model(&nextcloudSourceVersion{}).
++		Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND external_id = ?",
++			7, "kb", "ds", "nextcloud:instance:77").
++		Updates(map[string]any{"desired_etag": "etag-v1", "candidate_knowledge_id": oldReady.ID,
++			"state": "published", "updated_at": now.Add(4 * time.Second)}).Error)
++	var source types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&source).Error)
++	cursor, err := source.ParseSyncCursor()
++	require.NoError(t, err)
++	changeBytes, err := json.Marshal([]any{1, bindingID, "2", strings.Repeat("0", 64)})
++	require.NoError(t, err)
++	cursor.LastSyncTime = now.Add(4 * time.Second)
++	cursor.ConnectorCursor["last_reconcile_at"] = now.Add(4 * time.Second).Unix()
++	cursor.ConnectorCursor["changes"] = map[string]interface{}{
++		bindingID: base64.RawURLEncoding.EncodeToString(changeBytes),
++	}
++	cursor.ConnectorCursor["files"] = map[string]interface{}{bindingID: map[string]interface{}{
++		"77": map[string]string{"etag": "etag-v1", "name": "file.md", "path": "file.md"},
++	}}
++	rawCursor, err := cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", rawCursor).Error)
++
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(6*time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Zero(t, row.AppliedID, "a changes cursor through event 2 cannot prove a stale V1 manifest")
++	require.Equal(t, "queued", row.State)
++
++	ready := insertNextcloudVersionTestKnowledge(t, db, "new-candidate", "etag-v2",
++		types.ParseStatusCompleted, "enabled")
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", ready.ID).
++		Update("file_name", "file.md").Error)
++	require.NoError(t, db.Model(&nextcloudSourceVersion{}).
++		Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND external_id = ?",
++			7, "kb", "ds", "nextcloud:instance:77").
++		Updates(map[string]any{"desired_etag": "etag-v2", "candidate_knowledge_id": ready.ID,
++			"state": "published", "updated_at": now.Add(8 * time.Second)}).Error)
++	require.NoError(t, writeNextcloudETag(db, oldReady, ""))
++	cursor.ConnectorCursor["files"] = map[string]interface{}{bindingID: map[string]interface{}{
++		"77": map[string]string{"etag": "etag-v2", "name": "file.md", "path": "file.md"},
++	}}
++	cursor.LastSyncTime = now.Add(8 * time.Second)
++	rawCursor, err = cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", rawCursor).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(11*time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "idle", row.State)
++	require.Equal(t, int64(2), row.AppliedID,
++		"the newer complete manifest and publication proof cover both hints")
++	var unapplied int64
++	require.NoError(t, db.Table("nextcloud_event_inbox").
++		Where("connection_id = ? AND state <> 'applied'", "event-connection").Count(&unapplied).Error)
++	require.Zero(t, unapplied)
++}
++
++func TestNextcloudPublicationUnprovenRetryWakesOnlyForSignedImportableHint(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, _ := newNextcloudQueuedPublicationTest(t)
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	checkAt := now.Add(nextcloudPublicationRetryGrace + time.Second)
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", checkAt)
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row := publicationDispatchRow(t, db)
++	require.Equal(t, "retry", row.State)
++	require.Equal(t, "publication_unproven", row.LastErrorCode)
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
++		(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++		VALUES ('event-connection', 2, ?, 'upsert', 77, 'etag-v2', '/Published/file.md', 'file.md', 'pending')`,
++		strings.Repeat("2", 64)).Error)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_checkpoint SET received_id = 2
++		WHERE connection_id = 'event-connection'`).Error)
++	wakeAt := checkAt.Add(time.Second)
++	candidates, err := inbox.DispatchCandidates(ctx, wakeAt)
++	require.NoError(t, err)
++	require.Equal(t, []string{"event-connection"}, candidates)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", wakeAt)
++	require.NoError(t, err)
++	require.NotNil(t, claim)
++	require.Equal(t, int64(2), claim.TargetEventID)
++	row = publicationDispatchRow(t, db)
++	require.Zero(t, row.AppliedID)
++}
++
++func TestNextcloudUnprovenDoesNotCoalesceUnsupportedOrUnsignedHint(t *testing.T) {
++	for _, newer := range []struct {
++		name, etag, path string
++	}{
++		{"unsupported", "etag-v2", "/Published/file.bin"},
++		{"unsigned-etag", "", "/Published/file.md"},
++		{"missing-path", "etag-v2", ""},
++	} {
++		t.Run(newer.name, func(t *testing.T) {
++			ctx := context.Background()
++			db, inbox, now, _ := newNextcloudQueuedPublicationTest(t)
++			require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++				WHERE id = 'event-log'`, now).Error)
++			require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
++				(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++				VALUES ('event-connection', 2, ?, 'upsert', 77, ?, ?, ?, 'pending')`,
++				strings.Repeat("2", 64), newer.etag, newer.path,
++				strings.TrimPrefix(newer.path, "/Published/")).Error)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_checkpoint SET received_id = 2
++				WHERE connection_id = 'event-connection'`).Error)
++			claim, err := inbox.ClaimDispatch(ctx, "event-connection", now.Add(time.Second))
++			require.NoError(t, err)
++			require.Nil(t, claim)
++			row := publicationDispatchRow(t, db)
++			require.Equal(t, "queued", row.State)
++			require.Zero(t, row.AppliedID)
++		})
++	}
++}
++
++func TestNextcloudPublicationProofRejectsUnboundLatestHints(t *testing.T) {
++	for _, latest := range []struct {
++		name, eventType          string
++		etag, path, relativePath any
++		fileID                   any
++	}{
++		{"null-etag", "upsert", nil, "/Published/file.md", "file.md", int64(77)},
++		{"metadata-rename", "metadata", "etag-v1", "/Published/renamed.md", "renamed.md", int64(77)},
++		{"broad", "upsert", "etag-v1", "/Published/file.md", "file.md", nil},
++	} {
++		t.Run(latest.name, func(t *testing.T) {
++			ctx := context.Background()
++			db, inbox, now, _ := newNextcloudQueuedPublicationTest(t)
++			ready := insertNextcloudVersionTestKnowledge(t, db, "ready-unbound", "etag-v1",
++				types.ParseStatusCompleted, "enabled")
++			require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", ready.ID).
++				Update("file_name", "file.md").Error)
++			require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++				DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v1",
++				CandidateKnowledgeID: ready.ID, State: "published", UpdatedAt: now}).Error)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_inbox SET event_type = ?, file_id = ?, etag = ?, path = ?, relative_path = ?
++				WHERE connection_id = 'event-connection' AND event_id = 1`,
++				latest.eventType, latest.fileID, latest.etag, latest.path, latest.relativePath).Error)
++			require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++				WHERE id = 'event-log'`, now).Error)
++			claim, err := inbox.ClaimDispatch(ctx, "event-connection", now.Add(time.Second))
++			require.NoError(t, err)
++			require.Nil(t, claim)
++			row := publicationDispatchRow(t, db)
++			require.Zero(t, row.AppliedID)
++			require.Equal(t, "queued", row.State)
++			claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(nextcloudPublicationRetryGrace+time.Second))
++			require.NoError(t, err)
++			require.Nil(t, claim)
++			row = publicationDispatchRow(t, db)
++			if latest.name == "metadata-rename" {
++				require.Equal(t, "retry", row.State, "a signed relative path can become provable on a later scan")
++			} else {
++				require.Equal(t, "blocked", row.State)
++				require.Equal(t, "hint_unbound_manual_review", row.LastErrorCode)
++			}
++		})
++	}
++}
++
++func TestNextcloudSubtreeHintRequiresSecondCompleteManifest(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, _ := newNextcloudQueuedPublicationTest(t)
++	ready := insertNextcloudVersionTestKnowledge(t, db, "subtree-ready", "etag-v1",
++		types.ParseStatusCompleted, "enabled")
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", ready.ID).
++		Update("file_name", "file.md").Error)
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v1",
++		CandidateKnowledgeID: ready.ID, State: "published", UpdatedAt: now}).Error)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_event_inbox
++		SET event_type = 'subtree_moved', file_id = NULL, etag = NULL, relative_path = NULL
++		WHERE connection_id = 'event-connection' AND event_id = 1`).Error)
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", now.Add(time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row := publicationDispatchRow(t, db)
++	require.Equal(t, "retry", row.State)
++	require.Equal(t, "broad_confirm:1", row.LastErrorCode)
++	require.Zero(t, row.AppliedID)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(6*time.Second))
++	require.NoError(t, err)
++	require.NotNil(t, claim)
++	require.Equal(t, int64(1), claim.TargetEventID)
++	require.NoError(t, inbox.PrepareDispatch(ctx, *claim, "subtree-second-log", now.Add(6*time.Second)))
++	require.NoError(t, inbox.FinishDispatch(ctx, *claim, "subtree-second-log", now.Add(6*time.Second)))
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "broad_confirm:1", row.LastErrorCode)
++	finished := now.Add(7 * time.Second)
++	require.NoError(t, db.Create(&types.SyncLog{ID: "subtree-second-log", DataSourceID: "ds",
++		TenantID: 7, Status: types.SyncLogStatusSuccess,
++		StartedAt: now.Add(6 * time.Second), FinishedAt: &finished}).Error)
++	var source types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&source).Error)
++	cursor, err := source.ParseSyncCursor()
++	require.NoError(t, err)
++	cursor.LastSyncTime = finished
++	cursor.ConnectorCursor["last_reconcile_at"] = finished.Unix()
++	raw, err := cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", raw).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(12*time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "idle", row.State)
++	require.Equal(t, int64(1), row.AppliedID)
++}
++
++func TestNextcloudExcludedImportableUpsertNeedsTwoAbsentManifests(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, bindingID := newNextcloudQueuedPublicationTest(t)
++	// The signed event described an importable file, but the authoritative
++	// publication manifest excluded it. There is no prior indexed version.
++	var source types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&source).Error)
++	cursor, err := source.ParseSyncCursor()
++	require.NoError(t, err)
++	cursor.ConnectorCursor["files"] = map[string]interface{}{bindingID: map[string]interface{}{}}
++	raw, err := cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", raw).Error)
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", now.Add(time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row := publicationDispatchRow(t, db)
++	require.Equal(t, "retry", row.State)
++	require.Equal(t, "broad_confirm:1", row.LastErrorCode)
++	require.Zero(t, row.AppliedID)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(6*time.Second))
++	require.NoError(t, err)
++	require.NotNil(t, claim)
++	require.NoError(t, inbox.PrepareDispatch(ctx, *claim, "excluded-second-log", now.Add(6*time.Second)))
++	require.NoError(t, inbox.FinishDispatch(ctx, *claim, "excluded-second-log", now.Add(6*time.Second)))
++	finished := now.Add(7 * time.Second)
++	require.NoError(t, db.Create(&types.SyncLog{ID: "excluded-second-log", DataSourceID: "ds",
++		TenantID: 7, Status: types.SyncLogStatusSuccess,
++		StartedAt: now.Add(6 * time.Second), FinishedAt: &finished}).Error)
++	cursor.LastSyncTime = finished
++	cursor.ConnectorCursor["last_reconcile_at"] = finished.Unix()
++	raw, err = cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", raw).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(12*time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "idle", row.State)
++	require.Equal(t, int64(1), row.AppliedID)
++}
++
++func TestNextcloudExcludedPreviouslyPublishedFileRequiresWithdrawal(t *testing.T) {
++	ctx := context.Background()
++	db, inbox, now, bindingID := newNextcloudQueuedPublicationTest(t)
++	ready := insertNextcloudVersionTestKnowledge(t, db, "formerly-published", "etag-v1",
++		types.ParseStatusCompleted, "enabled")
++	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", ready.ID).
++		Update("file_name", "file.md").Error)
++	require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v1",
++		CandidateKnowledgeID: ready.ID, State: "published", UpdatedAt: now}).Error)
++	var source types.DataSource
++	require.NoError(t, db.Where("id = ?", "ds").Take(&source).Error)
++	cursor, err := source.ParseSyncCursor()
++	require.NoError(t, err)
++	cursor.ConnectorCursor["files"] = map[string]interface{}{bindingID: map[string]interface{}{
++		"77": map[string]string{"etag": "etag-v1", "name": "file.md", "path": "file.md"},
++	}}
++	cursor.ConnectorCursor["missing"] = map[string]interface{}{bindingID: map[string]interface{}{
++		"77": true,
++	}}
++	raw, err := cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", raw).Error)
++	require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++		WHERE id = 'event-log'`, now).Error)
++	claim, err := inbox.ClaimDispatch(ctx, "event-connection", now.Add(time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row := publicationDispatchRow(t, db)
++	require.Zero(t, row.AppliedID)
++	require.Equal(t, "retry", row.State)
++	require.Equal(t, "deletion_or_cursor_pending", row.LastErrorCode,
++		"the first missing scan cannot withdraw a published file")
++
++	// The retry runs the connector's second absence scan. It tombstones the
++	// previously indexed version and withdraws the old knowledge row.
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(61*time.Second))
++	require.NoError(t, err)
++	require.NotNil(t, claim)
++	require.NoError(t, inbox.PrepareDispatch(ctx, *claim, "withdrawn-first-complete-log", now.Add(61*time.Second)))
++	require.NoError(t, inbox.FinishDispatch(ctx, *claim, "withdrawn-first-complete-log", now.Add(61*time.Second)))
++	require.NoError(t, writeNextcloudETag(db, ready, ""))
++	require.NoError(t, db.Delete(ready).Error)
++	require.NoError(t, db.Model(&nextcloudSourceVersion{}).
++		Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND external_id = ?",
++			7, "kb", "ds", "nextcloud:instance:77").
++		Updates(map[string]any{"desired_etag": "", "candidate_knowledge_id": "",
++			"state": "tombstone"}).Error)
++	cursor.ConnectorCursor["files"] = map[string]interface{}{bindingID: map[string]interface{}{}}
++	cursor.ConnectorCursor["missing"] = map[string]interface{}{bindingID: map[string]interface{}{}}
++	cursor.ConnectorCursor["tombstones"] = map[string]interface{}{bindingID: map[string]interface{}{
++		"77": map[string]string{"etag": "etag-v1", "name": "file.md", "path": "file.md"},
++	}}
++	firstComplete := now.Add(62 * time.Second)
++	require.NoError(t, db.Create(&types.SyncLog{ID: "withdrawn-first-complete-log", DataSourceID: "ds",
++		TenantID: 7, Status: types.SyncLogStatusSuccess,
++		StartedAt: now.Add(61 * time.Second), FinishedAt: &firstComplete}).Error)
++	cursor.LastSyncTime = firstComplete
++	cursor.ConnectorCursor["last_reconcile_at"] = firstComplete.Unix()
++	raw, err = cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", raw).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(63*time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "retry", row.State)
++	require.Equal(t, "broad_confirm:1", row.LastErrorCode)
++	require.Zero(t, row.AppliedID)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(68*time.Second))
++	require.NoError(t, err)
++	require.NotNil(t, claim)
++	require.NoError(t, inbox.PrepareDispatch(ctx, *claim, "withdrawn-second-log", now.Add(68*time.Second)))
++	require.NoError(t, inbox.FinishDispatch(ctx, *claim, "withdrawn-second-log", now.Add(68*time.Second)))
++	finished := now.Add(69 * time.Second)
++	require.NoError(t, db.Create(&types.SyncLog{ID: "withdrawn-second-log", DataSourceID: "ds",
++		TenantID: 7, Status: types.SyncLogStatusSuccess,
++		StartedAt: now.Add(68 * time.Second), FinishedAt: &finished}).Error)
++	cursor.LastSyncTime = finished
++	cursor.ConnectorCursor["last_reconcile_at"] = finished.Unix()
++	raw, err = cursor.ToJSON()
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++		Update("last_sync_cursor", raw).Error)
++	claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(74*time.Second))
++	require.NoError(t, err)
++	require.Nil(t, claim)
++	row = publicationDispatchRow(t, db)
++	require.Equal(t, "idle", row.State)
++	require.Equal(t, int64(1), row.AppliedID)
 +}
 diff --git a/internal/application/repository/nextcloud_event_rebind.go b/internal/application/repository/nextcloud_event_rebind.go
 new file mode 100644
@@ -12495,10 +13488,10 @@ index 00000000..a4ea190c
 +}
 diff --git a/internal/application/repository/nextcloud_indexed_withdrawal_pg_test.go b/internal/application/repository/nextcloud_indexed_withdrawal_pg_test.go
 new file mode 100644
-index 00000000..6974c25e
+index 00000000..158b218d
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_indexed_withdrawal_pg_test.go
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,409 @@
 +package repository
 +
 +import (
@@ -12571,6 +13564,7 @@ index 00000000..6974c25e
 +	require.NoError(t, db.Exec(`CREATE TABLE sync_logs (id TEXT PRIMARY KEY, data_source_id TEXT, status TEXT)`).Error)
 +	for _, migration := range []string{
 +		"000113_nextcloud_event_inbox.up.sql", "000114_nextcloud_event_dispatch.up.sql",
++		"000130_nextcloud_event_hint_etag.up.sql",
 +	} {
 +		script, err := os.ReadFile("../../../migrations/versioned/" + migration)
 +		require.NoError(t, err)
@@ -16683,7 +17677,7 @@ index 00000000..cf0f3a2a
 +}
 diff --git a/internal/application/repository/nextcloud_versions_test.go b/internal/application/repository/nextcloud_versions_test.go
 new file mode 100644
-index 00000000..832a3b82
+index 00000000..c3004c22
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_versions_test.go
 @@ -0,0 +1,1011 @@
@@ -17015,7 +18009,7 @@ index 00000000..832a3b82
 +	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases
 +		(id TEXT PRIMARY KEY, tenant_id INTEGER, deleted_at DATETIME)`).Error)
 +	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb', 7)`).Error)
-+	for _, name := range []string{"000032_nextcloud_event_inbox.up.sql", "000033_nextcloud_event_dispatch.up.sql"} {
++	for _, name := range []string{"000032_nextcloud_event_inbox.up.sql", "000033_nextcloud_event_dispatch.up.sql", "000049_nextcloud_event_hint_etag.up.sql"} {
 +		schema, err := os.ReadFile("../../../migrations/sqlite/" + name)
 +		require.NoError(t, err)
 +		require.NoError(t, db.Exec(string(schema)).Error)
@@ -17040,12 +18034,12 @@ index 00000000..832a3b82
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_checkpoint (connection_id, received_id)
 +		VALUES ('event-connection', 1)`).Error)
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
-+		(connection_id, event_id, payload_sha256, event_type, file_id, state)
-+		VALUES ('event-connection', 1, ?, 'upsert', 77, 'dispatched')`, strings.Repeat("0", 64)).Error)
++		(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++		VALUES ('event-connection', 1, ?, 'upsert', 77, 'etag-v2', '/Published/file.md', 'file.md', 'dispatched')`, strings.Repeat("0", 64)).Error)
 +	now := time.Now().UTC()
 +	startedAt := now.Add(-time.Minute)
 +	log := &types.SyncLog{ID: "event-log", DataSourceID: "ds", TenantID: 7,
-+		Status: types.SyncLogStatusSuccess, StartedAt: startedAt}
++		Status: types.SyncLogStatusSuccess, StartedAt: startedAt, FinishedAt: &now}
 +	require.NoError(t, db.Create(log).Error)
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_dispatch
 +		(connection_id, dispatched_id, target_event_id, state, last_sync_log_id, next_attempt_at)
@@ -24343,7 +25337,7 @@ index 48620fad..c6fbfd4f 100644
  	// Run all pending migrations
  	logger.Infof(ctx, "Running pending migrations...")
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index ca9fa532..c1ac938d 100644
+index ca9fa532..1016ccf9 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -24355,10 +25349,11 @@ index ca9fa532..c1ac938d 100644
  var versionedSQLiteTables = []string{
  	"memory_extraction_sessions",
  	"task_pending_ops",
-@@ -40,6 +40,16 @@ var versionedSQLiteTables = []string{
+@@ -39,7 +39,16 @@ var versionedSQLiteTables = []string{
+ 	"resource_access_policies",
  	"resource_group_grants",
  	"directory_permission_versions",
- 	"evaluation_runs",
+-	"evaluation_runs",
 +	"nextcloud_event_connections",
 +	"nextcloud_event_nonces",
 +	"nextcloud_event_inbox",
@@ -24372,12 +25367,27 @@ index ca9fa532..c1ac938d 100644
  }
  
  // versionedSQLiteColumns maps each existing table to the columns that the
-@@ -64,7 +74,151 @@ var versionedSQLiteColumns = map[string][]string{
- 	"directories":        {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
+@@ -56,15 +65,160 @@ var versionedSQLiteColumns = map[string][]string{
+ 		"parent_session_id", "forked_from_message_id", "fork_bootstrap", // 000097
+ 		"sandbox_config_tenant_id", // 000108
+ 	},
+-	"tenant_invitations": {"token", "accepted_count"},                       // 000054
+-	"embed_channels":     {"allow_memory"},                                  // 000060
+-	"mcp_oauth_tokens":   {"principal_type", "principal_id"},                // 000064
+-	"mcp_tool_approvals": {"enabled"},                                       // 000091
+-	"message_artifacts":  {"deleted_at"},                                    // 000107
+-	"directories":        {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
++	"tenant_invitations":    {"token", "accepted_count"},                       // 000054
++	"embed_channels":        {"allow_memory"},                                  // 000060
++	"mcp_oauth_tokens":      {"principal_type", "principal_id"},                // 000064
++	"mcp_tool_approvals":    {"enabled"},                                       // 000091
++	"message_artifacts":     {"deleted_at"},                                    // 000107
++	"directories":           {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
++	"nextcloud_event_inbox": {"etag", "path", "relative_path"},                 // SQLite 000049 / PostgreSQL 000130
  }
  
 -const expectedSQLiteMigrationVersion = 34
-+const expectedSQLiteMigrationVersion = 48
++const expectedSQLiteMigrationVersion = 49
 +
 +func TestSQLiteNextcloudRevisionUpgradeFrom43PreservesUnknownHistory(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -28760,10 +29770,10 @@ index 00000000..1666bd12
 +}
 diff --git a/internal/datasource/connector/nextcloud/types.go b/internal/datasource/connector/nextcloud/types.go
 new file mode 100644
-index 00000000..521e16b8
+index 00000000..7e81eaaf
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/types.go
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,324 @@
 +package nextcloud
 +
 +import (
@@ -29080,6 +30090,13 @@ index 00000000..521e16b8
 +		return false
 +	}
 +	return true
++}
++
++// ImportableFileName keeps event publication proof aligned with the manifest
++// filter. The event path is a hint about whether an absent file is expected in
++// the importable inventory; authorization still comes from the live source.
++func ImportableFileName(name string, multimodal bool) bool {
++	return supportedFile(name, multimodal)
 +}
 diff --git a/internal/datasource/errors.go b/internal/datasource/errors.go
 index 426c71ec..38384b3c 100644
@@ -32278,10 +33295,10 @@ index 00000000..cbde1beb
 +}
 diff --git a/internal/handler/nextcloud_event_dispatch_test.go b/internal/handler/nextcloud_event_dispatch_test.go
 new file mode 100644
-index 00000000..d2ceee75
+index 00000000..34e6ea39
 --- /dev/null
 +++ b/internal/handler/nextcloud_event_dispatch_test.go
-@@ -0,0 +1,805 @@
+@@ -0,0 +1,819 @@
 +package handler
 +
 +import (
@@ -32369,8 +33386,18 @@ index 00000000..d2ceee75
 +
 +func receiveDispatchHint(t *testing.T, router *gin.Engine, secret, after, event, nonce string) {
 +	t.Helper()
++	batch := sampleNextcloudEventBatch(after, event)
++	etag, relative := "v1", "Notes.md"
++	if event == "43" {
++		// This synthetic event deliberately leaves the importable manifest
++		// empty; its file is outside the connector's supported formats.
++		relative = "ignored.bin"
++	}
++	absolute := "/Published/" + relative
++	batch.Events[0].ETag, batch.Events[0].Path = &etag, &absolute
++	batch.Events[0].RelativePath = &relative
 +	response := postNextcloudEvent(router, signedNextcloudEventRequest(t, secret,
-+		sampleNextcloudEventBatch(after, event), strings.Repeat(nonce, 32)))
++		batch, strings.Repeat(nonce, 32)))
 +	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
 +}
 +
@@ -32462,8 +33489,8 @@ index 00000000..d2ceee75
 +	require.NoError(t, err)
 +	require.NoError(t, db.Exec(`UPDATE data_sources SET last_sync_cursor = ? WHERE id = ?`,
 +		string(cursor), "ds-synthetic").Error)
-+	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at) VALUES (?, 'ds-synthetic', ?, ?)`,
-+		"log-43", types.SyncLogStatusSuccess, now).Error)
++	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at, finished_at) VALUES (?, 'ds-synthetic', ?, ?, ?)`,
++		"log-43", types.SyncLogStatusSuccess, now, now).Error)
 +	require.NoError(t, repo.FinishDispatch(ctx, *retry, "log-43", now.Add(6*time.Minute)))
 +	status, err = repo.ConnectionStatus(ctx, 7, "ds-synthetic")
 +	require.NoError(t, err)
@@ -32501,8 +33528,8 @@ index 00000000..d2ceee75
 +	require.NoError(t, err)
 +	require.NotNil(t, claim)
 +	require.NoError(t, repo.PrepareDispatch(ctx, *claim, "parse-log", now))
-+	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at)
-+		VALUES ('parse-log', 'ds-synthetic', 'success', ?)`, now).Error)
++	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at, finished_at)
++		VALUES ('parse-log', 'ds-synthetic', 'success', ?, ?)`, now, now).Error)
 +	require.NoError(t, repo.FinishDispatch(ctx, *claim, "parse-log", now))
 +	cursor, err := json.Marshal(map[string]any{
 +		"last_sync_time": now.Add(time.Minute),
@@ -32576,8 +33603,8 @@ index 00000000..d2ceee75
 +	require.NoError(t, err)
 +	require.NotNil(t, claim)
 +	require.NoError(t, repo.PrepareDispatch(ctx, *claim, "cursor-behind", now))
-+	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at)
-+		VALUES ('cursor-behind', 'ds-synthetic', 'success', ?)`, now).Error)
++	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at, finished_at)
++		VALUES ('cursor-behind', 'ds-synthetic', 'success', ?, ?)`, now, now).Error)
 +	require.NoError(t, repo.FinishDispatch(ctx, *claim, "cursor-behind", now))
 +	cursor, err := json.Marshal(map[string]any{
 +		"last_sync_time": now.Add(time.Minute),
@@ -32736,7 +33763,11 @@ index 00000000..d2ceee75
 +
 +func TestNextcloudEventDispatchRequiresSecondDeletionScan(t *testing.T) {
 +	db, router, secret := setupNextcloudDispatchTest(t, false)
-+	receiveDispatchHint(t, router, secret, "0", "41", "c")
++	deletion := sampleNextcloudEventBatch("0", "41")
++	deletion.Events[0].Type = "delete"
++	response := postNextcloudEvent(router, signedNextcloudEventRequest(t, secret,
++		deletion, strings.Repeat("c", 32)))
++	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
 +	repo := repository.NewNextcloudEventInboxRepository(db)
 +	ctx := context.Background()
 +	now := time.Now().UTC()
@@ -32744,8 +33775,8 @@ index 00000000..d2ceee75
 +	require.NoError(t, err)
 +	require.NotNil(t, claim)
 +	require.NoError(t, repo.PrepareDispatch(ctx, *claim, "missing-first", now))
-+	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at)
-+		VALUES ('missing-first', 'ds-synthetic', 'success', ?)`, now).Error)
++	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at, finished_at)
++		VALUES ('missing-first', 'ds-synthetic', 'success', ?, ?)`, now, now).Error)
 +	require.NoError(t, repo.FinishDispatch(ctx, *claim, "missing-first", now))
 +	require.NoError(t, db.Exec(`INSERT INTO knowledges
 +		(id, tenant_id, knowledge_base_id, channel, parse_status, enable_status, file_name, metadata)
@@ -32787,8 +33818,8 @@ index 00000000..d2ceee75
 +	require.NoError(t, err)
 +	require.NotNil(t, second)
 +	require.NoError(t, repo.PrepareDispatch(ctx, *second, "missing-second", now.Add(4*time.Minute)))
-+	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at)
-+		VALUES ('missing-second', 'ds-synthetic', 'success', ?)`, now.Add(4*time.Minute)).Error)
++	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at, finished_at)
++		VALUES ('missing-second', 'ds-synthetic', 'success', ?, ?)`, now.Add(4*time.Minute), now.Add(4*time.Minute)).Error)
 +	require.NoError(t, repo.FinishDispatch(ctx, *second, "missing-second", now.Add(4*time.Minute)))
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_source_versions
 +		(tenant_id, knowledge_base_id, datasource_id, external_id, state)
@@ -32897,8 +33928,8 @@ index 00000000..d2ceee75
 +	require.NoError(t, err)
 +	require.NotNil(t, claim)
 +	require.NoError(t, repo.PrepareDispatch(ctx, *claim, "completed-before-record", now))
-+	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at) VALUES (?, 'ds-synthetic', ?, ?)`,
-+		"completed-before-record", types.SyncLogStatusSuccess, now).Error)
++	require.NoError(t, db.Exec(`INSERT INTO sync_logs (id, data_source_id, status, started_at, finished_at) VALUES (?, 'ds-synthetic', ?, ?, ?)`,
++		"completed-before-record", types.SyncLogStatusSuccess, now, now).Error)
 +	// Simulate process death after the task ran but before FinishDispatch.
 +	recovered, err := repo.ClaimDispatch(ctx, testEventConnection, now.Add(4*time.Minute))
 +	require.NoError(t, err)
@@ -33691,10 +34722,10 @@ index 00000000..32383479
 +}
 diff --git a/internal/handler/nextcloud_events.go b/internal/handler/nextcloud_events.go
 new file mode 100644
-index 00000000..f2df39a6
+index 00000000..f38790f6
 --- /dev/null
 +++ b/internal/handler/nextcloud_events.go
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,265 @@
 +package handler
 +
 +import (
@@ -33735,13 +34766,14 @@ index 00000000..f2df39a6
 +}
 +
 +type nextcloudEventHintJSON struct {
-+	EventID   string  `json:"event_id"`
-+	FileID    *int64  `json:"file_id"`
-+	Type      string  `json:"type"`
-+	OldPath   *string `json:"old_path"`
-+	Path      *string `json:"path"`
-+	ETag      *string `json:"etag"`
-+	CreatedAt *int64  `json:"created_at"`
++	EventID      string  `json:"event_id"`
++	FileID       *int64  `json:"file_id"`
++	Type         string  `json:"type"`
++	OldPath      *string `json:"old_path"`
++	Path         *string `json:"path"`
++	RelativePath *string `json:"relative_path"`
++	ETag         *string `json:"etag"`
++	CreatedAt    *int64  `json:"created_at"`
 +}
 +
 +// Receive stores signed change hints. Neither a successful HTTP response nor
@@ -33815,6 +34847,7 @@ index 00000000..f2df39a6
 +			(event.FileID != nil && *event.FileID <= 0) ||
 +			(event.Type == "delete" && event.FileID == nil) ||
 +			!validOptionalNextcloudPath(event.OldPath) || !validOptionalNextcloudPath(event.Path) ||
++			!validOptionalNextcloudRelativePath(event.RelativePath) ||
 +			(event.ETag != nil && len(*event.ETag) > 255) ||
 +			(event.CreatedAt != nil && *event.CreatedAt < 0) {
 +			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_event_batch"})
@@ -33827,7 +34860,8 @@ index 00000000..f2df39a6
 +		}
 +		hints = append(hints, repository.NextcloudEventHint{
 +			EventID: id, PayloadSHA256: repository.NextcloudEventPayloadHash(serialized),
-+			EventType: event.Type, FileID: event.FileID,
++			EventType: event.Type, FileID: event.FileID, ETag: event.ETag,
++			Path: event.Path, RelativePath: event.RelativePath,
 +		})
 +		previousID = id
 +	}
@@ -33941,12 +34975,28 @@ index 00000000..f2df39a6
 +func validOptionalNextcloudPath(path *string) bool {
 +	return path == nil || len(*path) <= 4096 && !strings.ContainsRune(*path, 0)
 +}
++
++func validOptionalNextcloudRelativePath(relative *string) bool {
++	if relative == nil {
++		return true
++	}
++	if *relative == "" || len(*relative) > 4096 || strings.HasPrefix(*relative, "/") ||
++		strings.ContainsAny(*relative, "\\\x00") {
++		return false
++	}
++	for _, component := range strings.Split(*relative, "/") {
++		if component == "" || component == "." || component == ".." {
++			return false
++		}
++	}
++	return true
++}
 diff --git a/internal/handler/nextcloud_events_test.go b/internal/handler/nextcloud_events_test.go
 new file mode 100644
-index 00000000..072a04f0
+index 00000000..5f8216c7
 --- /dev/null
 +++ b/internal/handler/nextcloud_events_test.go
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,370 @@
 +package handler
 +
 +import (
@@ -34010,6 +35060,17 @@ index 00000000..072a04f0
 +	migration, err := os.ReadFile(migrationPath)
 +	require.NoError(t, err)
 +	for _, statement := range strings.Split(string(migration), ";") {
++		if strings.TrimSpace(statement) != "" {
++			require.NoError(t, db.Exec(statement).Error)
++		}
++	}
++	etagMigration := "../../migrations/sqlite/000049_nextcloud_event_hint_etag.up.sql"
++	if strings.Contains(migrationPath, "/versioned/") {
++		etagMigration = "../../migrations/versioned/000130_nextcloud_event_hint_etag.up.sql"
++	}
++	etagSchema, err := os.ReadFile(etagMigration)
++	require.NoError(t, err)
++	for _, statement := range strings.Split(string(etagSchema), ";") {
 +		if strings.TrimSpace(statement) != "" {
 +			require.NoError(t, db.Exec(statement).Error)
 +		}
@@ -34142,6 +35203,8 @@ index 00000000..072a04f0
 +func TestNextcloudEventInboxReceiptSequenceAndReplay(t *testing.T) {
 +	db, router, secret := setupNextcloudEventHTTPTest(t)
 +	first := sampleNextcloudEventBatch("0", "9007199254740993") // exact beyond JS Number precision
++	etag, path, relativePath := "signed-etag", "/Published/file.md", "file.md"
++	first.Events[0].ETag, first.Events[0].Path, first.Events[0].RelativePath = &etag, &path, &relativePath
 +	response := postNextcloudEvent(router, signedNextcloudEventRequest(t, secret, first, strings.Repeat("a", 32)))
 +	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
 +	require.Contains(t, response.Body.String(), `"received_through_event_id":"9007199254740993"`)
@@ -34172,6 +35235,17 @@ index 00000000..072a04f0
 +	var count int64
 +	require.NoError(t, db.Table("nextcloud_event_inbox").Count(&count).Error)
 +	require.Equal(t, int64(2), count)
++	var stored struct {
++		ETag         string `gorm:"column:etag"`
++		Path         string `gorm:"column:path"`
++		RelativePath string `gorm:"column:relative_path"`
++	}
++	require.NoError(t, db.Table("nextcloud_event_inbox").Select("etag", "path", "relative_path").
++		Where("connection_id = ? AND event_id = ?", testEventConnection, int64(9007199254740993)).
++		Take(&stored).Error)
++	require.Equal(t, etag, stored.ETag)
++	require.Equal(t, path, stored.Path)
++	require.Equal(t, relativePath, stored.RelativePath)
 +}
 +
 +func TestNextcloudEventInboxAuthenticationScopeAndDatabaseFailure(t *testing.T) {
@@ -42586,6 +43660,29 @@ index 00000000..1522bcb6
 +CREATE TRIGGER nextcloud_indexed_withdrawal_item_immutable_delete
 +BEFORE DELETE ON nextcloud_indexed_withdrawal_items
 +BEGIN SELECT RAISE(ABORT, 'nextcloud_indexed_withdrawal_item_immutable'); END;
+diff --git a/migrations/sqlite/000049_nextcloud_event_hint_etag.down.sql b/migrations/sqlite/000049_nextcloud_event_hint_etag.down.sql
+new file mode 100644
+index 00000000..a7acfb8e
+--- /dev/null
++++ b/migrations/sqlite/000049_nextcloud_event_hint_etag.down.sql
+@@ -0,0 +1,3 @@
++ALTER TABLE nextcloud_event_inbox DROP COLUMN relative_path;
++ALTER TABLE nextcloud_event_inbox DROP COLUMN path;
++ALTER TABLE nextcloud_event_inbox DROP COLUMN etag;
+diff --git a/migrations/sqlite/000049_nextcloud_event_hint_etag.up.sql b/migrations/sqlite/000049_nextcloud_event_hint_etag.up.sql
+new file mode 100644
+index 00000000..264b89c3
+--- /dev/null
++++ b/migrations/sqlite/000049_nextcloud_event_hint_etag.up.sql
+@@ -0,0 +1,8 @@
++-- Keep the signed source version with each durable hint. A later full-manifest
++-- proof can reject a stale snapshot even when its changes cursor is newer.
++ALTER TABLE nextcloud_event_inbox
++    ADD COLUMN etag TEXT CHECK (etag IS NULL OR LENGTH(etag) <= 255);
++ALTER TABLE nextcloud_event_inbox
++    ADD COLUMN path TEXT CHECK (path IS NULL OR LENGTH(path) <= 4096);
++ALTER TABLE nextcloud_event_inbox
++    ADD COLUMN relative_path TEXT CHECK (relative_path IS NULL OR LENGTH(relative_path) <= 4096);
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -44144,3 +45241,26 @@ index 00000000..5261e713
 +        'invalid_image_inventory', 'missing_local_embedding_table',
 +        'unverified_external_index', 'chunk', 'postgres_embedding',
 +        'gc_job', 'gc_item', 'source_version', 'source_revision', 'sync_log'));
+diff --git a/migrations/versioned/000130_nextcloud_event_hint_etag.down.sql b/migrations/versioned/000130_nextcloud_event_hint_etag.down.sql
+new file mode 100644
+index 00000000..a7acfb8e
+--- /dev/null
++++ b/migrations/versioned/000130_nextcloud_event_hint_etag.down.sql
+@@ -0,0 +1,3 @@
++ALTER TABLE nextcloud_event_inbox DROP COLUMN relative_path;
++ALTER TABLE nextcloud_event_inbox DROP COLUMN path;
++ALTER TABLE nextcloud_event_inbox DROP COLUMN etag;
+diff --git a/migrations/versioned/000130_nextcloud_event_hint_etag.up.sql b/migrations/versioned/000130_nextcloud_event_hint_etag.up.sql
+new file mode 100644
+index 00000000..264b89c3
+--- /dev/null
++++ b/migrations/versioned/000130_nextcloud_event_hint_etag.up.sql
+@@ -0,0 +1,8 @@
++-- Keep the signed source version with each durable hint. A later full-manifest
++-- proof can reject a stale snapshot even when its changes cursor is newer.
++ALTER TABLE nextcloud_event_inbox
++    ADD COLUMN etag TEXT CHECK (etag IS NULL OR LENGTH(etag) <= 255);
++ALTER TABLE nextcloud_event_inbox
++    ADD COLUMN path TEXT CHECK (path IS NULL OR LENGTH(path) <= 4096);
++ALTER TABLE nextcloud_event_inbox
++    ADD COLUMN relative_path TEXT CHECK (relative_path IS NULL OR LENGTH(relative_path) <= 4096);

@@ -657,6 +657,15 @@ employee file-status HTTP smoke and PHP signature contract passed. Its
 reproducible runtime archive has 75 files and SHA-256
 `df9fb1c261453197183aa2ffbf57b5936ea2e494f3deca45e304ff6e660e5f07`.
 
+Nextcloud 0.4.33 persists the binding-root-relative target path with new
+file upsert and metadata hints and signs it in the event batch. The local
+0.4.32→0.4.33 upgrade and an isolated HTTP smoke covered create, overwrite,
+nested file creation and same-binding rename. The shared LAN stack upgraded
+with maintenance mode off afterward and its login returned HTTP 200; the
+WeKnora receiver's cross-service path proof is recorded below. The
+runtime app archive contains 76 files and has SHA-256
+`cbc989cbac2795f216b2b51d7372e38fb62a7d34c52e0258b05480e8953ce440`.
+
 The fixed c6 full patch SHA-256 is
 `5da6f751906b938db68c014607f2adc22feb151f6d012f527c1400f10608f6e7`;
 the RAG77 patch SHA-256 is
@@ -730,11 +739,40 @@ enterprise answer-quality acceptance.
 
 The pilot harness now has a `post-accept` event pattern that times an update
 sent just after a previous event enters the queue. Its offline schedule test
-passed, but no new Docker load run or PRD 10,000-file/100-GB/P95 acceptance
-has been made. The safe dispatch fast wake preserves same-source single flight
+passed. At that point no new Docker load run or PRD 10,000-file/100-GB/P95
+acceptance had been made. The safe dispatch fast wake preserves same-source single flight
 and publication proof; it is not a measured latency guarantee. Derived-row
 physical GC remains disabled because other read and external-write paths lack
 complete coverage. Enterprise AD and production Team Folder acceptance still
 await a real target environment.
+
+## 2026-10-02 signed event proof follow-up
+
+The fixed c6 and RAG77 patches now persist each signed upsert's ETag and
+binding-relative path in the WeKnora event inbox. Applied ACK requires that
+exact file version in the completed source scan and published candidate.
+Broad or excluded-file hints require two complete scans of the same target;
+legacy file hints without a relative path enter manual review. The exact
+patch SHA-256 values are `a32114b68b9c260b94c889c603fa6b4167e7681fe831dfd26de7ff881afa4bfd`
+and `7b0b15ab9c9f93c6c707a13fa39cfc71d050b0b2095d132501584fad908601f4`.
+Both applied to their pinned clean bases, passed the 27-route OpenAPI
+contract and focused SQLite tests, and passed isolated PostgreSQL event,
+pairing, indexed-withdrawal and rebind tests. No enterprise AD fixture was
+available, as agreed for this phase.
+
+A disposable 0.4.33 Nextcloud and newer-head WeKnora event-only pilot
+observed seven signed inbox hints; all seven carried ETag and relative path.
+For three post-accept updates of two 256-byte synthetic files, the
+event-to-durable-job upper bounds were 5,463.7, 4,938.7 and 4,909.8 ms
+(nearest-rank P95 5,463.7 ms). Event-to-applied-proof bounds were 15,306.3,
+14,820.0 and 15,270.9 ms. The backend binary and migrations were layered
+onto the preceding AnyDoc image solely for this event experiment; this is
+not a rebuilt release image. The original report and image ID are in the
+[pilot record](isolated-event-queue-pilot.md). Three tiny samples do not
+establish the PRD's sustained P95 or 10,000-file/100-GB targets. Bounded
+overlap while a prior parser is still running remains unimplemented, so a
+later sample can still wait behind a parser. The shared LAN WeKnora image
+has not been upgraded to this receiver; a coordinated two-sided maintenance
+upgrade is required before enabling event delivery for connected sources.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.

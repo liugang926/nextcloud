@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`5da6f751906b938db68c014607f2adc22feb151f6d012f527c1400f10608f6e7`.
+`a32114b68b9c260b94c889c603fa6b4167e7681fe831dfd26de7ff881afa4bfd`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,9 +17,9 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611`.
-The build script and CI reject a different patch hash. On 2026-10-01 both
-baseline patches applied cleanly to fresh source archives. The failed-file
+`7b0b15ab9c9f93c6c707a13fa39cfc71d050b0b2095d132501584fad908601f4`.
+The build script and CI reject a different patch hash. On 2026-10-02 both
+current baseline patches applied cleanly to fresh source archives. The failed-file
 editor probe tests and frontend type checks passed for both patches. The RAG baseline
 retains the evaluated RAG runtime changes and is pinned to the tested source
 commit rather than a moving branch head.
@@ -35,13 +35,23 @@ vector-ID receipts, and exact claimed deletion with retrieval checks. These
 checks do not enable global derived GC.
 
 The current patch also rejects empty text candidates as published answers,
-returns a signed static no-content status, wakes the event dispatcher after a
-completed prior sync when a new hint exists, and fences knowledge-list and
+returns a signed static no-content status, polls queued event publication
+proof every five seconds during its first minute, and fences knowledge-list and
 raw-search output with read leases and current authorization. Focused Go tests
 in the repository and both handler packages passed for both pinned baselines;
 the 27-route OpenAPI checker passed after applying each patch to a clean
 source archive. The full suite and an exact pinned-`77c97fd7` RAG runtime
 image have not yet been verified for this patch revision.
+
+The current receiver also records each signed event's ETag and relative path.
+File ACK requires the exact version and publication proof; broad and excluded
+targets require two complete scans of the same target. Focused SQLite and
+isolated PostgreSQL event/pairing/withdrawal/rebind tests passed on both pinned
+baselines. A reduced newer-head event-only image, made by layering the Go
+binary and migrations onto an earlier AnyDoc runtime, completed a disposable
+three-sample queue pilot; see the [event queue record](isolated-event-queue-pilot.md).
+This does not substitute for the pinned full RAG image build or sustained
+load acceptance.
 
 For the existing local `weknora-ldap-local` stack, run:
 
@@ -101,7 +111,9 @@ revocation drill passed with mock models; see [its record](synthetic-ldap-compos
 Live enterprise AD, Team Folder ACLs, browser-click acceptance and production
 load remain open until separately verified; see [V1 status](v1-status.md).
 
-On 2026-10-01, the same patch SHA-256 also applied to newer RAG source head
+On 2026-10-01, the preceding patch SHA-256
+`251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611`
+also applied to newer RAG source head
 `3ad3b31f2b3e6409c6a9c196bbab70e2eac6c666`. An isolated build using an
 alternate Debian mirror produced the AnyDoc backend image
 `sha256:2ec7e6b31463e6764130973cc1d636d2f65c83268376943cbae59713b7156f9e`

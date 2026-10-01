@@ -60,3 +60,36 @@ unapplied, then entered `publication_unproven` retry after 15 seconds and
 waited one minute before dispatching the newer receipt. This preserves
 authorization but still misses the proposed queue-latency target in this
 small run. The second fixture and its private credentials were destroyed.
+
+## Signed version/path proof candidate, 2026-10-02
+
+A third disposable pair used Nextcloud app 0.4.33 and the newer RAG source
+`3ad3b31` with final RAG patch SHA-256
+`7b0b15ab9c9f93c6c707a13fa39cfc71d050b0b2095d132501584fad908601f4`.
+The Go backend binary and SQL migrations were layered onto the earlier
+AnyDoc runtime image for this event-only test. Its image ID was
+`sha256:06252aef292fa8bdbeed988cdd52af64f56b5463e9da6b8f97b6d5889005b201`;
+the original AnyDoc/UI were not rebuilt. The complete noncredential
+[JSON report](evidence/event-queue-pilot-2026-10-02-coalesced.json) has
+SHA-256 `790eb5a07c2749eb9117f299cf21fca4830d50d22c099b91b53ba5576e064416`.
+The PostgreSQL event inbox contained seven signed hints, all with ETag and
+binding-relative path.
+
+| Measurement | Result |
+| --- | ---: |
+| Initial two-file source sync | 0.306 seconds; 2 files created |
+| Event-to-durable-job upper bounds | 5,463.7 ms; 4,938.7 ms; 4,909.8 ms |
+| Three-sample nearest-rank durable-job P95 | 5,463.7 ms |
+| Event-to-applied-proof upper bounds | 15,306.3 ms; 14,820.0 ms; 15,270.9 ms |
+| Three-sample nearest-rank applied-proof P95 | 15,306.3 ms |
+
+The same `post-accept` pattern wrote each measured file version immediately
+after a priming event's durable acceptance. The dispatcher can use the exact
+signed version/path and latest completed scan to retire a superseded
+candidate after its publication result. This test did not exercise every
+possible timing of an older parser. The dispatcher still waits while an
+earlier parser is running, and a bounded overlapping parser budget is not
+implemented. This small mock-model run therefore does not establish the
+PRD's sustained 10-second P95, 10,000-file/100-GB capacity, or enterprise
+AD/Team Folder permission acceptance. The shared LAN WeKnora service was
+not changed by this pilot.
