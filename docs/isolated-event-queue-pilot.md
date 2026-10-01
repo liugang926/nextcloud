@@ -93,3 +93,23 @@ implemented. This small mock-model run therefore does not establish the
 PRD's sustained 10-second P95, 10,000-file/100-GB capacity, or enterprise
 AD/Team Folder permission acceptance. The shared LAN WeKnora service was
 not changed by this pilot.
+
+## Pending-parser overlap fix after the pilot, 2026-10-02
+
+Both pinned WeKnora patches now permit the dispatcher to admit a newer signed,
+same-file upsert while the old version is still parsing. Admission requires an
+exact changed ETag and importable relative path, a completed old source scan,
+and at most one unfinished parser generation or active build lease for that
+file. A further version waits for an older parser and its lease to finish.
+The old candidate's write fence closes when the newer version stages, and the
+applied watermark advances only after the newer version has its own source
+cursor and publication proof.
+
+Focused SQLite race tests verified a paused V1 parser, signed V2 receipt,
+prompt V2 queue admission after the one-minute polling window, denial of a
+late V1 publication, no ACK during V2 parsing, and ACK after V2 publication.
+A second test verified that a third version waits while V1 and V2 remain
+unfinished, even if V1 is marked failed while its build lease is still live.
+The fixed and RAG source trees passed their Nextcloud repository, service and
+handler Go tests. No new runtime image or latency pilot was run for this fix;
+the measured results above belong to the preceding patch revision.

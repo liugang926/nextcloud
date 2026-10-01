@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`748866423a51e6aa0d50b151366e80adb5325a9447d499164f9162b821fdaa40`.
+`a7cd69f12332f9f881999038f84df6f6bc7a41141cce875fe3e6ef3499b73fad`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`2542c3f423c2c143191de4d01d508db3761242cfa8e7decd1b3bc43ef98e7d12`.
+`84afeffc37040b2a85c2c795c05600817ea738b7862decc22f0310b4a0b23a2f`.
 The build script and CI reject a different patch hash. On 2026-10-02 both
 current baseline patches applied cleanly to fresh source archives. The failed-file
 editor probe tests and frontend type checks passed for both patches. The RAG baseline
@@ -52,6 +52,19 @@ binary and migrations onto an earlier AnyDoc runtime, completed a disposable
 three-sample queue pilot; see the [event queue record](isolated-event-queue-pilot.md).
 This does not substitute for the pinned full RAG image build or sustained
 load acceptance.
+
+The dispatcher now admits a newer signed upsert of the same file while its
+previous parser remains pending, processing or finalizing, after the earlier
+source scan has completed. The newer hint must carry a changed ETag and an
+importable binding-relative path. The source cursor must cover the old receipt,
+and only one unfinished parser generation or live build lease may already exist
+for that file. A third generation waits until an older row is terminal and its
+build lease is released. Staging the newer candidate retires the older fence;
+the applied watermark stays unchanged until a newer complete source cursor and
+exact publication proof pass. Both pinned source trees passed the focused
+overlap race and Nextcloud repository, service and handler tests in the local
+Go test image. This patch revision has not been rebuilt into the shared RAG
+runtime image or measured under sustained load.
 
 The latest patch also refreshes retired chunk image references on every
 due GC retry. A newly malformed `image_info` blocks the local provider
