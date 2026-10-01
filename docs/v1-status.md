@@ -680,9 +680,17 @@ Both images carry that exact source and patch in their OCI labels. A fresh
 isolated direct-group LDAP fixture (`nc-synldap-bc78b1d4`) started backend and
 UI healthy; UI returned HTTP 200, bootstrap indexed two chunks and embeddings,
 and the Alice/Bob six-field matrix passed with the same allow/deny pattern.
-The fixture's containers, volumes and network were destroyed. This checks the
-patch against a newer RAG source head, not a runtime image built from the
-repository's pinned `77c97fd7` baseline; it does not prove PDF recovery,
+Two further owned fixtures tested the same backend: `nc-synldap-f089ff7b`
+confirmed Alice's sole Engineering grant through her AD-shaped primary group,
+then changed that group to Domain Users; her existing WeKnora login could no
+longer read DAV, signed source, knowledge, direct content or search, and a new
+directory snapshot removed the membership. The first denial was observed after
+seven polls, 25.5 seconds after the baseline checkpoint in this fixture.
+`nc-synldap-521230a5` verified a sole nested-group edge and passed the same
+Alice/Bob six-field allow/deny matrix. Each fixture indexed two chunks and
+embeddings, and all owned containers, volumes and networks were destroyed.
+This checks the patch against a newer RAG source head, not a runtime image
+built from the repository's pinned `77c97fd7` baseline; it does not prove PDF recovery,
 enterprise AD permissions or the PRD load target.
 
 The pilot harness now has a `post-accept` event pattern that times an update

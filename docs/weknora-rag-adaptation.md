@@ -110,6 +110,12 @@ and UI image
 The OCI labels on both images identify that source head and this exact patch.
 A new direct-group synthetic LDAP stack started both images healthy, served
 the UI with HTTP 200, indexed two chunks and embeddings, and passed the
-six-field Alice/Bob permission matrix. The owned fixture was destroyed. This
-compatibility run does not change the pinned baseline or claim the PDF
+six-field Alice/Bob permission matrix. Additional fresh primary-group and
+nested-group fixtures passed. In the primary case, Alice's only grant came
+from `primaryGroupID`; changing it to Domain Users caused her existing login
+to lose DAV, signed-source, knowledge, direct-content and search access, and
+the directory membership disappeared. The nested case verified the sole
+nested group edge and the same allow/deny matrix. All three owned fixtures
+were destroyed. This compatibility run does not change the pinned baseline or
+claim the PDF
 recovery, real AD or production performance acceptance above.
