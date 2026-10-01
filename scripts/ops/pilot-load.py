@@ -575,6 +575,22 @@ def run(args):
         return report
     finally:
         cleanup_errors = []
+        # Revocation deliberately changes the receiver's dispatch state and
+        # last error. Capture only bounded diagnostic fields first so a failed
+        # pilot retains its original failure category without leaking keys.
+        if sys.exc_info()[0] is not None and source_paired:
+            try:
+                diagnostic_status, diagnostic = wk_request(wk_base, wk_token, "GET", source_path)
+                if diagnostic_status == 200 and isinstance(diagnostic, dict):
+                    state = diagnostic.get("dispatch_state")
+                    code = diagnostic.get("last_error_code")
+                    safe = re.compile(r"[a-z0-9_]{1,80}\Z")
+                    state = state if isinstance(state, str) and safe.fullmatch(state) else "unknown"
+                    code = code if isinstance(code, str) and safe.fullmatch(code) else "unknown"
+                    print(f"pilot receiver before cleanup: state={state} error_code={code}",
+                          file=sys.stderr)
+            except Exception:
+                print("pilot receiver diagnostic unavailable before cleanup", file=sys.stderr)
         if cloud_paired:
             try:
                 status, row = nc_request(admin, csrf, binding_url + "/event-connection", "GET")

@@ -123,3 +123,19 @@ its own parse and publication proof. The
 functional observation, separate from the three-sample timing pilot above.
 The new images were then installed in the shared LAN stack. This does not add a
 new latency sample or prove stale derived-row physical collection.
+
+## Full-image post-accept retry, 2026-10-02
+
+A separate owned, loopback-only fixture attempted ten 256-byte synthetic files
+and ten `post-accept` latency samples using the full RAG77 overlap image. The
+initial bulk sync succeeded. The first same-file pair wrote priming event #1,
+waited for its dispatched watermark, then wrote measured event #2. The inbox
+contained both events and reached dispatched #2 without an applied ACK. The
+first event's content GET subsequently returned HTTP 412 against its old ETag
+after the second write, and the harness observed a blocked dispatcher. Its
+automatic receiver revocation overwrote the original `last_error_code`, so the
+exact block condition was not preserved. The run produced **no valid P95** and
+does not extend the earlier timing result. All 11 owned containers, seven
+volumes, network, worktree and temporary credentials were removed. The pilot
+script now captures a bounded receiver state/error category before revocation
+on failure, for a future isolated investigation.
