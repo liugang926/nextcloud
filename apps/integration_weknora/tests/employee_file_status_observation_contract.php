@@ -7,7 +7,6 @@ require_once __DIR__ . '/../lib/Service/EmployeeFileStatusService.php';
 use OCA\IntegrationWeknora\Service\EmployeeFileStatusService;
 
 $method = new ReflectionMethod(EmployeeFileStatusService::class, 'sameRemoteObservation');
-$method->setAccessible(true);
 $matches = static fn (array $before, array $after): bool =>
     $method->invoke(null, $before, $after);
 
