@@ -658,9 +658,17 @@ passed on both baselines for zero-text publication/status/ask-target denial,
 completed-sync event fast wake, and knowledge-list/raw-search read leases
 with revocation and GC races. A local fixed-baseline backend image built as
 `sha256:1206e84f0e883492735bfe6efa9690adb0ad8ee6f7cb7d6f15d045d603bc5b91`.
-Its runtime has not completed a fresh paired end-to-end drill. The RAG AnyDoc
-image build failed first on Debian HTTP 502 downloads and then on Rust toolchain
-initialization, so the shared WeKnora stack still uses an older image.
+It was built before the test-fixture-only `sync_logs` schema correction in
+`140c8e1`; the runtime source is otherwise the same. On 2026-10-01, a fresh
+isolated direct-group LDAP fixture (`nc-synldap-72933917`) started this image,
+indexed two chunks and embeddings, and passed the six-field Alice/Bob matrix:
+Alice could log in and access DAV, signed source, knowledge and search; Bob
+could log in but was denied the four protected content paths. Its owned
+containers, volumes and network were destroyed. This is synthetic direct-group
+evidence, not real AD or the latest RAG runtime. The latest RAG AnyDoc,
+browser-skill and Go backend stages compiled, but two final image attempts
+ended on different Debian mirror single-package HTTP 502 responses. The shared
+WeKnora stack still uses an older image.
 
 The pilot harness now has a `post-accept` event pattern that times an update
 sent just after a previous event enters the queue. Its offline schedule test
