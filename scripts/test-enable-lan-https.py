@@ -4,6 +4,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -80,6 +81,44 @@ class GatewaySafetyTests(unittest.TestCase):
                  '<meta property="og:url" content="http://10.1.2.3:18482/login">'
                  '<link href="https://10.1.2.3:18482/core.css">'),
             )
+
+    def test_reads_exact_keys_without_redacted_config_list(self):
+        values = {
+            "trusted_domains": ["localhost", "10.1.2.3"],
+            "trusted_proxies": ["172.20.0.5"],
+            "overwrite.cli.url": "http://10.1.2.3:18082",
+        }
+
+        def fake_process(args, label, *, env=None):
+            index = args.index("config:system:get")
+            name = args[index + 1]
+            self.assertIn("--output=json", args)
+            if name == "trusted_proxies":
+                self.assertTrue(args[-1].startswith("--default-value="))
+            else:
+                self.assertEqual(args[-1], "--output=json")
+            return subprocess.CompletedProcess(args, 0, json.dumps(values[name]), "")
+
+        with patch.object(gateway, "process", side_effect=fake_process):
+            self.assertEqual(gateway.system_config(["docker", "compose"], {}), values)
+
+    def test_missing_proxy_value_is_empty_but_other_failure_is_not(self):
+        def absent_process(args, label, *, env=None):
+            marker = args[-1].split("=", 1)[1]
+            return subprocess.CompletedProcess(args, 0, json.dumps(marker), "")
+
+        with patch.object(gateway, "process", side_effect=absent_process):
+            self.assertEqual(gateway.occ_get([], {}, "trusted_proxies", allow_missing=True), [])
+        with patch.object(gateway, "process", return_value=subprocess.CompletedProcess(
+            [], 1, "", ""
+        )):
+            with self.assertRaises(gateway.GatewayError):
+                gateway.occ_get([], {}, "trusted_proxies", allow_missing=True)
+        with patch.object(gateway, "process", return_value=subprocess.CompletedProcess(
+            [], 1, "", "database unavailable"
+        )):
+            with self.assertRaises(gateway.GatewayError):
+                gateway.occ_get([], {}, "trusted_proxies", allow_missing=True)
 
 
 if __name__ == "__main__":

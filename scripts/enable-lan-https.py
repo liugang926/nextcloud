@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import ssl
 import subprocess
 import sys
@@ -29,6 +30,15 @@ class GatewayError(Exception):
 
 
 def command(args: Sequence[str], label: str, *, env: Optional[Dict[str, str]] = None) -> str:
+    result = process(args, label, env=env)
+    if result.returncode:
+        # Compose config and occ output can contain credentials. Never echo it.
+        raise GatewayError(f"{label} failed (exit {result.returncode})")
+    return result.stdout.strip()
+
+
+def process(args: Sequence[str], label: str, *,
+            env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
             list(args), cwd=PROJECT, env=env, text=True, stdout=subprocess.PIPE,
@@ -38,10 +48,7 @@ def command(args: Sequence[str], label: str, *, env: Optional[Dict[str, str]] = 
         raise GatewayError(f"{label} could not start: {error.strerror}") from error
     except subprocess.TimeoutExpired as error:
         raise GatewayError(f"{label} timed out") from error
-    if result.returncode:
-        # Compose config and occ output can contain credentials. Never echo it.
-        raise GatewayError(f"{label} failed (exit {result.returncode})")
-    return result.stdout.strip()
+    return result
 
 
 def compose_args() -> List[str]:
@@ -198,16 +205,33 @@ def desired_proxies(existing: Any, new_ip: str, old_ips: Sequence[Optional[str]]
     return result
 
 
-def system_config(compose: Sequence[str], env: Dict[str, str]) -> Dict[str, Any]:
-    raw = command([*compose, "exec", "-T", "-u", "www-data", "nextcloud", "php", "occ",
-                   "config:list", "system", "--output=json"], "Nextcloud configuration read", env=env)
+def occ_get(compose: Sequence[str], env: Dict[str, str], name: str,
+            *, allow_missing: bool = False) -> Any:
+    # config:list intentionally redacts trusted_proxies. The specific get
+    # command returns its exact value. A unique default marker distinguishes
+    # an absent key from a failed occ command without exposing other settings.
+    marker = f"__nextcloud_lan_https_missing_{secrets.token_hex(16)}__" if allow_missing else None
+    args = [*compose, "exec", "-T", "-u", "www-data", "nextcloud",
+            "php", "occ", "config:system:get", name, "--output=json"]
+    if marker is not None:
+        args.append(f"--default-value={marker}")
+    result = process(args,
+                     f"Nextcloud {name} read", env=env)
+    if result.returncode:
+        raise GatewayError(f"Nextcloud {name} read failed (exit {result.returncode})")
     try:
-        values = json.loads(raw)["system"]
-    except (json.JSONDecodeError, KeyError, TypeError) as error:
-        raise GatewayError("Nextcloud configuration JSON is invalid") from error
-    if not isinstance(values, dict):
-        raise GatewayError("Nextcloud system configuration is invalid")
-    return values
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise GatewayError(f"Nextcloud {name} returned invalid JSON") from error
+    return [] if marker is not None and value == marker else value
+
+
+def system_config(compose: Sequence[str], env: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "trusted_domains": occ_get(compose, env, "trusted_domains"),
+        "trusted_proxies": occ_get(compose, env, "trusted_proxies", allow_missing=True),
+        "overwrite.cli.url": occ_get(compose, env, "overwrite.cli.url"),
+    }
 
 
 def occ_set(compose: Sequence[str], env: Dict[str, str], name: str, value: str,

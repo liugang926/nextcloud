@@ -40,7 +40,8 @@ parallel HTTP login HTML. It records its managed IP under ignored
 `dist/nextcloud-https-gateway.json`, so a repeat run after container
 recreation removes the stale IP while preserving unrelated proxies. Keep this
 state file with the development stack. Trusting the whole Docker subnet would
-also trust other containers.
+also trust other containers. The helper reads the three required Nextcloud
+settings with `config:system:get`; `config:list` redacts `trusted_proxies`.
 
 The gateway passes the original `Host` including port, resets caller-supplied
 forwarding headers, and sends `X-Forwarded-Proto: https`. The Nextcloud Apache
