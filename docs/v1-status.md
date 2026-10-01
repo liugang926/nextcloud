@@ -637,4 +637,38 @@ HTTP 200, authenticated LAN DAV PROPFIND 207, and WeKnora LAN root HTTP 200
 passed. The reproducible 0.4.31 app archive contains 75 runtime files and has
 SHA-256 `110e4b9814c808f2f39f9121f77588ac96f9b114a4d36f913770308226b75876`.
 
+## 2026-10-01 follow-up
+
+Nextcloud 0.4.32 accepts a signed, allowlisted
+`failure_code=no_retrievable_content` for a failed current file. The Files
+sidebar shows a specific no-content message and does not create a question
+link. The shared local stack upgraded successfully; maintenance mode is off,
+LAN login returned HTTP 200, authenticated LAN DAV returned 207, and the
+employee file-status HTTP smoke and PHP signature contract passed. Its
+reproducible runtime archive has 75 files and SHA-256
+`df9fb1c261453197183aa2ffbf57b5936ea2e494f3deca45e304ff6e660e5f07`.
+
+The fixed c6 full patch SHA-256 is
+`595f2eed668d1b756aca717bb65384df4f38d6455897f53ececa251b64c660fc`;
+the RAG77 patch SHA-256 is
+`f7fbc90036cf6ce9caeee2d89c13555f9f962ec74d766c27d1930d05a67e6d7f`.
+Both applied to clean pinned source archives and passed the 27-route,
+26-response-shape, 11-Go-struct OpenAPI contract. Focused Docker Go tests
+passed on both baselines for zero-text publication/status/ask-target denial,
+completed-sync event fast wake, and knowledge-list/raw-search read leases
+with revocation and GC races. A local fixed-baseline backend image built as
+`sha256:1206e84f0e883492735bfe6efa9690adb0ad8ee6f7cb7d6f15d045d603bc5b91`.
+Its runtime has not completed a fresh paired end-to-end drill. The RAG AnyDoc
+image build failed first on Debian HTTP 502 downloads and then on Rust toolchain
+initialization, so the shared WeKnora stack still uses an older image.
+
+The pilot harness now has a `post-accept` event pattern that times an update
+sent just after a previous event enters the queue. Its offline schedule test
+passed, but no new Docker load run or PRD 10,000-file/100-GB/P95 acceptance
+has been made. The safe dispatch fast wake preserves same-source single flight
+and publication proof; it is not a measured latency guarantee. Derived-row
+physical GC remains disabled because other read and external-write paths lack
+complete coverage. Enterprise AD and production Team Folder acceptance still
+await a real target environment.
+
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.

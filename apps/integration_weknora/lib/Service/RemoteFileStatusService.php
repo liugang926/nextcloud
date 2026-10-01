@@ -23,7 +23,7 @@ final class RemoteFileStatusService {
     ) {
     }
 
-    /** @return array{knowledge_state: string, knowledge_ready_at: ?int, published_source_etag: ?string, qa_available: false}|null */
+    /** @return array{knowledge_state: string, knowledge_ready_at: ?int, published_source_etag: ?string, failure_code: ?string, qa_available: false}|null */
     public function status(string $bindingId, int $fileId, string $sourceEtag): ?array {
         if ($fileId < 1 || !preg_match('/\A[A-Za-z0-9._:-]{1,256}\z/D', $sourceEtag)) {
             return null;
@@ -126,7 +126,7 @@ final class RemoteFileStatusService {
     }
 
     /** @param array<string, mixed> $pair
-     *  @return array{knowledge_state: string, knowledge_ready_at: ?int, published_source_etag: ?string, qa_available: false}|null
+     *  @return array{knowledge_state: string, knowledge_ready_at: ?int, published_source_etag: ?string, failure_code: ?string, qa_available: false}|null
      */
     public static function validatedResponse(string $raw, string $signature,
         string $requestSignature, string $secret, string $connectionId, string $keyId,
@@ -158,10 +158,13 @@ final class RemoteFileStatusService {
         $state = $parsed['knowledge_state'] ?? null;
         $published = $parsed['published_source_etag'] ?? null;
         $readyAt = $parsed['knowledge_ready_at'] ?? null;
+        $failureCode = $parsed['failure_code'] ?? null;
         if (!in_array($state, ['unverified', 'updating', 'failed', 'ready'], true) ||
             ($published !== null && (!is_string($published) ||
                 !preg_match('/\A[A-Za-z0-9._:-]{1,256}\z/D', $published))) ||
-            ($readyAt !== null && (!is_int($readyAt) || $readyAt < 1))) {
+            ($readyAt !== null && (!is_int($readyAt) || $readyAt < 1)) ||
+            ($failureCode !== null && (!is_string($failureCode) || strlen($failureCode) > 64)) ||
+            ($state !== 'failed' && $failureCode !== null && $failureCode !== '')) {
             return null;
         }
         if ($state === 'ready') {
@@ -175,6 +178,10 @@ final class RemoteFileStatusService {
             'knowledge_state' => $state,
             'knowledge_ready_at' => $readyAt,
             'published_source_etag' => $published,
+            // Only an allowlisted code may reach the employee. Never forward
+            // free-form parser or source error text from the remote service.
+            'failure_code' => $state === 'failed' && $failureCode === 'no_retrievable_content'
+                ? $failureCode : null,
             // A machine status never grants this user's retrieval access.
             'qa_available' => false,
         ];

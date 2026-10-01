@@ -86,4 +86,32 @@ $updatingRaw = json_encode(array_replace($ready, [
 if (($verify($updatingRaw, $sign($updatingRaw))['knowledge_state'] ?? null) !== 'updating') {
     throw new RuntimeException('Older published version was not reported as updating');
 }
+$emptyRaw = json_encode(array_replace($ready, [
+    'knowledge_state' => 'failed',
+    'knowledge_ready_at' => null,
+    'published_source_etag' => null,
+    'failure_code' => 'no_retrievable_content',
+]), JSON_THROW_ON_ERROR);
+if (($verify($emptyRaw, $sign($emptyRaw))['failure_code'] ?? null) !== 'no_retrievable_content') {
+    throw new RuntimeException('Signed no-content failure was not recognized');
+}
+foreach ([
+    array_replace($ready, ['failure_code' => 'no_retrievable_content']),
+    array_replace($ready, ['knowledge_state' => 'failed', 'knowledge_ready_at' => null,
+        'failure_code' => ['unsafe' => 'detail']]),
+] as $invalid) {
+    $raw = json_encode($invalid, JSON_THROW_ON_ERROR);
+    if ($verify($raw, $sign($raw)) !== null) {
+        throw new RuntimeException('Malformed signed failure state was accepted');
+    }
+}
+$unknown = json_encode(array_replace($ready, [
+    'knowledge_state' => 'failed', 'knowledge_ready_at' => null,
+    'failure_code' => 'unrecognized_remote_code',
+]), JSON_THROW_ON_ERROR);
+$unknownState = $verify($unknown, $sign($unknown));
+if ($unknownState === null || !array_key_exists('failure_code', $unknownState) ||
+    $unknownState['failure_code'] !== null) {
+    throw new RuntimeException('Unrecognized remote failure code escaped the allowlist');
+}
 echo "remote file status signature contract passed\n";

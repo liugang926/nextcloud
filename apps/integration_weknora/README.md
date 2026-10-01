@@ -187,7 +187,9 @@ checks the response signature, full pair tuple, file ID and ETag, then checks
 the user's source access and ETag again. It reports `ready` only if the signed
 response proves that the candidate is completed, enabled and published for
 that same ETag. An older published ETag or a staged candidate is `updating`;
-a failed candidate for the current ETag is `failed`. No row, invalid proof,
+a failed candidate for the current ETag is `failed`. A signed static
+`failure_code=no_retrievable_content` tells the sidebar that a text file has
+no content eligible for retrieval; it never creates a question link. No row, invalid proof,
 missing connection, transport error, or unsupported ETag remains `unverified`.
 Stopped, withdrawn, inaccessible and outside-scope files never use this feed.
 

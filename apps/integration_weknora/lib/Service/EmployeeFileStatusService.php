@@ -75,6 +75,7 @@ final class EmployeeFileStatusService {
             'knowledge_state' => 'unverified',
             'knowledge_ready_at' => null,
             'published_source_etag' => null,
+            'failure_code' => null,
             'qa_available' => false,
             'weknora_login_url' => null,
             'weknora_ask_url' => null,

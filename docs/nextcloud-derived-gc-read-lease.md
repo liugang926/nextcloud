@@ -21,7 +21,8 @@ Do not enable general derived-row deletion. The patches contain a dormant, backe
 The publication guard (`internal/application/access/nextcloud_publication.go:60`) checks live source access at exposure points, but does not count in-flight readers. Existing tests of deny paths do not establish a zero-reader proof for GC.
 
 As of 2026-10-01, selected direct HTTP reads and downloads, HybridSearch,
-global `/knowledge/search`, Agent document tools and answer output hold
+global `/knowledge/search`, `ListKnowledge`, raw session `/knowledge-search`,
+Agent document tools and answer output hold
 renewable read leases and recheck publication and grants at output. A focused
 test retires a search result after lease acquisition, proves an active lease
 blocks GC claim, and denies the title before JSON output. MCP list/read reject

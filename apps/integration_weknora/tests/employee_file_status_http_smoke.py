@@ -50,6 +50,9 @@ def check_knowledge_status(source):
     assert source["qa_available"] is False
     state = source["knowledge_state"]
     assert state in ("unverified", "updating", "failed", "ready"), source
+    assert source["failure_code"] in (None, "no_retrievable_content"), source
+    if source["failure_code"] is not None:
+        assert state == "failed", source
     if state == "ready":
         assert source["source_state"] == "in_scope", source
         assert source["published_source_etag"] == source["source_etag"], source

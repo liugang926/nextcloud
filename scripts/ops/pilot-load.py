@@ -195,6 +195,29 @@ def percentile_nearest_rank(values, percentile):
     return sorted(values)[math.ceil(percentile * len(values)) - 1]
 
 
+def measure_event_queue(samples, pattern, write_probe, wait_checkpoint_time,
+                        clock=time.monotonic):
+    """Time distinct queued tasks, optionally sending after prior acceptance."""
+    if pattern not in ("sequential", "post-accept"):
+        raise ValueError("unknown pilot event pattern")
+    times_ms, event_ids, priming_event_ids = [], [], []
+    for _ in range(samples):
+        if pattern == "post-accept":
+            # The next PUT cannot be folded into the previous task: its
+            # target event ID was fixed before that task's queue acceptance.
+            priming_event_id = write_probe()
+            wait_checkpoint_time("dispatched_through_event_id", priming_event_id)
+            priming_event_ids.append(priming_event_id)
+        start = clock()
+        event_id = write_probe()
+        accepted = wait_checkpoint_time("dispatched_through_event_id", event_id)
+        times_ms.append(round((accepted - start) * 1000, 1))
+        event_ids.append(event_id)
+        # An applied checkpoint separates each measured sample or pair.
+        wait_checkpoint_time("applied_through_event_id", event_id)
+    return times_ms, event_ids, priming_event_ids
+
+
 def sync_row(db_container, source_id, sync_id):
     query = ("SELECT jsonb_build_object('status', status, 'duration_seconds', "
              "EXTRACT(EPOCH FROM finished_at-started_at), 'items_total', items_total, "
@@ -284,6 +307,9 @@ def parse_args():
     parser.add_argument("--file-count", type=int, default=8)
     parser.add_argument("--file-bytes", type=int, default=1024)
     parser.add_argument("--event-samples", type=int, default=20)
+    parser.add_argument("--event-pattern", choices=("sequential", "post-accept"),
+                        default="sequential",
+                        help="post-accept sends each measured update immediately after a prior event enters the queue")
     parser.add_argument("--sync-timeout", type=int, default=600)
     parser.add_argument("--event-timeout", type=int, default=600)
     parser.add_argument("--upload-timeout", type=int, default=120)
@@ -490,26 +516,30 @@ def run(args):
 
         stage = "measure event queue latency"
         event_path = folder + "/latency-probe.txt"
-        times_ms = []
-        event_ids = []
-        for index in range(args.event_samples):
-            start = time.monotonic()
+        write_index = 0
+        last_event_id = baseline_event_id
+
+        def write_probe():
+            nonlocal write_index, last_event_id
             status, _ = dav_request(event_path, "PUT", dav_headers,
-                                    f"synthetic event sample {index:04d}\n".encode())
-            require_status(status, 201 if index == 0 else 204, "write latency sample")
+                                    f"synthetic event sample {write_index:04d}\n".encode())
+            require_status(status, 201 if write_index == 0 else 204,
+                           "write latency sample")
             event_id = outbox_event_id(nc_db_container, binding,
                                        file_id(event_path, dav_headers))
-            if event_ids and event_id <= event_ids[-1]:
-                raise RuntimeError("event IDs did not advance between samples")
-            accepted, _ = wait_checkpoint(wk_base, wk_token, source_path,
-                                          "dispatched_through_event_id", event_id,
-                                          args.event_timeout)
-            times_ms.append(round((accepted - start) * 1000, 1))
-            event_ids.append(event_id)
-            # One applied checkpoint between samples prevents burst coalescing
-            # from counting a single durable job for multiple source events.
-            wait_checkpoint(wk_base, wk_token, source_path,
-                            "applied_through_event_id", event_id, args.event_timeout)
+            if event_id <= last_event_id:
+                raise RuntimeError("event IDs did not advance between writes")
+            write_index += 1
+            last_event_id = event_id
+            return event_id
+
+        def wait_event(field, event_id):
+            observed, _ = wait_checkpoint(wk_base, wk_token, source_path,
+                                          field, event_id, args.event_timeout)
+            return observed
+
+        times_ms, event_ids, priming_event_ids = measure_event_queue(
+            args.event_samples, args.event_pattern, write_probe, wait_event)
         report = {
             "schema_version": 1, "kind": "synthetic_disposable_pilot",
             "nextcloud_project": args.nextcloud_compose_project,
@@ -523,12 +553,14 @@ def run(args):
                 "p50_ms": percentile_nearest_rank(times_ms, .50),
                 "p95_ms": percentile_nearest_rank(times_ms, .95),
                 "max_ms": max(times_ms), "event_ids": event_ids,
+                "arrival_pattern": args.event_pattern,
+                "priming_event_ids": priming_event_ids,
                 "method": "host monotonic time before WebDAV PUT to first observed WeKnora dispatched watermark; upper bound includes PUT and status polling",
             },
             "limits": [
                 "WeKnora process RSS includes unrelated application activity; it is not connector-only heap.",
                 "Logical throughput uses fixture payload bytes divided by sync_log duration; it is not measured network bytes or completed indexing throughput.",
-                "Event P95 is nearest-rank over synthetic sequential samples; it does not establish sustained production P95.",
+                "Event P95 is nearest-rank over synthetic samples; even post-accept pairs do not establish sustained production P95.",
             ],
         }
         return report

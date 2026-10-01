@@ -1,9 +1,13 @@
 # Disposable pilot load and queue latency probe
 
 `pilot-load.py` creates synthetic files in a new binding, pairs a new dedicated
-WeKnora knowledge base, performs one full source sync, and times independent
-WebDAV upserts until WeKnora reports a durable queue-accepted event watermark.
-It waits for the previous event's applied watermark before each next sample.
+WeKnora knowledge base, performs one full source sync, and times WebDAV
+upserts until WeKnora reports a durable queue-accepted event watermark.
+The default sequential pattern waits for the previous event's applied
+watermark before each next sample. `--event-pattern post-accept` instead
+writes a priming event, waits for its queue acceptance, then immediately
+writes the measured event while the previous task may still be running. Each
+measured event has its own later queue acceptance and applied checkpoint.
 The fixture remains in its **disposable** stacks for inspection; the script
 revokes its temporary event connection, and the operator removes both stacks
 and their volumes after recording results.
@@ -95,13 +99,22 @@ Omit the three reduced-load flags for the default 20-event run. Use
 new. It contains image IDs, fixture IDs and metrics but no credentials or
 document bodies.
 
+Run a second small fixture with `--event-pattern post-accept` to exercise
+follow-up events that arrive just after a prior durable task was queued. This
+pattern performs two writes per reported sample; the report records both the
+priming and measured event IDs. Wait for adequate host and Docker disk space
+before starting any new disposable stack.
+
 `event_to_durable_job.p95_ms` is nearest-rank P95 of host monotonic intervals
 from just before a WebDAV PUT to the first observed WeKnora
 `dispatched_through_event_id` that covers that file's outbox hint. It is an
 **upper bound** that includes PUT time and 0.5-second status polling. A
 dispatch watermark means a durable sync job was accepted, not that parsing or
-publication finished. Applied checkpoints between samples prevent one queued
-job from being counted as several independent samples.
+publication finished. Applied checkpoints between sequential samples or
+post-accept pairs prevent one queued job from being counted as several
+independent samples. The latter pattern includes time spent behind an earlier
+task, so it measures queue behavior under overlap rather than idle queue
+latency.
 
 `bulk_sync.logical_payload_bytes_per_second` divides known fixture bytes by
 the successful `sync_logs` duration. This is a logical ingestion rate; it is

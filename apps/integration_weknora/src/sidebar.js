@@ -122,7 +122,8 @@ class WeknoraFileSidebarTab extends HTMLElement {
             const knowledgeState = {
                 ready: '当前版本已解析并发布',
                 updating: '正在更新',
-                failed: '当前版本解析失败',
+                failed: data.failure_code === 'no_retrievable_content'
+                    ? '当前版本没有可检索内容' : '当前版本处理失败',
                 unverified: '尚未验证',
             }[data.knowledge_state] || '尚未验证'
             this.addRow(section, '知识状态', knowledgeState)
@@ -137,7 +138,9 @@ class WeknoraFileSidebarTab extends HTMLElement {
             explanation.textContent = {
                 ready: 'WeKnora 已解析并发布此源文件的当前版本。能否提问仍取决于你在 WeKnora 登录后的个人权限。',
                 updating: 'WeKnora 尚未发布此源文件的当前版本。请稍后刷新。',
-                failed: 'WeKnora 处理此源文件的当前版本时失败。请联系管理员查看同步与解析记录。',
+                failed: data.failure_code === 'no_retrievable_content'
+                    ? '此文件没有可供问答的文本内容。请添加内容后保存，或联系管理员检查解析配置。'
+                    : 'WeKnora 处理此源文件的当前版本时失败。请联系管理员查看同步与解析记录。',
                 unverified: '目前无法验证 WeKnora 是否已解析并发布当前版本。请稍后刷新。',
             }[data.knowledge_state] || '目前无法验证 WeKnora 是否已解析并发布当前版本。请稍后刷新。'
         } else if (data.source_state === 'withdrawn') {

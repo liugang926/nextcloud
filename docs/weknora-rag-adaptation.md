@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`dd7e09a9df65085d31e99737220dd3a60ff8b2dabfe823f6cc75fabace1b73ee`.
+`595f2eed668d1b756aca717bb65384df4f38d6455897f53ececa251b64c660fc`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`f627d20af4edd053163d5f8594f8e75fc55393395d2135701073a1a75df0d475`.
+`f7fbc90036cf6ce9caeee2d89c13555f9f962ec74d766c27d1930d05a67e6d7f`.
 The build script and CI reject a different patch hash. On 2026-10-01 both
 baseline patches applied cleanly to fresh source archives. The failed-file
 editor probe tests and frontend type checks passed for both patches. The RAG baseline
@@ -33,6 +33,15 @@ BatchSave versus source retirement, stale Publish after a new Stage, Stage
 versus Tombstone, queued parser admission before Stage, crash/retry of exact
 vector-ID receipts, and exact claimed deletion with retrieval checks. These
 checks do not enable global derived GC.
+
+The current patch also rejects empty text candidates as published answers,
+returns a signed static no-content status, wakes the event dispatcher after a
+completed prior sync when a new hint exists, and fences knowledge-list and
+raw-search output with read leases and current authorization. Focused Go tests
+in the repository and both handler packages passed for both pinned baselines;
+the 27-route OpenAPI checker passed after applying each patch to a clean
+source archive. The full suite and a new RAG runtime image have not yet been
+verified for this patch revision.
 
 For the existing local `weknora-ldap-local` stack, run:
 

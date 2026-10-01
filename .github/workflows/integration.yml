@@ -53,6 +53,9 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             php apps/integration_weknora/tests/browser_file_url_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/remote_file_status_signature_contract.php
 
       - name: Install packaged app on an empty isolated stack
         run: python3 scripts/ops/isolated-fresh-install-smoke.py
@@ -151,7 +154,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo 'dd7e09a9df65085d31e99737220dd3a60ff8b2dabfe823f6cc75fabace1b73ee  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '595f2eed668d1b756aca717bb65384df4f38d6455897f53ececa251b64c660fc  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -253,7 +256,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'f627d20af4edd053163d5f8594f8e75fc55393395d2135701073a1a75df0d475  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo 'f7fbc90036cf6ce9caeee2d89c13555f9f962ec74d766c27d1930d05a67e6d7f  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check

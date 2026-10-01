@@ -34,6 +34,32 @@ class PilotLoadTests(unittest.TestCase):
         self.assertEqual(PILOT.percentile_nearest_rank(list(range(1, 21)), .95), 19)
         self.assertEqual(len(PILOT.payload(6, 1049)), 1049)
 
+    def test_post_accept_measures_a_new_task_after_previous_queue_acceptance(self):
+        sequence = []
+        next_id = 0
+
+        def write():
+            nonlocal next_id
+            next_id += 1
+            sequence.append(("write", next_id))
+            return next_id
+
+        def wait(field, event_id):
+            sequence.append((field, event_id))
+            return 1.0
+
+        times, measured, priming = PILOT.measure_event_queue(
+            2, "post-accept", write, wait, clock=lambda: 0.0)
+        self.assertEqual((times, measured, priming), ([1000.0, 1000.0], [2, 4], [1, 3]))
+        self.assertEqual(sequence, [
+            ("write", 1), ("dispatched_through_event_id", 1),
+            ("write", 2), ("dispatched_through_event_id", 2),
+            ("applied_through_event_id", 2),
+            ("write", 3), ("dispatched_through_event_id", 3),
+            ("write", 4), ("dispatched_through_event_id", 4),
+            ("applied_through_event_id", 4),
+        ])
+
     def test_large_fixture_needs_explicit_opt_in(self):
         with self.assertRaises(SystemExit):
             self.parse("--file-count", "101")
