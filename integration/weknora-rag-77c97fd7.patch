@@ -11408,10 +11408,10 @@ index 00000000..97fddacf
 +}
 diff --git a/internal/application/repository/nextcloud_gc.go b/internal/application/repository/nextcloud_gc.go
 new file mode 100644
-index 00000000..6c799b1d
+index 00000000..46ac8612
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc.go
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,537 @@
 +package repository
 +
 +import (
@@ -11723,16 +11723,19 @@ index 00000000..6c799b1d
 +		if err := refreshNextcloudGCDerivedInventory(tx, job, now); err != nil {
 +			return err
 +		}
-+		if job.LastErrorCode == "invalid_image_inventory" {
-+			valid, err := refreshNextcloudGCImageInventory(tx, job, now)
-+			if err != nil {
-+				return err
-+			}
-+			if !valid {
-+				return tx.Model(&nextcloudGCJob{}).Where("id = ?", job.ID).
-+					Updates(map[string]any{"state": "blocked", "attempts": job.Attempts + 1,
-+						"next_attempt_at": now.Add(nextcloudGCRetryWindow), "updated_at": now}).Error
-+			}
++		// A chunk may gain image references after the first inventory. Rescan
++		// before any physical claim so a late image is durably inventoried and
++		// a newly malformed image_info fails closed, even if the previous scan
++		// was valid.
++		valid, err := refreshNextcloudGCImageInventory(tx, job, now)
++		if err != nil {
++			return err
++		}
++		if !valid {
++			return tx.Model(&nextcloudGCJob{}).Where("id = ?", job.ID).
++				Updates(map[string]any{"state": "blocked", "attempts": job.Attempts + 1,
++					"last_error_code": "invalid_image_inventory",
++					"next_attempt_at": now.Add(nextcloudGCRetryWindow), "updated_at": now}).Error
 +		}
 +		var version nextcloudSourceVersion
 +		if err := nextcloudVersionQuery(tx.Clauses(clause.Locking{Strength: "UPDATE"}),
@@ -12442,10 +12445,10 @@ index 00000000..034ebd30
 +}
 diff --git a/internal/application/repository/nextcloud_gc_test.go b/internal/application/repository/nextcloud_gc_test.go
 new file mode 100644
-index 00000000..ff5d0f4c
+index 00000000..f5a8121f
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc_test.go
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,729 @@
 +package repository
 +
 +import (
@@ -12748,6 +12751,89 @@ index 00000000..ff5d0f4c
 +	var bindings int64
 +	require.NoError(t, db.Model(&types.ResourceBinding{}).Where("resource_id = ?", resource.ID).Count(&bindings).Error)
 +	require.Equal(t, int64(1), bindings)
++}
++
++func TestNextcloudGCRetryInventoriesLateImageReference(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	nextcloudGCTestSource(t, db, "old", "", now.Add(-2*time.Hour))
++	require.NoError(t, db.Create(&types.Chunk{ID: "chunk", TenantID: 7,
++		KnowledgeBaseID: "kb", KnowledgeID: "old"}).Error)
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	var job nextcloudGCJob
++	require.NoError(t, db.Take(&job).Error)
++	_, err = store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	require.NoError(t, db.Model(&types.Chunk{}).Where("id = ?", "chunk").
++		Update("image_info", `[{"url":"resource://late-image"}]`).Error)
++
++	_, err = store.RunDue(ctx, now.Add(time.Hour), 100)
++	require.NoError(t, err)
++	var item nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ? AND kind = ? AND object_ref = ?",
++		job.ID, "extracted_image", "resource://late-image").Take(&item).Error)
++	require.Equal(t, "blocked", item.State)
++	_, err = store.RunDue(ctx, now.Add(2*time.Hour), 100)
++	require.NoError(t, err)
++	var count int64
++	require.NoError(t, db.Model(&nextcloudGCItem{}).Where("job_id = ? AND kind = ?",
++		job.ID, "extracted_image").Count(&count).Error)
++	require.Equal(t, int64(1), count, "retry must not duplicate a persisted image item")
++}
++
++func TestNextcloudGCLateInvalidImageInventoryBlocksThenRecovers(t *testing.T) {
++	ctx := context.Background()
++	now := time.Now().UTC()
++	store, db := nextcloudGCTestDB(t)
++	ref := nextcloudGCTestLocalResource(t, db, strings.Repeat("i", 22), "old")
++	nextcloudGCTestSource(t, db, "old", ref, now.Add(-2*time.Hour))
++	_, err := store.InventoryRetired(ctx, now, 100)
++	require.NoError(t, err)
++	var job nextcloudGCJob
++	require.NoError(t, db.Take(&job).Error)
++	deletes := 0
++	store.ConfigureLocalDelete(func(context.Context, *types.StoredResource) (bool, error) {
++		deletes++
++		return true, nil
++	})
++	_, err = store.RunDue(ctx, now, 100)
++	require.NoError(t, err)
++	require.Zero(t, deletes, "the original is still inside its recovery window")
++	// The initial inventory and first due run were valid. A later writer
++	// leaves image_info corrupt before the original's recovery window ends.
++	require.NoError(t, db.Create(&types.Chunk{ID: "late-chunk", TenantID: 7,
++		KnowledgeBaseID: "kb", KnowledgeID: "old", ImageInfo: `{broken`}).Error)
++	_, err = store.RunDue(ctx, now.Add(7*24*time.Hour), 100)
++	require.NoError(t, err)
++	require.Zero(t, deletes)
++	status, err := store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.Equal(t, "invalid_image_inventory", status[0].LastErrorCode)
++	var resource types.StoredResource
++	require.NoError(t, db.Where("handle = ?", strings.Repeat("i", 22)).Take(&resource).Error)
++	require.Equal(t, types.ResourceStateActive, resource.State)
++	var bindings int64
++	require.NoError(t, db.Model(&types.ResourceBinding{}).
++		Where("resource_id = ?", resource.ID).Count(&bindings).Error)
++	require.Equal(t, int64(1), bindings)
++
++	require.NoError(t, db.Model(&types.Chunk{}).Where("id = ?", "late-chunk").
++		Update("image_info", `[{"url":"`+ref+`"}]`).Error)
++	_, err = store.RunDue(ctx, now.Add(7*24*time.Hour+time.Hour), 100)
++	require.NoError(t, err)
++	require.Equal(t, 1, deletes)
++	var imageItem nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ? AND kind = ? AND object_ref = ?",
++		job.ID, "extracted_image", ref).Take(&imageItem).Error)
++	require.Equal(t, "collected", imageItem.State)
++	require.NoError(t, db.Unscoped().Where("id = ?", resource.ID).Take(&resource).Error)
++	require.Equal(t, types.ResourceStateDeleted, resource.State)
++	status, err = store.ListStatus(ctx, 7, 100)
++	require.NoError(t, err)
++	require.NotEqual(t, "invalid_image_inventory", status[0].LastErrorCode)
++	require.Equal(t, "blocked", status[0].State, "derived copies still have no deletion proof")
 +}
 +
 +func TestNextcloudGCPhysicalClaimFailureIsDurable(t *testing.T) {

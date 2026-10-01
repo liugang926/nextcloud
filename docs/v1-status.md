@@ -753,8 +753,8 @@ binding-relative path in the WeKnora event inbox. Applied ACK requires that
 exact file version in the completed source scan and published candidate.
 Broad or excluded-file hints require two complete scans of the same target;
 legacy file hints without a relative path enter manual review. The exact
-patch SHA-256 values are `a32114b68b9c260b94c889c603fa6b4167e7681fe831dfd26de7ff881afa4bfd`
-and `7b0b15ab9c9f93c6c707a13fa39cfc71d050b0b2095d132501584fad908601f4`.
+patch SHA-256 values are `748866423a51e6aa0d50b151366e80adb5325a9447d499164f9162b821fdaa40`
+and `2542c3f423c2c143191de4d01d508db3761242cfa8e7decd1b3bc43ef98e7d12`.
 Both applied to their pinned clean bases, passed the 27-route OpenAPI
 contract and focused SQLite tests, and passed isolated PostgreSQL event,
 pairing, indexed-withdrawal and rebind tests. No enterprise AD fixture was
@@ -774,5 +774,17 @@ overlap while a prior parser is still running remains unimplemented, so a
 later sample can still wait behind a parser. The shared LAN WeKnora image
 has not been upgraded to this receiver; a coordinated two-sided maintenance
 upgrade is required before enabling event delivery for connected sources.
+
+The current patch also rechecks every retired knowledge's chunk image
+references at each due GC retry, before any local source-object claim. A
+late image URL is added to the durable inventory; a late malformed
+`image_info` value records `invalid_image_inventory` and blocks the provider
+delete callback. Correcting the value permits an idempotent retry. The
+focused SQLite and isolated tmpfs PostgreSQL GC tests passed on both pinned
+baselines. This closes the previously observed retry gap, but external
+writers can still race the scan and physical claim. Derived-index physical
+GC remains disabled until its full writer and reader lease coverage is
+proved. The three-sample event pilot above used the preceding patch revision;
+its historical hash remains in the pilot report.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.

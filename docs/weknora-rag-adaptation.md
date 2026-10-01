@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`a32114b68b9c260b94c889c603fa6b4167e7681fe831dfd26de7ff881afa4bfd`.
+`748866423a51e6aa0d50b151366e80adb5325a9447d499164f9162b821fdaa40`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`7b0b15ab9c9f93c6c707a13fa39cfc71d050b0b2095d132501584fad908601f4`.
+`2542c3f423c2c143191de4d01d508db3761242cfa8e7decd1b3bc43ef98e7d12`.
 The build script and CI reject a different patch hash. On 2026-10-02 both
 current baseline patches applied cleanly to fresh source archives. The failed-file
 editor probe tests and frontend type checks passed for both patches. The RAG baseline
@@ -52,6 +52,14 @@ binary and migrations onto an earlier AnyDoc runtime, completed a disposable
 three-sample queue pilot; see the [event queue record](isolated-event-queue-pilot.md).
 This does not substitute for the pinned full RAG image build or sustained
 load acceptance.
+
+The latest patch also refreshes retired chunk image references on every
+due GC retry. A newly malformed `image_info` blocks the local provider
+delete callback until repaired; a newly valid image URL is durably
+inventoried without duplicating prior items. Focused SQLite and isolated
+PostgreSQL GC tests passed on both baselines. This does not enable
+derived-index physical deletion or close the external-writer race between
+inventory and claim.
 
 For the existing local `weknora-ldap-local` stack, run:
 
