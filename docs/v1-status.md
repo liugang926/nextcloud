@@ -701,8 +701,23 @@ observed 8.2 seconds after the ACL mutation in this fixture. Its owned
 containers, volumes and network were destroyed. This is a synthetic Team
 Folder result, not a production revocation SLA.
 This checks the patch against a newer RAG source head, not a runtime image
-built from the repository's pinned `77c97fd7` baseline; it does not prove PDF recovery,
+built from the repository's pinned `77c97fd7` baseline; it does not prove
 enterprise AD permissions or the PRD load target.
+
+The same newer-head AnyDoc candidate completed two further owned PDF fixtures.
+The natural born-digital PDF path (`nc-synldap-d2d04e24`) indexed the protected
+marker in two ready chunks and embeddings, exposed an available AnyDoc engine
+and connected DocReader, answered a file-scoped question with the original
+Nextcloud file citation, then denied signed source, ask-target, direct content,
+document search and historical citation to Alice's old JWT after source-share
+revocation. The natural primary parse was complete, so the short-text AnyDoc
+recovery branch did not run. A separate controlled short-primary fixture
+(`nc-synldap-65f5b37f`) forced that branch: DocReader yielded 46 primary
+characters, AnyDoc recovered 283, and the same protected text, citation and
+old-JWT revocation checks passed. Both fixtures retained LDAP membership and
+the owner's original file, then destroyed their owned resources. These are
+synthetic PDFs with mock embedding/chat services, not a scanned-PDF OCR or
+enterprise answer-quality acceptance.
 
 The pilot harness now has a `post-accept` event pattern that times an update
 sent just after a previous event enters the queue. Its offline schedule test

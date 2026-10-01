@@ -34,9 +34,17 @@ handoff = runpy.run_path(str(HERE / "synthetic-ldap-ask-handoff.py"))
 matrix = runpy.run_path(str(HERE / "ad-permission-acceptance.py"))
 index = runpy.run_path(str(HERE / "local-indexed-withdrawal-smoke.py"))
 
-IMAGE = "weknora-ldap-app:nextcloud-rag-e5-anydoc-rebind"
-BASE = "e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e"
-PATCH_SHA = "ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03"
+CANDIDATES = {
+    "weknora-ldap-app:nextcloud-rag-e5-anydoc-rebind": (
+        "e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e",
+        "ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03",
+    ),
+    "weknora-ldap-app:rag-nc-3ad-251f": (
+        "3ad3b31f2b3e6409c6a9c196bbab70e2eac6c666",
+        "251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611",
+    ),
+}
+DEFAULT_IMAGE = "weknora-ldap-app:nextcloud-rag-e5-anydoc-rebind"
 PDF_NAME = "candidate-pdf.pdf"
 MARKER = "ORCHID-QUARTZ-2749"
 PDF_MARKER = "PDF-CANDIDATE-8734"
@@ -48,17 +56,18 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def candidate_image():
+def candidate_image(image):
+    base, patch_sha = CANDIDATES[image]
     inspected = subprocess.run(
-        ["docker", "image", "inspect", IMAGE,
+        ["docker", "image", "inspect", image,
          "--format", "{{json .Config.Labels}}"],
         text=True, capture_output=True, check=False, timeout=20)
     require(inspected.returncode == 0,
-            "candidate image is absent; build the pinned e5 AnyDoc image first")
+            "candidate image is absent; build the selected AnyDoc image first")
     labels = json.loads(inspected.stdout)
     require(isinstance(labels, dict) and
-            labels.get("org.opencontainers.image.revision") == BASE and
-            labels.get("io.github.liugang926.weknora.nextcloud-patch-sha256") == PATCH_SHA,
+            labels.get("org.opencontainers.image.revision") == base and
+            labels.get("io.github.liugang926.weknora.nextcloud-patch-sha256") == patch_sha,
             "candidate image does not carry the pinned source and patch labels")
     return labels
 
@@ -193,9 +202,9 @@ def source_denial(nc_base, wk_base, state, passwords, fixture, pdf_id,
     raise RuntimeError("old JWT PDF source, direct, search and citation denial did not converge")
 
 
-def run(scratch, *, require_recovery=False):
+def run(scratch, image, *, require_recovery=False):
     directory, state = owner["owned_state"](scratch)
-    require(state["mode"] == "direct" and state["weknora_image"] == IMAGE,
+    require(state["mode"] == "direct" and state["weknora_image"] == image,
             "PDF smoke requires its owned direct candidate fixture")
     passwords = json.loads((directory / "passwords.json").read_text())
     runtime = json.loads((directory / "runtime.json").read_text())
@@ -364,10 +373,10 @@ def run(scratch, *, require_recovery=False):
                      separators=(",", ":")))
 
 
-def force_short_primary(scratch):
+def force_short_primary(scratch, image):
     """Force rasterized primary output only in this owned private fixture."""
     directory, state = owner["owned_state"](scratch)
-    require(state["mode"] == "direct" and state["weknora_image"] == IMAGE,
+    require(state["mode"] == "direct" and state["weknora_image"] == image,
             "short-primary injection requires an owned candidate fixture")
     path = directory / "compose.yaml"
     compose = json.loads(path.read_text())
@@ -384,21 +393,21 @@ def force_short_primary(scratch):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", choices=(IMAGE,), default=IMAGE,
+    parser.add_argument("--image", choices=tuple(CANDIDATES), default=DEFAULT_IMAGE,
                         help="the pinned candidate tag; shared tags are rejected")
     parser.add_argument("--force-short-primary", action="store_true",
                         help="in the owned fixture only, force DocReader to "
                              "rasterize PDFs so the AnyDoc recovery branch is required")
     args = parser.parse_args()
-    candidate_image()
+    candidate_image(args.image)
     prepared = subprocess.run(
         [sys.executable, str(HERE / "synthetic-ldap-fixture.py"),
-         "prepare", "--weknora-image", IMAGE, "--mode", "direct"],
+         "prepare", "--weknora-image", args.image, "--mode", "direct"],
         text=True, capture_output=True, check=True, timeout=45)
     scratch = Path(json.loads(prepared.stdout)["scratch"])
     try:
         if args.force_short_primary:
-            force_short_primary(scratch)
+            force_short_primary(scratch, args.image)
         subprocess.run(
             [sys.executable, str(HERE / "synthetic-ldap-fixture.py"),
              "up", "--scratch", str(scratch)],
@@ -406,7 +415,7 @@ def main():
         directory, state = owner["owned_state"](scratch)
         e2e["bootstrap"](directory, state)
         e2e["matrix"](directory, state)
-        run(scratch, require_recovery=args.force_short_primary)
+        run(scratch, args.image, require_recovery=args.force_short_primary)
     finally:
         removed = subprocess.run(
             [sys.executable, str(HERE / "synthetic-ldap-fixture.py"),

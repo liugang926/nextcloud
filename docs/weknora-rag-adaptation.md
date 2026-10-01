@@ -121,5 +121,17 @@ bound its root and checked a file-scoped answer with its original Files
 citation. A file-level `-read` ACL for Alice then denied DAV, signed source,
 Files status, ask-target, knowledge, direct content and search; historical
 content was redacted. All owned resources were removed. This compatibility
-run does not change the pinned baseline or claim the PDF
-recovery, real AD or production performance acceptance above.
+run does not change the pinned baseline; PDF recovery is checked separately
+below, while real AD and production performance remain unaccepted.
+
+Two more owned fixtures used that exact newer-head candidate for PDF checks.
+The natural born-digital PDF path indexed two ready chunks and embeddings,
+answered a file-scoped question with an original Nextcloud Files citation,
+and hid source, answer, search and historical citation from Alice's old JWT
+after source-share revocation. Because DocReader returned complete text, that
+run did not enter the short-text recovery branch. In a separate controlled
+fixture, `DOCREADER_PDF_FORCE_SCANNED=1` made the primary output 46 characters;
+AnyDoc recovered 283 characters and the same protected text, citation and
+revocation checks passed. Both synthetic fixtures were destroyed. Mock
+embedding and chat services were used; scanned-PDF OCR, real AD and enterprise
+answer quality remain unaccepted.
