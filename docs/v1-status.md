@@ -771,9 +771,10 @@ not a rebuilt release image. The original report and image ID are in the
 [pilot record](isolated-event-queue-pilot.md). Three tiny samples do not
 establish the PRD's sustained P95 or 10,000-file/100-GB targets. Bounded
 overlap while a prior parser is still running remains unimplemented, so a
-later sample can still wait behind a parser. The shared LAN WeKnora image
-has not been upgraded to this receiver; a coordinated two-sided maintenance
-upgrade is required before enabling event delivery for connected sources.
+later sample can still wait behind a parser. At the time of this pilot, the
+shared LAN WeKnora image had not been upgraded to this receiver; the later
+coordinated upgrade is recorded below. Connected sources still require
+watermark and historical-hint review before event delivery is enabled.
 
 The current patch also rechecks every retired knowledge's chunk image
 references at each due GC retry, before any local source-object claim. A
@@ -786,5 +787,48 @@ writers can still race the scan and physical claim. Derived-index physical
 GC remains disabled until its full writer and reader lease coverage is
 proved. The three-sample event pilot above used the preceding patch revision;
 its historical hash remains in the pilot report.
+
+## 2026-10-02 pinned RAG77 image and LAN upgrade
+
+The pinned `77c97fd7` source and RAG patch SHA-256
+`2542c3f423c2c143191de4d01d508db3761242cfa8e7decd1b3bc43ef98e7d12`
+produced full arm64 AnyDoc backend and UI images. Their image IDs are
+`sha256:4106172dec93957e94ab8c2e1a23d7844579b4b25a4dc1db644f1cf624d64d3a`
+and `sha256:5f6842d7206558e825d9ac877596caba6a2a5b5cc42c953610a8509241c8d081`.
+The backend contains its binary, migration CLI and browser-skill artifact;
+the isolated parser-engine API reported AnyDoc available.
+
+An owned direct-group LDAP fixture (`nc-synldap-18925d9f`) booted both images
+and indexed two chunks and embeddings. Its six-field access matrix allowed
+Alice's Nextcloud DAV, signed source, WeKnora knowledge and search, while Bob
+could log in but could not read those four resources. A further synthetic file
+upsert carried a matching signed `relative_path` and ETag in the Nextcloud
+outbox and WeKnora inbox. Event #2 reached received, dispatched and applied
+watermarks on WeKnora and received and applied watermarks on Nextcloud; the
+candidate was published with two ready chunks and embeddings. WebDAV deletion
+produced event #3, which reached both applied watermarks and a tombstone with
+no visible candidate. The [redacted event evidence](evidence/rag77-full-image-event-2026-10-02.json)
+records this single functional probe; its 31.7-second upsert and 94.2-second
+delete timings are not P95 acceptance. The owned fixture was destroyed.
+
+A read-only dump of the shared WeKnora database was restored to a disposable
+PostgreSQL 17 container on an internal Docker network. Running only the
+candidate image's migration CLI advanced the clone from schema `127/false` to
+`130/false`, including the event inbox ETag, path and relative-path columns.
+The clone, its volume, network and temporary credentials were removed. Before
+the shared upgrade, both Nextcloud and WeKnora had zero active event
+connections. A verified shared-database backup was saved at
+`dist/backups/weknora-before-rag-20261001T194752Z.dump`, and the old images
+were retained under `pre-rag77-20261002` tags. The coordinated upgrade
+installed the two image IDs above; the shared database is `130/false`, both
+containers are healthy, both LAN entry points return HTTP 200, and an
+authenticated Nextcloud LAN WebDAV `PROPFIND` returns HTTP 207.
+
+The employee Files status lookup now compares the binding publication epoch
+and append-only publication audit revision around a slow signed WeKnora status
+request. A stop/resume or withdraw/republish transition cannot reuse an old
+`ready` observation with the same ETag. A focused PHP contract and CI checks
+pass. Real enterprise AD accounts, sustained 10,000-file/100-GB and P95 load,
+complete parser-overlap admission, and physical derived-index GC remain open.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.
