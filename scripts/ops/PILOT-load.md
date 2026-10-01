@@ -116,6 +116,11 @@ independent samples. The latter pattern includes time spent behind an earlier
 task, so it measures queue behavior under overlap rather than idle queue
 latency.
 
+`event_to_applied_proof.p95_ms` uses the same WebDAV start time and ends when
+WeKnora first reports an applied watermark covering that event. This includes
+queue wait, source scan, parsing, publication checks, and status polling. It
+does not measure the later signed Nextcloud status poll.
+
 `bulk_sync.logical_payload_bytes_per_second` divides known fixture bytes by
 the successful `sync_logs` duration. This is a logical ingestion rate; it is
 not measured network throughput or end-to-end indexing throughput. The

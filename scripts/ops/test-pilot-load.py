@@ -46,11 +46,12 @@ class PilotLoadTests(unittest.TestCase):
 
         def wait(field, event_id):
             sequence.append((field, event_id))
-            return 1.0
+            return 2.0 if field == "applied_through_event_id" else 1.0
 
-        times, measured, priming = PILOT.measure_event_queue(
+        times, applied, measured, priming = PILOT.measure_event_queue(
             2, "post-accept", write, wait, clock=lambda: 0.0)
-        self.assertEqual((times, measured, priming), ([1000.0, 1000.0], [2, 4], [1, 3]))
+        self.assertEqual((times, applied, measured, priming),
+                         ([1000.0, 1000.0], [2000.0, 2000.0], [2, 4], [1, 3]))
         self.assertEqual(sequence, [
             ("write", 1), ("dispatched_through_event_id", 1),
             ("write", 2), ("dispatched_through_event_id", 2),

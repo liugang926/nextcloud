@@ -200,7 +200,7 @@ def measure_event_queue(samples, pattern, write_probe, wait_checkpoint_time,
     """Time distinct queued tasks, optionally sending after prior acceptance."""
     if pattern not in ("sequential", "post-accept"):
         raise ValueError("unknown pilot event pattern")
-    times_ms, event_ids, priming_event_ids = [], [], []
+    times_ms, applied_times_ms, event_ids, priming_event_ids = [], [], [], []
     for _ in range(samples):
         if pattern == "post-accept":
             # The next PUT cannot be folded into the previous task: its
@@ -214,8 +214,9 @@ def measure_event_queue(samples, pattern, write_probe, wait_checkpoint_time,
         times_ms.append(round((accepted - start) * 1000, 1))
         event_ids.append(event_id)
         # An applied checkpoint separates each measured sample or pair.
-        wait_checkpoint_time("applied_through_event_id", event_id)
-    return times_ms, event_ids, priming_event_ids
+        applied = wait_checkpoint_time("applied_through_event_id", event_id)
+        applied_times_ms.append(round((applied - start) * 1000, 1))
+    return times_ms, applied_times_ms, event_ids, priming_event_ids
 
 
 def sync_row(db_container, source_id, sync_id):
@@ -538,7 +539,7 @@ def run(args):
                                           field, event_id, args.event_timeout)
             return observed
 
-        times_ms, event_ids, priming_event_ids = measure_event_queue(
+        times_ms, applied_times_ms, event_ids, priming_event_ids = measure_event_queue(
             args.event_samples, args.event_pattern, write_probe, wait_event)
         report = {
             "schema_version": 1, "kind": "synthetic_disposable_pilot",
@@ -556,6 +557,14 @@ def run(args):
                 "arrival_pattern": args.event_pattern,
                 "priming_event_ids": priming_event_ids,
                 "method": "host monotonic time before WebDAV PUT to first observed WeKnora dispatched watermark; upper bound includes PUT and status polling",
+            },
+            "event_to_applied_proof": {
+                "samples": len(applied_times_ms), "latency_ms": applied_times_ms,
+                "p50_ms": percentile_nearest_rank(applied_times_ms, .50),
+                "p95_ms": percentile_nearest_rank(applied_times_ms, .95),
+                "max_ms": max(applied_times_ms), "event_ids": event_ids,
+                "arrival_pattern": args.event_pattern,
+                "method": "host monotonic time before WebDAV PUT to first observed WeKnora applied watermark; upper bound includes PUT and status polling",
             },
             "limits": [
                 "WeKnora process RSS includes unrelated application activity; it is not connector-only heap.",
