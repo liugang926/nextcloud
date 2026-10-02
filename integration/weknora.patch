@@ -20527,10 +20527,10 @@ index 8276ba00..800aad73 100644
  func (r *resourceRepository) ListKnowledgeBaseIDsByResource(
 diff --git a/internal/application/repository/retriever/postgres/nextcloud_vector_gc.go b/internal/application/repository/retriever/postgres/nextcloud_vector_gc.go
 new file mode 100644
-index 00000000..318b15bc
+index 00000000..25aca2a2
 --- /dev/null
 +++ b/internal/application/repository/retriever/postgres/nextcloud_vector_gc.go
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,87 @@
 +package postgres
 +
 +import (
@@ -20576,6 +20576,17 @@ index 00000000..318b15bc
 +			job.KnowledgeID != scope.KnowledgeID || job.State == "collected" {
 +			return apprepo.ErrNextcloudContentLeaseDenied
 +		}
++		// The claim validates the caller's time argument, but the GC job owns
++		// the policy delay. Keep its row locked until deletion and receipt commit
++		// so a concurrent schedule extension cannot be crossed.
++		var schedule struct{ Due bool }
++		if err := tx.Raw(`SELECT not_before <= clock_timestamp() AS due
++			FROM nextcloud_gc_jobs WHERE id = ?`, jobID).Scan(&schedule).Error; err != nil {
++			return err
++		}
++		if !schedule.Due {
++			return apprepo.ErrNextcloudContentGCBusy
++		}
 +		var item struct{ State string }
 +		if err := tx.Table("nextcloud_gc_items").Clauses(clause.Locking{Strength: "UPDATE"}).
 +			Select("state").Where("job_id = ? AND kind = 'postgres_embedding' AND object_ref = ?",
@@ -20609,10 +20620,10 @@ index 00000000..318b15bc
 +}
 diff --git a/internal/application/repository/retriever/postgres/nextcloud_vector_race_test.go b/internal/application/repository/retriever/postgres/nextcloud_vector_race_test.go
 new file mode 100644
-index 00000000..e9a1274b
+index 00000000..df4b09b3
 --- /dev/null
 +++ b/internal/application/repository/retriever/postgres/nextcloud_vector_race_test.go
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,410 @@
 +package postgres
 +
 +import (
@@ -20877,6 +20888,22 @@ index 00000000..e9a1274b
 +	claim, err := leases.ClaimKnowledgeGC(ctx, nextcloudVectorTestScope("old"),
 +		time.UnixMilli(retiredMS), time.Minute)
 +	require.NoError(t, err)
++	// A caller can present a valid claim with the fence retirement time even
++	// while the durable job's policy delay is still open. The exact delete must
++	// consult that job, leaving both rows and receipts untouched until due.
++	require.NoError(t, db.Exec(`UPDATE nextcloud_gc_jobs
++		SET not_before = clock_timestamp() + INTERVAL '1 hour' WHERE id = ?`, jobID).Error)
++	require.ErrorIs(t, repo.DeleteNextcloudExactVectorForGC(ctx, claim, jobID, ids[0]),
++		apprepo.ErrNextcloudContentGCBusy)
++	require.NoError(t, db.Table("embeddings").Where("knowledge_id = 'old'").Count(&vectors).Error)
++	require.Equal(t, int64(2), vectors)
++	var collectedBeforeDue int64
++	require.NoError(t, db.Table("nextcloud_gc_items").Where(
++		"job_id = ? AND kind = 'postgres_embedding' AND state = 'collected'", jobID).
++		Count(&collectedBeforeDue).Error)
++	require.Zero(t, collectedBeforeDue)
++	require.NoError(t, db.Exec(`UPDATE nextcloud_gc_jobs
++		SET not_before = clock_timestamp() - INTERVAL '1 second' WHERE id = ?`, jobID).Error)
 +	for _, id := range ids {
 +		require.NoError(t, repo.DeleteNextcloudExactVectorForGC(ctx, claim, jobID, id))
 +		require.NoError(t, repo.DeleteNextcloudExactVectorForGC(ctx, claim, jobID, id))
