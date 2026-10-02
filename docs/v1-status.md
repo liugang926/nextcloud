@@ -861,11 +861,12 @@ citations retain their old HTTP origin until the documents are reindexed.
 
 ## 2026-10-02 bounded parser-overlap code follow-up
 
-The current fixed-c6 and RAG77 patch SHA-256 values are
+The parser-overlap fixed-c6 and RAG77 patch SHA-256 values are
 `a7cd69f12332f9f881999038f84df6f6bc7a41141cce875fe3e6ef3499b73fad`
 and `84afeffc37040b2a85c2c795c05600817ea738b7862decc22f0310b4a0b23a2f`.
-The earlier hashes above remain the exact versions used for the measured pilot
-and the currently running shared RAG77 images. Both new patches apply to clean
+These overlap hashes identify the currently running shared RAG77 images; the
+earlier measured pilot used its separately recorded patch. Both overlap
+patches apply to clean
 pinned source bases and pass their Nextcloud repository, service and handler
 Go tests.
 
@@ -903,5 +904,30 @@ return 200 with the local CA, the WeKnora application health endpoint returns
 Nextcloud HTTPS WebDAV `PROPFIND` returns 207. All eight PR checks passed at
 `5664b6b`. No fresh shared-service parser-overlap, second physical LAN-client,
 sustained latency or scale acceptance run has been made.
+
+## 2026-10-02 manual and scheduled sync admission recovery candidate
+
+The current fixed-c6 and RAG77 patch SHA-256 values are
+`80ae7db3f8bc6e9f84ab7c616f06a2b42c7eaf9e227a587043f705ed34371f50`
+and `211994dae371946fae1abcb793de4b265acb29853ae31f11b63dbd2e2b6b53f2`.
+They add PostgreSQL migration 131 and SQLite migration 50. Manual and
+scheduled sync logs retain their exact queue task ID, trigger and worker-start
+claim. The worker claims a versioned log before source I/O; an Asynq retry of
+the same task can reclaim that log. After five minutes, a bounded rotating
+scan releases an unstarted slot only when the exact Asynq task is definitively
+absent and a row compare-and-set still proves no worker started. Redis recovery
+requires `WEKNORA_NEXTCLOUD_SYNC_RECOVERY_ENABLED=true` after all queue workers
+have this claim logic; the single-process Lite queue recovers automatically.
+Legacy logs and started attempts still require manual investigation. Both
+patches applied to fresh pinned bases and passed focused Go package tests; the
+reviewed candidate has not yet been built, migrated or deployed on the shared
+LAN stack, which still runs the parser-overlap image and schema `130/false`.
+
+A ten-sample post-accept queue pilot attempt was invalidated by a signed
+source GET HTTP 412 on a same-file update; the captured error was overwritten
+by fixture revocation before a precise receiver error code could be retained.
+The harness now captures receiver state before cleanup. A later two-pair
+minimal rerun completed five applied events and five successful sync logs
+without reproducing 412. Neither run establishes a P95 latency result.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.

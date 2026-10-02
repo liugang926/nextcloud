@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`a7cd69f12332f9f881999038f84df6f6bc7a41141cce875fe3e6ef3499b73fad`.
+`80ae7db3f8bc6e9f84ab7c616f06a2b42c7eaf9e227a587043f705ed34371f50`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,31 +17,32 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`84afeffc37040b2a85c2c795c05600817ea738b7862decc22f0310b4a0b23a2f`.
+`211994dae371946fae1abcb793de4b265acb29853ae31f11b63dbd2e2b6b53f2`.
 The build script and CI reject a different patch hash. On 2026-10-02 both
-current baseline patches applied cleanly to fresh source archives. The failed-file
-editor probe tests and frontend type checks passed for both patches. The RAG baseline
-retains the evaluated RAG runtime changes and is pinned to the tested source
-commit rather than a moving branch head.
-Focused Docker Go tests passed for source publication, direct and RAG search
+current baseline patches applied cleanly to fresh source archives and passed
+focused Go package tests. The RAG baseline retains the evaluated RAG runtime
+changes and is pinned to the tested source commit rather than a moving branch
+head. For the preceding parser-overlap patches, failed-file editor probe tests,
+frontend type checks and focused Docker Go tests passed for source publication,
+direct and RAG search
 authorization, HTTP read leases, worker build admission, MCP denial, and the
 file-scoped question target. The fixed and RAG service and handler suites
 passed. The RAG frontend typecheck, citation/export tests and production build
-passed, and CI rebuilt the final patch at `5664b6b`.
-Both patched baselines also passed disposable pgvector PostgreSQL tests for
+passed, and CI rebuilt that patch at `5664b6b`.
+Those preceding patched baselines also passed disposable pgvector PostgreSQL tests for
 BatchSave versus source retirement, stale Publish after a new Stage, Stage
 versus Tombstone, queued parser admission before Stage, crash/retry of exact
 vector-ID receipts, and exact claimed deletion with retrieval checks. These
 checks do not enable global derived GC.
 
-The current patch also rejects empty text candidates as published answers,
+The inherited connector rejects empty text candidates as published answers,
 returns a signed static no-content status, polls queued event publication
 proof every five seconds during its first minute, and fences knowledge-list and
 raw-search output with read leases and current authorization. Focused Go tests
-in the repository and both handler packages passed for both pinned baselines;
-the 27-route OpenAPI checker passed after applying each patch to a clean
+in the repository and both handler packages passed for both preceding pinned
+patches; the 27-route OpenAPI checker passed after applying each to a clean
 source archive. The full suite and an exact pinned-`77c97fd7` RAG runtime
-image have not yet been verified for this patch revision.
+image have not yet been verified for the current recovery patch revision.
 
 The current receiver also records each signed event's ETag and relative path.
 File ACK requires the exact version and publication proof; broad and excluded
@@ -63,8 +64,10 @@ build lease is released. Staging the newer candidate retires the older fence;
 the applied watermark stays unchanged until a newer complete source cursor and
 exact publication proof pass. Both pinned source trees passed the focused
 overlap race and Nextcloud repository, service and handler tests in the local
-Go test image. A full pinned app/UI build with this exact patch was exercised
-in an isolated synthetic LDAP fixture, then installed on the shared LAN stack.
+Go test image. A full pinned app/UI build with the preceding RAG patch
+`84afeffc37040b2a85c2c795c05600817ea738b7862decc22f0310b4a0b23a2f`
+was exercised in an isolated synthetic LDAP fixture, then installed on the
+shared LAN stack.
 Its image IDs and the one-file signed V1/V2 overlap results are recorded in
 [V1 status](v1-status.md) and the
 [redacted acceptance report](evidence/rag77-parser-overlap-2026-10-02.json).
@@ -72,7 +75,18 @@ The stale V1 was denied by guarded retrieval, but retained a chunk and
 embedding at the final database read. Sustained load and physical derived-index
 collection remain unverified.
 
-The latest patch also refreshes retired chunk image references on every
+The current patch adds recovery for uncertain manual and scheduled Nextcloud
+sync enqueue. It persists a versioned exact queue intent and worker-start
+claim; after five minutes, only a definitively absent exact task with no
+worker claim releases its admission slot. Redis recovery is opt-in after all
+workers are upgraded, while Lite recovers its single-process queue
+automatically. Legacy logs and started attempts remain for operator review.
+Both pinned patches applied cleanly and passed six focused Go package suites.
+This patch has not yet been built into full app/UI images or installed on the
+shared stack; the shared image and schema remain at the preceding patch and
+`130/false`.
+
+The patch also refreshes retired chunk image references on every
 due GC retry. A newly malformed `image_info` blocks the local provider
 delete callback until repaired; a newly valid image URL is durably
 inventoried without duplicating prior items. Focused SQLite and isolated

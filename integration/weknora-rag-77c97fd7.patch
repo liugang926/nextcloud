@@ -4465,10 +4465,10 @@ index 943bcb06..755fc283 100644
  
  // ListImageInfoByKnowledgeIDs returns non-empty image_info values for the given knowledge IDs.
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
-index c3b2f58e..f37542fc 100644
+index c3b2f58e..ee902de7 100644
 --- a/internal/application/repository/datasource_repo.go
 +++ b/internal/application/repository/datasource_repo.go
-@@ -3,8 +3,12 @@ package repository
+@@ -3,10 +3,15 @@ package repository
  import (
  	"context"
  	"errors"
@@ -4480,8 +4480,11 @@ index c3b2f58e..f37542fc 100644
 +	"github.com/Tencent/WeKnora/internal/datasource"
  	"github.com/Tencent/WeKnora/internal/types"
  	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
  	"gorm.io/gorm"
-@@ -15,6 +19,15 @@ type DataSourceRepository struct {
+ )
+ 
+@@ -15,6 +20,15 @@ type DataSourceRepository struct {
  	db *gorm.DB
  }
  
@@ -4497,7 +4500,7 @@ index c3b2f58e..f37542fc 100644
  // NewDataSourceRepository creates a new data source repository
  func NewDataSourceRepository(db *gorm.DB) interfaces.DataSourceRepository {
  	return &DataSourceRepository{db: db}
-@@ -32,6 +45,9 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
+@@ -32,6 +46,9 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
  	// the HTTP 201 body) match the database.
  	syncDeletions := ds.SyncDeletions
  	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -4507,7 +4510,7 @@ index c3b2f58e..f37542fc 100644
  		if err := tx.Create(ds).Error; err != nil {
  			return err
  		}
-@@ -43,6 +59,64 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
+@@ -43,6 +60,64 @@ func (r *DataSourceRepository) Create(ctx context.Context, ds *types.DataSource)
  	return err
  }
  
@@ -4572,7 +4575,7 @@ index c3b2f58e..f37542fc 100644
  // FindByID retrieves a data source by ID
  func (r *DataSourceRepository) FindByID(ctx context.Context, id string) (*types.DataSource, error) {
  	if id == "" {
-@@ -77,6 +151,36 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
+@@ -77,6 +152,36 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
  	return dataSources, nil
  }
  
@@ -4609,7 +4612,7 @@ index c3b2f58e..f37542fc 100644
  // Update updates an existing data source
  func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource) error {
  	if ds == nil {
-@@ -86,6 +190,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -86,6 +191,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  		return errors.New("data source id is empty")
  	}
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -4644,7 +4647,7 @@ index c3b2f58e..f37542fc 100644
  		if err := tx.Model(ds).Updates(ds).Error; err != nil {
  			return err
  		}
-@@ -97,6 +229,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -97,6 +230,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  	})
  }
  
@@ -4711,7 +4714,7 @@ index c3b2f58e..f37542fc 100644
  // UpdateSyncState updates only fields managed by sync execution. GORM's
  // Updates(struct) skips zero values, so use a map here to persist cleared error
  // messages without broadening the generic Update method.
-@@ -128,6 +320,19 @@ func (r *DataSourceRepository) Delete(ctx context.Context, id string) error {
+@@ -128,6 +321,19 @@ func (r *DataSourceRepository) Delete(ctx context.Context, id string) error {
  	if id == "" {
  		return errors.New("id is empty")
  	}
@@ -4731,7 +4734,7 @@ index c3b2f58e..f37542fc 100644
  	if err := r.db.WithContext(ctx).
  		Where("id = ?", id).
  		Delete(&types.DataSource{}).Error; err != nil {
-@@ -166,6 +371,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
+@@ -166,6 +372,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
  		return errors.New("sync log is nil")
  	}
  	if err := r.db.WithContext(ctx).Create(log).Error; err != nil {
@@ -4741,6 +4744,88 @@ index c3b2f58e..f37542fc 100644
  		return err
  	}
  	return nil
+@@ -246,6 +455,81 @@ func (r *SyncLogRepository) HasRunningSync(ctx context.Context, dsID string) (bo
+ 	return count > 0, nil
+ }
+ 
++// ClaimNextcloudSyncStart fences every versioned manual/cron attempt to one
++// exact task. A retry may acquire only after its predecessor returned and
++// relinquished the token; a crashed or still-active worker remains fail-closed.
++func (r *SyncLogRepository) ClaimNextcloudSyncStart(ctx context.Context, logID, dsID string,
++	tenantID uint64, trigger, taskID string, retryCount int,
++) (string, error) {
++	if logID == "" || dsID == "" || tenantID == 0 || retryCount < 0 ||
++		(trigger != "manual" && trigger != "schedule") ||
++		taskID != datasource.NextcloudSyncTaskID(logID) {
++		return "", nil
++	}
++	token := uuid.NewString()
++	query := r.db.WithContext(ctx).Model(&types.SyncLog{}).
++		Where("id = ? AND data_source_id = ? AND tenant_id = ?", logID, dsID, tenantID).
++		Where("status = ? AND recovery_version = 1 AND recovery_trigger = ?", types.SyncLogStatusRunning, trigger).
++		Where("queue_task_id = ? AND worker_active = ?", taskID, false)
++	updates := map[string]any{"worker_active": true, "worker_attempt_token": token, "error_message": ""}
++	if retryCount == 0 {
++		query = query.Where("worker_started_at IS NULL")
++		updates["worker_started_at"] = time.Now().UTC()
++	} else {
++		query = query.Where("worker_started_at IS NOT NULL")
++	}
++	result := query.Updates(updates)
++	if result.Error != nil || result.RowsAffected != 1 {
++		return "", result.Error
++	}
++	return token, nil
++}
++
++// FinishNextcloudSyncAttempt never touches another worker's token or a row
++// already finished by the sync path. Releasing after a transient error allows
++// only an actual Asynq retry with the same task ID to claim again.
++func (r *SyncLogRepository) FinishNextcloudSyncAttempt(ctx context.Context, logID, dsID string,
++	tenantID uint64, trigger, taskID, token string, terminal bool, message string,
++) (bool, error) {
++	if logID == "" || dsID == "" || tenantID == 0 || token == "" ||
++		(trigger != "manual" && trigger != "schedule") ||
++		taskID != datasource.NextcloudSyncTaskID(logID) {
++		return false, nil
++	}
++	updates := map[string]any{"worker_active": false, "worker_attempt_token": ""}
++	if terminal {
++		updates["status"] = types.SyncLogStatusFailed
++		updates["finished_at"] = time.Now().UTC()
++	}
++	if message != "" {
++		updates["error_message"] = message
++	}
++	result := r.db.WithContext(ctx).Model(&types.SyncLog{}).
++		Where("id = ? AND data_source_id = ? AND tenant_id = ?", logID, dsID, tenantID).
++		Where("status = ? AND recovery_version = 1 AND recovery_trigger = ?", types.SyncLogStatusRunning, trigger).
++		Where("queue_task_id = ? AND worker_active = ? AND worker_attempt_token = ?", taskID, true, token).
++		Updates(updates)
++	return result.RowsAffected == 1, result.Error
++}
++
++// MarkNextcloudEnqueueUncertain never writes status from the stale producer
++// snapshot. A worker may finish between Enqueue and a lost queue reply.
++func (r *SyncLogRepository) MarkNextcloudEnqueueUncertain(ctx context.Context, logID, dsID string,
++	tenantID uint64, trigger, taskID string,
++) (bool, error) {
++	if logID == "" || dsID == "" || tenantID == 0 ||
++		(trigger != "manual" && trigger != "schedule") ||
++		taskID != datasource.NextcloudSyncTaskID(logID) {
++		return false, nil
++	}
++	result := r.db.WithContext(ctx).Model(&types.SyncLog{}).
++		Where("id = ? AND data_source_id = ? AND tenant_id = ?", logID, dsID, tenantID).
++		Where("status = ? AND recovery_version = 1 AND recovery_trigger = ?", types.SyncLogStatusRunning, trigger).
++		Where("queue_task_id = ? AND worker_started_at IS NULL AND worker_active = ?", taskID, false).
++		Update("error_message", datasource.NextcloudSyncEnqueueUncertain)
++	return result.RowsAffected == 1, result.Error
++}
++
+ // Update updates an existing sync log entry
+ func (r *SyncLogRepository) Update(ctx context.Context, log *types.SyncLog) error {
+ 	if log == nil {
 diff --git a/internal/application/repository/datasource_repo_test.go b/internal/application/repository/datasource_repo_test.go
 index 77ed065c..9cf4d886 100644
 --- a/internal/application/repository/datasource_repo_test.go
@@ -17032,6 +17117,261 @@ index 00000000..092c0ab5
 +	require.NoError(t, err)
 +	require.True(t, created, "a completed rotation permits the next one")
 +}
+diff --git a/internal/application/repository/nextcloud_sync_recovery.go b/internal/application/repository/nextcloud_sync_recovery.go
+new file mode 100644
+index 00000000..2e2f93b7
+--- /dev/null
++++ b/internal/application/repository/nextcloud_sync_recovery.go
+@@ -0,0 +1,83 @@
++package repository
++
++import (
++	"context"
++	"sync"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++// NextcloudSyncRecoveryStore only considers versioned manual/cron intents.
++// Old running rows, and rows reached by any worker, remain operator-owned.
++type NextcloudSyncRecoveryStore struct {
++	db            *gorm.DB
++	mu            sync.Mutex
++	lastStartedAt time.Time
++	lastID        string
++}
++
++func NewNextcloudSyncRecoveryStore(db *gorm.DB) *NextcloudSyncRecoveryStore {
++	return &NextcloudSyncRecoveryStore{db: db}
++}
++
++// UnstartedBefore rotates across eligible logs in stable (started_at, id)
++// order. Existing Redis tasks remain running, so repeatedly reading only the
++// oldest 100 would starve later missing tasks forever.
++func (s *NextcloudSyncRecoveryStore) UnstartedBefore(ctx context.Context, cutoff time.Time, limit int) ([]types.SyncLog, error) {
++	if limit <= 0 || limit > 100 {
++		limit = 100
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	load := func(after bool) ([]types.SyncLog, error) {
++		query := s.db.WithContext(ctx).Model(&types.SyncLog{}).
++			Where("status = ? AND recovery_version = 1 AND recovery_trigger IN ?", types.SyncLogStatusRunning, []string{"manual", "schedule"}).
++			Where("queue_task_id = 'dssync:' || sync_logs.id AND worker_started_at IS NULL AND worker_active = ? AND started_at <= ?", false, cutoff).
++			Where(`EXISTS (SELECT 1 FROM data_sources ds WHERE ds.id = sync_logs.data_source_id AND ds.type = ?)`, types.ConnectorTypeNextcloud)
++		if after {
++			query = query.Where("(started_at > ? OR (started_at = ? AND id > ?))", s.lastStartedAt, s.lastStartedAt, s.lastID)
++		}
++		var logs []types.SyncLog
++		err := query.Order("started_at, id").Limit(limit).Find(&logs).Error
++		return logs, err
++	}
++	logs, err := load(s.lastID != "")
++	if err != nil {
++		return nil, err
++	}
++	if len(logs) == 0 && s.lastID != "" {
++		logs, err = load(false)
++		if err != nil {
++			return nil, err
++		}
++	}
++	if len(logs) == 0 {
++		s.lastStartedAt = time.Time{}
++		s.lastID = ""
++	} else {
++		last := logs[len(logs)-1]
++		s.lastStartedAt = last.StartedAt
++		s.lastID = last.ID
++	}
++	return logs, nil
++}
++
++// FailMissing releases one slot only after the caller proved the exact task is
++// absent. The worker's ClaimNextcloudSyncStart races this statement on the
++// same row: one wins, so no worker can read the source after release.
++func (s *NextcloudSyncRecoveryStore) FailMissing(ctx context.Context, log types.SyncLog, cutoff, now time.Time) (bool, error) {
++	if log.ID == "" || log.DataSourceID == "" || log.TenantID == 0 ||
++		(log.RecoveryTrigger != "manual" && log.RecoveryTrigger != "schedule") ||
++		log.QueueTaskID != "dssync:"+log.ID {
++		return false, nil
++	}
++	result := s.db.WithContext(ctx).Model(&types.SyncLog{}).
++		Where("id = ? AND data_source_id = ? AND tenant_id = ?", log.ID, log.DataSourceID, log.TenantID).
++		Where("status = ? AND recovery_version = 1 AND recovery_trigger = ?", types.SyncLogStatusRunning, log.RecoveryTrigger).
++		Where("queue_task_id = ? AND worker_started_at IS NULL AND worker_active = ? AND started_at <= ?", log.QueueTaskID, false, cutoff).
++		Updates(map[string]any{"status": types.SyncLogStatusFailed,
++			"finished_at": now, "error_message": "sync_task_absent_before_worker_start"})
++	return result.RowsAffected == 1, result.Error
++}
+diff --git a/internal/application/repository/nextcloud_sync_recovery_test.go b/internal/application/repository/nextcloud_sync_recovery_test.go
+new file mode 100644
+index 00000000..89e73da0
+--- /dev/null
++++ b/internal/application/repository/nextcloud_sync_recovery_test.go
+@@ -0,0 +1,160 @@
++package repository
++
++import (
++	"context"
++	"fmt"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func nextcloudSyncRecoveryDB(t *testing.T) *gorm.DB {
++	t.Helper()
++	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++	require.NoError(t, err)
++	raw, err := db.DB()
++	require.NoError(t, err)
++	raw.SetMaxOpenConns(1)
++	require.NoError(t, db.AutoMigrate(&types.SyncLog{}))
++	require.NoError(t, db.Exec("CREATE TABLE data_sources (id TEXT PRIMARY KEY, type TEXT)").Error)
++	require.NoError(t, db.Exec("INSERT INTO data_sources (id, type) VALUES ('ds', 'nextcloud')").Error)
++	return db
++}
++
++func TestNextcloudSyncRecoveryClaimAndReleaseRace(t *testing.T) {
++	ctx := context.Background()
++	db := nextcloudSyncRecoveryDB(t)
++	logs := &SyncLogRepository{db: db}
++	store := NewNextcloudSyncRecoveryStore(db)
++	now := time.Now().UTC()
++	admitted := &types.SyncLog{ID: "new-log", DataSourceID: "ds", TenantID: 7,
++		Status: types.SyncLogStatusRunning, StartedAt: now.Add(-10 * time.Minute),
++		RecoveryVersion: 1, RecoveryTrigger: "manual"}
++	require.NoError(t, logs.Create(ctx, admitted))
++	require.Equal(t, "dssync:new-log", admitted.QueueTaskID)
++	candidates, err := store.UnstartedBefore(ctx, now.Add(-5*time.Minute), 100)
++	require.NoError(t, err)
++	require.Len(t, candidates, 1)
++	for _, tc := range []struct{ trigger, taskID string }{
++		{"schedule", "dssync:new-log"}, {"manual", "dssync:other"}, {"manual", ""},
++	} {
++		token, err := logs.ClaimNextcloudSyncStart(ctx, admitted.ID, "ds", 7, tc.trigger, tc.taskID, 0)
++		require.NoError(t, err)
++		require.Empty(t, token)
++	}
++	token, err := logs.ClaimNextcloudSyncStart(ctx, admitted.ID, "ds", 7, "manual", admitted.QueueTaskID, 0)
++	require.NoError(t, err)
++	require.NotEmpty(t, token)
++	marked, err := logs.MarkNextcloudEnqueueUncertain(ctx, admitted.ID, "ds", 7, "manual", admitted.QueueTaskID)
++	require.NoError(t, err)
++	require.False(t, marked, "a lost enqueue reply cannot overwrite a started worker")
++	released, err := store.FailMissing(ctx, candidates[0], now.Add(-5*time.Minute), now)
++	require.NoError(t, err)
++	require.False(t, released, "worker claim must defeat a stale absence proof")
++	duplicate, err := logs.ClaimNextcloudSyncStart(ctx, admitted.ID, "ds", 7, "manual", admitted.QueueTaskID, 0)
++	require.NoError(t, err)
++	require.Empty(t, duplicate)
++}
++
++func TestNextcloudSyncRecoveryReleaseFencesLateWorkerAndOldRows(t *testing.T) {
++	ctx := context.Background()
++	db := nextcloudSyncRecoveryDB(t)
++	logs := &SyncLogRepository{db: db}
++	store := NewNextcloudSyncRecoveryStore(db)
++	now := time.Now().UTC()
++	old := &types.SyncLog{ID: "old-log", DataSourceID: "ds", TenantID: 7,
++		Status: types.SyncLogStatusRunning, StartedAt: now.Add(-time.Hour)}
++	current := &types.SyncLog{ID: "current-log", DataSourceID: "ds", TenantID: 7,
++		Status: types.SyncLogStatusRunning, StartedAt: now.Add(-time.Hour),
++		RecoveryVersion: 1, RecoveryTrigger: "schedule"}
++	// The live trigger permits one running log per source; use separate
++	// records without the production admission trigger in this focused DB.
++	require.NoError(t, logs.Create(ctx, old))
++	require.NoError(t, logs.Create(ctx, current))
++	candidates, err := store.UnstartedBefore(ctx, now.Add(-5*time.Minute), 100)
++	require.NoError(t, err)
++	require.Len(t, candidates, 1)
++	require.Equal(t, current.ID, candidates[0].ID)
++	released, err := store.FailMissing(ctx, *old, now.Add(-5*time.Minute), now)
++	require.NoError(t, err)
++	require.False(t, released)
++	released, err = store.FailMissing(ctx, candidates[0], now.Add(-5*time.Minute), now)
++	require.NoError(t, err)
++	require.True(t, released)
++	token, err := logs.ClaimNextcloudSyncStart(ctx, current.ID, "ds", 7, "schedule", current.QueueTaskID, 0)
++	require.NoError(t, err)
++	require.Empty(t, token, "late queue acceptance must be fenced")
++	marked, err := logs.MarkNextcloudEnqueueUncertain(ctx, current.ID, "ds", 7, "schedule", current.QueueTaskID)
++	require.NoError(t, err)
++	require.False(t, marked, "late enqueue reply cannot reopen a recovered log")
++	oldAfter, err := logs.FindByID(ctx, old.ID)
++	require.NoError(t, err)
++	require.Equal(t, types.SyncLogStatusRunning, oldAfter.Status)
++}
++
++func TestNextcloudSyncRetryReclaimsOnlyReleasedExactTask(t *testing.T) {
++	ctx := context.Background()
++	db := nextcloudSyncRecoveryDB(t)
++	logs := &SyncLogRepository{db: db}
++	log := &types.SyncLog{ID: "retry-log", DataSourceID: "ds", TenantID: 7,
++		Status: types.SyncLogStatusRunning, RecoveryVersion: 1, RecoveryTrigger: "manual"}
++	require.NoError(t, logs.Create(ctx, log))
++	first, err := logs.ClaimNextcloudSyncStart(ctx, log.ID, "ds", 7, "manual", log.QueueTaskID, 0)
++	require.NoError(t, err)
++	require.NotEmpty(t, first)
++	blocked, err := logs.ClaimNextcloudSyncStart(ctx, log.ID, "ds", 7, "manual", log.QueueTaskID, 1)
++	require.NoError(t, err)
++	require.Empty(t, blocked, "concurrent duplicate cannot enter while first worker is active")
++	released, err := logs.FinishNextcloudSyncAttempt(ctx, log.ID, "ds", 7,
++		"manual", log.QueueTaskID, first, false, "retry pending")
++	require.NoError(t, err)
++	require.True(t, released)
++	second, err := logs.ClaimNextcloudSyncStart(ctx, log.ID, "ds", 7, "manual", log.QueueTaskID, 1)
++	require.NoError(t, err)
++	require.NotEmpty(t, second)
++	require.NotEqual(t, first, second)
++	stale, err := logs.FinishNextcloudSyncAttempt(ctx, log.ID, "ds", 7,
++		"manual", log.QueueTaskID, first, true, "stale")
++	require.NoError(t, err)
++	require.False(t, stale)
++	finished, err := logs.FinishNextcloudSyncAttempt(ctx, log.ID, "ds", 7,
++		"manual", log.QueueTaskID, second, true, "attempt exhausted")
++	require.NoError(t, err)
++	require.True(t, finished)
++	late, err := logs.ClaimNextcloudSyncStart(ctx, log.ID, "ds", 7, "manual", log.QueueTaskID, 2)
++	require.NoError(t, err)
++	require.Empty(t, late)
++	after, err := logs.FindByID(ctx, log.ID)
++	require.NoError(t, err)
++	require.Equal(t, types.SyncLogStatusFailed, after.Status)
++	require.NotNil(t, after.WorkerStartedAt)
++}
++
++func TestNextcloudSyncRecoveryMalformedIDsCannotStarveValidAdmission(t *testing.T) {
++	ctx := context.Background()
++	db := nextcloudSyncRecoveryDB(t)
++	logs := &SyncLogRepository{db: db}
++	store := NewNextcloudSyncRecoveryStore(db)
++	now := time.Now().UTC()
++	for i := 0; i < 101; i++ {
++		id := fmt.Sprintf("bad-%03d", i)
++		log := &types.SyncLog{ID: id, DataSourceID: "ds", TenantID: 7,
++			Status: types.SyncLogStatusRunning, StartedAt: now.Add(-10 * time.Minute),
++			RecoveryVersion: 1, RecoveryTrigger: "manual"}
++		require.NoError(t, logs.Create(ctx, log))
++		require.NoError(t, db.Model(&types.SyncLog{}).Where("id = ?", id).
++			Update("queue_task_id", "malformed").Error)
++	}
++	valid := &types.SyncLog{ID: "valid-after-bad", DataSourceID: "ds", TenantID: 7,
++		Status: types.SyncLogStatusRunning, StartedAt: now.Add(-9 * time.Minute),
++		RecoveryVersion: 1, RecoveryTrigger: "schedule"}
++	require.NoError(t, logs.Create(ctx, valid))
++	candidates, err := store.UnstartedBefore(ctx, now.Add(-5*time.Minute), 100)
++	require.NoError(t, err)
++	require.Len(t, candidates, 1)
++	require.Equal(t, valid.ID, candidates[0].ID)
++}
 diff --git a/internal/application/repository/nextcloud_text_content.go b/internal/application/repository/nextcloud_text_content.go
 new file mode 100644
 index 00000000..376bbbcc
@@ -20339,7 +20679,7 @@ index b4087b96..60ad2a04 100644
  		ID:           "log-pending",
  		DataSourceID: ds.ID,
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241..7508884e 100644
+index c0b24241..40eaac39 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -14,6 +14,7 @@ import (
@@ -20497,7 +20837,18 @@ index c0b24241..7508884e 100644
  
  	if ds.Status != types.DataSourceStatusActive &&
  		ds.Status != types.DataSourceStatusError &&
-@@ -493,9 +537,21 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
+@@ -472,6 +516,10 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
+ 		Status:       types.SyncLogStatusRunning,
+ 		StartedAt:    time.Now().UTC(),
+ 	}
++	if ds.Type == types.ConnectorTypeNextcloud {
++		syncLog.RecoveryVersion = 1
++		syncLog.RecoveryTrigger = "manual"
++	}
+ 
+ 	if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
+ 		logger.Errorf(ctx, "failed to create sync log: %v", err)
+@@ -493,9 +541,23 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
  	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON,
  		asynq.Queue(types.QueueSync), asynq.MaxRetry(5), asynq.Timeout(2*time.Hour))
  
@@ -20510,17 +20861,46 @@ index c0b24241..7508884e 100644
  	if err != nil {
  		logger.Errorf(ctx, "failed to enqueue sync task: %v", err)
 +		if ds.Type == types.ConnectorTypeNextcloud {
-+			// A queue may accept the task and lose its reply. Preserve the
-+			// running admission slot until that task terminates or an operator
-+			// establishes it never started.
-+			syncLog.ErrorMessage = datasource.NextcloudSyncEnqueueUncertain
-+			_ = s.syncLogRepo.Update(ctx, syncLog)
-+			return syncLog, datasource.ErrSyncEnqueueUncertain
++			// A queue may accept the task and lose its reply. Do not write a
++			// stale running snapshot over a worker that already finished.
++			marked, markErr := s.syncLogRepo.MarkNextcloudEnqueueUncertain(ctx,
++				syncLog.ID, dsID, ds.TenantID, "manual", datasource.NextcloudSyncTaskID(syncLog.ID))
++			if marked {
++				syncLog.ErrorMessage = datasource.NextcloudSyncEnqueueUncertain
++			}
++			return syncLog, errors.Join(datasource.ErrSyncEnqueueUncertain, markErr)
 +		}
  		syncLog.Status = types.SyncLogStatusFailed
  		syncLog.FinishedAt = timePtr(time.Now().UTC())
  		syncLog.ErrorMessage = err.Error()
-@@ -549,6 +605,15 @@ func (s *DataSourceService) ResumeDataSource(ctx context.Context, id string) err
+@@ -511,6 +573,26 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
+ 		return nil, err
+ 	}
+ 
++	if ds.Type == types.ConnectorTypeNextcloud {
++		stored, readErr := s.syncLogRepo.FindByID(ctx, syncLog.ID)
++		returnedID := ""
++		if info != nil {
++			returnedID = info.ID
++		}
++		if readErr != nil || !datasource.NextcloudSyncReceiptAccepted(stored,
++			dsID, ds.TenantID, "manual", returnedID) {
++			// A late queue acceptance cannot turn a recovered failed log into
++			// a successful API response. Unknown receipts remain fail-closed.
++			_, markErr := s.syncLogRepo.MarkNextcloudEnqueueUncertain(ctx,
++				syncLog.ID, dsID, ds.TenantID, "manual", datasource.NextcloudSyncTaskID(syncLog.ID))
++			if stored != nil {
++				syncLog = stored
++			}
++			return syncLog, errors.Join(datasource.ErrSyncEnqueueUncertain, readErr, markErr)
++		}
++		syncLog = stored
++	}
++
+ 	logger.Infof(ctx, "sync task enqueued: ds=%s syncLog=%s", dsID, syncLog.ID)
+ 	recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceSyncStarted,
+ 		"data_source", ds.ID, types.AuditOutcomeAccepted,
+@@ -549,6 +631,15 @@ func (s *DataSourceService) ResumeDataSource(ctx context.Context, id string) err
  	if err != nil {
  		return err
  	}
@@ -20536,7 +20916,7 @@ index c0b24241..7508884e 100644
  
  	ds.Status = types.DataSourceStatusActive
  	if err := s.dsRepo.Update(ctx, ds); err != nil {
-@@ -586,6 +651,33 @@ func (s *DataSourceService) GetSyncLog(ctx context.Context, syncLogID string) (*
+@@ -586,13 +677,93 @@ func (s *DataSourceService) GetSyncLog(ctx context.Context, syncLogID string) (*
  	return log, nil
  }
  
@@ -20567,10 +20947,23 @@ index c0b24241..7508884e 100644
 +	return retry
 +}
 +
++func nextcloudSyncRetryMetadata(ctx context.Context) (retried, maxRetry int) {
++	if n, ok := asynq.GetRetryCount(ctx); ok {
++		retried = n
++		maxRetry, _ = asynq.GetMaxRetry(ctx)
++		return retried, maxRetry
++	}
++	if n, max, ok := types.TaskRetryMetadataFromContext(ctx); ok {
++		return n, max
++	}
++	return 0, 0 // Missing worker metadata cannot authorize a retry.
++}
++
  // ProcessSync handles the actual sync operation (called by asynq task)
- func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) error {
+-func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) error {
++func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) (runErr error) {
  	var payload types.DataSourceSyncPayload
-@@ -593,6 +685,47 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+ 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
  		logger.Errorf(ctx, "failed to unmarshal sync payload: %v", err)
  		return err
  	}
@@ -20618,12 +21011,59 @@ index c0b24241..7508884e 100644
  	ctx = payload.Initiator.Apply(ctx)
  	taskID, _ := asynq.GetTaskID(ctx)
  	ctx = withKBActivityTask(ctx, taskID, payload.Trigger)
-@@ -618,6 +751,27 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -618,6 +789,74 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  		logger.Errorf(ctx, "failed to get sync log: %v", err)
  		return nil
  	}
 +	if ds.Type == types.ConnectorTypeNextcloud && syncLog.Status != types.SyncLogStatusRunning {
 +		return fmt.Errorf("%w: Nextcloud sync log is no longer running", asynq.SkipRetry)
++	}
++	if ds.Type == types.ConnectorTypeNextcloud &&
++		payload.Trigger != "nextcloud_event" && payload.Trigger != "nextcloud_candidate_retry" {
++		switch syncLog.RecoveryVersion {
++		case 0:
++			// Rows created before the recovery migration retain their original
++			// execution path, including older payloads with an empty trigger.
++			// No absence-based recovery is ever allowed for them.
++		case 1:
++			if payload.Trigger != "manual" && payload.Trigger != "schedule" {
++				return fmt.Errorf("%w: unknown Nextcloud sync trigger", asynq.SkipRetry)
++			}
++			if taskID == "" {
++				taskID, _ = types.TaskExecutionIDFromContext(ctx)
++			}
++			retried, maxRetry := nextcloudSyncRetryMetadata(ctx)
++			token, claimErr := s.syncLogRepo.ClaimNextcloudSyncStart(ctx, syncLog.ID,
++				payload.DataSourceID, payload.TenantID, payload.Trigger, taskID, retried)
++			if claimErr != nil {
++				return claimErr
++			}
++			if token == "" {
++				return fmt.Errorf("%w: Nextcloud sync worker claim rejected", asynq.SkipRetry)
++			}
++			syncLog.ErrorMessage = ""
++			defer func() {
++				// A canceled worker context must not prevent its durable handoff
++				// to the same Asynq task's next attempt.
++				finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
++				defer cancel()
++				terminal := runErr == nil || errors.Is(runErr, asynq.SkipRetry) || retried >= maxRetry
++				message := "sync_attempt_retry_pending"
++				if terminal {
++					message = "sync_attempt_stopped_before_terminal_status"
++				}
++				changed, finishErr := s.syncLogRepo.FinishNextcloudSyncAttempt(finishCtx,
++					syncLog.ID, payload.DataSourceID, payload.TenantID, payload.Trigger,
++					taskID, token, terminal, message)
++				if finishErr != nil {
++					runErr = errors.Join(runErr, fmt.Errorf("finish Nextcloud sync attempt: %w", finishErr))
++				} else if runErr == nil && changed {
++					runErr = datasource.ErrSyncFailed
++				}
++			}()
++		default:
++			return fmt.Errorf("%w: unknown Nextcloud sync recovery version", asynq.SkipRetry)
++		}
 +	}
 +	// An old queued task may survive an upgrade from a generic, unpaired
 +	// Nextcloud source. Deny it before connector construction or any remote
@@ -20646,7 +21086,7 @@ index c0b24241..7508884e 100644
  
  	kb, kbErr := s.kbService.GetKnowledgeBaseByID(ctx, ds.KnowledgeBaseID)
  	if kbErr != nil {
-@@ -640,15 +794,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -640,15 +879,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	connector, err := s.connectorRegistry.Get(ds.Type)
  	if err != nil {
  		logger.Errorf(ctx, "connector not found: type=%s", ds.Type)
@@ -20663,7 +21103,7 @@ index c0b24241..7508884e 100644
  		return err
  	}
  
-@@ -656,20 +802,22 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -656,20 +887,22 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	config, err := ds.ParseConfig()
  	if err != nil {
  		logger.Errorf(ctx, "failed to parse config: %v", err)
@@ -20695,7 +21135,7 @@ index c0b24241..7508884e 100644
  
  	// Streaming path: connectors that support it interleave fetch→ingest→
  	// checkpoint so a large sync bounds memory and resumes after a timeout
-@@ -685,16 +833,24 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -685,16 +918,24 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  
  	if payload.ForceFull || ds.SyncMode == types.SyncModeFull {
  		if full, ok := connector.(datasource.FullSyncWithCursor); ok {
@@ -20724,7 +21164,7 @@ index c0b24241..7508884e 100644
  		logger.Infof(ctx, "incremental sync fetched %d items", len(items))
  	}
  
-@@ -708,7 +864,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -708,7 +949,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	if fetchErr != nil {
  		// Persist connector cursor even when fetch failed so transient outages
  		// (e.g. RSS feed downtime) do not force a full re-ingest on recovery.
@@ -20733,7 +21173,7 @@ index c0b24241..7508884e 100644
  			if cursorJSON, cerr := nextCursor.ToJSON(); cerr == nil {
  				ds.LastSyncCursor = cursorJSON
  				if uerr := s.dsRepo.UpdateSyncState(ctx, ds); uerr != nil {
-@@ -717,17 +873,19 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -717,17 +958,19 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  			}
  		}
  		logger.Errorf(ctx, "fetch operation failed: %v", fetchErr)
@@ -20762,7 +21202,7 @@ index c0b24241..7508884e 100644
  
  	// Process fetched items and write to knowledge base
  	result := &types.SyncResult{
-@@ -740,15 +898,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -740,15 +983,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	tenant, err := s.tenantRepo.GetTenantByID(ctx, ds.TenantID)
  	if err != nil {
  		logger.Errorf(ctx, "failed to get tenant info: %v", err)
@@ -20779,7 +21219,7 @@ index c0b24241..7508884e 100644
  		return err
  	}
  	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
-@@ -757,9 +907,21 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -757,9 +992,21 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	autoTagIDs := s.resolveAutoTagIDs(ctx, ds)
  
  	for _, item := range items {
@@ -20801,7 +21241,7 @@ index c0b24241..7508884e 100644
  
  	resultJSON, _ := result.ToJSON()
  	if err := allFetchedItemsFailedError(result); err != nil {
-@@ -768,8 +930,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -768,8 +1015,12 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  		return err
  	}
  
@@ -20816,7 +21256,7 @@ index c0b24241..7508884e 100644
  		cursorJSON, _ := nextCursor.ToJSON()
  		ds.LastSyncCursor = cursorJSON
  	}
-@@ -807,6 +973,122 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
+@@ -807,6 +1058,122 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
  	return nil
  }
  
@@ -20939,7 +21379,7 @@ index c0b24241..7508884e 100644
  // resolveAutoTagIDs finds or creates the per-data-source tag applied to every
  // synced item so results are identifiable in the KB. A tag failure is
  // non-fatal: the sync proceeds untagged.
-@@ -866,8 +1148,9 @@ func (s *DataSourceService) applyFetchedItem(
+@@ -866,8 +1233,9 @@ func (s *DataSourceService) applyFetchedItem(
  	tagIDs []string, result *types.SyncResult,
  ) {
  	if item.IsDeleted {
@@ -20951,7 +21391,7 @@ index c0b24241..7508884e 100644
  			return
  		}
  		if item.ExternalID == "" {
-@@ -875,6 +1158,24 @@ func (s *DataSourceService) applyFetchedItem(
+@@ -875,6 +1243,24 @@ func (s *DataSourceService) applyFetchedItem(
  			result.Skipped++
  			return
  		}
@@ -20976,7 +21416,7 @@ index c0b24241..7508884e 100644
  		// Perform real KB deletion, scoped to items owned by this data source
  		// so identical external IDs from different data sources cannot collide.
  		repo := s.knowledgeService.GetRepository()
-@@ -947,6 +1248,10 @@ func (s *DataSourceService) applyFetchedItem(
+@@ -947,6 +1333,10 @@ func (s *DataSourceService) applyFetchedItem(
  	if err != nil {
  		var dupErr *types.DuplicateKnowledgeError
  		switch {
@@ -20987,7 +21427,7 @@ index c0b24241..7508884e 100644
  		case errors.As(err, &dupErr):
  			// Duplicate file/URL is not a failure — count as skipped.
  			logger.Infof(ctx, "item %q (external_id=%s) already exists, skipping", item.Title, item.ExternalID)
-@@ -993,11 +1298,116 @@ func streamStartCursor(ds *types.DataSource, forceFull bool, attempt int) (*type
+@@ -993,11 +1383,116 @@ func streamStartCursor(ds *types.DataSource, forceFull bool, attempt int) (*type
  // Emit ingests each item as it arrives (bounding memory) and Checkpoint persists
  // the connector cursor plus live progress counts at page boundaries.
  type streamSyncHandler struct {
@@ -21109,7 +21549,7 @@ index c0b24241..7508884e 100644
  }
  
  // Emit ingests one streamed item. A canceled context aborts the stream so the
-@@ -1008,8 +1418,34 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1008,8 +1503,34 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  	if err := ctx.Err(); err != nil {
  		return err
  	}
@@ -21145,7 +21585,7 @@ index c0b24241..7508884e 100644
  	return nil
  }
  
-@@ -1017,6 +1453,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1017,6 +1538,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  // running counts into the sync log so progress survives a crash and the UI can
  // reflect a long sync mid-flight instead of jumping from 0 to done.
  func (h *streamSyncHandler) Checkpoint(ctx context.Context, cursor *types.SyncCursor) error {
@@ -21158,7 +21598,7 @@ index c0b24241..7508884e 100644
  	if cursor == nil {
  		return nil
  	}
-@@ -1070,6 +1512,9 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1070,6 +1597,9 @@ func (s *DataSourceService) processSyncStreaming(
  	ds *types.DataSource, syncLog *types.SyncLog,
  	config *types.DataSourceConfig, payload types.DataSourceSyncPayload, wasPaused bool,
  ) error {
@@ -21168,7 +21608,7 @@ index c0b24241..7508884e 100644
  	// Tenant + auto-tag setup must precede fetching because the stream ingests
  	// each item on the fly.
  	ctx = context.WithValue(ctx, types.TenantIDContextKey, ds.TenantID)
-@@ -1095,7 +1540,8 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1095,7 +1625,8 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	result := &types.SyncResult{}
@@ -21178,7 +21618,7 @@ index c0b24241..7508884e 100644
  
  	fullBaseline := startCursor
  	if forceFull {
-@@ -1112,6 +1558,12 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1112,6 +1643,12 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	nextCursor, fetchErr := streamingFetch(ctx, sc, config, forceFull, startCursor, fullBaseline, handler)
@@ -21191,7 +21631,7 @@ index c0b24241..7508884e 100644
  	if fetchErr != nil {
  		// Progress so far is already checkpointed onto ds.LastSyncCursor; leave
  		// it in place so the Asynq retry resumes from there. Persist counts.
-@@ -1121,6 +1573,25 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1121,6 +1658,25 @@ func (s *DataSourceService) processSyncStreaming(
  			types.SyncLogStatusFailed, fmt.Sprintf("Fetch failed: %v", fetchErr), wasPaused)
  		return fetchErr
  	}
@@ -21217,7 +21657,7 @@ index c0b24241..7508884e 100644
  
  	resultJSON, _ := result.ToJSON()
  	if err := allFetchedItemsFailedError(result); err != nil {
-@@ -1129,13 +1600,11 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1129,13 +1685,11 @@ func (s *DataSourceService) processSyncStreaming(
  		return err
  	}
  
@@ -21235,7 +21675,7 @@ index c0b24241..7508884e 100644
  
  	// Surface per-document failures as a partial sync (not silent success), so
  	// the sync-log drawer's failure detail explains which docs didn't make it —
-@@ -1159,6 +1628,26 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1159,6 +1713,26 @@ func (s *DataSourceService) processSyncStreaming(
  	return nil
  }
  
@@ -21262,7 +21702,7 @@ index c0b24241..7508884e 100644
  func (s *DataSourceService) updateSyncRunResult(
  	ctx context.Context,
  	ds *types.DataSource,
-@@ -1179,8 +1668,21 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1179,8 +1753,21 @@ func (s *DataSourceService) updateSyncRunResult(
  	syncLog.FinishedAt = timePtr(time.Now().UTC())
  	syncLog.ErrorMessage = errorMessage
  	syncLog.Result = resultJSON
@@ -21286,7 +21726,7 @@ index c0b24241..7508884e 100644
  	}
  
  	if status == types.SyncLogStatusFailed {
-@@ -1196,6 +1698,16 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1196,6 +1783,16 @@ func (s *DataSourceService) updateSyncRunResult(
  	ds.LastSyncResult = resultJSON
  	if err := s.dsRepo.UpdateSyncState(ctx, ds); err != nil {
  		logger.Errorf(ctx, "failed to update data source: %v", err)
@@ -21303,7 +21743,7 @@ index c0b24241..7508884e 100644
  	}
  	action := types.AuditActionDataSourceSyncCompleted
  	outcome := types.AuditOutcomeSuccess
-@@ -1285,7 +1797,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1285,7 +1882,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	// "unknown" for the raw ds.Type "feishu_drive"). Fall back to ds.Type so
  	// connectors that don't set metadata.channel still get a meaningful label.
  	channel := ds.Type // e.g. "feishu", "notion"
@@ -21315,7 +21755,7 @@ index c0b24241..7508884e 100644
  		if mc, ok := item.Metadata["channel"]; ok && mc != "" {
  			channel = mc
  		}
-@@ -1308,6 +1823,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1308,6 +1908,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	for k, v := range item.Metadata {
  		metadata[k] = v
  	}
@@ -21329,7 +21769,7 @@ index c0b24241..7508884e 100644
  
  	// Check if a knowledge item with this external_id already exists → delete it first (update)
  	isUpdate := false
-@@ -1318,14 +1840,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1318,14 +1925,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  		// other during updates.
  		existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
  		if err != nil {
@@ -21353,7 +21793,7 @@ index c0b24241..7508884e 100644
  					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
  				}
  				isUpdate = true
-@@ -1407,6 +1938,76 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1407,6 +2023,76 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	return isUpdate, fmt.Errorf("item has neither content nor URL")
  }
  
@@ -21431,13 +21871,14 @@ index c0b24241..7508884e 100644
  // exists in the KB *under this item's own external_id* — i.e. a content-dedup hit
  // against this same node, so reconciling its subtree is safe. File deduplication
 diff --git a/internal/application/service/datasource_service_test.go b/internal/application/service/datasource_service_test.go
-index bc90b995..9289069f 100644
+index bc90b995..14768642 100644
 --- a/internal/application/service/datasource_service_test.go
 +++ b/internal/application/service/datasource_service_test.go
-@@ -4,19 +4,44 @@ import (
+@@ -4,19 +4,45 @@ import (
  	"context"
  	"encoding/json"
  	"errors"
++	"fmt"
 +	"mime/multipart"
 +	"path/filepath"
  	"strings"
@@ -21479,7 +21920,7 @@ index bc90b995..9289069f 100644
  func TestProcessSyncCancelsWhenKnowledgeBaseDeleted(t *testing.T) {
  	ds := &types.DataSource{
  		ID:              "ds-1",
-@@ -128,10 +153,180 @@ func (s *processSyncKBService) ProcessKBDelete(context.Context, *asynq.Task) err
+@@ -128,10 +154,366 @@ func (s *processSyncKBService) ProcessKBDelete(context.Context, *asynq.Task) err
  var _ interfaces.KnowledgeBaseService = (*processSyncKBService)(nil)
  
  type processSyncSyncLogRepo struct {
@@ -21504,6 +21945,60 @@ index bc90b995..9289069f 100644
 +		q.acceptedTaskID = q.taskID
 +	}
 +	return nil, errors.New("synthetic enqueue response lost")
++}
++
++type nextcloudLateSuccessQueue struct {
++	logs             *processSyncSyncLogRepo
++	taskID           string
++	failBeforeReturn bool
++}
++
++func (q *nextcloudLateSuccessQueue) Enqueue(_ *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
++	for _, opt := range opts {
++		if opt.Type() == asynq.TaskIDOpt {
++			q.taskID, _ = opt.Value().(string)
++		}
++	}
++	if q.failBeforeReturn {
++		for _, log := range q.logs.logs {
++			log.Status = types.SyncLogStatusFailed
++			log.ErrorMessage = "sync_task_absent_before_worker_start"
++			now := time.Now().UTC()
++			log.FinishedAt = &now
++		}
++	}
++	return &asynq.TaskInfo{ID: q.taskID}, nil
++}
++
++func TestManualNextcloudSyncLateEnqueueReceipt(t *testing.T) {
++	for _, tc := range []struct {
++		name             string
++		failBeforeReturn bool
++	}{
++		{name: "current admission remains accepted"},
++		{name: "recovery won before late queue reply", failBeforeReturn: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ds := &types.DataSource{ID: "nextcloud-manual", TenantID: 1,
++				KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud,
++				Status: types.DataSourceStatusActive}
++			logs := &processSyncSyncLogRepo{logs: make(map[string]*types.SyncLog), nextID: "late-receipt-log"}
++			queue := &nextcloudLateSuccessQueue{logs: logs, failBeforeReturn: tc.failBeforeReturn}
++			svc := &DataSourceService{dsRepo: newKBDeleteDSRepo("kb-1", ds),
++				syncLogRepo: logs, taskEnqueuer: queue}
++			admitted, err := svc.ManualSync(context.Background(), ds.ID)
++			require.Equal(t, "dssync:late-receipt-log", queue.taskID)
++			require.NotNil(t, admitted)
++			if tc.failBeforeReturn {
++				require.ErrorIs(t, err, datasource.ErrSyncEnqueueUncertain)
++				require.Equal(t, types.SyncLogStatusFailed, admitted.Status)
++				require.Equal(t, "sync_task_absent_before_worker_start", admitted.ErrorMessage)
++			} else {
++				require.NoError(t, err)
++				require.Equal(t, types.SyncLogStatusRunning, admitted.Status)
++			}
++		})
++	}
 +}
 +
 +func TestManualNextcloudSyncUncertainEnqueueRetainsAdmission(t *testing.T) {
@@ -21575,6 +22070,77 @@ index bc90b995..9289069f 100644
 +	require.Contains(t, log.ErrorMessage, "not paired")
 +}
 +
++func TestProcessSyncRejectsUnclaimedNextcloudManualBeforeSourceIO(t *testing.T) {
++	ds := &types.DataSource{ID: "nextcloud-claim", TenantID: 7,
++		KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud,
++		Status: types.DataSourceStatusActive}
++	for _, tc := range []struct {
++		name, trigger, taskID string
++		version               int
++	}{
++		{"unknown_version", "manual", "dssync:claim-log", 2},
++		{"wrong_trigger", "schedule", "dssync:claim-log", 1},
++		{"wrong_task", "manual", "dssync:wrong", 1},
++		{"unknown_trigger", "legacy", "dssync:claim-log", 1},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			log := &types.SyncLog{ID: "claim-log", DataSourceID: ds.ID, TenantID: ds.TenantID,
++				Status: types.SyncLogStatusRunning, RecoveryVersion: tc.version,
++				RecoveryTrigger: "manual", QueueTaskID: "dssync:claim-log"}
++			logs := &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}
++			// kbService is deliberately nil: reaching it means source work began
++			// without an exact claim.
++			svc := &DataSourceService{dsRepo: newKBDeleteDSRepo("kb", ds), syncLogRepo: logs}
++			payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: ds.ID,
++				TenantID: ds.TenantID, SyncLogID: log.ID, Trigger: tc.trigger})
++			require.NoError(t, err)
++			err = svc.ProcessSync(types.WithTaskExecutionID(context.Background(), tc.taskID),
++				asynq.NewTask(types.TypeDataSourceSync, payload))
++			require.ErrorIs(t, err, asynq.SkipRetry)
++			require.Nil(t, log.WorkerStartedAt)
++		})
++	}
++}
++
++func TestProcessSyncNextcloudRetryAfterTransientFailure(t *testing.T) {
++	config, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
++		ResourceIDs: []string{"binding-1"},
++		Settings:    map[string]interface{}{"base_url": "https://nextcloud.example.test"},
++		Credentials: map[string]interface{}{"token": "synthetic-token"}}).ToJSON()
++	require.NoError(t, err)
++	ds := &types.DataSource{ID: "nextcloud-retry", TenantID: 1,
++		KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud,
++		Status: types.DataSourceStatusActive, Config: config,
++		LastSyncCursor: types.JSON(`{"connector_cursor":`)}
++	log := &types.SyncLog{ID: "retry-log", DataSourceID: ds.ID,
++		TenantID: ds.TenantID, Status: types.SyncLogStatusRunning,
++		RecoveryVersion: 1, RecoveryTrigger: "manual", QueueTaskID: "dssync:retry-log"}
++	logs := &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}
++	registry := datasource.NewConnectorRegistry()
++	require.NoError(t, registry.Register(nextcloudconnector.NewConnector()))
++	svc := &DataSourceService{dsRepo: newKBDeleteDSRepo("kb-1", ds),
++		syncLogRepo: logs, connectorRegistry: registry,
++		kbService: &processSyncKBService{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}}}
++	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: ds.ID,
++		TenantID: ds.TenantID, SyncLogID: log.ID, Trigger: "manual"})
++	require.NoError(t, err)
++	task := asynq.NewTask(types.TypeDataSourceSync, payload)
++	firstCtx := types.WithTaskRetryMetadata(types.WithTaskExecutionID(context.Background(), log.QueueTaskID), 0, 2)
++	err = svc.ProcessSync(firstCtx, task)
++	require.ErrorContains(t, err, "baseline verifier is unavailable")
++	require.Equal(t, types.SyncLogStatusRunning, log.Status)
++	require.NotNil(t, log.WorkerStartedAt)
++	require.False(t, log.WorkerActive)
++	require.Empty(t, log.WorkerAttemptToken)
++
++	svc.nextcloudEventInbox = nextcloudBaselineTestRepo(t)
++	secondCtx := types.WithTaskRetryMetadata(types.WithTaskExecutionID(context.Background(), log.QueueTaskID), 1, 2)
++	err = svc.ProcessSync(secondCtx, task)
++	require.ErrorIs(t, err, apprepo.ErrNextcloudSourceCursor)
++	require.NotErrorIs(t, err, asynq.SkipRetry)
++	require.Equal(t, types.SyncLogStatusFailed, log.Status)
++}
++
 +func TestProcessSyncNextcloudMalformedCursorFailsClosed(t *testing.T) {
 +	for _, full := range []bool{true, false} {
 +		t.Run(map[bool]string{true: "full", false: "incremental"}[full], func(t *testing.T) {
@@ -21588,7 +22154,8 @@ index bc90b995..9289069f 100644
 +				Status: types.DataSourceStatusActive, Config: config,
 +				LastSyncCursor: types.JSON(`{"connector_cursor":`)}
 +			log := &types.SyncLog{ID: "bad-cursor-log", DataSourceID: ds.ID,
-+				TenantID: ds.TenantID, Status: types.SyncLogStatusRunning}
++				TenantID: ds.TenantID, Status: types.SyncLogStatusRunning,
++				RecoveryVersion: 1, RecoveryTrigger: "manual", QueueTaskID: "dssync:bad-cursor-log"}
 +			logs := &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}
 +			registry := datasource.NewConnectorRegistry()
 +			require.NoError(t, registry.Register(nextcloudconnector.NewConnector()))
@@ -21599,7 +22166,8 @@ index bc90b995..9289069f 100644
 +			payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: ds.ID,
 +				TenantID: ds.TenantID, SyncLogID: log.ID, ForceFull: full, Trigger: "manual"})
 +			require.NoError(t, err)
-+			err = svc.ProcessSync(context.Background(), asynq.NewTask(types.TypeDataSourceSync, payload))
++			err = svc.ProcessSync(types.WithTaskExecutionID(context.Background(), log.QueueTaskID),
++				asynq.NewTask(types.TypeDataSourceSync, payload))
 +			require.ErrorIs(t, err, apprepo.ErrNextcloudSourceCursor)
 +			require.Equal(t, types.SyncLogStatusFailed, log.Status)
 +			require.Equal(t, `{"connector_cursor":`, string(ds.LastSyncCursor))
@@ -21628,7 +22196,8 @@ index bc90b995..9289069f 100644
 +				KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeNextcloud,
 +				Status: types.DataSourceStatusActive, Config: config}
 +			log := &types.SyncLog{ID: "lost-cursor-log", DataSourceID: ds.ID,
-+				TenantID: ds.TenantID, Status: types.SyncLogStatusRunning}
++				TenantID: ds.TenantID, Status: types.SyncLogStatusRunning,
++				RecoveryVersion: 1, QueueTaskID: "dssync:lost-cursor-log"}
 +			logs := &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}
 +			registry := datasource.NewConnectorRegistry()
 +			require.NoError(t, registry.Register(nextcloudconnector.NewConnector()))
@@ -21640,15 +22209,70 @@ index bc90b995..9289069f 100644
 +			if scenario == "schedule_legacy_knowledge" {
 +				trigger = "schedule"
 +			}
++			log.RecoveryTrigger = trigger
 +			payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: ds.ID,
 +				TenantID: ds.TenantID, SyncLogID: log.ID, ForceFull: true, Trigger: trigger})
 +			require.NoError(t, err)
-+			err = svc.ProcessSync(context.Background(), asynq.NewTask(types.TypeDataSourceSync, payload))
++			err = svc.ProcessSync(types.WithTaskExecutionID(context.Background(), log.QueueTaskID),
++				asynq.NewTask(types.TypeDataSourceSync, payload))
 +			require.ErrorIs(t, err, apprepo.ErrNextcloudSourceCursor)
 +			require.Equal(t, types.SyncLogStatusFailed, log.Status)
 +			require.Empty(t, ds.LastSyncCursor)
 +		})
 +	}
++}
++
++func (r *processSyncSyncLogRepo) MarkNextcloudEnqueueUncertain(_ context.Context, logID, dsID string,
++	tenantID uint64, trigger, taskID string,
++) (bool, error) {
++	log := r.logs[logID]
++	if log == nil || log.DataSourceID != dsID || log.TenantID != tenantID ||
++		log.Status != types.SyncLogStatusRunning || log.WorkerStartedAt != nil {
++		return false, nil
++	}
++	log.ErrorMessage = datasource.NextcloudSyncEnqueueUncertain
++	return true, nil
++}
++
++func (r *processSyncSyncLogRepo) ClaimNextcloudSyncStart(_ context.Context, logID, dsID string,
++	tenantID uint64, trigger, taskID string, retried int,
++) (string, error) {
++	log := r.logs[logID]
++	if log == nil || log.DataSourceID != dsID || log.TenantID != tenantID ||
++		log.Status != types.SyncLogStatusRunning || log.RecoveryVersion != 1 ||
++		log.RecoveryTrigger != trigger || log.QueueTaskID != taskID || log.WorkerActive ||
++		(retried == 0 && log.WorkerStartedAt != nil) ||
++		(retried > 0 && log.WorkerStartedAt == nil) {
++		return "", nil
++	}
++	now := time.Now().UTC()
++	if log.WorkerStartedAt == nil {
++		log.WorkerStartedAt = &now
++	}
++	log.WorkerActive = true
++	log.WorkerAttemptToken = fmt.Sprintf("attempt-%d", retried)
++	return log.WorkerAttemptToken, nil
++}
++
++func (r *processSyncSyncLogRepo) FinishNextcloudSyncAttempt(_ context.Context, logID, dsID string,
++	tenantID uint64, trigger, taskID, token string, terminal bool, message string,
++) (bool, error) {
++	log := r.logs[logID]
++	if log == nil || log.DataSourceID != dsID || log.TenantID != tenantID ||
++		log.Status != types.SyncLogStatusRunning || log.RecoveryVersion != 1 ||
++		log.RecoveryTrigger != trigger || log.QueueTaskID != taskID ||
++		!log.WorkerActive || log.WorkerAttemptToken != token {
++		return false, nil
++	}
++	log.WorkerActive = false
++	log.WorkerAttemptToken = ""
++	log.ErrorMessage = message
++	if terminal {
++		log.Status = types.SyncLogStatusFailed
++		now := time.Now().UTC()
++		log.FinishedAt = &now
++	}
++	return true, nil
  }
  
  func (r *processSyncSyncLogRepo) Create(_ context.Context, log *types.SyncLog) error {
@@ -21658,10 +22282,13 @@ index bc90b995..9289069f 100644
 +			log.ID = uuid.NewString()
 +		}
 +	}
++	if log.RecoveryVersion == 1 && log.QueueTaskID == "" {
++		log.QueueTaskID = datasource.NextcloudSyncTaskID(log.ID)
++	}
  	r.logs[log.ID] = log
  	return nil
  }
-@@ -278,6 +473,36 @@ type deletionLookupKnowledgeRepo struct {
+@@ -278,6 +660,36 @@ type deletionLookupKnowledgeRepo struct {
  	knowledgeBaseID   string
  	dataSourceID      string
  	externalID        string
@@ -21698,7 +22325,7 @@ index bc90b995..9289069f 100644
  }
  
  func (r *deletionLookupKnowledgeRepo) UpdateKnowledge(_ context.Context, knowledge *types.Knowledge) error {
-@@ -356,6 +581,27 @@ type keyedDeletionRepo struct {
+@@ -356,6 +768,27 @@ type keyedDeletionRepo struct {
  	items         map[string]*types.Knowledge
  	hardDeleted   []string
  	hardDeleteErr error
@@ -21726,7 +22353,7 @@ index bc90b995..9289069f 100644
  }
  
  func (r *keyedDeletionRepo) FindByDataSourceExternalID(
-@@ -687,6 +933,78 @@ func (mixedSyncConnector) FetchIncremental(
+@@ -687,6 +1120,92 @@ func (mixedSyncConnector) FetchIncremental(
  	return items, nil, err
  }
  
@@ -21746,12 +22373,16 @@ index bc90b995..9289069f 100644
 +
 +func TestProcessSync_NextcloudPartialFailureDoesNotAdvanceCursor(t *testing.T) {
 +	for _, test := range []struct {
-+		name       string
-+		deleteFail bool
-+		wantMarker string
++		name            string
++		trigger         string
++		deleteFail      bool
++		wantMarker      string
++		recoveryVersion int
 +	}{
-+		{name: "failed deletion retains checkpoint", deleteFail: true, wantMarker: "old"},
-+		{name: "successful deletion advances checkpoint", wantMarker: "new"},
++		{name: "failed deletion retains checkpoint", trigger: "manual", deleteFail: true, wantMarker: "old", recoveryVersion: 1},
++		{name: "successful deletion advances checkpoint", trigger: "manual", wantMarker: "new", recoveryVersion: 1},
++		{name: "legacy queued manual sync completes after upgrade", trigger: "manual", wantMarker: "new", recoveryVersion: 0},
++		{name: "legacy queued empty trigger completes after upgrade", trigger: "", wantMarker: "new", recoveryVersion: 0},
 +	} {
 +		t.Run(test.name, func(t *testing.T) {
 +			configJSON, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud,
@@ -21770,6 +22401,11 @@ index bc90b995..9289069f 100644
 +			syncLog := &types.SyncLog{
 +				ID: "log-nextcloud", DataSourceID: ds.ID, TenantID: ds.TenantID,
 +				Status: types.SyncLogStatusRunning, StartedAt: time.Now().UTC(),
++				RecoveryVersion: test.recoveryVersion,
++			}
++			if test.recoveryVersion == 1 {
++				syncLog.RecoveryTrigger = "manual"
++				syncLog.QueueTaskID = "dssync:log-nextcloud"
 +			}
 +			repo := &keyedDeletionRepo{items: map[string]*types.Knowledge{
 +				"file:gone": {ID: "knowledge-gone"},
@@ -21790,10 +22426,15 @@ index bc90b995..9289069f 100644
 +				nextcloudEventInbox: nextcloudBaselineTestRepo(t),
 +			}
 +			payload, err := json.Marshal(types.DataSourceSyncPayload{
-+				DataSourceID: ds.ID, TenantID: ds.TenantID, SyncLogID: syncLog.ID,
++				DataSourceID: ds.ID, TenantID: ds.TenantID, SyncLogID: syncLog.ID, Trigger: test.trigger,
 +			})
 +			require.NoError(t, err)
-+			require.NoError(t, svc.ProcessSync(context.Background(), asynq.NewTask(types.TypeDataSourceSync, payload)))
++			ctx := context.Background()
++			if test.recoveryVersion == 1 {
++				ctx = types.WithTaskExecutionID(ctx, syncLog.QueueTaskID)
++			}
++			require.NoError(t, svc.ProcessSync(ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
++			require.NotEqual(t, types.SyncLogStatusRunning, syncLog.Status)
 +			stored, err := ds.ParseSyncCursor()
 +			require.NoError(t, err)
 +			require.NotNil(t, stored)
@@ -21805,7 +22446,7 @@ index bc90b995..9289069f 100644
  func TestProcessSync_SyncDeletionsPartialWhenMixedResults(t *testing.T) {
  	configJSON, err := (&types.DataSourceConfig{Type: "test-sync-mixed"}).ToJSON()
  	require.NoError(t, err)
-@@ -748,3 +1066,95 @@ func TestIngestItem_URLCreationMetadataAttachFailure(t *testing.T) {
+@@ -748,3 +1267,95 @@ func TestIngestItem_URLCreationMetadataAttachFailure(t *testing.T) {
  	require.Error(t, err)
  	assert.Contains(t, err.Error(), "attach datasource metadata")
  }
@@ -23357,10 +23998,26 @@ index a7f1f625..9860b432 100644
  	// Step 1: Delete the knowledge base record first (mark as deleted)
  	logger.Infof(ctx, "Deleting knowledge base from database")
 diff --git a/internal/application/service/knowledgebase_delete_datasource_test.go b/internal/application/service/knowledgebase_delete_datasource_test.go
-index 551a1316..97906ddd 100644
+index 551a1316..69cea2c9 100644
 --- a/internal/application/service/knowledgebase_delete_datasource_test.go
 +++ b/internal/application/service/knowledgebase_delete_datasource_test.go
-@@ -179,6 +179,24 @@ func TestDeleteKnowledgeBaseCleansUpDataSources(t *testing.T) {
+@@ -91,6 +91,15 @@ func (r *kbDeleteSyncLogRepo) FindLatest(_ context.Context, _ string) (*types.Sy
+ func (r *kbDeleteSyncLogRepo) HasRunningSync(_ context.Context, _ string) (bool, error) {
+ 	return false, nil
+ }
++func (r *kbDeleteSyncLogRepo) ClaimNextcloudSyncStart(context.Context, string, string, uint64, string, string, int) (string, error) {
++	return "", nil
++}
++func (r *kbDeleteSyncLogRepo) FinishNextcloudSyncAttempt(context.Context, string, string, uint64, string, string, string, bool, string) (bool, error) {
++	return false, nil
++}
++func (r *kbDeleteSyncLogRepo) MarkNextcloudEnqueueUncertain(context.Context, string, string, uint64, string, string) (bool, error) {
++	return false, nil
++}
+ func (r *kbDeleteSyncLogRepo) Update(_ context.Context, _ *types.SyncLog) error { return nil }
+ func (r *kbDeleteSyncLogRepo) UpdateResult(_ context.Context, _ *types.SyncLog) error {
+ 	return nil
+@@ -179,6 +188,24 @@ func TestDeleteKnowledgeBaseCleansUpDataSources(t *testing.T) {
  	assert.Equal(t, 0, scheduler.EntryCount())
  }
  
@@ -25412,7 +26069,7 @@ index 83fb0990..af50dbf7 100644
  }
  
 diff --git a/internal/container/container.go b/internal/container/container.go
-index 57dc3b66..70482c45 100644
+index 57dc3b66..01884319 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -34,6 +34,7 @@ import (
@@ -25479,15 +26136,16 @@ index 57dc3b66..70482c45 100644
  	must(container.Invoke(handler.ConfigureDataSourceCredentialsGroupAccess))
  	must(container.Provide(handler.NewWebSearchHandler))
  	must(container.Provide(handler.NewWebSearchProviderHandler))
-@@ -634,6 +655,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -634,6 +655,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	// persistence succeeded immediately before trigger enqueue failed). Re-arm
  	// them only after the matching handlers are ready.
  	must(container.Invoke(recoverPendingWikiTasks))
++	must(container.Invoke(startNextcloudSyncAdmissionRecovery))
 +	must(container.Invoke(startNextcloudEventDispatcher))
  
  	logger.Infof(ctx, "[Container] Container initialization completed successfully")
  	return container
-@@ -1138,12 +1160,15 @@ func syncSequences(db *gorm.DB) {
+@@ -1138,12 +1161,15 @@ func syncSequences(db *gorm.DB) {
  // Returns:
  //   - Configured file service implementation
  //   - Error if initialization fails
@@ -25505,7 +26163,7 @@ index 57dc3b66..70482c45 100644
  }
  
  func initRawFileService(_ *config.Config) (interfaces.FileService, error) {
-@@ -1880,6 +1905,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
+@@ -1880,6 +1906,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
  	if err := registry.Register(gitlabConnector.NewConnector()); err != nil {
  		errs = errors.Join(errs, fmt.Errorf("register gitlab connector: %w", err))
  	}
@@ -25515,7 +26173,7 @@ index 57dc3b66..70482c45 100644
  
  	// Future connectors will be registered here:
  	// if err := registry.Register(githubConnector.NewConnector()); err != nil { ... }
-@@ -1902,6 +1930,121 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
+@@ -1902,6 +1931,121 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
  	})
  }
  
@@ -25637,6 +26295,255 @@ index 57dc3b66..70482c45 100644
  // startDirectoryRuntime starts the LDAP/AD synchronization loop. The runtime
  // is always registered so local/OIDC deployments keep a stable dependency
  // graph; with directory.enabled=false its loop remains dormant.
+diff --git a/internal/container/recover_nextcloud_sync_admissions.go b/internal/container/recover_nextcloud_sync_admissions.go
+new file mode 100644
+index 00000000..8ec7aea5
+--- /dev/null
++++ b/internal/container/recover_nextcloud_sync_admissions.go
+@@ -0,0 +1,106 @@
++package container
++
++import (
++	"context"
++	"errors"
++	"os"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/logger"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/hibiken/asynq"
++	"github.com/redis/go-redis/v9"
++	"gorm.io/gorm"
++)
++
++const nextcloudSyncRecoveryGrace = 5 * time.Minute
++
++type nextcloudSyncTaskProbe interface {
++	GetTaskInfo(queue, id string) (*asynq.TaskInfo, error)
++}
++
++func recoverNextcloudSyncAdmissionsOnce(ctx context.Context, store *repository.NextcloudSyncRecoveryStore,
++	probe nextcloudSyncTaskProbe, distributed bool, now time.Time,
++) (int, error) {
++	if store == nil || (distributed && probe == nil) {
++		return 0, nil
++	}
++	cutoff := now.Add(-nextcloudSyncRecoveryGrace)
++	logs, err := store.UnstartedBefore(ctx, cutoff, 100)
++	if err != nil {
++		return 0, err
++	}
++	recovered := 0
++	for _, log := range logs {
++		if log.QueueTaskID != "dssync:"+log.ID {
++			continue
++		}
++		if distributed {
++			// Any queue/Redis error other than a definitive absence preserves
++			// the admission. An existing exact task, in any state, also wins.
++			_, lookupErr := probe.GetTaskInfo(types.QueueSync, log.QueueTaskID)
++			if lookupErr == nil {
++				continue
++			}
++			if !errors.Is(lookupErr, asynq.ErrTaskNotFound) {
++				return recovered, lookupErr
++			}
++		}
++		released, err := store.FailMissing(ctx, log, cutoff, now)
++		if err != nil {
++			return recovered, err
++		}
++		if released {
++			recovered++
++		}
++	}
++	return recovered, nil
++}
++
++// Redis recovery is opt-in during a rolling upgrade: every worker that can
++// consume the sync queue must enforce ClaimNextcloudSyncStart first. Lite has
++// one process, so the prior in-memory queue is gone on restart.
++func startNextcloudSyncAdmissionRecovery(db *gorm.DB, redisClient *redis.Client,
++	cleaner interfaces.ResourceCleaner,
++) {
++	distributed := redisClient != nil
++	if distributed && os.Getenv("WEKNORA_NEXTCLOUD_SYNC_RECOVERY_ENABLED") != "true" {
++		return
++	}
++	var probe nextcloudSyncTaskProbe
++	if distributed {
++		probe = asynq.NewInspectorFromRedisClient(redisClient)
++	}
++	store := repository.NewNextcloudSyncRecoveryStore(db)
++	stop := make(chan struct{})
++	run := func() {
++		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++		defer cancel()
++		count, err := recoverNextcloudSyncAdmissionsOnce(ctx, store, probe, distributed, time.Now().UTC())
++		if err != nil {
++			logger.Warnf(ctx, "[NextcloudSyncRecovery] scan failed: %v", err)
++		}
++		if count > 0 {
++			logger.Infof(ctx, "[NextcloudSyncRecovery] released %d unstarted admission(s)", count)
++		}
++	}
++	go func() {
++		run()
++		ticker := time.NewTicker(time.Minute)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-ticker.C:
++				run()
++			case <-stop:
++				return
++			}
++		}
++	}()
++	cleaner.RegisterWithName("NextcloudSyncAdmissionRecovery", func() error {
++		close(stop)
++		return nil
++	})
++}
+diff --git a/internal/container/recover_nextcloud_sync_admissions_test.go b/internal/container/recover_nextcloud_sync_admissions_test.go
+new file mode 100644
+index 00000000..38e4c85a
+--- /dev/null
++++ b/internal/container/recover_nextcloud_sync_admissions_test.go
+@@ -0,0 +1,131 @@
++package container
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/hibiken/asynq"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++type nextcloudRecoveryProbe struct {
++	err        error
++	exists     bool
++	existsByID map[string]bool
++	id         string
++}
++
++func (p *nextcloudRecoveryProbe) GetTaskInfo(queue, id string) (*asynq.TaskInfo, error) {
++	p.id = id
++	if queue != types.QueueSync {
++		return nil, errors.New("wrong queue")
++	}
++	if p.err != nil {
++		return nil, p.err
++	}
++	if p.exists || p.existsByID[id] {
++		return &asynq.TaskInfo{ID: id, Queue: queue}, nil
++	}
++	return nil, asynq.ErrTaskNotFound
++}
++
++func TestNextcloudSyncAdmissionRecoveryProofs(t *testing.T) {
++	for _, tc := range []struct {
++		name        string
++		distributed bool
++		probeErr    error
++		exists      bool
++		wantFailed  bool
++		wantErr     bool
++	}{
++		{name: "redis_task_present", distributed: true, exists: true},
++		{name: "redis_timeout", distributed: true, probeErr: errors.New("timeout"), wantErr: true},
++		{name: "redis_absent", distributed: true, probeErr: asynq.ErrTaskNotFound, wantFailed: true},
++		{name: "redis_queue_absent_is_not_exact_proof", distributed: true, probeErr: asynq.ErrQueueNotFound, wantErr: true},
++		{name: "lite_lost_queue", wantFailed: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++			require.NoError(t, err)
++			raw, err := db.DB()
++			require.NoError(t, err)
++			raw.SetMaxOpenConns(1)
++			require.NoError(t, db.AutoMigrate(&types.SyncLog{}))
++			require.NoError(t, db.Exec("CREATE TABLE data_sources (id TEXT PRIMARY KEY, type TEXT)").Error)
++			require.NoError(t, db.Exec("INSERT INTO data_sources (id, type) VALUES ('ds', 'nextcloud')").Error)
++			now := time.Now().UTC()
++			log := &types.SyncLog{ID: "admission", DataSourceID: "ds", TenantID: 7,
++				Status: types.SyncLogStatusRunning, StartedAt: now.Add(-10 * time.Minute),
++				RecoveryVersion: 1, RecoveryTrigger: "manual"}
++			require.NoError(t, db.Create(log).Error)
++			probe := &nextcloudRecoveryProbe{err: tc.probeErr, exists: tc.exists}
++			count, err := recoverNextcloudSyncAdmissionsOnce(context.Background(),
++				repository.NewNextcloudSyncRecoveryStore(db), probe, tc.distributed, now)
++			require.Equal(t, tc.wantErr, err != nil)
++			if tc.wantFailed {
++				require.Equal(t, 1, count)
++			} else {
++				require.Zero(t, count)
++			}
++			var after types.SyncLog
++			require.NoError(t, db.First(&after, "id = ?", log.ID).Error)
++			if tc.wantFailed {
++				require.Equal(t, types.SyncLogStatusFailed, after.Status)
++			} else {
++				require.Equal(t, types.SyncLogStatusRunning, after.Status)
++			}
++			if tc.distributed {
++				require.Equal(t, "dssync:admission", probe.id)
++			}
++		})
++	}
++}
++
++func TestNextcloudSyncAdmissionRecoveryRotatesPastExistingTasks(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++	require.NoError(t, err)
++	raw, err := db.DB()
++	require.NoError(t, err)
++	raw.SetMaxOpenConns(1)
++	require.NoError(t, db.AutoMigrate(&types.SyncLog{}))
++	require.NoError(t, db.Exec("CREATE TABLE data_sources (id TEXT PRIMARY KEY, type TEXT)").Error)
++	require.NoError(t, db.Exec("INSERT INTO data_sources (id, type) VALUES ('ds', 'nextcloud')").Error)
++	now := time.Now().UTC()
++	probe := &nextcloudRecoveryProbe{existsByID: make(map[string]bool)}
++	for i := 0; i < 101; i++ {
++		id := fmt.Sprintf("present-%03d", i)
++		log := &types.SyncLog{ID: id, DataSourceID: "ds", TenantID: 7,
++			Status: types.SyncLogStatusRunning, StartedAt: now.Add(-10 * time.Minute),
++			RecoveryVersion: 1, RecoveryTrigger: "manual"}
++		require.NoError(t, db.Create(log).Error)
++		probe.existsByID["dssync:"+id] = true
++	}
++	missing := &types.SyncLog{ID: "missing-after-present", DataSourceID: "ds", TenantID: 7,
++		Status: types.SyncLogStatusRunning, StartedAt: now.Add(-9 * time.Minute),
++		RecoveryVersion: 1, RecoveryTrigger: "schedule"}
++	require.NoError(t, db.Create(missing).Error)
++	store := repository.NewNextcloudSyncRecoveryStore(db)
++	for run := 0; run < 2; run++ {
++		count, err := recoverNextcloudSyncAdmissionsOnce(context.Background(), store, probe, true, now)
++		require.NoError(t, err)
++		if run == 0 {
++			require.Zero(t, count)
++		} else {
++			require.Equal(t, 1, count)
++		}
++	}
++	var after types.SyncLog
++	require.NoError(t, db.First(&after, "id = ?", missing.ID).Error)
++	require.Equal(t, types.SyncLogStatusFailed, after.Status)
++	require.Equal(t, "dssync:"+missing.ID, probe.id)
++	var present types.SyncLog
++	require.NoError(t, db.First(&present, "id = ?", "present-000").Error)
++	require.Equal(t, types.SyncLogStatusRunning, present.Status)
++}
 diff --git a/internal/container/reset_pending_tasks.go b/internal/container/reset_pending_tasks.go
 index 349f9e49..de900846 100644
 --- a/internal/container/reset_pending_tasks.go
@@ -25746,7 +26653,7 @@ index 48620fad..c6fbfd4f 100644
  	// Run all pending migrations
  	logger.Infof(ctx, "Running pending migrations...")
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index ca9fa532..1016ccf9 100644
+index ca9fa532..f16269a8 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -25776,7 +26683,7 @@ index ca9fa532..1016ccf9 100644
  }
  
  // versionedSQLiteColumns maps each existing table to the columns that the
-@@ -56,15 +65,160 @@ var versionedSQLiteColumns = map[string][]string{
+@@ -56,15 +65,161 @@ var versionedSQLiteColumns = map[string][]string{
  		"parent_session_id", "forked_from_message_id", "fork_bootstrap", // 000097
  		"sandbox_config_tenant_id", // 000108
  	},
@@ -25786,17 +26693,18 @@ index ca9fa532..1016ccf9 100644
 -	"mcp_tool_approvals": {"enabled"},                                       // 000091
 -	"message_artifacts":  {"deleted_at"},                                    // 000107
 -	"directories":        {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
-+	"tenant_invitations":    {"token", "accepted_count"},                       // 000054
-+	"embed_channels":        {"allow_memory"},                                  // 000060
-+	"mcp_oauth_tokens":      {"principal_type", "principal_id"},                // 000064
-+	"mcp_tool_approvals":    {"enabled"},                                       // 000091
-+	"message_artifacts":     {"deleted_at"},                                    // 000107
-+	"directories":           {"config_version", "security_config_fingerprint"}, // 000109 / SQLite 000028
-+	"nextcloud_event_inbox": {"etag", "path", "relative_path"},                 // SQLite 000049 / PostgreSQL 000130
++	"tenant_invitations":    {"token", "accepted_count"},                                                                                             // 000054
++	"embed_channels":        {"allow_memory"},                                                                                                        // 000060
++	"mcp_oauth_tokens":      {"principal_type", "principal_id"},                                                                                      // 000064
++	"mcp_tool_approvals":    {"enabled"},                                                                                                             // 000091
++	"message_artifacts":     {"deleted_at"},                                                                                                          // 000107
++	"directories":           {"config_version", "security_config_fingerprint"},                                                                       // 000109 / SQLite 000028
++	"nextcloud_event_inbox": {"etag", "path", "relative_path"},                                                                                       // SQLite 000049 / PostgreSQL 000130
++	"sync_logs":             {"recovery_version", "recovery_trigger", "queue_task_id", "worker_started_at", "worker_active", "worker_attempt_token"}, // SQLite 000050 / PostgreSQL 000131
  }
  
 -const expectedSQLiteMigrationVersion = 34
-+const expectedSQLiteMigrationVersion = 49
++const expectedSQLiteMigrationVersion = 50
 +
 +func TestSQLiteNextcloudRevisionUpgradeFrom43PreservesUnknownHistory(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -25944,7 +26852,7 @@ index ca9fa532..1016ccf9 100644
  
  func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
  	repoRoot := sqliteRepoRoot(t)
-@@ -201,6 +355,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
+@@ -201,6 +356,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
  	require.True(t, sqliteColumnExists(t, db, "messages", "sandbox_checkpoint"))
  }
  
@@ -30508,7 +31416,7 @@ index 00000000..7e81eaaf
 +	return supportedFile(name, multimodal)
 +}
 diff --git a/internal/datasource/errors.go b/internal/datasource/errors.go
-index 426c71ec..38384b3c 100644
+index 426c71ec..57b5e4a3 100644
 --- a/internal/datasource/errors.go
 +++ b/internal/datasource/errors.go
 @@ -23,10 +23,12 @@ var (
@@ -30519,22 +31427,24 @@ index 426c71ec..38384b3c 100644
 -	ErrSyncCanceled     = errors.New("sync operation was canceled")
 -	ErrFetchFailed      = errors.New("failed to fetch items from source")
 -	ErrResourceNotFound = errors.New("resource not found in source system")
-+	ErrSyncFailed         = errors.New("sync operation failed")
-+	ErrSyncCanceled       = errors.New("sync operation was canceled")
-+	ErrSyncAlreadyRunning = errors.New("data source sync already running")
++	ErrSyncFailed           = errors.New("sync operation failed")
++	ErrSyncCanceled         = errors.New("sync operation was canceled")
++	ErrSyncAlreadyRunning   = errors.New("data source sync already running")
 +	ErrSyncEnqueueUncertain = errors.New("data source sync enqueue outcome uncertain")
-+	ErrFetchFailed        = errors.New("failed to fetch items from source")
-+	ErrResourceNotFound   = errors.New("resource not found in source system")
++	ErrFetchFailed          = errors.New("failed to fetch items from source")
++	ErrResourceNotFound     = errors.New("resource not found in source system")
  
  	// Knowledge base errors
  	ErrKnowledgeBaseNotFound = errors.New("knowledge base not found")
 diff --git a/internal/datasource/nextcloud_sync_admission.go b/internal/datasource/nextcloud_sync_admission.go
 new file mode 100644
-index 00000000..e947ae63
+index 00000000..30a79473
 --- /dev/null
 +++ b/internal/datasource/nextcloud_sync_admission.go
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,33 @@
 +package datasource
++
++import "github.com/Tencent/WeKnora/internal/types"
 +
 +// NextcloudSyncEnqueueUncertain is a safe, source-independent status for a
 +// running sync log whose queue enqueue reply was lost. The log remains the
@@ -30546,8 +31456,27 @@ index 00000000..e947ae63
 +func NextcloudSyncTaskID(syncLogID string) string {
 +	return "dssync:" + syncLogID
 +}
++
++// NextcloudSyncReceiptAccepted re-reads a successful enqueue's durable intent.
++// The queue call can return after the five-minute absence proof already failed
++// the log; its late success must not be reported as an admitted sync.
++func NextcloudSyncReceiptAccepted(log *types.SyncLog, dsID string, tenantID uint64,
++	trigger, returnedTaskID string,
++) bool {
++	if log == nil || log.ID == "" || log.DataSourceID != dsID || log.TenantID != tenantID ||
++		log.RecoveryVersion != 1 || log.RecoveryTrigger != trigger ||
++		log.QueueTaskID != NextcloudSyncTaskID(log.ID) || returnedTaskID != log.QueueTaskID {
++		return false
++	}
++	switch log.Status {
++	case types.SyncLogStatusRunning, types.SyncLogStatusSuccess, types.SyncLogStatusPartial:
++		return true
++	default:
++		return false
++	}
++}
 diff --git a/internal/datasource/scheduler.go b/internal/datasource/scheduler.go
-index 196327fe..ea38c29c 100644
+index 196327fe..6cc1630f 100644
 --- a/internal/datasource/scheduler.go
 +++ b/internal/datasource/scheduler.go
 @@ -3,6 +3,7 @@ package datasource
@@ -30581,9 +31510,14 @@ index 196327fe..ea38c29c 100644
  func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
  	ctx := context.Background()
  
-@@ -159,6 +159,10 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+@@ -158,7 +158,15 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+ 		Status:       types.SyncLogStatusRunning,
  		StartedAt:    time.Now().UTC(),
  	}
++	if ds.Type == types.ConnectorTypeNextcloud {
++		syncLog.RecoveryVersion = 1
++		syncLog.RecoveryTrigger = "schedule"
++	}
  	if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
 +		if errors.Is(err, ErrSyncAlreadyRunning) {
 +			logger.Infof(ctx, "[Scheduler] skipping sync for ds=%s (another sync was admitted)", dataSourceID)
@@ -30592,7 +31526,7 @@ index 196327fe..ea38c29c 100644
  		logger.Errorf(ctx, "[Scheduler] failed to create sync log for ds=%s: %v", dataSourceID, err)
  		return
  	}
-@@ -174,8 +178,12 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+@@ -174,17 +182,21 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
  	payloadJSON, _ := json.Marshal(payload)
  	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON)
  
@@ -30605,24 +31539,60 @@ index 196327fe..ea38c29c 100644
 +		taskID = fmt.Sprintf("dssync:%s:%s", dataSourceID, time.Now().UTC().Truncate(time.Minute).Format("200601021504"))
 +	}
  
- 	_, err = s.taskEnqueuer.Enqueue(task,
+-	_, err = s.taskEnqueuer.Enqueue(task,
++	info, err := s.taskEnqueuer.Enqueue(task,
  		asynq.Queue(types.QueueSync),
-@@ -194,6 +202,13 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+ 		asynq.MaxRetry(5),
+ 		asynq.Timeout(2*time.Hour),
+ 		asynq.TaskID(taskID),
+ 	)
+ 	if err != nil {
+-		if err == asynq.ErrTaskIDConflict {
++		if err == asynq.ErrTaskIDConflict && ds.Type != types.ConnectorTypeNextcloud {
+ 			logger.Infof(ctx, "[Scheduler] sync already enqueued by another instance for ds=%s", dataSourceID)
+ 			syncLog.Status = types.SyncLogStatusCanceled
+ 			now := time.Now().UTC()
+@@ -194,6 +206,15 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
  			return
  		}
  		logger.Errorf(ctx, "[Scheduler] failed to enqueue sync task for ds=%s: %v", dataSourceID, err)
 +		if ds.Type == types.ConnectorTypeNextcloud {
-+			// Keep the admission slot: enqueue may have succeeded even though
-+			// its response was lost. Startup reset excludes this source type.
-+			syncLog.ErrorMessage = NextcloudSyncEnqueueUncertain
-+			_ = s.syncLogRepo.Update(ctx, syncLog)
++			// A worker may have finished before the lost enqueue reply.
++			// Update only the exact still-unstarted admission.
++			if _, markErr := s.syncLogRepo.MarkNextcloudEnqueueUncertain(ctx,
++				syncLog.ID, dataSourceID, tenantID, "schedule", taskID); markErr != nil {
++				logger.Warnf(ctx, "[Scheduler] could not mark uncertain sync enqueue: %v", markErr)
++			}
 +			return
 +		}
  		syncLog.Status = types.SyncLogStatusFailed
  		now := time.Now().UTC()
  		syncLog.FinishedAt = &now
+@@ -202,6 +223,22 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
+ 		return
+ 	}
+ 
++	if ds.Type == types.ConnectorTypeNextcloud {
++		stored, readErr := s.syncLogRepo.FindByID(ctx, syncLog.ID)
++		returnedID := ""
++		if info != nil {
++			returnedID = info.ID
++		}
++		if readErr != nil || !NextcloudSyncReceiptAccepted(stored,
++			dataSourceID, tenantID, "schedule", returnedID) {
++			_, markErr := s.syncLogRepo.MarkNextcloudEnqueueUncertain(ctx,
++				syncLog.ID, dataSourceID, tenantID, "schedule", taskID)
++			logger.Warnf(ctx, "[Scheduler] Nextcloud enqueue receipt cannot be confirmed: lookup=%v mark=%v",
++				readErr, markErr)
++			return
++		}
++	}
++
+ 	logger.Infof(ctx, "[Scheduler] sync task enqueued for ds=%s syncLog=%s", dataSourceID, syncLog.ID)
+ }
+ 
 diff --git a/internal/datasource/scheduler_test.go b/internal/datasource/scheduler_test.go
-index dbd35b46..7726a959 100644
+index dbd35b46..e88d0097 100644
 --- a/internal/datasource/scheduler_test.go
 +++ b/internal/datasource/scheduler_test.go
 @@ -2,6 +2,7 @@ package datasource
@@ -30633,7 +31603,7 @@ index dbd35b46..7726a959 100644
  	"sync"
  	"sync/atomic"
  	"testing"
-@@ -11,6 +12,91 @@ import (
+@@ -11,6 +12,154 @@ import (
  	"github.com/hibiken/asynq"
  )
  
@@ -30661,6 +31631,69 @@ index dbd35b46..7726a959 100644
 +		q.acceptedTaskID = q.taskID
 +	}
 +	return nil, errors.New("synthetic lost enqueue reply")
++}
++
++type nextcloudLateScheduleQueue struct {
++	logs             *fakeSyncLogRepo
++	taskID           string
++	failBeforeReturn bool
++}
++
++func (q *nextcloudLateScheduleQueue) Enqueue(_ *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
++	for _, opt := range opts {
++		if opt.Type() == asynq.TaskIDOpt {
++			q.taskID, _ = opt.Value().(string)
++		}
++	}
++	if q.failBeforeReturn {
++		q.logs.mu.Lock()
++		for _, log := range q.logs.logs {
++			log.Status = types.SyncLogStatusFailed
++			log.ErrorMessage = "sync_task_absent_before_worker_start"
++			now := time.Now().UTC()
++			log.FinishedAt = &now
++		}
++		q.logs.mu.Unlock()
++	}
++	return &asynq.TaskInfo{ID: q.taskID}, nil
++}
++
++func TestNextcloudEventSchedulerLateEnqueueReceipt(t *testing.T) {
++	for _, tc := range []struct {
++		name             string
++		failBeforeReturn bool
++	}{
++		{name: "current admission remains accepted"},
++		{name: "recovery won before late queue reply", failBeforeReturn: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ds := &types.DataSource{ID: "nextcloud-scheduled", TenantID: 1,
++				Type: types.ConnectorTypeNextcloud, Status: types.DataSourceStatusActive}
++			dsRepo := newFakeDataSourceRepo()
++			_ = dsRepo.Create(context.Background(), ds)
++			logs := newFakeSyncLogRepo()
++			logs.nextID = "late-schedule-log"
++			queue := &nextcloudLateScheduleQueue{logs: logs, failBeforeReturn: tc.failBeforeReturn}
++			s := NewScheduler(dsRepo, logs, queue)
++			s.triggerSync(ds.ID, ds.TenantID)
++			if queue.taskID != "dssync:late-schedule-log" {
++				t.Fatalf("queued task ID = %q", queue.taskID)
++			}
++			logs.mu.Lock()
++			defer logs.mu.Unlock()
++			log := logs.logs["late-schedule-log"]
++			if log == nil {
++				t.Fatal("missing sync log")
++			}
++			if tc.failBeforeReturn {
++				if log.Status != types.SyncLogStatusFailed || logs.markAttempts != 1 {
++					t.Fatalf("late receipt must enter uncertainty branch, status=%q attempts=%d", log.Status, logs.markAttempts)
++				}
++			} else if log.Status != types.SyncLogStatusRunning || logs.markAttempts != 0 {
++				t.Fatalf("current receipt rejected, status=%q attempts=%d", log.Status, logs.markAttempts)
++			}
++		})
++	}
 +}
 +
 +func TestNextcloudEventSchedulerSkipsAdmissionConflict(t *testing.T) {
@@ -30725,19 +31758,20 @@ index dbd35b46..7726a959 100644
  // ──────────────────────────────────────────────────────────────────────
  // Fake implementations for testing
  // ──────────────────────────────────────────────────────────────────────
-@@ -78,8 +164,9 @@ func (r *fakeDataSourceRepo) FindActive(_ context.Context) ([]*types.DataSource,
+@@ -78,8 +227,10 @@ func (r *fakeDataSourceRepo) FindActive(_ context.Context) ([]*types.DataSource,
  
  // fakeSyncLogRepo is an in-memory SyncLogRepository.
  type fakeSyncLogRepo struct {
 -	mu   sync.Mutex
 -	logs map[string]*types.SyncLog
-+	mu     sync.Mutex
-+	logs   map[string]*types.SyncLog
-+	nextID string
++	mu           sync.Mutex
++	logs         map[string]*types.SyncLog
++	nextID       string
++	markAttempts int
  }
  
  func newFakeSyncLogRepo() *fakeSyncLogRepo {
-@@ -90,7 +177,10 @@ func (r *fakeSyncLogRepo) Create(_ context.Context, log *types.SyncLog) error {
+@@ -90,7 +241,13 @@ func (r *fakeSyncLogRepo) Create(_ context.Context, log *types.SyncLog) error {
  	r.mu.Lock()
  	defer r.mu.Unlock()
  	if log.ID == "" {
@@ -30746,9 +31780,38 @@ index dbd35b46..7726a959 100644
 +		if log.ID == "" {
 +			log.ID = "log-" + time.Now().Format("150405.000")
 +		}
++	}
++	if log.RecoveryVersion == 1 && log.QueueTaskID == "" {
++		log.QueueTaskID = NextcloudSyncTaskID(log.ID)
  	}
  	r.logs[log.ID] = log
  	return nil
+@@ -114,6 +271,25 @@ func (r *fakeSyncLogRepo) FindLatest(_ context.Context, dsID string) (*types.Syn
+ 	return nil, nil
+ }
+ 
++func (r *fakeSyncLogRepo) ClaimNextcloudSyncStart(_ context.Context, _, _ string, _ uint64, _, _ string, _ int) (string, error) {
++	return "", nil
++}
++func (r *fakeSyncLogRepo) FinishNextcloudSyncAttempt(context.Context, string, string, uint64, string, string, string, bool, string) (bool, error) {
++	return false, nil
++}
++
++func (r *fakeSyncLogRepo) MarkNextcloudEnqueueUncertain(_ context.Context, logID, _ string, _ uint64, _, _ string) (bool, error) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	r.markAttempts++
++	log := r.logs[logID]
++	if log == nil || log.Status != types.SyncLogStatusRunning || log.WorkerStartedAt != nil {
++		return false, nil
++	}
++	log.ErrorMessage = NextcloudSyncEnqueueUncertain
++	return true, nil
++}
++
+ func (r *fakeSyncLogRepo) Update(_ context.Context, log *types.SyncLog) error {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
 diff --git a/internal/handler/chunk.go b/internal/handler/chunk.go
 index 162bc952..99f70df5 100644
 --- a/internal/handler/chunk.go
@@ -42259,10 +43322,15 @@ index b0690d90..37bef342 100644
  // RegisterWeKnoraCloudRoutes registers the WeKnoraCloud credential
  // management endpoints. SaveCredentials persists external SaaS keys
 diff --git a/internal/router/sync_task.go b/internal/router/sync_task.go
-index 8c8762f3..a37ff236 100644
+index 8c8762f3..29d90ba1 100644
 --- a/internal/router/sync_task.go
 +++ b/internal/router/sync_task.go
-@@ -6,6 +6,7 @@ import (
+@@ -2,10 +2,12 @@ package router
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
  	"sync"
  	"time"
  
@@ -42270,7 +43338,97 @@ index 8c8762f3..a37ff236 100644
  	"github.com/Tencent/WeKnora/internal/logger"
  	"github.com/Tencent/WeKnora/internal/types"
  	"github.com/Tencent/WeKnora/internal/types/interfaces"
-@@ -120,6 +121,9 @@ type SyncTaskParams struct {
+@@ -19,11 +21,13 @@ import (
+ type SyncTaskExecutor struct {
+ 	mu       sync.RWMutex
+ 	handlers map[string]func(context.Context, *asynq.Task) error
++	ids      map[string]struct{}
+ }
+ 
+ func NewSyncTaskExecutor() *SyncTaskExecutor {
+ 	return &SyncTaskExecutor{
+ 		handlers: make(map[string]func(context.Context, *asynq.Task) error),
++		ids:      make(map[string]struct{}),
+ 	}
+ }
+ 
+@@ -38,19 +42,14 @@ func (e *SyncTaskExecutor) RegisterHandler(pattern string, handler func(context.
+ // Instead of queuing to Redis, it dispatches the task to a goroutine.
+ // Supports ProcessIn (delay) and MaxRetry options for parity with asynq.
+ func (e *SyncTaskExecutor) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
+-	e.mu.RLock()
+-	handler, ok := e.handlers[task.Type()]
+-	e.mu.RUnlock()
+-
+-	if !ok {
+-		return nil, fmt.Errorf("sync task executor: no handler registered for type %q", task.Type())
+-	}
+-
+ 	var delay time.Duration
++	requestedTaskID := ""
+ 	maxRetry := 25 // asynq default
+ 	maxRetrySet := false
+ 	for _, opt := range opts {
+ 		switch opt.Type() {
++		case asynq.TaskIDOpt:
++			requestedTaskID, _ = opt.Value().(string)
+ 		case asynq.ProcessInOpt:
+ 			if d, ok := opt.Value().(time.Duration); ok {
+ 				delay = d
+@@ -68,7 +67,22 @@ func (e *SyncTaskExecutor) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asy
+ 		maxRetry = 0
+ 	}
+ 
+-	taskID := uuid.New().String()
++	taskID := requestedTaskID
++	if taskID == "" {
++		taskID = uuid.New().String()
++	}
++	e.mu.Lock()
++	handler, ok := e.handlers[task.Type()]
++	if !ok {
++		e.mu.Unlock()
++		return nil, fmt.Errorf("sync task executor: no handler registered for type %q", task.Type())
++	}
++	if _, exists := e.ids[taskID]; exists {
++		e.mu.Unlock()
++		return nil, asynq.ErrTaskIDConflict
++	}
++	e.ids[taskID] = struct{}{}
++	e.mu.Unlock()
+ 	info := &asynq.TaskInfo{
+ 		ID:    taskID,
+ 		Queue: "sync",
+@@ -76,6 +90,11 @@ func (e *SyncTaskExecutor) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asy
+ 	}
+ 
+ 	go func() {
++		defer func() {
++			e.mu.Lock()
++			delete(e.ids, taskID)
++			e.mu.Unlock()
++		}()
+ 		if delay > 0 {
+ 			time.Sleep(delay)
+ 		}
+@@ -100,12 +119,16 @@ func (e *SyncTaskExecutor) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asy
+ 			}
+ 
+ 			attemptCtx := types.WithTaskRetryMetadata(ctx, attempt, maxRetry)
++			attemptCtx = types.WithTaskExecutionID(attemptCtx, taskID)
+ 			lastErr = handler(attemptCtx, task)
+ 			if lastErr == nil {
+ 				logger.Infof(ctx, "[SyncTask] Task completed type=%s id=%s elapsed=%v",
+ 					task.Type(), taskID, time.Since(start))
+ 				return
+ 			}
++			if errors.Is(lastErr, asynq.SkipRetry) {
++				break
++			}
+ 		}
+ 
+ 		logger.Errorf(ctx, "[SyncTask] Task failed (exhausted retries) type=%s id=%s elapsed=%v err=%v",
+@@ -120,6 +143,9 @@ type SyncTaskParams struct {
  
  	Executor             *SyncTaskExecutor
  	KnowledgeService     interfaces.KnowledgeService
@@ -42280,7 +43438,7 @@ index 8c8762f3..a37ff236 100644
  	KnowledgeBaseService interfaces.KnowledgeBaseService
  	TagService           interfaces.KnowledgeTagService
  	DataSourceService    interfaces.DataSourceService
-@@ -137,23 +141,26 @@ type SyncTaskParams struct {
+@@ -137,23 +163,26 @@ type SyncTaskParams struct {
  // RegisterSyncHandlers registers all task handlers on the SyncTaskExecutor.
  // Used in Lite mode instead of RunAsynqServer.
  func RegisterSyncHandlers(params SyncTaskParams) {
@@ -42316,6 +43474,52 @@ index 8c8762f3..a37ff236 100644
  	params.Executor.RegisterHandler(types.TypeKnowledgeBaseProfile, params.KnowledgeBaseProfile.Handle)
  	params.Executor.RegisterHandler(types.TypeDataSourceSync, params.DataSourceService.ProcessSync)
  	params.Executor.RegisterHandler(types.TypeWikiIngest, params.WikiIngest.Handle)
+diff --git a/internal/router/sync_task_id_test.go b/internal/router/sync_task_id_test.go
+new file mode 100644
+index 00000000..7bdaeca1
+--- /dev/null
++++ b/internal/router/sync_task_id_test.go
+@@ -0,0 +1,40 @@
++package router
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/hibiken/asynq"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLiteExecutorPreservesExactTaskIDAndRejectsConcurrentDuplicate(t *testing.T) {
++	executor := NewSyncTaskExecutor()
++	started := make(chan string, 1)
++	release := make(chan struct{})
++	executor.RegisterHandler("fixture:task", func(ctx context.Context, _ *asynq.Task) error {
++		id, ok := types.TaskExecutionIDFromContext(ctx)
++		if !ok {
++			started <- ""
++		} else {
++			started <- id
++		}
++		<-release
++		return nil
++	})
++	task := asynq.NewTask("fixture:task", nil)
++	info, err := executor.Enqueue(task, asynq.TaskID("dssync:one"), asynq.MaxRetry(0))
++	require.NoError(t, err)
++	require.Equal(t, "dssync:one", info.ID)
++	select {
++	case id := <-started:
++		require.Equal(t, info.ID, id)
++	case <-time.After(time.Second):
++		t.Fatal("worker did not start")
++	}
++	_, err = executor.Enqueue(task, asynq.TaskID(info.ID))
++	require.ErrorIs(t, err, asynq.ErrTaskIDConflict)
++	close(release)
++}
 diff --git a/internal/router/task.go b/internal/router/task.go
 index fe0e240f..be563336 100644
 --- a/internal/router/task.go
@@ -42389,11 +43593,45 @@ index fe0e240f..be563336 100644
  	mux.HandleFunc(types.TypeKnowledgeBaseProfile, params.KnowledgeBaseProfile.Handle)
  
  	// Register data source sync handler
+diff --git a/internal/types/context_helpers.go b/internal/types/context_helpers.go
+index 01b6709f..29c6eaa5 100644
+--- a/internal/types/context_helpers.go
++++ b/internal/types/context_helpers.go
+@@ -333,6 +333,21 @@ func TaskRetryMetadataFromContext(ctx context.Context) (retried, maxRetry int, o
+ }
+ 
+ type taskRetryMetadataContextKey struct{}
++type taskExecutionIDContextKey struct{}
++
++// WithTaskExecutionID supplies the exact task ID to Lite workers. Redis
++// workers use asynq.GetTaskID instead.
++func WithTaskExecutionID(ctx context.Context, id string) context.Context {
++	return context.WithValue(ctx, taskExecutionIDContextKey{}, id)
++}
++
++func TaskExecutionIDFromContext(ctx context.Context) (string, bool) {
++	if ctx == nil {
++		return "", false
++	}
++	id, ok := ctx.Value(taskExecutionIDContextKey{}).(string)
++	return id, ok && id != ""
++}
+ 
+ // WithLLMCallMetadata annotates a provider call for cache observability. The
+ // fingerprint must be a hash, never raw prompt content.
 diff --git a/internal/types/datasource.go b/internal/types/datasource.go
-index 5130b931..b7289f6e 100644
+index 5130b931..9242a48e 100644
 --- a/internal/types/datasource.go
 +++ b/internal/types/datasource.go
-@@ -38,6 +38,7 @@ const (
+@@ -2,6 +2,7 @@ package types
+ 
+ import (
+ 	"encoding/json"
++	"errors"
+ 	"log"
+ 	"strings"
+ 	"time"
+@@ -38,6 +39,7 @@ const (
  	ConnectorTypeRSS         = "rss"
  	ConnectorTypeGitLab      = "gitlab"
  	ConnectorTypeIMA         = "ima"
@@ -42401,18 +43639,40 @@ index 5130b931..b7289f6e 100644
  
  	// Sync modes
  	SyncModeIncremental = "incremental"
-@@ -182,6 +183,10 @@ type SyncLog struct {
+@@ -182,6 +184,15 @@ type SyncLog struct {
  	// Error details if status is "failed"
  	ErrorMessage string `json:"error_message"`
  
-+	// QueueTaskID is a response-only operator reference for uncertain Nextcloud
-+	// admission. It is not a database column or evidence of task execution.
-+	QueueTaskID string `json:"queue_task_id,omitempty" gorm:"-"`
++	// Versioned manual/cron queue intent is written with the running log before
++	// enqueue. Version zero belongs to old rows and must never be recovered.
++	RecoveryVersion    int        `json:"-" gorm:"column:recovery_version"`
++	RecoveryTrigger    string     `json:"-" gorm:"column:recovery_trigger"`
++	QueueTaskID        string     `json:"queue_task_id,omitempty" gorm:"column:queue_task_id"`
++	WorkerStartedAt    *time.Time `json:"-" gorm:"column:worker_started_at"`
++	WorkerActive       bool       `json:"-" gorm:"column:worker_active"`
++	WorkerAttemptToken string     `json:"-" gorm:"column:worker_attempt_token"`
 +
  	// Detailed sync result (JSON-encoded)
  	Result JSON `json:"result" gorm:"type:jsonb"`
  
-@@ -498,6 +503,21 @@ type DataSourceSyncPayload struct {
+@@ -205,6 +216,16 @@ func (s *SyncLog) BeforeCreate(tx *gorm.DB) error {
+ 	if s.StartedAt.IsZero() {
+ 		s.StartedAt = time.Now().UTC()
+ 	}
++	if s.RecoveryVersion == 1 {
++		if s.RecoveryTrigger != "manual" && s.RecoveryTrigger != "schedule" {
++			return errors.New("invalid recoverable sync trigger")
++		}
++		want := "dssync:" + s.ID
++		if s.QueueTaskID != "" && s.QueueTaskID != want {
++			return errors.New("recoverable sync task ID mismatch")
++		}
++		s.QueueTaskID = want
++	}
+ 	return nil
+ }
+ 
+@@ -498,6 +519,21 @@ type DataSourceSyncPayload struct {
  	Initiator TaskInitiator `json:"initiator,omitempty"`
  	// Trigger distinguishes a user-requested run from a scheduler-created run.
  	Trigger string `json:"trigger,omitempty"`
@@ -42434,6 +43694,27 @@ index 5130b931..b7289f6e 100644
  
  	// Data source ID to sync
  	DataSourceID string `json:"data_source_id"`
+diff --git a/internal/types/interfaces/datasource.go b/internal/types/interfaces/datasource.go
+index cdbb92a7..e2c01f9a 100644
+--- a/internal/types/interfaces/datasource.go
++++ b/internal/types/interfaces/datasource.go
+@@ -114,6 +114,16 @@ type SyncLogRepository interface {
+ 	// Used to prevent overlapping sync executions.
+ 	HasRunningSync(ctx context.Context, dsID string) (bool, error)
+ 
++	// ClaimNextcloudSyncStart fences duplicate, old, and recovered manual/cron
++	// tasks before any source I/O. The task ID is supplied by the executor.
++	ClaimNextcloudSyncStart(ctx context.Context, logID, dsID string, tenantID uint64, trigger, taskID string, retryCount int) (string, error)
++	// FinishNextcloudSyncAttempt releases a failed attempt to the exact Asynq
++	// retry, or terminally fails a still-running log after its last attempt.
++	FinishNextcloudSyncAttempt(ctx context.Context, logID, dsID string, tenantID uint64, trigger, taskID, token string, terminal bool, message string) (bool, error)
++	// MarkNextcloudEnqueueUncertain records a lost reply only while this exact
++	// reserved task is still unstarted; it never reopens a worker result.
++	MarkNextcloudEnqueueUncertain(ctx context.Context, logID, dsID string, tenantID uint64, trigger, taskID string) (bool, error)
++
+ 	// Update updates an existing sync log entry
+ 	Update(ctx context.Context, log *types.SyncLog) error
+ 
 diff --git a/internal/types/interfaces/resource.go b/internal/types/interfaces/resource.go
 index 52fc309c..5f1abc6a 100644
 --- a/internal/types/interfaces/resource.go
@@ -44092,6 +45373,34 @@ index 00000000..264b89c3
 +    ADD COLUMN path TEXT CHECK (path IS NULL OR LENGTH(path) <= 4096);
 +ALTER TABLE nextcloud_event_inbox
 +    ADD COLUMN relative_path TEXT CHECK (relative_path IS NULL OR LENGTH(relative_path) <= 4096);
+diff --git a/migrations/sqlite/000050_nextcloud_sync_recovery.down.sql b/migrations/sqlite/000050_nextcloud_sync_recovery.down.sql
+new file mode 100644
+index 00000000..58b02b58
+--- /dev/null
++++ b/migrations/sqlite/000050_nextcloud_sync_recovery.down.sql
+@@ -0,0 +1,7 @@
++DROP INDEX IF EXISTS idx_sync_logs_nextcloud_recovery;
++ALTER TABLE sync_logs DROP COLUMN worker_attempt_token;
++ALTER TABLE sync_logs DROP COLUMN worker_active;
++ALTER TABLE sync_logs DROP COLUMN worker_started_at;
++ALTER TABLE sync_logs DROP COLUMN queue_task_id;
++ALTER TABLE sync_logs DROP COLUMN recovery_trigger;
++ALTER TABLE sync_logs DROP COLUMN recovery_version;
+diff --git a/migrations/sqlite/000050_nextcloud_sync_recovery.up.sql b/migrations/sqlite/000050_nextcloud_sync_recovery.up.sql
+new file mode 100644
+index 00000000..ae197901
+--- /dev/null
++++ b/migrations/sqlite/000050_nextcloud_sync_recovery.up.sql
+@@ -0,0 +1,9 @@
++-- Version zero preserves all pre-upgrade running logs without recovery.
++ALTER TABLE sync_logs ADD COLUMN recovery_version INTEGER NOT NULL DEFAULT 0;
++ALTER TABLE sync_logs ADD COLUMN recovery_trigger TEXT NOT NULL DEFAULT '';
++ALTER TABLE sync_logs ADD COLUMN queue_task_id TEXT NOT NULL DEFAULT '';
++ALTER TABLE sync_logs ADD COLUMN worker_started_at DATETIME;
++ALTER TABLE sync_logs ADD COLUMN worker_active BOOLEAN NOT NULL DEFAULT FALSE;
++ALTER TABLE sync_logs ADD COLUMN worker_attempt_token TEXT NOT NULL DEFAULT '';
++CREATE INDEX idx_sync_logs_nextcloud_recovery ON sync_logs (started_at, id)
++    WHERE status = 'running' AND recovery_version = 1 AND worker_started_at IS NULL;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -45673,3 +46982,32 @@ index 00000000..264b89c3
 +    ADD COLUMN path TEXT CHECK (path IS NULL OR LENGTH(path) <= 4096);
 +ALTER TABLE nextcloud_event_inbox
 +    ADD COLUMN relative_path TEXT CHECK (relative_path IS NULL OR LENGTH(relative_path) <= 4096);
+diff --git a/migrations/versioned/000131_nextcloud_sync_recovery.down.sql b/migrations/versioned/000131_nextcloud_sync_recovery.down.sql
+new file mode 100644
+index 00000000..8f5850a3
+--- /dev/null
++++ b/migrations/versioned/000131_nextcloud_sync_recovery.down.sql
+@@ -0,0 +1,7 @@
++DROP INDEX IF EXISTS idx_sync_logs_nextcloud_recovery;
++ALTER TABLE sync_logs DROP COLUMN IF EXISTS worker_attempt_token;
++ALTER TABLE sync_logs DROP COLUMN IF EXISTS worker_active;
++ALTER TABLE sync_logs DROP COLUMN IF EXISTS worker_started_at;
++ALTER TABLE sync_logs DROP COLUMN IF EXISTS queue_task_id;
++ALTER TABLE sync_logs DROP COLUMN IF EXISTS recovery_trigger;
++ALTER TABLE sync_logs DROP COLUMN IF EXISTS recovery_version;
+diff --git a/migrations/versioned/000131_nextcloud_sync_recovery.up.sql b/migrations/versioned/000131_nextcloud_sync_recovery.up.sql
+new file mode 100644
+index 00000000..7d6cb681
+--- /dev/null
++++ b/migrations/versioned/000131_nextcloud_sync_recovery.up.sql
+@@ -0,0 +1,10 @@
++-- Only new manual/cron admissions opt into automatic absence proof.
++-- Existing running logs remain version zero and require operator review.
++ALTER TABLE sync_logs ADD COLUMN recovery_version INTEGER NOT NULL DEFAULT 0;
++ALTER TABLE sync_logs ADD COLUMN recovery_trigger TEXT NOT NULL DEFAULT '';
++ALTER TABLE sync_logs ADD COLUMN queue_task_id TEXT NOT NULL DEFAULT '';
++ALTER TABLE sync_logs ADD COLUMN worker_started_at TIMESTAMPTZ;
++ALTER TABLE sync_logs ADD COLUMN worker_active BOOLEAN NOT NULL DEFAULT FALSE;
++ALTER TABLE sync_logs ADD COLUMN worker_attempt_token TEXT NOT NULL DEFAULT '';
++CREATE INDEX idx_sync_logs_nextcloud_recovery ON sync_logs (started_at, id)
++    WHERE status = 'running' AND recovery_version = 1 AND worker_started_at IS NULL;

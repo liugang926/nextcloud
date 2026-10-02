@@ -154,12 +154,19 @@ If their queue enqueue result is uncertain, the running log keeps that slot;
 new tasks use the stable Asynq ID `dssync:<sync_log_id>`. The manual 503
 response contains both IDs, and the redacted administrator sync-log list
 shows the static `sync_enqueue_uncertain_review_required` state and queue ID.
-If the queue did not actually accept the task, an administrator must verify
-the queue and repair the log before another sync can start. A missing queue
-entry alone does not prove the task never ran, so the service does not
-automatically release the slot. Logs created before stable task IDs were
-introduced still require a separate manual investigation. These non-event
-logs do not use the event dispatcher's 150-minute blocked transition.
+The current patch records a versioned exact queue intent and requires a worker
+claim before source I/O. A same-task Asynq retry may reclaim its log. After a
+five-minute grace period, a bounded rotating scan can release the slot only if
+the exact Asynq task is definitively absent, the log has no worker-start claim,
+and a compare-and-set still proves it is unstarted. Queue errors or an
+existing task preserve the slot. Redis recovery is enabled only with
+`WEKNORA_NEXTCLOUD_SYNC_RECOVERY_ENABLED=true` after every sync worker has the
+claim code; Lite recovers its single-process queue automatically. Logs created
+before versioned intents, and logs whose worker started, still require manual
+investigation. These non-event logs do not use the event dispatcher's
+150-minute blocked transition. This recovery patch has passed focused tests
+but has not yet been built or deployed on the shared LAN stack.
+
 `applied_through_event_id` does not advance. Source deletion still follows
 the connector's two-complete-scan rule, so an absent file is not treated as
 deleted from a single failed or partial manifest. A missing or malformed old
