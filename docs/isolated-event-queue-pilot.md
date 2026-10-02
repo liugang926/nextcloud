@@ -139,3 +139,8 @@ does not extend the earlier timing result. All 11 owned containers, seven
 volumes, network, worktree and temporary credentials were removed. The pilot
 script now captures a bounded receiver state/error category before revocation
 on failure, for a future isolated investigation.
+
+A later minimal rerun with two 256-byte files and two `post-accept` pairs did
+not reproduce the 412: inbox events #1–#5 all reached applied, both receiver
+watermarks ended at #5, and all five sync logs succeeded. Its owned fixture
+was removed. This does not explain the first failure or establish a P95.
