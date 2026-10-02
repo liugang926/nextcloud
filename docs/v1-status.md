@@ -907,7 +907,7 @@ sustained latency or scale acceptance run has been made.
 
 ## 2026-10-02 manual and scheduled sync admission recovery candidate
 
-The current fixed-c6 and RAG77 patch SHA-256 values are
+At this checkpoint, the fixed-c6 and RAG77 patch SHA-256 values were
 `08b6f45addf7d753d8df1962bda538444e0290e2acbf5db26d2eb56eebe468d2`
 and `a74bc9739a43cdc668c44201ac8221fed69c85642d46a8ca75533b6e0ce0cee1`.
 They add PostgreSQL migration 131 and SQLite migration 50. Manual and
@@ -1113,3 +1113,25 @@ This uses in-memory file and database substitutes in an isolated PHP
 container. It does not measure Nextcloud filecache or PostgreSQL I/O, HTTP,
 WeKnora indexing, real AD/Team Folder permissions, or 100 GB of content. A
 real 10,000-file/100-GB pilot and sustained latency target remain unaccepted.
+
+## 2026-10-02 derived cleanup safety follow-up
+
+The fixed-c6 and RAG77 full patch SHA-256 values are now
+`29d45af07c0fe7edac599d81f4696c2349232db778e65d6ba74dace0dd8256c6`
+and `970248e5fd4ad112e1d264c8e96b5394ebf22d97edbd7481e07692d6b0278cde`.
+`SaveChunkRevision` now checks a persisted Nextcloud knowledge marker and
+requires an exact live build lease before a chunk edit; its update is scoped
+to the tenant, KB and knowledge ID. The dormant PostgreSQL exact-vector GC
+helper rechecks the persisted job `not_before` while holding its row lock.
+Both baselines passed focused SQLite tests and disposable PostgreSQL vector
+tests, including a regression that failed against the prior vector helper.
+
+Both patches also contain a dormant exact-chunk-and-revision delete helper.
+Its scope, claim, delay, item inventory and atomic receipt passed SQLite and
+disposable PostgreSQL tests, including a forced receipt failure rollback.
+It is not called by the collector, and the migration still creates no
+coverage activation marker. Unknown concurrent writers, unenumerated read
+paths and external stores leave the `derived_index` blocker active. The
+[lease-gate checklist](nextcloud-derived-gc-read-lease.md) records the
+remaining preconditions; these helpers do not establish physical cleanup
+acceptance.

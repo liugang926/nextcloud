@@ -76,6 +76,16 @@ its regression verifies that neither an embedding nor its receipt changes
 before the delay expires. This does not establish full writer coverage or
 activate physical derived cleanup.
 
+Both pinned patches now also contain a dormant exact-chunk delete helper.
+It validates the live GC claim, retired source, persisted job delay, exact
+tenant/KB/knowledge/chunk inventory, and tracked image references. Chunk
+revisions, the chunk and the item receipt change in one transaction. SQLite
+and disposable PostgreSQL tests cover read-lease admission, wrong scope,
+delay, receipt failure rollback and idempotence. The collector never calls
+this helper, and no coverage marker is created. A count of foreign revisions
+cannot fence an unknown writer inserting a new revision concurrently;
+complete writer and reader coverage remains a prerequisite.
+
 ## Proposed durable protocol
 
 1. Add a per-knowledge fence keyed by `(tenant_id, knowledge_base_id, knowledge_id)` with source tuple, `epoch`, state `open | retired | deleting`, and retirement time. The state is never reopened for an old generation; restoration creates a new knowledge/version ID.

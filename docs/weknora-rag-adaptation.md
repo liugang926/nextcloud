@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`08b6f45addf7d753d8df1962bda538444e0290e2acbf5db26d2eb56eebe468d2`.
+`29d45af07c0fe7edac599d81f4696c2349232db778e65d6ba74dace0dd8256c6`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`a74bc9739a43cdc668c44201ac8221fed69c85642d46a8ca75533b6e0ce0cee1`.
+`970248e5fd4ad112e1d264c8e96b5394ebf22d97edbd7481e07692d6b0278cde`.
 Both patches treat a `reconcile` change hint with a positive `file_id` as a
 request to re-read that file's content, even if its ETag is unchanged. Each
 scan still compares the complete manifest. A `reconcile` hint without a
