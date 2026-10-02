@@ -80,3 +80,15 @@ derived GC stays denied.
 - Delayed Asynq retries for `ProcessDocument`, summary/question, image multimodal and legacy `Attempt=0` fail to acquire after retirement. A worker whose renewal expires cannot recreate chunk/index rows after GC.
 - Crash/restart tests expire stale leases and recheck the fence. A stale token cannot write or acknowledge a newer claim. GC deletion and receipt remain atomic, and unrelated tenant/KB leases do not block each other.
 - SQLite and PostgreSQL scoped deletion tests from the isolated prototype can be reused after the lease gate is wired. The prototype passed focused tests against a disposable PostgreSQL 16 container and SQLite FTS5/vec build; test success does **not** satisfy the missing lease precondition.
+
+## Isolated runtime gate check, 2026-10-02
+
+The [redacted synthetic drill](evidence/nextcloud-publication-reconcile-gc-2026-10-02.json)
+with the complete RAG77 image withdrew an indexed file and observed a
+two-scan source tombstone. After restarting only the disposable WeKnora app,
+the GC job was blocked with `derived_index`, `derived_chunk` and
+`postgres_embedding` items blocked, while the old physical chunk and enabled
+embedding each still had one row. The tenant/KB coverage marker had zero
+rows. The source file item was collected, and the old knowledge row was no
+longer visible. This checks the live fail-closed gate on one synthetic
+generation; it does not enable or prove physical derived cleanup.

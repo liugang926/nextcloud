@@ -1,0 +1,94 @@
+{
+  "kind": "synthetic_disposable_publication_gc_pilot",
+  "date": "2026-10-02",
+  "fixture": {
+    "published_files_before_withdraw": 11,
+    "target": "pilot-000000.txt",
+    "target_file_id": 81,
+    "target_content_bytes": 256,
+    "isolation": "Two disposable loopback-only Compose projects; no shared LAN stack or production content."
+  },
+  "versions": {
+    "nextcloud_patch_commit": "29f57bf461c9471d08e7cf732ed84d587d458371",
+    "isolated_cherry_pick_commit": "e526bd237356895766e0c00478777f9cc78ead03",
+    "weknora_image_id": "sha256:d0e695504b503034744b8a08388d0818b14fc3fb04ef30bc59a8d2638357915d",
+    "weknora_dispatch_interval": "1s"
+  },
+  "withdraw": {
+    "http_status": 200,
+    "publication_state": "withdrawn",
+    "excluded": true,
+    "reconcile_hint_recorded": true,
+    "broad_reconcile_outbox_id": 43,
+    "broad_reconcile_file_id_and_path": null,
+    "first_manual_sync": {
+      "status": "success",
+      "duration_seconds": 1.692924,
+      "items_total": 10,
+      "items_created": 0,
+      "items_updated": 10,
+      "items_failed": 0,
+      "target_version_after_sync": "published",
+      "cursor_missing_marker_for_target": true
+    },
+    "second_manual_sync": {
+      "status": "success",
+      "duration_seconds": 1.27146,
+      "items_total": 1,
+      "items_created": 0,
+      "items_updated": 0,
+      "items_failed": 0,
+      "target_version_after_sync": "tombstone",
+      "target_candidate_cleared": true,
+      "cursor_missing_marker_for_target": false
+    },
+    "signed_manifest_http_status": 200,
+    "target_in_signed_manifest": false,
+    "signed_target_content_http_status": 404
+  },
+  "gc_without_coverage_marker": {
+    "trigger": "Restart only the disposable WeKnora app to run its startup GC scan.",
+    "old_knowledge_visible_rows": 0,
+    "job_state": "blocked",
+    "items": {
+      "derived_index": "blocked",
+      "derived_chunk": "blocked",
+      "postgres_embedding": "blocked",
+      "knowledge": "pending",
+      "source_file": "collected"
+    },
+    "old_physical_chunk_rows": 1,
+    "old_enabled_embedding_rows": 1,
+    "tenant_kb_coverage_marker_rows": 0
+  },
+  "republish": {
+    "http_status": 200,
+    "publication_state": "eligible",
+    "excluded": false,
+    "reconcile_hint_recorded": true,
+    "broad_reconcile_outbox_id": 44,
+    "broad_reconcile_file_id_and_path": null,
+    "signed_manifest_http_status": 200,
+    "manifest_items": 11,
+    "target_in_signed_manifest": true,
+    "signed_target_content_http_status": 200,
+    "signed_target_content_bytes": 256,
+    "manual_sync": {
+      "status": "success",
+      "duration_seconds": 1.529836,
+      "items_total": 11,
+      "items_created": 1,
+      "items_updated": 10,
+      "items_failed": 0,
+      "target_version_after_sync": "published",
+      "target_candidate_parse_status": "completed",
+      "target_new_chunk_rows": 1
+    }
+  },
+  "limits": [
+    "Synthetic 256-byte files measure connector work, not 100 GB transfer time or network bytes.",
+    "The broad reconcile hint updated all 10 unaffected files on both full scans; a file-scoped hint optimization remains separate work.",
+    "The GC check proves the missing-coverage blocker retained old derived rows; it did not test collection after a coverage marker is installed."
+  ],
+  "evidence_redaction": "Contains only disposable synthetic counts and commit/image hashes. Credentials, tokens, private env paths, full cursors, content bodies, and raw logs were omitted."
+}

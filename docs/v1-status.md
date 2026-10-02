@@ -984,3 +984,52 @@ and the app/frontend/gateway restarted healthy. No live uncertain-enqueue
 fault or second physical LAN client was tested on the shared stack.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.
+
+## 2026-10-02 dispatch contrast and file-publication reconciliation
+
+The full RAG77 image passed two disposable ten-sample `post-accept` runs with
+read-only hop diagnostics. At the default five-second dispatcher interval,
+event-to-durable-job nearest-rank P95 was 10,076.4 ms; setting only the
+WeKnora dispatcher interval to one second reduced the isolated P95 to
+5,977.8 ms. Both runs applied all 21 signed events and had 21 successful
+sync logs. Inbox timing around the queued recheck is consistent with a
+missed five-second polling phase, but the short dispatcher claim was not
+sampled. The [pilot record](isolated-event-queue-pilot.md) and its two
+redacted reports carry the samples and limits. App image, host and harness
+were the same, but each run used a new binding/source and only ten samples.
+This is not sustained PRD latency or 10,000-file/100-GB acceptance.
+
+The shared LAN development WeKnora app now has
+`WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL=1s` in its local override. The
+upgrade script saved a verified private PostgreSQL dump, kept the candidate
+app image `sha256:d0e695504b503034744b8a08388d0818b14fc3fb04ef30bc59a8d2638357915d`,
+and returned it healthy. The WeKnora and Nextcloud LAN HTTPS entries returned
+200. Faster polling increases idle scan frequency; sustained database load
+has not been measured.
+
+An isolated indexed file exposed a separate reconciliation gap: withdrawing
+one file immediately denied source access but did not append a change hint.
+Two manual syncs within the configured full-scan interval each reported zero
+items and left the old source version published. Nextcloud app 0.4.34 now
+appends a durable, hint-only `reconcile` row after each administrator
+withdrawal or republish, including idempotent retries. A failed append is
+reported without hiding the already committed state. The new PHP failure
+contract and HTTP outbox assertions were added to CI. The shared local app
+was upgraded from 0.4.33 to 0.4.34 after a verified private DB dump;
+maintenance mode is off, its container is healthy, and authenticated LAN DAV
+returned 207. Its runtime archive has SHA-256
+`301e9d529c1e9fd75dc0641969fa8a37692b8597afb64a1a6397923cc8977807`.
+
+The [redacted publication/GC drill](evidence/nextcloud-publication-reconcile-gc-2026-10-02.json)
+has SHA-256 `dbc479b3a34c64d897fb17cea66ba683078d4e63353299174ec9a03eaffaacc0`.
+In the disposable pair, repeating the withdrawal wrote a broad hint; the
+first manual scan marked the file missing, and the second tombstoned its
+source version. A signed manifest excluded it and signed content returned
+404. After a disposable app restart, the old chunk and enabled embedding
+remained because the derived-index GC job was blocked and the coverage
+marker was absent. Republish restored a new published candidate and signed
+content. This proves the fail-closed deletion gate on one synthetic file,
+not completed physical derived cleanup. The broad hint also updated all ten
+unchanged files, so a file-scoped reconcile optimization is needed before a
+100-GB pilot. Real AD, sustained load, full read/build coverage and physical
+derived cleanup remain open.
