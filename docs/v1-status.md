@@ -1117,8 +1117,8 @@ real 10,000-file/100-GB pilot and sustained latency target remain unaccepted.
 ## 2026-10-02 derived cleanup safety follow-up
 
 The fixed-c6 and RAG77 full patch SHA-256 values are now
-`a1385136ae3878dc29c214872814f95a8ee1cf498256a8f1c795a4f25527877f`
-and `b2ccabc1f4ac2671981d983dd27f4f04f56dba4105afb2b43a8d667d2f0bca5e`.
+`02a77dcf42dc28871c344885251c514f834759aa64139fbbfebb7478c2875fa6`
+and `176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`.
 `SaveChunkRevision` now checks a persisted Nextcloud knowledge marker and
 requires an exact live build lease before a chunk edit; its update is scoped
 to the tenant, KB and knowledge ID. The dormant PostgreSQL exact-vector GC
