@@ -5,7 +5,7 @@ disabled until every listed read and build path uses the durable fence.
 
 ## Decision
 
-Do not enable general derived-row deletion. The patches contain a dormant, backend-specific PostgreSQL exact-vector-ID delete helper with claim validation and an atomic item receipt; the collector does not call it. The broader experimental local deletion prototype remains unmerged. PRD §7.4 requires **no active build or read lease** before deleting retired chunks/indexes. The repository has a durable lease and fence foundation with partial read and worker coverage, but it does not cover every Nextcloud path or external write. A terminal `parse_status`, `pending_subtasks_count = 0`, and a one-hour delay do not prove this condition. The `derived_index` blocker still prevents a false completed job.
+Do not enable general derived-row deletion. The patches contain dormant exact-vector and exact-chunk delete helpers with claim validation and atomic item receipts; the collector does not call them. The broader experimental local deletion prototype remains unmerged. PRD §7.4 requires **no active build or read lease** before deleting retired chunks/indexes. The repository has a durable lease and fence foundation with partial read and worker coverage, but it does not cover every Nextcloud path or external write. A terminal `parse_status`, `pending_subtasks_count = 0`, and a one-hour delay do not prove this condition. The `derived_index` blocker still prevents a false completed job.
 
 ## Read paths that need coverage
 

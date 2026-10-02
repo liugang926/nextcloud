@@ -1135,3 +1135,25 @@ paths and external stores leave the `derived_index` blocker active. The
 [lease-gate checklist](nextcloud-derived-gc-read-lease.md) records the
 remaining preconditions; these helpers do not establish physical cleanup
 acceptance.
+
+## 2026-10-02 disposable real Nextcloud 10,000-file manifest pilot
+
+An isolated, loopback-only Nextcloud 34.0.4 stack with app 0.4.36 accepted
+10,000 WebDAV `PUT` requests for 19-byte synthetic files and held exactly
+10,000 live matching filecache rows. The five measured upload batches took
+391.815 seconds in total, excluding gaps between batches (25.52 files/s).
+The [redacted pilot result](evidence/manifest-10k-real-2026-10-02.json) has
+SHA-256 `a8e85bf0678ec7f85392ccdc75e6402cc4a45fbe2928a67bea7303de4b8b9eba`.
+
+The real HTTP manifest returned 50 successful pages of 200 unique files.
+The first page took 202.04 ms, the remaining pages took 2,812.21 ms in
+total, and per-page nearest-rank P95 was 82.67 ms. The largest stored
+snapshot JSON was 3,577,448 bytes. A file overwrite and an administrator
+withdrawal each invalidated an old cursor with HTTP 409; the file was then
+republished. The three saved snapshot rows match the three first-page
+requests, although SQL tracing was not performed. The dedicated containers,
+volumes, network and private credentials were removed and the port released.
+
+This is a single small-text-file manifest pilot. It does not test 100 GB of
+originals, WeKnora indexing, mixed file types, real AD/Team Folder ACLs or
+sustained event-to-job P95. Those PRD acceptance gates remain open.
