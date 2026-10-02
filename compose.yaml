@@ -1,0 +1,155 @@
+name: nextcloud-weknora-dev
+
+services:
+  db:
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # initdb runs a temporary Unix-socket-only server. TCP readiness starts
+      # only after the final server can accept Nextcloud connections.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U nextcloud -d nextcloud"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  nextcloud:
+    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    ports:
+      - "${NEXTCLOUD_HTTP_BIND_IP:-127.0.0.1}:${NEXTCLOUD_HTTP_PORT:-18082}:80"
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:?set NEXTCLOUD_ADMIN_USER in .env}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?set NEXTCLOUD_ADMIN_PASSWORD in .env}
+      NEXTCLOUD_TRUSTED_DOMAINS: "localhost nextcloud host.docker.internal ${NEXTCLOUD_LAN_HOST:-}"
+      REDIS_HOST: redis
+      # This Compose stack is a local development environment. The sender
+      # will accept exactly this Docker-network WeKnora origin, not an
+      # administrator-supplied arbitrary URL.
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      # Explicit opt-in for local accounts used by synthetic permission smokes.
+      # Defaults to fail-closed live LDAP GUID proof.
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
+      PHP_MEMORY_LIMIT: 512M
+      PHP_UPLOAD_LIMIT: 512M
+    volumes:
+      - nextcloud-html:/var/www/html
+      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/status.php >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    restart: unless-stopped
+
+  cron:
+    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    entrypoint: /cron.sh
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
+      REDIS_HOST: redis
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
+    volumes:
+      - nextcloud-html:/var/www/html
+      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+
+  event-worker:
+    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    user: www-data
+    entrypoint: ["/bin/sh", "/srv/weknora-event-worker.sh"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
+      REDIS_HOST: redis
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
+    volumes:
+      - nextcloud-html:/var/www/html
+      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ./scripts/weknora-event-worker.sh:/srv/weknora-event-worker.sh:ro
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+
+  event-status-worker:
+    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    user: www-data
+    entrypoint: ["/bin/sh", "/srv/weknora-event-status-worker.sh"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:?set NEXTCLOUD_DB_PASSWORD in .env}
+      REDIS_HOST: redis
+      WEKNORA_EVENT_ALLOWED_ORIGINS: http://app:8080,http://event-receiver-smoke:8080
+      WEKNORA_EVENT_DEV_HTTP: "1"
+      WEKNORA_LOCAL_COMPOSE: "1"
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
+    volumes:
+      - nextcloud-html:/var/www/html
+      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ./scripts/weknora-event-status-worker.sh:/srv/weknora-event-status-worker.sh:ro
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mock-embedding:
+    image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
+    command: ["python", "/srv/mock_embedding.py"]
+    volumes:
+      - ./integration/mock_embedding.py:/srv/mock_embedding.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  nextcloud-html:
