@@ -1030,6 +1030,33 @@ remained because the derived-index GC job was blocked and the coverage
 marker was absent. Republish restored a new published candidate and signed
 content. This proves the fail-closed deletion gate on one synthetic file,
 not completed physical derived cleanup. The broad hint also updated all ten
-unchanged files, so a file-scoped reconcile optimization is needed before a
-100-GB pilot. Real AD, sustained load, full read/build coverage and physical
-derived cleanup remain open.
+unchanged files. Real AD, sustained load, full read/build coverage and
+physical derived cleanup remain open.
+
+## 2026-10-02 file-scoped publication reconciliation candidate
+
+Nextcloud app 0.4.35 now writes a `reconcile` hint with the affected
+`file_id` after withdraw and republish. WeKnora still reads the complete
+authoritative manifest, but forces content re-read only for that file. A
+binding-wide hint with a null file ID retains the previous full-content
+fallback. The receiver still requires two complete manifests before
+acknowledging these hints; focused fixed and RAG77 Go tests cover both rapid
+withdraw/republish orderings and prevent a one-scan ACK. Both full patches
+apply cleanly to their pinned source archives. The full RAG77/AnyDoc candidate
+backend image is
+`sha256:7bca5e4408bf34849f0aadea989f519ab2537583de0bbd3d3ef2b1bc8e579b06`.
+
+The [redacted targeted publication drill](evidence/nextcloud-publication-targeted-2026-10-02.json)
+has SHA-256 `ea5541c4237d8c2454dc3de0351d9271d0d5ae592fa9c9d6663266b4f5521eb0`.
+Its disposable source held eleven published synthetic files. Withdrawal took
+two manual scans to tombstone the target; each scan processed zero or one
+item instead of updating ten unchanged neighbors. Republish and both rapid
+reversal orderings also processed at most one item per scan, with the target
+eventually published or tombstoned as requested. No broad hints were written.
+After reinstalling a disposable event connection, WeKnora acknowledged the
+replayed baseline through event 16, then the two rapid reversals through 18
+and 20, and the final restore through 21. The observed source version matched
+the final state at each applied watermark. The event credential and both
+isolated stacks were removed. These 256-byte-file checks do not establish
+100-GB throughput, sustained latency, real AD ACLs or physical derived
+cleanup.
