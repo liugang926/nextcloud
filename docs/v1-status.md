@@ -1157,3 +1157,48 @@ volumes, network and private credentials were removed and the port released.
 This is a single small-text-file manifest pilot. It does not test 100 GB of
 originals, WeKnora indexing, mixed file types, real AD/Team Folder ACLs or
 sustained event-to-job P95. Those PRD acceptance gates remain open.
+
+## 2026-10-02 RAG77 image rebuild and LAN switch
+
+The pinned RAG77 build now downloads DuckDB's signed `httpfs`, `spatial`, and
+`excel` archives for the engine's reported version and platform, decompresses
+the official `.duckdb_extension.gz` files, then installs and loads them
+locally with DuckDB's default signature check. Both pinned source patches
+apply cleanly; an arm64 Docker check loaded all three extensions. The first
+full image build reached AnyDoc/Go compilation but an alternate Debian
+mirror lost the `gcc-12` download. A container-network check found a working
+mirror; the retry completed the full AnyDoc backend and frontend builds.
+
+The backend image is
+`sha256:ac6c3a5c975886ada55fbcd0c65058516fa4ac7d245a9a32c656d39e428b9365`
+and the frontend is
+`sha256:b8f0c6dc13847c48f2a5b6e7e08777389b272f1736ad0d45053d7cb3579d1d7b`.
+Both carry pinned source commit `77c97fd72f26e84435503d24eeed88cb5dfe1f01`
+and the exact RAG patch SHA-256
+`176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`.
+Scoped BuildKit cache cleanup after the build preserved images and data
+volumes and restored about 12 GiB of host free space.
+
+Two owned, loopback-only synthetic LDAP/PDF fixtures exercised the new image.
+The forced-short-primary run recovered 46 DocReader characters to 283 AnyDoc
+characters; the normal run kept DocReader's complete text. Each published
+two ready chunks and embeddings, returned a protected answer with the
+original Nextcloud Files citation, and denied the old JWT's source, question,
+direct, search, and historical-citation reads after source-share revocation.
+The fixtures' containers, volumes, and networks were removed. The
+[redacted build and LAN record](evidence/weknora-rag-duckdb-lan-2026-10-02.json)
+has SHA-256 `1a3ad18a5912ff75f1a731070fbd8ba013aa0892f7f913d002c943f96e3ea5b3`.
+
+Before switching the shared WeKnora stack, both databases were healthy,
+schema 131 was not dirty, all seven event connections were revoked, Nextcloud
+had zero sender connections, and no sync logs were running, pending, or
+queued. The old backend/frontend images remain tagged `pre-duckdb-20261002`.
+The switch script made a mode-0600 WeKnora dump, verified its archive list,
+then recreated the app/frontend and restarted the LAN gateway. The dump's
+SHA-256 is `d85509b9e541920170d946c2a32adb8cb5d03c70723a781d7bf82aba29f0ed86`.
+The running containers now use the new exact image IDs, WeKnora remains at
+schema 131/clean, and the local-CA-verified WeKnora and Nextcloud HTTPS
+pages return 200. Nextcloud still runs app 0.4.36 with maintenance mode off;
+authenticated DAV over the LAN URL returns 207. A second physical LAN client,
+real enterprise AD/Team Folder permissions, 100-GB content, sustained task
+latency, and derived-index physical GC remain unaccepted.
