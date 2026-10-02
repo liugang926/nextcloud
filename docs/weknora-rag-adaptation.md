@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`80ae7db3f8bc6e9f84ab7c616f06a2b42c7eaf9e227a587043f705ed34371f50`.
+`b1652548af695d62560a092e1d5520382faef36094a9d0b35499aebe3c0fb267`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`211994dae371946fae1abcb793de4b265acb29853ae31f11b63dbd2e2b6b53f2`.
+`79b4ae7574ab88274f2931d1a46eb89728dbd96eb4a5791604a71ce14287b9b3`.
 The build script and CI reject a different patch hash. On 2026-10-02 both
 current baseline patches applied cleanly to fresh source archives and passed
 focused Go package tests. The RAG baseline retains the evaluated RAG runtime
@@ -42,7 +42,7 @@ raw-search output with read leases and current authorization. Focused Go tests
 in the repository and both handler packages passed for both preceding pinned
 patches; the 27-route OpenAPI checker passed after applying each to a clean
 source archive. The full suite and an exact pinned-`77c97fd7` RAG runtime
-image have not yet been verified for the current recovery patch revision.
+image have not yet been verified for the current patch revision.
 
 The current receiver also records each signed event's ETag and relative path.
 File ACK requires the exact version and publication proof; broad and excluded
@@ -81,10 +81,16 @@ claim; after five minutes, only a definitively absent exact task with no
 worker claim releases its admission slot. Redis recovery is opt-in after all
 workers are upgraded, while Lite recovers its single-process queue
 automatically. Legacy logs and started attempts remain for operator review.
-Both pinned patches applied cleanly and passed six focused Go package suites.
-This patch has not yet been built into full app/UI images or installed on the
-shared stack; the shared image and schema remain at the preceding patch and
-`130/false`.
+It also treats an ETag-raced 412, source 429/5xx and interrupted content reads
+as retryable, so a failed event scan does not turn an otherwise active source
+into an `error` that blocks following hints. A narrow status/cursor update
+guards normal and pre-stream sync finalization against a concurrent
+administrator pause or resume. Agent graph queries now retain a KB read lease
+and recheck every displayed chunk against current source and user scope.
+Both pinned patches applied cleanly and passed focused Nextcloud repository,
+service, connector, handler and graph-tool Go tests. This patch has not yet
+been built into full app/UI images or installed on the shared stack; the
+shared image and schema remain at the preceding patch and `130/false`.
 
 The patch also refreshes retired chunk image references on every
 due GC retry. A newly malformed `image_info` blocks the local provider

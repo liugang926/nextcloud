@@ -167,6 +167,16 @@ investigation. These non-event logs do not use the event dispatcher's
 150-minute blocked transition. This recovery patch has passed focused tests
 but has not yet been built or deployed on the shared LAN stack.
 
+An ETag-raced content GET (HTTP 412), source 429/5xx or interrupted source
+read now fails its sync log but remains retryable without changing an active
+source to `error`. HTTP 401/403 still marks invalid credentials. At sync
+completion, a Nextcloud source status/cursor compare-and-set requires the
+run-start status to remain unchanged. If an administrator paused or resumed
+the source while a run was active, the old run cannot overwrite that choice
+or advance the cursor; the event dispatcher cannot publish an applied ACK
+from the canceled or failed run. Focused connector, repository and service
+tests cover those races on both pinned source baselines.
+
 `applied_through_event_id` does not advance. Source deletion still follows
 the connector's two-complete-scan rule, so an absent file is not treated as
 deleted from a single failed or partial manifest. A missing or malformed old

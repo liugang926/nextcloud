@@ -144,3 +144,19 @@ A later minimal rerun with two 256-byte files and two `post-accept` pairs did
 not reproduce the 412: inbox events #1–#5 all reached applied, both receiver
 watermarks ended at #5, and all five sync logs succeeded. Its owned fixture
 was removed. This does not explain the first failure or establish a P95.
+
+## Retryable source-read follow-up, 2026-10-02
+
+Code review traced the observed 412 to an old ETag content read racing a newer
+WebDAV write. The failed event sync previously set the source to `error`, which
+made the dispatcher block later hints as `source_changed`. The current patch
+classifies 412, 429, 5xx, transport interruption, a content 404 after the
+manifest, and changed manifest/content versions as retryable source reads.
+The event sync still records a failed log, but a conditional source update
+preserves an active source only for this typed retryable class; 401/403 remain
+credential failures. A concurrent administrator pause wins the conditional
+update. Focused tests on both pinned WeKnora bases cover the actual HTTP
+classification, a truncated response body, source-state race and dispatcher's
+failed-log backoff without an applied ACK. This code has not yet been built
+into the shared image or rerun as a full-image latency pilot; no new P95 is
+claimed.

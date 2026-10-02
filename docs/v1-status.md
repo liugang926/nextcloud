@@ -908,8 +908,8 @@ sustained latency or scale acceptance run has been made.
 ## 2026-10-02 manual and scheduled sync admission recovery candidate
 
 The current fixed-c6 and RAG77 patch SHA-256 values are
-`80ae7db3f8bc6e9f84ab7c616f06a2b42c7eaf9e227a587043f705ed34371f50`
-and `211994dae371946fae1abcb793de4b265acb29853ae31f11b63dbd2e2b6b53f2`.
+`b1652548af695d62560a092e1d5520382faef36094a9d0b35499aebe3c0fb267`
+and `79b4ae7574ab88274f2931d1a46eb89728dbd96eb4a5791604a71ce14287b9b3`.
 They add PostgreSQL migration 131 and SQLite migration 50. Manual and
 scheduled sync logs retain their exact queue task ID, trigger and worker-start
 claim. The worker claims a versioned log before source I/O; an Asynq retry of
@@ -919,9 +919,18 @@ absent and a row compare-and-set still proves no worker started. Redis recovery
 requires `WEKNORA_NEXTCLOUD_SYNC_RECOVERY_ENABLED=true` after all queue workers
 have this claim logic; the single-process Lite queue recovers automatically.
 Legacy logs and started attempts still require manual investigation. Both
-patches applied to fresh pinned bases and passed focused Go package tests; the
-reviewed candidate has not yet been built, migrated or deployed on the shared
-LAN stack, which still runs the parser-overlap image and schema `130/false`.
+patches applied to fresh pinned bases and passed focused Go package tests.
+The patch also classifies ETag-raced HTTP 412, 429/5xx and interrupted source
+content reads as retryable: a failed event log keeps its retry/backoff and
+does not turn an active source into `error`, while 401/403 still indicate
+credential failure. A source-status/cursor compare-and-set protects normal
+and pre-stream completion from a concurrent administrator pause or resume;
+on a missed update, the run cannot yield an applied event ACK. The Agent graph
+tool now holds a KB read lease across answer formatting and checks each
+displayed chunk against current source/version and user scope. Physical
+derived GC remains disabled. This candidate has not yet been built, migrated
+or deployed on the shared LAN stack, which still runs the parser-overlap image
+and schema `130/false`.
 
 A ten-sample post-accept queue pilot attempt was invalidated by a signed
 source GET HTTP 412 on a same-file update; the captured error was overwritten

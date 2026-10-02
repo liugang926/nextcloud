@@ -28,8 +28,19 @@ test retires a search result after lease acquisition, proves an active lease
 blocks GC claim, and denies the title before JSON output. MCP list/read reject
 machine retrieval of Nextcloud source rows; current MCP server exposes no file
 resource endpoint.
-The table remains the full coverage checklist: Wiki, graph, other raw reads,
+The table remains the full coverage checklist: Wiki, other raw reads,
 historical hydration and external adapters still need enumeration and tests.
+
+The 2026-10-02 patch closes the identified Agent `query_knowledge_graph` gap:
+an outer KB lease now spans `HybridSearch`, result filtering, formatting and
+the final output check. Each displayed result is compared with its freshly
+loaded knowledge row's source channel and full metadata, and current
+document/tag scope and source publication are checked before output. Focused
+tests on both pinned WeKnora bases cover a retired result, revoked source or
+tag access, duplicate chunks with mixed generations, and missing lease
+providers. The patch has not yet been built into the shared LAN image. Wiki,
+historical hydration, external adapters and complete writer coverage remain
+open; the derived-index deletion gate stays disabled.
 
 ## Build/write paths that need coverage
 
