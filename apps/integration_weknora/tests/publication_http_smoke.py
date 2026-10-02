@@ -114,9 +114,10 @@ def audit_actions(binding, file_id):
     return result.stdout.splitlines()
 
 
-def latest_reconcile_hint(binding):
+def latest_reconcile_hint(binding, file_id):
+    file_predicate = "file_id IS NULL" if file_id is None else f"file_id = {int(file_id)}"
     query = ("SELECT COALESCE(MAX(id),0) FROM oc_weknora_outbox "
-             f"WHERE binding_id = '{binding}' AND file_id IS NULL "
+             f"WHERE binding_id = '{binding}' AND {file_predicate} "
              "AND event_type = 'reconcile'")
     result = subprocess.run(["docker", "compose", "exec", "-T", "db", "psql", "-U", "nextcloud",
                              "-d", "nextcloud", "-Atc", query], cwd=PROJECT, check=True,
@@ -139,13 +140,14 @@ def main():
     admin, token = login(base, values["NEXTCLOUD_ADMIN_USER"], values["NEXTCLOUD_ADMIN_PASSWORD"])
     admin_headers = {"requesttoken": token}
 
-    hint_id = latest_reconcile_hint(args.binding)
+    hint_id = latest_reconcile_hint(args.binding, args.file_id)
+    broad_hint_id = latest_reconcile_hint(args.binding, None)
     status, body = request(admin, f"{file_api}/publication", headers=admin_headers)
     check(status, 200, "admin state")
     state = json.loads(body)
     original = state["state"]
     assert "reconcile_hint_recorded" not in state
-    assert latest_reconcile_hint(args.binding) == hint_id, "read-only state appended a hint"
+    assert latest_reconcile_hint(args.binding, args.file_id) == hint_id, "read-only state appended a hint"
     user_id = f"weknora_permission_{secrets.token_hex(4)}"
     password = secrets.token_urlsafe(24)
     test_env = dict(os.environ, NC_PASS=password)
@@ -168,13 +170,14 @@ def main():
         withdrawn = json.loads(body)
         assert withdrawn["state"] == "withdrawn" and withdrawn["excluded"] is True
         assert withdrawn["reconcile_hint_recorded"] is True
-        next_hint_id = latest_reconcile_hint(args.binding)
-        assert next_hint_id > hint_id, "withdraw did not append a broad reconcile hint"
+        next_hint_id = latest_reconcile_hint(args.binding, args.file_id)
+        assert next_hint_id > hint_id, "withdraw did not append a file-scoped reconcile hint"
+        assert latest_reconcile_hint(args.binding, None) == broad_hint_id, "withdraw appended a broad reconcile hint"
         hint_id = next_hint_id
         status, body = request(admin, f"{file_api}/withdraw", "POST", admin_headers, b"")
         check(status, 200, "idempotent withdraw")
         assert json.loads(body)["reconcile_hint_recorded"] is True
-        next_hint_id = latest_reconcile_hint(args.binding)
+        next_hint_id = latest_reconcile_hint(args.binding, args.file_id)
         assert next_hint_id > hint_id, "repeated withdraw did not append a repair hint"
         hint_id = next_hint_id
         status, body = request(reader, f"{api}/bindings/{args.binding}/manifest", headers=bearer)
@@ -191,7 +194,8 @@ def main():
         republished = json.loads(body)
         assert republished["state"] == "eligible" and republished["excluded"] is False
         assert republished["reconcile_hint_recorded"] is True
-        assert latest_reconcile_hint(args.binding) > hint_id, "republish did not append a broad reconcile hint"
+        assert latest_reconcile_hint(args.binding, args.file_id) > hint_id, "republish did not append a file-scoped reconcile hint"
+        assert latest_reconcile_hint(args.binding, None) == broad_hint_id, "republish appended a broad reconcile hint"
         assert audit_actions(args.binding, args.file_id) == ["eligible", "withdrawn"]
         status, body = request(reader, f"{api}/bindings/{args.binding}/manifest", headers=bearer)
         check(status, 200, "manifest after republish")

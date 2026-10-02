@@ -85,11 +85,11 @@ final class PublicationController extends Controller {
             if ($action !== null) {
                 $hintRecorded = true;
                 try {
-                    // The state transaction has committed. A broad hint asks
-                    // WeKnora to recheck the authoritative manifest; it is
-                    // never evidence that a file was deleted or published.
+                    // The state transaction has committed. A file-scoped hint
+                    // asks WeKnora to recheck the authoritative manifest and
+                    // this file; it is never evidence of publication state.
                     // Repeat on idempotent requests to repair a failed append.
-                    $this->outbox->append($id, null, 'reconcile');
+                    $this->outbox->append($id, $fileId, 'reconcile');
                 } catch (\Throwable $exception) {
                     $hintRecorded = false;
                     try {

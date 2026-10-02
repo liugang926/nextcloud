@@ -194,8 +194,8 @@ namespace {
         $retry->getData()['reconcile_hint_recorded'] === true,
         'repeated withdrawal did not repair the hint');
     expect($states->writes === 3 && $outbox->recorded === [
-        ['test-binding', null, 'reconcile', 'withdrawn'],
-    ], 'retry did not append a broad reconcile hint after state write');
+        ['test-binding', 77, 'reconcile', 'withdrawn'],
+    ], 'retry did not append a file-scoped reconcile hint after state write');
 
     $republish = $controller->republish('test-binding', 77);
     expect($republish->getStatus() === 200 && $republish->getData()['state'] === 'eligible' &&
@@ -203,9 +203,9 @@ namespace {
         $republish->getData()['reconcile_hint_recorded'] === true,
         'republish did not report the restored publication');
     expect($outbox->recorded === [
-        ['test-binding', null, 'reconcile', 'withdrawn'],
-        ['test-binding', null, 'reconcile', 'eligible'],
-    ], 'republish did not append a broad reconcile hint after state write');
+        ['test-binding', 77, 'reconcile', 'withdrawn'],
+        ['test-binding', 77, 'reconcile', 'eligible'],
+    ], 'republish did not append a file-scoped reconcile hint after state write');
 
     echo "publication reconciliation hint contract passed\n";
 }
