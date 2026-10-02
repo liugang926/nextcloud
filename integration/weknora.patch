@@ -32715,7 +32715,7 @@ index 196327fe..6cc1630f 100644
  }
  
 diff --git a/internal/datasource/scheduler_test.go b/internal/datasource/scheduler_test.go
-index dbd35b46..e88d0097 100644
+index dbd35b46..04012d2c 100644
 --- a/internal/datasource/scheduler_test.go
 +++ b/internal/datasource/scheduler_test.go
 @@ -2,6 +2,7 @@ package datasource
@@ -32881,7 +32881,53 @@ index dbd35b46..e88d0097 100644
  // ──────────────────────────────────────────────────────────────────────
  // Fake implementations for testing
  // ──────────────────────────────────────────────────────────────────────
-@@ -78,8 +227,10 @@ func (r *fakeDataSourceRepo) FindActive(_ context.Context) ([]*types.DataSource,
+@@ -57,6 +206,45 @@ func (r *fakeDataSourceRepo) UpdateSyncState(ctx context.Context, ds *types.Data
+ 	return r.Update(ctx, ds)
+ }
+ 
++func (r *fakeDataSourceRepo) UpdateNextcloudSyncStateCAS(_ context.Context, ds *types.DataSource, expectedStatus string) (bool, error) {
++	if ds == nil || ds.ID == "" || ds.TenantID == 0 || ds.Type != types.ConnectorTypeNextcloud ||
++		(expectedStatus != types.DataSourceStatusActive && expectedStatus != types.DataSourceStatusPaused &&
++			expectedStatus != types.DataSourceStatusError) {
++		return false, errors.New("invalid Nextcloud sync state comparison")
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	current := r.dataSources[ds.ID]
++	if current == nil || current.TenantID != ds.TenantID || current.Type != ds.Type ||
++		current.Status != expectedStatus || current.DeletedAt.Valid {
++		return false, nil
++	}
++	current.Status = ds.Status
++	current.LastSyncAt = ds.LastSyncAt
++	current.LastSyncCursor = ds.LastSyncCursor
++	current.LastSyncResult = ds.LastSyncResult
++	current.ErrorMessage = ds.ErrorMessage
++	current.UpdatedAt = time.Now().UTC()
++	return true, nil
++}
++
++func (r *fakeDataSourceRepo) UpdateNextcloudRetryableEventFailure(_ context.Context, ds *types.DataSource) (bool, error) {
++	if ds == nil || ds.ID == "" || ds.TenantID == 0 || ds.Type != types.ConnectorTypeNextcloud {
++		return false, errors.New("invalid Nextcloud event failure source")
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	current := r.dataSources[ds.ID]
++	if current == nil || current.TenantID != ds.TenantID || current.Type != ds.Type ||
++		current.Status != types.DataSourceStatusActive || current.DeletedAt.Valid {
++		return false, nil
++	}
++	current.LastSyncResult = ds.LastSyncResult
++	current.ErrorMessage = ds.ErrorMessage
++	current.UpdatedAt = time.Now().UTC()
++	return true, nil
++}
++
+ func (r *fakeDataSourceRepo) Delete(_ context.Context, id string) error {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+@@ -78,8 +266,10 @@ func (r *fakeDataSourceRepo) FindActive(_ context.Context) ([]*types.DataSource,
  
  // fakeSyncLogRepo is an in-memory SyncLogRepository.
  type fakeSyncLogRepo struct {
@@ -32894,7 +32940,7 @@ index dbd35b46..e88d0097 100644
  }
  
  func newFakeSyncLogRepo() *fakeSyncLogRepo {
-@@ -90,7 +241,13 @@ func (r *fakeSyncLogRepo) Create(_ context.Context, log *types.SyncLog) error {
+@@ -90,7 +280,13 @@ func (r *fakeSyncLogRepo) Create(_ context.Context, log *types.SyncLog) error {
  	r.mu.Lock()
  	defer r.mu.Unlock()
  	if log.ID == "" {
@@ -32909,7 +32955,7 @@ index dbd35b46..e88d0097 100644
  	}
  	r.logs[log.ID] = log
  	return nil
-@@ -114,6 +271,25 @@ func (r *fakeSyncLogRepo) FindLatest(_ context.Context, dsID string) (*types.Syn
+@@ -114,6 +310,25 @@ func (r *fakeSyncLogRepo) FindLatest(_ context.Context, dsID string) (*types.Syn
  	return nil, nil
  }
  
