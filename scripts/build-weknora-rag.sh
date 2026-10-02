@@ -6,7 +6,7 @@ workspace_dir="$(cd "$project_dir/.." && pwd)"
 source_dir="$workspace_dir/WeKnora-ldap-ad"
 patch_file="$project_dir/integration/weknora-rag-77c97fd7.patch"
 base_commit="77c97fd72f26e84435503d24eeed88cb5dfe1f01"
-expected_patch_sha="14cf98ee2f2260cdb74ce71d53906c043acc7d9397e63b33dad4c65044ce4fbc"
+expected_patch_sha="a74bc9739a43cdc668c44201ac8221fed69c85642d46a8ca75533b6e0ce0cee1"
 
 # An alternate suffix lets an operator verify a candidate without replacing
 # the image tags used by the shared local WeKnora stack.

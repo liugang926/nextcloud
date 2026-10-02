@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`bdc004046b4ed1cf4b809ef9635c63ff64bae3b1fdc0301bfcb2a71099cd51af`.
+`08b6f45addf7d753d8df1962bda538444e0290e2acbf5db26d2eb56eebe468d2`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,8 +17,14 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`14cf98ee2f2260cdb74ce71d53906c043acc7d9397e63b33dad4c65044ce4fbc`.
-The build script and CI reject a different patch hash. On 2026-10-02 both
+`a74bc9739a43cdc668c44201ac8221fed69c85642d46a8ca75533b6e0ce0cee1`.
+Both patches treat a `reconcile` change hint with a positive `file_id` as a
+request to re-read that file's content, even if its ETag is unchanged. Each
+scan still compares the complete manifest. A `reconcile` hint without a
+`file_id` still refreshes every file's content. The receiver continues to
+require two successful complete scans before acknowledging reconcile hints,
+including successive withdrawal and republication of the same file.
+The RAG build script and CI reject a different patch hash. On 2026-10-02 both
 current baseline patches applied cleanly to fresh source archives and passed
 focused Go package tests. The RAG baseline retains the evaluated RAG runtime
 changes and is pinned to the tested source commit rather than a moving branch

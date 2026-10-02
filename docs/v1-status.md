@@ -908,8 +908,8 @@ sustained latency or scale acceptance run has been made.
 ## 2026-10-02 manual and scheduled sync admission recovery candidate
 
 The current fixed-c6 and RAG77 patch SHA-256 values are
-`bdc004046b4ed1cf4b809ef9635c63ff64bae3b1fdc0301bfcb2a71099cd51af`
-and `14cf98ee2f2260cdb74ce71d53906c043acc7d9397e63b33dad4c65044ce4fbc`.
+`08b6f45addf7d753d8df1962bda538444e0290e2acbf5db26d2eb56eebe468d2`
+and `a74bc9739a43cdc668c44201ac8221fed69c85642d46a8ca75533b6e0ce0cee1`.
 They add PostgreSQL migration 131 and SQLite migration 50. Manual and
 scheduled sync logs retain their exact queue task ID, trigger and worker-start
 claim. The worker claims a versioned log before source I/O; an Asynq retry of

@@ -11074,10 +11074,10 @@ index 00000000..ebd21109
 +}
 diff --git a/internal/application/repository/nextcloud_event_publication_poll_test.go b/internal/application/repository/nextcloud_event_publication_poll_test.go
 new file mode 100644
-index 00000000..70178756
+index 00000000..a4c38382
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_event_publication_poll_test.go
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,663 @@
 +package repository
 +
 +import (
@@ -11487,6 +11487,119 @@ index 00000000..70178756
 +	row = publicationDispatchRow(t, db)
 +	require.Equal(t, "idle", row.State)
 +	require.Equal(t, int64(1), row.AppliedID)
++}
++
++func TestNextcloudFileScopedReconcileTransitionsAckAfterSecondCompleteManifest(t *testing.T) {
++	for _, scenario := range []struct {
++		name           string
++		firstETag      any
++		latestETag     any
++		finalPublished bool
++	}{
++		{name: "withdraw-then-republish", firstETag: nil, latestETag: "etag-v2", finalPublished: true},
++		{name: "republish-then-withdraw", firstETag: "etag-v2", latestETag: nil},
++	} {
++		t.Run(scenario.name, func(t *testing.T) {
++			ctx := context.Background()
++			db, inbox, now, bindingID := newNextcloudQueuedPublicationTest(t)
++			// Both file-scoped receipts were dispatched in one reconciliation.
++			// Their event-time states conflict, so only the final inventory and
++			// publication rows can prove what should be acknowledged.
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_inbox
++				SET event_type = 'reconcile', etag = ?
++				WHERE connection_id = 'event-connection' AND event_id = 1`, scenario.firstETag).Error)
++			require.NoError(t, db.Exec(`INSERT INTO nextcloud_event_inbox
++				(connection_id, event_id, payload_sha256, event_type, file_id, etag, path, relative_path, state)
++				VALUES ('event-connection', 2, ?, 'reconcile', 77, ?, '/Published/file.md', 'file.md', 'dispatched')`,
++				strings.Repeat("2", 64), scenario.latestETag).Error)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_checkpoint SET received_id = 2
++				WHERE connection_id = 'event-connection'`).Error)
++			require.NoError(t, db.Exec(`UPDATE nextcloud_event_dispatch
++				SET dispatched_id = 2, target_event_id = 2
++				WHERE connection_id = 'event-connection'`).Error)
++			require.NoError(t, db.Exec(`UPDATE sync_logs SET status = 'success', finished_at = ?
++				WHERE id = 'event-log'`, now).Error)
++
++			var source types.DataSource
++			require.NoError(t, db.Where("id = ?", "ds").Take(&source).Error)
++			cursor, err := source.ParseSyncCursor()
++			require.NoError(t, err)
++			changeBytes, err := json.Marshal([]any{1, bindingID, "2", strings.Repeat("0", 64)})
++			require.NoError(t, err)
++			cursor.ConnectorCursor["changes"] = map[string]interface{}{
++				bindingID: base64.RawURLEncoding.EncodeToString(changeBytes),
++			}
++			if scenario.finalPublished {
++				old := insertNextcloudVersionTestKnowledge(t, db, "withdrawn-before-republish", "etag-v1",
++					types.ParseStatusCompleted, "enabled")
++				require.NoError(t, writeNextcloudETag(db, old, ""))
++				require.NoError(t, db.Delete(old).Error)
++				ready := insertNextcloudVersionTestKnowledge(t, db, "republished", "etag-v2",
++					types.ParseStatusCompleted, "enabled")
++				require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", ready.ID).
++					Update("file_name", "file.md").Error)
++				require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++					DataSourceID: "ds", ExternalID: "nextcloud:instance:77", DesiredETag: "etag-v2",
++					CandidateKnowledgeID: ready.ID, State: "published", UpdatedAt: now}).Error)
++				cursor.ConnectorCursor["files"] = map[string]interface{}{bindingID: map[string]interface{}{
++					"77": map[string]string{"etag": "etag-v2", "name": "file.md", "path": "file.md"},
++				}}
++			} else {
++				old := insertNextcloudVersionTestKnowledge(t, db, "withdrawn", "etag-v1",
++					types.ParseStatusCompleted, "enabled")
++				require.NoError(t, writeNextcloudETag(db, old, ""))
++				require.NoError(t, db.Delete(old).Error)
++				require.NoError(t, db.Create(&nextcloudSourceVersion{TenantID: 7, KnowledgeBaseID: "kb",
++					DataSourceID: "ds", ExternalID: "nextcloud:instance:77",
++					State: "tombstone", UpdatedAt: now}).Error)
++				cursor.ConnectorCursor["files"] = map[string]interface{}{bindingID: map[string]interface{}{}}
++				cursor.ConnectorCursor["tombstones"] = map[string]interface{}{bindingID: map[string]interface{}{
++					"77": map[string]string{"etag": "etag-v1", "name": "file.md", "path": "file.md"},
++				}}
++			}
++			raw, err := cursor.ToJSON()
++			require.NoError(t, err)
++			require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++				Update("last_sync_cursor", raw).Error)
++
++			claim, err := inbox.ClaimDispatch(ctx, "event-connection", now.Add(time.Second))
++			require.NoError(t, err)
++			require.Nil(t, claim)
++			row := publicationDispatchRow(t, db)
++			require.Equal(t, "retry", row.State)
++			require.Equal(t, "broad_confirm:2", row.LastErrorCode)
++			require.Zero(t, row.AppliedID, "one complete inventory cannot ACK file-scoped reconcile")
++
++			claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(6*time.Second))
++			require.NoError(t, err)
++			require.NotNil(t, claim)
++			require.Equal(t, int64(2), claim.TargetEventID)
++			require.NoError(t, inbox.PrepareDispatch(ctx, *claim, "reconcile-second-log", now.Add(6*time.Second)))
++			require.NoError(t, inbox.FinishDispatch(ctx, *claim, "reconcile-second-log", now.Add(6*time.Second)))
++			finished := now.Add(7 * time.Second)
++			require.NoError(t, db.Create(&types.SyncLog{ID: "reconcile-second-log", DataSourceID: "ds",
++				TenantID: 7, Status: types.SyncLogStatusSuccess,
++				StartedAt: now.Add(6 * time.Second), FinishedAt: &finished}).Error)
++			cursor.LastSyncTime = finished
++			cursor.ConnectorCursor["last_reconcile_at"] = finished.Unix()
++			raw, err = cursor.ToJSON()
++			require.NoError(t, err)
++			require.NoError(t, db.Model(&types.DataSource{}).Where("id = ?", "ds").
++				Update("last_sync_cursor", raw).Error)
++
++			claim, err = inbox.ClaimDispatch(ctx, "event-connection", now.Add(12*time.Second))
++			require.NoError(t, err)
++			require.Nil(t, claim)
++			row = publicationDispatchRow(t, db)
++			require.Equal(t, "idle", row.State)
++			require.Equal(t, int64(2), row.AppliedID,
++				"the latest published or tombstone state covers both reconcile receipts")
++			var unapplied int64
++			require.NoError(t, db.Table("nextcloud_event_inbox").
++				Where("connection_id = ? AND state <> 'applied'", "event-connection").Count(&unapplied).Error)
++			require.Zero(t, unapplied)
++		})
++	}
 +}
 +
 +func TestNextcloudExcludedImportableUpsertNeedsTwoAbsentManifests(t *testing.T) {
@@ -28208,10 +28321,10 @@ index 00000000..4e4bdcf6
 +}
 diff --git a/internal/datasource/connector/nextcloud/changes_test.go b/internal/datasource/connector/nextcloud/changes_test.go
 new file mode 100644
-index 00000000..9e65a67c
+index 00000000..df352095
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/changes_test.go
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,494 @@
 +package nextcloud
 +
 +import (
@@ -28317,11 +28430,18 @@ index 00000000..9e65a67c
 +					"event_id": "1", "file_id": 41, "type": "upsert",
 +				}}, false))
 +			case "c1":
++				if hintType != "targeted_reconcile" {
++					t.Errorf("unexpected targeted reconcile state %q", hintType)
++				}
++				writeJSON(w, testChangesPage("c2", []map[string]interface{}{{
++					"event_id": "2", "file_id": 41, "type": "reconcile",
++				}}, false))
++			case "c2":
 +				if hintType != "reconcile" {
 +					t.Errorf("unexpected broad hint state %q", hintType)
 +				}
-+				writeJSON(w, testChangesPage("c2", []map[string]interface{}{{
-+					"event_id": "2", "type": "reconcile",
++				writeJSON(w, testChangesPage("c3", []map[string]interface{}{{
++					"event_id": "3", "type": "reconcile",
 +				}}, false))
 +			default:
 +				t.Errorf("unexpected changes cursor %q", r.URL.Query().Get("cursor"))
@@ -28364,12 +28484,20 @@ index 00000000..9e65a67c
 +		manifestCalls != 2 || contentCalls[41] != 2 || contentCalls[42] != 1 {
 +		t.Fatalf("targeted hint = %+v, %v; manifests=%d downloads=%v", items, err, manifestCalls, contentCalls)
 +	}
++	// A file-scoped reconcile does not carry an ETag or path, but it must
++	// re-read that file even when its opaque ETag is unchanged.
++	hintType, body41 = "targeted_reconcile", "later"
++	items, cursor, err = connector.FetchIncremental(ctx, config, cursor)
++	if err != nil || len(items) != 1 || string(items[0].Content) != "later" ||
++		manifestCalls != 3 || contentCalls[41] != 3 || contentCalls[42] != 1 {
++		t.Fatalf("targeted reconcile = %+v, %v; manifests=%d downloads=%v", items, err, manifestCalls, contentCalls)
++	}
 +	// An unscoped hint cannot identify safe skips, so every current file is
 +	// re-read after another complete manifest preflight.
 +	hintType = "reconcile"
 +	items, _, err = connector.FetchIncremental(ctx, config, cursor)
-+	if err != nil || len(items) != 2 || manifestCalls != 3 ||
-+		contentCalls[41] != 3 || contentCalls[42] != 2 {
++	if err != nil || len(items) != 2 || manifestCalls != 4 ||
++		contentCalls[41] != 4 || contentCalls[42] != 2 {
 +		t.Fatalf("broad hint = %+v, %v; manifests=%d downloads=%v", items, err, manifestCalls, contentCalls)
 +	}
 +}
@@ -28693,7 +28821,7 @@ index 00000000..9e65a67c
 +}
 diff --git a/internal/datasource/connector/nextcloud/client.go b/internal/datasource/connector/nextcloud/client.go
 new file mode 100644
-index 00000000..8028c48f
+index 00000000..d3864d3a
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/client.go
 @@ -0,0 +1,404 @@
@@ -28886,13 +29014,13 @@ index 00000000..8028c48f
 +			// opaque ETag and other metadata. Broad or unscoped hints fall
 +			// back to a full content refresh.
 +			switch hint.Type {
-+			case "upsert", "metadata", "delete":
++			case "upsert", "metadata", "delete", "reconcile":
 +				if hint.FileID == nil {
 +					forceAllContent = true
 +				} else {
 +					changedFiles[*hint.FileID] = true
 +				}
-+			case "subtree_scan", "subtree_moved", "subtree_deleted", "reconcile":
++			case "subtree_scan", "subtree_moved", "subtree_deleted":
 +				forceAllContent = true
 +			}
 +		}
