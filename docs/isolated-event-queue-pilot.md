@@ -186,3 +186,69 @@ The report lacks per-hop timestamps and cannot tell which gate missed its
 first check. A follow-up isolated run should capture bounded outbox-write,
 receiver-receipt, queue-eligibility and task-admission times before changing
 poll intervals or asserting the 10-second target.
+
+## Read-only hop diagnosis at the default interval, 2026-10-02
+
+A new disposable pair repeated the full-image `post-accept` pilot with ten
+256-byte files, ten measured events and optional read-only database snapshots.
+The same RAG77 image was used; the WeKnora dispatcher and Nextcloud sender
+kept their default five-second intervals. All 21 signed events reached the
+applied watermark, all 21 sync logs succeeded and the source remained active.
+The [redacted hop report](evidence/event-queue-pilot-2026-10-02-syncfix-hop-diagnostics.json)
+has SHA-256 `f949bc6baa5262b6a07dbbbd7269cbe141b90971cbfdd901bb1746811b8ac510`.
+It contains no credentials, paths or document content. Its ten hop samplers
+reported no read error or truncation.
+
+The event-to-durable-job nearest-rank P95 was **10,076.4 ms**, 76.4 ms above
+the proposed 10-second target; applied-proof P95 was 19,943.5 ms. The two
+approximately ten-second measured events entered WeKnora's inbox 852 ms and
+19 ms after the prior queued task's scheduled recheck timestamp. Their
+dispatch rows were next updated about five seconds after that timestamp.
+For comparison, two roughly five-second events entered the inbox 3.28 and
+3.99 seconds before the scheduled recheck and their dispatch rows updated
+within two milliseconds of it. These database timestamps are consistent with
+missing one five-second dispatcher check; they do not show each dispatcher
+invocation, and the brief claim state was not sampled. The report's per-hop
+elapsed values are first-observed upper bounds starting before the WebDAV PUT;
+the sampler begins after the write and event-ID lookup. Its read-only queries
+also add load. Event-triggered sync logs may leave `worker_started_at` empty,
+so this report does not time their worker start. This small run is diagnostic
+evidence, not sustained P95 acceptance.
+
+## One-second dispatcher contrast, 2026-10-02
+
+The same disposable pair and full RAG77 image then ran a new independent
+binding/source and ten `post-accept` samples with
+`WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL=1s`. The Nextcloud sender kept its
+five-second loop, and the dispatcher retained its separate five-second queued
+recheck rule. All 21 new signed events reached applied, all 21 sync logs
+succeeded, and the source remained active. The
+[redacted one-second report](evidence/event-queue-pilot-2026-10-02-syncfix-hop-1s.json)
+has SHA-256 `0985adfa0d0ebd4871d48e57bbe201df65c7c32d6f531ade63ec7a74a0eaa5a7`.
+No hop sampler was truncated or reported a read error.
+
+| Isolated ten-sample measure | Default 5s | Dispatcher 1s |
+| --- | ---: | ---: |
+| Event to durable job, nearest-rank P95 | 10,076.4 ms | 5,977.8 ms |
+| Event to applied proof, nearest-rank P95 | 19,943.5 ms | 12,225.1 ms |
+
+In three one-second samples, the inbox receipt followed the prior queued
+task's scheduled recheck by 203, 21 and 125 ms; the next dispatch-row update
+followed that scheduled time by about one second rather than the roughly five
+seconds observed for the slow default-interval samples. This supports a
+polling-phase explanation, but the brief claim state was not sampled and the
+database row update does not identify a specific dispatcher call. A single
+`docker stats` snapshot during the one-second run showed 3.58% app CPU and
+4.27% PostgreSQL CPU; snapshots cannot establish sustained resource cost.
+The supported one-second setting increases idle scanning frequency and does
+not shorten the sender loop, fixed queued gate, parsing, or retry backoff.
+This small isolated result is below the proposed 10-second queue target; it
+is not sustained-load or 10,000-file/100-GB acceptance.
+
+After the isolated comparison, the shared LAN development WeKnora app was
+restarted with this one-second dispatcher setting. The existing upgrade
+script verified no installed sender connections, saved and checked a private
+PostgreSQL backup, kept the candidate image ID, and returned the app to a
+healthy state. The WeKnora and Nextcloud LAN HTTPS entry points returned 200.
+No new shared-service latency or enterprise AD claim follows from this
+configuration change.

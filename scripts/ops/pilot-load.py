@@ -815,7 +815,7 @@ def run(args):
                     "The queued next_attempt_at is a scheduled recheck, not proof that a dispatcher ran; completed prior sync and publication can wake it earlier.",
                     "A dispatch row timestamp change is an observed database update, not proof of which handler performed the recheck.",
                     "Sampling starts after the WebDAV write and event-ID lookup, so early stages can share one first-observed upper bound.",
-                    "The sync log is created during queue admission; worker_started_at records actual worker start. State polling can miss brief lease transitions.",
+                    "The sync log is created during queue admission. worker_started_at records actual worker start when populated; current event-triggered tasks may leave it null, so their worker-start hop is unobserved. State polling can miss brief lease transitions.",
                     "Each diagnostic poll adds read-only database load; compare latency with a run without diagnostics before drawing performance conclusions.",
                 ],
             }
