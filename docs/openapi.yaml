@@ -65,6 +65,15 @@ components:
         publication_epoch: {type: integer, minimum: 0}
         changed: {type: boolean}
         reconcile_hint_recorded: {type: boolean, description: True when this explicit request recorded a reconcile hint; retry the same operation if false}
+    FilePublicationTransition:
+      type: object
+      required: [binding_id, file_id, state, excluded, reconcile_hint_recorded]
+      properties:
+        binding_id: {type: string}
+        file_id: {type: integer, minimum: 1}
+        state: {type: string, enum: [eligible, withdrawn]}
+        excluded: {type: boolean, description: True when the file is withdrawn from this binding}
+        reconcile_hint_recorded: {type: boolean, description: True when a broad reconcile hint was recorded. False does not undo the committed publication state; repeat the same operation to retry the hint. A recorded hint is not proof that WeKnora applied it.}
     SourcePairing:
       type: object
       required: [binding_id, operation_id, instance_id, tenant_id, knowledge_base_id, data_source_id, state, key_id, publication_epoch]
@@ -1199,7 +1208,12 @@ paths:
           required: true
           schema: {type: integer}
       responses:
-        '200': {description: Publication withdrawn}
+        '200':
+          description: Publication withdrawal committed; a reconciliation hint is recorded when possible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FilePublicationTransition'
         '403': {description: Administrator privileges required}
         '404': {description: File is not within the binding}
   /admin/bindings/{bindingId}/files/{fileId}/republish:
@@ -1219,6 +1233,11 @@ paths:
           required: true
           schema: {type: integer}
       responses:
-        '200': {description: File eligible for a new publication scan}
+        '200':
+          description: File made eligible for a new publication scan; a reconciliation hint is recorded when possible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FilePublicationTransition'
         '403': {description: Administrator privileges required}
         '404': {description: File is not within the binding}

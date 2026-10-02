@@ -92,12 +92,16 @@ final class PublicationController extends Controller {
                     $this->outbox->append($id, null, 'reconcile');
                 } catch (\Throwable $exception) {
                     $hintRecorded = false;
-                    $this->logger->error('File publication reconciliation hint could not be recorded', [
-                        'binding_id' => $id,
-                        'file_id' => $fileId,
-                        'action' => $action,
-                        'error_type' => get_class($exception),
-                    ]);
+                    try {
+                        $this->logger->error('File publication reconciliation hint could not be recorded', [
+                            'binding_id' => $id,
+                            'file_id' => $fileId,
+                            'action' => $action,
+                            'error_type' => get_class($exception),
+                        ]);
+                    } catch (\Throwable) {
+                        // Diagnostics must not hide a committed publication change.
+                    }
                 }
             }
             $state = $this->states->getState($id, $fileId);

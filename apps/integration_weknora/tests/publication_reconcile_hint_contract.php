@@ -139,9 +139,14 @@ namespace {
         public function isAdmin(string $uid): bool { return $uid === 'admin'; }
     };
     $logger = new class implements LoggerInterface {
+        public bool $failNext = false;
         public array $errors = [];
         public function error(string $message, array $context = []): void {
             $this->errors[] = [$message, $context];
+            if ($this->failNext) {
+                $this->failNext = false;
+                throw new \RuntimeException('synthetic logger failure');
+            }
         }
     };
     $controller = new PublicationController(
@@ -173,11 +178,22 @@ namespace {
         $logger->errors[0][1]['error_type'] === \RuntimeException::class,
         'hint failure was not observable');
 
+    $outbox->failNext = true;
+    $logger->failNext = true;
+    $doubleFailure = $controller->withdraw('test-binding', 77);
+    expect($doubleFailure->getStatus() === 200 &&
+        $doubleFailure->getData()['state'] === 'withdrawn' &&
+        $doubleFailure->getData()['excluded'] === true &&
+        $doubleFailure->getData()['reconcile_hint_recorded'] === false,
+        'logger failure hid the committed withdrawal after hint failure');
+    expect($states->writes === 2 && count($outbox->attempts) === 2 && !$outbox->recorded,
+        'double failure unexpectedly rolled back or recorded a hint');
+
     $retry = $controller->withdraw('test-binding', 77);
     expect($retry->getStatus() === 200 && $retry->getData()['state'] === 'withdrawn' &&
         $retry->getData()['reconcile_hint_recorded'] === true,
         'repeated withdrawal did not repair the hint');
-    expect($states->writes === 2 && $outbox->recorded === [
+    expect($states->writes === 3 && $outbox->recorded === [
         ['test-binding', null, 'reconcile', 'withdrawn'],
     ], 'retry did not append a broad reconcile hint after state write');
 
