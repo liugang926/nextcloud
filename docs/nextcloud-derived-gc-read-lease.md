@@ -65,6 +65,17 @@ pgvector PostgreSQL. External vector providers, graph, object and Wiki writes
 remain outside this fence. No coverage activation marker is written, so global
 derived GC stays denied.
 
+The 2026-10-02 patch also closes the direct `SaveChunkRevision` gap. That
+transaction reads the persisted knowledge channel and Nextcloud source
+markers, requires an exact live build lease for a source document, and scopes
+the update to its tenant, KB and knowledge ID. Ordinary document edits remain
+available. Focused tests on both pinned WeKnora bases cover missing, valid,
+retired and cross-document leases. The dormant PostgreSQL exact-vector delete
+helper now rechecks the job's persisted `not_before` under the job row lock;
+its regression verifies that neither an embedding nor its receipt changes
+before the delay expires. This does not establish full writer coverage or
+activate physical derived cleanup.
+
 ## Proposed durable protocol
 
 1. Add a per-knowledge fence keyed by `(tenant_id, knowledge_base_id, knowledge_id)` with source tuple, `epoch`, state `open | retired | deleting`, and retirement time. The state is never reopened for an old generation; restoration creates a new knowledge/version ID.
