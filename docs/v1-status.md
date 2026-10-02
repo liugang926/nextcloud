@@ -1021,7 +1021,7 @@ returned 207. Its runtime archive has SHA-256
 `301e9d529c1e9fd75dc0641969fa8a37692b8597afb64a1a6397923cc8977807`.
 
 The [redacted publication/GC drill](evidence/nextcloud-publication-reconcile-gc-2026-10-02.json)
-has SHA-256 `dbc479b3a34c64d897fb17cea66ba683078d4e63353299174ec9a03eaffaacc0`.
+has SHA-256 `5be4afcbef61a45a156f278cf0a7a295de75e451b8b7992e4d61b4d202bc9959`.
 In the disposable pair, repeating the withdrawal wrote a broad hint; the
 first manual scan marked the file missing, and the second tombstoned its
 source version. A signed manifest excluded it and signed content returned
