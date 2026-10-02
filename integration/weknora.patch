@@ -4820,7 +4820,7 @@ index 00000000..3793cb1d
 +	require.NoError(t, (*NextcloudReadGuard)(nil).PinKnowledge(ordinary))
 +}
 diff --git a/internal/application/repository/chunk.go b/internal/application/repository/chunk.go
-index 943bcb06..755fc283 100644
+index 943bcb06..2249a024 100644
 --- a/internal/application/repository/chunk.go
 +++ b/internal/application/repository/chunk.go
 @@ -68,6 +68,15 @@ func (r *chunkRepository) CreateChunks(ctx context.Context, chunks []*types.Chun
@@ -4857,7 +4857,58 @@ index 943bcb06..755fc283 100644
  }
  
  func (r *chunkRepository) CreateChunkRevision(ctx context.Context, revision *types.ChunkRevision) error {
-@@ -439,6 +457,15 @@ func (r *chunkRepository) SaveChunks(ctx context.Context, chunks []*types.Chunk)
+@@ -390,9 +408,49 @@ func (r *chunkRepository) CreateChunkRevision(ctx context.Context, revision *typ
+ func (r *chunkRepository) SaveChunkRevision(
+ 	ctx context.Context, chunk *types.Chunk, revision *types.ChunkRevision, expectedRevision int,
+ ) error {
++	if chunk == nil || revision == nil || revision.TenantID != chunk.TenantID ||
++		revision.KnowledgeBaseID != chunk.KnowledgeBaseID ||
++		revision.KnowledgeID != chunk.KnowledgeID || revision.ChunkID != chunk.ID ||
++		revision.Revision != expectedRevision {
++		return ErrChunkRevisionConflict
++	}
++	if err := CheckNextcloudBuildIdentity(ctx, chunk.TenantID,
++		chunk.KnowledgeBaseID, chunk.KnowledgeID); err != nil {
++		return err
++	}
+ 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		// Manual edits have no build context. Resolve the persisted document in
++		// this transaction so a source chunk cannot bypass its build fence.
++		var knowledge types.Knowledge
++		if err := tx.Select("channel", "metadata").Where(
++			"id = ? AND tenant_id = ? AND knowledge_base_id = ?",
++			chunk.KnowledgeID, chunk.TenantID, chunk.KnowledgeBaseID,
++		).Take(&knowledge).Error; err != nil {
++			return err
++		}
++		var metadata map[string]json.RawMessage
++		if len(knowledge.Metadata) > 0 {
++			if err := json.Unmarshal(knowledge.Metadata, &metadata); err != nil {
++				return ErrNextcloudContentLeaseInvalid
++			}
++		}
++		source := knowledge.Channel == types.ConnectorTypeNextcloud
++		for _, key := range []string{"nextcloud_instance_id", "nextcloud_binding_id", "nextcloud_file_id"} {
++			if _, marked := metadata[key]; marked {
++				source = true
++			}
++		}
++		if source && !NextcloudBuildLeasePresent(ctx, chunk.TenantID,
++			chunk.KnowledgeBaseID, chunk.KnowledgeID) {
++			return ErrNextcloudContentLeaseInvalid
++		}
++		if err := ValidateNextcloudBuildWrite(ctx, tx,
++			chunk.TenantID, chunk.KnowledgeBaseID, chunk.KnowledgeID); err != nil {
++			return err
++		}
+ 		result := tx.Model(&types.Chunk{}).
+-			Where("id = ? AND tenant_id = ? AND content_revision = ?", chunk.ID, chunk.TenantID, expectedRevision).
++			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND knowledge_id = ? AND content_revision = ?",
++				chunk.ID, chunk.TenantID, chunk.KnowledgeBaseID, chunk.KnowledgeID, expectedRevision).
+ 			Updates(map[string]interface{}{
+ 				"content":          common.CleanInvalidUTF8(chunk.Content),
+ 				"source_content":   common.CleanInvalidUTF8(chunk.SourceContent),
+@@ -439,6 +497,15 @@ func (r *chunkRepository) SaveChunks(ctx context.Context, chunks []*types.Chunk)
  		return nil
  	}
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -4873,7 +4924,7 @@ index 943bcb06..755fc283 100644
  		for _, chunk := range chunks {
  			if err := tx.Omit("SeqID").Save(chunk).Error; err != nil {
  				return err
-@@ -477,6 +504,15 @@ func (r *chunkRepository) UpdateChunks(ctx context.Context, chunks []*types.Chun
+@@ -477,6 +544,15 @@ func (r *chunkRepository) UpdateChunks(ctx context.Context, chunks []*types.Chun
  	}
  
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -4889,7 +4940,7 @@ index 943bcb06..755fc283 100644
  		for start := 0; start < len(chunks); start += updateChunksBatchSize {
  			end := start + updateChunksBatchSize
  			if end > len(chunks) {
-@@ -615,9 +651,20 @@ func (r *chunkRepository) DeleteChunks(ctx context.Context, tenantID uint64, ids
+@@ -615,9 +691,20 @@ func (r *chunkRepository) DeleteChunks(ctx context.Context, tenantID uint64, ids
  
  // DeleteChunksByKnowledgeID deletes all chunks for a knowledge ID
  func (r *chunkRepository) DeleteChunksByKnowledgeID(ctx context.Context, tenantID uint64, knowledgeID string) error {
@@ -4913,6 +4964,30 @@ index 943bcb06..755fc283 100644
  }
  
  // ListImageInfoByKnowledgeIDs returns non-empty image_info values for the given knowledge IDs.
+diff --git a/internal/application/repository/chunk_revision_test.go b/internal/application/repository/chunk_revision_test.go
+index c8c518ac..3124c329 100644
+--- a/internal/application/repository/chunk_revision_test.go
++++ b/internal/application/repository/chunk_revision_test.go
+@@ -16,7 +16,7 @@ import (
+ func TestSaveChunkRevisionIsAtomicAndOptimistic(t *testing.T) {
+ 	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+ 	require.NoError(t, err)
+-	require.NoError(t, db.AutoMigrate(&types.Chunk{}, &types.ChunkRevision{}))
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &types.Chunk{}, &types.ChunkRevision{}))
+ 	repo := NewChunkRepository(db)
+ 	ctx := context.Background()
+ 	now := time.Now()
+@@ -25,6 +25,10 @@ func TestSaveChunkRevisionIsAtomicAndOptimistic(t *testing.T) {
+ 		Content: "before", SourceContent: "before", ChunkType: types.ChunkTypeText,
+ 		IsEnabled: true, IndexStatus: "ready", CreatedAt: now, UpdatedAt: now,
+ 	}
++	require.NoError(t, db.Create(&types.Knowledge{
++		ID: chunk.KnowledgeID, TenantID: chunk.TenantID,
++		KnowledgeBaseID: chunk.KnowledgeBaseID, Channel: types.KnowledgeTypeManual,
++	}).Error)
+ 	require.NoError(t, repo.CreateChunks(ctx, []*types.Chunk{chunk}))
+ 
+ 	snapshot := &types.ChunkRevision{
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
 index c3b2f58e..c0a174b0 100644
 --- a/internal/application/repository/datasource_repo.go
@@ -6136,10 +6211,10 @@ index 00000000..e72110b0
 +}
 diff --git a/internal/application/repository/nextcloud_build_context_test.go b/internal/application/repository/nextcloud_build_context_test.go
 new file mode 100644
-index 00000000..ff82c562
+index 00000000..071f57e9
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_build_context_test.go
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,165 @@
 +package repository
 +
 +import (
@@ -6185,6 +6260,102 @@ index 00000000..ff82c562
 +	require.NoError(t, db.Find(&saved).Error)
 +	require.Len(t, saved, 1)
 +	require.Equal(t, "first", saved[0].Content)
++}
++
++func TestNextcloudBuildSaveChunkRevisionRequiresExactLiveLease(t *testing.T) {
++	db := leaseTestSQLite(t)
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &types.Chunk{}, &types.ChunkRevision{}))
++	store := NewNextcloudContentLeaseStore(db)
++	repo := &chunkRepository{db: db}
++	scope := leaseTestScope("source-revision")
++	other := leaseTestScope("other-revision")
++	for _, item := range []NextcloudContentScope{scope, other} {
++		require.NoError(t, db.Create(&types.Knowledge{
++			ID: item.KnowledgeID, TenantID: item.TenantID,
++			KnowledgeBaseID: item.KnowledgeBaseID, Channel: types.ConnectorTypeNextcloud,
++		}).Error)
++	}
++	lease, err := store.AcquireKnowledge(context.Background(), scope,
++		NextcloudContentBuildLease, "worker", time.Minute)
++	require.NoError(t, err)
++	ctx := WithNextcloudBuildLease(context.Background(), store, lease, scope)
++	chunk := &types.Chunk{ID: "revision-source-chunk", TenantID: scope.TenantID,
++		KnowledgeBaseID: scope.KnowledgeBaseID, KnowledgeID: scope.KnowledgeID,
++		Content: "before", ChunkType: types.ChunkTypeText}
++	require.NoError(t, repo.CreateChunks(ctx, []*types.Chunk{chunk}))
++	readLease, err := store.AcquireKnowledge(context.Background(), scope,
++		NextcloudContentReadLease, "reader", time.Minute)
++	require.NoError(t, err)
++
++	edit := *chunk
++	edit.Content, edit.ContentRevision = "after", 1
++	revision := &types.ChunkRevision{ID: "revision-before", TenantID: scope.TenantID,
++		KnowledgeBaseID: scope.KnowledgeBaseID, KnowledgeID: scope.KnowledgeID,
++		ChunkID: chunk.ID, Revision: 0, Content: "before"}
++	require.ErrorIs(t, repo.SaveChunkRevision(context.Background(), &edit, revision, 0),
++		ErrNextcloudContentLeaseInvalid)
++
++	otherLease, err := store.AcquireKnowledge(context.Background(), other,
++		NextcloudContentBuildLease, "other-worker", time.Minute)
++	require.NoError(t, err)
++	otherCtx := WithNextcloudBuildLease(context.Background(), store, otherLease, other)
++	forged := edit
++	forged.KnowledgeID = other.KnowledgeID
++	forgedRevision := *revision
++	forgedRevision.ID, forgedRevision.KnowledgeID = "revision-forged", other.KnowledgeID
++	require.ErrorIs(t, repo.SaveChunkRevision(otherCtx, &forged, &forgedRevision, 0),
++		ErrChunkRevisionConflict)
++	require.ErrorIs(t, repo.SaveChunkRevision(ctx, &forged, &forgedRevision, 0),
++		ErrNextcloudContentLeaseInvalid)
++	badRevision := *revision
++	badRevision.ID, badRevision.ChunkID = "revision-wrong-chunk", "other-chunk"
++	require.ErrorIs(t, repo.SaveChunkRevision(ctx, &edit, &badRevision, 0),
++		ErrChunkRevisionConflict)
++
++	require.NoError(t, repo.SaveChunkRevision(ctx, &edit, revision, 0))
++	stored, err := repo.GetChunkByID(context.Background(), scope.TenantID, chunk.ID)
++	require.NoError(t, err)
++	require.Equal(t, "after", stored.Content)
++	require.Equal(t, 1, stored.ContentRevision)
++	require.NoError(t, store.RetireKnowledge(context.Background(), scope))
++	late := edit
++	late.Content, late.ContentRevision = "late", 2
++	lateRevision := *revision
++	lateRevision.ID, lateRevision.Revision, lateRevision.Content = "revision-late", 1, "after"
++	require.ErrorIs(t, repo.SaveChunkRevision(ctx, &late, &lateRevision, 1),
++		ErrNextcloudContentLeaseDenied)
++	stored, err = repo.GetChunkByID(context.Background(), scope.TenantID, chunk.ID)
++	require.NoError(t, err)
++	require.Equal(t, "after", stored.Content)
++	require.Equal(t, 1, stored.ContentRevision)
++	var count int64
++	require.NoError(t, db.Model(&types.ChunkRevision{}).Count(&count).Error)
++	require.EqualValues(t, 1, count)
++	require.NoError(t, store.ReleaseLease(context.Background(), readLease.ID))
++}
++
++func TestNextcloudMarkedChunkRevisionRejectsNoLease(t *testing.T) {
++	db := leaseTestSQLite(t)
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &types.Chunk{}, &types.ChunkRevision{}))
++	repo := &chunkRepository{db: db}
++	chunk := &types.Chunk{ID: "marked-chunk", TenantID: 7,
++		KnowledgeBaseID: "kb-1", KnowledgeID: "marked-source", Content: "before",
++		ChunkType: types.ChunkTypeText}
++	require.NoError(t, db.Create(&types.Knowledge{
++		ID: chunk.KnowledgeID, TenantID: chunk.TenantID,
++		KnowledgeBaseID: chunk.KnowledgeBaseID,
++		Metadata:        types.JSON(`{"nextcloud_file_id":"41"}`),
++	}).Error)
++	require.NoError(t, repo.CreateChunks(context.Background(), []*types.Chunk{chunk}))
++	chunk.Content, chunk.ContentRevision = "after", 1
++	revision := &types.ChunkRevision{ID: "marked-revision", TenantID: chunk.TenantID,
++		KnowledgeBaseID: chunk.KnowledgeBaseID, KnowledgeID: chunk.KnowledgeID,
++		ChunkID: chunk.ID, Revision: 0, Content: "before"}
++	require.ErrorIs(t, repo.SaveChunkRevision(context.Background(), chunk, revision, 0),
++		ErrNextcloudContentLeaseInvalid)
++	var count int64
++	require.NoError(t, db.Model(&types.ChunkRevision{}).Count(&count).Error)
++	require.Zero(t, count)
 +}
 +
 +func TestNextcloudBuildDetachedFinalizationCannotReviveCanceledWorker(t *testing.T) {
