@@ -6,6 +6,7 @@ namespace OCA\IntegrationWeknora\Controller;
 
 use OCA\IntegrationWeknora\Service\FilePublicationStateService;
 use OCA\IntegrationWeknora\Service\BindingRegistryService;
+use OCA\IntegrationWeknora\Service\ChangeOutboxService;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\Files\File;
@@ -14,6 +15,7 @@ use OCP\Files\IRootFolder;
 use OCP\IGroupManager;
 use OCP\IRequest;
 use OCP\IUserSession;
+use Psr\Log\LoggerInterface;
 
 /** Session and CSRF protected administrator operations. */
 final class PublicationController extends Controller {
@@ -26,6 +28,8 @@ final class PublicationController extends Controller {
         private IUserSession $userSession,
         private IGroupManager $groupManager,
         private FilePublicationStateService $states,
+        private ChangeOutboxService $outbox,
+        private LoggerInterface $logger,
     ) {
         parent::__construct(self::APP_ID, $request);
     }
@@ -72,18 +76,41 @@ final class PublicationController extends Controller {
                 !$this->states->hasRecordedState($id, $fileId)) {
                 return $this->json(['error' => 'not_found'], 404);
             }
+            $hintRecorded = null;
             if ($action === 'withdraw' && $actorUid !== null) {
                 $this->states->withdraw($id, $fileId, $actorUid);
             } elseif ($action === 'republish' && $actorUid !== null) {
                 $this->states->republish($id, $fileId, $actorUid);
             }
+            if ($action !== null) {
+                $hintRecorded = true;
+                try {
+                    // The state transaction has committed. A broad hint asks
+                    // WeKnora to recheck the authoritative manifest; it is
+                    // never evidence that a file was deleted or published.
+                    // Repeat on idempotent requests to repair a failed append.
+                    $this->outbox->append($id, null, 'reconcile');
+                } catch (\Throwable $exception) {
+                    $hintRecorded = false;
+                    $this->logger->error('File publication reconciliation hint could not be recorded', [
+                        'binding_id' => $id,
+                        'file_id' => $fileId,
+                        'action' => $action,
+                        'error_type' => get_class($exception),
+                    ]);
+                }
+            }
             $state = $this->states->getState($id, $fileId);
-            return $this->json([
+            $response = [
                 'binding_id' => $id,
                 'file_id' => $fileId,
                 'state' => $state,
                 'excluded' => $state === 'withdrawn',
-            ]);
+            ];
+            if ($hintRecorded !== null) {
+                $response['reconcile_hint_recorded'] = $hintRecorded;
+            }
+            return $this->json($response);
         } catch (\UnexpectedValueException $exception) {
             return $this->json(['error' => 'invalid_configuration'], 503);
         } catch (\Throwable $exception) {
