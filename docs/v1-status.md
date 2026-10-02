@@ -1095,3 +1095,21 @@ the authenticated administrator page and its JavaScript asset returned 200,
 and the panel markup was present. The reproducible 0.4.36 app archive has
 SHA-256 `36e3ca0cc46ff065da314c88493acca57306ce8fc1b78cba2d6489c4536cb431`.
 This UI check did not create a pending production pairing or test real AD.
+
+## 2026-10-02 synthetic 10,000-entry manifest check
+
+An offline PHP contract now calls the real `ApiController::manifest` and
+`ManifestSnapshotService` with a synthetic 10,000-file metadata tree. The
+[redacted result](evidence/manifest-10k-synthetic-2026-10-02.json) has SHA-256
+`329b807ab9b41afbc0e13b245d11a27cdc3a3aabff16a64ba20ab1350447b79f`.
+All 50 pages had unique, ordered IDs, and stored pages did not rescan the
+tree. The recorded run serialized a 2,600,001-byte snapshot, took 41.27 ms
+for the first page and 574.25 ms for the other 49 pages together, and reached
+35,573,760 bytes of PHP peak memory. Root ETag, withdrawal revision,
+stop/resume epoch, snapshot expiry, invalid cursor, and an unreadable node
+failed closed. A local rerun passed the same assertions.
+
+This uses in-memory file and database substitutes in an isolated PHP
+container. It does not measure Nextcloud filecache or PostgreSQL I/O, HTTP,
+WeKnora indexing, real AD/Team Folder permissions, or 100 GB of content. A
+real 10,000-file/100-GB pilot and sustained latency target remain unaccepted.
