@@ -10,6 +10,7 @@ written to the report.
 
 import argparse
 import base64
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -54,19 +55,19 @@ def require_status(actual, wanted, stage):
         raise RuntimeError(f"{stage}: HTTP {actual}, expected {wanted}")
 
 
-def docker_sql(db_container, query):
+def docker_sql(db_container, query, timeout=25):
     # Query interpolation is limited to UUIDs and decimal IDs validated by the
     # caller. The database is an explicitly isolated Compose service.
     result = subprocess.run([
         "docker", "exec", db_container, "sh", "-c",
         'psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"',
         "sh", query,
-    ], text=True, capture_output=True, timeout=25, check=False)
+    ], text=True, capture_output=True, timeout=timeout, check=False)
     if result.returncode:
-        raise RuntimeError("isolated WeKnora PostgreSQL read failed")
+        raise RuntimeError("isolated PostgreSQL read failed")
     rows = result.stdout.strip().splitlines()
     if len(rows) != 1:
-        raise RuntimeError("isolated WeKnora PostgreSQL returned an unexpected row count")
+        raise RuntimeError("isolated PostgreSQL returned an unexpected row count")
     return json.loads(rows[0])
 
 
@@ -195,8 +196,223 @@ def percentile_nearest_rank(values, percentile):
     return sorted(values)[math.ceil(percentile * len(values)) - 1]
 
 
+HOP_POLL_SECONDS = 0.5
+MAX_HOP_POLLS = 120
+MAX_HOP_WALL_SECONDS = 60
+MAX_HOP_STATE_CHANGES = 16
+SENDER_STATES = {"active", "paused", "revoked"}
+INBOX_STATES = {"pending", "dispatched", "applied"}
+DISPATCH_STATES = {"idle", "leased", "queued", "retry", "blocked"}
+SYNC_STATES = {"running", "success", "failed", "partial", "canceled"}
+
+
+def hop_snapshot(nc_db_container, wk_db_container, binding_id, connection_id,
+                 source_id, tenant_id, event_id):
+    """Read only bounded, scoped columns; never select payloads or secrets."""
+    if (not re.fullmatch(r"pilot-load-[0-9a-f]{16}", binding_id) or
+            type(event_id) is not int or event_id <= 0):
+        raise ValueError("invalid pilot event identity")
+    connection_id = str(uuid.UUID(connection_id))
+    source_id = str(uuid.UUID(source_id))
+    tenant_id = int(tenant_id)
+    if tenant_id <= 0:
+        raise ValueError("invalid pilot tenant identity")
+    cloud = docker_sql(nc_db_container, (
+        "SELECT jsonb_build_object("
+        "'outbox_created_unix_s', (SELECT created_at FROM oc_weknora_outbox "
+        f"WHERE binding_id='{binding_id}' AND id={event_id}), "
+        "'sender_received_id', (SELECT received_id FROM oc_weknora_event_conn "
+        f"WHERE binding_id='{binding_id}'), "
+        "'sender_status', (SELECT status FROM oc_weknora_event_conn "
+        f"WHERE binding_id='{binding_id}'))"
+    ), timeout=4)
+    receiver = docker_sql(wk_db_container, (
+        "WITH c AS (SELECT connection_id FROM nextcloud_event_connections "
+        f"WHERE connection_id='{connection_id}' AND datasource_id='{source_id}' "
+        f"AND tenant_id={tenant_id}), "
+        "d AS (SELECT state, target_event_id, dispatched_id, next_attempt_at, "
+        "updated_at, last_sync_log_id, last_error_code FROM nextcloud_event_dispatch "
+        "WHERE connection_id=(SELECT connection_id FROM c)), "
+        "s AS (SELECT status, started_at, worker_started_at, finished_at FROM sync_logs WHERE "
+        f"id=(SELECT last_sync_log_id FROM d) AND data_source_id='{source_id}' "
+        f"AND tenant_id={tenant_id}) "
+        "SELECT jsonb_build_object("
+        "'inbox_state', (SELECT state FROM nextcloud_event_inbox "
+        f"WHERE connection_id=(SELECT connection_id FROM c) AND event_id={event_id}), "
+        "'inbox_received_unix_ms', (SELECT ROUND(EXTRACT(EPOCH FROM received_at)*1000)::bigint "
+        "FROM nextcloud_event_inbox "
+        f"WHERE connection_id=(SELECT connection_id FROM c) AND event_id={event_id}), "
+        "'checkpoint_received_id', (SELECT received_id FROM nextcloud_event_checkpoint "
+        "WHERE connection_id=(SELECT connection_id FROM c)), "
+        "'dispatch_state', (SELECT state FROM d), "
+        "'dispatch_target_event_id', (SELECT target_event_id FROM d), "
+        "'dispatch_dispatched_id', (SELECT dispatched_id FROM d), "
+        "'dispatch_next_attempt_unix_ms', (SELECT ROUND(EXTRACT(EPOCH FROM next_attempt_at)*1000)::bigint FROM d), "
+        "'dispatch_updated_unix_ms', (SELECT ROUND(EXTRACT(EPOCH FROM updated_at)*1000)::bigint FROM d), "
+        "'dispatch_error_clear', (SELECT last_error_code='' FROM d), "
+        "'dispatch_publication_pending', (SELECT last_error_code='publication_pending' FROM d), "
+        "'sync_status', (SELECT status FROM s), "
+        "'sync_log_created_unix_ms', (SELECT ROUND(EXTRACT(EPOCH FROM started_at)*1000)::bigint FROM s), "
+        "'sync_worker_started_unix_ms', (SELECT ROUND(EXTRACT(EPOCH FROM worker_started_at)*1000)::bigint FROM s), "
+        "'sync_finished_unix_ms', (SELECT ROUND(EXTRACT(EPOCH FROM finished_at)*1000)::bigint FROM s), "
+        "'db_now_unix_ms', ROUND(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)*1000)::bigint)"
+    ), timeout=4)
+    return cloud, receiver
+
+
+def bounded_int(value):
+    if type(value) is int and 0 <= value <= 10**16:
+        return value
+    return None
+
+
+def bounded_state(value, allowed):
+    return value if isinstance(value, str) and value in allowed else None
+
+
+class HopRecorder:
+    """Keep first-observed upper bounds and a capped state timeline."""
+
+    def __init__(self, event_id):
+        self.event_id = event_id
+        self.first = {}
+        self.database = {}
+        self.states = []
+        self.sample_count = 0
+        self.truncated = False
+        self.errors = set()
+
+    def observe(self, cloud, receiver, elapsed_ms):
+        self.sample_count += 1
+        elapsed_ms = round(max(0, elapsed_ms), 1)
+        cloud = cloud if isinstance(cloud, dict) else {}
+        receiver = receiver if isinstance(receiver, dict) else {}
+        event_id = self.event_id
+        outbox_created = bounded_int(cloud.get("outbox_created_unix_s"))
+        sender_id = bounded_int(cloud.get("sender_received_id"))
+        inbox_received = bounded_int(receiver.get("inbox_received_unix_ms"))
+        checkpoint = bounded_int(receiver.get("checkpoint_received_id"))
+        target = bounded_int(receiver.get("dispatch_target_event_id"))
+        dispatched = bounded_int(receiver.get("dispatch_dispatched_id"))
+        due_at = bounded_int(receiver.get("dispatch_next_attempt_unix_ms"))
+        updated_at = bounded_int(receiver.get("dispatch_updated_unix_ms"))
+        db_now = bounded_int(receiver.get("db_now_unix_ms"))
+        sync_log_created = bounded_int(receiver.get("sync_log_created_unix_ms"))
+        worker_started = bounded_int(receiver.get("sync_worker_started_unix_ms"))
+        sync_finished = bounded_int(receiver.get("sync_finished_unix_ms"))
+        sender = bounded_state(cloud.get("sender_status"), SENDER_STATES)
+        inbox = bounded_state(receiver.get("inbox_state"), INBOX_STATES)
+        dispatch = bounded_state(receiver.get("dispatch_state"), DISPATCH_STATES)
+        sync = bounded_state(receiver.get("sync_status"), SYNC_STATES)
+        covers_event = target is not None and target >= event_id
+        prior_queued = dispatch == "queued" and target is not None and target < event_id
+        recheck_due = (prior_queued and due_at is not None and db_now is not None
+                       and due_at <= db_now)
+        success_wake = (prior_queued and receiver.get("dispatch_error_clear") is True
+                        and sync == "success" and sync_finished is not None
+                        and checkpoint is not None and dispatched is not None
+                        and checkpoint > dispatched)
+        publication_wake = (prior_queued and receiver.get("dispatch_publication_pending") is True
+                            and sync == "success" and sync_finished is not None
+                            and checkpoint is not None and target is not None
+                            and checkpoint > target and updated_at is not None
+                            and db_now is not None and updated_at <= db_now - 5000)
+        admitted = dispatched is not None and dispatched >= event_id
+        stages = {
+            "outbox_row": outbox_created is not None,
+            "sender_receipt": sender_id is not None and sender_id >= event_id,
+            "weknora_inbox": inbox_received is not None,
+            "waiting_behind_prior_queue": prior_queued and checkpoint is not None and checkpoint >= event_id,
+            "prior_queue_recheck_due": recheck_due,
+            "prior_queue_success_wake": success_wake,
+            "prior_queue_publication_wake": publication_wake,
+            "prior_queue_candidate_due": recheck_due or success_wake or publication_wake,
+            "dispatch_claim": dispatch == "leased" and covers_event,
+            "queue_log_created": covers_event and sync_log_created is not None,
+            "durable_queue_accept": admitted,
+            "worker_started": covers_event and worker_started is not None,
+        }
+        for name, reached in stages.items():
+            if reached and name not in self.first:
+                self.first[name] = elapsed_ms
+        timestamps = {
+            "outbox_created_unix_s": outbox_created,
+            "inbox_received_unix_ms": inbox_received,
+            "prior_queue_scheduled_recheck_unix_ms": due_at if prior_queued else None,
+            "dispatch_row_updated_unix_ms_at_first_accept_observation": updated_at if admitted else None,
+            "queue_log_created_unix_ms": sync_log_created if covers_event else None,
+            "worker_started_unix_ms": worker_started if covers_event else None,
+        }
+        for name, value in timestamps.items():
+            if value is not None and name not in self.database:
+                self.database[name] = value
+        state = {
+            "at_ms": elapsed_ms, "sender": sender, "inbox": inbox,
+            "dispatch": dispatch, "sync": sync if covers_event else None,
+            "prior_queue_wait": prior_queued,
+            "prior_queue_recheck_due": recheck_due,
+            "prior_queue_success_wake": success_wake,
+            "prior_queue_publication_wake": publication_wake,
+            "target_covers_event": covers_event,
+            "durable_queue_accept": admitted,
+            "dispatch_row_updated_unix_ms": updated_at,
+            "scheduled_recheck_unix_ms": due_at,
+        }
+        if not self.states or any(state[key] != self.states[-1][key] for key in state if key != "at_ms"):
+            if len(self.states) < MAX_HOP_STATE_CHANGES:
+                self.states.append(state)
+            else:
+                self.truncated = True
+
+    def report(self):
+        return {
+            "event_id": self.event_id, "first_observed_after_put_start_ms": self.first,
+            "database_timestamps": self.database,
+            "state_changes": self.states, "polls": self.sample_count,
+            "truncated": self.truncated, "diagnostic_codes": sorted(self.errors),
+        }
+
+
+class HopSampler:
+    def __init__(self, event_id, start, read_snapshot, clock=time.monotonic):
+        self.recorder = HopRecorder(event_id)
+        self.start = start
+        self.read_snapshot = read_snapshot
+        self.clock = clock
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._sample, daemon=True)
+
+    def _sample(self):
+        deadline = self.clock() + MAX_HOP_WALL_SECONDS
+        for _ in range(MAX_HOP_POLLS):
+            if self.stop.is_set():
+                return
+            if self.clock() >= deadline:
+                self.recorder.truncated = True
+                return
+            try:
+                cloud, receiver = self.read_snapshot(self.recorder.event_id)
+            except (RuntimeError, subprocess.TimeoutExpired, ValueError):
+                self.recorder.errors.add("read_only_snapshot_unavailable")
+            else:
+                self.recorder.observe(cloud, receiver, (self.clock() - self.start) * 1000)
+            if self.stop.wait(HOP_POLL_SECONDS):
+                return
+        self.recorder.truncated = True
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop.set()
+        self.thread.join(timeout=10)
+        if self.thread.is_alive():
+            self.recorder.errors.add("sampler_stop_timeout")
+
+
 def measure_event_queue(samples, pattern, write_probe, wait_checkpoint_time,
-                        clock=time.monotonic):
+                        clock=time.monotonic, observer_factory=None):
     """Time distinct queued tasks, optionally sending after prior acceptance."""
     if pattern not in ("sequential", "post-accept"):
         raise ValueError("unknown pilot event pattern")
@@ -210,12 +426,14 @@ def measure_event_queue(samples, pattern, write_probe, wait_checkpoint_time,
             priming_event_ids.append(priming_event_id)
         start = clock()
         event_id = write_probe()
-        accepted = wait_checkpoint_time("dispatched_through_event_id", event_id)
-        times_ms.append(round((accepted - start) * 1000, 1))
-        event_ids.append(event_id)
-        # An applied checkpoint separates each measured sample or pair.
-        applied = wait_checkpoint_time("applied_through_event_id", event_id)
-        applied_times_ms.append(round((applied - start) * 1000, 1))
+        observer = observer_factory(event_id, start) if observer_factory else nullcontext()
+        with observer:
+            accepted = wait_checkpoint_time("dispatched_through_event_id", event_id)
+            times_ms.append(round((accepted - start) * 1000, 1))
+            event_ids.append(event_id)
+            # An applied checkpoint separates each measured sample or pair.
+            applied = wait_checkpoint_time("applied_through_event_id", event_id)
+            applied_times_ms.append(round((applied - start) * 1000, 1))
     return times_ms, applied_times_ms, event_ids, priming_event_ids
 
 
@@ -311,6 +529,8 @@ def parse_args():
     parser.add_argument("--event-pattern", choices=("sequential", "post-accept"),
                         default="sequential",
                         help="post-accept sends each measured update immediately after a prior event enters the queue")
+    parser.add_argument("--hop-diagnostics", action="store_true",
+                        help="sample read-only sender/receiver state for each post-accept event")
     parser.add_argument("--sync-timeout", type=int, default=600)
     parser.add_argument("--event-timeout", type=int, default=600)
     parser.add_argument("--upload-timeout", type=int, default=120)
@@ -332,6 +552,8 @@ def parse_args():
         parser.error("larger custom fixture requires --allow-large-pilot")
     if not 2 <= args.event_samples <= 1000 or args.sync_timeout < 30 or args.event_timeout < 30:
         parser.error("need 2..1,000 event samples and timeouts of at least 30 seconds")
+    if args.hop_diagnostics and args.event_pattern != "post-accept":
+        parser.error("--hop-diagnostics requires --event-pattern post-accept")
     if not 20 <= args.upload_timeout <= 3600:
         parser.error("--upload-timeout must be 20..3,600 seconds")
     if not 0.1 <= args.rss_interval <= 10:
@@ -400,6 +622,7 @@ def run(args):
     cloud_paired = source_paired = False
     stage = "create fixture"
     source_id = kb_id = None
+    hop_diagnostics = []
     try:
         require_status(dav_request(folder, "MKCOL", dav_headers)[0], 201, "create pilot folder")
         root_id = file_id(folder, dav_headers)
@@ -539,8 +762,16 @@ def run(args):
                                           field, event_id, args.event_timeout)
             return observed
 
+        def observe_hops(event_id, start):
+            sampler = HopSampler(event_id, start, lambda measured_id: hop_snapshot(
+                nc_db_container, db_container, binding, connection_id,
+                source_id, tenant_id, measured_id))
+            hop_diagnostics.append(sampler.recorder)
+            return sampler
+
         times_ms, applied_times_ms, event_ids, priming_event_ids = measure_event_queue(
-            args.event_samples, args.event_pattern, write_probe, wait_event)
+            args.event_samples, args.event_pattern, write_probe, wait_event,
+            observer_factory=observe_hops if args.hop_diagnostics else None)
         report = {
             "schema_version": 1, "kind": "synthetic_disposable_pilot",
             "nextcloud_project": args.nextcloud_compose_project,
@@ -572,6 +803,22 @@ def run(args):
                 "Event P95 is nearest-rank over synthetic samples; even post-accept pairs do not establish sustained production P95.",
             ],
         }
+        if args.hop_diagnostics:
+            report["per_hop_diagnostics"] = {
+                "minimum_poll_spacing_seconds": HOP_POLL_SECONDS,
+                "max_polls_per_event": MAX_HOP_POLLS,
+                "max_sampling_seconds_per_event": MAX_HOP_WALL_SECONDS,
+                "events": [item.report() for item in hop_diagnostics],
+                "method": "read-only scoped database snapshots; first-observed times are upper bounds after PUT start; sender receipt is its durable cursor, dispatch admission is its dispatched cursor",
+                "limits": [
+                    "Outbox created_at has one-second precision; receiver and dispatch timestamps use the database clock.",
+                    "The queued next_attempt_at is a scheduled recheck, not proof that a dispatcher ran; completed prior sync and publication can wake it earlier.",
+                    "A dispatch row timestamp change is an observed database update, not proof of which handler performed the recheck.",
+                    "Sampling starts after the WebDAV write and event-ID lookup, so early stages can share one first-observed upper bound.",
+                    "The sync log is created during queue admission; worker_started_at records actual worker start. State polling can miss brief lease transitions.",
+                    "Each diagnostic poll adds read-only database load; compare latency with a run without diagnostics before drawing performance conclusions.",
+                ],
+            }
         return report
     finally:
         cleanup_errors = []
@@ -579,6 +826,9 @@ def run(args):
         # last error. Capture only bounded diagnostic fields first so a failed
         # pilot retains its original failure category without leaking keys.
         if sys.exc_info()[0] is not None and source_paired:
+            if args.hop_diagnostics and hop_diagnostics:
+                print("pilot last per-hop diagnostic before cleanup: " +
+                      json.dumps(hop_diagnostics[-1].report(), sort_keys=True), file=sys.stderr)
             try:
                 diagnostic_status, diagnostic = wk_request(wk_base, wk_token, "GET", source_path)
                 if diagnostic_status == 200 and isinstance(diagnostic, dict):

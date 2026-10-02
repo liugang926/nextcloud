@@ -2,7 +2,9 @@
 """Offline checks for the pilot harness safety boundary and statistics."""
 
 import importlib.util
+import json
 from pathlib import Path
+import re
 import sys
 import unittest
 from unittest import mock
@@ -61,6 +63,165 @@ class PilotLoadTests(unittest.TestCase):
             ("applied_through_event_id", 4),
         ])
 
+    def test_optional_observer_sees_only_measured_events_and_closes_on_failure(self):
+        seen = []
+        next_id = 0
+
+        class Observer:
+            def __init__(self, event_id):
+                self.event_id = event_id
+
+            def __enter__(self):
+                seen.append(("enter", self.event_id))
+
+            def __exit__(self, *_):
+                seen.append(("exit", self.event_id))
+
+        def write():
+            nonlocal next_id
+            next_id += 1
+            return next_id
+
+        def wait(field, event_id):
+            if event_id == 4 and field == "applied_through_event_id":
+                raise RuntimeError("synthetic wait failure")
+            return 1.0
+
+        with self.assertRaisesRegex(RuntimeError, "synthetic wait failure"):
+            PILOT.measure_event_queue(2, "post-accept", write, wait,
+                clock=lambda: 0.0,
+                observer_factory=lambda event_id, _: Observer(event_id))
+        self.assertEqual(seen, [("enter", 2), ("exit", 2),
+                                ("enter", 4), ("exit", 4)])
+
+    def test_hop_recorder_distinguishes_sender_recheck_admission_and_worker(self):
+        recorder = PILOT.HopRecorder(22)
+        base = {
+            "inbox_state": None, "inbox_received_unix_ms": None,
+            "checkpoint_received_id": 21, "dispatch_state": "queued",
+            "dispatch_target_event_id": 21, "dispatch_dispatched_id": 21,
+            "dispatch_next_attempt_unix_ms": 12000,
+            "dispatch_updated_unix_ms": 7000,
+            "sync_status": "running", "sync_log_created_unix_ms": 7100,
+            "db_now_unix_ms": 11000,
+        }
+        recorder.observe({"outbox_created_unix_s": 10, "sender_received_id": 21,
+                          "sender_status": "active"}, base, 100)
+        received = {**base, "inbox_state": "pending", "inbox_received_unix_ms": 11250,
+                    "checkpoint_received_id": 22, "db_now_unix_ms": 11500}
+        recorder.observe({"outbox_created_unix_s": 10, "sender_received_id": 22,
+                          "sender_status": "active"}, received, 500)
+        recorder.observe({"outbox_created_unix_s": 10, "sender_received_id": 22,
+                          "sender_status": "active"},
+                         {**received, "db_now_unix_ms": 12001}, 1000)
+        accepted = {**received, "dispatch_state": "queued", "dispatch_target_event_id": 22,
+                    "dispatch_dispatched_id": 22, "dispatch_updated_unix_ms": 12345,
+                    "sync_status": "running", "sync_log_created_unix_ms": 12200,
+                    "db_now_unix_ms": 12400}
+        recorder.observe({"outbox_created_unix_s": 10, "sender_received_id": 22,
+                          "sender_status": "active"}, accepted, 1500)
+        recorder.observe({"outbox_created_unix_s": 10, "sender_received_id": 22,
+                          "sender_status": "active"},
+                         {**accepted, "sync_status": "running",
+                          "sync_worker_started_unix_ms": 12500},
+                         1700)
+        report = recorder.report()
+        self.assertEqual(report["first_observed_after_put_start_ms"], {
+            "outbox_row": 100, "sender_receipt": 500, "weknora_inbox": 500,
+            "waiting_behind_prior_queue": 500, "prior_queue_recheck_due": 1000,
+            "prior_queue_candidate_due": 1000,
+            "queue_log_created": 1500, "durable_queue_accept": 1500,
+            "worker_started": 1700,
+        })
+        self.assertEqual(report["database_timestamps"], {
+            "outbox_created_unix_s": 10, "inbox_received_unix_ms": 11250,
+            "prior_queue_scheduled_recheck_unix_ms": 12000,
+            "dispatch_row_updated_unix_ms_at_first_accept_observation": 12345,
+            "queue_log_created_unix_ms": 12200,
+            "worker_started_unix_ms": 12500,
+        })
+        self.assertEqual(report["state_changes"][1]["prior_queue_wait"], True)
+        self.assertEqual(report["state_changes"][-1]["sync"], "running")
+
+    def test_hop_report_redacts_unknown_fields_and_states(self):
+        recorder = PILOT.HopRecorder(8)
+        recorder.observe({"outbox_created_unix_s": 99, "sender_received_id": 8,
+                          "sender_status": "password=private", "secret_ciphertext": "private"},
+                         {"inbox_state": "file path private", "path": "private",
+                          "dispatch_state": "token private", "sync_status": "private",
+                          "last_error_code": "private", "dispatch_target_event_id": 8,
+                          "dispatch_dispatched_id": 8, "db_now_unix_ms": 100000}, 10)
+        encoded = json.dumps(recorder.report())
+        self.assertNotIn("private", encoded)
+        self.assertNotIn("password", encoded)
+        self.assertIsNone(recorder.report()["state_changes"][0]["dispatch"])
+
+    def test_completed_prior_sync_can_wake_queue_before_scheduled_recheck(self):
+        recorder = PILOT.HopRecorder(42)
+        recorder.observe({"sender_received_id": 42, "sender_status": "active"}, {
+            "inbox_state": "pending", "inbox_received_unix_ms": 1000,
+            "checkpoint_received_id": 42, "dispatch_state": "queued",
+            "dispatch_target_event_id": 41, "dispatch_dispatched_id": 41,
+            "dispatch_next_attempt_unix_ms": 20000,
+            "dispatch_error_clear": True, "sync_status": "success",
+            "sync_finished_unix_ms": 1100, "db_now_unix_ms": 1200,
+        }, 300)
+        first = recorder.report()["first_observed_after_put_start_ms"]
+        self.assertEqual(first["prior_queue_success_wake"], 300)
+        self.assertEqual(first["prior_queue_candidate_due"], 300)
+        self.assertNotIn("prior_queue_recheck_due", first)
+        self.assertTrue(recorder.report()["state_changes"][0]["prior_queue_success_wake"])
+
+    def test_queued_row_update_is_visible_without_state_change(self):
+        recorder = PILOT.HopRecorder(42)
+        baseline = {"checkpoint_received_id": 42, "dispatch_state": "queued",
+                    "dispatch_target_event_id": 41, "dispatch_dispatched_id": 41,
+                    "dispatch_next_attempt_unix_ms": 20000,
+                    "dispatch_updated_unix_ms": 1000, "db_now_unix_ms": 1100}
+        recorder.observe({}, baseline, 100)
+        recorder.observe({}, {**baseline, "dispatch_next_attempt_unix_ms": 21000,
+                              "dispatch_updated_unix_ms": 1200}, 200)
+        states = recorder.report()["state_changes"]
+        self.assertEqual(len(states), 2)
+        self.assertEqual(states[1]["dispatch_row_updated_unix_ms"], 1200)
+        self.assertEqual(states[1]["scheduled_recheck_unix_ms"], 21000)
+
+    def test_hop_snapshot_queries_are_read_only_and_scoped(self):
+        queries = []
+
+        def sql(container, query, timeout):
+            queries.append((container, query, timeout))
+            return {}
+
+        with mock.patch.object(PILOT, "docker_sql", side_effect=sql):
+            PILOT.hop_snapshot("nc-db", "wk-db", "pilot-load-0123456789abcdef",
+                               "00000000-0000-0000-0000-000000000001",
+                               "00000000-0000-0000-0000-000000000002", 7, 22)
+        self.assertEqual(len(queries), 2)
+        self.assertEqual([row[0] for row in queries], ["nc-db", "wk-db"])
+        self.assertEqual([row[2] for row in queries], [4, 4])
+        self.assertTrue(all(query.startswith(("SELECT", "WITH")) for _, query, _ in queries))
+        self.assertIn("binding_id='pilot-load-0123456789abcdef' AND id=22", queries[0][1])
+        self.assertIn("connection_id='00000000-0000-0000-0000-000000000001' AND datasource_id='00000000-0000-0000-0000-000000000002'", queries[1][1])
+        self.assertIn("connection_id=(SELECT connection_id FROM c) AND event_id=22", queries[1][1])
+        self.assertIn("data_source_id='00000000-0000-0000-0000-000000000002'", queries[1][1])
+        self.assertNotIn("secret", queries[0][1] + queries[1][1])
+        self.assertFalse(any(re.search(r"\b(?:INSERT|UPDATE|DELETE|ALTER|DROP)\b", query)
+                             for _, query, _ in queries))
+
+    def test_sampler_errors_do_not_echo_database_exception(self):
+        def failure(_):
+            raise RuntimeError("password=private file text")
+
+        sampler = PILOT.HopSampler(9, 0.0, failure)
+        with mock.patch.object(PILOT, "MAX_HOP_POLLS", 1), \
+             mock.patch.object(PILOT, "HOP_POLL_SECONDS", 0):
+            sampler._sample()
+        encoded = json.dumps(sampler.recorder.report())
+        self.assertNotIn("private", encoded)
+        self.assertEqual(sampler.recorder.report()["diagnostic_codes"],
+                         ["read_only_snapshot_unavailable"])
+
     def test_large_fixture_needs_explicit_opt_in(self):
         with self.assertRaises(SystemExit):
             self.parse("--file-count", "101")
@@ -68,6 +229,8 @@ class PilotLoadTests(unittest.TestCase):
         self.assertEqual(args.file_count * args.file_bytes, 100_000_000_000)
         with self.assertRaises(SystemExit):
             self.parse("--pilot-10k-100gb", "--file-count", "12")
+        with self.assertRaises(SystemExit):
+            self.parse("--hop-diagnostics")
 
     def test_shared_or_non_loopback_project_is_rejected_before_docker(self):
         with self.assertRaises(SystemExit):
