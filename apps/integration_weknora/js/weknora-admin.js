@@ -25,6 +25,9 @@
         const refreshPairing = document.getElementById('weknora-refresh-pairing');
         const pairingMessage = document.getElementById('weknora-pairing-message');
         const pairingDetails = document.getElementById('weknora-pairing-details');
+        const pairingPending = document.getElementById('weknora-pairing-pending');
+        const pairingStatusPath = document.getElementById('weknora-pairing-status-path');
+        const pairingRetryPath = document.getElementById('weknora-pairing-retry-path');
         const connectionBinding = document.getElementById('weknora-connection-binding');
         const refreshConnection = document.getElementById('weknora-refresh-connection');
         const connectionMessage = document.getElementById('weknora-connection-message');
@@ -264,6 +267,7 @@
                 ? selectedConnection : (bindings[0] ? bindings[0].id : '');
             clearPublicationState();
             pairingDetails.hidden = true;
+            clearPairingRecovery();
             refreshPairing.disabled = !pairingBinding.value;
             connectionConfigured = false;
             pausedConnection = null;
@@ -307,10 +311,18 @@
             return `${bindingsUrl}/${encodeURIComponent(binding)}/event-connection`;
         }
 
+        function clearPairingRecovery() {
+            pairingPending.hidden = true;
+            pairingPending.open = false;
+            pairingStatusPath.textContent = '';
+            pairingRetryPath.textContent = '';
+        }
+
         async function loadPairingStatus() {
             const binding = pairingBinding.value;
             const epoch = ++pairingRequestEpoch;
             pairingDetails.hidden = true;
+            clearPairingRecovery();
             refreshPairing.disabled = !binding;
             if (!binding) {
                 message(pairingMessage, 'Create or choose a binding to inspect source pairing.', '');
@@ -328,6 +340,7 @@
                 if (!pairing || pairing.binding_id !== binding ||
                     !['pending', 'active', 'aborted'].includes(pairing.state) ||
                     typeof pairing.operation_id !== 'string' ||
+                    !/^[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$/.test(pairing.operation_id) ||
                     typeof pairing.instance_id !== 'string' ||
                     typeof pairing.tenant_id !== 'string' ||
                     typeof pairing.knowledge_base_id !== 'string' ||
@@ -351,6 +364,12 @@
                     document.getElementById(`weknora-pairing-${field}`).textContent = value;
                 });
                 pairingDetails.hidden = false;
+                if (pairing.state === 'pending') {
+                    const path = `/api/v1/datasource/nextcloud-source-pairings/${encodeURIComponent(pairing.operation_id)}`;
+                    pairingStatusPath.textContent = path;
+                    pairingRetryPath.textContent = `${path}/retry`;
+                    pairingPending.hidden = false;
+                }
                 message(pairingMessage,
                     pairing.state === 'active'
                         ? 'Nextcloud committed this source. Confirm the same active operation in WeKnora; this does not confirm indexing.'
@@ -363,6 +382,7 @@
                     return;
                 }
                 pairingDetails.hidden = true;
+                clearPairingRecovery();
                 if (error.status === 404 && error.code === 'pairing_not_found') {
                     message(pairingMessage, 'No source pairing has been prepared for this binding.', '');
                 } else {

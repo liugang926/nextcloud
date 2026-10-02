@@ -42,6 +42,13 @@ and exactly one Nextcloud binding.
    was lost. Repeating the original WeKnora POST with the exact tuple and
    token also reuses the same source.
 
+The Nextcloud administrator page shows its latest local pairing state. For a
+pending operation it also shows the exact, nonsecret WeKnora status and retry
+paths for that operation ID. Those calls require a WeKnora tenant administrator
+with edit access to the dedicated knowledge base; a Nextcloud session cannot
+make them. The page never fetches or displays the one-time token. After a
+retry, inspect both sides before starting synchronization.
+
 A deterministic Nextcloud rejection (wrong tuple, revoked key, or stale
 uncommitted epoch) returns HTTP 409 with `last_error_code:
 remote_commit_conflict` in the nonsecret pairing status. It leaves the source

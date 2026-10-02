@@ -87,6 +87,13 @@ style('integration_weknora', 'weknora-admin');
             <dt>Machine key ID</dt><dd id="weknora-pairing-key"></dd>
             <dt>Publication epoch at prepare</dt><dd id="weknora-pairing-epoch"></dd>
         </dl>
+        <details id="weknora-pairing-pending" hidden>
+            <summary>Inspect or retry this pending operation in WeKnora</summary>
+            <p>Use a WeKnora tenant administrator with edit access to the dedicated knowledge base. Inspect the same operation before retrying it. WeKnora uses its stored credential for retry; neither status nor retry returns the one-time token.</p>
+            <p>Inspect: <code>GET <span id="weknora-pairing-status-path"></span></code></p>
+            <p>Retry: <code>POST <span id="weknora-pairing-retry-path"></span></code></p>
+            <p>Send these requests to the approved WeKnora origin through its administrator workflow, then refresh the state in both services. This Nextcloud session cannot submit WeKnora administrator requests. If WeKnora has no matching operation, resolve the pending intent through the documented abort workflow before preparing another one.</p>
+        </details>
     </div>
 
     <div class="weknora-admin__panel">
