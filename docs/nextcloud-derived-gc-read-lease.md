@@ -38,7 +38,7 @@ loaded knowledge row's source channel and full metadata, and current
 document/tag scope and source publication are checked before output. Focused
 tests on both pinned WeKnora bases cover a retired result, revoked source or
 tag access, duplicate chunks with mixed generations, and missing lease
-providers. The patch has not yet been built into the shared LAN image. Wiki,
+providers. The patch is now in the shared LAN image. Wiki,
 historical hydration, external adapters and complete writer coverage remain
 open; the derived-index deletion gate stays disabled.
 

@@ -88,9 +88,19 @@ guards normal and pre-stream sync finalization against a concurrent
 administrator pause or resume. Agent graph queries now retain a KB read lease
 and recheck every displayed chunk against current source and user scope.
 Both pinned patches applied cleanly and passed focused Nextcloud repository,
-service, connector, handler and graph-tool Go tests. This patch has not yet
-been built into full app/UI images or installed on the shared stack; the
-shared image and schema remain at the preceding patch and `130/false`.
+service, connector, handler and graph-tool Go tests. All eight CI checks
+passed at `610d2d1`. The complete pinned RAG77/AnyDoc candidate images are
+app `sha256:d0e695504b503034744b8a08388d0818b14fc3fb04ef30bc59a8d2638357915d`
+and UI
+`sha256:545b6ff7321931f63e8c8ebb85aa2fa0cbca2d29aa953f1fef285f77b0c52f71`.
+An isolated clone of the shared PostgreSQL database migrated from `130/false`
+to `131/false`, and a fresh synthetic LDAP plus real groupfolders Team Folder
+fixture passed the Alice/Bob access and file-level ACL revocation matrix.
+The shared LAN stack has since switched to these exact app/UI image IDs and
+schema `131/false`. Its previous images remain under `pre-syncfix-20261002`
+tags, and a verified mode-600 PostgreSQL dump was saved before switching.
+The local single app worker now has Redis sync recovery enabled after its
+upgrade; no active event connection or sender existed during the switch.
 
 The patch also refreshes retired chunk image references on every
 due GC retry. A newly malformed `image_info` blocks the local provider

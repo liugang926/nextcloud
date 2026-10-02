@@ -157,6 +157,32 @@ preserves an active source only for this typed retryable class; 401/403 remain
 credential failures. A concurrent administrator pause wins the conditional
 update. Focused tests on both pinned WeKnora bases cover the actual HTTP
 classification, a truncated response body, source-state race and dispatcher's
-failed-log backoff without an applied ACK. This code has not yet been built
-into the shared image or rerun as a full-image latency pilot; no new P95 is
-claimed.
+failed-log backoff without an applied ACK.
+
+## Full-image sync-fix pilot, 2026-10-02
+
+The complete pinned RAG77/AnyDoc app image
+`sha256:d0e695504b503034744b8a08388d0818b14fc3fb04ef30bc59a8d2638357915d`
+passed a fresh, loopback-only ten-file `post-accept` pilot. Its ten 256-byte
+bulk items were created in 1.448 seconds. All signed inbox events #1–#21
+reached applied, all 21 sync logs succeeded, and the source remained active;
+this run did not reproduce HTTP 412 or a blocked dispatcher. The complete
+[redacted JSON report](evidence/event-queue-pilot-2026-10-02-syncfix-full-image.json)
+records image IDs, the ten samples and measurement limits. The owned Docker
+containers, volumes, networks, worktree and private credentials were removed.
+
+The ten event-to-durable-job samples were 4,960.0, 5,062.0, 4,912.3, 4,909.9,
+4,924.8, 4,940.8, 4,896.2, 10,101.2, 4,973.9 and 4,919.6 ms. Their
+nearest-rank P95 was **10,101.2 ms**, 101.2 ms above the PRD's 10-second
+target. Event-to-applied-proof P95 was 20,467.4 ms. The eighth sample took
+about one extra five-second poll interval, but the retained evidence does not
+identify its cause. This small synthetic run neither meets the observed
+10-second target nor establishes sustained P95 or 10,000-file/100-GB capacity.
+The applied-minus-dispatched interval for the eighth sample was 10,366.2 ms,
+close to the other samples, so the extra time was before durable admission.
+The dispatcher has a separate five-second queued recheck after a priming
+event, while the Nextcloud sender and dispatcher also poll every five seconds.
+The report lacks per-hop timestamps and cannot tell which gate missed its
+first check. A follow-up isolated run should capture bounded outbox-write,
+receiver-receipt, queue-eligibility and task-admission times before changing
+poll intervals or asserting the 10-second target.

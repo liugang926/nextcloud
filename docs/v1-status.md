@@ -891,17 +891,17 @@ final read, so physical derived-index GC remains unproved. The owned fixture,
 its volumes, network and temporary credentials were destroyed. This one-file
 probe is not a latency, scale or real AD acceptance run.
 
-The shared LAN stack now runs the same full app and UI image IDs,
+At that stage, the shared LAN stack ran the same full app and UI image IDs,
 `sha256:e0b2b932dca4d988930ac1972ec582ad883e155f4c044f00d9230baa592804f7`
 and `sha256:e9d606d5115dc5c93f2328f671d0fe2c12c8cdc1126ca7c73cd0f64c8d1cd458`.
 Before switching, the receiver had zero active or unknown event connections
 and Nextcloud had zero sender rows. The previous running images remain under
 `pre-overlap-20261002` tags. The verified, mode-600 shared database backup is
-`dist/backups/weknora-before-rag-20261001T225001Z.dump`. The new containers
-are running and healthy, schema remains `130/false`, both LAN HTTPS entries
-return 200 with the local CA, the WeKnora application health endpoint returns
-200, the original Nextcloud HTTP login returns 200, and an authenticated
-Nextcloud HTTPS WebDAV `PROPFIND` returns 207. All eight PR checks passed at
+`dist/backups/weknora-before-rag-20261001T225001Z.dump`. Those containers
+were healthy at schema `130/false`; both LAN HTTPS entries returned 200 with
+the local CA, the WeKnora application health endpoint returned 200, the
+original Nextcloud HTTP login returned 200, and an authenticated Nextcloud
+HTTPS WebDAV `PROPFIND` returned 207. All eight PR checks passed at
 `5664b6b`. No fresh shared-service parser-overlap, second physical LAN-client,
 sustained latency or scale acceptance run has been made.
 
@@ -928,9 +928,29 @@ and pre-stream completion from a concurrent administrator pause or resume;
 on a missed update, the run cannot yield an applied event ACK. The Agent graph
 tool now holds a KB read lease across answer formatting and checks each
 displayed chunk against current source/version and user scope. Physical
-derived GC remains disabled. This candidate has not yet been built, migrated
-or deployed on the shared LAN stack, which still runs the parser-overlap image
-and schema `130/false`.
+derived GC remains disabled. The complete RAG77/AnyDoc candidate built as app
+`sha256:d0e695504b503034744b8a08388d0818b14fc3fb04ef30bc59a8d2638357915d`
+and UI
+`sha256:545b6ff7321931f63e8c8ebb85aa2fa0cbca2d29aa953f1fef285f77b0c52f71`.
+Both images carry the pinned RAG source and full patch hash. A read-only dump
+of the shared PostgreSQL 17 database was restored to an isolated container;
+the candidate migration advanced the clone from `130/false` to `131/false`.
+Six new `sync_logs` columns, its index and old-row defaults passed checks,
+while the 20 sync logs, two data sources and three knowledge bases kept their
+row counts. The clone's container, network and volume were removed without
+modifying the shared database.
+
+A fresh owned direct-mode synthetic LDAP fixture used these exact app/UI
+image IDs and installed the pinned groupfolders 22.0.6 package. It published
+one Team Folder document with two ready chunks and two embeddings. The
+six-field HTTP matrix allowed Alice's login, DAV, signed source, WeKnora LDAP
+login, knowledge and search; Bob could log in but could not access the file
+or knowledge. After a real file-level Team Folder `-read` ACL for Alice, her
+old JWT lost DAV, signed source, Files status, ask-target, direct knowledge,
+search and historical answer/citation access on the next poll. Bob remained
+denied. Its owned containers, volumes, network and scratch were destroyed.
+This is isolated AD-shaped LDAP and groupfolders evidence, not real enterprise
+AD or production Team Folder acceptance.
 
 A ten-sample post-accept queue pilot attempt was invalidated by a signed
 source GET HTTP 412 on a same-file update; the captured error was overwritten
@@ -938,5 +958,29 @@ by fixture revocation before a precise receiver error code could be retained.
 The harness now captures receiver state before cleanup. A later two-pair
 minimal rerun completed five applied events and five successful sync logs
 without reproducing 412. Neither run establishes a P95 latency result.
+
+The complete candidate then ran a ten-sample full-image `post-accept` pilot.
+All 21 signed events reached applied, all 21 sync logs succeeded, and the
+source stayed active without a reproduced 412. The ten-file initial sync
+created ten items in 1.448 seconds. The nearest-rank event-to-durable-job P95
+was **10,101.2 ms**, 101.2 ms above the PRD's 10-second target; the
+event-to-applied-proof P95 was 20,467.4 ms. The eighth sample took roughly
+one extra poll interval, but its cause was not established. The full
+[redacted pilot report](evidence/event-queue-pilot-2026-10-02-syncfix-full-image.json)
+contains all samples and limits. Its private environment was destroyed.
+This small run does not accept sustained latency or 10,000-file/100-GB scale.
+
+All eight PR checks passed at `610d2d1`. Before the shared LAN upgrade,
+WeKnora had zero active/unknown event connections and running sync logs;
+Nextcloud had zero sender rows. The script saved and verified the mode-600
+backup `dist/backups/weknora-before-rag-20261002T044132Z.dump`, and prior
+app/UI images remain tagged `pre-syncfix-20261002`. The shared WeKnora app
+and UI now run the exact candidate image IDs above, the database is
+`131/false`, the app health endpoint and both LAN HTTPS login entries return
+200, the original Nextcloud HTTP login returns 200, and authenticated
+Nextcloud HTTPS DAV `PROPFIND` returns 207. After verifying only one shared
+app worker was running, the local Redis admission recovery flag was enabled
+and the app/frontend/gateway restarted healthy. No live uncertain-enqueue
+fault or second physical LAN client was tested on the shared stack.
 
 Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.

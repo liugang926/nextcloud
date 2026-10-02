@@ -164,8 +164,11 @@ existing task preserve the slot. Redis recovery is enabled only with
 claim code; Lite recovers its single-process queue automatically. Logs created
 before versioned intents, and logs whose worker started, still require manual
 investigation. These non-event logs do not use the event dispatcher's
-150-minute blocked transition. This recovery patch has passed focused tests
-but has not yet been built or deployed on the shared LAN stack.
+150-minute blocked transition. This recovery patch passed focused tests and
+is deployed on the shared LAN stack. The local single app worker was upgraded
+before `WEKNORA_NEXTCLOUD_SYNC_RECOVERY_ENABLED=true` was enabled; no connected
+sender was active during the upgrade. A live uncertain-enqueue failure has not
+been induced against the shared stack.
 
 An ETag-raced content GET (HTTP 412), source 429/5xx or interrupted source
 read now fails its sync log but remains retryable without changing an active
