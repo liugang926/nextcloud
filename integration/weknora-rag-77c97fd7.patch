@@ -48866,10 +48866,10 @@ index 0000000..99be88a
 +}
 diff --git a/internal/application/repository/nextcloud_gc_chunks_pg_test.go b/internal/application/repository/nextcloud_gc_chunks_pg_test.go
 new file mode 100644
-index 0000000..0ea084f
+index 0000000..5741a55
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc_chunks_pg_test.go
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,155 @@
 +package repository
 +
 +import (
@@ -48901,12 +48901,16 @@ index 0000000..0ea084f
 +	schema := "gc_chunk_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
 +	require.NoError(t, admin.Exec(`CREATE SCHEMA "`+schema+`"`).Error)
 +	t.Cleanup(func() { _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`).Error })
-+	u, err := url.Parse(dsn)
-+	require.NoError(t, err)
-+	query := u.Query()
-+	query.Set("search_path", schema+",public")
-+	u.RawQuery = query.Encode()
-+	db, err := gorm.Open(postgres.Open(u.String()), &gorm.Config{})
++	scopedDSN := dsn + " search_path=" + schema + ",public"
++	if strings.Contains(dsn, "://") {
++		u, err := url.Parse(dsn)
++		require.NoError(t, err)
++		query := u.Query()
++		query.Set("search_path", schema+",public")
++		u.RawQuery = query.Encode()
++		scopedDSN = u.String()
++	}
++	db, err := gorm.Open(postgres.Open(scopedDSN), &gorm.Config{})
 +	require.NoError(t, err)
 +	sqlDB, err := db.DB()
 +	require.NoError(t, err)
