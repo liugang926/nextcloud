@@ -1060,3 +1060,19 @@ the final state at each applied watermark. The event credential and both
 isolated stacks were removed. These 256-byte-file checks do not establish
 100-GB throughput, sustained latency, real AD ACLs or physical derived
 cleanup.
+
+The shared LAN stack was upgraded after confirming zero active WeKnora event
+connections, zero Nextcloud sender rows and zero running sync logs. A verified
+mode-0600 WeKnora dump (`weknora-before-rag-20261002T080705Z.dump`, SHA-256
+`338a2b7e3ddc09fa3eb296583e0a01f64ba87f3d553287eb0c4f0c9de2ae826a`)
+preceded the backend/frontend switch; the previous images remain tagged for
+rollback. A verified mode-0600 Nextcloud dump
+(`nextcloud-before-targeted-20261002T080845Z.dump`, SHA-256
+`961a50f3c5b3b8a1d79257091f9c1434372271acba525114fe87e4c51b8ca47e`)
+preceded `occ upgrade` to app 0.4.35. The reproducible app archive has
+SHA-256 `f333a675a5dbc69a3deb613293ecb862b2b79e22fa4edb6d1bfc84cf03bca76f`.
+Nextcloud maintenance mode is off, no DB upgrade is pending, and both app
+containers are healthy. The host-to-LAN-IP HTTPS login pages returned 200,
+authenticated Nextcloud DAV returned 207, and the publication HTTP smoke
+passed with the local CA and a separate login on the Files citation origin.
+A second physical LAN client has not yet been tested.

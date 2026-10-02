@@ -3,6 +3,7 @@
 
 Run after scripts/bootstrap.sh, for example:
   python3 apps/integration_weknora/tests/publication_http_smoke.py --file-id 77
+Set NEXTCLOUD_TEST_CA_FILE to the trusted CA for a LAN HTTPS Files citation.
 """
 
 import argparse
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import ssl
 import subprocess
 import urllib.error
 import urllib.parse
@@ -45,7 +47,12 @@ def request(opener, url, method="GET", headers=None, data=None):
 
 
 def login(base, user, password):
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    handlers = [urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())]
+    ca_file = os.environ.get("NEXTCLOUD_TEST_CA_FILE")
+    if ca_file:
+        handlers.append(urllib.request.HTTPSHandler(
+            context=ssl.create_default_context(cafile=ca_file)))
+    opener = urllib.request.build_opener(*handlers)
     status, body = request(opener, f"{base}/login")
     assert status == 200, (status, body[:200])
     token = re.search(rb'data-requesttoken="([^"]+)"', body).group(1).decode()
@@ -211,7 +218,14 @@ def main():
         ).strip()
         public = urllib.parse.urlsplit(public_url)
         assert (human.scheme, human.netloc) == (public.scheme, public.netloc)
-        status, _ = request(admin, item["human_url"])
+        human_base = f"{human.scheme}://{human.netloc}"
+        # The Files citation can use the LAN origin while the smoke uses
+        # loopback for API calls. Log in on that origin so a 200 login page
+        # cannot be mistaken for an authenticated Files citation.
+        human_admin = (admin if human_base == base else
+                       login(human_base, values["NEXTCLOUD_ADMIN_USER"],
+                             values["NEXTCLOUD_ADMIN_PASSWORD"])[0])
+        status, _ = request(human_admin, item["human_url"])
         check(status, 200, "employee-facing Files citation route")
         status, body = request(reader, f"{api}/capabilities", headers=bearer)
         check(status, 200, "source capabilities for publication check")
