@@ -43,6 +43,10 @@ CANDIDATES = {
         "3ad3b31f2b3e6409c6a9c196bbab70e2eac6c666",
         "251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611",
     ),
+    "weknora-ldap-app:nextcloud-rag-duckdb-20261002": (
+        "77c97fd72f26e84435503d24eeed88cb5dfe1f01",
+        "176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef",
+    ),
 }
 DEFAULT_IMAGE = "weknora-ldap-app:nextcloud-rag-e5-anydoc-rebind"
 PDF_NAME = "candidate-pdf.pdf"
