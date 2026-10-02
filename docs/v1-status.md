@@ -1076,3 +1076,22 @@ containers are healthy. The host-to-LAN-IP HTTPS login pages returned 200,
 authenticated Nextcloud DAV returned 207, and the publication HTTP smoke
 passed with the local CA and a separate login on the Files citation origin.
 A second physical LAN client has not yet been tested.
+
+## 2026-10-02 pending source-pairing recovery guidance
+
+The administrator page in app 0.4.36 now shows operation-specific WeKnora
+status and retry paths only while the selected source pairing is pending. It
+clears them when the binding or state changes, and states that a WeKnora
+tenant administrator must use the approved WeKnora origin. The Nextcloud page
+does not proxy a WeKnora administrator credential, read a one-time token or
+claim that it performed the retry. The headless pairing protocol and
+two-sided reconciliation remain the authority.
+
+Before upgrading the shared local app, a mode-0600 Nextcloud dump
+(`nextcloud-before-pairing-ui-20261002T083701Z.dump`, SHA-256
+`b18e41e206c809f3758e4a4a9034dea929d66355afa65d093eb26156d1cf7e7c`)
+was verified. `occ upgrade` completed to 0.4.36 with maintenance mode off;
+the authenticated administrator page and its JavaScript asset returned 200,
+and the panel markup was present. The reproducible 0.4.36 app archive has
+SHA-256 `36e3ca0cc46ff065da314c88493acca57306ce8fc1b78cba2d6489c4536cb431`.
+This UI check did not create a pending production pairing or test real AD.
