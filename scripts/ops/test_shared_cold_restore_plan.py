@@ -71,7 +71,8 @@ class RestoreTests(unittest.TestCase):
             for service in sorted(restore.SERVICES[project]):
                 counter += 1
                 containers[service] = {"id": f"{counter:064x}", "image_id": "sha256:" + "a" * 64,
-                                       "image_tag": "fixture:old"}
+                                       "image_tag": "fixture:old", "running_port_bindings": {},
+                                       "compose_config_hash": hashlib.sha256(json.dumps(services[service], sort_keys=True).encode()).hexdigest()}
             config_file = self.evidence / f"{restore.SHORT[project]}-resolved-compose.json"
             self.write_private(config_file, json.dumps(config).encode())
             self.projects[project] = {"containers": containers,
@@ -143,7 +144,8 @@ class RestoreTests(unittest.TestCase):
                 item = {"Id": identity["id"], "Image": identity["image_id"],
                         "Config": {"Image": definition["image"], "Labels": {
                             "com.docker.compose.project": project, "com.docker.compose.service": service,
-                            "com.docker.compose.container-number": "1", "com.docker.compose.oneoff": "False"},
+                            "com.docker.compose.container-number": "1", "com.docker.compose.oneoff": "False",
+                            "com.docker.compose.config-hash": identity["compose_config_hash"]},
                             "Env": [key + "=" + value for key, value in definition["environment"].items()]},
                         "State": {"Running": False, "Status": "exited"}, "Mounts": [],
                         "HostConfig": {"PortBindings": {}}, "NetworkSettings": {"Networks": {}}}
@@ -172,6 +174,10 @@ class RestoreTests(unittest.TestCase):
         if args[-3:] == ["config", "--format", "json"]:
             project = capture.NC_PROJECT if "--env-file" in args else capture.WK_PROJECT
             return json.dumps(self.configs[project]).encode()
+        if args[-3:] == ["config", "--hash", "*"]:
+            project = capture.NC_PROJECT if "--env-file" in args else capture.WK_PROJECT
+            return "\n".join(service + " " + hashlib.sha256(json.dumps(definition, sort_keys=True).encode()).hexdigest()
+                             for service, definition in self.configs[project]["services"].items()).encode()
         if args[:3] == ["docker", "ps", "-aq"]:
             ids = {obj["Id"] for (kind, name), obj in self.objects.items() if kind == "container"}
             for argument in args:
@@ -350,6 +356,8 @@ class RestoreTests(unittest.TestCase):
         item["Image"] = "sha256:" + "b" * 64
         item["Config"]["Image"] = "fixture:new"
         self.configs[capture.WK_PROJECT]["services"]["app"]["image"] = "fixture:new"
+        item["Config"]["Labels"]["com.docker.compose.config-hash"] = hashlib.sha256(
+            json.dumps(self.configs[capture.WK_PROJECT]["services"]["app"], sort_keys=True).encode()).hexdigest()
         self.objects.pop(("container", old_id))
         self.objects[("container", item["Id"])] = item
         self.objects[("image", item["Image"])] = {"Id": item["Image"], "Os": "linux"}
@@ -371,6 +379,40 @@ class RestoreTests(unittest.TestCase):
         self.configs[capture.NC_PROJECT]["services"]["nextcloud"]["volumes"][0]["read_only"] = False
         with self.assertRaisesRegex(restore.RestorePlanError, "mounts differ"):
             self.target()
+
+    def test_exact_desktop_stopped_port_loss_requires_matching_current_hash(self):
+        self.checked = copy.deepcopy(self.checked)
+        service = self.configs[capture.NC_PROJECT]["services"]["nextcloud"]
+        ports = [{"target": 80, "protocol": "tcp", "host_ip": "127.0.0.1", "published": "18082"},
+                 {"target": 80, "protocol": "tcp", "host_ip": "10.106.105.121", "published": "18082"}]
+        service["ports"] = ports
+        self.checked["configs"][capture.NC_PROJECT]["services"]["nextcloud"]["ports"] = ports
+        item = self.objects[("container", f"{capture.NC_PROJECT}-nextcloud-1")]
+        item["HostConfig"]["PortBindings"] = {"80/tcp": [
+            {"HostIp": "127.0.0.1", "HostPort": "18082"}, {"HostIp": "127.0.0.1", "HostPort": ""}]}
+        item["Config"]["Labels"]["com.docker.compose.config-hash"] = hashlib.sha256(
+            json.dumps(service, sort_keys=True).encode()).hexdigest()
+        self.target()
+        item["Config"]["Labels"]["com.docker.compose.config-hash"] = "0" * 64
+        with self.assertRaisesRegex(restore.RestorePlanError, "creation-time Compose hash"):
+            self.target()
+        item["Config"]["Labels"]["com.docker.compose.config-hash"] = hashlib.sha256(
+            json.dumps(service, sort_keys=True).encode()).hexdigest()
+        item["HostConfig"]["PortBindings"]["80/tcp"][1]["HostPort"] = "28082"
+        with self.assertRaisesRegex(restore.RestorePlanError, "ports"):
+            self.target()
+
+    def test_frozen_running_bindings_and_creation_hash_required_in_checkpoint(self):
+        identity = self.manifest["projects"][capture.NC_PROJECT]["containers"]["nextcloud"]
+        identity["running_port_bindings"] = {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18082"}]}
+        self.save_manifest()
+        with self.assertRaisesRegex(restore.RestorePlanError, "running port bindings differ"):
+            self.verify()
+        identity["running_port_bindings"] = {}
+        identity.pop("compose_config_hash")
+        self.save_manifest()
+        with self.assertRaisesRegex(restore.RestorePlanError, "creation-time Compose"):
+            self.verify()
 
     def test_nonlocal_volume_driver_refused(self):
         self.objects[("volume", f"{capture.WK_PROJECT}_app-data")]["Driver"] = "nfs"
@@ -430,6 +472,7 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(len(plan["steps"][3]["volumes"]), 8)
         self.assertFalse(plan["restore_verified"])
         self.assertFalse(plan["automatic_reopen_permitted"])
+        self.assertFalse(plan["external_replay_lower_bound_proven"])
         self.assertFalse(plan["apply_supported"])
         self.assertFalse(plan["current_stopped_target_verified"])
         self.assertIn("live stopped target, owned volumes/networks and old immutable images", plan["open_gates"])

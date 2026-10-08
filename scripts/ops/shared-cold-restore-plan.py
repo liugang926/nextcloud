@@ -371,6 +371,13 @@ def verify_checkpoint(directory: Path, nc_dir: Path, wk_dir: Path,
         for service, identity in saved["containers"].items():
             require(config["services"][service]["image"] == identity["image_tag"],
                     "saved Compose image reference differs from captured container")
+        for service, identity in saved["containers"].items():
+            require(isinstance(identity.get("compose_config_hash"), str) and
+                    DIGEST.fullmatch(identity["compose_config_hash"]) is not None,
+                    "checkpoint lacks the captured creation-time Compose service hash")
+            require(frozen_port_bindings(identity.get("running_port_bindings")) ==
+                    expected_port_bindings(config["services"][service]),
+                    "captured running port bindings differ from saved Compose")
         configs[project] = config
     code = archive_inventory(directory / "nextcloud-app-code.tar",
                              allowed_roots={"apps/integration_weknora"})
@@ -402,6 +409,43 @@ def verify_checkpoint(directory: Path, nc_dir: Path, wk_dir: Path,
             "app_code_verification": code_verification}
 
 
+def expected_port_bindings(service: dict) -> set[tuple[str, str, str]]:
+    return {(f"{port['target']}/{port.get('protocol', 'tcp')}",
+             str(port.get("host_ip", "0.0.0.0")), str(port["published"]))
+            for port in service.get("ports", [])}
+
+
+def frozen_port_bindings(bindings: dict) -> set[tuple[str, str, str]]:
+    require(isinstance(bindings, dict), "captured running port bindings are unavailable")
+    result = set()
+    count = 0
+    for target, mappings in bindings.items():
+        require(isinstance(target, str) and re.fullmatch(r"[0-9]+/(tcp|udp|sctp)", target) is not None and
+                isinstance(mappings, list) and bool(mappings),
+                "captured running port bindings are invalid")
+        for mapping in mappings:
+            require(isinstance(mapping, dict) and set(mapping) == {"HostIp", "HostPort"} and
+                    isinstance(mapping["HostIp"], str) and bool(mapping["HostIp"]) and
+                    isinstance(mapping["HostPort"], str) and mapping["HostPort"].isdigit() and
+                    1 <= int(mapping["HostPort"]) <= 65535,
+                    "captured running port bindings are invalid")
+            result.add((target, mapping["HostIp"], mapping["HostPort"]))
+            count += 1
+    require(len(result) == count, "captured running port bindings contain duplicate entries")
+    return result
+
+
+def compose_service_hashes(command: list[str], cwd: Path, project: str) -> dict:
+    values = {}
+    for line in capture.run(command + ["config", "--hash", "*"], cwd=cwd).decode("ascii").splitlines():
+        parts = line.split()
+        require(len(parts) == 2 and parts[0] not in values and DIGEST.fullmatch(parts[1]) is not None,
+                "current Compose service configuration hashes are invalid")
+        values[parts[0]] = parts[1]
+    require(set(values) == SERVICES[project], "current Compose hash topology differs from the local pair")
+    return values
+
+
 def verify_stopped_target(checked: dict, nc_dir: Path, wk_dir: Path) -> dict:
     capture.local_docker(nc_dir)
     stacks = []
@@ -414,6 +458,7 @@ def verify_stopped_target(checked: dict, nc_dir: Path, wk_dir: Path) -> dict:
         current_config_digests[project] = hashlib.sha256(config_bytes).hexdigest()
         config = json_object(config_bytes, "current resolved Compose")
         capture.validate_config(config, project, nc_dir, wk_dir)
+        service_hashes = compose_service_hashes(command, cwd, project)
         # Restoration can revert a newer image, but must retain the identical
         # volume/bind destinations. Config/input bytes are restored as a pair.
         old = checked["configs"][project]
@@ -436,7 +481,10 @@ def verify_stopped_target(checked: dict, nc_dir: Path, wk_dir: Path) -> dict:
                     not state.get("Paused") and not state.get("Restarting") and
                     not state.get("Dead") and state.get("Status") in {"exited", "created"},
                     "target must contain exactly the fifteen owned, stopped services")
-            require(capture.container_runtime_matches(item, config["services"][service], config) and
+            require(labels.get("com.docker.compose.config-hash") == service_hashes[service],
+                    "current container creation-time Compose hash differs from current configuration")
+            require(capture.container_runtime_matches(item, config["services"][service], config,
+                                                       allow_stopped_port_loss=True) and
                     item.get("Config", {}).get("Image") == config["services"][service]["image"],
                     "stopped target mounts, ports, environment or image reference differs from Compose")
             require(isinstance(item.get("Id"), str) and CONTAINER.fullmatch(item["Id"]) is not None and
@@ -444,7 +492,8 @@ def verify_stopped_target(checked: dict, nc_dir: Path, wk_dir: Path) -> dict:
                     "current container or image ID is invalid")
             require(item["Id"] not in current_ids, "current container ID is duplicated")
             current_ids.add(item["Id"])
-            containers[service] = {"id": item["Id"], "image_id": item.get("Image")}
+            containers[service] = {"id": item["Id"], "image_id": item.get("Image"),
+                                   "compose_config_hash": service_hashes[service]}
         require(ids == {item["id"] for item in containers.values()},
                 "target has an extra or missing Compose container")
         volume_names = set(capture.run(["docker", "volume", "ls", "-q", "--filter",
@@ -462,7 +511,8 @@ def verify_stopped_target(checked: dict, nc_dir: Path, wk_dir: Path) -> dict:
                     "target volume ownership, driver or options differ from the expected local role")
         stacks.append({"project": project, "containers": containers,
                        "volumes": {role: f"{project}_{role}" for role in VOLUMES[project]},
-                       "config": config, "cwd": cwd, "command": command})
+                       "config": config, "cwd": cwd, "command": command,
+                       "service_hashes": service_hashes})
     names = {name for stack in stacks for name in stack["volumes"].values()}
     networks = {entry["name"] for stack in stacks
                 for entry in stack["config"].get("networks", {}).values()}
@@ -499,13 +549,18 @@ def verify_stopped_target(checked: dict, nc_dir: Path, wk_dir: Path) -> dict:
                                           cwd=stack["cwd"])).hexdigest() ==
                 current_config_digests[stack["project"]],
                 "current Compose configuration changed during target verification")
+        require(compose_service_hashes(stack["command"], stack["cwd"], stack["project"]) ==
+                stack["service_hashes"], "current Compose service hashes changed during verification")
         for service, original in stack["containers"].items():
             item = capture.inspect("container", original["id"], nc_dir)
             state = item.get("State") or {}
             require(item.get("Id") == original["id"] and item.get("Image") == original["image_id"] and
                     state.get("Running") is False and not state.get("Paused") and
                     not state.get("Restarting") and not state.get("Dead") and
-                    capture.container_runtime_matches(item, stack["config"]["services"][service], stack["config"]),
+                    (item.get("Config", {}).get("Labels") or {}).get("com.docker.compose.config-hash") ==
+                    original["compose_config_hash"] and
+                    capture.container_runtime_matches(item, stack["config"]["services"][service], stack["config"],
+                                                      allow_stopped_port_loss=True),
                     "stopped target changed during verification")
     require(capture.source_fingerprint(inputs) == fingerprint,
             "current bind inputs changed during target verification")
@@ -541,7 +596,7 @@ def restore_plan(checked: dict, *, target_verified: bool, current_target: dict |
         {"order": 6, "action": "verify_restored_bytes_and_isolated_database_start",
          "requires": "verify restored volumes/inputs/app code against archives; start only fenced database/Redis validation with no ingress or application traffic; verify database versions, schemas and paired identity"},
         {"order": 7, "action": "replay_external_post_checkpoint_withdrawals_and_reconcile",
-         "requires": "authoritative external withdrawal/ACL/deletion ledger through recovery time; replay every post-checkpoint change while public ingress, cron and ordinary app workers remain closed; only fenced operator reconciliation may access apps"},
+         "requires": "authoritative external withdrawal/ACL/deletion ledger from a recorded conservative cursor at or before both write shutdowns through recovery time; manifest creation time is completion time and cannot supply that cursor; replay while public ingress, cron and ordinary app workers remain closed; only fenced operator reconciliation may access apps"},
         {"order": 8, "action": "prove_revoked_sources_stay_denied_before_reopen",
          "requires": "both Nextcloud and WeKnora agree on publication versions and pairing; previously revoked sources denied in search/chat/history/download; no pending replay; record operator acceptance"},
         {"order": 9, "action": "operator_controlled_reopen",
@@ -555,6 +610,7 @@ def restore_plan(checked: dict, *, target_verified: bool, current_target: dict |
             "restore_verified": False, "apply_supported": False,
             "automatic_reopen_permitted": False,
             "external_withdrawal_replay_required": True,
+            "external_replay_lower_bound_proven": False,
             "nextcloud_git_commit": manifest["nextcloud_git_commit"],
             "nextcloud_app_code_sha256": manifest["nextcloud_app_code_sha256"],
             "app_code_verification": checked.get("app_code_verification"),

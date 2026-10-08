@@ -79,8 +79,14 @@ eight owned local volumes. It rejects extra services or volumes, non-local
 volume drivers/options, foreign network ownership, and any other container
 using a target volume or network, including stopped containers. The current
 containers must match their current resolved Compose mounts, ports,
-environment and image references; the restore mounts must equal the captured
-mounts. Current service IDs and images may differ after an upgrade. Both the
+environment and image references; their creation-time Compose config-hash
+labels must equal the hashes calculated from that current configuration. Only
+the documented Docker Desktop stopped representation of an additional
+same-container-port address becoming an empty loopback binding is accepted.
+Unrelated or nonempty port changes are refused. The checkpoint must include
+the original running port bindings and creation-time service hashes;
+checkpoints predating those fields are refused by this verifier. The restore
+mounts must equal the captured mounts. Current service IDs and images may differ after an upgrade. Both the
 captured immutable image IDs and current recovery image IDs must still be
 available locally. Captured mutable image tags are never the restore image
 identity.
@@ -108,7 +114,8 @@ following operator-controlled sequence:
 6. Verify restored bytes; validate databases/Redis behind an isolated fence
    before admitting application traffic.
 7. Replay the authoritative external withdrawal, ACL-change and deletion
-   record from checkpoint time through recovery time. Use only fenced
+   record from a recorded conservative cursor at or before both write
+   shutdowns through recovery time. Use only fenced
    operator reconciliation access; public ingress, cron and ordinary workers
    remain closed.
 8. Prove both sides agree on source pairing/publication versions and that
@@ -119,7 +126,9 @@ following operator-controlled sequence:
 A stale matched backup cannot reveal withdrawals that happened later.
 **Without an authoritative external replay source, ingress must remain
 closed.** Neither this verifier nor the capture manifest provides that source.
-This companion has no destructive `--apply` mode and cannot attest to actual
+The manifest creation timestamp marks capture completion; it does not prove
+a replay lower bound or ledger cursor. The plan leaves
+`external_replay_lower_bound_proven` as `false`. This companion has no destructive `--apply` mode and cannot attest to actual
 restoration, byte recovery, runtime recovery or post-checkpoint replay. The
 shared destructive implementation and rehearsal gate remains open. Existing
 [disposable restore drills](isolated-dual-service-restore.md) are separate
