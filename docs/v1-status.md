@@ -1255,3 +1255,33 @@ has SHA-256 `2bd5f8fd12b5e4c58e6aedb0ff68c48e5c0efb25785341e2a6682c4b40610863`.
 The owned containers, volumes, network and private scratch were removed.
 This three-file run does not accept the current RAG patch or the PRD's
 sustained P95, 10,000-file/100-GB, upload-latency, scanned-PDF or real-AD targets.
+
+## 2026-10-08 pinned patch safety and complete frontend checks
+
+Both pinned WeKnora patches now recheck the persisted coverage marker and
+active exact/KB leases inside the dormant exact-chunk delete transaction.
+The generated-profile repository write also requires
+`ever_had_nextcloud_source=false`, so a source registration that commits while
+the model is running prevents the stale profile from being saved. Focused
+SQLite and disposable PostgreSQL race tests passed on both source baselines;
+these guards do not activate physical derived-index deletion.
+
+The full frontend suites exposed missing failed-candidate translations in
+Korean, Japanese and Russian and one theme-token fallback. After repair, the
+RAG77 suite had 1,217 passes, zero failures and one skipped browser-harness
+case; the fixed baseline had 1,213 passes, zero failures and the same skip.
+Both passed type checking and production builds. An opt-in PostgreSQL
+migration test now verifies the full 0→131 chain and agent-history plan in
+its terminal database, then tests the legacy 106→105→106 concurrent-index
+roundtrip in a separate schema. The intentional 126/129 rollback guards were
+not changed. Both pinned baselines passed this PostgreSQL and the relevant
+SQLite migration/pairing tests; both CI jobs now run the PostgreSQL check.
+
+The fixed-baseline patch SHA-256 is
+`db842d71468fd663347e70898e20db982293a34af599df400bf368abe19a5021`;
+the RAG77 patch SHA-256 is
+`34c560e03bbc20d4eff3c4ce9d652389f2a4f6056e738d01b8cdc0c05ee2c877`.
+These are source and test results. The shared LAN WeKnora containers still
+run the 2026-10-02 image built from patch SHA-256
+`176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`;
+no current patch image switch or full production acceptance is claimed.
