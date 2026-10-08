@@ -47,6 +47,13 @@ def recovery_journal_module():
     spec.loader.exec_module(module)
     return module
 
+def recovery_gate_module():
+    source = Path(__file__).with_name('coordinated-recovery-gate.py')
+    spec = importlib.util.spec_from_file_location('coordinated_recovery_gate', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 class CheckpointError(Exception):
     pass
@@ -533,9 +540,25 @@ def verify_recovery_anchor_source(stack: dict, anchor: dict, nc_dir: Path) -> No
             sequence <= int(data['head_sequence']) and data['prefix_hash'] == anchor['database_chain_sha256'],
             'external journal anchor does not match this live snapshot source')
 
+def verify_weknora_inventory_source(stack: dict, binding: dict, nc_dir: Path) -> None:
+    instance = binding['anchor']['instance_id']
+    require(re.fullmatch(r'[A-Za-z0-9_-]{1,64}', instance) is not None, 'invalid inventory instance')
+    query = ("SELECT COALESCE(json_agg(row_to_json(p) ORDER BY p.operation_id),'[]'::json) FROM (SELECT "
+             "operation_id,tenant_id,knowledge_base_id,datasource_id,nextcloud_instance_id AS instance_id,"
+             "binding_id,datasource_base_url AS base_url,datasource_config_sha256 AS config_sha256,"
+             "publication_epoch,key_id,state FROM nextcloud_source_pairings WHERE nextcloud_instance_id='" + instance + "') p")
+    current = json.loads(run(['docker','exec',stack['containers']['postgres']['id'],'psql','-X','-U','weknora',
+                             '-d','weknora','-v','ON_ERROR_STOP=1','-At','-c',query],cwd=nc_dir))
+    require(current == binding['pairs'], 'pinned inventory does not match the current original WeKnora source tuples')
+    # Old schema131 has no closure receipts/admission guards and cannot claim
+    # this coordinated replay contract merely by retaining a JSON inventory.
+    schema = run(['docker','exec',stack['containers']['postgres']['id'],'psql','-X','-U','weknora','-d','weknora','-At','-c',
+                  "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename IN ('nextcloud_publication_recovery_receipts','nextcloud_publication_recovery_scopes')"],cwd=nc_dir).decode().strip()
+    require(schema == '2', 'WeKnora publication recovery schema145 is required for a coordinated replay checkpoint')
+
 
 def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
-               evidence: Path, git_head: str, recovery_journal=None) -> dict:
+               evidence: Path, git_head: str, recovery_journal=None, weknora_inventory=None) -> dict:
     stages: list[str] = []
     incomplete = evidence / "INCOMPLETE"
     private_file(incomplete, data=b"Checkpoint capture is incomplete; do not restore from it.\n")
@@ -562,6 +585,13 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
             recovery_anchor = recovery_journal_module().checkpoint_anchor(path, key, pin,
                 [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
             verify_recovery_anchor_source(stacks[0], recovery_anchor, nc_dir)
+        inventory_binding = None
+        if weknora_inventory is not None:
+            require(recovery_anchor is not None, 'WeKnora recovery inventory requires the external Nextcloud anchor')
+            inventory_path, inventory_pin = weknora_inventory
+            inventory_binding = recovery_gate_module().inventory_binding(recovery_anchor, inventory_path, inventory_pin,
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+            verify_weknora_inventory_source(stacks[1], inventory_binding, nc_dir)
         reject_foreign_volume_users(stacks, nc_dir)
         for stack in stacks:
             services = sorted(set(stack["containers"]) - DB_REDIS[stack["project"]])
@@ -570,6 +600,8 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
         for stack in stacks:
             ensure_state(stack, nc_dir,
                          stopped=set(stack["containers"]) - DB_REDIS[stack["project"]])
+        if inventory_binding is not None:
+            verify_weknora_inventory_source(stacks[1], inventory_binding, nc_dir)
         reject_foreign_volume_users(stacks, nc_dir)
         stages.append("both_application_and_ingress_sides_stopped")
 
@@ -668,6 +700,11 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
                 [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
             require(current_anchor == recovery_anchor, 'external recovery anchor changed during capture')
             manifest['external_recovery_anchor'] = recovery_anchor
+        if inventory_binding is not None:
+            current_inventory = recovery_gate_module().inventory_binding(recovery_anchor, inventory_path, inventory_pin,
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+            require(current_inventory == inventory_binding, 'external WeKnora recovery inventory changed during capture')
+            manifest['weknora_recovery_inventory'] = inventory_binding
         private_file(evidence / "manifest.json",
                      data=(json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode())
         incomplete.unlink()
@@ -722,6 +759,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--recovery-journal', type=Path)
     parser.add_argument('--recovery-key-file', type=Path)
     parser.add_argument('--recovery-record-sha256')
+    parser.add_argument('--weknora-recovery-inventory', type=Path)
+    parser.add_argument('--weknora-recovery-inventory-sha256')
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm-pair", default="",
                         help=f"required with --apply: {PAIR_CONFIRMATION}")
@@ -759,8 +798,14 @@ def main(argv: list[str] | None = None) -> int:
         require(all(value is not None for value in recovery_values) or all(value is None for value in recovery_values),
                 'all three external journal options are required together')
         recovery_journal = recovery_values if args.recovery_journal is not None else None
+        inventory_values = (args.weknora_recovery_inventory, args.weknora_recovery_inventory_sha256)
+        require(all(value is not None for value in inventory_values) or all(value is None for value in inventory_values),
+                'both external WeKnora inventory options are required together')
+        require(args.weknora_recovery_inventory is None or recovery_journal is not None,
+                'external WeKnora inventory requires all external journal options')
+        weknora_inventory = inventory_values if args.weknora_recovery_inventory is not None else None
         evidence = prepare_evidence(args.evidence_dir)
-        result = checkpoint(stacks, nc_dir, wk_dir, evidence, git_head, recovery_journal)
+        result = checkpoint(stacks, nc_dir, wk_dir, evidence, git_head, recovery_journal, weknora_inventory)
         print(json.dumps({"status": result["status"], "evidence": str(evidence),
                           "all_services_stopped": True}, sort_keys=True))
         return 0

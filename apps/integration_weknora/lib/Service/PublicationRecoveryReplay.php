@@ -140,6 +140,46 @@ final class PublicationRecoveryReplay {
             ->executeStatement();
         return ['closed_bindings' => $closed, 'withdrawn_files' => $withdrawn,
             'external_replay_applied' => true, 'authoritative_reconciliation_required' => true,
-            'ingress_reopen_permitted' => false];
+            'ingress_reopen_permitted' => false, 'current_state' => $this->inspect($plan)];
+    }
+
+    /** Re-read DB authority under closed maintenance; a receipt alone is insufficient. */
+    public function inspect(array $plan): array {
+        if (!$this->config->getSystemValueBool('maintenance', false) ||
+            ($plan['instance_id'] ?? '') !== $this->config->getSystemValueString('instanceid')) {
+            throw new \DomainException('Recovery observation requires matching closed maintenance');
+        }
+        $q = $this->db->getQueryBuilder();
+        $r = $q->select('checkpoint_sha256', 'recovery_sha256', 'plan_sha256', 'stream_id', 'through_sequence', 'completed')
+            ->from('weknora_recovery_apply')->where($q->expr()->eq('recovery_sha256', $q->createNamedParameter($plan['recovery_record_sha256'] ?? '')))->executeQuery();
+        try { $receipt = $r->fetchAssociative(); } finally { $r->closeCursor(); }
+        if ($receipt === false || (int)$receipt['completed'] !== 1 ||
+            $receipt['plan_sha256'] !== hash('sha256', json_encode($plan, JSON_THROW_ON_ERROR)) ||
+            $receipt['checkpoint_sha256'] !== ($plan['checkpoint_record_sha256'] ?? '') ||
+            $receipt['stream_id'] !== ($plan['stream_id'] ?? '') ||
+            (string)$receipt['through_sequence'] !== (string)($plan['through_sequence'] ?? '')) {
+            throw new \DomainException('Recovery observation receipt mismatch');
+        }
+        $bindings = $this->bindings->listBindings();
+        usort($bindings, static fn(array $a, array $b): int => strcmp($a['id'], $b['id']));
+        $current = [];
+        foreach ($bindings as $binding) {
+            $current[$binding['id']] = $binding;
+        }
+        $withdrawals = [];
+        foreach ($plan['withdraw_files'] as $file) {
+            if (isset($current[$file['binding_id']])) {
+                $state = $this->files->getState($file['binding_id'], (int)$file['file_id']);
+                if ($state !== 'withdrawn') { throw new \DomainException('Recovery withdrawal revived'); }
+                $withdrawals[] = ['binding_id' => $file['binding_id'], 'file_id' => (string)$file['file_id'], 'state' => $state];
+            }
+        }
+        $q = $this->db->getQueryBuilder();
+        $r = $q->select('operation_id', 'binding_id', 'instance_id', 'tenant_id', 'knowledge_base_id', 'data_source_id', 'key_id', 'state', 'publication_epoch')
+            ->from('weknora_src_pair')->orderBy('operation_id')->executeQuery();
+        try { $pairs = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
+        return ['schema_version' => 1, 'instance_id' => $plan['instance_id'],
+            'receipt' => $receipt, 'bindings' => $bindings, 'pairs' => $pairs,
+            'withdrawals' => $withdrawals, 'ingress_reopen_permitted' => false];
     }
 }

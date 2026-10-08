@@ -16,7 +16,8 @@ final class ReplayRecoveryLedger extends Command {
         $this->setName('integration_weknora:replay-recovery-ledger')
             ->setDescription('Apply a verified external recovery closure plan in maintenance')
             ->addOption('plan', null, InputOption::VALUE_REQUIRED, 'Absolute private authenticated plan')
-            ->addOption('key-file', null, InputOption::VALUE_REQUIRED, 'Absolute private 32-byte journal key');
+            ->addOption('key-file', null, InputOption::VALUE_REQUIRED, 'Absolute private 32-byte journal key')
+            ->addOption('inspect-state', null, InputOption::VALUE_NONE, 'Read current receipt and source state without replay');
     }
     private function readPrivateFile(mixed $file, int $maxBytes): string {
         $stat = is_string($file) ? @lstat($file) : false;
@@ -61,7 +62,8 @@ final class ReplayRecoveryLedger extends Command {
             throw new \DomainException('Recovery plan authentication failed');
         }
         $plan = json_decode($envelope['plan'], true, 32, JSON_THROW_ON_ERROR);
-        $output->writeln(json_encode($this->replay->apply($plan), JSON_THROW_ON_ERROR));
+        $value = $input->getOption('inspect-state') ? $this->replay->inspect($plan) : $this->replay->apply($plan);
+        $output->writeln(json_encode($value, JSON_THROW_ON_ERROR));
         return Command::SUCCESS;
     }
 }
