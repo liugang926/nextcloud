@@ -1533,3 +1533,22 @@ Both pinned complete source profiles passed their whole session package
 and reverse checks passed. [Source evidence](
 nextcloud-stream-poll-failure-authorization-2026-10-08.md) records the exact
 hashes. Runtime and full lineage/GC acceptance remain unchanged.
+
+## 2026-10-08 bootstrap job-registration ordering
+
+The stream-fix commit `29bc245` had seven successful CI jobs and one failing
+PR-triggered local smoke. The failing assertion expected exactly one installed
+OutboxRetentionJob; its old message did not report the observed count. The
+other complete run on that same commit passed, but does not replace the failure.
+Pinned Nextcloud source registers jobs before final app activation and removes
+an unresolved job class. Running cron concurrently with initial app enable is
+a possible class-resolution race; that inference is recorded without claiming
+the missing count was observed.
+
+Bootstrap now stops cron and integration workers before enabling the app,
+checks exactly one retention job after the route is ready, then starts the
+workers. The HTTP assertion remains strict and now includes the observed
+count. [Failure record](
+evidence/nextcloud-bootstrap-job-registration-2026-10-08.json) preserves the
+original job and log digest. A new full CI run must verify this ordering; the
+shared local runtime was not bootstrapped by this source change.

@@ -14,6 +14,12 @@ set +a
 base_url="http://127.0.0.1:${NEXTCLOUD_HTTP_PORT:-18082}"
 occ=(docker compose exec -T -u www-data nextcloud php occ)
 
+# Installer registers app jobs before enabling the app. A concurrent cron
+# process can resolve those classes from its earlier app state and remove
+# an unavailable class. Keep workers stopped until installation and routing
+# are ready; the bootstrap owns this development-stack transition.
+docker compose stop cron event-worker event-status-worker
+
 # Docker reports a healthy HTTP endpoint as soon as Apache serves status.php,
 # while the first-install entrypoint can still be creating the database. Wait
 # for occ to report an installed instance before enabling the app.
@@ -104,5 +110,13 @@ if [[ "$route_status" != 401 ]]; then
   echo "Integration API route did not become ready (HTTP $route_status)." >&2
   exit 1
 fi
+
+retention_jobs="$(docker compose exec -T db psql -X -U nextcloud -d nextcloud \
+  -v ON_ERROR_STOP=1 -qAtc "SELECT COUNT(*) FROM oc_jobs WHERE class = 'OCA\IntegrationWeknora\BackgroundJob\OutboxRetentionJob'")"
+if [[ "$retention_jobs" != 1 ]]; then
+  echo "Expected one installed OutboxRetentionJob; found $retention_jobs." >&2
+  exit 1
+fi
+docker compose up -d --wait --wait-timeout 180 cron event-worker event-status-worker
 
 echo "Nextcloud app and sample binding are ready at $base_url (binding: dev-published, folder ID: $root_id)."

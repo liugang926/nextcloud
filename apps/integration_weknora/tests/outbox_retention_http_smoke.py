@@ -85,8 +85,9 @@ def main():
     env = load_env()
     assert sql("SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'oc_weknora_outbox' "
                "AND indexname = 'weknora_outbox_retention'") == "1"
-    assert sql("SELECT COUNT(*) FROM oc_jobs WHERE "
-               "class = 'OCA\\IntegrationWeknora\\BackgroundJob\\OutboxRetentionJob'") == "1"
+    job_count = sql("SELECT COUNT(*) FROM oc_jobs WHERE "
+                    "class = 'OCA\\IntegrationWeknora\\BackgroundJob\\OutboxRetentionJob'")
+    assert job_count == "1", f"expected one OutboxRetentionJob, found {job_count}"
     base = f"http://127.0.0.1:{env.get('NEXTCLOUD_HTTP_PORT', '18082')}"
     owner = urllib.parse.quote(env["NEXTCLOUD_ADMIN_USER"])
     dav_base = f"{base}/remote.php/dav/files/{owner}"
