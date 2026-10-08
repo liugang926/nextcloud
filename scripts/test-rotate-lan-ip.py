@@ -23,6 +23,14 @@ class RotationSafetyTests(unittest.TestCase):
     OLD = "10.106.105.128"
     NEW = "10.106.105.121"
 
+    def test_weknora_commands_use_the_running_three_file_stack(self):
+        self.assertEqual(rotation.wk_compose(), [
+            "docker", "compose", "--project-directory", str(rotation.WEKNORA),
+            "-f", str(rotation.WEKNORA / "compose.yaml"),
+            "-f", str(rotation.PROJECT / "integration/weknora.override.yaml"),
+            "-f", str(rotation.PROJECT / "integration/weknora-rag-local.override.yaml"),
+        ])
+
     def test_only_rfc1918_host_addresses(self):
         for value in ("10.106.105.121", "172.16.1.2", "192.168.1.20"):
             self.assertEqual(rotation.private_host_ipv4(value), value)
@@ -186,6 +194,20 @@ class RotationSafetyTests(unittest.TestCase):
             rotation, "run", side_effect=results
         ), self.assertRaises(rotation.RotationError):
             rotation.ensure_running_image_matches({})
+
+    def test_weknora_frontend_drift_blocks_automatic_recreation(self):
+        config = {"services": {"app": {"image": "example/app:local"},
+                               "frontend": {"image": "example/frontend:local"}}}
+        image_id = "sha256:" + "a" * 64
+        config_hash = "c" * 64
+        results = ["b" * 64, image_id, image_id, f"app {config_hash}", config_hash,
+                   "d" * 64, image_id, image_id, f"frontend {config_hash}", "e" * 64]
+        with patch.object(rotation, "load_json", return_value=config), patch.object(
+            rotation, "run", side_effect=results
+        ) as command, self.assertRaisesRegex(rotation.RotationError, "frontend config"):
+            rotation.ensure_running_image_matches({})
+        self.assertIn([*rotation.wk_compose(), "config", "--hash", "frontend"],
+                      [call.args[0] for call in command.call_args_list])
 
     @unittest.skipUnless(shutil.which("openssl"), "OpenSSL is required")
     def test_candidate_cert_uses_existing_ca_and_server_key(self):

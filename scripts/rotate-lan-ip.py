@@ -123,7 +123,9 @@ def nc_compose() -> list[str]:
 
 def wk_compose() -> list[str]:
     return ["docker", "compose", "--project-directory", str(WEKNORA),
-            "-f", str(WEKNORA / "compose.yaml")]
+            "-f", str(WEKNORA / "compose.yaml"),
+            "-f", str(PROJECT / "integration/weknora.override.yaml"),
+            "-f", str(PROJECT / "integration/weknora-rag-local.override.yaml")]
 
 
 def no_symlink_file(path: Path) -> None:
@@ -499,29 +501,31 @@ def atomic_replace(path: Path, content: bytes, *, expected_hash: str | None = No
 def ensure_running_image_matches(env: dict[str, str]) -> None:
     config = load_json([*wk_compose(), "config", "--format", "json"],
                        "WeKnora Compose config", cwd=WEKNORA, env=env)
-    image = config["services"]["app"]["image"]
-    ids = run([*wk_compose(), "ps", "-q", "app"], "WeKnora app lookup",
-              cwd=WEKNORA, env=env).splitlines()
-    if len(ids) != 1 or not re.fullmatch(r"[0-9a-f]{12,64}", ids[0]):
-        raise RotationError("WeKnora app must have one running container")
-    current = run(["docker", "inspect", "--format", "{{.Image}}", ids[0]],
-                  "WeKnora running image lookup", env=env)
-    declared = run(["docker", "image", "inspect", "--format", "{{.Id}}", image],
-                   "WeKnora declared image lookup", env=env)
-    if current != declared:
-        raise RotationError("WeKnora running app image differs from Compose image; "
-                            "recreation requires manual review")
-    hash_line = run([*wk_compose(), "config", "--hash", "app"],
-                    "WeKnora app Compose hash", cwd=WEKNORA, env=env)
-    parts = hash_line.split()
-    if len(parts) != 2 or parts[0] != "app" or not re.fullmatch(r"[0-9a-f]{64}", parts[1]):
-        raise RotationError("WeKnora app Compose hash is invalid")
-    running_hash = run(["docker", "inspect", "--format",
-                        '{{index .Config.Labels "com.docker.compose.config-hash"}}', ids[0]],
-                       "WeKnora running app config hash", env=env)
-    if running_hash != parts[1]:
-        raise RotationError("WeKnora running app config differs from Compose; "
-                            "recreation requires manual review")
+    for service in ("app", "frontend"):
+        image = config["services"][service]["image"]
+        ids = run([*wk_compose(), "ps", "-q", service],
+                  f"WeKnora {service} lookup", cwd=WEKNORA, env=env).splitlines()
+        if len(ids) != 1 or not re.fullmatch(r"[0-9a-f]{12,64}", ids[0]):
+            raise RotationError(f"WeKnora {service} must have one running container")
+        current = run(["docker", "inspect", "--format", "{{.Image}}", ids[0]],
+                      f"WeKnora {service} running image lookup", env=env)
+        declared = run(["docker", "image", "inspect", "--format", "{{.Id}}", image],
+                       f"WeKnora {service} declared image lookup", env=env)
+        if current != declared:
+            raise RotationError(f"WeKnora running {service} image differs from Compose; "
+                                "recreation requires manual review")
+        hash_line = run([*wk_compose(), "config", "--hash", service],
+                        f"WeKnora {service} Compose hash", cwd=WEKNORA, env=env)
+        parts = hash_line.split()
+        if (len(parts) != 2 or parts[0] != service
+                or not re.fullmatch(r"[0-9a-f]{64}", parts[1])):
+            raise RotationError(f"WeKnora {service} Compose hash is invalid")
+        running_hash = run(["docker", "inspect", "--format",
+                            '{{index .Config.Labels "com.docker.compose.config-hash"}}', ids[0]],
+                           f"WeKnora {service} running config hash", env=env)
+        if running_hash != parts[1]:
+            raise RotationError(f"WeKnora running {service} config differs from Compose; "
+                                "recreation requires manual review")
 
 
 def preflight(old_ip: str, new_ip: str, env: dict[str, str]) -> tuple[dict[str, str],
@@ -578,8 +582,17 @@ def apply(old_ip: str, new_ip: str, env: dict[str, str]) -> Path:
             run([sys.executable, str(PROJECT / "scripts/enable-lan-https.py"),
                  "--check-only"], "Nextcloud HTTPS helper preflight", env=env)
             run([*wk_compose(), "up", "-d", "--no-deps", "--wait",
-                 "--wait-timeout", "120", "app", "lan-gateway"],
-                "WeKnora app and LAN gateway restart", cwd=WEKNORA, env=env)
+                 "--wait-timeout", "120", "app"],
+                "WeKnora app restart", cwd=WEKNORA, env=env)
+            # Frontend Nginx resolves `app` when it starts; force recreation
+            # after the app so it cannot retain the old container IP.
+            run([*wk_compose(), "up", "-d", "--no-deps", "--force-recreate",
+                 "--wait", "--wait-timeout", "120", "frontend"],
+                "WeKnora frontend restart", cwd=WEKNORA, env=env)
+            run([*wk_compose(), "up", "-d", "--no-deps", "--wait",
+                 "--wait-timeout", "120", "lan-gateway"],
+                "WeKnora LAN gateway restart", cwd=WEKNORA, env=env)
+            ensure_running_image_matches(env)
             verify_weknora_https(new_ip, env)
             domains = nc_occ_get("trusted_domains", env)
             if (not isinstance(domains, list) or domains.count(old_ip) != 1
