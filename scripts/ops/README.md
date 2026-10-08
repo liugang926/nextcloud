@@ -37,6 +37,13 @@ credentials and measures full-source logical throughput, WeKnora process RSS,
 and event-to-durable-job P95. Its small synthetic result is diagnostic only;
 the PRD's 10,000-file/100-GB acceptance remains open.
 
+The [original-volume pilot](PILOT-original-volume.md) separately provisions 20
+local synthetic users and two department group shares, streams an optional
+exact 10,000-file/100-GB binary corpus, and verifies native files, filecache,
+manifest totals and source authorization. Its optional app-disabled/enabled
+PUT samples measure portal upload overhead. It never starts WeKnora, so it
+does not substitute for AI ingestion or real AD acceptance.
+
 ## Local Nextcloud source pairing
 
 Install the current Nextcloud app and matching WeKnora patch before this probe.

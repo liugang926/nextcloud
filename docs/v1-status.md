@@ -1348,9 +1348,9 @@ The incremental fix had focused access/service/session and complete session
 package tests on merged-main plus the preceding RAG patch source. Both pinned
 combined patches passed static apply checks and the GitHub patch suites; the
 `c1c45cf` run passed all eight CI jobs, including the isolated Nextcloud
-Docker smoke and direct upgrade. A runtime image switch is still pending. The
-shared LAN WeKnora image predates this correction, so a live chat repair is
-not yet claimed.
+Docker smoke and direct upgrade. At that source-only stage the shared image
+predated the correction. The subsequent deployment and runtime checks are
+recorded below.
 
 ## 2026-10-08 built and running RAG77 chat correction
 
@@ -1387,3 +1387,34 @@ tags. Capture integrity does not prove restoration or withdrawal replay.
 This running revision does not include subsequent Agent-history, source-lineage
 schema132 or frontend dependency updates. Full source/version/history coverage,
 derived GC, real AD/Team Folder and sustained 100GB acceptance remain open.
+
+## 2026-10-08 isolated original-volume pilot harness
+
+The [original-volume harness](../scripts/ops/PILOT-original-volume.md) now
+creates 20 local synthetic staff users, two ten-member department groups and
+two independent normal-folder publication scopes. Both scopes use one isolated
+publisher, preserving the app's current rejection of unverified cross-owner
+bindings. Its opt-in full preset streams exactly 10,000 synthetic binary files
+of 10,000,000 bytes each, with host and Docker data capacity preflights,
+64-KiB generation chunks, native-file/filecache/manifest count and byte checks,
+permission samples, and exact ownership checks for teardown. It can separately
+measure matched app-disabled/enabled PUT phases in a temporary unbound folder.
+
+The [small runtime report](evidence/pilot-original-volume-small-2026-10-08.json)
+has SHA-256 `df912a1a9485e589a5cb9176866305194435ad0a5d612f4b40a6bfd752c71d52`.
+On Nextcloud 34.0.4/app 0.4.37, 402 new 1-KiB originals produced exactly 411,648
+logical bytes. Native files, filecache and four total manifest pages agreed;
+four original hashes matched. All 20 local staff principals were allowed for
+one sample in their own department and denied for one sample in the other;
+both sibling machine-key reads were denied. Uploading the corpus took 79.803
+seconds with two workers. The separate 20-sample PUT phases measured P95
+510.892 ms disabled and 376.176 ms enabled, with unresolved phase-order/cache
+effects and no concurrent signed event sender or parser. Seventeen offline
+safety tests passed. A post-run Docker inventory found no owned containers,
+volumes or networks, and the private credentials had been removed.
+
+The full 100-GB preset has not run. This small synthetic binary result does
+not accept AI parsing/indexing throughput, mixed document distributions, real
+AD/Team Folder ACLs, twenty-user concurrency, sustained upload or event P95,
+physical derived cleanup, or coordinated restore. Shared stacks and WeKnora
+source patches were not changed by this pilot.
