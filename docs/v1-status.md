@@ -1477,3 +1477,26 @@ to the actual image. The backend remains
 `sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d`
 (RAG77 + 7f), with schema131. This frontend deployment does not activate the
 new Agent-history backend or schema132 lineage producers/readers.
+
+## 2026-10-08 prebuilt local service digest references
+
+The RAG local overlay now pins PostgreSQL, Redis, DocReader, OpenLDAP and the
+LAN gateway to the exact digest artifacts previously running. DocReader uses
+a digest-only reference; no floating latest tag remains for that service.
+The source-built app/UI remain local candidate aliases, whose actual image
+IDs and distinct source hashes are recorded separately. Full source release
+locking remains a deployment gate for subsequent built candidates.
+
+Before changing the references, both local stacks produced a matched private
+cold checkpoint with 16 artifacts totaling 1,528,644,011 bytes. Its independent
+SHA/mode verification passed; manifest SHA-256 is
+`7911dff3dff8a8f8586c0c0facbbff91b01e0354a44691eda03559d1ac2a8248`.
+The five prebuilt containers were recreated from the same immutable images,
+and both stacks returned healthy. Nextcloud remained 34.0.4/app0.4.37 with
+maintenance off and no DB upgrade. CA-verified LAN checks returned 200, local
+WeKnora authentication returned 200, and authenticated Nextcloud DAV returned
+207. WeKnora remains schema131/false with the same RAG77 backend and updated
+security UI. [Pinning evidence](
+evidence/weknora-prebuilt-runtime-pins-2026-10-08.json) records exact references
+and IDs. The new checkpoint was captured and verified, not restored; it does
+not establish external replay or complete application recovery.
