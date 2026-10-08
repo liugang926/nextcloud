@@ -81,7 +81,9 @@ The checkpoint contains local passwords, TLS private keys, JWT/AES material,
 and document contents. Restrict access to the entire directory. It records
 image IDs but does not export image layers or external LLM, object-store, or
 remote LDAP state. A complete manifest establishes a matched local copy; it
-does not prove restoration or post-restore publication replay. The disposable
+does not prove restoration or post-restore publication replay. The read-only [restore plan verifier](shared-cold-restore-plan.md) checks saved
+artifacts, stopped target ownership and old image availability; it leaves the
+destructive restore and external replay gates open. The disposable
 restore rehearsal remains documented in
 [isolated-dual-service-restore.md](isolated-dual-service-restore.md).
 
