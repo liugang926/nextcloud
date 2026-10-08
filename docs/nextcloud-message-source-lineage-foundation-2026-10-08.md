@@ -8,13 +8,15 @@ remain separate.
 
 | Complete patch | Pinned WeKnora base | SHA-256 |
 | --- | --- | --- |
-| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80` |
-| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2` |
+| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `d1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4` |
+| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea` |
 
 The complete hashes above also include the subsequent frontend security
 updates; see [dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
-The backend foundation is byte-identical to the preceding source integration:
-its verification below was recorded with fixed hash
+The production backend foundation is byte-identical to the preceding source
+integration. The subsequent change only isolates PostgreSQL test databases;
+its ParadeDB validation is recorded below. Earlier foundation verification was
+recorded with fixed hash
 `082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab` and RAG hash
 `b6afcd4e150d1b7fdb006993f5936f72ddacf88e00bcaa6ff0e013e610b466dc`.
 The frontend update does not activate lineage producers or authorization.
@@ -75,6 +77,35 @@ behavior. CI explicitly runs source-lineage types, tombstone lookup, all
 SQLite migration gates and the new PostgreSQL upgrade test on both bases. CI's
 existing ParadeDB/full-vector and frontend gates still need their own run for
 this integrated revision. No full image build or shared database was used.
+
+### PostgreSQL fixture isolation correction
+
+The integrated CI run at `315bb1f` exposed a test isolation error on both
+pinned bases: the source-lineage upgrade forced `app.skip_embedding=true` in a
+private schema with `public` in its search path. Migration125 resolved the
+preceding full migration's `public.embeddings` and attempted to install an
+already-present withdrawal trigger. A schema does not isolate this migration
+chain's unqualified relation, index and extension lookups.
+
+The upgrade fixture now uses a random database created from `template0`,
+requiring `CREATEDB` on the disposable test server. It preserves explicit DSN
+options and runs both the configured embedding mode and a separate skipped
+embedding case. CI's default ParadeDB DSN therefore exercises actual vector
+migrations. Both cases assert that the parent embedding table's identity,
+row count, columns, indexes, triggers and trigger function definitions remain
+unchanged, including after fixture cleanup. When embedding is enabled, the
+fixture also requires its own withdrawal trigger. No production migration or
+permission guard was changed.
+
+The [machine-readable validation](evidence/weknora-lineage-postgres-isolation-2026-10-08.json)
+records exact patch/image hashes, log digests and final parent state. On
+disposable pinned ParadeDB17, the preceding RAG patch reproduced the exact
+migration125 failure. The corrected fixed and RAG trees passed full0-to132,
+the concurrent106 index roundtrip, both actual131-to132 embedding modes and
+the SQLite50-to51 legacy/tombstone test using one CPU and `go test -p 1`.
+The full CI jobs still require a new run for the corrected hashes. Earlier
+frontend evidence retains the hashes actually tested; its frontend contents
+are unchanged by this test-only correction.
 
 The next implementation work follows the
 [lineage design](nextcloud-message-source-lineage-design.md). The temporary

@@ -1,0 +1,78 @@
+{
+  "recordedAt": "2026-10-08T06:02:15.388591+00:00",
+  "nextcloudBase": "315bb1f35f3cb9926904c2cee635f5ef38fdb284",
+  "scope": "PostgreSQL migration test fixture isolation only; no production migration/runtime change",
+  "patches": {
+    "integration/weknora.patch": {
+      "beforeSha256": "b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80",
+      "afterSha256": "d1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4",
+      "changedSourceSections": [
+        "diff --git a/internal/database/migration_source_lineage_test.go b/internal/database/migration_source_lineage_test.go"
+      ]
+    },
+    "integration/weknora-rag-77c97fd7.patch": {
+      "beforeSha256": "f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2",
+      "afterSha256": "ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea",
+      "changedSourceSections": [
+        "diff --git a/internal/database/migration_source_lineage_test.go b/internal/database/migration_source_lineage_test.go"
+      ]
+    }
+  },
+  "databaseImage": "paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2",
+  "goImage": "golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107",
+  "resourceLimits": {
+    "goCpu": 1,
+    "postgresCpu": 1,
+    "goMaxProcs": 2,
+    "goParallelPackages": 1,
+    "network": "owned internal network; module proxy off",
+    "databaseStorage": "owned tmpfs; no shared volumes"
+  },
+  "command": "go test -v -p 1 ./internal/database -run '^Test(PostgresMigrationsServeAgentHistory|PostgresSourceLineage|SQLiteSourceLineage)' -count=1",
+  "beforeFailure": "Original RAG full0-to132 passed, then schema+public / forced skip_embedding fixture failed at migration125 duplicate public embedding guard",
+  "passedGates": [
+    "PostgreSQL full0-to132",
+    "Concurrent index106 down/up",
+    "SQLite source lineage50-to51",
+    "PostgreSQL actual131-to132 configured embedding enabled",
+    "PostgreSQL actual131-to132 embedding skipped with parent vector table present"
+  ],
+  "parentInvariant": "Each lineage subtest snapshots and compares public.embeddings identity, row count, column defaults/types, index definitions/validity, trigger identity/body/enabled state and trigger function definitions after fixture cleanup",
+  "parentFinalState": {
+    "rag": {
+      "version": 132,
+      "dirty": false,
+      "embedding_guard_count": 1,
+      "embedding_rows": 0,
+      "leaked_fixture_databases": 0
+    },
+    "c6": {
+      "version": 132,
+      "dirty": false,
+      "embedding_guard_count": 1,
+      "embedding_rows": 0,
+      "leaked_fixture_databases": 0
+    }
+  },
+  "logs": {
+    "lineage-ci-before-rag.log": {
+      "sha256": "78c293b4760b1d9bc1835761a38a98725272fffef1b651d5abb8073108ca30ff",
+      "outcome": "expected failure reproduced"
+    },
+    "lineage-ci-final-rag.log": {
+      "sha256": "3ddb8108b90de0d7f4287b5e80f0d8cc674bcacd412fab1e6ec984a0cb5efe61",
+      "outcome": "pass"
+    },
+    "lineage-ci-final-c6.log": {
+      "sha256": "ae1b7ab64199eac52996ce439b35d33175fcf106a2d721954ffd43f4217a4af6",
+      "outcome": "pass"
+    }
+  },
+  "cleanArchiveApplyReverse": "passed for both exact pinned baselines",
+  "productionSourceDiffSections": 0,
+  "limitations": [
+    "Full remote CI must be rerun for corrected hashes",
+    "No full image build or shared runtime/database used",
+    "This migration fixture does not implement full per-message lineage authorization"
+  ]
+}

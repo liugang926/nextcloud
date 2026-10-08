@@ -5,6 +5,9 @@ updates and persistent KaTeX trust/shared-resolution regression. The dependency
 audit, combined-source frontend gates, browser comparison and targeted Mermaid
 override are recorded in [frontend dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
 This source update is separate from the frozen 7f / schema 131 runtime.
+The PostgreSQL lineage upgrade fixture now uses its own temporary database,
+checks both embedding modes, and verifies the parent's table and guards remain
+unchanged; see [fixture validation](nextcloud-message-source-lineage-foundation-2026-10-08.md#postgresql-fixture-isolation-correction).
 
 当前补丁包含 Agent 历史准入的临时保护、保存消息/SSE 检查和所有者控制查询。限制与验证范围见 [Agent 历史来源准入](nextcloud-agent-history-admission-2026-10-08.md)；保留来源证据的实例会排除 Agent 旧历史，用空历史继续本次新提问，完整传递来源尚未实现。
 
@@ -25,7 +28,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80`.
+`d1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -35,7 +38,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2`.
+`ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict

@@ -170,7 +170,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo 'b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo 'd1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -249,7 +249,7 @@ jobs:
           go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(GlobalAndScopedHistoryAdmission|EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
-      - name: Verify full PostgreSQL migrations and concurrent index roundtrip
+      - name: Verify full PostgreSQL migrations, concurrent index and isolated lineage upgrade
         working-directory: weknora
         env:
           WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable
@@ -288,7 +288,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo 'ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -337,7 +337,7 @@ jobs:
           go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(GlobalAndScopedHistoryAdmission|EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories|ProfileWriteWaitsForSourceMarker)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
-      - name: Verify full PostgreSQL migrations and concurrent index roundtrip
+      - name: Verify full PostgreSQL migrations, concurrent index and isolated lineage upgrade
         working-directory: weknora-rag
         env:
           WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable

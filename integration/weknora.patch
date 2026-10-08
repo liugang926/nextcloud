@@ -31526,22 +31526,22 @@ index 7fc2639e..3af4e779 100644
  
 diff --git a/internal/database/migration_source_lineage_test.go b/internal/database/migration_source_lineage_test.go
 new file mode 100644
-index 00000000..ac0f8432
+index 00000000..7eb79618
 --- /dev/null
 +++ b/internal/database/migration_source_lineage_test.go
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,307 @@
 +package database
 +
 +import (
++	"crypto/rand"
 +	"database/sql"
++	"encoding/hex"
 +	"fmt"
 +	"net/url"
 +	"os"
 +	"path/filepath"
-+	"strconv"
 +	"strings"
 +	"testing"
-+	"time"
 +
 +	"github.com/golang-migrate/migrate/v4"
 +	"github.com/stretchr/testify/require"
@@ -31574,30 +31574,65 @@ index 00000000..ac0f8432
 +	if dsn == "" {
 +		t.Skip("set WEKNORA_MIGRATION_TEST_POSTGRES_DSN to a disposable database")
 +	}
++	t.Run("ConfiguredEmbeddingMode", func(t *testing.T) {
++		requirePostgresSourceLineageUpgrade(t, dsn)
++	})
++	// Repeat the exact failing mode while a preceding full migration test has
++	// already created the parent database's public vector table and its guard.
++	u, err := url.Parse(dsn)
++	require.NoError(t, err)
++	query := u.Query()
++	query.Set("options", strings.TrimSpace(query.Get("options")+" -c app.skip_embedding=true"))
++	u.RawQuery = query.Encode()
++	t.Run("EmbeddingSkipped", func(t *testing.T) {
++		requirePostgresSourceLineageUpgrade(t, u.String())
++	})
++}
++
++func requirePostgresSourceLineageUpgrade(t *testing.T, dsn string) {
++	t.Helper()
 +	root := sqliteRepoRoot(t)
 +	base, err := sql.Open("postgres", dsn)
 +	require.NoError(t, err)
 +	t.Cleanup(func() { _ = base.Close() })
-+	schema := "lineage_foundation_" + strconv.FormatInt(time.Now().UnixNano(), 10)
-+	_, err = base.Exec("CREATE SCHEMA " + schema)
-+	require.NoError(t, err)
-+	t.Cleanup(func() { _, err := base.Exec("DROP SCHEMA " + schema + " CASCADE"); require.NoError(t, err) })
-+	isolatedDSN := postgresSchemaDSN(t, dsn, schema)
-+	// This metadata migration does not touch vector indexes. Exercise the full
-+	// application chain in its supported extension-free mode on vanilla PG too.
-+	isolatedURL, err := url.Parse(isolatedDSN)
-+	require.NoError(t, err)
-+	query := isolatedURL.Query()
-+	query.Set("options", strings.TrimSpace(query.Get("options")+" -c app.skip_embedding=true"))
-+	isolatedURL.RawQuery = query.Encode()
-+	isolatedDSN = isolatedURL.String()
++	parentEmbeddingState := snapshotPostgresPublicEmbedding(t, base)
++	t.Logf("parent public.embeddings present: %t", parentEmbeddingState != "absent")
++	t.Cleanup(func() {
++		require.Equal(t, parentEmbeddingState, snapshotPostgresPublicEmbedding(t, base),
++			"the upgrade fixture must preserve the parent public.embeddings table and its guards")
++	})
++	// The application migration chain contains unqualified relation/extension
++	// lookups. A schema,public search_path can resolve the parent's embeddings
++	// when the fixture skips vector setup and then attach its guard there.
++	// Use a truly separate database; default CI exercises embedding migrations,
++	// while a caller may explicitly retain app.skip_embedding in its DSN options.
++	isolatedDSN := postgresLineageDatabaseDSN(t, base, dsn)
 +	db, err := sql.Open("postgres", isolatedDSN)
 +	require.NoError(t, err)
 +	t.Cleanup(func() { _ = db.Close() })
++	var parentDatabase, fixtureDatabase string
++	require.NoError(t, base.QueryRow("SELECT current_database()").Scan(&parentDatabase))
++	require.NoError(t, db.QueryRow("SELECT current_database()").Scan(&fixtureDatabase))
++	require.NotEqual(t, parentDatabase, fixtureDatabase)
++	require.Equal(t, "absent", snapshotPostgresPublicEmbedding(t, db),
++		"the fixture must start without the parent's embedding table")
++	var skipEmbedding bool
++	require.NoError(t, db.QueryRow(`SELECT COALESCE(current_setting('app.skip_embedding', true), '') = 'true'`).Scan(&skipEmbedding))
++	t.Logf("fixture embedding migrations enabled: %t", !skipEmbedding)
 +	m, err := migrate.New("file://"+filepath.Join(root, "migrations/versioned"), isolatedDSN)
 +	require.NoError(t, err)
 +	t.Cleanup(func() { _, _ = m.Close() })
 +	require.NoError(t, m.Migrate(131))
++	requirePostgresMigrationVersion(t, db, 131)
++	if skipEmbedding {
++		require.Equal(t, "absent", snapshotPostgresPublicEmbedding(t, db))
++	} else {
++		require.NotEqual(t, "absent", snapshotPostgresPublicEmbedding(t, db))
++		var guards int
++		require.NoError(t, db.QueryRow(`SELECT count(*) FROM pg_trigger
++			WHERE tgrelid = 'public.embeddings'::regclass AND tgname = 'nextcloud_indexed_embedding_guard'`).Scan(&guards))
++		require.Equal(t, 1, guards, "the fixture's own embeddings must retain its production withdrawal guard")
++	}
 +	seedSourceLineageLegacy(t, db, "postgres")
 +	require.NoError(t, m.Migrate(132))
 +	requirePostgresMigrationVersion(t, db, 132)
@@ -31614,6 +31649,62 @@ index 00000000..ac0f8432
 +	require.ErrorContains(t, err, "nextcloud_source_tombstones_immutable")
 +	require.ErrorContains(t, m.Steps(-1), "message_source_lineage_rollback_requires_audit_export")
 +	requireSourceTombstone(t, db, "postgres", 7, "tenant", "7", 1)
++}
++
++// These PostgreSQL fixtures require CREATEDB on a disposable server. A new
++// database avoids cross-schema table/index visibility in the production chain.
++func postgresLineageDatabaseDSN(t *testing.T, base *sql.DB, dsn string) string {
++	t.Helper()
++	var random [8]byte
++	_, err := rand.Read(random[:])
++	require.NoError(t, err)
++	name := "weknora_lineage_" + hex.EncodeToString(random[:])
++	_, err = base.Exec("CREATE DATABASE " + name + " TEMPLATE template0")
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		_, err := base.Exec("DROP DATABASE " + name + " WITH (FORCE)")
++		require.NoError(t, err)
++	})
++	u, err := url.Parse(dsn)
++	require.NoError(t, err)
++	u.Path = "/" + name
++	u.RawPath = ""
++	query := u.Query()
++	query.Set("search_path", "public")
++	u.RawQuery = query.Encode()
++	return u.String()
++}
++
++// Capture table identity, row count, columns, indexes and trigger identity/body.
++// Checking again after fixture cleanup catches both relation mutation and a
++// replacement/foreign trigger, including when a preceding full migration test
++// has already populated the parent database's public schema.
++func snapshotPostgresPublicEmbedding(t *testing.T, db *sql.DB) string {
++	t.Helper()
++	var state string
++	err := db.QueryRow(`SELECT jsonb_build_object(
++		'table_oid', c.oid,
++		'columns', (SELECT jsonb_agg(jsonb_build_object('name', a.attname,
++			'type', format_type(a.atttypid, a.atttypmod), 'not_null', a.attnotnull,
++			'default', pg_get_expr(d.adbin, d.adrelid)) ORDER BY a.attnum)
++			FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
++			WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped),
++		'indexes', (SELECT jsonb_agg(jsonb_build_object('oid', i.indexrelid,
++			'definition', pg_get_indexdef(i.indexrelid), 'valid', i.indisvalid) ORDER BY i.indexrelid)
++			FROM pg_index i WHERE i.indrelid = c.oid),
++		'triggers', (SELECT jsonb_agg(jsonb_build_object('oid', g.oid, 'function', g.tgfoid,
++			'definition', pg_get_triggerdef(g.oid), 'function_definition', pg_get_functiondef(g.tgfoid),
++			'enabled', g.tgenabled) ORDER BY g.oid)
++			FROM pg_trigger g WHERE g.tgrelid = c.oid AND NOT g.tgisinternal)
++		)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
++		WHERE n.nspname = 'public' AND c.relname = 'embeddings'`).Scan(&state)
++	if err == sql.ErrNoRows {
++		return "absent"
++	}
++	require.NoError(t, err)
++	var rows int64
++	require.NoError(t, db.QueryRow("SELECT count(*) FROM public.embeddings").Scan(&rows))
++	return fmt.Sprintf("%s rows=%d", state, rows)
 +}
 +
 +func lineageMigrationQuery(dialect, query string) string {
