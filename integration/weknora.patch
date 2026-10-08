@@ -5984,7 +5984,7 @@ index 4b29c552..a2a240f4 100644
  
  // CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base
 diff --git a/internal/application/repository/knowledgebase.go b/internal/application/repository/knowledgebase.go
-index e560e686..c2f3bd79 100644
+index e560e686..409eec3e 100644
 --- a/internal/application/repository/knowledgebase.go
 +++ b/internal/application/repository/knowledgebase.go
 @@ -169,7 +169,9 @@ func (r *knowledgeBaseRepository) ListUserKBPinIDs(
@@ -5998,6 +5998,32 @@ index e560e686..c2f3bd79 100644
  }
  
  // UpdateKnowledgeBaseGeneratedProfile writes the generated_profile column
+@@ -185,12 +187,22 @@ func (r *knowledgeBaseRepository) UpdateKnowledgeBaseGeneratedProfile(
+ 	if profile != nil {
+ 		value = *profile
+ 	}
+-	return r.db.WithContext(ctx).Model(&types.KnowledgeBase{}).
+-		Where("id = ?", id).
++	result := r.db.WithContext(ctx).Model(&types.KnowledgeBase{}).
++		Where("id = ? AND ever_had_nextcloud_source = ?", id, false).
+ 		Updates(map[string]interface{}{
+ 			"generated_profile": value,
+ 			"updated_at":        time.Now(),
+-		}).Error
++		})
++	if result.Error != nil {
++		return result.Error
++	}
++	if result.RowsAffected != 1 {
++		// The KB may have become Nextcloud-backed while a model call was in
++		// flight. The provenance update and this conditional write serialize
++		// on the same row, so a stale profile cannot be saved afterward.
++		return types.ErrKnowledgeBaseProfileUnsupported
++	}
++	return nil
+ }
+ 
+ // DeleteKnowledgeBase deletes a knowledge base
 diff --git a/internal/application/repository/knowledgebase_sqlite_test.go b/internal/application/repository/knowledgebase_sqlite_test.go
 index 0a35e402..4bf221f5 100644
 --- a/internal/application/repository/knowledgebase_sqlite_test.go
@@ -13437,7 +13463,7 @@ index 00000000..46ac8612
 +}
 diff --git a/internal/application/repository/nextcloud_gc_chunks.go b/internal/application/repository/nextcloud_gc_chunks.go
 new file mode 100644
-index 0000000..c2a3c2b
+index 00000000..c2a3c2b2
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc_chunks.go
 @@ -0,0 +1,159 @@
@@ -13602,7 +13628,7 @@ index 0000000..c2a3c2b
 +}
 diff --git a/internal/application/repository/nextcloud_gc_chunks_pg_test.go b/internal/application/repository/nextcloud_gc_chunks_pg_test.go
 new file mode 100644
-index 0000000..5741a55
+index 00000000..5741a554
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc_chunks_pg_test.go
 @@ -0,0 +1,155 @@
@@ -15967,10 +15993,10 @@ index 00000000..158b218d
 +}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
-index 00000000..35c5f3de
+index 00000000..f89a984a
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_kb_provenance_test.go
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,142 @@
 +package repository
 +
 +import (
@@ -15992,6 +16018,8 @@ index 00000000..35c5f3de
 +	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases (
 +		id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
 +		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT 0,
++		generated_profile TEXT,
++		updated_at DATETIME,
 +		deleted_at DATETIME
 +	)`).Error)
 +	require.NoError(t, db.Exec(`CREATE TABLE knowledges (
@@ -16060,6 +16088,33 @@ index 00000000..35c5f3de
 +		KnowledgeBaseID: "kb-past-documents", Type: types.ConnectorTypeNextcloud}))
 +}
 +
++func TestSQLiteNextcloudSourceRegistrationFencesGeneratedProfileWrite(t *testing.T) {
++	db := provenanceTestDB(t)
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id, tenant_id) VALUES ('kb-profile', 7)`).Error)
++	profiles := NewKnowledgeBaseRepository(db)
++	ctx := context.Background()
++	require.NoError(t, profiles.UpdateKnowledgeBaseGeneratedProfile(ctx, "kb-profile",
++		&types.KnowledgeBaseProfile{Gist: "ordinary profile"}))
++
++	sources := NewDataSourceRepository(db)
++	require.NoError(t, sources.Create(ctx, &types.DataSource{ID: "source-profile", TenantID: 7,
++		KnowledgeBaseID: "kb-profile", Type: types.ConnectorTypeNextcloud}))
++	require.ErrorIs(t, profiles.UpdateKnowledgeBaseGeneratedProfile(ctx, "kb-profile",
++		&types.KnowledgeBaseProfile{Gist: "stale generated profile"}),
++		types.ErrKnowledgeBaseProfileUnsupported)
++	var stored string
++	require.NoError(t, db.Raw(`SELECT generated_profile FROM knowledge_bases WHERE id = 'kb-profile'`).
++		Scan(&stored).Error)
++	require.Contains(t, stored, "ordinary profile")
++	require.NotContains(t, stored, "stale generated profile")
++
++	// A hard-deleted source does not reopen profile generation: the KB flag
++	// records historical provenance, not only its current source list.
++	require.NoError(t, db.Unscoped().Delete(&types.DataSource{}, "id = ?", "source-profile").Error)
++	require.ErrorIs(t, profiles.UpdateKnowledgeBaseGeneratedProfile(ctx, "kb-profile", nil),
++		types.ErrKnowledgeBaseProfileUnsupported)
++}
++
 +func TestSQLiteNextcloudKBProvenanceMigrationBackfillsDeletedSources(t *testing.T) {
 +	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 +	require.NoError(t, err)
@@ -16083,6 +16138,75 @@ index 00000000..35c5f3de
 +		require.Equal(t, want, got, id)
 +	}
 +	require.Error(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source = 0 WHERE id = 'source'").Error)
++}
+diff --git a/internal/application/repository/nextcloud_profile_write_fence_pg_test.go b/internal/application/repository/nextcloud_profile_write_fence_pg_test.go
+new file mode 100644
+index 00000000..ce04983e
+--- /dev/null
++++ b/internal/application/repository/nextcloud_profile_write_fence_pg_test.go
+@@ -0,0 +1,63 @@
++package repository
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestPostgresNextcloudProfileWriteWaitsForSourceMarker(t *testing.T) {
++	// leaseTestPostgres gives this test its own schema in disposable PostgreSQL.
++	db := leaseTestPostgres(t)
++	require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases (
++		id TEXT PRIMARY KEY, generated_profile JSONB,
++		ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT FALSE,
++		updated_at TIMESTAMPTZ,
++		deleted_at TIMESTAMPTZ
++	)`).Error)
++	require.NoError(t, db.Exec(`INSERT INTO knowledge_bases (id) VALUES ('racing'), ('ordinary')`).Error)
++	profiles := NewKnowledgeBaseRepository(db)
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++
++	// Registration holds the KB row while it marks source provenance. The
++	// generated-profile write must wait and then re-evaluate its WHERE clause.
++	mark := db.WithContext(ctx).Begin()
++	require.NoError(t, mark.Error)
++	defer mark.Rollback()
++	require.NoError(t, mark.Exec(`UPDATE knowledge_bases
++		SET ever_had_nextcloud_source = TRUE WHERE id = 'racing'`).Error)
++	started := make(chan struct{})
++	finished := make(chan error, 1)
++	go func() {
++		close(started)
++		finished <- profiles.UpdateKnowledgeBaseGeneratedProfile(ctx, "racing",
++			&types.KnowledgeBaseProfile{Gist: "stale generated profile"})
++	}()
++	<-started
++	select {
++	case err := <-finished:
++		t.Fatalf("profile write crossed uncommitted source marker: %v", err)
++	case <-time.After(100 * time.Millisecond):
++	}
++	require.NoError(t, mark.Commit().Error)
++	select {
++	case err := <-finished:
++		require.ErrorIs(t, err, types.ErrKnowledgeBaseProfileUnsupported)
++	case <-ctx.Done():
++		t.Fatal("profile write did not resume after source marker committed")
++	}
++	var stored string
++	require.NoError(t, db.Raw(`SELECT COALESCE(generated_profile::TEXT, '')
++		FROM knowledge_bases WHERE id = 'racing'`).Scan(&stored).Error)
++	require.Empty(t, stored)
++
++	require.NoError(t, profiles.UpdateKnowledgeBaseGeneratedProfile(ctx, "ordinary",
++		&types.KnowledgeBaseProfile{Gist: "ordinary profile"}))
++	require.NoError(t, db.Raw(`SELECT generated_profile::TEXT
++		FROM knowledge_bases WHERE id = 'ordinary'`).Scan(&stored).Error)
++	require.Contains(t, stored, "ordinary profile")
 +}
 diff --git a/internal/application/repository/nextcloud_revisions_pg_test.go b/internal/application/repository/nextcloud_revisions_pg_test.go
 new file mode 100644
@@ -26100,7 +26224,7 @@ index 00000000..f831b5aa
 +	}
 +}
 diff --git a/internal/application/service/knowledgebase_profile.go b/internal/application/service/knowledgebase_profile.go
-index 538687bb..23f91c11 100644
+index 538687bb..9d7ceb3a 100644
 --- a/internal/application/service/knowledgebase_profile.go
 +++ b/internal/application/service/knowledgebase_profile.go
 @@ -83,7 +83,8 @@ func NewKnowledgeBaseProfileService(
@@ -26113,6 +26237,51 @@ index 538687bb..23f91c11 100644
  }
  
  // requestKnowledgeBaseProfileRefresh enqueues a debounced rebuild. It is a
+@@ -395,6 +396,11 @@ func (s *KnowledgeBaseProfileService) persistFailure(
+ 	failed.Error = previewText(cause.Error(), 300)
+ 	failed.Stats = agg.Stats
+ 	if err := s.kbRepo.UpdateKnowledgeBaseGeneratedProfile(ctx, kb.ID, failed); err != nil {
++		if errors.Is(err, ErrKnowledgeBaseProfileUnsupported) {
++			// Source provenance can change while the model is running. This
++			// rejection is terminal even when the model failed first.
++			return nil, err
++		}
+ 		logger.Warnf(ctx, "[KnowledgeBaseProfile] Failed to record generation failure for %s: %v", kb.ID, err)
+ 	} else {
+ 		kb.GeneratedProfile = failed
+diff --git a/internal/application/service/knowledgebase_profile_test.go b/internal/application/service/knowledgebase_profile_test.go
+index 4ac525b1..fa9b6a2a 100644
+--- a/internal/application/service/knowledgebase_profile_test.go
++++ b/internal/application/service/knowledgebase_profile_test.go
+@@ -357,6 +357,28 @@ func TestKnowledgeBaseProfileHandle(t *testing.T) {
+ 	assert.NoError(t, run(true), "a deleted knowledge base is skipped")
+ }
+ 
++func TestKnowledgeBaseProfileHandleSkipsSourceRegistrationRace(t *testing.T) {
++	for _, modelFailure := range []bool{false, true} {
++		f := newKBProfileFixture(kbProfileResponse)
++		if modelFailure {
++			f.chatModel.err = errors.New("model failed during source registration")
++		}
++		// The worker loaded an ordinary KB before source registration; the
++		// repository's write boundary now sees its persisted Nextcloud marker.
++		f.kbRepo.updateErr = types.ErrKnowledgeBaseProfileUnsupported
++		body, err := json.Marshal(types.KnowledgeBaseProfilePayload{
++			TenantID: 7, KnowledgeBaseID: "kb", Force: true,
++		})
++		require.NoError(t, err)
++		err = f.service.Handle(context.Background(),
++			asynq.NewTask(types.TypeKnowledgeBaseProfile, body))
++		require.NoError(t, err, "a source-registration race is terminal, not retried")
++		require.Equal(t, 1, f.chatModel.calls)
++		require.Empty(t, f.kbRepo.saved)
++		require.Nil(t, f.kb.GeneratedProfile)
++	}
++}
++
+ func TestParseDocumentSummaryOutput(t *testing.T) {
+ 	t.Run("structured JSON", func(t *testing.T) {
+ 		out := parseDocumentSummaryOutput("```json\n" +
 diff --git a/internal/application/service/knowledgebase_search.go b/internal/application/service/knowledgebase_search.go
 index 5970777f..0bb80cfc 100644
 --- a/internal/application/service/knowledgebase_search.go

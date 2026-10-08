@@ -76,6 +76,13 @@ its regression verifies that neither an embedding nor its receipt changes
 before the delay expires. This does not establish full writer coverage or
 activate physical derived cleanup.
 
+The generated KB profile writer now conditions its final database update on
+`ever_had_nextcloud_source = false`. Source registration and the profile update
+serialize on the same KB row; a queued ordinary profile job cannot save its
+result or failure state after the source marker commits. SQLite registration
+and disposable PostgreSQL two-connection tests pass on both pinned bases. This
+fences one KB-wide derived writer, not the other paths listed above.
+
 Both pinned patches now also contain a dormant exact-chunk delete helper.
 It validates the live GC claim, retired source, persisted job delay, exact
 tenant/KB/knowledge/chunk inventory, and tracked image references. Chunk

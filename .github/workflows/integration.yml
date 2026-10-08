@@ -163,7 +163,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '0b88371d781cbf68b81b116427fb4b0dc733262203872697fea34e3c43cd01eb  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo 'b81174da65cbfcc4bebe72d9b49e78a60bfc58e56c97d500236c32f2f70b07c2  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -179,7 +179,7 @@ jobs:
       - name: Compile and test Nextcloud integration paths
         working-directory: weknora
         run: |
-          go test -p 2 -run 'Nextcloud|GlobalKnowledgeSearch|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
+          go test -p 2 -run 'Nextcloud|KnowledgeBaseProfile|GlobalKnowledgeSearch|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
@@ -266,7 +266,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'd0ad079d552cc814e93ba6797726e2d7a68283be72e35945f584f8918cd41d17  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo '358644d0541ceac11d4e70abde29f15fe1328a99e234e695defc9d955006da4b  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -282,7 +282,7 @@ jobs:
       - name: Test patched RAG authorization paths
         working-directory: weknora-rag
         run: |
-          go test -p 2 -run 'Test(Nextcloud|ManualNextcloud|GlobalKnowledgeSearch|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
+          go test -p 2 -run 'Test(Nextcloud|SQLiteNextcloudSourceRegistrationFencesGeneratedProfileWrite|KnowledgeBaseProfile|ManualNextcloud|GlobalKnowledgeSearch|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
@@ -305,7 +305,7 @@ jobs:
           WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
           WEKNORA_INDEXED_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
         run: |
-          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories)' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories|ProfileWriteWaitsForSourceMarker)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
       - uses: actions/setup-node@v4
