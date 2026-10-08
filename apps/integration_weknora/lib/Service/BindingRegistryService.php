@@ -197,6 +197,7 @@ final class BindingRegistryService {
                 'publication_epoch' => $audit->createNamedParameter($epoch),
                 'created_at' => $audit->createNamedParameter(time()),
             ])->executeStatement();
+            PublicationRecoveryLedger::appendInTransaction($this->db, $id, null, $state === 'stopped' ? 'binding_stop' : 'binding_resume', $epoch);
             $this->db->commit();
             return ['publication_state' => $state, 'publication_epoch' => $epoch, 'changed' => true];
         } catch (\Throwable $exception) {
@@ -421,6 +422,7 @@ final class BindingRegistryService {
                 'root_file_id' => $binding['root_file_id'],
             ], $bindings);
             $this->config->setAppValue(self::APP_ID, 'bindings', json_encode($storedBindings, JSON_THROW_ON_ERROR));
+            if (!$found) { PublicationRecoveryLedger::appendInTransaction($this->db, $id, null, 'binding_created', 0); }
             $this->db->commit();
             return !$found;
         } catch (\Throwable $exception) {
@@ -563,6 +565,7 @@ final class BindingRegistryService {
                     throw new \DomainException('Decommission acknowledgement changed concurrently');
                 }
             }
+            PublicationRecoveryLedger::appendInTransaction($this->db, $id, null, 'binding_retired', 0);
             $this->db->commit();
             return $revoked;
         } catch (\Throwable $exception) {

@@ -15,7 +15,7 @@ namespace OCP\Migration {
     interface IOutput {}
     class SimpleMigrationStep {}
 }
-namespace OCP { interface IDBConnection {} }
+namespace OCP { interface IDBConnection {} interface IConfig {} }
 
 namespace PublicationDecisionContract {
     use OCP\DB\ISchemaWrapper;
@@ -52,11 +52,13 @@ namespace PublicationDecisionContract {
         public function fetchAssociative(): array|false {
             return $this->statement->fetch(PDO::FETCH_ASSOC);
         }
+        public function fetchAllAssociative(): array { return $this->statement->fetchAll(PDO::FETCH_ASSOC); }
         public function closeCursor(): void { $this->statement->closeCursor(); }
     }
 
     final class Expr {
-        public function eq(string $column, mixed $value): array { return [$column, $value]; }
+        public function eq(string $column, mixed $value): array { return [$column, $value, "="]; }
+        public function gt(string $column, mixed $value): array { return [$column, $value, ">"]; }
     }
 
     final class Query {
@@ -65,6 +67,8 @@ namespace PublicationDecisionContract {
         private array $columns = [];
         private array $values = [];
         private array $conditions = [];
+        private string $order = "";
+        private int $limit = 0;
 
         public function __construct(private DB $db) {}
         public function expr(): Expr { return new Expr(); }
@@ -77,12 +81,14 @@ namespace PublicationDecisionContract {
         public function set(string $column, mixed $value): self { $this->values[$column] = $value; return $this; }
         public function where(array $condition): self { $this->conditions = [$condition]; return $this; }
         public function andWhere(array $condition): self { $this->conditions[] = $condition; return $this; }
+        public function orderBy(string $field, string $direction): self { $this->order = " ORDER BY " . $field . " " . $direction; return $this; }
+        public function setMaxResults(int $limit): self { $this->limit = $limit; return $this; }
         public function forUpdate(): self { return $this; } // SQLite holds the writer transaction.
 
         public function executeQuery(): Result {
             $params = [];
             $where = $this->whereSql($params);
-            $sql = 'SELECT ' . implode(', ', $this->columns) . ' FROM ' . $this->table . $where;
+            $sql = 'SELECT ' . implode(', ', $this->columns) . ' FROM ' . $this->table . $where . $this->order . ($this->limit ? ' LIMIT ' . $this->limit : '');
             $statement = $this->db->execute($sql, $params);
             return new Result($statement);
         }
@@ -111,8 +117,8 @@ namespace PublicationDecisionContract {
         private function whereSql(array &$params): string {
             if ($this->conditions === []) { return ''; }
             $parts = [];
-            foreach ($this->conditions as [$column, $value]) {
-                $parts[] = $column . ' = ?';
+            foreach ($this->conditions as [$column, $value, $operator]) {
+                $parts[] = $column . " " . $operator . " ?";
                 $params[] = $value;
             }
             return ' WHERE ' . implode(' AND ', $parts);
@@ -123,6 +129,7 @@ namespace PublicationDecisionContract {
         public ?string $failSqlContaining = null;
         public function __construct(public PDO $pdo) {}
         public function getQueryBuilder(): Query { return new Query($this); }
+        public function inTransaction(): bool { return $this->pdo->inTransaction(); }
         public function beginTransaction(): void { $this->pdo->beginTransaction(); }
         public function commit(): void { $this->pdo->commit(); }
         public function rollBack(): void { $this->pdo->rollBack(); }
@@ -152,6 +159,7 @@ namespace PublicationDecisionContract {
 
 namespace {
     require_once __DIR__ . '/../lib/Migration/Version0021Date20261008000000.php';
+    require_once __DIR__ . '/../lib/Service/PublicationRecoveryLedger.php';
     require_once __DIR__ . '/../lib/Service/FilePublicationStateService.php';
 
     use OCA\IntegrationWeknora\Migration\Version0021Date20261008000000;
@@ -164,6 +172,8 @@ namespace {
     $pdo = new PDO('sqlite::memory:');
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->exec('CREATE TABLE weknora_bind_lock (id INTEGER PRIMARY KEY)');
+    $pdo->exec('CREATE TABLE weknora_recovery_head(id INTEGER PRIMARY KEY, stream_id TEXT NOT NULL, sequence BIGINT NOT NULL, chain_sha256 TEXT NOT NULL)');
+    $pdo->exec('CREATE TABLE weknora_recovery_log(sequence BIGINT PRIMARY KEY, binding_id TEXT NOT NULL, file_id BIGINT, kind TEXT NOT NULL, source_revision BIGINT NOT NULL, created_at BIGINT NOT NULL, chain_sha256 TEXT NOT NULL)');
     $pdo->exec('CREATE TABLE weknora_pub_state (id INTEGER PRIMARY KEY AUTOINCREMENT,
         binding_id TEXT NOT NULL, file_id BIGINT NOT NULL, state TEXT NOT NULL,
         actor_uid TEXT NOT NULL, updated_at BIGINT NOT NULL,

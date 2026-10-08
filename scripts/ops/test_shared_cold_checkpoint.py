@@ -20,6 +20,21 @@ SPEC.loader.exec_module(checkpoint)
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_external_anchor_matches_live_instance_stream_and_prefix(self):
+        stack={'containers':{'nextcloud':{'id':'owned-nc'},'db':{'id':'owned-db'}}}
+        anchor={'instance_id':'instance','stream_id':'stream','sequence':'3','database_chain_sha256':'a'*64}
+        answer={'stream_id':'stream','head_sequence':4,'prefix_hash':'a'*64}
+        with mock.patch.object(checkpoint,'run',side_effect=[b'instance\n',json.dumps(answer).encode()]):
+            checkpoint.verify_recovery_anchor_source(stack,anchor,Path('/private/nc'))
+        for field,value in [('stream_id','other'),('head_sequence',2),('prefix_hash','b'*64)]:
+            invalid={**answer,field:value}
+            with mock.patch.object(checkpoint,'run',side_effect=[b'instance\n',json.dumps(invalid).encode()]):
+                with self.assertRaises(checkpoint.CheckpointError):
+                    checkpoint.verify_recovery_anchor_source(stack,anchor,Path('/private/nc'))
+        with mock.patch.object(checkpoint,'run',side_effect=[b'other-instance\n',json.dumps(answer).encode()]):
+            with self.assertRaises(checkpoint.CheckpointError):
+                checkpoint.verify_recovery_anchor_source(stack,anchor,Path('/private/nc'))
+
     def test_duplicate_raw_port_rows_are_rejected_before_set_comparison(self):
         service = {"ports": [{"target": 443, "host_ip": "10.0.0.2", "published": "18482"}]}
         config = {"volumes": {}, "networks": {}}

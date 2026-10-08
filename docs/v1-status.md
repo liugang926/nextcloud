@@ -1572,3 +1572,18 @@ and has exact-tree apply/reverse proof on the new baseline. Local focused
 checks passed 149 tests/subtests with one optional PostgreSQL fixture skipped.
 New baseline remote CI and an actual candidate image are separate checks.
 The shared schema-131 backend and the private Phase 3 candidates remain separate.
+
+
+## 2026-10-09 external publication journal candidate
+
+App 0.4.38 adds an atomic metadata-only recovery journal and external signed
+retention with database-prefix and witnessed-head fork detection. A pinned
+external record can be attached before coordinated shutdown after matching
+the live instance/stream/prefix. Actual isolated Nextcloud installation, admin
+publication, simulated backup rollback and maintenance-only replay/retry passed;
+bindings stayed stopped, withdrawn files stayed excluded and original DAV bytes
+remained intact. The fixture was removed. [Implementation and boundary](publication-recovery-journal.md)
+and [measured evidence](evidence/publication-recovery-journal-2026-10-09.json)
+record the exact package and post-measurement validation change. Shared runtime
+still uses app 0.4.37. WeKnora closure, authoritative full reconciliation and
+reopening remain separate incomplete gates.

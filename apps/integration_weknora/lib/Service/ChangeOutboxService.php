@@ -76,6 +76,7 @@ final class ChangeOutboxService {
             ]);
             $insert->executeStatement();
             $id = $this->db->lastInsertId('weknora_outbox');
+            PublicationRecoveryLedger::appendInTransaction($this->db, $bindingId, $fileId, $type, (int)$id);
             $this->db->commit();
             try {
                 // Wake a healthy idle sender after releasing the global

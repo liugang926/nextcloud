@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -37,6 +38,14 @@ WK_VOLUMES = frozenset(("postgres-data", "redis-data", "app-data",
 DB_REDIS = {NC_PROJECT: frozenset(("db", "redis")),
             WK_PROJECT: frozenset(("postgres", "redis"))}
 MIN_FREE_BYTES = 2 * 1024 ** 3
+
+
+def recovery_journal_module():
+    source = Path(__file__).with_name('publication-recovery-journal.py')
+    spec = importlib.util.spec_from_file_location('publication_recovery_journal', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class CheckpointError(Exception):
@@ -507,8 +516,26 @@ def estimate_volume_bytes(stacks: list[dict], nc_dir: Path) -> int:
     return total
 
 
+def verify_recovery_anchor_source(stack: dict, anchor: dict, nc_dir: Path) -> None:
+    sequence = int(anchor['sequence'])
+    require(sequence >= 0, 'invalid external anchor sequence')
+    # instanceid is a system config value, so read it from the live NC process
+    # before stopping applications; do not substitute a database UUID.
+    instance = run(['docker', 'exec', '-u', 'www-data', stack['containers']['nextcloud']['id'],
+                    'php', 'occ', 'config:system:get', 'instanceid'], cwd=nc_dir).decode().strip()
+    query = ("SELECT json_build_object('stream_id',stream_id,'head_sequence',sequence,'prefix_hash'," +
+             ("'" + '0' * 64 + "'" if sequence == 0 else
+              "(SELECT chain_sha256 FROM oc_weknora_recovery_log WHERE sequence=" + str(sequence) + ")") +
+             ") FROM oc_weknora_recovery_head WHERE id=1")
+    data = json.loads(run(['docker','exec',stack['containers']['db']['id'],'psql','-X','-U','nextcloud',
+                          '-d','nextcloud','-v','ON_ERROR_STOP=1','-At','-c',query],cwd=nc_dir))
+    require(instance == anchor['instance_id'] and data['stream_id'] == anchor['stream_id'] and
+            sequence <= int(data['head_sequence']) and data['prefix_hash'] == anchor['database_chain_sha256'],
+            'external journal anchor does not match this live snapshot source')
+
+
 def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
-               evidence: Path, git_head: str) -> dict:
+               evidence: Path, git_head: str, recovery_journal=None) -> dict:
     stages: list[str] = []
     incomplete = evidence / "INCOMPLETE"
     private_file(incomplete, data=b"Checkpoint capture is incomplete; do not restore from it.\n")
@@ -529,6 +556,12 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
         require(git_identity(nc_dir) == git_head and
                 source_fingerprint(all_bind_inputs) == before_inputs,
                 "runtime inputs changed before shutdown")
+        recovery_anchor = None
+        if recovery_journal is not None:
+            path, key, pin = recovery_journal
+            recovery_anchor = recovery_journal_module().checkpoint_anchor(path, key, pin,
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+            verify_recovery_anchor_source(stacks[0], recovery_anchor, nc_dir)
         reject_foreign_volume_users(stacks, nc_dir)
         for stack in stacks:
             services = sorted(set(stack["containers"]) - DB_REDIS[stack["project"]])
@@ -629,6 +662,12 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
             "all_services_stopped_at_completion": True,
             "restore_or_runtime_switch_performed": False,
         }
+        if recovery_anchor is not None:
+            path, key, pin = recovery_journal
+            current_anchor = recovery_journal_module().checkpoint_anchor(path, key, pin,
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+            require(current_anchor == recovery_anchor, 'external recovery anchor changed during capture')
+            manifest['external_recovery_anchor'] = recovery_anchor
         private_file(evidence / "manifest.json",
                      data=(json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode())
         incomplete.unlink()
@@ -680,6 +719,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--weknora-dir", type=Path,
                         default=ROOT.parent / "weknora-ldap-local")
     parser.add_argument("--evidence-dir", type=Path)
+    parser.add_argument('--recovery-journal', type=Path)
+    parser.add_argument('--recovery-key-file', type=Path)
+    parser.add_argument('--recovery-record-sha256')
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm-pair", default="",
                         help=f"required with --apply: {PAIR_CONFIRMATION}")
@@ -713,8 +755,12 @@ def main(argv: list[str] | None = None) -> int:
         require(args.evidence_dir is not None,
                 "--apply requires a new absolute --evidence-dir")
         safe_evidence_location(args.evidence_dir, nc_dir, wk_dir, inputs)
+        recovery_values = (args.recovery_journal, args.recovery_key_file, args.recovery_record_sha256)
+        require(all(value is not None for value in recovery_values) or all(value is None for value in recovery_values),
+                'all three external journal options are required together')
+        recovery_journal = recovery_values if args.recovery_journal is not None else None
         evidence = prepare_evidence(args.evidence_dir)
-        result = checkpoint(stacks, nc_dir, wk_dir, evidence, git_head)
+        result = checkpoint(stacks, nc_dir, wk_dir, evidence, git_head, recovery_journal)
         print(json.dumps({"status": result["status"], "evidence": str(evidence),
                           "all_services_stopped": True}, sort_keys=True))
         return 0

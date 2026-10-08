@@ -120,7 +120,7 @@ def compose_text(port: int, db_password: str, user: str, password: str) -> str:
     }, indent=2) + "\n"
 
 
-def main() -> None:
+def main(runtime_probe=None) -> None:
     version = ET.parse(APP_INFO).getroot().findtext("version")
     if not version or not all(part.isdigit() for part in version.split(".")):
         raise RuntimeError("invalid app version")
@@ -225,6 +225,9 @@ def main() -> None:
                             "-d", "nextcloud", "-At", "-c", query)
                 if count != "1":
                     raise AssertionError(f"fresh migration did not create {table}")
+
+            if runtime_probe is not None:
+                runtime_probe(compose, occ, container, port, user, password, Path(tmp))
 
             assert_dav()
             before_disable = b"before-disable-" + secrets.token_bytes(16)

@@ -189,6 +189,7 @@ final class FilePublicationStateService {
             if ($changed !== 1) {
                 throw new \UnexpectedValueException('Publication state row changed unexpectedly');
             }
+            PublicationRecoveryLedger::appendInTransaction($this->db, $bindingId, $fileId, $state, $auditId);
             $this->db->commit();
             if (isset($this->excludedByBinding[$bindingId])) {
                 if ($state === self::STATE_WITHDRAWN) {
