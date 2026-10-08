@@ -1227,3 +1227,31 @@ have not been tested. The later `scripts/rotate-lan-ip.py` helper passed 13
 offline tests and read-only checks against the current Compose overlays,
 running image/config hashes and certificate. Its mutating path has not been
 exercised on the shared stack; this address change was performed manually.
+
+## 2026-10-08 isolated tiny mixed-format timing
+
+An owned, loopback-only synthetic LDAP fixture at Nextcloud commit
+`d1c48929` measured two tiny text PUTs (500/505 bytes) and one born-digital
+PDF PUT (969 bytes), sequentially after the preceding event applied. Each PUT
+created two outbox upsert hints and one successful source sync job. From just
+before each PUT, the first observed durable-job bounds were 3,461.5 / 5,464.5 /
+5,434.5 ms; published, current-ETag, parsed, ready-chunk and embedding bounds
+were 4,678.3 / 7,832.2 / 8,398.9 ms; WeKnora applied-watermark bounds were
+13,406.9 / 15,008.0 / 14,644.7 ms. The PDF's protected synthetic text was in
+a ready chunk. These are host-monotonic upper bounds with 0.5-second status and
+database polling. The three sync logs themselves lasted about 0.17 seconds;
+the 6.25–8.73-second publication-to-applied observation gap is the next
+latency component to isolate.
+
+The fixture used local AD-shaped LDAP and mock embedding. Its Nextcloud
+container ran the repository event-delivery command in an owned, manually
+launched five-second loop because the synthetic fixture has no dedicated
+event-worker service. The existing WeKnora image carries patch SHA-256
+`176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`,
+while this worktree's `integration/weknora.patch` is
+`b81174da65cbfcc4bebe72d9b49e78a60bfc58e56c97d500236c32f2f70b07c2`.
+The [redacted per-file evidence](evidence/isolated-mixed-format-load-2026-10-08.json)
+has SHA-256 `2bd5f8fd12b5e4c58e6aedb0ff68c48e5c0efb25785341e2a6682c4b40610863`.
+The owned containers, volumes, network and private scratch were removed.
+This three-file run does not accept the current RAG patch or the PRD's
+sustained P95, 10,000-file/100-GB, upload-latency, scanned-PDF or real-AD targets.
