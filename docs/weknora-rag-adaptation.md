@@ -1,5 +1,11 @@
 # WeKnora RAG baseline adaptation
 
+The current source patches also include the validated frontend dependency
+updates and persistent KaTeX trust/shared-resolution regression. The dependency
+audit, combined-source frontend gates, browser comparison and targeted Mermaid
+override are recorded in [frontend dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
+This source update is separate from the frozen 7f / schema 131 runtime.
+
 当前补丁包含 Agent 历史准入的临时保护、保存消息/SSE 检查和所有者控制查询。限制与验证范围见 [Agent 历史来源准入](nextcloud-agent-history-admission-2026-10-08.md)；保留来源证据的实例会排除 Agent 旧历史，用空历史继续本次新提问，完整传递来源尚未实现。
 
 The current pinned patches also contain the dormant message source-lineage
@@ -19,7 +25,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab`.
+`b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -29,7 +35,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`b6afcd4e150d1b7fdb006993f5936f72ddacf88e00bcaa6ff0e013e610b466dc`.
+`f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict

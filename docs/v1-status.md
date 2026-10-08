@@ -1418,3 +1418,21 @@ not accept AI parsing/indexing throughput, mixed document distributions, real
 AD/Team Folder ACLs, twenty-user concurrency, sustained upload or event P95,
 physical derived cleanup, or coordinated restore. Shared stacks and WeKnora
 source patches were not changed by this pilot.
+
+## 2026-10-08 frontend dependency security in the combined source patches
+
+The pinned source patches now include the frontend dependency updates on top
+of the interim history guards and dormant lineage foundation. Production npm
+audit findings fell from 13 to zero; the full dependency audit fell from 14 to
+zero, including the development-only shell-quote finding. KaTeX 0.18.2 is
+shared by the direct, Markdown-extension and Mermaid consumers through a
+targeted override; Mermaid remains at 11.16.1. A persistent regression rejects
+inherited `trust` and verifies all three consumers resolve the same package.
+
+Combined-source frontend suites, type checks, builds, audit results and the
+limited synthetic browser rendering comparison are recorded in
+[frontend dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
+These are source and frontend validation results. The frozen 7f images and
+schema 131 runtime do not contain this source update. No new full image build,
+shared migration, physical GC activation or complete V1 acceptance is claimed
+by this dependency integration.

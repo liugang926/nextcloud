@@ -8,8 +8,16 @@ remain separate.
 
 | Complete patch | Pinned WeKnora base | SHA-256 |
 | --- | --- | --- |
-| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab` |
-| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `b6afcd4e150d1b7fdb006993f5936f72ddacf88e00bcaa6ff0e013e610b466dc` |
+| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80` |
+| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2` |
+
+The complete hashes above also include the subsequent frontend security
+updates; see [dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
+The backend foundation is byte-identical to the preceding source integration:
+its verification below was recorded with fixed hash
+`082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab` and RAG hash
+`b6afcd4e150d1b7fdb006993f5936f72ddacf88e00bcaa6ff0e013e610b466dc`.
+The frontend update does not activate lineage producers or authorization.
 
 ## Implemented boundaries
 

@@ -170,7 +170,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo 'b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -221,7 +221,8 @@ jobs:
         working-directory: weknora/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+          npm audit --registry=https://registry.npmjs.org
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts src/utils/markdownDependencySecurity.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 
@@ -287,7 +288,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'b6afcd4e150d1b7fdb006993f5936f72ddacf88e00bcaa6ff0e013e610b466dc  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo 'f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -354,7 +355,8 @@ jobs:
         working-directory: weknora-rag/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts
+          npm audit --registry=https://registry.npmjs.org
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts src/utils/markdownDependencySecurity.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
 

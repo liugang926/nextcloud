@@ -21,8 +21,8 @@ in this audit. A static audit cannot establish that all legacy tasks drained.
 A follow-up source-only patch now rejects the three generic mutation entries
 identified below (`ReparseKnowledge`, `ReplaceKnowledgeFile`, `UpdateImageInfo`)
 for rows marked by the channel or Nextcloud metadata. Its new fixed/RAG patch
-hashes are `082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab`
-and `b6afcd4e150d1b7fdb006993f5936f72ddacf88e00bcaa6ff0e013e610b466dc`.
+hashes are `b0f67ca5eb089227444c70b2259654928339119de7488e61d93d3161d1206a80`
+and `f027c42aa933bab17122c60f4dda244865ed261948dfcdc1de5ccb968a72cef2`.
 The table records the original audit gap; this narrow mitigation does not
 establish generic repository writer or full derived-GC coverage. The shared
 WeKnora image has not been switched to this follow-up patch.
