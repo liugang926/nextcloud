@@ -8,8 +8,8 @@ shared database migration or complete V1 acceptance.
 
 | Complete patch | Exact base | SHA-256 |
 | --- | --- | --- |
-| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53` |
-| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `4fd0bde201c9ac542da74569051202370ffc87145584289ec4962dd957ae3891` |
+| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `3662b15840610041b6a8df55d3f1ebed8751b4d02e74d45b7593203952a154ef` |
+| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `46da62e72ebeca8c81b1582bce2d1438a8d56846a1113bd92fb1cd42f5a3fe1b` |
 
 Apply one complete patch to its matching base. Both build scripts and pinned
 CI jobs check the current SHA. The frontend dependency files and persistent
@@ -119,3 +119,5 @@ with the 7f patch/schema131. The
 [UI runtime record](evidence/weknora-frontend-security-runtime-2026-10-08.json)
 retains the preceding frontend build patch SHA. The existing 100GB original
 volume and eight-volume closed-restore evidence are separate and unchanged.
+
+The current complete patch hashes include the subsequent raw-search ranking/denial correction. Earlier policy integration evidence retains the exact hashes tested there; the policy itself is unchanged. See [raw-search correction](nextcloud-raw-search-ranked-metadata-2026-10-08.md).

@@ -1500,3 +1500,22 @@ security UI. [Pinning evidence](
 evidence/weknora-prebuilt-runtime-pins-2026-10-08.json) records exact references
 and IDs. The new checkpoint was captured and verified, not restored; it does
 not establish external replay or complete application recovery.
+
+## 2026-10-08 ranked raw search and response denial correction
+
+The current pinned complete c6/RAG77 patches now accept only the two finite
+reranking diagnostics (`base_score` and `model_score`) in addition to exact
+persisted source metadata. Every persisted key, channel, knowledge base,
+publication and durable read lease remains checked. A response latches its
+first authorization or lease denial, so later success cannot release its
+protected JSON. The original false-403 and transient-denial counterexamples
+are covered by persistent regressions.
+
+Both complete pinned trees passed the entire session package independently
+with local model stubs. Clean application reconstructs the exact frozen tree
+for each profile, and reverse application reconstructs its exact base. CI now
+explicitly includes the raw-search regressions. See the [correction record](
+nextcloud-raw-search-ranked-metadata-2026-10-08.md) for source hashes and scope.
+These are source checks; the shared backend remains RAG77 + 7f/schema131.
+No new image deployment, live event acceptance, full lineage rollout or
+physical derived cleanup is implied.

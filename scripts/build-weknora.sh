@@ -8,7 +8,7 @@ patch_file="$project_dir/integration/weknora.patch"
 dockerfile="$project_dir/integration/Dockerfile.weknora"
 # Fixed submission/feat/ldap-ad-group-permissions baseline for this patch.
 base_commit="c6c4bd445a8ee49e742da9d804957a3fe4bf52d4"
-expected_patch_sha="daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53"
+expected_patch_sha="3662b15840610041b6a8df55d3f1ebed8751b4d02e74d45b7593203952a154ef"
 
 if [[ ! -d "$source_dir/.git" && ! -f "$source_dir/.git" ]]; then
   echo "WeKnora source was not found at $source_dir" >&2

@@ -10,8 +10,8 @@ deployed frontend security update remain separate; see the
 
 | Complete patch | Pinned WeKnora base | SHA-256 |
 | --- | --- | --- |
-| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53` |
-| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `4fd0bde201c9ac542da74569051202370ffc87145584289ec4962dd957ae3891` |
+| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `3662b15840610041b6a8df55d3f1ebed8751b4d02e74d45b7593203952a154ef` |
+| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `46da62e72ebeca8c81b1582bce2d1438a8d56846a1113bd92fb1cd42f5a3fe1b` |
 
 The complete hashes above also include the subsequent frontend security
 updates; see [dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
@@ -119,3 +119,5 @@ The next implementation work follows the
 [Agent guards](nextcloud-agent-history-admission-2026-10-08.md) and their limits
 remain relevant until all actual inputs, persisted derivatives and output
 boundaries carry and enforce complete lineage.
+
+The current complete patch hashes include the subsequent raw-search ranking/denial correction. Earlier policy integration evidence retains the exact hashes tested there; the policy itself is unchanged. See [raw-search correction](nextcloud-raw-search-ranked-metadata-2026-10-08.md).

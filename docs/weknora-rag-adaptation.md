@@ -36,7 +36,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53`.
+`3662b15840610041b6a8df55d3f1ebed8751b4d02e74d45b7593203952a154ef`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -46,7 +46,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`4fd0bde201c9ac542da74569051202370ffc87145584289ec4962dd957ae3891`.
+`46da62e72ebeca8c81b1582bce2d1438a8d56846a1113bd92fb1cd42f5a3fe1b`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict
@@ -288,3 +288,5 @@ AnyDoc recovered 283 characters and the same protected text, citation and
 revocation checks passed. Both synthetic fixtures were destroyed. Mock
 embedding and chat services were used; scanned-PDF OCR, real AD and enterprise
 answer quality remain unaccepted.
+
+The current complete patch hashes include the subsequent raw-search ranking/denial correction. Earlier policy integration evidence retains the exact hashes tested there; the policy itself is unchanged. See [raw-search correction](nextcloud-raw-search-ranked-metadata-2026-10-08.md).
