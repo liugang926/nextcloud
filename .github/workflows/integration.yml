@@ -194,7 +194,7 @@ jobs:
           WEKNORA_FAQ_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_faq sslmode=disable
         run: |
           go test -json -p 1 ./internal/config ./internal/application/repository ./internal/application/service ./internal/handler ./internal/container ./internal/database ./cmd/publication-recovery \
-            -run 'FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
+            -run 'CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
           go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
       - uses: actions/setup-node@v4
         with:

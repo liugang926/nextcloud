@@ -542,6 +542,43 @@ index 0000000000000000000000000000000000000000..579802e53fe1a4ad617c3bd4c34b246b
 +receipts, perform authoritative directory/ACL and physical/index inventory
 +reconciliation, and gate ingress reopening. This module does not declare that
 +larger acceptance completed.
+diff --git a/docs/faq-tag-collection-read-leases.md b/docs/faq-tag-collection-read-leases.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3d074604f29fb122cc1af31941f18d70f5a6c41
+--- /dev/null
++++ b/docs/faq-tag-collection-read-leases.md
+@@ -0,0 +1,31 @@
++# FAQ, tag and collection HTTP read fences
++
++FAQ list, entry, search, export and producer responses now acquire a durable
++read lease on the selected KB before loading the FAQ input snapshot. Tag list
++and committed producer responses do the same. The lease remains live through
++predicate/count evaluation and actual HTTP writes, renews with a bounded TTL,
++and is released on success, rejection or cancellation. Original input receipts
++and current source/actor checks still authorize every result; a lease grants no
++permission. A missing durable store returns unavailable.
++
++The existing knowledge collection handler already fences every resolved target
++KB before capture. Its missing-store path now refuses the request instead of
++continuing without the fence. All three paths use the same underlying database
++as their original-input receipts and the physical GC claim protocol.
++
++Actual SQL/HTTP contracts verify that a retired generation cannot obtain a GC
++claim while these requests hold their broad KB lease, that the claim succeeds
++after the response releases the lease, and that lease expiration, retired KBs,
++cancelled requests and absent stores suppress output. The existing signed-source
++withdrawal and current-actor tests also remain necessary.
++
++This establishes the selected KB boundary. Additional original parent chunks
++can belong to other KBs, and those scopes must be resolved from immutable
++receipt metadata and leased before parent material is captured. Full reader /
++builder inventory and physical adapter coverage remain outstanding. This change
++does not insert production lease-coverage rows or enable derived GC.
++
++The tested GC competitor is the generation claim protocol. The existing
++`RunDue` local-object claim adapter still needs to join this content fence;
++its resource-reference lock alone does not establish reader/build coverage.
++Actual provider deletion and that adapter's races are a separate pending gate.
 diff --git a/docs/nextcloud-ask-handoff.md b/docs/nextcloud-ask-handoff.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..b7f336b9e6b1d2fdfffb9c11a732ee34ef6eb09c
@@ -18518,6 +18555,22 @@ index 0000000000000000000000000000000000000000..21f4a6378655875b0363f7f01c58bd85
 +	require.NoError(t, db.Model(assistant).Update("content", "changed").Error)
 +	require.NoError(t, db.Model(assistant).Update("content", oldAnswer).Error)
 +	require.Error(t, store.RecheckKnowledgeBuildInputs(ctx, input.Proof))
++}
+diff --git a/internal/application/repository/knowledge_input_content_lease.go b/internal/application/repository/knowledge_input_content_lease.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d917848d3ed77f04c1e1b97e35298b15b99dbf72
+--- /dev/null
++++ b/internal/application/repository/knowledge_input_content_lease.go
+@@ -0,0 +1,10 @@
++package repository
++
++// ContentLeaseStore uses the same durable database as the original input
++// receipts. Output handlers must hold its read fences before loading bodies.
++func (s *KnowledgeInputProvenanceStore) ContentLeaseStore() *NextcloudContentLeaseStore {
++	if s == nil || s.db == nil {
++		return nil
++	}
++	return NewNextcloudContentLeaseStore(s.db)
 +}
 diff --git a/internal/application/repository/knowledge_input_context.go b/internal/application/repository/knowledge_input_context.go
 new file mode 100644
@@ -46122,6 +46175,33 @@ index 0000000000000000000000000000000000000000..edfb11efdc7b4dd21ddac89816d01798
 +	}
 +	return matchBody()
 +}
+diff --git a/internal/application/service/collection_content_lease.go b/internal/application/service/collection_content_lease.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2f1c83c363a69fa2f33b90b760fd9153260352b
+--- /dev/null
++++ b/internal/application/service/collection_content_lease.go
+@@ -0,0 +1,21 @@
++package service
++
++import "github.com/Tencent/WeKnora/internal/application/repository"
++
++func (a *FAQOutputAuthorizer) ContentLeaseStore() *repository.NextcloudContentLeaseStore {
++	if a == nil {
++		return nil
++	}
++	return a.store.ContentLeaseStore()
++}
++
++func (a *TagOutputAuthorizer) ContentLeaseStore() *repository.NextcloudContentLeaseStore {
++	if a == nil {
++		return nil
++	}
++	store, ok := a.reader.(*repository.KnowledgeInputProvenanceStore)
++	if !ok {
++		return nil
++	}
++	return store.ContentLeaseStore()
++}
 diff --git a/internal/application/service/datasource_delete_sqlite_test.go b/internal/application/service/datasource_delete_sqlite_test.go
 index b4087b96a812ee0bd32ffe3481db6c77f1764c48..60ad2a04d6cc2aa1354f881faca6388a95921f68 100644
 --- a/internal/application/service/datasource_delete_sqlite_test.go
@@ -70842,6 +70922,165 @@ index 0000000000000000000000000000000000000000..934c9a749f514ba3fa5f1e1204e34a6c
 +		})
 +	}
 +}
+diff --git a/internal/handler/collection_read_lease.go b/internal/handler/collection_read_lease.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fcb922c47203d0bd3ce4a409effc29462d306a96
+--- /dev/null
++++ b/internal/handler/collection_read_lease.go
+@@ -0,0 +1,30 @@
++package handler
++
++import (
++	"context"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/errors"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++)
++
++// Hold the selected KB through capture, predicate evaluation and actual HTTP
++// output. The original-input/current-source guards still authorize all data;
++// a lease prevents physical GC and never supplies a read permission.
++func beginCollectionHTTPRead(c *gin.Context, ctx context.Context, store *repository.NextcloudContentLeaseStore, kbID string) (context.Context, func(), error) {
++	if store == nil {
++		return ctx, nil, errors.NewServiceUnavailableError("Collection content lease store unavailable")
++	}
++	tenant, ok := types.TenantIDFromContext(ctx)
++	if !ok || tenant == 0 || kbID == "" {
++		return ctx, nil, errors.NewForbiddenError("Current collection scope is required")
++	}
++	fence, err := acquireNextcloudHTTPKBReadLease(ctx, store, tenant, kbID, nextcloudHTTPReadLeaseHeartbeat)
++	if err != nil {
++		return ctx, nil, err
++	}
++	ctx = fence.Context(ctx)
++	restore := guardNextcloudResponseWrites(c, fence, nil)
++	return ctx, func() { restore(); fence.Close() }, nil
++}
+diff --git a/internal/handler/collection_read_lease_test.go b/internal/handler/collection_read_lease_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..729d9d66bb140c0318816fc836dc5cdc6a22b71c
+--- /dev/null
++++ b/internal/handler/collection_read_lease_test.go
+@@ -0,0 +1,117 @@
++package handler
++
++import (
++	"context"
++	"net/http"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/application/service"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func fixtureRetiredCollectionGeneration(t *testing.T, db *gorm.DB) (*repository.NextcloudContentLeaseStore, repository.NextcloudContentScope, time.Time) {
++	t.Helper()
++	store := repository.NewNextcloudContentLeaseStore(db)
++	scope := repository.NextcloudContentScope{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: "old-generation", DataSourceID: "old-source", ExternalID: "nextcloud:instance:99"}
++	require.NoError(t, store.RetireKnowledge(context.Background(), scope))
++	var retired int64
++	require.NoError(t, db.Table("nextcloud_content_fences").Where("knowledge_id=?", scope.KnowledgeID).Select("retired_at_ms").Scan(&retired).Error)
++	// This fixture enables only a claim contract; production coverage stays absent.
++	require.NoError(t, db.Exec(`INSERT INTO nextcloud_content_lease_coverage VALUES (7,'kb',?,?, 'isolated-reader-contract','isolated-builder-contract')`, retired, retired).Error)
++	return store, scope, time.UnixMilli(retired)
++}
++
++func activeCollectionLeases(t *testing.T, db *gorm.DB) int64 {
++	t.Helper()
++	var n int64
++	require.NoError(t, db.Table("nextcloud_content_leases").Where("tenant_id=7 AND knowledge_base_id='kb' AND released_at_ms IS NULL").Count(&n).Error)
++	return n
++}
++
++func TestCollectionHTTPReadLeaseBlocksGCThroughActualFAQTagAndList(t *testing.T) {
++	for _, kind := range []string{"faq", "tag", "knowledge"} {
++		t.Run(kind, func(t *testing.T) {
++			var db *gorm.DB
++			var groups *outputHTTPGroups
++			var serve func() int
++			switch kind {
++			case "faq":
++				h, _, actualDB, inputs, _, _, ctx := faqActualHTTPFixture(t)
++				db = actualDB
++				groups = &outputHTTPGroups{allowed: true}
++				guard := access.NewNextcloudSourceLineageGuard(nil, faqHTTPKB{collectionHTTPKB{db: db}}, nil, nil, groups, nil, inputs)
++				service.ConfigureFAQInputProvenance(h.knowledgeService, inputs, guard)
++				serve = func() int { return serveFAQHTTP(h, ctx, http.MethodGet, "/knowledge-bases/kb/faq/entries", "").Code }
++			case "tag":
++				h, actualDB, _, actualGroups := tagHTTPFixture(t)
++				db, groups = actualDB, actualGroups
++				serve = func() int {
++					return serveTagHTTP(h, collectionHumanInputContext(7), http.MethodGet, "/knowledge-bases/kb/tags", "").Code
++				}
++			case "knowledge":
++				h, actualDB, _, actualGroups, _, _ := collectionHTTPFixture(t)
++				db, groups = actualDB, actualGroups
++				serve = func() int {
++					return serveCollectionHTTP(h, "/knowledge-bases/kb/knowledge", false).Code
++				}
++			}
++			store, retired, notBefore := fixtureRetiredCollectionGeneration(t, db)
++			observed := false
++			groups.hook = func(int) {
++				if observed {
++					return
++				}
++				observed = true
++				require.Positive(t, activeCollectionLeases(t, db))
++				_, err := store.ClaimKnowledgeGC(context.Background(), retired, notBefore, time.Minute)
++				require.ErrorIs(t, err, repository.ErrNextcloudContentGCBusy)
++			}
++			require.Equal(t, http.StatusOK, serve())
++			require.True(t, observed)
++			require.Zero(t, activeCollectionLeases(t, db))
++			_, err := store.ClaimKnowledgeGC(context.Background(), retired, notBefore, time.Minute)
++			require.NoError(t, err)
++		})
++	}
++}
++
++func TestCollectionHTTPReadLeaseExpirationSuppressesActualOutput(t *testing.T) {
++	h, db, _, groups := tagHTTPFixture(t)
++	groups.hook = func(call int) {
++		if call == 1 {
++			require.Positive(t, activeCollectionLeases(t, db))
++			require.NoError(t, db.Exec("UPDATE nextcloud_content_leases SET expires_at_ms=1 WHERE released_at_ms IS NULL").Error)
++		}
++	}
++	w := serveTagHTTP(h, collectionHumanInputContext(7), http.MethodGet, "/knowledge-bases/kb/tags", "")
++	require.NotEqual(t, http.StatusOK, w.Code)
++	require.NotContains(t, w.Body.String(), "knowledge_count")
++	require.Zero(t, activeCollectionLeases(t, db))
++}
++
++func TestCollectionHTTPReadLeaseRetirementCancelAndMissingStoreDeny(t *testing.T) {
++	for _, mode := range []string{"retired", "cancelled", "missing_store"} {
++		t.Run(mode, func(t *testing.T) {
++			h, db, _, _ := tagHTTPFixture(t)
++			ctx := collectionHumanInputContext(7)
++			switch mode {
++			case "retired":
++				require.NoError(t, repository.NewNextcloudContentLeaseStore(db).RetireKB(context.Background(), 7, "kb"))
++			case "cancelled":
++				cancelled, cancel := context.WithCancel(ctx)
++				cancel()
++				ctx = cancelled
++			case "missing_store":
++				h.outputAuthorizer = &service.TagOutputAuthorizer{}
++			}
++			w := serveTagHTTP(h, ctx, http.MethodGet, "/knowledge-bases/kb/tags", "")
++			require.NotEqual(t, http.StatusOK, w.Code)
++			require.NotContains(t, w.Body.String(), "knowledge_count")
++			require.Zero(t, activeCollectionLeases(t, db))
++		})
++	}
++}
 diff --git a/internal/handler/datasource.go b/internal/handler/datasource.go
 index 1cd51dcbd281dc6270aa1d66e63de9313367b780..980e894577d8373319ecf154785c4be6b1cc3ef1 100644
 --- a/internal/handler/datasource.go
@@ -71127,7 +71366,7 @@ index 7456ef1ed619c4dcaab6572cda15261150713569..165f5ac53f0715ae741fdc7df0cebb67
  	cfg := types.DataSourceConfig{
  		Type: types.ConnectorTypeRSS,
 diff --git a/internal/handler/faq.go b/internal/handler/faq.go
-index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f6767d713212 100644
+index 24f6bc25743053cdfee8555aa01d3b5ea880365c..b59add5ff6538e4ca8fce61da1183ff6b3fa8044 100644
 --- a/internal/handler/faq.go
 +++ b/internal/handler/faq.go
 @@ -7,6 +7,8 @@ import (
@@ -71156,7 +71395,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	kbID := secutils.SanitizeForLog(c.Param("id"))
  
  	var page types.Pagination
-@@ -109,6 +112,10 @@ func (h *FAQHandler) ListEntries(c *gin.Context) {
+@@ -109,6 +112,17 @@ func (h *FAQHandler) ListEntries(c *gin.Context) {
  		return
  	}
  
@@ -71164,10 +71403,17 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
 +		return
 +	}
 +
++	ctx, closeRead, leaseErr := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kbID)
++	if leaseErr != nil {
++		_ = c.Error(leaseErr)
++		return
++	}
++	defer closeRead()
++
  	result, err := h.knowledgeService.ListFAQEntries(ctx, kbID, &page, tagUUIDs, legacyTagSeqID, keyword, searchField, sortOrder, isEnabled)
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
-@@ -116,10 +123,7 @@ func (h *FAQHandler) ListEntries(c *gin.Context) {
+@@ -116,10 +130,7 @@ func (h *FAQHandler) ListEntries(c *gin.Context) {
  		return
  	}
  
@@ -71179,7 +71425,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  }
  
  // parseOptionalFAQEnabled preserves the distinction between an omitted filter
-@@ -168,6 +172,11 @@ func (h *FAQHandler) UpsertEntries(c *gin.Context) {
+@@ -168,6 +179,11 @@ func (h *FAQHandler) UpsertEntries(c *gin.Context) {
  		return
  	}
  
@@ -71191,7 +71437,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	taskID, err := h.knowledgeService.UpsertFAQEntries(ctx, kbID, &req)
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
-@@ -197,7 +206,10 @@ func (h *FAQHandler) UpsertEntries(c *gin.Context) {
+@@ -197,8 +213,17 @@ func (h *FAQHandler) UpsertEntries(c *gin.Context) {
  // @Security     ApiKeyAuth
  // @Router       /knowledge-bases/{id}/faq/entry [post]
  func (h *FAQHandler) CreateEntry(c *gin.Context) {
@@ -71201,9 +71447,16 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
 +	}
 +	ctx := service.WithFAQOutputBoundary(c.Request.Context())
  	kbID := secutils.SanitizeForLog(c.Param("id"))
++	ctx, closeRead, leaseErr := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kbID)
++	if leaseErr != nil {
++		_ = c.Error(leaseErr)
++		return
++	}
++	defer closeRead()
  
  	var req types.FAQEntryPayload
-@@ -207,6 +219,11 @@ func (h *FAQHandler) CreateEntry(c *gin.Context) {
+ 	if err := c.ShouldBindJSON(&req); err != nil {
+@@ -207,6 +232,11 @@ func (h *FAQHandler) CreateEntry(c *gin.Context) {
  		return
  	}
  
@@ -71215,7 +71468,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	entry, err := h.knowledgeService.CreateFAQEntry(ctx, kbID, &req)
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
-@@ -214,10 +231,7 @@ func (h *FAQHandler) CreateEntry(c *gin.Context) {
+@@ -214,10 +244,7 @@ func (h *FAQHandler) CreateEntry(c *gin.Context) {
  		return
  	}
  
@@ -71227,7 +71480,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  }
  
  // UpdateEntry godoc
-@@ -235,7 +249,10 @@ func (h *FAQHandler) CreateEntry(c *gin.Context) {
+@@ -235,8 +262,17 @@ func (h *FAQHandler) CreateEntry(c *gin.Context) {
  // @Security     ApiKeyAuth
  // @Router       /knowledge-bases/{id}/faq/entries/{entry_id} [put]
  func (h *FAQHandler) UpdateEntry(c *gin.Context) {
@@ -71237,9 +71490,16 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
 +	}
 +	ctx := service.WithFAQOutputBoundary(c.Request.Context())
  	kbID := secutils.SanitizeForLog(c.Param("id"))
++	ctx, closeRead, leaseErr := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kbID)
++	if leaseErr != nil {
++		_ = c.Error(leaseErr)
++		return
++	}
++	defer closeRead()
  
  	var req types.FAQEntryPayload
-@@ -251,6 +268,11 @@ func (h *FAQHandler) UpdateEntry(c *gin.Context) {
+ 	if err := c.ShouldBindJSON(&req); err != nil {
+@@ -251,6 +287,11 @@ func (h *FAQHandler) UpdateEntry(c *gin.Context) {
  		return
  	}
  
@@ -71251,7 +71511,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	entry, err := h.knowledgeService.UpdateFAQEntry(ctx, kbID, entrySeqID, &req)
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
-@@ -258,10 +280,7 @@ func (h *FAQHandler) UpdateEntry(c *gin.Context) {
+@@ -258,10 +299,7 @@ func (h *FAQHandler) UpdateEntry(c *gin.Context) {
  		return
  	}
  
@@ -71263,7 +71523,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  }
  
  // UpdateEntryTagBatch godoc
-@@ -287,6 +306,19 @@ func (h *FAQHandler) UpdateEntryTagBatch(c *gin.Context) {
+@@ -287,6 +325,19 @@ func (h *FAQHandler) UpdateEntryTagBatch(c *gin.Context) {
  		c.Error(errors.NewBadRequestError("请求参数不合法").WithDetails(err.Error()))
  		return
  	}
@@ -71283,7 +71543,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	if err := h.knowledgeService.UpdateFAQEntryTagBatch(ctx, kbID, req.Updates); err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
  		c.Error(err)
-@@ -320,6 +352,11 @@ func (h *FAQHandler) UpdateEntryFieldsBatch(c *gin.Context) {
+@@ -320,6 +371,11 @@ func (h *FAQHandler) UpdateEntryFieldsBatch(c *gin.Context) {
  		c.Error(errors.NewBadRequestError("请求参数不合法").WithDetails(err.Error()))
  		return
  	}
@@ -71295,7 +71555,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	if err := h.knowledgeService.UpdateFAQEntryFieldsBatch(ctx, kbID, &req); err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
  		c.Error(err)
-@@ -354,6 +391,11 @@ func (h *FAQHandler) DeleteEntries(c *gin.Context) {
+@@ -354,6 +410,11 @@ func (h *FAQHandler) DeleteEntries(c *gin.Context) {
  		return
  	}
  
@@ -71307,7 +71567,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	if err := h.knowledgeService.DeleteFAQEntries(ctx, kbID, req.IDs); err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
  		c.Error(err)
-@@ -379,7 +421,10 @@ func (h *FAQHandler) DeleteEntries(c *gin.Context) {
+@@ -379,8 +440,17 @@ func (h *FAQHandler) DeleteEntries(c *gin.Context) {
  // @Security     ApiKeyAuth
  // @Router       /knowledge-bases/{id}/faq/search [post]
  func (h *FAQHandler) SearchFAQ(c *gin.Context) {
@@ -71317,9 +71577,16 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
 +	}
 +	ctx := service.WithFAQOutputBoundary(c.Request.Context())
  	kbID := secutils.SanitizeForLog(c.Param("id"))
++	ctx, closeRead, leaseErr := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kbID)
++	if leaseErr != nil {
++		_ = c.Error(leaseErr)
++		return
++	}
++	defer closeRead()
  
  	var req types.FAQSearchRequest
-@@ -402,10 +447,7 @@ func (h *FAQHandler) SearchFAQ(c *gin.Context) {
+ 	if err := c.ShouldBindJSON(&req); err != nil {
+@@ -402,10 +472,7 @@ func (h *FAQHandler) SearchFAQ(c *gin.Context) {
  		return
  	}
  
@@ -71331,7 +71598,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  }
  
  // ExportEntries godoc
-@@ -423,7 +465,10 @@ func (h *FAQHandler) SearchFAQ(c *gin.Context) {
+@@ -423,8 +490,17 @@ func (h *FAQHandler) SearchFAQ(c *gin.Context) {
  // @Security     ApiKeyAuth
  // @Router       /knowledge-bases/{id}/faq/entries/export [get]
  func (h *FAQHandler) ExportEntries(c *gin.Context) {
@@ -71341,9 +71608,16 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
 +	}
 +	ctx := service.WithFAQOutputBoundary(c.Request.Context())
  	kbID := secutils.SanitizeForLog(c.Param("id"))
++	ctx, closeRead, leaseErr := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kbID)
++	if leaseErr != nil {
++		_ = c.Error(leaseErr)
++		return
++	}
++	defer closeRead()
  	format := strings.ToLower(strings.TrimSpace(c.Query("format")))
  
-@@ -436,7 +481,7 @@ func (h *FAQHandler) ExportEntries(c *gin.Context) {
+ 	if format == "json" {
+@@ -436,7 +512,7 @@ func (h *FAQHandler) ExportEntries(c *gin.Context) {
  		}
  		c.Header("Content-Type", "application/json; charset=utf-8")
  		c.Header("Content-Disposition", "attachment; filename=faq_export.json")
@@ -71352,7 +71626,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  		return
  	}
  
-@@ -452,7 +497,7 @@ func (h *FAQHandler) ExportEntries(c *gin.Context) {
+@@ -452,7 +528,7 @@ func (h *FAQHandler) ExportEntries(c *gin.Context) {
  	c.Header("Content-Disposition", "attachment; filename=faq_export.csv")
  	// Add BOM for Excel compatibility with UTF-8
  	bom := []byte{0xEF, 0xBB, 0xBF}
@@ -71361,7 +71635,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  }
  
  // GetEntry godoc
-@@ -470,7 +515,10 @@ func (h *FAQHandler) ExportEntries(c *gin.Context) {
+@@ -470,8 +546,17 @@ func (h *FAQHandler) ExportEntries(c *gin.Context) {
  // @Security     ApiKeyAuth
  // @Router       /knowledge-bases/{id}/faq/entries/{entry_id} [get]
  func (h *FAQHandler) GetEntry(c *gin.Context) {
@@ -71371,9 +71645,16 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
 +	}
 +	ctx := service.WithFAQOutputBoundary(c.Request.Context())
  	kbID := secutils.SanitizeForLog(c.Param("id"))
++	ctx, closeRead, leaseErr := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kbID)
++	if leaseErr != nil {
++		_ = c.Error(leaseErr)
++		return
++	}
++	defer closeRead()
  
  	entrySeqID, err := strconv.ParseInt(c.Param("entry_id"), 10, 64)
-@@ -486,10 +534,7 @@ func (h *FAQHandler) GetEntry(c *gin.Context) {
+ 	if err != nil {
+@@ -486,10 +571,7 @@ func (h *FAQHandler) GetEntry(c *gin.Context) {
  		return
  	}
  
@@ -71385,7 +71666,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  }
  
  // GetImportProgress godoc
-@@ -577,7 +622,10 @@ func (h *FAQHandler) UpdateLastImportResultDisplayStatus(c *gin.Context) {
+@@ -577,8 +659,17 @@ func (h *FAQHandler) UpdateLastImportResultDisplayStatus(c *gin.Context) {
  // @Security     ApiKeyAuth
  // @Router       /knowledge-bases/{id}/faq/entries/{entry_id}/similar-questions [post]
  func (h *FAQHandler) AddSimilarQuestions(c *gin.Context) {
@@ -71395,9 +71676,16 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
 +	}
 +	ctx := service.WithFAQOutputBoundary(c.Request.Context())
  	kbID := secutils.SanitizeForLog(c.Param("id"))
++	ctx, closeRead, leaseErr := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kbID)
++	if leaseErr != nil {
++		_ = c.Error(leaseErr)
++		return
++	}
++	defer closeRead()
  
  	entrySeqID, err := strconv.ParseInt(c.Param("entry_id"), 10, 64)
-@@ -593,6 +641,11 @@ func (h *FAQHandler) AddSimilarQuestions(c *gin.Context) {
+ 	if err != nil {
+@@ -593,6 +684,11 @@ func (h *FAQHandler) AddSimilarQuestions(c *gin.Context) {
  		return
  	}
  
@@ -71409,7 +71697,7 @@ index 24f6bc25743053cdfee8555aa01d3b5ea880365c..0da91b96bad62457cf5cdfe8e8a2f676
  	entry, err := h.knowledgeService.AddSimilarQuestions(ctx, kbID, entrySeqID, req.SimilarQuestions)
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
-@@ -600,8 +653,5 @@ func (h *FAQHandler) AddSimilarQuestions(c *gin.Context) {
+@@ -600,8 +696,5 @@ func (h *FAQHandler) AddSimilarQuestions(c *gin.Context) {
  		return
  	}
  
@@ -72739,7 +73027,7 @@ index 8c05828c8f5c1314bbd03d934e6e1a7d748ee79c..fb91f12d297662bfb6277ede1081d439
  // MoveKnowledgeRequest defines the request for moving knowledge items
 diff --git a/internal/handler/knowledge_collection_nextcloud_test.go b/internal/handler/knowledge_collection_nextcloud_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..1bd92fdd5fd4a7ff4d0e28657c16198522e8c543
+index 0000000000000000000000000000000000000000..eec278d0586cc947357b64e212aa9466a46b3df6
 --- /dev/null
 +++ b/internal/handler/knowledge_collection_nextcloud_test.go
 @@ -0,0 +1,161 @@
@@ -72829,7 +73117,7 @@ index 0000000000000000000000000000000000000000..1bd92fdd5fd4a7ff4d0e28657c161985
 +	t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", server.URL)
 +	require.NoError(t, db.Exec("DROP TABLE nextcloud_source_versions; DROP TABLE nextcloud_source_revisions").Error)
 +	require.NoError(t, db.AutoMigrate(&types.DataSource{}, &repository.NextcloudSourcePairing{}))
-+	for _, name := range []string{"000031_nextcloud_source_versions", "000045_nextcloud_source_revisions", "000046_nextcloud_content_leases", "000047_nextcloud_candidate_retry"} {
++	for _, name := range []string{"000031_nextcloud_source_versions", "000045_nextcloud_source_revisions", "000047_nextcloud_candidate_retry"} {
 +		script, err := os.ReadFile("../../migrations/sqlite/" + name + ".up.sql")
 +		require.NoError(t, err)
 +		require.NoError(t, db.Exec(string(script)).Error)
@@ -72906,10 +73194,10 @@ index 0000000000000000000000000000000000000000..1bd92fdd5fd4a7ff4d0e28657c161985
 +}
 diff --git a/internal/handler/knowledge_collection_output.go b/internal/handler/knowledge_collection_output.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d41db0d16cc01f9e7a6aabbbfb769b237ff67195
+index 0000000000000000000000000000000000000000..d5703a86f95cf8c6505320f37920f4b2eb9d517a
 --- /dev/null
 +++ b/internal/handler/knowledge_collection_output.go
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,187 @@
 +package handler
 +
 +import (
@@ -72986,21 +73274,23 @@ index 0000000000000000000000000000000000000000..d41db0d16cc01f9e7a6aabbbfb769b23
 +
 +func (h *KnowledgeHandler) respondKnowledgeCollection(c *gin.Context, ctx context.Context, scopes []types.KnowledgeSearchScope, request types.KnowledgeCollectionSelectionRequest, scope access.LineageReadScope) {
 +	var fences []*nextcloudHTTPReadLeases
++	if h.contentLeases == nil {
++		_ = c.Error(errors.NewServiceUnavailableError("Collection content lease store unavailable"))
++		return
++	}
 +	defer func() {
 +		for _, fence := range fences {
 +			fence.Close()
 +		}
 +	}()
-+	if h.contentLeases != nil {
-+		for _, target := range scopes {
-+			fence, err := acquireNextcloudHTTPKBReadLease(ctx, h.contentLeases, target.TenantID, target.KBID, h.leaseHeartbeat)
-+			if err != nil {
-+				_ = c.Error(err)
-+				return
-+			}
-+			fences = append(fences, fence)
-+			ctx = fence.Context(ctx)
++	for _, target := range scopes {
++		fence, err := acquireNextcloudHTTPKBReadLease(ctx, h.contentLeases, target.TenantID, target.KBID, h.leaseHeartbeat)
++		if err != nil {
++			_ = c.Error(err)
++			return
 +		}
++		fences = append(fences, fence)
++		ctx = fence.Context(ctx)
 +	}
 +	guard, err := h.collectionOutputAuthorizer.Begin(ctx, types.KnowledgeCollectionReadRequest{Scopes: scopes}, scope)
 +	if err != nil {
@@ -73097,10 +73387,10 @@ index 0000000000000000000000000000000000000000..d41db0d16cc01f9e7a6aabbbfb769b23
 +}
 diff --git a/internal/handler/knowledge_collection_output_test.go b/internal/handler/knowledge_collection_output_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3bd5fd393900859dbb23357918895d07fbc07e41
+index 0000000000000000000000000000000000000000..7d881cc735b7531465e1070857dcff78f6bdba6d
 --- /dev/null
 +++ b/internal/handler/knowledge_collection_output_test.go
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,375 @@
 +package handler
 +
 +import (
@@ -73193,7 +73483,7 @@ index 0000000000000000000000000000000000000000..3bd5fd393900859dbb23357918895d07
 +	require.NoError(t, db.AutoMigrate(&types.User{}, &types.TenantMember{}, &types.TenantAPIKey{}, &types.Directory{}, &types.DirectoryIdentity{}, &types.DirectoryGroup{}, &types.DirectoryGroupMembership{}, &types.TenantGroupRoleGrant{}, &types.ResourceAccessPolicy{}, &types.ResourceGroupGrant{}))
 +	db.Config.DisableForeignKeyConstraintWhenMigrating = false
 +	require.NoError(t, db.Exec(`CREATE TABLE nextcloud_source_versions(candidate_knowledge_id TEXT); CREATE TABLE nextcloud_source_revisions(candidate_knowledge_id TEXT)`).Error)
-+	for _, name := range []string{"000053_knowledge_input_provenance", "000054_knowledge_configuration_history_inputs", "000055_knowledge_actual_config_controls", "000058_knowledge_collection_checkpoints", "000059_knowledge_collection_display_inputs"} {
++	for _, name := range []string{"000046_nextcloud_content_leases", "000053_knowledge_input_provenance", "000054_knowledge_configuration_history_inputs", "000055_knowledge_actual_config_controls", "000058_knowledge_collection_checkpoints", "000059_knowledge_collection_display_inputs"} {
 +		path := "../../migrations/sqlite/" + name + ".up.sql"
 +		script, err := os.ReadFile(path)
 +		require.NoError(t, err)
@@ -73236,6 +73526,7 @@ index 0000000000000000000000000000000000000000..3bd5fd393900859dbb23357918895d07
 +	require.NoError(t, err)
 +	h := &KnowledgeHandler{kgService: kg, kbService: kbs, kbShareService: shares, agentShareService: agents}
 +	ConfigureKnowledgeHandlerCollectionOutput(h, service.NewKnowledgeCollectionOutputAuthorizer(store, guard))
++	ConfigureKnowledgeHandlerContentLeaseStore(h, repository.NewNextcloudContentLeaseStore(db))
 +	return h, db, store, groups, shares, agents
 +}
 +
@@ -85249,10 +85540,10 @@ index 59b2a2b584c12080dd1de52b8b6d8e959a910498..a769cc7a213643325c7da506b145e893
  // DeleteTag godoc
 diff --git a/internal/handler/tag_output_lineage.go b/internal/handler/tag_output_lineage.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..251c975f69028fb89c8267b12e59237bec84a999
+index 0000000000000000000000000000000000000000..b7ceb1852e775b1d5912d46a804581154165e980
 --- /dev/null
 +++ b/internal/handler/tag_output_lineage.go
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,82 @@
 +package handler
 +
 +import (
@@ -85286,6 +85577,12 @@ index 0000000000000000000000000000000000000000..251c975f69028fb89c8267b12e59237b
 +		_ = c.Error(knowledgeOutputHTTPError(err))
 +		return
 +	}
++	ctx, closeRead, err := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), snapshot.Request.KnowledgeBaseID)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer closeRead()
 +	guard, err := h.outputAuthorizer.BeginCommitted(ctx, snapshot)
 +	if err != nil {
 +		_ = c.Error(knowledgeOutputHTTPError(err))
@@ -85304,6 +85601,12 @@ index 0000000000000000000000000000000000000000..251c975f69028fb89c8267b12e59237b
 +		_ = c.Error(errors.NewForbiddenError("Current tag scope is required"))
 +		return
 +	}
++	ctx, closeRead, err := beginCollectionHTTPRead(c, ctx, h.outputAuthorizer.ContentLeaseStore(), kb)
++	if err != nil {
++		_ = c.Error(err)
++		return
++	}
++	defer closeRead()
 +	guard, err := h.outputAuthorizer.Begin(ctx, types.TagOutputReadRequest{TenantID: tenant, KnowledgeBaseID: kb})
 +	if err != nil {
 +		_ = c.Error(knowledgeOutputHTTPError(err))

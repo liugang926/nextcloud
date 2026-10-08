@@ -61,6 +61,20 @@ or skipped cases, including owned PostgreSQL and SQLite; the complete Go source
 compiled on both profiles. Separate capacity/recovery and tag/auto-span gates
 are recorded with their original measured commits.
 
+The subsequently integrated FAQ/tag HTTP lease gate and existing knowledge
+collection gate passed 367 cases per profile, zero failures/skips, and full
+source compilation. They protect the selected KB through capture and output,
+reject missing stores, and release on cancellation. Cross-KB original parent
+material and the actual `RunDue` object-delete adapter remain separate coverage
+gates. The tests use the generation claim protocol and do not establish complete
+physical provider cleanup.
+
+Both CI runs of submission `324425d` passed all 12 jobs, including each
+candidate's 337 producer/recovery cases with zero failures/skips, 115 compiled
+test packages and frontend typecheck/build. Those logs are retained and pinned
+in the evidence; the newer read-lease candidate is verified separately above
+and will receive its own CI run.
+
 The live joint recovery probe uses actual Nextcloud, nested synthetic LDAP,
 PostgreSQL dump/restore, signed HTTP endpoints and WeKnora maintenance CLI /
 repositories. Its parser/index payloads are fixture rows. It does not establish

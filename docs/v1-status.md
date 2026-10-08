@@ -1604,3 +1604,19 @@ records actual dual PostgreSQL rollback, exact external plan replay, closed
 receipts and fresh signed source reconciliation using live Nextcloud and nested
 synthetic LDAP. Its WeKnora parser/index rows are fixtures; global ingress
 reopening and full external-index/application recovery remain unaccepted.
+
+## 2026-10-09 selected-KB FAQ/tag HTTP lease update
+
+The complete candidate patches now hold selected-KB read fences through FAQ/tag
+input capture and actual response writes, and knowledge collection requests
+refuse a missing durable lease store. The two candidate combinations passed
+367 tests each with no failures/skips and complete Go compilation; owned PG
+resources were removed. A malformed FAQ filter still returns 400 before lease
+admission, correcting the first combination's one failed fixture per profile.
+
+The preceding submitted candidate `324425d` passed both complete CI runs
+(37827990151 and 37827979194): all 12 jobs green, including 337 candidate cases
+and frontend builds per profile. The newer source is separately pinned in the
+[candidate manifest](../integration/candidates/manifest.json). Cross-KB parent
+read coverage and the actual local-object `RunDue` adapter remain pending; this
+update does not enable physical derived GC or change the shared runtime.
