@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`b81174da65cbfcc4bebe72d9b49e78a60bfc58e56c97d500236c32f2f70b07c2`.
+`9fa13ede6fa8aa7505e3d6967fb47974322f3db32545cf3774d783f2b050776b`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,14 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`358644d0541ceac11d4e70abde29f15fe1328a99e234e695defc9d955006da4b`.
+`c1ed9c949b9e06b09546c5d37ce058af268fad0a6e25e127b594c0dcc973d039`.
+The frontend patch supplies the failed-candidate controls in all five locales
+and uses the theme container token without a hard-coded fallback. The
+2026-10-08 combined pinned RAG source (including the generated-profile write
+fence) passed 1,217 frontend tests with zero failures, type checking, and the
+production build. The fixed baseline passed 1,213 tests with zero failures,
+type checking, and its production build. Each suite skipped one browser test
+because its browser harness was not configured.
 Both patches treat a `reconcile` change hint with a positive `file_id` as a
 request to re-read that file's content, even if its ETag is unchanged. Each
 scan still compares the complete manifest. A `reconcile` hint without a
