@@ -163,7 +163,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '9fa13ede6fa8aa7505e3d6967fb47974322f3db32545cf3774d783f2b050776b  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo 'db842d71468fd663347e70898e20db982293a34af599df400bf368abe19a5021  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -235,6 +235,14 @@ jobs:
           go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
+      - name: Verify full PostgreSQL migrations and concurrent index roundtrip
+        working-directory: weknora
+        env:
+          WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable
+        run: |
+          docker exec "${{ job.services.pgvector.id }}" createdb -U postgres weknora_migration_test
+          go test -p 2 ./internal/database -run '^TestPostgresMigrationsServeAgentHistory$' -count=1
+
   weknora-rag-patch:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -266,7 +274,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'c1ed9c949b9e06b09546c5d37ce058af268fad0a6e25e127b594c0dcc973d039  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo '34c560e03bbc20d4eff3c4ce9d652389f2a4f6056e738d01b8cdc0c05ee2c877  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -307,6 +315,14 @@ jobs:
         run: |
           go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories|ProfileWriteWaitsForSourceMarker)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
+
+      - name: Verify full PostgreSQL migrations and concurrent index roundtrip
+        working-directory: weknora-rag
+        env:
+          WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable
+        run: |
+          docker exec "${{ job.services.pgvector.id }}" createdb -U postgres weknora_migration_test
+          go test -p 2 ./internal/database -run '^TestPostgresMigrationsServeAgentHistory$' -count=1
 
       - uses: actions/setup-node@v4
         with:

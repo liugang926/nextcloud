@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`9fa13ede6fa8aa7505e3d6967fb47974322f3db32545cf3774d783f2b050776b`.
+`db842d71468fd663347e70898e20db982293a34af599df400bf368abe19a5021`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`c1ed9c949b9e06b09546c5d37ce058af268fad0a6e25e127b594c0dcc973d039`.
+`34c560e03bbc20d4eff3c4ce9d652389f2a4f6056e738d01b8cdc0c05ee2c877`.
 The frontend patch supplies the failed-candidate controls in all five locales
 and uses the theme container token without a hard-coded fallback. The
 2026-10-08 combined pinned RAG source (including the generated-profile write
