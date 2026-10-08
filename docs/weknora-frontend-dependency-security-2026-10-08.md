@@ -1,8 +1,10 @@
 # Frontend dependency security validation
 
 The complete pinned source patches now combine the interim history guards,
-dormant message-lineage foundation, frontend dependency updates and a
-persistent KaTeX security regression. The current complete patch hashes are in
+dormant message-lineage foundation and Phase 2 policy, frontend dependency
+updates and a persistent KaTeX security regression. The frontend files remain
+byte-identical after [policy integration](nextcloud-message-source-lineage-policy-2026-10-08.md).
+The current complete patch hashes are in
 [RAG adaptation](weknora-rag-adaptation.md). The
 [sanitized evidence](evidence/weknora-frontend-dependency-security-2026-10-08.json)
 records the pinned bases, exact patch/tree identities and verification scope.
@@ -68,7 +70,8 @@ Fresh worktrees extended the exact history/lineage heads with only the two
 frontend package files and the persistent regression. Regenerated full patches
 applied cleanly to their exact pinned bases. Their staged Git trees matched the
 integrated source trees, and reversing each patch restored its original base.
-The backend is byte-identical to the preceding history/lineage integration.
+For that frontend validation, the backend was byte-identical to the preceding
+history/lineage integration.
 
 | Combined source profile | Full tests | Type check | Production build | Production / full npm audit |
 | --- | --- | --- | --- | --- |
@@ -92,7 +95,13 @@ Git trees are identical to those validated dependency source trees; this
 composition did not rerun the browser fixture. These samples do not exhaust
 all Mermaid diagram types or all application flows.
 
-The frozen **7f images and schema 131 runtime do not contain this frontend
-security update or the dormant schema 132 lineage foundation**. This is source
-and CI integration; shared-runtime migration and complete V1 acceptance remain
-separate work.
+The separately deployed frontend security image is
+`sha256:3e5feb7e70f4fda72f270435a85a60656615689df14a02572e57e6996586d1ca`,
+built from the preceding RAG full patch
+`ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea`.
+The backend remains
+`sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d`
+on its 7f patch and schema131, as recorded in the
+[runtime evidence](evidence/weknora-frontend-security-runtime-2026-10-08.json).
+The schema132 foundation, Phase 2 policy and Agent history guards remain
+source-only; complete V1 acceptance remains separate work.

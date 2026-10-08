@@ -8,6 +8,7 @@ patch_file="$project_dir/integration/weknora.patch"
 dockerfile="$project_dir/integration/Dockerfile.weknora"
 # Fixed submission/feat/ldap-ad-group-permissions baseline for this patch.
 base_commit="c6c4bd445a8ee49e742da9d804957a3fe4bf52d4"
+expected_patch_sha="daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53"
 
 if [[ ! -d "$source_dir/.git" && ! -f "$source_dir/.git" ]]; then
   echo "WeKnora source was not found at $source_dir" >&2
@@ -19,6 +20,11 @@ if ! git -C "$source_dir" cat-file -e "$base_commit^{commit}"; then
 fi
 if [[ ! -s "$patch_file" || ! -f "$dockerfile" ]]; then
   echo 'WeKnora patch or local runtime Dockerfile is missing.' >&2
+  exit 1
+fi
+patch_sha="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$patch_file")"
+if [[ "$patch_sha" != "$expected_patch_sha" ]]; then
+  echo "WeKnora patch SHA-256 mismatch: expected $expected_patch_sha, got $patch_sha" >&2
   exit 1
 fi
 

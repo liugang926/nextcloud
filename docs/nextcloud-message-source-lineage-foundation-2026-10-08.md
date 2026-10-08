@@ -1,20 +1,26 @@
 # Message source lineage foundation integration
 
 The pinned source patches now combine the approved interim Agent history,
-saved-message/SSE and owner-control guards with Phase 1 lineage storage/types.
+saved-message/SSE and owner-control guards with Phase 1 lineage storage/types
+and the independently reviewed, unused Phase 2 source resolver/authorizer.
 This is source integration, not a shared-runtime deployment or complete V1
-permission acceptance. The prepared7f candidate and schema131 deployment
-remain separate.
+permission acceptance. The backend7f/schema131 runtime and the separately
+deployed frontend security update remain separate; see the
+[runtime evidence](evidence/weknora-frontend-security-runtime-2026-10-08.json).
 
 | Complete patch | Pinned WeKnora base | SHA-256 |
 | --- | --- | --- |
-| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `d1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4` |
-| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea` |
+| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53` |
+| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `4fd0bde201c9ac542da74569051202370ffc87145584289ec4962dd957ae3891` |
 
 The complete hashes above also include the subsequent frontend security
 updates; see [dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
-The production backend foundation is byte-identical to the preceding source
-integration. The subsequent change only isolates PostgreSQL test databases;
+The Phase 1 storage/codec implementation, frontend security files and
+PostgreSQL migration fixture are unchanged by the
+[Phase 2 policy integration](nextcloud-message-source-lineage-policy-2026-10-08.md).
+The preceding fixture correction used fixed hash
+`d1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4` and RAG hash
+`ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea`;
 its ParadeDB validation is recorded below. Earlier foundation verification was
 recorded with fixed hash
 `082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab` and RAG hash
@@ -35,7 +41,8 @@ explicit trusted producer assertion, not inferred from missing metadata.
 Checkpoints have their own persistence lineage field. Message lineage and the
 host checkpoint remain excluded from public Message JSON. No influencing
 prompt/tool/result producer or per-message lineage authorization is enabled by
-this foundation; old NULLs and transitive history still need the full policy.
+this foundation or the unused policy; old NULLs and transitive history still
+need complete producer, persistence and read-boundary wiring.
 
 `nextcloud_source_tombstones` holds independent positive ever-source facts for
 tenant, KB, data source and pair scopes. Atomic backfill includes retained,
@@ -53,7 +60,7 @@ binding of saved/cached output, compaction lineage propagation, memory,
 artifacts and history-index propagation remain incomplete. This integration
 does not activate physical derived GC or its coverage marker.
 
-## Verification
+## Foundation verification before Phase 2 policy integration
 
 Both exact pinned bases passed clean-archive apply/reverse checks,
 `git diff --check`, `gofmt` for all 270 changed Go files, and the Nextcloud

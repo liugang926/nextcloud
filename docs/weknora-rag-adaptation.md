@@ -1,10 +1,18 @@
 # WeKnora RAG baseline adaptation
 
+The complete pinned patches now also contain the independently reviewed,
+unused Phase 2 source-lineage resolver and authorizer. The final check reloads
+fresh grants, then checks the captured caller's directory identity and all
+saved source tuples/build fences locally in a coherent snapshot. Producers,
+DI and message/SSE/history/derivative readers do not use this policy yet; see
+[policy integration and validation](nextcloud-message-source-lineage-policy-2026-10-08.md).
+
 The current source patches also include the validated frontend dependency
 updates and persistent KaTeX trust/shared-resolution regression. The dependency
 audit, combined-source frontend gates, browser comparison and targeted Mermaid
 override are recorded in [frontend dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
-This source update is separate from the frozen 7f / schema 131 runtime.
+This source update is separate from the backend7f/schema131 runtime and the
+already deployed frontend dependency update.
 The PostgreSQL lineage upgrade fixture now uses its own temporary database,
 checks both embedding modes, and verifies the parent's table and guards remain
 unchanged; see [fixture validation](nextcloud-message-source-lineage-foundation-2026-10-08.md#postgresql-fixture-isolation-correction).
@@ -28,7 +36,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`d1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4`.
+`daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -38,19 +46,20 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea`.
+`4fd0bde201c9ac542da74569051202370ffc87145584289ec4962dd957ae3891`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict
 directing it to the connector's new-candidate flow. New tests are named
 `TestNextcloud*` so both pinned `weknora-patch` CI jobs exercise them. The
-shared WeKnora image has not been switched to these revised patches; no
+shared WeKnora backend has not been switched to these revised patches; no
 derived-GC coverage marker or physical deletion has been enabled.
 
-The local source-only check passed `gofmt`, `git diff --check` and reverse
-patch validation on both pinned worktrees. An offline focused Go service test
-could not start because required modules are absent from the host cache;
-the two pinned CI jobs are the compile/test gate for this revision.
+The current complete patches passed clean pinned-base apply/reverse checks,
+exact Git-tree comparison and focused policy behavior with real disposable
+PostgreSQL on both integrated profiles. Four consumer packages also compiled
+on each profile. The detailed scope is in the policy validation above; the
+complete remote CI jobs still require a run for these new hashes.
 
 The current patches also incorporate the independently tested
 `stream-empty-result-fix.patch` (SHA-256

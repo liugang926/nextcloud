@@ -1332,10 +1332,10 @@ index 00000000..e6ba9870
 +only retained local history.
 diff --git a/docs/source-lineage-foundation.md b/docs/source-lineage-foundation.md
 new file mode 100644
-index 00000000..22d45fc3
+index 00000000..76476893
 --- /dev/null
 +++ b/docs/source-lineage-foundation.md
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,50 @@
 +# Source lineage foundation
 +
 +This additive foundation provides storage/types, not complete prompt capture or
@@ -1351,7 +1351,7 @@ index 00000000..22d45fc3
 +
 +Version 1 records `complete`/`unknown` plus controlled source identities,
 +including effective source tenant, dedicated KB/data source, immutable pair,
-+instance/binding/file, original knowledge and source-ledger revision, and opaque
++instance/binding/file, original knowledge and exact build-fence epoch, and opaque
 +ETag. Constructors/codec/union reject duplicate JSON keys and invalid raw UTF-8,
 +validate identities, retain different revisions,
 +propagate unknown, produce deterministic independent sets and fail closed at
@@ -1381,6 +1381,128 @@ index 00000000..22d45fc3
 +mandatory authorization before model input, output, replay and derivatives.
 +Until then, source-dependent indexing and physical derived GC remain subject
 +to their existing safety gates; this foundation provides no coverage marker.
++
++The next source-only step supplies an unused
++[trusted resolver/authorizer](source-lineage-policy.md). Its build epoch is not
++the append-only observation sequence; same-content bookkeeping does not alter
++the generation. Complete producer/reader wiring remains required.
+diff --git a/docs/source-lineage-policy.md b/docs/source-lineage-policy.md
+new file mode 100644
+index 00000000..3947ccc3
+--- /dev/null
++++ b/docs/source-lineage-policy.md
+@@ -0,0 +1,111 @@
++# Trusted source lineage policy boundary
++
++The resolver/authorizer in this change is deliberately unused by existing
++producers, message readers, history/SSE replay and indexing. It is a boundary
++for the next implementation phase, not complete lineage coverage or V1
++permission acceptance. No DI entry or runtime route enables it here.
++
++## Resolver
++
++The knowledge repository implements the narrow
++`access.NextcloudLineageSnapshotLookup` capability:
++
++```go
++ResolveNextcloudSourceLineage(ctx, effectiveSourceTenant, kbID, knowledgeID)
++```
++
++Arguments identify a server-resolved document scope. Source identity and ETag
++are never accepted from tool/model strings, citation metadata or request JSON.
++The resolver reloads the document, current published source intent, active
++paired data source/configuration, pair operation, latest observation record
++and open KB/exact build fences in a coherent database snapshot. It requires
++matching ownership and complete source metadata, denies disabled/deleted/
++staging/retired/missing rows, and validates the full typed identity. PostgreSQL
++uses a read-only REPEATABLE READ transaction; SQLite uses its read transaction.
++This method itself does not grant caller access.
++
++`SourceIdentity.Revision` is the **exact open build-fence epoch**, together
++with the immutable knowledge ID. It is not the append-only source observation
++sequence or manifest generation. A same-ETag/current-candidate rename or repeat
++publication may append observations without changing the captured identity.
++A changed candidate/build epoch or original ETag is a different dependency.
++The latest ledger observation is checked for consistency with the current
++published intent, not compared as the answer's generation.
++
++This boundary relies on the existing fenced generation protocol. It does not
++establish that every generic/external writer is covered; that broader build
++and derived-GC coverage remains open. A real parser/build configuration change
++must receive a new immutable candidate or admitted build epoch through that
++protocol, never reuse an old generation silently.
++
++## Authorizer
++
++`access.NewNextcloudSourceLineageGuard` takes snapshot lookup, KB lookup,
++current organization/Agent sharing, directory resource permission lookup and
++the existing live `NextcloudPublicationGuard`. All controlling dependencies
++are mandatory for source content; missing/error outcomes close access.
++
++- `Check(ctx, lineage, LineageReadScope)` requires a complete validated envelope,
++  compares every original identity/ETag/epoch to trusted current rows, verifies
++  current KB and directory/group resource grants and interactive directory
++  identity, and runs the live Nextcloud authorization/ETag check. It reloads
++  current grants after all remote calls, then locally revalidates the same
++  principal's AD identity/snapshot and the entire source dependency set in one
++  coherent database snapshot. Source mismatch denies; snapshot storage failure
++  remains unavailable rather than being redacted as an ordinary denial.
++- `Resolve(ctx, tenant, kb, document, scope)` obtains a trusted identity and
++  passes the same authorization before returning its single-document envelope.
++  Producers must still union all actual influencing inputs and emitted source
++  results; this envelope is not an exhaustive turn by itself.
++- `LineageReadScope.Targets` contains server-resolved KB scopes whose existing
++  rules still apply even for explicit complete-empty ordinary lineage. An
++  optional Agent selector is reloaded/reauthorized against its actual source
++  tenant/configuration even for empty targets, and also checks its current
++  Agent/use directory resource policy. Owned/builtin Agent existence and
++  lifecycle remain the entry-point's responsibility; the selected resource
++  policy is still checked. It is not treated as a grant.
++
++Source-bearing lineages require the captured interactive web caller and the
++same principal/user, reject API-key/machine/uncaptured callers, and preserve
++the original caller independently of shared effective source tenant. Cached
++exact KB/context/Agent grants are not proof of current access. Each check
++performs fresh organization/Agent and directory resource decisions. Ordinary
++complete-empty lineages retain current KB/API-key rules and do not require
++Nextcloud or AD source calls merely because no source was used.
++
++Organization KB grants are checked independently before Agent KB fallback,
++as in `ResolveKB`. A legitimate machine principal may hold a tenant/role
++organization grant without a Web UserID; source-bearing lineages retain the
++strict interactive principal requirement.
++
++The batch capability is
++`RecheckNextcloudSourceLineage(ctx, lineage) (matches bool, err error)`.
++`false, nil` means a recorded tuple/fence no longer matches;
++`false, err` is availability failure and must stop the operation.
++
++Session/message ownership remains an entry-point responsibility. This policy
++does not acquire a source lease, retain rows for GC, hide metadata for an
++unrelated resource, backfill legacy NULL, persist answer/event lineage or
++propagate dependencies through summaries/forks/memory/artifacts. Calls must
++occur before actual model input and each output/replay/derivative boundary
++once producer coverage is implemented. Current producer/reader behavior is
++unchanged by this unused policy.
++
++## Tests
++
++The focused command is:
++
++```sh
++go test -p 1 ./internal/application/access ./internal/application/repository ./internal/types \
++  -run '^Test(NextcloudSourceLineage|PostgresNextcloudSourceLineage|SourceLineage)' -count=1
++```
++
++Set `WEKNORA_LEASE_TEST_POSTGRES_DSN` to a disposable PostgreSQL to exercise
++the PostgreSQL resolver (its schema is isolated). Tests cover real persisted
++SQLite/PostgreSQL tuple resolution and same-ETag rename/republish, changed
++ETag/build epoch/candidate, missing/corrupt rows, unknown/NULL/overflow,
++current KB/directory/org/Agent revocation while Nextcloud still allows,
++local change during remote authorization, current source denial/error/ETag
++change, unsupported/machine callers, shared effective tenant and complete-empty
++ordinary KB/API scope. Directory and Nextcloud policy tests use service stubs;
++they are not real AD or external source acceptance.
 diff --git a/frontend/package-lock.json b/frontend/package-lock.json
 index 0b30ad81..a611e15d 100644
 --- a/frontend/package-lock.json
@@ -5050,10 +5172,10 @@ index 00000000..c7b6f210
 +}
 diff --git a/internal/application/access/nextcloud_publication.go b/internal/application/access/nextcloud_publication.go
 new file mode 100644
-index 00000000..e6959522
+index 00000000..53ef520f
 --- /dev/null
 +++ b/internal/application/access/nextcloud_publication.go
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,229 @@
 +package access
 +
 +import (
@@ -5183,57 +5305,12 @@ index 00000000..e6959522
 +	}
 +	config.Type = ds.Type
 +
-+	// A legacy worker context can carry UserIDContextKey without an authenticated
-+	// request principal. This guard requires the caller captured by auth middleware.
-+	caller, captured := ctx.Value(types.CallerContextKey).(types.Caller)
-+	if !captured || caller.TenantID == 0 || strings.TrimSpace(caller.UserID) == "" ||
-+		types.IsSyntheticUserID(caller.UserID) {
-+		return fmt.Errorf("%w: authenticated human user required", ErrNextcloudPublicationDenied)
-+	}
-+	// A machine identity can have a user-shaped ID (embed-..., mcp-..., or an
-+	// external API user). The principal, captured by the authentication
-+	// middleware, must explicitly identify the same interactive web user.
-+	// Do not use PrincipalFromContext here: its legacy UserID fallback would
-+	// turn an uncaptured machine identity into a web principal.
-+	principal, captured := ctx.Value(types.PrincipalContextKey).(types.Principal)
-+	if !captured || principal.Type != types.PrincipalWebUser || principal.ID != caller.UserID {
-+		return fmt.Errorf("%w: interactive web user required", ErrNextcloudPublicationDenied)
-+	}
-+	if _, machineScope := types.TenantAPIKeyScopeFromContext(ctx); machineScope {
-+		return fmt.Errorf("%w: machine API key cannot read source publication", ErrNextcloudPublicationDenied)
-+	}
-+	if g.directories == nil || g.authorize == nil {
-+		return ErrNextcloudPublicationUnavailable
-+	}
-+	identities, err := g.directories.GetIdentityByUserID(ctx, caller.UserID)
++	currentIdentity, err := g.currentDirectoryIdentity(ctx)
 +	if err != nil {
-+		return fmt.Errorf("%w: directory identity lookup failed: %v", ErrNextcloudPublicationUnavailable, err)
++		return err
 +	}
-+	if len(identities) != 1 || identities[0] == nil {
-+		return fmt.Errorf("%w: exactly one linked directory identity is required", ErrNextcloudPublicationDenied)
-+	}
-+	identity := identities[0]
-+	if identity.UserID == nil || *identity.UserID != caller.UserID ||
-+		identity.Status != types.DirectoryObjectActive ||
-+		identity.DirectoryID == "" || identity.ObjectGUID == "" {
-+		return fmt.Errorf("%w: linked directory identity is inactive", ErrNextcloudPublicationDenied)
-+	}
-+	snapshot, err := g.directories.GetLoginSnapshot(ctx, identity.DirectoryID, identity.ObjectGUID)
-+	if err != nil || snapshot == nil || snapshot.Directory == nil {
-+		return fmt.Errorf("%w: directory snapshot lookup failed: %v", ErrNextcloudPublicationUnavailable, err)
-+	}
-+	directory := snapshot.Directory
-+	currentIdentity := snapshot.Identity
-+	if directory.ID != identity.DirectoryID || directory.Protocol != types.DirectoryProtocolAD ||
-+		!directory.IsFresh(time.Now().UTC()) || strings.TrimSpace(directory.LastSyncError) != "" ||
-+		directory.SnapshotVersion == 0 || identity.SnapshotVersion != directory.SnapshotVersion ||
-+		currentIdentity == nil || currentIdentity.ID != identity.ID ||
-+		currentIdentity.DirectoryID != identity.DirectoryID ||
-+		currentIdentity.ObjectGUID != identity.ObjectGUID ||
-+		currentIdentity.UserID == nil || *currentIdentity.UserID != caller.UserID ||
-+		currentIdentity.Status != types.DirectoryObjectActive ||
-+		currentIdentity.SnapshotVersion != directory.SnapshotVersion {
-+		return fmt.Errorf("%w: directory snapshot is unavailable or stale", ErrNextcloudPublicationDenied)
++	if g.authorize == nil {
++		return ErrNextcloudPublicationUnavailable
 +	}
 +	decision, err := g.authorize(ctx, config, instanceID, bindingID,
 +		currentIdentity.DirectoryID, currentIdentity.ObjectGUID, fileID)
@@ -5249,6 +5326,72 @@ index 00000000..e6959522
 +		return fmt.Errorf("%w: source version changed", ErrNextcloudPublicationDenied)
 +	}
 +	return nil
++}
++
++// currentDirectoryIdentity validates only captured principal and local AD
++// identity/snapshot state. It makes no Nextcloud request and returns a copy so
++// a concurrent lookup update cannot change the checked binding in memory.
++func (g *NextcloudPublicationGuard) currentDirectoryIdentity(ctx context.Context) (*types.DirectoryIdentity, error) {
++	if ctx == nil {
++		return nil, ErrNextcloudPublicationDenied
++	}
++	// A legacy worker context can carry UserIDContextKey without an authenticated
++	// request principal. This guard requires the caller captured by auth middleware.
++	caller, captured := ctx.Value(types.CallerContextKey).(types.Caller)
++	if !captured || caller.TenantID == 0 || strings.TrimSpace(caller.UserID) == "" ||
++		types.IsSyntheticUserID(caller.UserID) {
++		return nil, fmt.Errorf("%w: authenticated human user required", ErrNextcloudPublicationDenied)
++	}
++	// A machine identity can have a user-shaped ID (embed-..., mcp-..., or an
++	// external API user). The principal, captured by the authentication
++	// middleware, must explicitly identify the same interactive web user.
++	// Do not use PrincipalFromContext here: its legacy UserID fallback would
++	// turn an uncaptured machine identity into a web principal.
++	principal, captured := ctx.Value(types.PrincipalContextKey).(types.Principal)
++	if !captured || principal.Type != types.PrincipalWebUser || principal.ID != caller.UserID {
++		return nil, fmt.Errorf("%w: interactive web user required", ErrNextcloudPublicationDenied)
++	}
++	if _, machineScope := types.TenantAPIKeyScopeFromContext(ctx); machineScope {
++		return nil, fmt.Errorf("%w: machine API key cannot read source publication", ErrNextcloudPublicationDenied)
++	}
++	if g == nil || g.directories == nil {
++		return nil, ErrNextcloudPublicationUnavailable
++	}
++	identities, err := g.directories.GetIdentityByUserID(ctx, caller.UserID)
++	if err != nil {
++		return nil, fmt.Errorf("%w: directory identity lookup failed: %v", ErrNextcloudPublicationUnavailable, err)
++	}
++	if len(identities) != 1 || identities[0] == nil {
++		return nil, fmt.Errorf("%w: exactly one linked directory identity is required", ErrNextcloudPublicationDenied)
++	}
++	identity := identities[0]
++	if identity.UserID == nil || *identity.UserID != caller.UserID ||
++		identity.Status != types.DirectoryObjectActive ||
++		identity.DirectoryID == "" || identity.ObjectGUID == "" {
++		return nil, fmt.Errorf("%w: linked directory identity is inactive", ErrNextcloudPublicationDenied)
++	}
++	snapshot, err := g.directories.GetLoginSnapshot(ctx, identity.DirectoryID, identity.ObjectGUID)
++	if err != nil || snapshot == nil || snapshot.Directory == nil {
++		return nil, fmt.Errorf("%w: directory snapshot lookup failed: %v", ErrNextcloudPublicationUnavailable, err)
++	}
++	directory := snapshot.Directory
++	currentIdentity := snapshot.Identity
++	if directory.ID != identity.DirectoryID || directory.Protocol != types.DirectoryProtocolAD ||
++		!directory.IsFresh(time.Now().UTC()) || strings.TrimSpace(directory.LastSyncError) != "" ||
++		directory.SnapshotVersion == 0 || identity.SnapshotVersion != directory.SnapshotVersion ||
++		currentIdentity == nil || currentIdentity.ID != identity.ID ||
++		currentIdentity.DirectoryID != identity.DirectoryID ||
++		currentIdentity.ObjectGUID != identity.ObjectGUID ||
++		currentIdentity.UserID == nil || *currentIdentity.UserID != caller.UserID ||
++		currentIdentity.Status != types.DirectoryObjectActive ||
++		currentIdentity.SnapshotVersion != directory.SnapshotVersion {
++		return nil, fmt.Errorf("%w: directory snapshot is unavailable or stale", ErrNextcloudPublicationDenied)
++	}
++
++	copy := *currentIdentity
++	userID := *currentIdentity.UserID
++	copy.UserID = &userID
++	return &copy, nil
 +}
 +
 +func publicationMetadataString(metadata map[string]json.RawMessage, key string) (string, bool) {
@@ -5485,6 +5628,803 @@ index 00000000..345e4807
 +			}
 +		})
 +	}
++}
+diff --git a/internal/application/access/nextcloud_source_lineage.go b/internal/application/access/nextcloud_source_lineage.go
+new file mode 100644
+index 00000000..dcf48581
+--- /dev/null
++++ b/internal/application/access/nextcloud_source_lineage.go
+@@ -0,0 +1,279 @@
++package access
++
++import (
++	"context"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++type NextcloudLineageSnapshotLookup interface {
++	ResolveNextcloudSourceLineage(context.Context, uint64, string, string) (*types.Knowledge, types.SourceIdentity, error)
++	RecheckNextcloudSourceLineage(context.Context, *types.SourceLineage) (bool, error)
++}
++type LineageKnowledgeBaseLookup interface {
++	GetKnowledgeBaseByIDOnly(context.Context, string) (*types.KnowledgeBase, error)
++}
++type LineageGroupPermissionLookup interface {
++	EffectivePermission(context.Context, uint64, types.ResourceType, string, types.ResourceAction, time.Time) (types.EffectiveResourcePermission, error)
++}
++
++// LineageReadScope is supplied by a trusted entry point after owner/session
++// resolution. Agent selectors are reauthorized, not accepted as grants.
++type LineageReadScope struct {
++	Targets       types.SearchTargets
++	AgentID       string
++	AgentTenantID uint64
++}
++
++// NextcloudSourceLineageGuard is deliberately unused by existing message and
++// prompt paths. Wiring it before exhaustive producers would certify incomplete
++// dependency sets. It is not a source lease or session-owner check.
++type NextcloudSourceLineageGuard struct {
++	snapshots   NextcloudLineageSnapshotLookup
++	kbs         LineageKnowledgeBaseLookup
++	shares      KBShareLookup
++	agents      AgentShareLookup
++	groups      LineageGroupPermissionLookup
++	publication *NextcloudPublicationGuard
++}
++
++func NewNextcloudSourceLineageGuard(snapshots NextcloudLineageSnapshotLookup, kbs LineageKnowledgeBaseLookup,
++	shares KBShareLookup, agents AgentShareLookup, groups LineageGroupPermissionLookup, publication *NextcloudPublicationGuard,
++) *NextcloudSourceLineageGuard {
++	return &NextcloudSourceLineageGuard{snapshots: snapshots, kbs: kbs, shares: shares, agents: agents, groups: groups, publication: publication}
++}
++
++func (g *NextcloudSourceLineageGuard) Check(ctx context.Context, lineage *types.SourceLineage, scope LineageReadScope) error {
++	if lineage.RequireComplete() != nil {
++		return ErrNextcloudPublicationDenied
++	}
++	if ctx == nil || g == nil {
++		return ErrNextcloudPublicationUnavailable
++	}
++	caller, captured := ctx.Value(types.CallerContextKey).(types.Caller)
++	principal, principalCaptured := ctx.Value(types.PrincipalContextKey).(types.Principal)
++	if !captured || caller.TenantID == 0 || !principalCaptured || !principal.Valid() {
++		return ErrNextcloudPublicationDenied
++	}
++	if principal != principal.Normalize() {
++		return ErrNextcloudPublicationDenied
++	}
++	switch principal.Type {
++	case types.PrincipalWebUser, types.PrincipalAPITenant, types.PrincipalAPIPlatform, types.PrincipalAPIExternalUser,
++		types.PrincipalIMUser, types.PrincipalEmbedChannel, types.PrincipalEmbedSession, types.PrincipalEmbedVisitor, types.PrincipalMCPEndpoint:
++	default:
++		return ErrNextcloudPublicationDenied
++	}
++	if principal.Type == types.PrincipalWebUser && (strings.TrimSpace(caller.UserID) == "" || principal.ID != caller.UserID || types.IsSyntheticUserID(caller.UserID)) {
++		return ErrNextcloudPublicationDenied
++	}
++	if len(lineage.Sources) != 0 {
++		if principal.Type != types.PrincipalWebUser || principal.ID != caller.UserID || strings.TrimSpace(caller.UserID) == "" || types.IsSyntheticUserID(caller.UserID) {
++			return ErrNextcloudPublicationDenied
++		}
++		if _, machine := types.TenantAPIKeyScopeFromContext(ctx); machine {
++			return ErrNextcloudPublicationDenied
++		}
++		if g.snapshots == nil || g.publication == nil || g.groups == nil {
++			return ErrNextcloudPublicationUnavailable
++		}
++	}
++	targets := append(types.SearchTargets{}, scope.Targets...)
++	controlled := map[string]uint64{}
++	for _, saved := range lineage.Sources {
++		if owner, exists := controlled[saved.KnowledgeBaseID]; exists && owner != saved.TenantID {
++			return ErrNextcloudPublicationDenied
++		}
++		controlled[saved.KnowledgeBaseID] = saved.TenantID
++		targets = append(targets, &types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, TenantID: saved.TenantID, KnowledgeBaseID: saved.KnowledgeBaseID})
++	}
++	if err := g.checkCurrentKBReads(ctx, caller, targets, controlled, scope); err != nil {
++		return err
++	}
++	var checkedDirectory *types.DirectoryIdentity
++	if len(lineage.Sources) > 0 {
++		var err error
++		checkedDirectory, err = g.publication.currentDirectoryIdentity(ctx)
++		if err != nil {
++			return err
++		}
++	}
++	for _, saved := range lineage.Sources {
++		knowledge, current, err := g.snapshots.ResolveNextcloudSourceLineage(ctx, saved.TenantID, saved.KnowledgeBaseID, saved.KnowledgeID)
++		if err != nil {
++			return fmt.Errorf("%w: trusted lineage lookup", ErrNextcloudPublicationUnavailable)
++		}
++		if current != saved || current.Validate() != nil || knowledge == nil || knowledge.ID != saved.KnowledgeID || knowledge.TenantID != saved.TenantID ||
++			knowledge.KnowledgeBaseID != saved.KnowledgeBaseID || knowledge.Channel != types.ConnectorTypeNextcloud || knowledge.DeletedAt.Valid ||
++			knowledge.ParseStatus != types.ParseStatusCompleted || knowledge.EnableStatus != "enabled" {
++			return ErrNextcloudPublicationDenied
++		}
++		if err := g.publication.CheckKnowledge(ctx, knowledge); err != nil {
++			return err
++		}
++		// Catch a local version/fence change while directory/Nextcloud calls ran.
++		_, after, err := g.snapshots.ResolveNextcloudSourceLineage(ctx, saved.TenantID, saved.KnowledgeBaseID, saved.KnowledgeID)
++		if err != nil {
++			return fmt.Errorf("%w: trusted lineage recheck", ErrNextcloudPublicationUnavailable)
++		}
++		if after != saved {
++			return ErrNextcloudPublicationDenied
++		}
++	}
++	// Repeat grants after remote checks; no operation-wide/context grant cache
++	// may extend a revoked org share, shared Agent or directory permission.
++	if err := g.checkCurrentKBReads(ctx, caller, targets, controlled, scope); err != nil {
++		return err
++	}
++	if len(lineage.Sources) == 0 {
++		return nil
++	}
++	currentDirectory, err := g.publication.currentDirectoryIdentity(ctx)
++	if err != nil {
++		return err
++	}
++	if currentDirectory.ID != checkedDirectory.ID || currentDirectory.DirectoryID != checkedDirectory.DirectoryID ||
++		currentDirectory.ObjectGUID != checkedDirectory.ObjectGUID || *currentDirectory.UserID != *checkedDirectory.UserID {
++		return ErrNextcloudPublicationDenied
++	}
++	matches, err := g.snapshots.RecheckNextcloudSourceLineage(ctx, lineage)
++	if err != nil {
++		return fmt.Errorf("%w: final coherent lineage snapshot", ErrNextcloudPublicationUnavailable)
++	}
++	if !matches {
++		return ErrNextcloudPublicationDenied
++	}
++	return nil
++}
++
++// Resolve performs both trusted identity resolution and current authorization.
++// Producers must still union every actual input, not just displayed citations.
++func (g *NextcloudSourceLineageGuard) Resolve(ctx context.Context, tenantID uint64, kbID, knowledgeID string, scope LineageReadScope) (*types.SourceLineage, error) {
++	if g == nil || g.snapshots == nil {
++		return types.UnknownSourceLineage(), ErrNextcloudPublicationUnavailable
++	}
++	_, identity, err := g.snapshots.ResolveNextcloudSourceLineage(ctx, tenantID, kbID, knowledgeID)
++	if err != nil {
++		return types.UnknownSourceLineage(), fmt.Errorf("%w: trusted lineage lookup", ErrNextcloudPublicationUnavailable)
++	}
++	if identity.TenantID != tenantID || identity.KnowledgeBaseID != kbID || identity.KnowledgeID != knowledgeID {
++		return types.UnknownSourceLineage(), ErrNextcloudPublicationDenied
++	}
++	lineage, err := types.NewCompleteSourceLineage(identity)
++	if err != nil {
++		return types.UnknownSourceLineage(), ErrNextcloudPublicationDenied
++	}
++	if err := g.Check(ctx, lineage, scope); err != nil {
++		return types.UnknownSourceLineage(), err
++	}
++	return lineage, nil
++}
++
++func (g *NextcloudSourceLineageGuard) checkCurrentKBReads(ctx context.Context, caller types.Caller, targets types.SearchTargets,
++	controlled map[string]uint64, scope LineageReadScope,
++) error {
++	// A selected shared Agent supplies configuration/system input even when a
++	// turn returns no KB target. Source-empty does not exempt its access check.
++	if scope.AgentID != "" {
++		if scope.AgentTenantID == 0 {
++			return ErrNextcloudPublicationDenied
++		}
++		if scope.AgentTenantID != caller.TenantID {
++			if g.agents == nil {
++				return ErrNextcloudPublicationUnavailable
++			}
++			agent, err := g.agents.GetSharedAgentForTenant(ctx, caller.TenantID, caller.Role, scope.AgentID, scope.AgentTenantID)
++			if err != nil {
++				return ErrNextcloudPublicationUnavailable
++			}
++			if agent == nil || agent.ID != scope.AgentID || agent.TenantID != scope.AgentTenantID {
++				return ErrNextcloudPublicationDenied
++			}
++		}
++		if g.groups == nil {
++			return ErrNextcloudPublicationUnavailable
++		}
++		use, err := g.groups.EffectivePermission(ctx, scope.AgentTenantID, types.GroupResourceTypeAgent, scope.AgentID, types.ResourceActionUse, time.Now().UTC())
++		if err != nil {
++			return ErrNextcloudPublicationUnavailable
++		}
++		if !use.Allowed {
++			return ErrNextcloudPublicationDenied
++		}
++	}
++	if len(targets) == 0 {
++		return nil
++	}
++	if g.kbs == nil {
++		return ErrNextcloudPublicationUnavailable
++	}
++	seen := map[string]uint64{}
++	for _, target := range targets {
++		if target == nil || target.TenantID == 0 || strings.TrimSpace(target.KnowledgeBaseID) == "" {
++			return ErrNextcloudPublicationDenied
++		}
++		if owner, exists := seen[target.KnowledgeBaseID]; exists {
++			if owner != target.TenantID {
++				return ErrNextcloudPublicationDenied
++			}
++			continue
++		}
++		seen[target.KnowledgeBaseID] = target.TenantID
++		kb, err := g.kbs.GetKnowledgeBaseByIDOnly(ctx, target.KnowledgeBaseID)
++		if err != nil || kb == nil {
++			return ErrNextcloudPublicationUnavailable
++		}
++		if kb.ID != target.KnowledgeBaseID || kb.TenantID != target.TenantID || kb.DeletedAt.Valid {
++			return ErrNextcloudPublicationDenied
++		}
++		if err := types.AuthorizeTenantAPIKeyKnowledgeBases(ctx, kb.ID); err != nil {
++			return ErrNextcloudPublicationDenied
++		}
++		allowed := caller.TenantID == kb.TenantID
++		// Current org permission is independent of an Agent's KB fallback.
++		// Machine callers may hold tenant/role shares without a Web UserID.
++		if !allowed && g.shares != nil {
++			role, shared, err := g.shares.CheckTenantKBPermission(ctx, kb.ID, caller.TenantID, caller.Role)
++			if err != nil {
++				return ErrNextcloudPublicationUnavailable
++			}
++			allowed = shared && role.IsValid() && role.HasPermission(types.OrgRoleViewer)
++		}
++		if !allowed && scope.AgentID != "" {
++			if g.agents == nil || scope.AgentTenantID == 0 {
++				return ErrNextcloudPublicationUnavailable
++			}
++			agent, err := g.agents.GetSharedAgentForTenant(ctx, caller.TenantID, caller.Role, scope.AgentID, scope.AgentTenantID)
++			if err != nil {
++				return ErrNextcloudPublicationUnavailable
++			}
++			allowed = agent != nil && agent.ID == scope.AgentID && agent.TenantID == scope.AgentTenantID && types.SharedAgentIncludesKB(agent, kb)
++		} else if !allowed && g.agents != nil {
++			var err error
++			allowed, err = g.agents.TenantCanAccessKBViaSomeSharedAgent(ctx, caller.TenantID, caller.Role, kb)
++			if err != nil {
++				return ErrNextcloudPublicationUnavailable
++			}
++		}
++		if !allowed {
++			return ErrNextcloudPublicationDenied
++		}
++		_, sourceControlled := controlled[kb.ID]
++		if (sourceControlled || kb.EverHadNextcloudSource) && g.groups == nil {
++			return ErrNextcloudPublicationUnavailable
++		}
++		if g.groups != nil {
++			grant, err := g.groups.EffectivePermission(ctx, kb.TenantID, types.GroupResourceTypeKnowledgeBase, kb.ID, types.ResourceActionRead, time.Now().UTC())
++			if err != nil {
++				return ErrNextcloudPublicationUnavailable
++			}
++			if !grant.Allowed {
++				return ErrNextcloudPublicationDenied
++			}
++		}
++	}
++	return nil
++}
+diff --git a/internal/application/access/nextcloud_source_lineage_review_test.go b/internal/application/access/nextcloud_source_lineage_review_test.go
+new file mode 100644
+index 00000000..ec897b37
+--- /dev/null
++++ b/internal/application/access/nextcloud_source_lineage_review_test.go
+@@ -0,0 +1,227 @@
++package access
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++type reviewLineageSnapshots struct {
++	knowledge map[string]*types.Knowledge
++	identity  map[string]types.SourceIdentity
++}
++
++func (s *reviewLineageSnapshots) ResolveNextcloudSourceLineage(_ context.Context, tenant uint64, kb, id string) (*types.Knowledge, types.SourceIdentity, error) {
++	identity, ok := s.identity[id]
++	if !ok || identity.TenantID != tenant || identity.KnowledgeBaseID != kb {
++		return nil, types.SourceIdentity{}, fmt.Errorf("missing source")
++	}
++	return s.knowledge[id], identity, nil
++}
++
++func (s *reviewLineageSnapshots) RecheckNextcloudSourceLineage(ctx context.Context, lineage *types.SourceLineage) (bool, error) {
++	for _, saved := range lineage.Sources {
++		_, current, err := s.ResolveNextcloudSourceLineage(ctx, saved.TenantID, saved.KnowledgeBaseID, saved.KnowledgeID)
++		if err != nil {
++			return false, err
++		}
++		if current != saved {
++			return false, nil
++		}
++	}
++	return true, nil
++}
++
++// A later source's slow remote authorization must not hide a local generation
++// change to an earlier source in the same dependency set.
++func TestNextcloudSourceLineageReviewEarlierSourceChangesDuringLaterRemoteCall(t *testing.T) {
++	guard, ctx, saved, single, _ := lineagePolicyFixture(t)
++	first := saved.Sources[0]
++	second := first
++	second.KnowledgeID = "document-2"
++	second.FileID = "43"
++	second.ExternalID = "nextcloud:instance-1:43"
++	second.ETag = "etag-43"
++	knowledge2 := *single.knowledge
++	knowledge2.ID = second.KnowledgeID
++	metadata := single.knowledge.GetMetadata()
++	metadata["nextcloud_file_id"] = second.FileID
++	metadata["external_id"] = second.ExternalID
++	metadata["nextcloud_etag"] = second.ETag
++	encoded, err := json.Marshal(metadata)
++	require.NoError(t, err)
++	knowledge2.Metadata = types.JSON(encoded)
++	snapshots := &reviewLineageSnapshots{
++		knowledge: map[string]*types.Knowledge{first.KnowledgeID: single.knowledge, second.KnowledgeID: &knowledge2},
++		identity:  map[string]types.SourceIdentity{first.KnowledgeID: first, second.KnowledgeID: second},
++	}
++	guard.snapshots = snapshots
++	lineage, err := types.NewCompleteSourceLineage(first, second)
++	require.NoError(t, err)
++	require.Equal(t, first, lineage.Sources[0], "the changed source must be checked before the delayed source")
++	guard.publication.authorize = func(_ context.Context, _ *types.DataSourceConfig, _, _, _, _ string, fileID int64) (nextcloud.AuthorizationDecision, error) {
++		if fileID == 43 {
++			current := snapshots.identity[first.KnowledgeID]
++			current.Revision++
++			snapshots.identity[first.KnowledgeID] = current
++			return nextcloud.AuthorizationDecision{Allow: true, SourceETag: second.ETag}, nil
++		}
++		return nextcloud.AuthorizationDecision{Allow: true, SourceETag: first.ETag}, nil
++	}
++	require.ErrorIs(t, guard.Check(ctx, lineage, LineageReadScope{}), ErrNextcloudPublicationDenied)
++	require.NotEqual(t, first.Revision, snapshots.identity[first.KnowledgeID].Revision, "the later remote call must actually change the earlier source")
++}
++
++// An identity can become disabled while the source response is in flight,
++// although the KB's group-resource policy still inherits workspace access.
++func TestNextcloudSourceLineageReviewDirectoryRevokedDuringRemoteCall(t *testing.T) {
++	guard, ctx, saved, _, _ := lineagePolicyFixture(t)
++	directory := guard.publication.directories.(*publicationDirectoryLookup)
++	guard.publication.authorize = func(context.Context, *types.DataSourceConfig, string, string, string, string, int64) (nextcloud.AuthorizationDecision, error) {
++		directory.identities[0].Status = types.DirectoryObjectDisabled
++		return nextcloud.AuthorizationDecision{Allow: true, SourceETag: saved.Sources[0].ETag}, nil
++	}
++	require.ErrorIs(t, guard.Check(ctx, saved, LineageReadScope{}), ErrNextcloudPublicationDenied)
++	require.Equal(t, types.DirectoryObjectDisabled, directory.identities[0].Status, "the remote callback must actually revoke the identity")
++}
++
++func TestNextcloudSourceLineageReviewCompleteEmptyRequiresCurrentSharedAgent(t *testing.T) {
++	guard, ctx, _, _, _ := lineagePolicyFixture(t)
++	ctx = types.WithCaller(ctx, types.Caller{TenantID: 99, UserID: "person-1", Role: types.TenantRoleViewer})
++	agents := &reviewLineageAgents{}
++	guard.agents = agents
++	lineage, err := types.NewCompleteSourceLineage()
++	require.NoError(t, err)
++	// This plain-chat turn still uses the selected shared Agent's configuration
++	// and system prompt, even though it consulted no knowledge base.
++	scope := LineageReadScope{AgentID: "agent-1", AgentTenantID: 12}
++	require.ErrorIs(t, guard.Check(ctx, lineage, scope), ErrNextcloudPublicationDenied, "revoked Agent must not be admitted by an empty source set")
++	require.Positive(t, agents.calls, "the current Agent grant must be reloaded")
++}
++
++type reviewLineageAgents struct {
++	calls int
++}
++
++func (a *reviewLineageAgents) GetSharedAgentForTenant(context.Context, uint64, types.TenantRole, string, ...uint64) (*types.CustomAgent, error) {
++	a.calls++
++	return nil, nil
++}
++
++func (a *reviewLineageAgents) TenantCanAccessKBViaSomeSharedAgent(context.Context, uint64, types.TenantRole, *types.KnowledgeBase) (bool, error) {
++	return false, nil
++}
++
++type reviewLineageGroups struct {
++	onRead func()
++}
++
++func (g *reviewLineageGroups) EffectivePermission(context.Context, uint64, types.ResourceType, string, types.ResourceAction, time.Time) (types.EffectiveResourcePermission, error) {
++	g.onRead()
++	return types.EffectiveResourcePermission{Allowed: true}, nil
++}
++
++func TestNextcloudSourceLineageReviewLocalRechecksFollowFinalGrantLookup(t *testing.T) {
++	for _, change := range []string{"generation", "directory identity"} {
++		t.Run(change, func(t *testing.T) {
++			guard, ctx, saved, snapshots, _ := lineagePolicyFixture(t)
++			remoteDone := false
++			changed := false
++			directory := guard.publication.directories.(*publicationDirectoryLookup)
++			guard.publication.authorize = func(context.Context, *types.DataSourceConfig, string, string, string, string, int64) (nextcloud.AuthorizationDecision, error) {
++				remoteDone = true
++				return nextcloud.AuthorizationDecision{Allow: true, SourceETag: saved.Sources[0].ETag}, nil
++			}
++			guard.groups = &reviewLineageGroups{onRead: func() {
++				if !remoteDone || changed {
++					return
++				}
++				changed = true
++				if change == "generation" {
++					snapshots.identity.Revision++
++				} else {
++					directory.identities[0].Status = types.DirectoryObjectDisabled
++				}
++			}}
++			require.ErrorIs(t, guard.Check(ctx, saved, LineageReadScope{}), ErrNextcloudPublicationDenied)
++			require.True(t, changed, "the final grant lookup must be exercised")
++		})
++	}
++}
++
++func TestNextcloudSourceLineageReviewOrdinaryAPISharedKBRetainsExistingGrant(t *testing.T) {
++	guard, ctx, _, _, _ := lineagePolicyFixture(t)
++	guard.groups = nil
++	kb := guard.kbs.(*lineageKBStub).kb
++	kb.EverHadNextcloudSource = false
++	shares := &lineageSharesStub{allowed: true}
++	guard.shares = shares
++	caller := types.Caller{TenantID: 99, Role: types.TenantRoleViewer}
++	ctx = types.WithCaller(ctx, caller)
++	ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalAPITenant, ID: "api-key-99"})
++	ctx = types.WithTenantAPIKeyScope(ctx, types.TenantAPIKeyScope{KnowledgeBaseIDs: types.StringArray{kb.ID}})
++	// The existing resource authorizer does not require a web-user ID for this
++	// tenant API key's current organization grant and explicit ordinary KB scope.
++	_, err := ResolveKB(ctx, KBRequest{Caller: caller}, kb, types.OrgRoleViewer, shares, nil)
++	require.NoError(t, err)
++	lineage, err := types.NewCompleteSourceLineage()
++	require.NoError(t, err)
++	scope := LineageReadScope{Targets: types.SearchTargets{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: kb.TenantID, KnowledgeBaseID: kb.ID}}}
++	require.NoError(t, guard.Check(ctx, lineage, scope))
++}
++
++type reviewLineageAgentUseDenied struct {
++	agentCalls int
++}
++
++func (g *reviewLineageAgentUseDenied) EffectivePermission(_ context.Context, _ uint64, kind types.ResourceType, _ string, action types.ResourceAction, _ time.Time) (types.EffectiveResourcePermission, error) {
++	if kind == types.GroupResourceTypeAgent {
++		g.agentCalls++
++		return types.EffectiveResourcePermission{Allowed: false, Action: action}, nil
++	}
++	return types.EffectiveResourcePermission{Allowed: true, Action: action}, nil
++}
++
++func TestNextcloudSourceLineageReviewCompleteEmptyRequiresAgentUseGroupGrant(t *testing.T) {
++	for _, callerTenant := range []uint64{12, 99} {
++		t.Run(fmt.Sprintf("caller-%d", callerTenant), func(t *testing.T) {
++			guard, ctx, _, _, _ := lineagePolicyFixture(t)
++			ctx = types.WithCaller(ctx, types.Caller{TenantID: callerTenant, UserID: "person-1", Role: types.TenantRoleViewer})
++			guard.agents = &lineageAgentsStub{allowed: true, agent: &types.CustomAgent{ID: "agent-1", TenantID: 12}}
++			groups := &reviewLineageAgentUseDenied{}
++			guard.groups = groups
++			lineage, err := types.NewCompleteSourceLineage()
++			require.NoError(t, err)
++			scope := LineageReadScope{AgentID: "agent-1", AgentTenantID: 12}
++			require.ErrorIs(t, guard.Check(ctx, lineage, scope), ErrNextcloudPublicationDenied)
++			require.Positive(t, groups.agentCalls, "existing Agent/use directory-resource permission must be checked")
++		})
++	}
++}
++
++func TestNextcloudSourceLineageReviewOrdinaryOrgGrantRemainsIndependentOfAgentKBSelection(t *testing.T) {
++	guard, ctx, _, _, _ := lineagePolicyFixture(t)
++	kb := guard.kbs.(*lineageKBStub).kb
++	kb.EverHadNextcloudSource = false
++	caller := types.Caller{TenantID: 99, UserID: "person-1", Role: types.TenantRoleViewer}
++	ctx = types.WithCaller(ctx, caller)
++	shares := &lineageSharesStub{allowed: true}
++	guard.shares = shares
++	agent := &types.CustomAgent{ID: "agent-1", TenantID: 12}
++	agent.Config.KBSelectionMode = "selected"
++	agent.Config.KnowledgeBases = []string{"other-kb"}
++	agents := &lineageAgentsStub{allowed: true, agent: agent}
++	guard.agents = agents
++	_, err := ResolveKB(ctx, KBRequest{Caller: caller, AgentID: agent.ID, AgentSourceTenantID: "12"}, kb, types.OrgRoleViewer, shares, agents)
++	require.NoError(t, err, "current organization KB permission grants read independently of an Agent KB fallback")
++	lineage, err := types.NewCompleteSourceLineage()
++	require.NoError(t, err)
++	scope := LineageReadScope{AgentID: agent.ID, AgentTenantID: agent.TenantID, Targets: types.SearchTargets{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: kb.TenantID, KnowledgeBaseID: kb.ID}}}
++	require.NoError(t, guard.Check(ctx, lineage, scope))
++}
+diff --git a/internal/application/access/nextcloud_source_lineage_test.go b/internal/application/access/nextcloud_source_lineage_test.go
+new file mode 100644
+index 00000000..39993ecd
+--- /dev/null
++++ b/internal/application/access/nextcloud_source_lineage_test.go
+@@ -0,0 +1,273 @@
++package access
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++type lineageSnapshotStub struct {
++	knowledge *types.Knowledge
++	identity  types.SourceIdentity
++	err       error
++	batchErr  error
++	calls     int
++	onRead    func(int)
++}
++
++func (s *lineageSnapshotStub) RecheckNextcloudSourceLineage(ctx context.Context, lineage *types.SourceLineage) (bool, error) {
++	if s.batchErr != nil {
++		return false, s.batchErr
++	}
++	for _, saved := range lineage.Sources {
++		_, current, err := s.ResolveNextcloudSourceLineage(ctx, saved.TenantID, saved.KnowledgeBaseID, saved.KnowledgeID)
++		if err != nil {
++			return false, err
++		}
++		if current != saved {
++			return false, nil
++		}
++	}
++	return true, nil
++}
++
++func (s *lineageSnapshotStub) ResolveNextcloudSourceLineage(_ context.Context, tenant uint64, kb, id string) (*types.Knowledge, types.SourceIdentity, error) {
++	s.calls++
++	if s.onRead != nil {
++		s.onRead(s.calls)
++	}
++	if s.err != nil {
++		return nil, types.SourceIdentity{}, s.err
++	}
++	if tenant != s.identity.TenantID || kb != s.identity.KnowledgeBaseID || id != s.identity.KnowledgeID {
++		return nil, types.SourceIdentity{}, errors.New("not found")
++	}
++	return s.knowledge, s.identity, nil
++}
++
++type lineageKBStub struct {
++	kb  *types.KnowledgeBase
++	err error
++}
++
++func (s *lineageKBStub) GetKnowledgeBaseByIDOnly(context.Context, string) (*types.KnowledgeBase, error) {
++	return s.kb, s.err
++}
++
++type lineageSharesStub struct {
++	allowed bool
++	err     error
++	calls   int
++}
++
++func (s *lineageSharesStub) CheckTenantKBPermission(context.Context, string, uint64, types.TenantRole) (types.OrgMemberRole, bool, error) {
++	s.calls++
++	return types.OrgRoleViewer, s.allowed, s.err
++}
++
++type lineageGroupsStub struct {
++	allowed bool
++	err     error
++	callers []types.Caller
++}
++
++func (s *lineageGroupsStub) EffectivePermission(ctx context.Context, tenant uint64, kind types.ResourceType, kb string, action types.ResourceAction, now time.Time) (types.EffectiveResourcePermission, error) {
++	s.callers = append(s.callers, types.CallerFromContext(ctx))
++	return types.EffectiveResourcePermission{Allowed: s.allowed}, s.err
++}
++
++type lineageAgentsStub struct {
++	agent   *types.CustomAgent
++	allowed bool
++	err     error
++}
++
++func (s *lineageAgentsStub) GetSharedAgentForTenant(context.Context, uint64, types.TenantRole, string, ...uint64) (*types.CustomAgent, error) {
++	if !s.allowed {
++		return nil, s.err
++	}
++	return s.agent, s.err
++}
++func (s *lineageAgentsStub) TenantCanAccessKBViaSomeSharedAgent(context.Context, uint64, types.TenantRole, *types.KnowledgeBase) (bool, error) {
++	return s.allowed, s.err
++}
++
++func lineagePolicyFixture(t *testing.T) (*NextcloudSourceLineageGuard, context.Context, *types.SourceLineage, *lineageSnapshotStub, *lineageGroupsStub) {
++	t.Helper()
++	publication, ctx, knowledge := publicationFixture(t)
++	knowledge.ID = "document-1"
++	knowledge.ParseStatus = types.ParseStatusCompleted
++	knowledge.EnableStatus = "enabled"
++	identity := types.SourceIdentity{Provider: types.ConnectorTypeNextcloud, TenantID: 12, KnowledgeBaseID: "kb-1", DataSourceID: "source-1", PairOperationID: "pair-1",
++		InstanceID: "instance-1", BindingID: "binding-1", FileID: "42", ExternalID: "nextcloud:instance-1:42", KnowledgeID: "document-1", Revision: 1, ETag: "etag-42"}
++	snapshots := &lineageSnapshotStub{knowledge: knowledge, identity: identity}
++	groups := &lineageGroupsStub{allowed: true}
++	guard := NewNextcloudSourceLineageGuard(snapshots, &lineageKBStub{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 12, EverHadNextcloudSource: true}}, nil, nil, groups, publication)
++	lineage, err := types.NewCompleteSourceLineage(identity)
++	require.NoError(t, err)
++	return guard, ctx, lineage, snapshots, groups
++}
++
++func TestNextcloudSourceLineageChecksOriginalIdentityAndVersion(t *testing.T) {
++	guard, ctx, saved, snapshots, _ := lineagePolicyFixture(t)
++	require.NoError(t, guard.Check(ctx, saved, LineageReadScope{}))
++	for name, change := range map[string]func(*types.SourceIdentity){
++		"same knowledge reindexed etag":  func(s *types.SourceIdentity) { s.ETag = "new-etag" },
++		"same etag new build generation": func(s *types.SourceIdentity) { s.Revision++ },
++		"pair recreated":                 func(s *types.SourceIdentity) { s.PairOperationID = "other-pair" },
++		"binding moved":                  func(s *types.SourceIdentity) { s.BindingID = "other-binding" },
++		"current candidate changed":      func(s *types.SourceIdentity) { s.KnowledgeID = "new-candidate" },
++	} {
++		t.Run(name, func(t *testing.T) {
++			g, c, original, current, _ := lineagePolicyFixture(t)
++			change(&current.identity)
++			require.Error(t, g.Check(c, original, LineageReadScope{}))
++		})
++	}
++	// Name/path/observation bookkeeping is not part of the saved content identity.
++	snapshots.knowledge.Title = "renamed"
++	snapshots.knowledge.FileName = "renamed.md"
++	require.NoError(t, guard.Check(ctx, saved, LineageReadScope{}))
++	resolved, err := guard.Resolve(ctx, 12, "kb-1", "document-1", LineageReadScope{})
++	require.NoError(t, err)
++	require.Equal(t, saved, resolved)
++}
++
++func TestNextcloudSourceLineageRechecksFreshGrantsAndLocalVersionAfterRemoteAuth(t *testing.T) {
++	for _, changed := range []string{"KB directory grant", "org share", "shared agent", "local generation"} {
++		t.Run(changed, func(t *testing.T) {
++			guard, ctx, saved, snapshots, groups := lineagePolicyFixture(t)
++			shares := &lineageSharesStub{allowed: true}
++			guard.shares = shares
++			scope := LineageReadScope{}
++			if changed == "org share" || changed == "shared agent" {
++				ctx = types.WithCaller(ctx, types.Caller{TenantID: 99, UserID: "person-1", Role: types.TenantRoleViewer})
++				ctx = types.WithExecutionTenant(ctx, 12)
++				// An old exact upstream context grant must not bypass fresh checks.
++				ctx = (&KBAccess{KnowledgeBase: &types.KnowledgeBase{ID: "kb-1", TenantID: 12}, Caller: types.CallerFromContext(ctx), EffectiveTenantID: 12, Permission: types.OrgRoleViewer}).WithGrant(ctx)
++			}
++			agent := &types.CustomAgent{ID: "agent-1", TenantID: 12}
++			agent.Config.KBSelectionMode = "selected"
++			agent.Config.KnowledgeBases = []string{"kb-1"}
++			agents := &lineageAgentsStub{allowed: true, agent: agent}
++			if changed == "shared agent" {
++				guard.agents = agents
++				scope.AgentID = "agent-1"
++				scope.AgentTenantID = 12
++			}
++			guard.publication.authorize = func(context.Context, *types.DataSourceConfig, string, string, string, string, int64) (nextcloud.AuthorizationDecision, error) {
++				switch changed {
++				case "KB directory grant":
++					groups.allowed = false
++				case "org share":
++					shares.allowed = false
++				case "shared agent":
++					agents.allowed = false
++				case "local generation":
++					snapshots.identity.Revision++
++				}
++				return nextcloud.AuthorizationDecision{Allow: true, SourceETag: "etag-42"}, nil
++			}
++			require.ErrorIs(t, guard.Check(ctx, saved, scope), ErrNextcloudPublicationDenied)
++		})
++	}
++}
++
++func TestNextcloudSourceLineageSharedEffectiveTenantRequiresCurrentCallerGrant(t *testing.T) {
++	guard, ctx, saved, _, groups := lineagePolicyFixture(t)
++	ctx = types.WithCaller(ctx, types.Caller{TenantID: 99, UserID: "person-1", Role: types.TenantRoleViewer})
++	ctx = types.WithExecutionTenant(ctx, 12)
++	shares := &lineageSharesStub{allowed: true}
++	guard.shares = shares
++	require.NoError(t, guard.Check(ctx, saved, LineageReadScope{}))
++	for _, caller := range groups.callers {
++		require.Equal(t, uint64(99), caller.TenantID)
++		require.Equal(t, "person-1", caller.UserID)
++	}
++	shares.allowed = false
++	require.ErrorIs(t, guard.Check(ctx, saved, LineageReadScope{}), ErrNextcloudPublicationDenied)
++	// Merely changing execution scope never creates a caller grant.
++	require.Equal(t, uint64(99), types.CallerFromContext(ctx).TenantID)
++}
++
++func TestNextcloudSourceLineageUnknownUnsupportedAndUnavailableDeny(t *testing.T) {
++	for _, name := range []string{"legacy NULL", "unknown", "overflow", "snapshot error", "KB error", "missing groups", "uncaptured caller", "machine", "web API key", "principal mismatch", "unknown principal", "source denied", "source error", "source etag changed"} {
++		t.Run(name, func(t *testing.T) {
++			guard, ctx, lineage, snapshots, _ := lineagePolicyFixture(t)
++			switch name {
++			case "legacy NULL":
++				lineage = nil
++			case "unknown":
++				lineage = types.UnknownSourceLineage()
++			case "overflow":
++				lineage.Sources = make([]types.SourceIdentity, types.SourceLineageMaxSources+1)
++			case "snapshot error":
++				snapshots.err = errors.New("database offline")
++			case "KB error":
++				guard.kbs.(*lineageKBStub).err = errors.New("KB offline")
++			case "missing groups":
++				guard.groups = nil
++			case "uncaptured caller":
++				ctx = context.Background()
++			case "machine":
++				ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalMCPEndpoint, ID: "endpoint"})
++			case "web API key":
++				ctx = types.WithTenantAPIKeyScope(ctx, types.TenantAPIKeyScope{FullAccess: true})
++			case "principal mismatch":
++				ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalWebUser, ID: "other"})
++			case "unknown principal":
++				ctx = types.WithPrincipal(ctx, types.Principal{Type: "unsupported", ID: "person-1"})
++			case "source denied":
++				guard.publication.authorize = func(context.Context, *types.DataSourceConfig, string, string, string, string, int64) (nextcloud.AuthorizationDecision, error) {
++					return nextcloud.AuthorizationDecision{}, nil
++				}
++			case "source error":
++				guard.publication.authorize = func(context.Context, *types.DataSourceConfig, string, string, string, string, int64) (nextcloud.AuthorizationDecision, error) {
++					return nextcloud.AuthorizationDecision{}, errors.New("source offline")
++				}
++			case "source etag changed":
++				guard.publication.authorize = func(context.Context, *types.DataSourceConfig, string, string, string, string, int64) (nextcloud.AuthorizationDecision, error) {
++					return nextcloud.AuthorizationDecision{Allow: true, SourceETag: "new-etag"}, nil
++				}
++			}
++			require.Error(t, guard.Check(ctx, lineage, LineageReadScope{}))
++		})
++	}
++}
++
++func TestNextcloudSourceLineageExplicitEmptyStillChecksOrdinaryKBAndAPIKeyScope(t *testing.T) {
++	guard, ctx, _, _, _ := lineagePolicyFixture(t)
++	guard.snapshots = nil
++	guard.publication = nil
++	guard.groups = nil
++	guard.kbs.(*lineageKBStub).kb.EverHadNextcloudSource = false
++	lineage, err := types.NewCompleteSourceLineage()
++	require.NoError(t, err)
++	scope := LineageReadScope{Targets: types.SearchTargets{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 12, KnowledgeBaseID: "kb-1"}}}
++	require.NoError(t, guard.Check(ctx, lineage, scope))
++	ctx = types.WithCaller(ctx, types.Caller{TenantID: 99, UserID: "person-1"})
++	require.ErrorIs(t, guard.Check(ctx, lineage, scope), ErrNextcloudPublicationDenied)
++	guard.shares = &lineageSharesStub{allowed: true}
++	require.NoError(t, guard.Check(ctx, lineage, scope))
++	apiCtx := types.WithCaller(ctx, types.Caller{TenantID: 12, Role: types.TenantRoleViewer})
++	apiCtx = types.WithPrincipal(apiCtx, types.Principal{Type: types.PrincipalAPITenant, ID: "api-key"})
++	apiCtx = types.WithTenantAPIKeyScope(apiCtx, types.TenantAPIKeyScope{KnowledgeBaseIDs: types.StringArray{"other-kb"}})
++	require.ErrorIs(t, guard.Check(apiCtx, lineage, scope), ErrNextcloudPublicationDenied)
++	apiCtx = types.WithTenantAPIKeyScope(apiCtx, types.TenantAPIKeyScope{KnowledgeBaseIDs: types.StringArray{"kb-1"}})
++	require.NoError(t, guard.Check(apiCtx, lineage, scope), "explicit ordinary lineage preserves valid machine KB scope")
++	guard.kbs.(*lineageKBStub).kb.TenantID = 99 // Wrong persisted owner for requested scope.
++	require.ErrorIs(t, guard.Check(ctx, lineage, scope), ErrNextcloudPublicationDenied)
++}
++
++func TestNextcloudSourceLineageFinalSnapshotFailureIsUnavailable(t *testing.T) {
++	guard, ctx, saved, snapshots, _ := lineagePolicyFixture(t)
++	snapshots.batchErr = errors.New("snapshot store offline")
++	err := guard.Check(ctx, saved, LineageReadScope{})
++	require.ErrorIs(t, err, ErrNextcloudPublicationUnavailable)
++	require.NotErrorIs(t, err, ErrNextcloudPublicationDenied)
 +}
 diff --git a/internal/application/readlease/nextcloud_content_read.go b/internal/application/readlease/nextcloud_content_read.go
 new file mode 100644
@@ -18862,6 +19802,455 @@ index 00000000..fdbff91d
 +	defer db.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
 +	require.NoError(t, db.Exec(`SET search_path TO "`+schema+`"`).Error)
 +	testNextcloudSourceHealthObservations(t, db)
++}
+diff --git a/internal/application/repository/nextcloud_source_lineage.go b/internal/application/repository/nextcloud_source_lineage.go
+new file mode 100644
+index 00000000..9fa6b300
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_lineage.go
+@@ -0,0 +1,231 @@
++package repository
++
++import (
++	"bytes"
++	"context"
++	"database/sql"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"math"
++	"strconv"
++	"time"
++	"unicode/utf8"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++var (
++	ErrNextcloudLineageSnapshotDenied = errors.New("Nextcloud lineage snapshot is unavailable or changed")
++	ErrNextcloudLineageSnapshotStore  = errors.New("Nextcloud lineage snapshot storage unavailable")
++)
++
++// ResolveNextcloudSourceLineage is an unused producer boundary. Arguments are
++// the server-resolved document scope, not citation/model metadata. Every part
++// of the returned identity is reloaded from persisted rows in one snapshot.
++// It neither authorizes the caller nor accounts for other influencing inputs.
++func (r *knowledgeRepository) ResolveNextcloudSourceLineage(
++	ctx context.Context, tenantID uint64, kbID, knowledgeID string,
++) (*types.Knowledge, types.SourceIdentity, error) {
++	var knowledge *types.Knowledge
++	var identity types.SourceIdentity
++	if r == nil || r.db == nil || tenantID == 0 || tenantID > math.MaxInt64 || kbID == "" || knowledgeID == "" {
++		return nil, identity, ErrNextcloudLineageSnapshotDenied
++	}
++	if r.db.Dialector.Name() != "postgres" && r.db.Dialector.Name() != "sqlite" {
++		return nil, identity, ErrNextcloudLineageSnapshotStore
++	}
++	// PostgreSQL READ COMMITTED would permit a mixed version/pair/fence across
++	// queries. SQLite's read transaction supplies a coherent database snapshot.
++	options := &sql.TxOptions{ReadOnly: true}
++	if r.db.Dialector.Name() == "postgres" {
++		options.Isolation = sql.LevelRepeatableRead
++	}
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var err error
++		knowledge, identity, err = r.resolveNextcloudSourceLineageInTx(tx, tenantID, kbID, knowledgeID)
++		return err
++
++	}, options)
++	if err != nil {
++		return nil, types.SourceIdentity{}, err
++	}
++	return knowledge, identity, nil
++}
++
++func (r *knowledgeRepository) resolveNextcloudSourceLineageInTx(tx *gorm.DB, tenantID uint64, kbID, knowledgeID string) (*types.Knowledge, types.SourceIdentity, error) {
++	var knowledge *types.Knowledge
++	var identity types.SourceIdentity
++	err := func() error {
++		var current types.Knowledge
++		if err := tx.Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?", knowledgeID, tenantID, kbID).
++			Take(&current).Error; err != nil {
++			return lineageSnapshotReadError(err)
++		}
++		if current.Channel != types.ConnectorTypeNextcloud || current.ParseStatus != types.ParseStatusCompleted || current.EnableStatus != "enabled" {
++			return ErrNextcloudLineageSnapshotDenied
++		}
++		metadata, err := strictLineageKnowledgeMetadata(current.Metadata)
++		if err != nil {
++			return err
++		}
++		var kb types.KnowledgeBase
++		if err := tx.Select("id", "tenant_id", "deleted_at").Where("id = ? AND tenant_id = ?", kbID, tenantID).
++			Take(&kb).Error; err != nil {
++			return lineageSnapshotReadError(err)
++		}
++		candidate, ready, err := r.publicationCandidate(tx, knowledgeID, false)
++		if err != nil {
++			return fmt.Errorf("%w: publication snapshot", ErrNextcloudLineageSnapshotStore)
++		}
++		if !ready || candidate.version.State != "published" || candidate.version.TenantID != tenantID ||
++			candidate.version.KnowledgeBaseID != kbID || candidate.version.CandidateKnowledgeID != knowledgeID {
++			return ErrNextcloudLineageSnapshotDenied
++		}
++		var pair NextcloudSourcePairing
++		if err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND state = 'active'",
++			tenantID, kbID, candidate.version.DataSourceID).Take(&pair).Error; err != nil {
++			return lineageSnapshotReadError(err)
++		}
++		var observed struct {
++			Revision             int64
++			DesiredETag          string `gorm:"column:desired_etag"`
++			CandidateKnowledgeID string
++			State                string
++			SourceUpdatedAt      time.Time
++		}
++		if err := tx.Table("nextcloud_source_revisions").Where("tenant_id = ? AND knowledge_base_id = ? AND datasource_id = ? AND external_id = ?",
++			tenantID, kbID, candidate.version.DataSourceID, candidate.version.ExternalID).
++			Order("revision DESC").Take(&observed).Error; err != nil {
++			return lineageSnapshotReadError(err)
++		}
++		if observed.Revision <= 0 || observed.DesiredETag != candidate.version.DesiredETag ||
++			observed.CandidateKnowledgeID != knowledgeID || observed.State != "published" || !observed.SourceUpdatedAt.Equal(candidate.version.UpdatedAt) {
++			return ErrNextcloudLineageSnapshotDenied
++		}
++		var fence nextcloudContentFence
++		var kbFence nextcloudContentFence
++		if err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND knowledge_id = ''", tenantID, kbID).
++			Take(&kbFence).Error; err != nil {
++			return lineageSnapshotReadError(err)
++		}
++		if kbFence.State != "open" || kbFence.Epoch <= 0 {
++			return ErrNextcloudLineageSnapshotDenied
++		}
++		if err := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND knowledge_id = ?", tenantID, kbID, knowledgeID).
++			Take(&fence).Error; err != nil {
++			return lineageSnapshotReadError(err)
++		}
++		if fence.Epoch <= 0 || fence.State != "open" || fence.DataSourceID != candidate.version.DataSourceID || fence.ExternalID != candidate.version.ExternalID {
++			return ErrNextcloudLineageSnapshotDenied
++		}
++		// The observation sequence is not a publication/build generation. The
++		// exact open fence epoch is the durable build-write token; paired with
++		// immutable knowledge ID, it survives same-content path/metadata edits.
++		identity = types.SourceIdentity{Provider: types.ConnectorTypeNextcloud, TenantID: current.TenantID,
++			KnowledgeBaseID: current.KnowledgeBaseID, DataSourceID: candidate.version.DataSourceID,
++			PairOperationID: pair.OperationID, InstanceID: candidate.instance, BindingID: candidate.binding,
++			FileID: strconv.FormatInt(candidate.fileID, 10), ExternalID: candidate.version.ExternalID,
++			KnowledgeID: current.ID, Revision: uint64(fence.Epoch), ETag: metadata["nextcloud_etag"]}
++		if identity.ETag != candidate.etag || identity.ETag != candidate.version.DesiredETag || identity.Validate() != nil {
++			return ErrNextcloudLineageSnapshotDenied
++		}
++		knowledge = &current
++		return nil
++	}()
++	if err != nil {
++		return nil, types.SourceIdentity{}, err
++	}
++	return knowledge, identity, nil
++}
++
++// RecheckNextcloudSourceLineage compares the entire dependency set in one
++// coherent local snapshot after every remote/grant check has completed. A
++// source checked early cannot be silently changed during a later remote call.
++func (r *knowledgeRepository) RecheckNextcloudSourceLineage(ctx context.Context, lineage *types.SourceLineage) (bool, error) {
++	if lineage.RequireComplete() != nil {
++		return false, nil
++	}
++	if r == nil || r.db == nil {
++		return false, ErrNextcloudLineageSnapshotStore
++	}
++	options := &sql.TxOptions{ReadOnly: true}
++	switch r.db.Dialector.Name() {
++	case "postgres":
++		options.Isolation = sql.LevelRepeatableRead
++	case "sqlite":
++	default:
++		return false, ErrNextcloudLineageSnapshotStore
++	}
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		for _, saved := range lineage.Sources {
++			_, current, err := r.resolveNextcloudSourceLineageInTx(tx, saved.TenantID, saved.KnowledgeBaseID, saved.KnowledgeID)
++			if err != nil {
++				return err
++			}
++			if current != saved {
++				return ErrNextcloudLineageSnapshotDenied
++			}
++		}
++		return nil
++	}, options)
++	if errors.Is(err, ErrNextcloudLineageSnapshotDenied) {
++		return false, nil
++	}
++	if err != nil {
++		return false, err
++	}
++	return true, nil
++}
++
++func lineageSnapshotReadError(err error) error {
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return ErrNextcloudLineageSnapshotDenied
++	}
++	return fmt.Errorf("%w: snapshot read", ErrNextcloudLineageSnapshotStore)
++}
++
++// Metadata may contain unrelated parser fields, but identity keys must be
++// canonical strings and unique. No source identity is recovered from text.
++func strictLineageKnowledgeMetadata(data []byte) (map[string]string, error) {
++	if !utf8.Valid(data) {
++		return nil, ErrNextcloudLineageSnapshotDenied
++	}
++	d := json.NewDecoder(bytes.NewReader(data))
++	start, err := d.Token()
++	if err != nil || start != json.Delim('{') {
++		return nil, ErrNextcloudLineageSnapshotDenied
++	}
++	seen := map[string]bool{}
++	out := map[string]string{}
++	for d.More() {
++		token, err := d.Token()
++		key, ok := token.(string)
++		if err != nil || !ok || seen[key] {
++			return nil, ErrNextcloudLineageSnapshotDenied
++		}
++		seen[key] = true
++		var raw json.RawMessage
++		if err := d.Decode(&raw); err != nil {
++			return nil, ErrNextcloudLineageSnapshotDenied
++		}
++		switch key {
++		case "datasource_id", "external_id", "source_resource_id", "nextcloud_instance_id", "nextcloud_binding_id", "nextcloud_file_id", "nextcloud_etag", "nextcloud_target_etag":
++			var value *string
++			if err := json.Unmarshal(raw, &value); err != nil || value == nil {
++				return nil, ErrNextcloudLineageSnapshotDenied
++			}
++			out[key] = *value
++		}
++	}
++	end, err := d.Token()
++	if err != nil || end != json.Delim('}') {
++		return nil, ErrNextcloudLineageSnapshotDenied
++	}
++	if _, err := d.Token(); err != io.EOF {
++		return nil, ErrNextcloudLineageSnapshotDenied
++	}
++	return out, nil
++}
+diff --git a/internal/application/repository/nextcloud_source_lineage_test.go b/internal/application/repository/nextcloud_source_lineage_test.go
+new file mode 100644
+index 00000000..4af2a77e
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_lineage_test.go
+@@ -0,0 +1,206 @@
++package repository
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"os"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++func sourceLineageRepoFixture(t *testing.T) (*knowledgeRepository, *gorm.DB, *types.Knowledge) {
++	t.Helper()
++	repo, db := newNextcloudVersionTestRepo(t)
++	require.NoError(t, db.AutoMigrate(&types.KnowledgeBase{}))
++	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb", TenantID: 7, Name: "source", EmbeddingModelID: "embed", SummaryModelID: "summary"}).Error)
++	script, err := os.ReadFile("../../../migrations/sqlite/000045_nextcloud_source_revisions.up.sql")
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(string(script)).Error)
++	knowledge := insertNextcloudVersionTestKnowledge(t, db, "candidate", "", types.ParseStatusCompleted, "enabled")
++	require.NoError(t, repo.StageNextcloudVersion(context.Background(), 7, "kb", "ds", "nextcloud:instance:77", "original-etag", knowledge.ID))
++	published, err := repo.PublishNextcloudVersion(context.Background(), knowledge.ID)
++	require.NoError(t, err)
++	require.True(t, published)
++	return repo, db, knowledge
++}
++
++func TestNextcloudSourceLineageResolverUsesPersistedTupleAndStableBuildGeneration(t *testing.T) {
++	repo, db, k := sourceLineageRepoFixture(t)
++	ctx := context.Background()
++	knowledge, original, err := repo.ResolveNextcloudSourceLineage(ctx, 7, "kb", k.ID)
++	require.NoError(t, err)
++	require.Equal(t, k.ID, knowledge.ID)
++	require.Equal(t, uint64(7), original.TenantID)
++	require.Equal(t, "ds", original.DataSourceID)
++	require.Equal(t, "instance", original.InstanceID)
++	require.Equal(t, "binding", original.BindingID)
++	require.Equal(t, "77", original.FileID)
++	require.Equal(t, "original-etag", original.ETag)
++	require.Equal(t, uint64(1), original.Revision)
++	require.NotEmpty(t, original.PairOperationID)
++	lineage, err := types.NewCompleteSourceLineage(original)
++	require.NoError(t, err)
++	matches, err := repo.RecheckNextcloudSourceLineage(ctx, lineage)
++	require.NoError(t, err)
++	require.True(t, matches)
++	before := nextcloudRevisionRows(t, mustLineageSQLDB(t, db), "nextcloud:instance:77")
++	metadata := knowledge.GetMetadata()
++	metadata["nextcloud_target_etag"] = "original-etag"
++	metadata["nextcloud_etag"] = ""
++	metadata["nextcloud_path"] = "renamed.md"
++	require.NoError(t, repo.StageNextcloudVersionWithSource(ctx, 7, "kb", "ds", "nextcloud:instance:77", "original-etag", k.ID, "renamed.md", metadata))
++	published, err := repo.PublishNextcloudVersion(ctx, k.ID)
++	require.NoError(t, err)
++	require.True(t, published)
++	after := nextcloudRevisionRows(t, mustLineageSQLDB(t, db), "nextcloud:instance:77")
++	require.Greater(t, len(after), len(before))
++	renamed, stable, err := repo.ResolveNextcloudSourceLineage(ctx, 7, "kb", k.ID)
++	require.NoError(t, err)
++	require.Equal(t, original, stable, "path/observation changes are not a build generation")
++	require.Equal(t, "renamed.md", renamed.FileName)
++	// A new admitted build epoch for the same immutable document is distinct.
++	require.NoError(t, db.Exec("UPDATE nextcloud_content_fences SET epoch=epoch+1 WHERE knowledge_id=?", k.ID).Error)
++	_, newBuild, err := repo.ResolveNextcloudSourceLineage(ctx, 7, "kb", k.ID)
++	require.NoError(t, err)
++	require.NotEqual(t, original.Revision, newBuild.Revision)
++	// Reusing the same document ID for a changed source ETag cannot retain its
++	// former snapshot, even when the parser reuses the content rows.
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds", "nextcloud:instance:77", "new-etag", k.ID))
++	published, err = repo.PublishNextcloudVersion(ctx, k.ID)
++	require.NoError(t, err)
++	require.True(t, published)
++	_, updated, err := repo.ResolveNextcloudSourceLineage(ctx, 7, "kb", k.ID)
++	require.NoError(t, err)
++	require.Equal(t, "new-etag", updated.ETag)
++	require.NotEqual(t, original, updated)
++	matches, err = repo.RecheckNextcloudSourceLineage(ctx, lineage)
++	require.NoError(t, err)
++	require.False(t, matches)
++	require.NoError(t, db.Exec("DROP TABLE nextcloud_source_revisions").Error)
++	matches, err = repo.RecheckNextcloudSourceLineage(ctx, lineage)
++	require.ErrorIs(t, err, ErrNextcloudLineageSnapshotStore)
++	require.False(t, matches)
++}
++
++func mustLineageSQLDB(t *testing.T, db *gorm.DB) *sql.DB {
++	t.Helper()
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	return sqlDB
++}
++
++func TestNextcloudSourceLineageResolverDeniesChangedMissingOrCorruptRows(t *testing.T) {
++	for _, change := range []string{"wrong tenant", "wrong KB", "metadata forged", "paused source", "pair identity", "version hidden", "ledger missing", "fence missing", "KB fence closed", "ledger error"} {
++		t.Run(change, func(t *testing.T) {
++			repo, db, k := sourceLineageRepoFixture(t)
++			tenant := uint64(7)
++			kb := "kb"
++			switch change {
++			case "wrong tenant":
++				tenant = 99
++			case "wrong KB":
++				kb = "other"
++			case "metadata forged":
++				require.NoError(t, db.Model(k).Update("metadata", types.JSON(`{"datasource_id":"other"}`)).Error)
++			case "paused source":
++				require.NoError(t, db.Exec("UPDATE data_sources SET status='paused'").Error)
++			case "pair identity":
++				require.NoError(t, db.Exec("UPDATE nextcloud_source_pairings SET binding_id='other'").Error)
++			case "version hidden":
++				require.NoError(t, db.Exec("UPDATE nextcloud_source_versions SET state='staging'").Error)
++			case "ledger missing":
++				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_revisions").Error)
++			case "fence missing":
++				require.NoError(t, db.Exec("DELETE FROM nextcloud_content_fences WHERE knowledge_id=?", k.ID).Error)
++			case "KB fence closed":
++				require.NoError(t, db.Exec("UPDATE nextcloud_content_fences SET state='retired' WHERE knowledge_id=''").Error)
++			case "ledger error":
++				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_versions").Error)
++			}
++			knowledge, identity, err := repo.ResolveNextcloudSourceLineage(context.Background(), tenant, kb, k.ID)
++			require.Error(t, err)
++			require.Nil(t, knowledge)
++			require.Equal(t, types.SourceIdentity{}, identity)
++		})
++	}
++}
++
++func TestNextcloudSourceLineageResolverRejectsAmbiguousMetadata(t *testing.T) {
++	for _, raw := range []string{`{"datasource_id":"one","datasource_id":"two"}`, `{"datasource_id":1}`, `{"nextcloud_etag":null}`} {
++		_, err := strictLineageKnowledgeMetadata([]byte(raw))
++		require.Error(t, err)
++	}
++	_, err := strictLineageKnowledgeMetadata(append([]byte(`{"datasource_id":"`), append([]byte{0xff}, []byte(`"}`)...)...))
++	require.Error(t, err)
++	good, _ := json.Marshal(map[string]string{"datasource_id": "ds", "nextcloud_etag": "opaque-etag"})
++	metadata, err := strictLineageKnowledgeMetadata(good)
++	require.NoError(t, err)
++	require.Equal(t, "opaque-etag", metadata["nextcloud_etag"])
++}
++
++func TestPostgresNextcloudSourceLineageResolverReadSnapshotAndRename(t *testing.T) {
++	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
++	db := leaseTestPostgres(t)
++	require.NoError(t, db.AutoMigrate(&types.Knowledge{}, &types.KnowledgeBase{}, &types.Chunk{}, &nextcloudSourceVersion{}, &types.DataSource{}, &NextcloudSourcePairing{}, &nextcloudCandidateRetryJob{}))
++	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb", TenantID: 7, Name: "source", EmbeddingModelID: "embed", SummaryModelID: "summary"}).Error)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	migrations, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{})
++	require.NoError(t, err)
++	script, err := os.ReadFile("../../../migrations/versioned/000126_nextcloud_source_revisions.up.sql")
++	require.NoError(t, err)
++	require.NoError(t, migrations.Exec(string(script)).Error)
++	config, err := (&types.DataSourceConfig{Type: types.ConnectorTypeNextcloud, ResourceIDs: []string{"binding"}, Settings: map[string]interface{}{"base_url": "https://nextcloud.example"}, Credentials: map[string]interface{}{"token": "test-token", "key_id": "test_key"}}).ToJSON()
++	require.NoError(t, err)
++	source := &types.DataSource{ID: "ds", TenantID: 7, KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud, Status: types.DataSourceStatusActive, Config: config}
++	require.NoError(t, db.Create(source).Error)
++	// JSONB normalizes representation. Pairing binds the persisted source,
++	// rather than the pre-insert compact JSON used by this test fixture.
++	require.NoError(t, db.Where("id = 'ds'").Take(source).Error)
++	base, sha, binding, err := NextcloudEventDataSourceIdentity(source.Config)
++	require.NoError(t, err)
++	require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "pair", TenantID: 7, KnowledgeBaseID: "kb", DataSourceID: "ds", InstanceID: "instance", BindingID: binding, BaseURL: base, ConfigSHA: sha, State: "active"}).Error)
++	repo := &knowledgeRepository{db: db, nextcloudPublicationCheck: func(context.Context, *types.DataSourceConfig, string, string, int64, string, string) error {
++		return nil
++	}}
++	k := insertNextcloudVersionTestKnowledge(t, db, "candidate", "", types.ParseStatusCompleted, "enabled")
++	ctx := context.Background()
++	require.NoError(t, repo.StageNextcloudVersion(ctx, 7, "kb", "ds", "nextcloud:instance:77", "etag", k.ID))
++	published, err := repo.PublishNextcloudVersion(ctx, k.ID)
++	require.NoError(t, err)
++	require.True(t, published)
++	knowledge, saved, err := repo.ResolveNextcloudSourceLineage(ctx, 7, "kb", k.ID)
++	require.NoError(t, err)
++	metadata := knowledge.GetMetadata()
++	metadata["nextcloud_target_etag"] = "etag"
++	metadata["nextcloud_etag"] = ""
++	metadata["nextcloud_path"] = "renamed.md"
++	require.NoError(t, repo.StageNextcloudVersionWithSource(ctx, 7, "kb", "ds", "nextcloud:instance:77", "etag", k.ID, "renamed.md", metadata))
++	published, err = repo.PublishNextcloudVersion(ctx, k.ID)
++	require.NoError(t, err)
++	require.True(t, published)
++	_, renamed, err := repo.ResolveNextcloudSourceLineage(ctx, 7, "kb", k.ID)
++	require.NoError(t, err)
++	require.Equal(t, saved, renamed)
++	lineage, err := types.NewCompleteSourceLineage(saved)
++	require.NoError(t, err)
++	matches, err := repo.RecheckNextcloudSourceLineage(ctx, lineage)
++	require.NoError(t, err)
++	require.True(t, matches)
++	require.NoError(t, db.Exec("UPDATE nextcloud_content_fences SET epoch=epoch+1 WHERE knowledge_id=?", k.ID).Error)
++	_, changed, err := repo.ResolveNextcloudSourceLineage(ctx, 7, "kb", k.ID)
++	require.NoError(t, err)
++	require.NotEqual(t, saved.Revision, changed.Revision)
++	matches, err = repo.RecheckNextcloudSourceLineage(ctx, lineage)
++	require.NoError(t, err)
++	require.False(t, matches)
++	require.NoError(t, db.Exec("DROP TABLE nextcloud_source_revisions").Error)
++	matches, err = repo.RecheckNextcloudSourceLineage(ctx, lineage)
++	require.ErrorIs(t, err, ErrNextcloudLineageSnapshotStore)
++	require.False(t, matches)
 +}
 diff --git a/internal/application/repository/nextcloud_source_pairing.go b/internal/application/repository/nextcloud_source_pairing.go
 new file mode 100644
@@ -50152,10 +51541,10 @@ index 350dcab7..7ad15d27 100644
  
 diff --git a/internal/types/source_lineage.go b/internal/types/source_lineage.go
 new file mode 100644
-index 00000000..562342a6
+index 00000000..8610a7c2
 --- /dev/null
 +++ b/internal/types/source_lineage.go
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,310 @@
 +package types
 +
 +import (
@@ -50200,8 +51589,10 @@ index 00000000..562342a6
 +	FileID          string `json:"file_id"`
 +	ExternalID      string `json:"external_id"`
 +	KnowledgeID     string `json:"knowledge_id"`
-+	Revision        uint64 `json:"revision"`
-+	ETag            string `json:"etag"`
++	// Revision is the exact open build-fence epoch, paired with KnowledgeID.
++	// It is not the append-only observation/audit sequence number.
++	Revision uint64 `json:"revision"`
++	ETag     string `json:"etag"`
 +}
 +
 +func (s SourceIdentity) Validate() error {
