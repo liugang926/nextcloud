@@ -1351,3 +1351,39 @@ combined patches passed static apply checks and the GitHub patch suites; the
 Docker smoke and direct upgrade. A runtime image switch is still pending. The
 shared LAN WeKnora image predates this correction, so a live chat repair is
 not yet claimed.
+
+## 2026-10-08 built and running RAG77 chat correction
+
+The shared local app and UI now run the complete pinned RAG77 + patch
+`7f9c7f6a0027e42a4dd01b33366051ee7533aeddb9369653b83653165d5b5517`:
+app `sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d`,
+UI `sha256:42649eebce2a6f4b55b6dff59b9e9170a8ee73534523b666ceb932bf56128e54`.
+The normal backend build links AnyDoc and includes the BrowserSkill daemon;
+the normal frontend build uses its exact verified Nginx base. Runtime system
+info reports `77c97fd72f26e84435503d24eeed88cb5dfe1f01+nextcloud.7f9c7f6a0027`.
+PostgreSQL remains `131/false`. This is the pinned RAG baseline, not newer main.
+
+An owned isolated manual-document fixture completed two zero-result turns in
+one session and a third diagnostic-only tool-failure turn. All three emitted
+answer and complete frames with no source-stop or error; six local chat-stub
+calls were observed and the fixture was removed. The [redacted HTTP evidence](
+evidence/rag77-empty-chat-http-2026-10-08.json) identifies the exact image.
+After deployment a new, empty manual KB and local mock model also completed
+an actual shared-stack question; its four temporary resources were removed.
+The existing administrator authenticated, both LAN HTTPS chains verified, and
+Nextcloud authenticated DAV returned 207. Its app remains 0.4.37 with maintenance
+off and no pending database upgrade. [Runtime evidence](
+evidence/rag77-chatfix-shared-runtime-2026-10-08.json) records the observed scope.
+
+Before the image switch, the corrected cold-checkpoint helper captured both
+databases, eight cold volumes, runtime inputs and app code: 16 private artifacts,
+1,594,309,659 bytes. Independent SHA and permission checks passed; the manifest
+SHA-256 is `3ad12fbd4edbefb33b3986ab375c0d85deb6bd7a4518d74e16f79f068f9c7bae`.
+Two earlier attempts refused stopped-port metadata and produced no usable
+backup. Their original services were restored before the validated lifecycle
+fix and final capture. The old app/UI images remain under `pre-chatfix-20261008`
+tags. Capture integrity does not prove restoration or withdrawal replay.
+
+This running revision does not include subsequent Agent-history, source-lineage
+schema132 or frontend dependency updates. Full source/version/history coverage,
+derived GC, real AD/Team Folder and sustained 100GB acceptance remain open.
