@@ -1,7 +1,7 @@
 # Optional Nextcloud LAN HTTPS gateway
 
 The `lan-https` Compose profile serves this development stack at
-`https://10.106.105.128:18482` while its existing HTTP listeners remain in
+`https://10.106.105.121:18482` while its existing HTTP listeners remain in
 place. Nginx terminates TLS and forwards every path and method, including
 WebDAV, to the same Nextcloud container. It binds only the configured private
 LAN address. This profile is excluded from ordinary `docker compose up` and
@@ -10,7 +10,7 @@ from fresh CI stacks that do not have local certificates.
 The default certificate and key are
 `../weknora-ldap-local/certs/weknora-lan-signed.crt` and
 `../weknora-ldap-local/certs/weknora-lan.key`, relative to this repository.
-The certificate covers `10.106.105.128`; its trust root is
+The certificate covers `10.106.105.121`; its trust root is
 `../weknora-ldap-local/certs/weknora-lan-ca.crt` (not `certs/ca.crt`). Install
 that root on each LAN test device before browser testing. Keep the private key
 on the Docker host. Set `NEXTCLOUD_HTTPS_CERT_FILE` and
@@ -21,7 +21,7 @@ helper if the replacement certificate has a different trust root.
 
 ## Start and configure
 
-First run `scripts/allow-lan-access.sh 10.106.105.128` if LAN access has not
+First run `scripts/allow-lan-access.sh 10.106.105.121` if LAN access has not
 already been enabled. It records `NEXTCLOUD_LAN_HOST` and adds that IP to
 `trusted_domains`. Then run the operator helper from this repository:
 
@@ -73,14 +73,14 @@ Use the WeKnora LAN CA certificate, not the LDAP CA:
 ```bash
 ca=../weknora-ldap-local/certs/weknora-lan-ca.crt
 curl --noproxy '*' --cacert "$ca" -I \
-  https://10.106.105.128:18482/
+  https://10.106.105.121:18482/
 curl --noproxy '*' --cacert "$ca" -I \
-  https://10.106.105.128:18482/login
+  https://10.106.105.121:18482/login
 curl --noproxy '*' --cacert "$ca" -I \
-  https://10.106.105.128:18482/.well-known/carddav
+  https://10.106.105.121:18482/.well-known/carddav
 curl --noproxy '*' --cacert "$ca" -i -X PROPFIND -H 'Depth: 0' \
-  https://10.106.105.128:18482/remote.php/dav/files/devadmin/
-curl --noproxy '*' -I http://10.106.105.128:18082/login
+  https://10.106.105.121:18482/remote.php/dav/files/devadmin/
+curl --noproxy '*' -I http://10.106.105.121:18082/login
 dc=(docker compose --env-file .env \
   -f compose.yaml -f integration/nextcloud.lan.yaml \
   -f integration/nextcloud.https.yaml --profile lan-https)
@@ -97,9 +97,9 @@ redirect with `Location: /remote.php/dav/`, and anonymous DAV to return 401.
 With a private test-account netrc file, repeat the DAV `PROPFIND`
 using `curl --netrc-file <file>` and expect 207. The old HTTP `/login` must
 still return 200. Check any `Location` header stays on
-`https://10.106.105.128:18482`. Check the HTTPS `/login` HTML contains only
-`https://10.106.105.128:18482` for its own canonical and icon URLs, while
-the HTTP `/login` HTML still uses `http://10.106.105.128:18082`. A request
+`https://10.106.105.121:18482`. Check the HTTPS `/login` HTML contains only
+`https://10.106.105.121:18482` for its own canonical and icon URLs, while
+the HTTP `/login` HTML still uses `http://10.106.105.121:18082`. A request
 with spoofed `X-Real-IP` and `X-Forwarded-Proto` headers must still produce
 HTTPS origin URLs at the gateway. Then open the HTTPS Files UI and a newly
 indexed citation in a trusted-CA browser. Its scripts, API requests, Files

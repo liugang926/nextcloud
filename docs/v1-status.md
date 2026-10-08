@@ -1202,3 +1202,24 @@ pages return 200. Nextcloud still runs app 0.4.36 with maintenance mode off;
 authenticated DAV over the LAN URL returns 207. A second physical LAN client,
 real enterprise AD/Team Folder permissions, 100-GB content, sustained task
 latency, and derived-index physical GC remain unaccepted.
+
+## 2026-10-08 local LAN address rotation
+
+Docker Desktop restarted after the host's private address changed from
+`10.106.105.128` to `10.106.105.121`. The existing containers resumed, but
+their old host-IP port bindings were absent. After a mode-0600 backup of the
+local settings and public certificate, the WeKnora leaf certificate was
+reissued under the existing local test CA with `10.106.105.121` in its SAN.
+The local WeKnora gateway and external URL, Nextcloud LAN listener and HTTPS
+gateway, `trusted_domains`, `overwrite.cli.url`, and `weknora_web_url` were
+updated to the new address.
+
+Both HTTPS gateways now publish only on `10.106.105.121` (`18482` for
+Nextcloud, `18443` for WeKnora); Nextcloud HTTP also publishes there on
+`18082` and on loopback. CA-verified HTTPS login/root and WeKnora health
+requests returned 200, Nextcloud HTTP login returned 200, and an
+authenticated Nextcloud HTTPS DAV `PROPFIND` returned 207. Nextcloud remains
+34.0.4 with integration app 0.4.36 and maintenance mode off. The WeKnora
+backend/frontend image digests are unchanged from the 2026-10-02 entry.
+These requests originated on the host against its LAN address; a second
+physical client and enterprise AD have not been tested.
