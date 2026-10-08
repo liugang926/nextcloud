@@ -100,6 +100,46 @@ python3 scripts/ops/test_shared_cold_restore_drill.py TinyDockerRehearsal -v
 ```
 
 [Recorded tiny-volume evidence](evidence/shared-cold-restore-drill-small-2026-10-08.json)
-proves that limited real volume path. The full 1.5GB shared checkpoint and its
-PostgreSQL/Redis runtime checks remain pending; neither tiny data nor the
-source verifier substitutes for them.
+proves that limited real volume path. The subsequent
+[full-checkpoint evidence](evidence/shared-cold-restore-drill-full-2026-10-08.json)
+records a separate actual restoration of the finalized shared checkpoint into
+new isolated volumes, including fenced PostgreSQL/Redis startup. It does not
+satisfy the application or external-replay gates.
+
+## Full checkpoint rehearsal on 2026-10-08
+
+Frozen code `d5d0207` includes the independent sticky-bit and ownership/start
+reviews. Its 17 offline drill tests and 32 restore-plan tests passed. The real
+checkpoint's external manifest pin was
+`3ad12fbd4edbefb33b3986ab375c0d85deb6bd7a4518d74e16f79f068f9c7bae`.
+All sixteen source artifacts, captured Git app code and required runtime inputs
+passed the source verifier. All source hashes were checked again after the
+completed drill.
+
+All eight cold-volume archives were restored into new random owned volumes.
+The complete inventory compared 39,508 members and 1,525,088,462 payload bytes,
+including ownership, permissions/sticky bit, symlinks and hardlink groups.
+The proof records each original archive SHA-256 and matching restored-inventory
+SHA-256. Byte equality was established before database startup.
+
+| Closed restored service | Observed version and state |
+| --- | --- |
+| Nextcloud PostgreSQL | 16.13; app0.4.37; users1, files3,268, publication states5, decisions121 |
+| WeKnora PostgreSQL | 17.9; migration131, clean; tenants3, KBs3, knowledges29, chunks263 |
+| Nextcloud Redis | 7.4.8; db0 keys66 |
+| WeKnora Redis | 7.0.15; db0 keys22 |
+
+The run used the captured immutable image IDs, 17 helpers on network-none,
+four PostgreSQL/Redis containers listening on Unix sockets on one internal
+network, eight new volumes and no host ports. Exact ownership checks preceded
+starts and cleanup. All 21 containers, eight volumes and the internal network
+were removed; the owned-resource inventory was empty afterwards. The shared
+running projects were untouched.
+
+The app-code archive's 106 Git files and 1,551 allowed captured build-extra
+entries were source checked. App code and runtime-input archives were not
+extracted into application bind roots. No application, LDAP, cron, worker or
+ingress process started. This evidence proves the physical cold-volume and
+closed database portion of an isolated rehearsal. Actual application restore,
+shared destructive apply, external withdrawal replay and revocation acceptance
+before reopening remain open.

@@ -157,6 +157,8 @@ It does not verify live target state, actual restoration or external replay.
 
 The [isolated cold-volume rehearsal](shared-cold-restore-drill.md) can now
 restore the eight archives into new random owned volumes and compare the full
-inventory. It never replaces the shared target. Its tiny Docker proof and
-source-only verification do not satisfy the shared destructive apply, full
-application recovery or external withdrawal replay gates above.
+inventory. Its [full checkpoint proof](evidence/shared-cold-restore-drill-full-2026-10-08.json)
+now covers all eight real archives and fenced startup of both PostgreSQL and
+Redis instances. It never replaces the shared target. App-code/runtime inputs
+are source checked only; shared destructive apply, full application recovery
+and external withdrawal replay remain open.
