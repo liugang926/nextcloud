@@ -1321,6 +1321,57 @@ index 00000000..e6ba9870
 +90-day retention policy, recovery-copy policy, or physical cleanup. Both down
 +migrations intentionally fail closed; automatic rollback would destroy the
 +only retained local history.
+diff --git a/docs/source-lineage-foundation.md b/docs/source-lineage-foundation.md
+new file mode 100644
+index 00000000..22d45fc3
+--- /dev/null
++++ b/docs/source-lineage-foundation.md
+@@ -0,0 +1,45 @@
++# Source lineage foundation
++
++This additive foundation provides storage/types, not complete prompt capture or
++message authorization. Existing producers do not assign complete lineage and
++existing read/SSE/history-index paths are not switched by this change. It does
++not close the history paraphrase, compaction or derived GC requirements.
++
++PostgreSQL migration 132 adds nullable `messages.source_lineage` JSONB; SQLite
++migration 51 adds nullable TEXT. Existing answers retain SQL NULL. The internal
++Message field is excluded from public JSON. ContextCheckpoint has a separate
++persistence envelope, also excluded through Message's existing `json:"-"`
++checkpoint field. Never serialize a checkpoint directly as a public response.
++
++Version 1 records `complete`/`unknown` plus controlled source identities,
++including effective source tenant, dedicated KB/data source, immutable pair,
++instance/binding/file, original knowledge and source-ledger revision, and opaque
++ETag. Constructors/codec/union reject duplicate JSON keys and invalid raw UTF-8,
++validate identities, retain different revisions,
++propagate unknown, produce deterministic independent sets and fail closed at
++1024 identities or 256 KiB. A complete empty set is an explicit trusted
++producer assertion. NULL, missing/malformed fields and unsupported versions do
++not become complete. The schema checks the envelope; the typed codec also
++validates every identity. Neither is an authorization grant.
++
++`nextcloud_source_tombstones` stores independent positive ever-source facts for
++tenant, KB, data source and pair scopes. It has no business-row foreign key.
++Backfill includes retained/deleted business rows and retained local revision,
++pairing/rotation/abort/withdrawal, event-connection and GC evidence. A retained
++pair-rebuild ID without an owner is not assigned to a guessed tenant. New
++evidence appends facts transactionally; business deletion cannot remove them.
++Update/delete and PostgreSQL TRUNCATE are rejected. SQLite REPLACE retains the
++first conflicting fact even when recursive triggers are disabled. Automatic
++down migration deliberately fails rather than discarding provenance.
++
++`LookupNextcloudSourcePresence` is an unused foundation API: matching evidence
++returns `ever`; absence returns `unknown`; failed storage returns `unknown`
++with an error. It cannot prove `never` or recertify old messages. Backup restore
++must still replay/verify the separate withdrawal ledger before reopening reads.
++
++The next implementation phase must capture every actual influencing input and
++emitted source result in RAG, Agent tools and mode switches, inherit history,
++propagate summaries/forks, atomically save answer and sealed lineage, and apply
++mandatory authorization before model input, output, replay and derivatives.
++Until then, source-dependent indexing and physical derived GC remain subject
++to their existing safety gates; this foundation provides no coverage marker.
 diff --git a/frontend/src/App.vue b/frontend/src/App.vue
 index a1e59e67..a369ad87 100644
 --- a/frontend/src/App.vue
@@ -5314,7 +5365,7 @@ index c8c518ac..3124c329 100644
  
  	snapshot := &types.ChunkRevision{
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
-index c3b2f58e..02e09855 100644
+index c3b2f58e..ea381b70 100644
 --- a/internal/application/repository/datasource_repo.go
 +++ b/internal/application/repository/datasource_repo.go
 @@ -3,10 +3,15 @@ package repository
@@ -5424,7 +5475,7 @@ index c3b2f58e..02e09855 100644
  // FindByID retrieves a data source by ID
  func (r *DataSourceRepository) FindByID(ctx context.Context, id string) (*types.DataSource, error) {
  	if id == "" {
-@@ -77,6 +152,105 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
+@@ -77,6 +152,118 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
  	return dataSources, nil
  }
  
@@ -5467,7 +5518,7 @@ index c3b2f58e..02e09855 100644
 +	}
 +	var seen bool
 +	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-+		var sources, markers, pairings, aborts int64
++		var sources, markers, pairings, aborts, tombstones int64
 +		if err := tx.Unscoped().Model(&types.DataSource{}).Where(scope, id).Where("type = ?", types.ConnectorTypeNextcloud).Count(&sources).Error; err != nil {
 +			return err
 +		}
@@ -5484,7 +5535,16 @@ index c3b2f58e..02e09855 100644
 +		if err := tx.Table("nextcloud_source_pairing_aborts").Where(scope, id).Count(&aborts).Error; err != nil {
 +			return err
 +		}
-+		seen = sources > 0 || markers > 0 || pairings > 0 || aborts > 0
++		tombstoneQuery := tx.Table("nextcloud_source_tombstones")
++		if scope == "knowledge_base_id = ?" {
++			tombstoneQuery = tombstoneQuery.Where("scope_type = ? AND scope_id = ?", "knowledge_base", id)
++		} else {
++			tombstoneQuery = tombstoneQuery.Where(scope, id)
++		}
++		if err := tombstoneQuery.Count(&tombstones).Error; err != nil {
++			return err
++		}
++		seen = sources > 0 || markers > 0 || pairings > 0 || aborts > 0 || tombstones > 0
 +		return nil
 +	})
 +	return seen, err
@@ -5494,7 +5554,8 @@ index c3b2f58e..02e09855 100644
 +// histories and compaction summaries, whose transitive provenance is not yet
 +// persisted. Scope is the whole instance: shared KBs, tools and previous Agent
 +// turns can cross tenant boundaries. Every evidence table is required, and
-+// sticky KB markers and pairing tombstones survive source removal.
++// independent ever-source tombstones survive business-row removal. Absence
++// of retained evidence does not reconstruct history erased before backfill.
 +func (r *DataSourceRepository) HasEverNextcloudSourceGlobally(ctx context.Context) (bool, error) {
 +	if r == nil || r.db == nil {
 +		return false, errors.New("source history database is unavailable")
@@ -5508,7 +5569,7 @@ index c3b2f58e..02e09855 100644
 +		if malformed != 0 {
 +			return errors.New("knowledge base provenance is malformed")
 +		}
-+		var sources, markers, pairings, aborts int64
++		var sources, markers, pairings, aborts, tombstones int64
 +		if err := tx.Unscoped().Model(&types.DataSource{}).Where("type = ?", types.ConnectorTypeNextcloud).Count(&sources).Error; err != nil {
 +			return err
 +		}
@@ -5521,7 +5582,10 @@ index c3b2f58e..02e09855 100644
 +		if err := tx.Table("nextcloud_source_pairing_aborts").Count(&aborts).Error; err != nil {
 +			return err
 +		}
-+		seen = sources > 0 || markers > 0 || pairings > 0 || aborts > 0
++		if err := tx.Table("nextcloud_source_tombstones").Count(&tombstones).Error; err != nil {
++			return err
++		}
++		seen = sources > 0 || markers > 0 || pairings > 0 || aborts > 0 || tombstones > 0
 +		return nil
 +	})
 +	return seen, err
@@ -5530,7 +5594,7 @@ index c3b2f58e..02e09855 100644
  // Update updates an existing data source
  func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource) error {
  	if ds == nil {
-@@ -86,6 +260,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -86,6 +273,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  		return errors.New("data source id is empty")
  	}
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -5565,7 +5629,7 @@ index c3b2f58e..02e09855 100644
  		if err := tx.Model(ds).Updates(ds).Error; err != nil {
  			return err
  		}
-@@ -97,6 +299,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -97,6 +312,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  	})
  }
  
@@ -5632,7 +5696,7 @@ index c3b2f58e..02e09855 100644
  // UpdateSyncState updates only fields managed by sync execution. GORM's
  // Updates(struct) skips zero values, so use a map here to persist cleared error
  // messages without broadening the generic Update method.
-@@ -123,11 +385,68 @@ func (r *DataSourceRepository) UpdateSyncState(ctx context.Context, ds *types.Da
+@@ -123,11 +398,68 @@ func (r *DataSourceRepository) UpdateSyncState(ctx context.Context, ds *types.Da
  	return nil
  }
  
@@ -5701,7 +5765,7 @@ index c3b2f58e..02e09855 100644
  	if err := r.db.WithContext(ctx).
  		Where("id = ?", id).
  		Delete(&types.DataSource{}).Error; err != nil {
-@@ -166,6 +485,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
+@@ -166,6 +498,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
  		return errors.New("sync log is nil")
  	}
  	if err := r.db.WithContext(ctx).Create(log).Error; err != nil {
@@ -5711,7 +5775,7 @@ index c3b2f58e..02e09855 100644
  		return err
  	}
  	return nil
-@@ -246,6 +568,81 @@ func (r *SyncLogRepository) HasRunningSync(ctx context.Context, dsID string) (bo
+@@ -246,6 +581,81 @@ func (r *SyncLogRepository) HasRunningSync(ctx context.Context, dsID string) (bo
  	return count > 0, nil
  }
  
@@ -15468,10 +15532,10 @@ index 00000000..f5a8121f
 +}
 diff --git a/internal/application/repository/nextcloud_global_history_pg_test.go b/internal/application/repository/nextcloud_global_history_pg_test.go
 new file mode 100644
-index 00000000..79ab7554
+index 00000000..e1d426c5
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_global_history_pg_test.go
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,59 @@
 +package repository
 +
 +import (
@@ -15482,11 +15546,14 @@ index 00000000..79ab7554
 +)
 +
 +func TestPostgresNextcloudGlobalAndScopedHistoryAdmission(t *testing.T) {
-+	for _, kind := range []string{"none", "source", "sticky", "pairing", "abort", "unavailable"} {
++	for _, kind := range []string{"none", "source", "sticky", "pairing", "abort", "tombstone-after-hard-delete", "unavailable", "tombstone-unavailable"} {
 +		t.Run(kind, func(t *testing.T) {
 +			db := leaseTestPostgres(t)
 +			require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases(id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT FALSE, deleted_at TIMESTAMPTZ)`).Error)
 +			require.NoError(t, db.AutoMigrate(&types.DataSource{}, &NextcloudSourcePairing{}, &NextcloudSourcePairingAbort{}))
++			require.NoError(t, db.Exec(`CREATE TABLE nextcloud_source_tombstones (
++				tenant_id BIGINT NOT NULL, scope_type TEXT NOT NULL, scope_id TEXT NOT NULL,
++				PRIMARY KEY(tenant_id,scope_type,scope_id))`).Error)
 +			require.NoError(t, db.Exec("INSERT INTO knowledge_bases(id,tenant_id) VALUES('kb',99)").Error)
 +			switch kind {
 +			case "source":
@@ -15499,8 +15566,17 @@ index 00000000..79ab7554
 +				require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "pair", KnowledgeBaseID: "kb", TenantID: 99}).Error)
 +			case "abort":
 +				require.NoError(t, db.Create(&NextcloudSourcePairingAbort{OperationID: "abort", KnowledgeBaseID: "kb", TenantID: 99}).Error)
++			case "tombstone-after-hard-delete":
++				require.NoError(t, db.Create(&types.DataSource{ID: "source", TenantID: 99, KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud}).Error)
++				require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "pair", TenantID: 99, KnowledgeBaseID: "kb", DataSourceID: "source"}).Error)
++				require.NoError(t, db.Exec("INSERT INTO nextcloud_source_tombstones VALUES (99,'tenant','99'), (99,'knowledge_base','kb')").Error)
++				require.NoError(t, db.Exec("DELETE FROM nextcloud_source_pairings").Error)
++				require.NoError(t, db.Exec("DELETE FROM data_sources").Error)
++				require.NoError(t, db.Exec("DELETE FROM knowledge_bases").Error)
 +			case "unavailable":
 +				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_pairing_aborts").Error)
++			case "tombstone-unavailable":
++				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_tombstones").Error)
 +			}
 +			repo := &DataSourceRepository{db: db}
 +			for _, check := range []func() (bool, error){
@@ -15509,7 +15585,7 @@ index 00000000..79ab7554
 +				func() (bool, error) { return repo.HasEverNextcloudSourceForKnowledgeBase(context.Background(), "kb") },
 +			} {
 +				ever, err := check()
-+				if kind == "unavailable" {
++				if kind == "unavailable" || kind == "tombstone-unavailable" {
 +					require.Error(t, err)
 +				} else {
 +					require.NoError(t, err)
@@ -15521,10 +15597,10 @@ index 00000000..79ab7554
 +}
 diff --git a/internal/application/repository/nextcloud_global_history_test.go b/internal/application/repository/nextcloud_global_history_test.go
 new file mode 100644
-index 00000000..8cdd6fb3
+index 00000000..c0375a9c
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_global_history_test.go
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,110 @@
 +package repository
 +
 +import (
@@ -15535,7 +15611,7 @@ index 00000000..8cdd6fb3
 +)
 +
 +func TestNextcloudGlobalHistoryAdmissionIncludesAllPersistentEvidence(t *testing.T) {
-+	for _, kind := range []string{"none", "source-soft-deleted-other-tenant", "sticky-deleted-kb", "pairing", "abort", "malformed-marker", "missing-table"} {
++	for _, kind := range []string{"none", "source-soft-deleted-other-tenant", "sticky-deleted-kb", "pairing", "abort", "tombstone", "malformed-marker", "missing-table", "missing-tombstone-table"} {
 +		t.Run(kind, func(t *testing.T) {
 +			db := provenanceTestDB(t)
 +			require.NoError(t, db.Exec("INSERT INTO knowledge_bases(id, tenant_id) VALUES('kb', 99)").Error)
@@ -15550,13 +15626,17 @@ index 00000000..8cdd6fb3
 +				require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "pair"}).Error)
 +			case "abort":
 +				require.NoError(t, db.Create(&NextcloudSourcePairingAbort{OperationID: "abort"}).Error)
++			case "tombstone":
++				require.NoError(t, db.Exec("INSERT INTO nextcloud_source_tombstones VALUES (99, 'tenant', '99')").Error)
 +			case "malformed-marker":
 +				require.NoError(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source=2").Error)
 +			case "missing-table":
 +				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_pairing_aborts").Error)
++			case "missing-tombstone-table":
++				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_tombstones").Error)
 +			}
 +			ever, err := (&DataSourceRepository{db: db}).HasEverNextcloudSourceGlobally(context.Background())
-+			if kind == "malformed-marker" || kind == "missing-table" {
++			if kind == "malformed-marker" || kind == "missing-table" || kind == "missing-tombstone-table" {
 +				require.Error(t, err)
 +				return
 +			}
@@ -15564,6 +15644,38 @@ index 00000000..8cdd6fb3
 +			require.Equal(t, kind != "none", ever)
 +		})
 +	}
++}
++
++func TestNextcloudHistoryTombstoneSurvivesAllBusinessEvidenceDeletion(t *testing.T) {
++	db := provenanceTestDB(t)
++	require.NoError(t, db.Exec("INSERT INTO knowledge_bases(id, tenant_id, ever_had_nextcloud_source) VALUES('kb',99,TRUE)").Error)
++	require.NoError(t, db.Create(&types.DataSource{ID: "ds", TenantID: 99, KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud}).Error)
++	require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "pair", TenantID: 99, KnowledgeBaseID: "kb", DataSourceID: "ds"}).Error)
++	require.NoError(t, db.Exec("INSERT INTO nextcloud_source_tombstones VALUES (99, 'tenant', '99'), (99, 'knowledge_base', 'kb')").Error)
++	require.NoError(t, db.Exec("DELETE FROM nextcloud_source_pairings").Error)
++	require.NoError(t, db.Exec("DELETE FROM data_sources").Error)
++	require.NoError(t, db.Exec("DELETE FROM knowledge_bases").Error)
++	repo := &DataSourceRepository{db: db}
++	ever, err := repo.HasEverNextcloudSourceGlobally(context.Background())
++	require.NoError(t, err)
++	require.True(t, ever)
++	ever, err = repo.HasEverNextcloudSourceForTenant(context.Background(), 99)
++	require.NoError(t, err)
++	require.True(t, ever)
++	ever, err = repo.HasEverNextcloudSourceForKnowledgeBase(context.Background(), "kb")
++	require.NoError(t, err)
++	require.True(t, ever)
++	ever, err = repo.HasEverNextcloudSourceForTenant(context.Background(), 100)
++	require.NoError(t, err)
++	require.False(t, ever, "positive evidence must retain tenant scope")
++	ever, err = repo.HasEverNextcloudSourceForKnowledgeBase(context.Background(), "other-kb")
++	require.NoError(t, err)
++	require.False(t, ever, "positive evidence must retain KB scope")
++	require.NoError(t, db.Exec("DROP TABLE nextcloud_source_tombstones").Error)
++	_, err = repo.HasEverNextcloudSourceForTenant(context.Background(), 99)
++	require.Error(t, err)
++	_, err = repo.HasEverNextcloudSourceForKnowledgeBase(context.Background(), "kb")
++	require.Error(t, err)
 +}
 +
 +func TestNextcloudScopedHistoryRetainsDeletedKBAndPairingEvidence(t *testing.T) {
@@ -16410,10 +16522,10 @@ index 00000000..158b218d
 +}
 diff --git a/internal/application/repository/nextcloud_kb_provenance_test.go b/internal/application/repository/nextcloud_kb_provenance_test.go
 new file mode 100644
-index 00000000..f89a984a
+index 00000000..7608ed4d
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_kb_provenance_test.go
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,145 @@
 +package repository
 +
 +import (
@@ -16446,6 +16558,9 @@ index 00000000..f89a984a
 +	require.NoError(t, db.AutoMigrate(&types.DataSource{}))
 +	require.NoError(t, db.AutoMigrate(&NextcloudSourcePairing{}))
 +	require.NoError(t, db.AutoMigrate(&NextcloudSourcePairingAbort{}))
++	require.NoError(t, db.Exec(`CREATE TABLE nextcloud_source_tombstones (
++		tenant_id INTEGER NOT NULL, scope_type TEXT NOT NULL, scope_id TEXT NOT NULL,
++		PRIMARY KEY (tenant_id, scope_type, scope_id))`).Error)
 +	return db
 +}
 +
@@ -19227,6 +19342,125 @@ index 00000000..092c0ab5
 +	_, created, err = repo.PrepareSourceRotation(ctx, other, "other-secret")
 +	require.NoError(t, err)
 +	require.True(t, created, "a completed rotation permits the next one")
++}
+diff --git a/internal/application/repository/nextcloud_source_tombstones.go b/internal/application/repository/nextcloud_source_tombstones.go
+new file mode 100644
+index 00000000..7db55810
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_tombstones.go
+@@ -0,0 +1,50 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"math"
++	"strconv"
++	"strings"
++)
++
++// NextcloudSourcePresence deliberately has no "never" state. Absence of
++// retained evidence cannot prove that a legacy scope was source-independent.
++type NextcloudSourcePresence string
++
++const (
++	NextcloudSourcePresenceUnknown NextcloudSourcePresence = "unknown"
++	NextcloudSourcePresenceEver    NextcloudSourcePresence = "ever"
++)
++
++// LookupNextcloudSourcePresence reads independent positive tombstones. It is a
++// foundation API, not yet wired into message authorization. Ever is evidence
++// for conservative classification; it never grants access to an old answer.
++func (r *DataSourceRepository) LookupNextcloudSourcePresence(
++	ctx context.Context, tenantID uint64, scopeType, scopeID string,
++) (NextcloudSourcePresence, error) {
++	if r == nil || r.db == nil || tenantID == 0 || tenantID > math.MaxInt64 ||
++		scopeID == "" || strings.TrimSpace(scopeID) != scopeID || strings.ContainsAny(scopeID, "\x00\r\n") {
++		return NextcloudSourcePresenceUnknown, errors.New("invalid Nextcloud source tombstone lookup")
++	}
++	switch scopeType {
++	case "tenant":
++		if scopeID != strconv.FormatUint(tenantID, 10) {
++			return NextcloudSourcePresenceUnknown, errors.New("Nextcloud tenant tombstone identity mismatch")
++		}
++	case "knowledge_base", "datasource", "pair":
++	default:
++		return NextcloudSourcePresenceUnknown, errors.New("invalid Nextcloud source tombstone scope")
++	}
++	var count int64
++	if err := r.db.WithContext(ctx).Table("nextcloud_source_tombstones").
++		Where("tenant_id = ? AND scope_type = ? AND scope_id = ?", tenantID, scopeType, scopeID).
++		Count(&count).Error; err != nil {
++		return NextcloudSourcePresenceUnknown, fmt.Errorf("read Nextcloud source tombstone: %w", err)
++	}
++	if count > 0 {
++		return NextcloudSourcePresenceEver, nil
++	}
++	return NextcloudSourcePresenceUnknown, nil
++}
+diff --git a/internal/application/repository/nextcloud_source_tombstones_test.go b/internal/application/repository/nextcloud_source_tombstones_test.go
+new file mode 100644
+index 00000000..bdc4d2cd
+--- /dev/null
++++ b/internal/application/repository/nextcloud_source_tombstones_test.go
+@@ -0,0 +1,57 @@
++package repository
++
++import (
++	"context"
++	"testing"
++
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func TestNextcloudSourceTombstoneLookupNeverCertifiesAbsence(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	sqlDB, err := db.DB()
++	if err != nil {
++		t.Fatal(err)
++	}
++	sqlDB.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	if err := db.Exec(`CREATE TABLE nextcloud_source_tombstones (
++		tenant_id INTEGER NOT NULL, scope_type TEXT NOT NULL, scope_id TEXT NOT NULL,
++		PRIMARY KEY(tenant_id, scope_type, scope_id))`).Error; err != nil {
++		t.Fatal(err)
++	}
++	repo := &DataSourceRepository{db: db}
++	ctx := context.Background()
++	state, err := repo.LookupNextcloudSourcePresence(ctx, 7, "tenant", "7")
++	if err != nil || state != NextcloudSourcePresenceUnknown {
++		t.Fatal("missing evidence must be unknown", state, err)
++	}
++	if err := db.Exec(`INSERT INTO nextcloud_source_tombstones VALUES (7, 'tenant', '7'), (7, 'knowledge_base', 'kb')`).Error; err != nil {
++		t.Fatal(err)
++	}
++	state, err = repo.LookupNextcloudSourcePresence(ctx, 7, "knowledge_base", "kb")
++	if err != nil || state != NextcloudSourcePresenceEver {
++		t.Fatal("retained positive evidence lost", state, err)
++	}
++	state, err = repo.LookupNextcloudSourcePresence(ctx, 8, "knowledge_base", "kb")
++	if err != nil || state != NextcloudSourcePresenceUnknown {
++		t.Fatal("cross-tenant evidence accepted", state, err)
++	}
++	for _, scope := range [][2]string{{"tenant", "8"}, {"unsupported", "kb"}, {"datasource", ""}} {
++		state, err = repo.LookupNextcloudSourcePresence(ctx, 7, scope[0], scope[1])
++		if err == nil || state != NextcloudSourcePresenceUnknown {
++			t.Fatal("invalid lookup did not fail closed", state, err)
++		}
++	}
++	if err := db.Exec("DROP TABLE nextcloud_source_tombstones").Error; err != nil {
++		t.Fatal(err)
++	}
++	state, err = repo.LookupNextcloudSourcePresence(ctx, 7, "tenant", "7")
++	if err == nil || state != NextcloudSourcePresenceUnknown {
++		t.Fatal("storage failure was treated as absence", state, err)
++	}
 +}
 diff --git a/internal/application/repository/nextcloud_sync_recovery.go b/internal/application/repository/nextcloud_sync_recovery.go
 new file mode 100644
@@ -30554,8 +30788,230 @@ index 7fc2639e..3af4e779 100644
  	require.True(t, valid, "a CONCURRENTLY build that failed leaves an INVALID index")
  }
  
+diff --git a/internal/database/migration_source_lineage_test.go b/internal/database/migration_source_lineage_test.go
+new file mode 100644
+index 00000000..ac0f8432
+--- /dev/null
++++ b/internal/database/migration_source_lineage_test.go
+@@ -0,0 +1,216 @@
++package database
++
++import (
++	"database/sql"
++	"fmt"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/golang-migrate/migrate/v4"
++	"github.com/stretchr/testify/require"
++)
++
++func TestSQLiteSourceLineageUpgradeFrom50PreservesLegacyAndTombstones(t *testing.T) {
++	root := sqliteRepoRoot(t)
++	legacy := copySQLiteMigrationsThrough(t, root, 50)
++	chdirAndRestore(t, legacy)
++	dbPath := filepath.Join(t.TempDir(), "lineage-upgrade.db")
++	require.NoError(t, RunMigrationsWithOptions("sqlite3://unused", MigrationOptions{SQLiteDBPath: dbPath}))
++	db := openSQLiteDB(t, dbPath)
++	seedSourceLineageLegacy(t, db, "sqlite")
++	chdirAndRestore(t, root)
++	require.NoError(t, RunMigrationsWithOptions("sqlite3://unused", MigrationOptions{SQLiteDBPath: dbPath}))
++	version, dirty := sqliteMigrationState(t, db)
++	require.Equal(t, 51, version)
++	require.False(t, dirty)
++	requireSourceLineageMigrationBehavior(t, db, "sqlite")
++	// A downgrade cannot silently discard the durable facts or answer lineage.
++	down, err := os.ReadFile(filepath.Join(root, "migrations/sqlite/000051_message_source_lineage.down.sql"))
++	require.NoError(t, err)
++	_, err = db.Exec(string(down))
++	require.ErrorContains(t, err, "message_source_lineage_rollback_requires_audit_export")
++	requireSourceTombstone(t, db, "sqlite", 7, "tenant", "7", 1)
++}
++
++func TestPostgresSourceLineageUpgradeFrom131PreservesLegacyAndTombstones(t *testing.T) {
++	dsn := os.Getenv("WEKNORA_MIGRATION_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("set WEKNORA_MIGRATION_TEST_POSTGRES_DSN to a disposable database")
++	}
++	root := sqliteRepoRoot(t)
++	base, err := sql.Open("postgres", dsn)
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = base.Close() })
++	schema := "lineage_foundation_" + strconv.FormatInt(time.Now().UnixNano(), 10)
++	_, err = base.Exec("CREATE SCHEMA " + schema)
++	require.NoError(t, err)
++	t.Cleanup(func() { _, err := base.Exec("DROP SCHEMA " + schema + " CASCADE"); require.NoError(t, err) })
++	isolatedDSN := postgresSchemaDSN(t, dsn, schema)
++	// This metadata migration does not touch vector indexes. Exercise the full
++	// application chain in its supported extension-free mode on vanilla PG too.
++	isolatedURL, err := url.Parse(isolatedDSN)
++	require.NoError(t, err)
++	query := isolatedURL.Query()
++	query.Set("options", strings.TrimSpace(query.Get("options")+" -c app.skip_embedding=true"))
++	isolatedURL.RawQuery = query.Encode()
++	isolatedDSN = isolatedURL.String()
++	db, err := sql.Open("postgres", isolatedDSN)
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = db.Close() })
++	m, err := migrate.New("file://"+filepath.Join(root, "migrations/versioned"), isolatedDSN)
++	require.NoError(t, err)
++	t.Cleanup(func() { _, _ = m.Close() })
++	require.NoError(t, m.Migrate(131))
++	seedSourceLineageLegacy(t, db, "postgres")
++	require.NoError(t, m.Migrate(132))
++	requirePostgresMigrationVersion(t, db, 132)
++	var dataType, nullable string
++	var defaultValue sql.NullString
++	require.NoError(t, db.QueryRow(`SELECT data_type, is_nullable, column_default
++		FROM information_schema.columns WHERE table_schema = current_schema()
++		AND table_name = 'messages' AND column_name = 'source_lineage'`).Scan(&dataType, &nullable, &defaultValue))
++	require.Equal(t, "jsonb", dataType)
++	require.Equal(t, "YES", nullable)
++	require.False(t, defaultValue.Valid, "legacy NULL is not a complete empty default")
++	requireSourceLineageMigrationBehavior(t, db, "postgres")
++	_, err = db.Exec("TRUNCATE nextcloud_source_tombstones")
++	require.ErrorContains(t, err, "nextcloud_source_tombstones_immutable")
++	require.ErrorContains(t, m.Steps(-1), "message_source_lineage_rollback_requires_audit_export")
++	requireSourceTombstone(t, db, "postgres", 7, "tenant", "7", 1)
++}
++
++func lineageMigrationQuery(dialect, query string) string {
++	if dialect != "postgres" {
++		return query
++	}
++	var result strings.Builder
++	n := 0
++	for _, c := range query {
++		if c == '?' {
++			n++
++			fmt.Fprintf(&result, "$%d", n)
++		} else {
++			result.WriteRune(c)
++		}
++	}
++	return result.String()
++}
++
++func lineageMigrationExec(t *testing.T, db *sql.DB, dialect, query string, args ...any) {
++	t.Helper()
++	_, err := db.Exec(lineageMigrationQuery(dialect, query), args...)
++	require.NoError(t, err, query)
++}
++
++func seedSourceLineageLegacy(t *testing.T, db *sql.DB, dialect string) {
++	t.Helper()
++	for _, id := range []int{7, 8, 9} {
++		lineageMigrationExec(t, db, dialect, `INSERT INTO tenants(id, name, business) VALUES (?, 'lineage', 'test')`, id)
++	}
++	lineageMigrationExec(t, db, dialect, `INSERT INTO messages(id, request_id, session_id, role, content)
++		VALUES ('legacy-answer', 'req', 'session', 'assistant', 'legacy copied answer')`)
++	lineageMigrationExec(t, db, dialect, `INSERT INTO knowledge_bases
++		(id, name, tenant_id, embedding_model_id, summary_model_id)
++		VALUES ('legacy-kb', 'legacy', 7, 'embed', 'summary')`)
++	lineageMigrationExec(t, db, dialect, `INSERT INTO data_sources
++		(id, tenant_id, knowledge_base_id, name, type, config, status)
++		VALUES ('legacy-source', 7, 'legacy-kb', 'legacy', 'nextcloud', '{}', 'paused')`)
++	lineageMigrationExec(t, db, dialect, `INSERT INTO nextcloud_source_pairings
++		(operation_id, tenant_id, knowledge_base_id, datasource_id, nextcloud_instance_id,
++		binding_id, datasource_base_url, datasource_config_sha256, publication_epoch, key_id, state)
++		VALUES ('legacy-pair', 7, 'legacy-kb', 'legacy-source', 'instance', 'binding',
++		'https://nextcloud.test', 'hash', 1, 'key', 'pending')`)
++	// Ledger evidence survives even when business rows/knowledge no longer exist.
++	lineageMigrationExec(t, db, dialect, `INSERT INTO nextcloud_source_versions
++		(tenant_id, knowledge_base_id, datasource_id, external_id, desired_etag, candidate_knowledge_id, state)
++		VALUES (9, 'orphan-kb', 'orphan-source', 'nextcloud:old:1', 'old-etag', 'old-knowledge', 'tombstone')`)
++	lineageMigrationExec(t, db, dialect, `INSERT INTO knowledge_bases
++		(id, name, tenant_id, embedding_model_id, summary_model_id, ever_had_nextcloud_source)
++		VALUES ('marker-only-kb', 'marker', 9, 'embed', 'summary', TRUE)`)
++	lineageMigrationExec(t, db, dialect, `INSERT INTO knowledges
++		(id, tenant_id, knowledge_base_id, type, title, source, metadata)
++		VALUES ('metadata-only', 7, 'metadata-only-kb', 'file', 'metadata', '',
++		'{"nextcloud_instance_id":"instance","datasource_id":"deleted-metadata-source"}')`)
++}
++
++func requireSourceTombstone(t *testing.T, db *sql.DB, dialect string, tenant int, scope, id string, want int) {
++	t.Helper()
++	var count int
++	require.NoError(t, db.QueryRow(lineageMigrationQuery(dialect, `SELECT count(*)
++		FROM nextcloud_source_tombstones WHERE tenant_id = ? AND scope_type = ? AND scope_id = ?`), tenant, scope, id).Scan(&count))
++	require.Equal(t, want, count, "%d/%s/%s", tenant, scope, id)
++}
++
++func requireSourceLineageMigrationBehavior(t *testing.T, db *sql.DB, dialect string) {
++	t.Helper()
++	var legacyNull bool
++	require.NoError(t, db.QueryRow(`SELECT source_lineage IS NULL FROM messages WHERE id = 'legacy-answer'`).Scan(&legacyNull))
++	require.True(t, legacyNull, "migration must not certify old answers")
++	for _, scope := range []struct {
++		tenant   int
++		kind, id string
++	}{
++		{7, "tenant", "7"}, {7, "knowledge_base", "legacy-kb"}, {7, "datasource", "legacy-source"}, {7, "pair", "legacy-pair"},
++		{9, "tenant", "9"}, {9, "knowledge_base", "orphan-kb"}, {9, "datasource", "orphan-source"},
++		{9, "knowledge_base", "marker-only-kb"}, {7, "knowledge_base", "metadata-only-kb"},
++		{7, "datasource", "deleted-metadata-source"},
++	} {
++		requireSourceTombstone(t, db, dialect, scope.tenant, scope.kind, scope.id, 1)
++	}
++	requireSourceTombstone(t, db, dialect, 8, "tenant", "8", 0) // absence remains unknown
++	for _, invalid := range []string{`{}`, `{"version":1,"sources":[]}`, `{"version":2,"state":"complete","sources":[]}`,
++		`{"version":1,"state":"complete","sources":null}`, `{"version":1,"state":"complete","sources":[],"extra":true} trailing`} {
++		_, err := db.Exec(lineageMigrationQuery(dialect, `UPDATE messages SET source_lineage = ? WHERE id = 'legacy-answer'`), invalid)
++		require.Error(t, err, invalid)
++	}
++	lineageMigrationExec(t, db, dialect, `UPDATE messages SET source_lineage = ? WHERE id = 'legacy-answer'`,
++		`{"version":1,"state":"unknown","sources":[]}`)
++	// Complete empty is representable, but no producer or read path is enabled by
++	// this schema test. It is not a claim that the legacy content is independent.
++	lineageMigrationExec(t, db, dialect, `INSERT INTO messages(id, request_id, session_id, role, content, source_lineage)
++		VALUES ('typed-answer', 'req2', 'session', 'assistant', 'ordinary', ?)`, `{"version":1,"state":"complete","sources":[]}`)
++	_, err := db.Exec(`UPDATE nextcloud_source_tombstones SET scope_id = 'changed' WHERE tenant_id = 7`)
++	require.ErrorContains(t, err, "nextcloud_source_tombstones_immutable")
++	_, err = db.Exec(`DELETE FROM nextcloud_source_tombstones WHERE tenant_id = 7`)
++	require.ErrorContains(t, err, "nextcloud_source_tombstones_immutable")
++	if dialect == "sqlite" {
++		var original string
++		require.NoError(t, db.QueryRow(`SELECT recorded_at FROM nextcloud_source_tombstones WHERE tenant_id = 7 AND scope_type = 'tenant'`).Scan(&original))
++		lineageMigrationExec(t, db, dialect, `INSERT OR REPLACE INTO nextcloud_source_tombstones
++			(tenant_id, scope_type, scope_id, recorded_at) VALUES (7, 'tenant', '7', '2099-01-01')`)
++		var stillOriginal string
++		require.NoError(t, db.QueryRow(`SELECT recorded_at FROM nextcloud_source_tombstones WHERE tenant_id = 7 AND scope_type = 'tenant'`).Scan(&stillOriginal))
++		require.Equal(t, original, stillOriginal, "REPLACE must not rewrite the first fact")
++	}
++	// Delete/recreate business scope without deleting its independent fact.
++	lineageMigrationExec(t, db, dialect, `DELETE FROM nextcloud_source_pairings WHERE operation_id = 'legacy-pair'`)
++	lineageMigrationExec(t, db, dialect, `DELETE FROM data_sources WHERE id = 'legacy-source'`)
++	lineageMigrationExec(t, db, dialect, `DELETE FROM knowledge_bases WHERE id = 'legacy-kb'`)
++	requireSourceTombstone(t, db, dialect, 7, "pair", "legacy-pair", 1)
++	requireSourceTombstone(t, db, dialect, 7, "datasource", "legacy-source", 1)
++	requireSourceTombstone(t, db, dialect, 7, "knowledge_base", "legacy-kb", 1)
++	lineageMigrationExec(t, db, dialect, `INSERT INTO knowledge_bases
++		(id, name, tenant_id, embedding_model_id, summary_model_id)
++		VALUES ('legacy-kb', 'recreated', 7, 'embed', 'summary')`)
++	requireSourceTombstone(t, db, dialect, 7, "knowledge_base", "legacy-kb", 1)
++	// New raw source admission creates independent evidence in the same commit;
++	// transaction rollback must not leave an ever fact for an uncommitted source.
++	tx, err := db.Begin()
++	require.NoError(t, err)
++	_, err = tx.Exec(`INSERT INTO data_sources (id, tenant_id, knowledge_base_id, name, type, config, status)
++		VALUES ('rolled-back-source', 8, 'never-committed', 'rollback', 'nextcloud', '{}', 'paused')`)
++	require.NoError(t, err)
++	require.NoError(t, tx.Rollback())
++	requireSourceTombstone(t, db, dialect, 8, "tenant", "8", 0)
++	lineageMigrationExec(t, db, dialect, `INSERT INTO data_sources (id, tenant_id, knowledge_base_id, name, type, config, status)
++		VALUES ('new-source', 8, 'new-kb', 'new', 'nextcloud', '{}', 'paused')`)
++	requireSourceTombstone(t, db, dialect, 8, "tenant", "8", 1)
++	requireSourceTombstone(t, db, dialect, 8, "datasource", "new-source", 1)
++	lineageMigrationExec(t, db, dialect, `DELETE FROM data_sources WHERE id = 'new-source'`)
++	requireSourceTombstone(t, db, dialect, 8, "datasource", "new-source", 1)
++}
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e515..f16269a8 100644
+index 9cc4e515..5bc78f08 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -30567,7 +31023,7 @@ index 9cc4e515..f16269a8 100644
  var versionedSQLiteTables = []string{
  	"memory_extraction_sessions",
  	"task_pending_ops",
-@@ -39,6 +39,16 @@ var versionedSQLiteTables = []string{
+@@ -39,31 +39,188 @@ var versionedSQLiteTables = []string{
  	"resource_access_policies",
  	"resource_group_grants",
  	"directory_permission_versions",
@@ -30581,10 +31037,27 @@ index 9cc4e515..f16269a8 100644
 +	"nextcloud_source_pairing_aborts",
 +	"nextcloud_pair_rebuild_history",
 +	"nextcloud_source_revisions",
++	"nextcloud_source_tombstones",
  }
  
  // versionedSQLiteColumns maps each existing table to the columns that the
-@@ -55,15 +65,161 @@ var versionedSQLiteColumns = map[string][]string{
+ // versioned migrations add and the SQLite baseline was missing.
+ var versionedSQLiteColumns = map[string][]string{
+-	"memory_subjects": {"extraction_state"},                                                 // 000094
+-	"memory_items":    {"replaces_id"},                                                      // 000094
+-	"tenants":         {"api_principal_config"},                                             // 000064
+-	"users":           {"is_system_admin"},                                                  // 000053
+-	"knowledges":      {"pending_subtasks_count", "profile"},                                // 000056, 000101
+-	"knowledge_bases": {"profile_config", "generated_profile"},                              // 000101
+-	"messages":        {"attachments", "usage", "sandbox_checkpoint", "context_checkpoint"}, // 000034/085/097/105
++	"memory_subjects": {"extraction_state"},                                                                   // 000094
++	"memory_items":    {"replaces_id"},                                                                        // 000094
++	"tenants":         {"api_principal_config"},                                                               // 000064
++	"users":           {"is_system_admin"},                                                                    // 000053
++	"knowledges":      {"pending_subtasks_count", "profile"},                                                  // 000056, 000101
++	"knowledge_bases": {"profile_config", "generated_profile"},                                                // 000101
++	"messages":        {"attachments", "usage", "sandbox_checkpoint", "context_checkpoint", "source_lineage"}, // 000034/085/097/105/132
+ 	"sessions": {
  		"parent_session_id", "forked_from_message_id", "fork_bootstrap", // 000097
  		"sandbox_config_tenant_id", // 000108
  	},
@@ -30605,7 +31078,7 @@ index 9cc4e515..f16269a8 100644
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 50
++const expectedSQLiteMigrationVersion = 51
 +
 +func TestSQLiteNextcloudRevisionUpgradeFrom43PreservesUnknownHistory(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -30753,7 +31226,7 @@ index 9cc4e515..f16269a8 100644
  
  func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
  	repoRoot := sqliteRepoRoot(t)
-@@ -200,6 +356,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
+@@ -200,6 +357,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
  	require.True(t, sqliteColumnExists(t, db, "messages", "sandbox_checkpoint"))
  }
  
@@ -48456,6 +48929,28 @@ index e4e3b035..b01e789a 100644
  	// MaxIterations caps ReAct rounds. Zero is unset (filled with a default);
  	// a negative value is unlimited — the loop runs until the model stops,
  	// the user cancels, or another guard fires. See UnlimitedMaxIterations.
+diff --git a/internal/types/context_checkpoint.go b/internal/types/context_checkpoint.go
+index bd042c8d..20c16858 100644
+--- a/internal/types/context_checkpoint.go
++++ b/internal/types/context_checkpoint.go
+@@ -22,6 +22,9 @@ type ContextCheckpoint struct {
+ 	// Degraded marks a raw archive kept because the summarizer failed. The
+ 	// next compaction folds it in as the previous summary.
+ 	Degraded bool `json:"degraded,omitempty"`
++	// The summary has its own dependencies, independent of the host answer.
++	// Missing lineage on an older checkpoint is unknown, never complete empty.
++	SourceLineage *SourceLineage `json:"source_lineage,omitempty"`
+ }
+ 
+ // Value implements the driver.Valuer interface for database serialization.
+@@ -31,6 +34,7 @@ func (c ContextCheckpoint) Value() (driver.Value, error) {
+ 
+ // Scan implements the sql.Scanner interface for database deserialization.
+ func (c *ContextCheckpoint) Scan(value any) error {
++	*c = ContextCheckpoint{}
+ 	if value == nil {
+ 		*c = ContextCheckpoint{}
+ 		return nil
 diff --git a/internal/types/context_helpers.go b/internal/types/context_helpers.go
 index 01b6709f..29c6eaa5 100644
 --- a/internal/types/context_helpers.go
@@ -48721,10 +49216,20 @@ index 00000000..9664df0a
 +	}
 +}
 diff --git a/internal/types/message.go b/internal/types/message.go
-index 28d5c161..51563219 100644
+index 28d5c161..c428b20d 100644
 --- a/internal/types/message.go
 +++ b/internal/types/message.go
-@@ -450,7 +450,11 @@ type Message struct {
+@@ -373,6 +373,9 @@ type Message struct {
+ 	Role string `json:"role"`
+ 	// References to knowledge chunks used in the response
+ 	KnowledgeReferences References `json:"knowledge_references"  gorm:"type:json;column:knowledge_references"`
++	// SourceLineage is internal exhaustive source provenance. Nil is unknown,
++	// including every pre-feature answer. Producer/read integration is separate.
++	SourceLineage *SourceLineage `json:"-" gorm:"type:jsonb;column:source_lineage"`
+ 	// Agent execution steps (only for assistant messages generated by agent)
+ 	// This contains the detailed reasoning process and tool calls made by the agent
+ 	// Stored for user history display, but NOT included in LLM context to avoid redundancy
+@@ -450,7 +453,11 @@ type Message struct {
  // MessageExecutionContext is a message-level snapshot of the non-secret
  // request state used by derived experiences such as follow-up suggestions.
  type MessageExecutionContext struct {
@@ -48800,6 +49305,604 @@ index 350dcab7..7ad15d27 100644
  	return nil
  }
  
+diff --git a/internal/types/source_lineage.go b/internal/types/source_lineage.go
+new file mode 100644
+index 00000000..562342a6
+--- /dev/null
++++ b/internal/types/source_lineage.go
+@@ -0,0 +1,308 @@
++package types
++
++import (
++	"bytes"
++	"database/sql/driver"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"math"
++	"slices"
++	"strconv"
++	"strings"
++	"unicode/utf8"
++)
++
++const (
++	SourceLineageVersion    = 1
++	SourceLineageMaxSources = 1024
++	SourceLineageMaxBytes   = 256 * 1024
++	SourceLineageComplete   = "complete"
++	SourceLineageUnknown    = "unknown"
++)
++
++var (
++	ErrSourceLineageInvalid = errors.New("invalid source lineage")
++	ErrSourceLineageUnknown = errors.New("source lineage is unknown")
++	ErrSourceLineageLimit   = errors.New("source lineage exceeds limit")
++)
++
++// SourceIdentity identifies the original source revision, not its current row
++// or a visible citation. Only trusted source adapters may construct identities.
++// ETag is preserved as an opaque token; equal bytes do not make revisions equal.
++type SourceIdentity struct {
++	Provider        string `json:"provider"`
++	TenantID        uint64 `json:"tenant_id"`
++	KnowledgeBaseID string `json:"knowledge_base_id"`
++	DataSourceID    string `json:"datasource_id"`
++	PairOperationID string `json:"pair_operation_id"`
++	InstanceID      string `json:"instance_id"`
++	BindingID       string `json:"binding_id"`
++	FileID          string `json:"file_id"`
++	ExternalID      string `json:"external_id"`
++	KnowledgeID     string `json:"knowledge_id"`
++	Revision        uint64 `json:"revision"`
++	ETag            string `json:"etag"`
++}
++
++func (s SourceIdentity) Validate() error {
++	if s.Provider != ConnectorTypeNextcloud || s.TenantID == 0 || s.TenantID > math.MaxInt64 ||
++		s.Revision == 0 || s.Revision > math.MaxInt64 {
++		return fmt.Errorf("%w: source provider, tenant or revision", ErrSourceLineageInvalid)
++	}
++	for _, id := range []string{s.KnowledgeBaseID, s.DataSourceID, s.PairOperationID,
++		s.InstanceID, s.BindingID, s.FileID, s.ExternalID, s.KnowledgeID} {
++		if id == "" || strings.TrimSpace(id) != id || !utf8.ValidString(id) || len(id) > 512 || strings.ContainsAny(id, "\x00\r\n") {
++			return fmt.Errorf("%w: source identity", ErrSourceLineageInvalid)
++		}
++	}
++	fileID, err := strconv.ParseInt(s.FileID, 10, 64)
++	if err != nil || fileID < 1 || strconv.FormatInt(fileID, 10) != s.FileID ||
++		s.ExternalID != "nextcloud:"+s.InstanceID+":"+s.FileID {
++		return fmt.Errorf("%w: source file identity", ErrSourceLineageInvalid)
++	}
++	if strings.TrimSpace(s.ETag) == "" || !utf8.ValidString(s.ETag) || len(s.ETag) > 4096 || strings.ContainsAny(s.ETag, "\x00\r\n") {
++		return fmt.Errorf("%w: original ETag", ErrSourceLineageInvalid)
++	}
++	return nil
++}
++
++// SourceLineage is an internal, versioned record of every controlled source
++// influencing a generated message. NULL/zero values remain unknown. A complete
++// empty set is an explicit producer assertion, never inferred from absence.
++type SourceLineage struct {
++	Version int              `json:"version"`
++	State   string           `json:"state"`
++	Sources []SourceIdentity `json:"sources"`
++}
++
++type sourceLineageJSON SourceLineage
++
++func UnknownSourceLineage() *SourceLineage {
++	return &SourceLineage{Version: SourceLineageVersion, State: SourceLineageUnknown, Sources: []SourceIdentity{}}
++}
++
++// NewCompleteSourceLineage is for producers that have accounted for every
++// input. It does not discover dependencies or authorize the source identities.
++func NewCompleteSourceLineage(sources ...SourceIdentity) (*SourceLineage, error) {
++	if len(sources) > SourceLineageMaxSources {
++		return UnknownSourceLineage(), ErrSourceLineageLimit
++	}
++	lineage := &SourceLineage{Version: SourceLineageVersion, State: SourceLineageComplete,
++		Sources: append([]SourceIdentity{}, sources...)}
++	return UnionSourceLineage(lineage)
++}
++
++func (l *SourceLineage) Validate() error {
++	if l == nil || l.Version != SourceLineageVersion ||
++		(l.State != SourceLineageComplete && l.State != SourceLineageUnknown) || l.Sources == nil {
++		return fmt.Errorf("%w: envelope or version", ErrSourceLineageInvalid)
++	}
++	if len(l.Sources) > SourceLineageMaxSources {
++		return ErrSourceLineageLimit
++	}
++	for _, source := range l.Sources {
++		if err := source.Validate(); err != nil {
++			return err
++		}
++	}
++	b, err := json.Marshal(sourceLineageJSON(*l))
++	if err != nil {
++		return err
++	}
++	if len(b) > SourceLineageMaxBytes {
++		return ErrSourceLineageLimit
++	}
++	return nil
++}
++
++func (l *SourceLineage) RequireComplete() error {
++	if l == nil {
++		return ErrSourceLineageUnknown
++	}
++	if err := l.Validate(); err != nil {
++		return err
++	}
++	if l.State != SourceLineageComplete {
++		return ErrSourceLineageUnknown
++	}
++	return nil
++}
++
++// UnionSourceLineage returns a fresh deterministic set. Unknown dominates;
++// malformed or oversized inputs produce unknown plus an error, never a
++// truncated complete result. No inputs is unknown; producers must explicitly
++// assert a complete empty set with NewCompleteSourceLineage().
++func UnionSourceLineage(inputs ...*SourceLineage) (*SourceLineage, error) {
++	out := UnknownSourceLineage()
++	if len(inputs) == 0 {
++		return out, nil
++	}
++	out.State = SourceLineageComplete
++	seen := make(map[SourceIdentity]struct{})
++	for _, input := range inputs {
++		if input == nil {
++			out.State = SourceLineageUnknown
++			continue
++		}
++		if err := input.Validate(); err != nil {
++			return UnknownSourceLineage(), err
++		}
++		if input.State == SourceLineageUnknown {
++			out.State = SourceLineageUnknown
++		}
++		for _, source := range input.Sources {
++			seen[source] = struct{}{}
++			if len(seen) > SourceLineageMaxSources {
++				return UnknownSourceLineage(), ErrSourceLineageLimit
++			}
++		}
++	}
++	for source := range seen {
++		out.Sources = append(out.Sources, source)
++	}
++	slices.SortFunc(out.Sources, func(a, b SourceIdentity) int {
++		// The fixed-field encoding is an unambiguous sort key, including ETag
++		// and revision. Delimiter concatenation could alias source identities.
++		left, _ := json.Marshal(a)
++		right, _ := json.Marshal(b)
++		return bytes.Compare(left, right)
++	})
++	if err := out.Validate(); err != nil {
++		return UnknownSourceLineage(), err
++	}
++	return out, nil
++}
++
++func (l SourceLineage) MarshalJSON() ([]byte, error) {
++	if err := l.Validate(); err != nil {
++		return nil, err
++	}
++	return json.Marshal(sourceLineageJSON(l))
++}
++
++func (l *SourceLineage) UnmarshalJSON(data []byte) error {
++	*l = *UnknownSourceLineage()
++	if len(data) > SourceLineageMaxBytes {
++		return ErrSourceLineageLimit
++	}
++	if !utf8.Valid(data) {
++		return fmt.Errorf("%w: invalid UTF-8 envelope", ErrSourceLineageInvalid)
++	}
++	if err := uniqueSourceLineageJSONKeys(data); err != nil {
++		return err
++	}
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.DisallowUnknownFields()
++	var candidate sourceLineageJSON
++	if err := decoder.Decode(&candidate); err != nil {
++		return fmt.Errorf("%w: decode envelope", ErrSourceLineageInvalid)
++	}
++	if err := decoder.Decode(new(any)); err != io.EOF {
++		return fmt.Errorf("%w: trailing data", ErrSourceLineageInvalid)
++	}
++	next := SourceLineage(candidate)
++	if err := next.Validate(); err != nil {
++		return err
++	}
++	*l = next
++	return nil
++}
++
++// encoding/json normally lets later duplicate keys overwrite earlier ones.
++// Reject ambiguity before typed decoding, including keys inside each source.
++func uniqueSourceLineageJSONKeys(data []byte) error {
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.UseNumber()
++	var readValue func(int) error
++	readValue = func(depth int) error {
++		if depth > 8 {
++			return fmt.Errorf("%w: excessive JSON nesting", ErrSourceLineageInvalid)
++		}
++		token, err := decoder.Token()
++		if err != nil {
++			return fmt.Errorf("%w: malformed JSON", ErrSourceLineageInvalid)
++		}
++		delim, container := token.(json.Delim)
++		if !container {
++			return nil
++		}
++		switch delim {
++		case '{':
++			seen := make(map[string]struct{})
++			for decoder.More() {
++				keyToken, err := decoder.Token()
++				if err != nil {
++					return fmt.Errorf("%w: malformed object", ErrSourceLineageInvalid)
++				}
++				key, ok := keyToken.(string)
++				if !ok {
++					return fmt.Errorf("%w: malformed object key", ErrSourceLineageInvalid)
++				}
++				// Struct decoding also accepts case-folded aliases (even some
++				// Unicode aliases). Version 1 permits only its canonical keys.
++				if !canonicalSourceLineageJSONKey(depth, key) {
++					return fmt.Errorf("%w: noncanonical object key", ErrSourceLineageInvalid)
++				}
++				if _, duplicate := seen[key]; duplicate {
++					return fmt.Errorf("%w: duplicate object key", ErrSourceLineageInvalid)
++				}
++				seen[key] = struct{}{}
++				if err := readValue(depth + 1); err != nil {
++					return err
++				}
++			}
++		case '[':
++			for decoder.More() {
++				if err := readValue(depth + 1); err != nil {
++					return err
++				}
++			}
++		default:
++			return fmt.Errorf("%w: malformed container", ErrSourceLineageInvalid)
++		}
++		end, err := decoder.Token()
++		if err != nil || (delim == '{' && end != json.Delim('}')) || (delim == '[' && end != json.Delim(']')) {
++			return fmt.Errorf("%w: malformed container end", ErrSourceLineageInvalid)
++		}
++		return nil
++	}
++	if err := readValue(0); err != nil {
++		return err
++	}
++	if _, err := decoder.Token(); err != io.EOF {
++		return fmt.Errorf("%w: trailing data", ErrSourceLineageInvalid)
++	}
++	return nil
++}
++
++func canonicalSourceLineageJSONKey(depth int, key string) bool {
++	if depth == 0 {
++		return key == "version" || key == "state" || key == "sources"
++	}
++	if depth == 2 {
++		switch key {
++		case "provider", "tenant_id", "knowledge_base_id", "datasource_id", "pair_operation_id",
++			"instance_id", "binding_id", "file_id", "external_id", "knowledge_id", "revision", "etag":
++			return true
++		}
++	}
++	return false
++}
++
++func (l SourceLineage) Value() (driver.Value, error) { return l.MarshalJSON() }
++
++func (l *SourceLineage) Scan(value any) error {
++	*l = *UnknownSourceLineage()
++	switch value := value.(type) {
++	case nil:
++		return nil
++	case []byte:
++		return l.UnmarshalJSON(value)
++	case string:
++		return l.UnmarshalJSON([]byte(value))
++	default:
++		return fmt.Errorf("%w: unsupported database type", ErrSourceLineageInvalid)
++	}
++}
+diff --git a/internal/types/source_lineage_test.go b/internal/types/source_lineage_test.go
+new file mode 100644
+index 00000000..be8d5cfa
+--- /dev/null
++++ b/internal/types/source_lineage_test.go
+@@ -0,0 +1,278 @@
++package types
++
++import (
++	"encoding/json"
++	"errors"
++	"reflect"
++	"strconv"
++	"strings"
++	"testing"
++
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func lineageTestIdentity(fileID, etag string) SourceIdentity {
++	return SourceIdentity{Provider: ConnectorTypeNextcloud, TenantID: 7,
++		KnowledgeBaseID: "kb", DataSourceID: "ds", PairOperationID: "pair",
++		InstanceID: "instance", BindingID: "binding", FileID: fileID,
++		ExternalID: "nextcloud:instance:" + fileID, KnowledgeID: "knowledge-" + fileID,
++		Revision: 1, ETag: etag}
++}
++
++func TestSourceLineageUnionKeepsOriginalRevisionsAndUnknown(t *testing.T) {
++	a, err := NewCompleteSourceLineage(lineageTestIdentity("1", `"etag-original"`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	b, err := NewCompleteSourceLineage(lineageTestIdentity("1", `"etag-new"`), lineageTestIdentity("2", "etag-2"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	ab, err := UnionSourceLineage(a, b, a)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ba, err := UnionSourceLineage(b, a)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(ab.Sources) != 3 || !reflect.DeepEqual(ab, ba) || ab.RequireComplete() != nil {
++		t.Fatalf("union lost revision or was nondeterministic: %#v / %#v", ab, ba)
++	}
++	unknown, err := UnionSourceLineage(a, nil, b)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !errors.Is(unknown.RequireComplete(), ErrSourceLineageUnknown) || len(unknown.Sources) != 3 {
++		t.Fatal("unknown must dominate without losing known dependencies")
++	}
++	ab.Sources[0].ETag = "mutated"
++	if a.Sources[0].ETag != `"etag-original"` {
++		t.Fatal("union aliases its inputs")
++	}
++	empty, err := NewCompleteSourceLineage()
++	if err != nil || empty.RequireComplete() != nil || empty.Sources == nil {
++		t.Fatal("explicit complete empty rejected")
++	}
++	absent, err := UnionSourceLineage()
++	if err != nil || !errors.Is(absent.RequireComplete(), ErrSourceLineageUnknown) {
++		t.Fatal("absence was certified complete")
++	}
++}
++
++func TestSourceLineageInvalidInputCannotRetainCompleteState(t *testing.T) {
++	good, err := NewCompleteSourceLineage(lineageTestIdentity("1", "etag"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for name, mutate := range map[string]func(*SourceLineage){
++		"unsupported version":  func(l *SourceLineage) { l.Version = 2 },
++		"unsupported state":    func(l *SourceLineage) { l.State = "safe" },
++		"missing set":          func(l *SourceLineage) { l.Sources = nil },
++		"missing etag":         func(l *SourceLineage) { l.Sources[0].ETag = "" },
++		"invalid utf8 etag":    func(l *SourceLineage) { l.Sources[0].ETag = string([]byte{0xff}) },
++		"missing pairing":      func(l *SourceLineage) { l.Sources[0].PairOperationID = "" },
++		"missing revision":     func(l *SourceLineage) { l.Sources[0].Revision = 0 },
++		"aliased identity":     func(l *SourceLineage) { l.Sources[0].ExternalID = "nextcloud:other:1" },
++		"noncanonical file id": func(l *SourceLineage) { l.Sources[0].FileID = "01" },
++	} {
++		t.Run(name, func(t *testing.T) {
++			bad := *good
++			bad.Sources = append([]SourceIdentity{}, good.Sources...)
++			mutate(&bad)
++			out, err := UnionSourceLineage(good, &bad)
++			if !errors.Is(err, ErrSourceLineageInvalid) || !errors.Is(out.RequireComplete(), ErrSourceLineageUnknown) {
++				t.Fatalf("invalid lineage did not fail closed: %v / %#v", err, out)
++			}
++		})
++	}
++}
++
++func TestSourceLineageCodecLegacyAndErrorsResetToUnknown(t *testing.T) {
++	good, err := NewCompleteSourceLineage(lineageTestIdentity("1", "etag-original"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	encoded, err := good.Value()
++	if err != nil {
++		t.Fatal(err)
++	}
++	var loaded SourceLineage
++	if err := loaded.Scan(encoded); err != nil || !reflect.DeepEqual(&loaded, good) {
++		t.Fatal("byte codec round trip", err)
++	}
++	if err := loaded.Scan(string(encoded.([]byte))); err != nil {
++		t.Fatal("text codec", err)
++	}
++	if err := loaded.Scan(nil); err != nil || !errors.Is(loaded.RequireComplete(), ErrSourceLineageUnknown) {
++		t.Fatal("NULL must be unknown")
++	}
++	for _, raw := range []string{`null`, `{`, `{}`, `{"version":1,"state":"complete"}`, `{"version":1,"state":"complete","sources":null}`,
++		`{"version":1,"state":"complete","sources":[],"unexpected":"field"}`, `{"version":1,"state":"complete","sources":[]} {}`} {
++		loaded = *good
++		if err := loaded.Scan(raw); err == nil || !errors.Is(loaded.RequireComplete(), ErrSourceLineageUnknown) {
++			t.Fatalf("malformed data retained complete lineage: %q", raw)
++		}
++	}
++	loaded = *good
++	if err := loaded.Scan(123); !errors.Is(err, ErrSourceLineageInvalid) || loaded.State != SourceLineageUnknown {
++		t.Fatal("database type error retained state")
++	}
++	for _, fieldValue := range []string{"etag-original", "knowledge-1"} {
++		invalidUTF8 := strings.Replace(string(encoded.([]byte)), fieldValue, string([]byte{0xff}), 1)
++		if err := loaded.Scan(invalidUTF8); !errors.Is(err, ErrSourceLineageInvalid) || loaded.State != SourceLineageUnknown {
++			t.Fatal("database codec changed source identity/ETag by replacing invalid UTF-8")
++		}
++	}
++	checkpoint := ContextCheckpoint{Summary: "source-derived summary", SourceLineage: good}
++	encoded, err = checkpoint.Value()
++	if err != nil {
++		t.Fatal(err)
++	}
++	var cp ContextCheckpoint
++	if err := cp.Scan(encoded); err != nil || !reflect.DeepEqual(cp.SourceLineage, good) {
++		t.Fatal("checkpoint lineage codec", err)
++	}
++	if err := cp.Scan(`{"summary":"legacy"}`); err != nil || cp.SourceLineage != nil {
++		t.Fatal("legacy checkpoint acquired lineage")
++	}
++	if err := cp.Scan(nil); err != nil || cp.Summary != "" || cp.SourceLineage != nil {
++		t.Fatal("checkpoint NULL retained stale data")
++	}
++}
++
++func TestSourceLineageDuplicateJSONKeysRemainUnknown(t *testing.T) {
++	good, err := NewCompleteSourceLineage(lineageTestIdentity("1", "etag-original"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	encoded, err := good.Value()
++	if err != nil {
++		t.Fatal(err)
++	}
++	for name, raw := range map[string]string{
++		"unknown overwritten complete": `{"version":1,"state":"unknown","state":"complete","sources":[]}`,
++		"escaped duplicate state":      `{"version":1,"state":"unknown","st\u0061te":"complete","sources":[]}`,
++		"case alias state":             `{"version":1,"state":"unknown","STATE":"complete","sources":[]}`,
++		"unicode alias state":          `{"version":1,"state":"unknown","\u017ftate":"complete","sources":[]}`,
++		"duplicate version":            `{"version":2,"version":1,"state":"complete","sources":[]}`,
++		"duplicate source set":         `{"version":1,"state":"complete","sources":[],"sources":[]}`,
++		"duplicate original etag":      strings.Replace(string(encoded.([]byte)), `"etag":"etag-original"`, `"etag":"old","etag":"new"`, 1),
++		"duplicate knowledge id":       strings.Replace(string(encoded.([]byte)), `"knowledge_id":"knowledge-1"`, `"knowledge_id":"old","knowledge_id":"new"`, 1),
++	} {
++		t.Run(name, func(t *testing.T) {
++			loaded := *good
++			if err := loaded.Scan(raw); !errors.Is(err, ErrSourceLineageInvalid) || loaded.State != SourceLineageUnknown {
++				t.Fatalf("ambiguous envelope became complete: %v / %#v", err, loaded)
++			}
++		})
++	}
++}
++
++func TestSourceLineageBoundsNeverTruncateACompleteSet(t *testing.T) {
++	sources := make([]SourceIdentity, SourceLineageMaxSources)
++	for i := range sources {
++		sources[i] = lineageTestIdentity(strconv.Itoa(i+1), "etag")
++	}
++	// Use two individually valid input envelopes so overflow occurs at union.
++	left, err := NewCompleteSourceLineage(sources[:400]...)
++	if err != nil {
++		t.Fatal(err)
++	}
++	right, err := NewCompleteSourceLineage(sources[400:800]...)
++	if err != nil {
++		t.Fatal(err)
++	}
++	last, err := NewCompleteSourceLineage(sources[800:]...)
++	if err != nil {
++		t.Fatal(err)
++	}
++	// The byte bound may be reached before the count bound; both deny output.
++	out, err := UnionSourceLineage(left, right, last)
++	if !errors.Is(err, ErrSourceLineageLimit) || out.State != SourceLineageUnknown {
++		t.Fatal("oversized set was certified", err)
++	}
++	oversize := &SourceLineage{Version: 1, State: SourceLineageComplete, Sources: make([]SourceIdentity, SourceLineageMaxSources+1)}
++	if !errors.Is(oversize.Validate(), ErrSourceLineageLimit) {
++		t.Fatal("source count bound missing")
++	}
++	constructed, err := NewCompleteSourceLineage(oversize.Sources...)
++	if !errors.Is(err, ErrSourceLineageLimit) || constructed.State != SourceLineageUnknown {
++		t.Fatal("oversized producer input was copied/certified", err)
++	}
++	loaded := *left
++	if err := json.Unmarshal([]byte(strings.Repeat(" ", SourceLineageMaxBytes+1)), &loaded); err == nil {
++		t.Fatal("oversized JSON accepted")
++	}
++	// Direct UnmarshalJSON is used by Scan; encoding/json rejects invalid JSON
++	// before invoking it, so test the database boundary separately.
++	if err := loaded.Scan(strings.Repeat(" ", SourceLineageMaxBytes+1)); !errors.Is(err, ErrSourceLineageLimit) || loaded.State != SourceLineageUnknown {
++		t.Fatal("oversized database envelope retained readable state")
++	}
++}
++
++func TestSourceLineageRemainsInternalInPublicMessageJSON(t *testing.T) {
++	lineage, err := NewCompleteSourceLineage(lineageTestIdentity("1", "private-etag"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	message := Message{ID: "answer", Role: "assistant", Content: "safe answer",
++		SourceLineage: lineage, ContextCheckpoint: &ContextCheckpoint{Summary: "private summary", SourceLineage: lineage}}
++	encoded, err := json.Marshal(message)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, private := range []string{"source_lineage", "context_checkpoint", "private-etag", "private summary", "pair_operation_id"} {
++		if strings.Contains(string(encoded), private) {
++			t.Fatalf("public Message JSON exposed %q", private)
++		}
++	}
++	// The same metadata must still survive the independent persistence codec.
++	persisted, err := message.ContextCheckpoint.Value()
++	if err != nil || !strings.Contains(string(persisted.([]byte)), "private-etag") {
++		t.Fatal("checkpoint persistence lost lineage", err)
++	}
++}
++
++func TestSourceLineageNullableMessageFieldPersistsThroughGORM(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	sqlDB, err := db.DB()
++	if err != nil {
++		t.Fatal(err)
++	}
++	sqlDB.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	if err := db.Exec(`CREATE TABLE messages (id TEXT PRIMARY KEY,
++		source_lineage TEXT, created_at DATETIME, updated_at DATETIME, deleted_at DATETIME)`).Error; err != nil {
++		t.Fatal(err)
++	}
++	lineage, err := NewCompleteSourceLineage(lineageTestIdentity("1", "original-etag"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, message := range []Message{{ID: "legacy"}, {ID: "typed", SourceLineage: lineage}} {
++		if err := db.Select("id", "source_lineage").Create(&message).Error; err != nil {
++			t.Fatal(err)
++		}
++		var loaded Message
++		if err := db.Select("id", "source_lineage").First(&loaded, "id = ?", message.ID).Error; err != nil {
++			t.Fatal(err)
++		}
++		if !reflect.DeepEqual(message.SourceLineage, loaded.SourceLineage) {
++			t.Fatal("nullable Message codec changed lineage")
++		}
++	}
++	if err := db.Exec(`INSERT INTO messages(id, source_lineage) VALUES ('ambiguous',
++		'{"version":1,"state":"unknown","state":"complete","sources":[]}')`).Error; err != nil {
++		t.Fatal(err)
++	}
++	var malformed Message
++	if err := db.Select("id", "source_lineage").First(&malformed, "id = 'ambiguous'").Error; err == nil ||
++		(malformed.SourceLineage != nil && malformed.SourceLineage.State == SourceLineageComplete) {
++		t.Fatal("GORM accepted ambiguous persisted provenance", err)
++	}
++}
 diff --git a/migrations/sqlite/000029_resource_source_provenance.down.sql b/migrations/sqlite/000029_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..3752ed3c
@@ -50277,6 +51380,533 @@ index 00000000..ae197901
 +ALTER TABLE sync_logs ADD COLUMN worker_attempt_token TEXT NOT NULL DEFAULT '';
 +CREATE INDEX idx_sync_logs_nextcloud_recovery ON sync_logs (started_at, id)
 +    WHERE status = 'running' AND recovery_version = 1 AND worker_started_at IS NULL;
+diff --git a/migrations/sqlite/000051_message_source_lineage.down.sql b/migrations/sqlite/000051_message_source_lineage.down.sql
+new file mode 100644
+index 00000000..2b0ddf39
+--- /dev/null
++++ b/migrations/sqlite/000051_message_source_lineage.down.sql
+@@ -0,0 +1,2 @@
++-- A deliberate failure preserves lineage/tombstones on attempted downgrade.
++SELECT * FROM message_source_lineage_rollback_requires_audit_export;
+diff --git a/migrations/sqlite/000051_message_source_lineage.up.sql b/migrations/sqlite/000051_message_source_lineage.up.sql
+new file mode 100644
+index 00000000..709c7870
+--- /dev/null
++++ b/migrations/sqlite/000051_message_source_lineage.up.sql
+@@ -0,0 +1,513 @@
++-- Additive foundation only. Migration execution holds SQLite's write
++-- transaction across backfill and trigger installation. Legacy answers stay NULL.
++ALTER TABLE messages ADD COLUMN source_lineage TEXT CHECK (
++    source_lineage IS NULL OR CASE WHEN json_valid(source_lineage) THEN
++        json_type(source_lineage) IS 'object'
++        AND json_type(source_lineage, '$.version') IS 'integer'
++        AND json_extract(source_lineage, '$.version') IS 1
++        AND json_type(source_lineage, '$.state') IS 'text'
++        AND json_extract(source_lineage, '$.state') IN ('complete', 'unknown')
++        AND json_type(source_lineage, '$.sources') IS 'array'
++        AND length(CAST(source_lineage AS BLOB)) <= 262144
++    ELSE 0 END);
++
++-- Only positive facts are recorded. A missing row is unknown, never a never-source proof.
++CREATE TABLE nextcloud_source_tombstones (
++    tenant_id INTEGER NOT NULL CHECK (tenant_id > 0),
++    scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'knowledge_base', 'datasource', 'pair')),
++    scope_id TEXT NOT NULL CHECK (length(trim(scope_id)) > 0),
++    recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (tenant_id, scope_type, scope_id),
++    CHECK (scope_type <> 'tenant' OR scope_id = CAST(tenant_id AS TEXT))
++);
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM knowledge_bases
++    WHERE (ever_had_nextcloud_source = 1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', id FROM knowledge_bases
++    WHERE (ever_had_nextcloud_source = 1) AND tenant_id > 0 AND length(trim(id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM data_sources
++    WHERE (type = 'nextcloud') AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM data_sources
++    WHERE (type = 'nextcloud') AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', id FROM data_sources
++    WHERE (type = 'nextcloud') AND tenant_id > 0 AND length(trim(id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM knowledges
++    WHERE (channel = 'nextcloud' OR metadata LIKE '%"nextcloud_instance_id"%' OR metadata LIKE '%"nextcloud_binding_id"%' OR metadata LIKE '%"nextcloud_file_id"%') AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM knowledges
++    WHERE (channel = 'nextcloud' OR metadata LIKE '%"nextcloud_instance_id"%' OR metadata LIKE '%"nextcloud_binding_id"%' OR metadata LIKE '%"nextcloud_file_id"%') AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.datasource_id') ELSE '' END FROM knowledges
++    WHERE (channel = 'nextcloud' OR metadata LIKE '%"nextcloud_instance_id"%' OR metadata LIKE '%"nextcloud_binding_id"%' OR metadata LIKE '%"nextcloud_file_id"%') AND tenant_id > 0 AND length(trim(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.datasource_id') ELSE '' END)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_source_versions
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_source_versions
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_source_versions
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_source_revisions
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_source_revisions
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_source_revisions
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_source_pairings
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_source_pairings
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_source_pairings
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'pair', operation_id FROM nextcloud_source_pairings
++    WHERE (1) AND tenant_id > 0 AND length(trim(operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_source_rotations
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_source_rotations
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_source_rotations
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'pair', pair_operation_id FROM nextcloud_source_rotations
++    WHERE (1) AND tenant_id > 0 AND length(trim(pair_operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_source_pairing_aborts
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_source_pairing_aborts
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_source_pairing_aborts
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'pair', operation_id FROM nextcloud_source_pairing_aborts
++    WHERE (1) AND tenant_id > 0 AND length(trim(operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_source_decommissions
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_source_decommissions
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_source_decommissions
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'pair', pair_operation_id FROM nextcloud_source_decommissions
++    WHERE (1) AND tenant_id > 0 AND length(trim(pair_operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_indexed_withdrawals
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_indexed_withdrawals
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_indexed_withdrawals
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'pair', pair_operation_id FROM nextcloud_indexed_withdrawals
++    WHERE (1) AND tenant_id > 0 AND length(trim(pair_operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_event_connections
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_event_connections
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_event_connections
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'tenant', CAST(tenant_id AS TEXT) FROM nextcloud_gc_jobs
++    WHERE (1) AND tenant_id > 0 AND length(trim(CAST(tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'knowledge_base', knowledge_base_id FROM nextcloud_gc_jobs
++    WHERE (1) AND tenant_id > 0 AND length(trim(knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT tenant_id, 'datasource', datasource_id FROM nextcloud_gc_jobs
++    WHERE (1) AND tenant_id > 0 AND length(trim(datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++
++CREATE TRIGGER nextcloud_source_tombstones_knowledge_bases_insert
++AFTER INSERT ON knowledge_bases
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (NEW.ever_had_nextcloud_source = 1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.id
++    WHERE (NEW.ever_had_nextcloud_source = 1) AND NEW.tenant_id > 0 AND length(trim(NEW.id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_knowledge_bases_update
++AFTER UPDATE ON knowledge_bases
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'tenant', CAST(OLD.tenant_id AS TEXT)
++    WHERE (OLD.ever_had_nextcloud_source = 1) AND OLD.tenant_id > 0 AND length(trim(CAST(OLD.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'knowledge_base', OLD.id
++    WHERE (OLD.ever_had_nextcloud_source = 1) AND OLD.tenant_id > 0 AND length(trim(OLD.id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (NEW.ever_had_nextcloud_source = 1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.id
++    WHERE (NEW.ever_had_nextcloud_source = 1) AND NEW.tenant_id > 0 AND length(trim(NEW.id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_data_sources_insert
++AFTER INSERT ON data_sources
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (NEW.type = 'nextcloud') AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (NEW.type = 'nextcloud') AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.id
++    WHERE (NEW.type = 'nextcloud') AND NEW.tenant_id > 0 AND length(trim(NEW.id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_data_sources_update
++AFTER UPDATE ON data_sources
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'tenant', CAST(OLD.tenant_id AS TEXT)
++    WHERE (OLD.type = 'nextcloud') AND OLD.tenant_id > 0 AND length(trim(CAST(OLD.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'knowledge_base', OLD.knowledge_base_id
++    WHERE (OLD.type = 'nextcloud') AND OLD.tenant_id > 0 AND length(trim(OLD.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'datasource', OLD.id
++    WHERE (OLD.type = 'nextcloud') AND OLD.tenant_id > 0 AND length(trim(OLD.id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (NEW.type = 'nextcloud') AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (NEW.type = 'nextcloud') AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.id
++    WHERE (NEW.type = 'nextcloud') AND NEW.tenant_id > 0 AND length(trim(NEW.id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_knowledges_insert
++AFTER INSERT ON knowledges
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (NEW.channel = 'nextcloud' OR NEW.metadata LIKE '%"nextcloud_instance_id"%' OR NEW.metadata LIKE '%"nextcloud_binding_id"%' OR NEW.metadata LIKE '%"nextcloud_file_id"%') AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (NEW.channel = 'nextcloud' OR NEW.metadata LIKE '%"nextcloud_instance_id"%' OR NEW.metadata LIKE '%"nextcloud_binding_id"%' OR NEW.metadata LIKE '%"nextcloud_file_id"%') AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.datasource_id') ELSE '' END
++    WHERE (NEW.channel = 'nextcloud' OR NEW.metadata LIKE '%"nextcloud_instance_id"%' OR NEW.metadata LIKE '%"nextcloud_binding_id"%' OR NEW.metadata LIKE '%"nextcloud_file_id"%') AND NEW.tenant_id > 0 AND length(trim(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.datasource_id') ELSE '' END)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_knowledges_update
++AFTER UPDATE ON knowledges
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'tenant', CAST(OLD.tenant_id AS TEXT)
++    WHERE (OLD.channel = 'nextcloud' OR OLD.metadata LIKE '%"nextcloud_instance_id"%' OR OLD.metadata LIKE '%"nextcloud_binding_id"%' OR OLD.metadata LIKE '%"nextcloud_file_id"%') AND OLD.tenant_id > 0 AND length(trim(CAST(OLD.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'knowledge_base', OLD.knowledge_base_id
++    WHERE (OLD.channel = 'nextcloud' OR OLD.metadata LIKE '%"nextcloud_instance_id"%' OR OLD.metadata LIKE '%"nextcloud_binding_id"%' OR OLD.metadata LIKE '%"nextcloud_file_id"%') AND OLD.tenant_id > 0 AND length(trim(OLD.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT OLD.tenant_id, 'datasource', CASE WHEN json_valid(OLD.metadata) THEN json_extract(OLD.metadata, '$.datasource_id') ELSE '' END
++    WHERE (OLD.channel = 'nextcloud' OR OLD.metadata LIKE '%"nextcloud_instance_id"%' OR OLD.metadata LIKE '%"nextcloud_binding_id"%' OR OLD.metadata LIKE '%"nextcloud_file_id"%') AND OLD.tenant_id > 0 AND length(trim(CASE WHEN json_valid(OLD.metadata) THEN json_extract(OLD.metadata, '$.datasource_id') ELSE '' END)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (NEW.channel = 'nextcloud' OR NEW.metadata LIKE '%"nextcloud_instance_id"%' OR NEW.metadata LIKE '%"nextcloud_binding_id"%' OR NEW.metadata LIKE '%"nextcloud_file_id"%') AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (NEW.channel = 'nextcloud' OR NEW.metadata LIKE '%"nextcloud_instance_id"%' OR NEW.metadata LIKE '%"nextcloud_binding_id"%' OR NEW.metadata LIKE '%"nextcloud_file_id"%') AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.datasource_id') ELSE '' END
++    WHERE (NEW.channel = 'nextcloud' OR NEW.metadata LIKE '%"nextcloud_instance_id"%' OR NEW.metadata LIKE '%"nextcloud_binding_id"%' OR NEW.metadata LIKE '%"nextcloud_file_id"%') AND NEW.tenant_id > 0 AND length(trim(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.datasource_id') ELSE '' END)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_source_versions_insert
++AFTER INSERT ON nextcloud_source_versions
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_source_revisions_insert
++AFTER INSERT ON nextcloud_source_revisions
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_source_pairings_insert
++AFTER INSERT ON nextcloud_source_pairings
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'pair', NEW.operation_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_source_rotations_insert
++AFTER INSERT ON nextcloud_source_rotations
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'pair', NEW.pair_operation_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.pair_operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_source_pairing_aborts_insert
++AFTER INSERT ON nextcloud_source_pairing_aborts
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'pair', NEW.operation_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_source_decommissions_insert
++AFTER INSERT ON nextcloud_source_decommissions
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'pair', NEW.pair_operation_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.pair_operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_indexed_withdrawals_insert
++AFTER INSERT ON nextcloud_indexed_withdrawals
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'pair', NEW.pair_operation_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.pair_operation_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_event_connections_insert
++AFTER INSERT ON nextcloud_event_connections
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_nextcloud_gc_jobs_insert
++AFTER INSERT ON nextcloud_gc_jobs
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'tenant', CAST(NEW.tenant_id AS TEXT)
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(CAST(NEW.tenant_id AS TEXT))) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'knowledge_base', NEW.knowledge_base_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.knowledge_base_id)) > 0
++    ON CONFLICT DO NOTHING;
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT NEW.tenant_id, 'datasource', NEW.datasource_id
++    WHERE (1) AND NEW.tenant_id > 0 AND length(trim(NEW.datasource_id)) > 0
++    ON CONFLICT DO NOTHING;
++END;
++
++CREATE TRIGGER nextcloud_source_tombstones_no_update
++BEFORE UPDATE ON nextcloud_source_tombstones
++BEGIN
++    SELECT RAISE(ABORT, 'nextcloud_source_tombstones_immutable');
++END;
++-- REPLACE normally deletes a conflicting row without firing delete triggers
++-- when recursive_triggers is off. Preserve the first fact for that key too.
++CREATE TRIGGER nextcloud_source_tombstones_existing_insert
++BEFORE INSERT ON nextcloud_source_tombstones
++WHEN EXISTS (SELECT 1 FROM nextcloud_source_tombstones
++    WHERE tenant_id = NEW.tenant_id AND scope_type = NEW.scope_type AND scope_id = NEW.scope_id)
++BEGIN
++    SELECT RAISE(IGNORE);
++END;
++CREATE TRIGGER nextcloud_source_tombstones_no_delete
++BEFORE DELETE ON nextcloud_source_tombstones
++BEGIN
++    SELECT RAISE(ABORT, 'nextcloud_source_tombstones_immutable');
++END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 00000000..cf1f675a
@@ -51887,3 +53517,165 @@ index 00000000..7d6cb681
 +ALTER TABLE sync_logs ADD COLUMN worker_attempt_token TEXT NOT NULL DEFAULT '';
 +CREATE INDEX idx_sync_logs_nextcloud_recovery ON sync_logs (started_at, id)
 +    WHERE status = 'running' AND recovery_version = 1 AND worker_started_at IS NULL;
+diff --git a/migrations/versioned/000132_message_source_lineage.down.sql b/migrations/versioned/000132_message_source_lineage.down.sql
+new file mode 100644
+index 00000000..396408ea
+--- /dev/null
++++ b/migrations/versioned/000132_message_source_lineage.down.sql
+@@ -0,0 +1,5 @@
++-- Export and reconcile provenance before a manual rollback. An automatic
++-- downgrade must not erase original answer lineage or independent tombstones.
++DO $$ BEGIN
++    RAISE EXCEPTION 'message_source_lineage_rollback_requires_audit_export' USING ERRCODE = '23514';
++END $$;
+diff --git a/migrations/versioned/000132_message_source_lineage.up.sql b/migrations/versioned/000132_message_source_lineage.up.sql
+new file mode 100644
+index 00000000..c6f98957
+--- /dev/null
++++ b/migrations/versioned/000132_message_source_lineage.up.sql
+@@ -0,0 +1,145 @@
++-- Additive foundation only: no legacy answer is certified complete.
++-- golang-migrate runs this file atomically. Fence evidence writes across
++-- backfill and trigger installation; tombstones have no business-row FK.
++LOCK TABLE knowledge_bases, data_sources, knowledges, nextcloud_source_versions,
++    nextcloud_source_revisions, nextcloud_source_pairings,
++    nextcloud_source_rotations, nextcloud_source_pairing_aborts,
++    nextcloud_source_decommissions, nextcloud_indexed_withdrawals,
++    nextcloud_event_connections, nextcloud_gc_jobs IN SHARE ROW EXCLUSIVE MODE;
++
++ALTER TABLE messages ADD COLUMN source_lineage JSONB;
++ALTER TABLE messages ADD CONSTRAINT messages_source_lineage_envelope CHECK (
++    source_lineage IS NULL OR COALESCE(
++        jsonb_typeof(source_lineage) = 'object'
++        AND source_lineage->'version' = '1'::jsonb
++        AND source_lineage->>'state' IN ('complete', 'unknown')
++        AND jsonb_typeof(source_lineage->'sources') = 'array'
++        AND octet_length(source_lineage::text) <= 262144, FALSE));
++
++-- This table holds only positive ever-source facts. Absence is unknown,
++-- including scopes whose pre-upgrade business rows were already removed.
++CREATE TABLE nextcloud_source_tombstones (
++    tenant_id BIGINT NOT NULL CHECK (tenant_id > 0),
++    scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'knowledge_base', 'datasource', 'pair')),
++    scope_id TEXT NOT NULL CHECK (length(trim(scope_id)) > 0),
++    recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
++    PRIMARY KEY (tenant_id, scope_type, scope_id),
++    CHECK (scope_type <> 'tenant' OR scope_id = tenant_id::text)
++);
++
++CREATE FUNCTION nextcloud_source_tombstones_record(owner BIGINT, kb TEXT, ds TEXT, pair_id TEXT)
++RETURNS void LANGUAGE plpgsql AS $record$
++BEGIN
++    INSERT INTO nextcloud_source_tombstones(tenant_id, scope_type, scope_id)
++    SELECT owner, scope_type, scope_id FROM (VALUES
++        ('tenant', owner::text), ('knowledge_base', kb), ('datasource', ds), ('pair', pair_id)
++    ) AS scopes(scope_type, scope_id)
++    WHERE owner > 0 AND length(trim(scope_id)) > 0
++    ON CONFLICT DO NOTHING;
++END
++$record$;
++
++CREATE FUNCTION nextcloud_source_tombstones_capture_row(row_data JSONB, origin TEXT)
++RETURNS void LANGUAGE plpgsql AS $capture_row$
++DECLARE
++    marked BOOLEAN := TRUE;
++    ds TEXT := row_data->>'datasource_id';
++    kb TEXT := row_data->>'knowledge_base_id';
++    pair_id TEXT := row_data->>'pair_operation_id';
++BEGIN
++    IF row_data IS NULL THEN RETURN; END IF;
++    IF origin = 'data_sources' THEN
++        marked := row_data->>'type' = 'nextcloud';
++        ds := row_data->>'id';
++    ELSIF origin = 'knowledge_bases' THEN
++        marked := row_data->>'ever_had_nextcloud_source' = 'true';
++        kb := row_data->>'id';
++    ELSIF origin = 'knowledges' THEN
++        marked := row_data->>'channel' = 'nextcloud'
++            OR (row_data->'metadata') ?| ARRAY['nextcloud_instance_id', 'nextcloud_binding_id', 'nextcloud_file_id'];
++        ds := row_data->'metadata'->>'datasource_id';
++    ELSIF origin IN ('nextcloud_source_pairings', 'nextcloud_source_pairing_aborts') THEN
++        pair_id := row_data->>'operation_id';
++    END IF;
++    IF marked THEN
++        PERFORM nextcloud_source_tombstones_record((row_data->>'tenant_id')::bigint, kb, ds, pair_id);
++    END IF;
++END
++$capture_row$;
++
++CREATE FUNCTION nextcloud_source_tombstones_capture() RETURNS trigger
++LANGUAGE plpgsql AS $capture$
++BEGIN
++    IF TG_OP <> 'INSERT' THEN
++        PERFORM nextcloud_source_tombstones_capture_row(to_jsonb(OLD), TG_TABLE_NAME);
++    END IF;
++    IF TG_OP <> 'DELETE' THEN
++        PERFORM nextcloud_source_tombstones_capture_row(to_jsonb(NEW), TG_TABLE_NAME);
++        RETURN NEW;
++    END IF;
++    RETURN OLD;
++END
++$capture$;
++
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'knowledge_bases') FROM knowledge_bases AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'data_sources') FROM data_sources AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'knowledges') FROM knowledges AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_source_versions') FROM nextcloud_source_versions AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_source_revisions') FROM nextcloud_source_revisions AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_source_pairings') FROM nextcloud_source_pairings AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_source_rotations') FROM nextcloud_source_rotations AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_source_pairing_aborts') FROM nextcloud_source_pairing_aborts AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_source_decommissions') FROM nextcloud_source_decommissions AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_indexed_withdrawals') FROM nextcloud_indexed_withdrawals AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_event_connections') FROM nextcloud_event_connections AS evidence;
++SELECT nextcloud_source_tombstones_capture_row(to_jsonb(evidence), 'nextcloud_gc_jobs') FROM nextcloud_gc_jobs AS evidence;
++
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON knowledge_bases FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON data_sources FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON knowledges FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_source_versions FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_source_revisions FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_source_pairings FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_source_rotations FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_source_pairing_aborts FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_source_decommissions FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_indexed_withdrawals FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_event_connections FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++CREATE TRIGGER nextcloud_source_tombstones_capture
++AFTER INSERT OR UPDATE OR DELETE ON nextcloud_gc_jobs FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_capture();
++
++CREATE FUNCTION nextcloud_source_tombstones_immutable() RETURNS trigger
++LANGUAGE plpgsql AS $immutable$
++BEGIN
++    RAISE EXCEPTION 'nextcloud_source_tombstones_immutable' USING ERRCODE = '23514';
++END
++$immutable$;
++CREATE TRIGGER nextcloud_source_tombstones_immutable
++BEFORE UPDATE OR DELETE ON nextcloud_source_tombstones FOR EACH ROW
++EXECUTE FUNCTION nextcloud_source_tombstones_immutable();
++CREATE TRIGGER nextcloud_source_tombstones_no_truncate
++BEFORE TRUNCATE ON nextcloud_source_tombstones FOR EACH STATEMENT
++EXECUTE FUNCTION nextcloud_source_tombstones_immutable();

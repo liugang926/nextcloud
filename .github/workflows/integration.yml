@@ -170,7 +170,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '49c18b24f8639fba6e0a5bb181af2174e9298b5ddecd9bc41f0764cc6ec14a21  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '082c03295820a97a6e969973726bd7e07bb03b55c67a63563c5004360a9469ab  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -205,6 +205,12 @@ jobs:
           go test -p 2 ./internal/datasource -run Nextcloud -count=1
           go test -p 2 ./internal/agent/tools -run '^TestQueryKnowledgeGraph' -count=1
 
+      - name: Verify source lineage codec and independent tombstone lookup
+        working-directory: weknora
+        run: |
+          go test -p 2 ./internal/types -run '^TestSourceLineage' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestNextcloudSourceTombstone' -count=1
+
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -231,7 +237,7 @@ jobs:
           go test -p 2 ./internal/handler -run '^TestNextcloudEvent' -count=1
           go test -p 2 ./internal/application/repository \
             -run '^Test(PostgresNextcloud|NextcloudSourcePairingPostgres)' -count=1
-          go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
+          go test -p 2 ./internal/database -run '^TestSQLite' -count=1
 
       - name: Verify pgvector retirement races and exact-ID receipts
         working-directory: weknora
@@ -248,7 +254,7 @@ jobs:
           WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable
         run: |
           docker exec "${{ job.services.pgvector.id }}" createdb -U postgres weknora_migration_test
-          go test -p 2 ./internal/database -run '^TestPostgresMigrationsServeAgentHistory$' -count=1
+          go test -p 2 ./internal/database -run '^Test(PostgresMigrationsServeAgentHistory|PostgresSourceLineage)' -count=1
 
   weknora-rag-patch:
     runs-on: ubuntu-latest
@@ -281,7 +287,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo 'b274b2074c1b5532d52e7f084e6c87306290adf29950478e102e6435c73ac797  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo 'b6afcd4e150d1b7fdb006993f5936f72ddacf88e00bcaa6ff0e013e610b466dc  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -311,8 +317,14 @@ jobs:
             ./internal/container \
             ./internal/mcpserver
           go test -p 2 ./internal/handler/session -run '^Test(LiveSSE|ContinueStream|StopSessionAndSteer)' -count=1
-          go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
+          go test -p 2 ./internal/database -run '^TestSQLite' -count=1
           go test -p 2 ./internal/agent/tools -run '^TestQueryKnowledgeGraph' -count=1
+
+      - name: Verify RAG source lineage codec and independent tombstone lookup
+        working-directory: weknora-rag
+        run: |
+          go test -p 2 ./internal/types -run '^TestSourceLineage' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestNextcloudSourceTombstone' -count=1
 
       - name: Verify pgvector retirement races and exact-ID receipts
         working-directory: weknora-rag
@@ -330,7 +342,7 @@ jobs:
           WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable
         run: |
           docker exec "${{ job.services.pgvector.id }}" createdb -U postgres weknora_migration_test
-          go test -p 2 ./internal/database -run '^TestPostgresMigrationsServeAgentHistory$' -count=1
+          go test -p 2 ./internal/database -run '^Test(PostgresMigrationsServeAgentHistory|PostgresSourceLineage)' -count=1
 
       - uses: actions/setup-node@v4
         with:

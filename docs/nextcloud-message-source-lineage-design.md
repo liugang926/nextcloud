@@ -1,6 +1,7 @@
 # Message source lineage design
 
-Status: proposed; no migration or implementation is included in this document.
+Status: design with Phase 1 storage/types now implemented in the current pinned
+source patches. Prompt capture and lineage-based authorization remain open.
 This is an implementation plan for PRD §§7.3, 7.7 cases 6–8 and 8. It does not
 close those requirements, establish derived GC coverage, or authorize rollout.
 
@@ -35,10 +36,11 @@ recover this dependency.
 ## Persisted contract
 
 Add an internal, per-assistant `messages.source_lineage`: PostgreSQL `JSONB`,
-SQLite `TEXT`, nullable for existing rows. The proposed next migration slots
-are PostgreSQL **132** and SQLite **51**, following the currently inspected
-131/50. These numbers are reservations for implementation review only; no SQL
-files are added here and they must be rechecked before a migration is written.
+SQLite `TEXT`, nullable for existing rows. The current source patches implement
+PostgreSQL **132** and SQLite **51**, following 131/50, with nullable message
+storage and independent positive provenance tombstones. This additive
+foundation preserves legacy NULL; it does not enable message-level
+authorization. See [foundation integration](nextcloud-message-source-lineage-foundation-2026-10-08.md).
 
 Version 1 has the following logical shape (illustrative, not SQL):
 
@@ -208,7 +210,7 @@ reconstruct per-answer lineage or authorize an old answer.
 
 | Phase | Code boundary and required proof |
 | --- | --- |
-| 1. Schema/types and mandatory policy | Review proposed PG132/SQLite51; add nullable column, typed codec/union, checkpoint envelope and independent tombstones. Test malformed/unknown/overflow and migrations from real pre-change schemas; no legacy complete backfill. |
+| 1. Schema/types and mandatory policy | PG132/SQLite51 storage/types, codec/union, checkpoint field and independent tombstones are now implemented and tested in the pinned patches. Mandatory per-message policy remains open; no legacy complete backfill. |
 | 2. Prompt and producer coverage | Wire RAG final prompt/history merges and Agent actual history/tool/model inputs. Instrument every influencing model call and source output adapter. Compare captured input envelopes against saved union; an uncovered adapter must fail closed. |
 | 3. Persistence/replay | Atomic answer+lineage and checkpoint writes, fork preservation, durable stream-prefix metadata, mandatory read/replay/history-index checks. Inject crashes between text, lineage, queue and event publication; no readable orphan text. |
 | 4. Derivative propagation | Preserve lineage through history passages, memory, suggestions, artifacts and their searches/writers. Inventory legacy derived copies and require source-aware denial/invalidation before enabling indexing. |
@@ -229,7 +231,11 @@ Run both PostgreSQL and SQLite, HTTP plus non-HTTP consumers, and pause at the
 actual model-send/output boundaries to verify revocation. Static scans or a
 green codec test cannot substitute for these behavioral proofs.
 
-All phases remain unimplemented in this design. Keep the existing
+Phase 1 storage/types is implemented and tested in the pinned source patches;
+phases 2–4 and the complete lineage-based read policy remain unimplemented.
+The current interim Agent gate also reads positive independent tombstones.
+Absence of retained evidence cannot reconstruct pre-backfill erased history.
+Keep the existing
 `derived_index` blocker and physical derived deletion gate until the separate
 [coverage gaps](nextcloud-derived-gc-coverage-gap-map-2026-10-08.md) are closed
 with runtime evidence.
