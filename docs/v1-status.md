@@ -1256,6 +1256,20 @@ The owned containers, volumes, network and private scratch were removed.
 This three-file run does not accept the current RAG patch or the PRD's
 sustained P95, 10,000-file/100-GB, upload-latency, scanned-PDF or real-AD targets.
 
+A subsequent read-only scheduler trace found that the tested image queues
+applied-proof work for five seconds after dispatch commits, while its default
+dispatcher ticks every five seconds. A queue commit just after a tick can miss
+the next tick and wait nearly ten seconds for proof evaluation, consistent
+with this run's 9.21–9.95-second dispatched-to-applied observations and older
+five-second-poll samples. The fixture did not record its dispatcher setting,
+so that attribution remains an inference. The shared LAN overlay explicitly
+uses a one-second dispatcher interval, and an older isolated comparison
+observed about six seconds with that setting; see the
+[event queue pilot](isolated-event-queue-pilot.md). The PRD's separate event-to-job
+and tiny-text publication targets do not impose a ten-second applied-watermark
+limit. A future isolated A/B run should record the configured interval and
+safe tick/due/proof timestamps before changing the scheduler.
+
 ## 2026-10-08 pinned patch safety and complete frontend checks
 
 Both pinned WeKnora patches now recheck the persisted coverage marker and
