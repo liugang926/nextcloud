@@ -154,3 +154,9 @@ records a successful read-only pass over the finalized local checkpoint with
 an externally supplied manifest pin. It covers all sixteen artifacts and
 eight volume archives, the captured app code and the approved pair bridge.
 It does not verify live target state, actual restoration or external replay.
+
+The [isolated cold-volume rehearsal](shared-cold-restore-drill.md) can now
+restore the eight archives into new random owned volumes and compare the full
+inventory. It never replaces the shared target. Its tiny Docker proof and
+source-only verification do not satisfy the shared destructive apply, full
+application recovery or external withdrawal replay gates above.
