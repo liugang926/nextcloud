@@ -156,6 +156,7 @@ class OwnedDrill:
 
     def create_volume(self, role):
         require(role not in self.volumes, "duplicate owned volume role")
+        self.verify()
         name = self.prefix + "-" + role
         require(name not in self.listed("volume"), "fresh drill volume name is occupied")
         self.attempted_resources.append({"kind": "volume", "name": name})
@@ -167,6 +168,7 @@ class OwnedDrill:
         return name
 
     def create_network(self):
+        self.verify()
         name = self.prefix + "-internal"
         require(self.network is None and name not in self.listed("network"), "fresh drill network is occupied")
         self.attempted_resources.append({"kind": "network", "name": name})
@@ -179,6 +181,7 @@ class OwnedDrill:
     def create_container(self, role, image, volume_role, target, entrypoint, command,
                          *, readonly_volume=False, database=False, user="0:0"):
         require(role not in self.containers and plan.IMAGE.fullmatch(image), "invalid owned container specification")
+        self.verify()
         name = self.prefix + "-" + role
         require(name not in self.run(["docker", "ps", "-a", "--format", "{{.Names}}"]).decode().split(),
                 "fresh drill container name is occupied")
@@ -269,8 +272,15 @@ class OwnedDrill:
                     labels.get(LABEL) == self.token and labels.get(ROLE_LABEL) == "internal" and
                     set(item.get("Containers") or {}).issubset(own_ids), "owned network identity or peers changed")
 
-    def execute(self, container_id, *, input_file=None, output_file=None):
+    def require_recorded_container(self, container_id, *, database):
+        matches = [saved for saved in self.containers.values() if saved["id"] == container_id]
+        require(isinstance(container_id, str) and plan.CONTAINER.fullmatch(container_id) is not None and
+                len(matches) == 1 and matches[0]["database"] is database,
+                "start target is not a recorded owned container with the required purpose")
         self.verify()
+
+    def execute(self, container_id, *, input_file=None, output_file=None):
+        self.require_recorded_container(container_id, database=False)
         self.run(["docker", "start", "-a", "-i", container_id], input_file=input_file,
                  output_file=output_file, timeout=600)
         item = self.inspect("container", container_id)
@@ -279,7 +289,7 @@ class OwnedDrill:
         self.verify()
 
     def start_database(self, container_id):
-        self.verify()
+        self.require_recorded_container(container_id, database=True)
         self.run(["docker", "start", container_id])
         self.verify()
 

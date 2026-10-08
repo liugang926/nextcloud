@@ -184,13 +184,44 @@ class OwnershipTests(unittest.TestCase):
         self.assertTrue(all(command[:2] == ["docker", "inspect"] for command in self.calls))
 
     def test_unknown_image_default_volume_refused_before_create(self):
-        self.owner.run = lambda args, **kwargs: self.calls.append(args) or b""
+        original_run = self.owner.run
+        self.owner.run = lambda args, **kwargs: (self.calls.append(args) or b"") if args[:2] == ["docker", "ps"] else original_run(args, **kwargs)
         self.owner.inspect = lambda kind, target: {"Id": IMAGE, "Os": "linux",
-            "Config": {"Volumes": {drill.DATA: {}, "/anonymous-extra": {}}}}
+            "Config": {"Volumes": {drill.DATA: {}, "/anonymous-extra": {}}}} if kind == "image" else copy.deepcopy(self.volume)
         with self.assertRaisesRegex(drill.DrillError, "anonymous"):
             self.owner.create_container("new-helper", IMAGE, "nextcloud-html", drill.DATA, "tar", ["--help"])
         self.assertFalse(self.owner.attempted_resources)
-        self.assertTrue(all(command[:2] == ["docker", "ps"] for command in self.calls))
+        self.assertTrue(all(command[:2] in (["docker", "ps"], ["docker", "inspect"]) for command in self.calls))
+
+    def test_create_refuses_existing_owned_drift_before_any_resource_write(self):
+        original_run = self.owner.run
+        self.owner.run = lambda args, **kwargs: (self.calls.append(args) or b"") if args[:2] == ["docker", "ps"] else original_run(args, **kwargs)
+        self.owner.inspect = lambda kind, target: {"Id": IMAGE, "Os": "linux",
+            "Config": {"Volumes": {drill.DATA: {}}}} if kind == "image" else copy.deepcopy(self.volume)
+        operations = [lambda: self.owner.create_volume("another-volume"),
+            lambda: self.owner.create_network(),
+            lambda: self.owner.create_container("another-helper", IMAGE, "nextcloud-html", drill.DATA, "tar", ["--help"])]
+        for operation in operations:
+            with self.subTest(operation=operation):
+                self.item["HostConfig"]["ReadonlyRootfs"] = False
+                with self.assertRaisesRegex(drill.DrillError, "isolation"):
+                    operation()
+                self.assertFalse(self.owner.attempted_resources)
+        self.assertTrue(all(command[:2] == ["docker", "inspect"] for command in self.calls))
+
+    def test_foreign_or_wrong_purpose_container_cannot_start(self):
+        helper = self.item["Id"]
+        for method, target in [(self.owner.execute, "f" * 64),
+                               (self.owner.start_database, "f" * 64),
+                               (self.owner.start_database, helper),
+                               (self.owner.execute, "not-an-immutable-id")]:
+            with self.subTest(method=method, target=target), self.assertRaisesRegex(drill.DrillError, "purpose"):
+                method(target)
+        self.owner.containers["audit"]["database"] = True
+        self.item["HostConfig"]["Tmpfs"] = {"/tmp": "rw,noexec,nosuid,size=16777216,mode=1777"}
+        with self.assertRaisesRegex(drill.DrillError, "purpose"):
+            self.owner.execute(helper)
+        self.assertFalse(self.calls)
 
     def test_failed_ownership_prevents_start(self):
         self.item["HostConfig"]["ReadonlyRootfs"] = False

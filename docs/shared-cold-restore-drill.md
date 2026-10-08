@@ -59,10 +59,12 @@ queries, version and row/key counts enter the report; credentials, identities,
 source names, keys and document bodies do not. Startup can modify the cloned
 WAL/AOF state, so archive byte equality is recorded **before** database start.
 
-Before every helper start and cleanup, the script rechecks all exact resource
+Before every resource creation, helper/database start and cleanup, the script rechecks all exact resource
 labels/IDs, image IDs, command, user, capabilities, isolation flags, mounts,
 volume creation identity and network peers. It also checks stopped foreign
-containers for any use of the new volumes or network. Cleanup uses only
+containers for any use of the new volumes or network. Starts require the
+recorded exact ID and helper/database purpose, rejecting arbitrary target IDs
+before sending a Docker start. Cleanup uses only
 recorded IDs/names. If ownership cannot be proved, it retains closed resources
 and their attempted names in private failure evidence; it never prunes Docker
 state.
