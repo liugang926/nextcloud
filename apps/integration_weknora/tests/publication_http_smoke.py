@@ -153,6 +153,8 @@ def main():
     check(status, 200, "admin state")
     state = json.loads(body)
     original = state["state"]
+    audit_id = state["decision_audit_id"]
+    assert isinstance(audit_id, int) and audit_id >= 0, "invalid local decision audit ID"
     assert "reconcile_hint_recorded" not in state
     assert latest_reconcile_hint(args.binding, args.file_id) == hint_id, "read-only state appended a hint"
     user_id = f"weknora_permission_{secrets.token_hex(4)}"
@@ -176,6 +178,9 @@ def main():
         check(status, 200, "withdraw")
         withdrawn = json.loads(body)
         assert withdrawn["state"] == "withdrawn" and withdrawn["excluded"] is True
+        assert isinstance(withdrawn["decision_audit_id"], int)
+        assert withdrawn["decision_audit_id"] > audit_id, "withdraw did not link a new audit row"
+        audit_id = withdrawn["decision_audit_id"]
         assert withdrawn["reconcile_hint_recorded"] is True
         next_hint_id = latest_reconcile_hint(args.binding, args.file_id)
         assert next_hint_id > hint_id, "withdraw did not append a file-scoped reconcile hint"
@@ -183,7 +188,10 @@ def main():
         hint_id = next_hint_id
         status, body = request(admin, f"{file_api}/withdraw", "POST", admin_headers, b"")
         check(status, 200, "idempotent withdraw")
-        assert json.loads(body)["reconcile_hint_recorded"] is True
+        repeated = json.loads(body)
+        assert repeated["reconcile_hint_recorded"] is True
+        assert repeated["decision_audit_id"] > audit_id, "repeated decision did not advance its audit ID"
+        audit_id = repeated["decision_audit_id"]
         next_hint_id = latest_reconcile_hint(args.binding, args.file_id)
         assert next_hint_id > hint_id, "repeated withdraw did not append a repair hint"
         hint_id = next_hint_id
@@ -194,12 +202,16 @@ def main():
         check(status, 404, "content after withdrawal")
         status, body = request(admin, f"{file_api}/publication", headers=admin_headers)
         check(status, 200, "persisted withdrawal")
-        assert json.loads(body)["state"] == "withdrawn"
+        persisted = json.loads(body)
+        assert persisted["state"] == "withdrawn"
+        assert persisted["decision_audit_id"] == audit_id, "point read lost the current audit link"
 
         status, body = request(admin, f"{file_api}/republish", "POST", admin_headers, b"")
         check(status, 200, "republish")
         republished = json.loads(body)
         assert republished["state"] == "eligible" and republished["excluded"] is False
+        assert republished["decision_audit_id"] > audit_id, "republish did not advance its audit ID"
+        audit_id = republished["decision_audit_id"]
         assert republished["reconcile_hint_recorded"] is True
         assert latest_reconcile_hint(args.binding, args.file_id) > hint_id, "republish did not append a file-scoped reconcile hint"
         assert latest_reconcile_hint(args.binding, None) == broad_hint_id, "republish appended a broad reconcile hint"
