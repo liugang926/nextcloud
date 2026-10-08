@@ -143,3 +143,10 @@ ingress process started. This evidence proves the physical cold-volume and
 closed database portion of an isolated rehearsal. Actual application restore,
 shared destructive apply, external withdrawal replay and revocation acceptance
 before reopening remain open.
+
+The subsequent [captured application and LDAP extension](shared-application-restore-drill.md)
+now records actual fenced Nextcloud/WeKnora/OpenLDAP startup from the same
+externally pinned checkpoint, including private code/input extraction, exact
+original-data protection and disposable startup caches. Its successful
+read-only runtime acceptance leaves shared destructive apply, authoritative
+external replay and reopening unperformed.

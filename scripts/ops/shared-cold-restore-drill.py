@@ -138,6 +138,7 @@ class OwnedDrill:
         self.cwd, self.token = cwd, token
         self.prefix = "nc-cold-drill-" + token
         self.volumes, self.containers, self.network = {}, {}, None
+        self.retired_containers = {}
         self.attempted_resources = []
 
     def run(self, args, **kwargs):
@@ -239,6 +240,9 @@ class OwnedDrill:
         by_id = {item["Id"]: item for item in items}
         for role, saved in self.containers.items():
             item = by_id.get(saved["id"])
+            if saved.get("runtime"):
+                self.verify_runtime_container(role, saved, item)
+                continue
             require(item is not None, "owned container disappeared")
             cfg, host = item.get("Config") or {}, item.get("HostConfig") or {}
             labels = cfg.get("Labels") or {}
@@ -270,7 +274,11 @@ class OwnedDrill:
             require(item.get("Name") == self.network["name"] and item.get("Id") == self.network["id"] and
                     item.get("Internal") is True and item.get("Driver") == "bridge" and
                     labels.get(LABEL) == self.token and labels.get(ROLE_LABEL) == "internal" and
-                    set(item.get("Containers") or {}).issubset(own_ids), "owned network identity or peers changed")
+                    set(item.get("Containers") or {}).issubset(own_ids | set(self.retired_containers)) and
+                    not (set(self.retired_containers) & set(all_ids)), "owned network identity or peers changed")
+
+    def verify_runtime_container(self, role, saved, item):
+        raise DrillError("runtime containers require an explicit ownership verifier")
 
     def require_recorded_container(self, container_id, *, database):
         matches = [saved for saved in self.containers.values() if saved["id"] == container_id]
@@ -300,9 +308,20 @@ class OwnedDrill:
         for saved in self.containers.values():
             self.verify()
             self.run(["docker", "rm", "-f", saved["id"]])
+            self.retired_containers[saved["id"]] = saved
             self.containers = {role: c for role, c in self.containers.items() if c["id"] != saved["id"]}
         self.verify()
         if self.network:
+            # Docker Desktop may briefly retain a removed container endpoint.
+            # Only recorded, successfully removed IDs absent from all live/
+            # stopped container listings are allowed during this wait.
+            for _ in range(30):
+                self.verify()
+                if not self.inspect("network", self.network["id"]).get("Containers"):
+                    break
+                time.sleep(0.1)
+            else:
+                raise DrillError("removed owned endpoints did not detach")
             self.run(["docker", "network", "rm", self.network["id"]])
             self.network = None
         for role in list(self.volumes):
@@ -314,7 +333,8 @@ class OwnedDrill:
     def resources(self):
         return json.loads(json.dumps({"prefix": self.prefix, "volumes": self.volumes,
                                       "containers": self.containers, "network": self.network,
-                                      "attempted_resources": self.attempted_resources}))
+                                      "attempted_resources": self.attempted_resources,
+                                      "retired_containers": self.retired_containers}))
 
 
 def drill_plan(checked):
@@ -400,16 +420,35 @@ def verify_databases(owner, checked):
     return report
 
 
-def apply_drill(checked, checkpoint, cwd, output_dir, *, volumes_only=False):
+def safe_drill_evidence_location(output, checkpoint, cwd, checked):
+    candidate = output.resolve(strict=False)
+    wk_root = checked["inputs"]["weknora-local/.env"].parent
+    forbidden = [checkpoint, cwd / "apps/integration_weknora", wk_root,
+                 cwd.parent / "WeKnora-ldap-ad", *checked["inputs"].values()]
+    for source in forbidden:
+        source = source.resolve(strict=False)
+        require(candidate != source and source not in candidate.parents,
+                "evidence cannot modify the checkpoint or original runtime input tree")
+    for checkout in {cwd.resolve(), plan.ROOT.resolve()}:
+        if candidate == checkout or checkout in candidate.parents:
+            require(checkout / "dist" in candidate.parents,
+                    "evidence inside a checkout must be under ignored dist")
+            capture.run(["git", "check-ignore", "--quiet", "--", str(candidate)], cwd=checkout)
+
+
+def apply_drill(checked, checkpoint, cwd, output_dir, *, volumes_only=False,
+                owner_type=OwnedDrill, runtime_validator=None):
     for inventory in checked["archives"].values():
         require_representable(inventory)
     token = secrets.token_hex(12)
     require(not output_dir.exists() and output_dir.is_absolute() and not output_dir.is_symlink(), "evidence destination must be a new absolute directory")
     require(output_dir.parent.resolve(strict=True) == output_dir.parent,
             "evidence parent contains a symlink")
+    safe_drill_evidence_location(output_dir, checkpoint, cwd, checked)
     output_dir.mkdir(mode=0o700)
     plan.plain_owned(output_dir, 0o700, directory=True)
-    owner = OwnedDrill(cwd, token)
+    owner = owner_type(cwd, token)
+    owner.evidence = output_dir
     report = drill_plan(checked)
     report.update(mode="isolated_cold_volume_restore_drill", status="INCOMPLETE", volumes=[], database_validation={}, cleanup_verified=False)
     helper_image = checked["manifest"]["projects"][capture.NC_PROJECT]["containers"]["db"]["image_id"]
@@ -447,18 +486,27 @@ def apply_drill(checked, checkpoint, cwd, output_dir, *, volumes_only=False):
                     "payload_bytes": expected["payload_bytes"], "exact_members_bytes_owners_modes_links_verified": True})
                 copied.unlink(); audited.unlink()
         report["byte_validation_before_database_start"] = True
-        if not volumes_only:
+        if runtime_validator is not None:
+            require(not volumes_only, "application validation cannot be volumes-only")
+            report.update(runtime_validator(owner, checked, checkpoint, output_dir))
+        elif not volumes_only:
             report["database_validation"] = verify_databases(owner, checked)
         report["database_validation_performed"] = not volumes_only
         report["resource_inventory_at_validation"] = owner.resources()
+        if hasattr(owner, "save_logs"):
+            owner.save_logs(output_dir)
         owner.cleanup()
         report.update(status="COMPLETE", cleanup_verified=True)
         private_json(output_dir / "result.json", report)
         return report
-    except BaseException:
+    except BaseException as error:
+        report["failure_type"] = type(error).__name__
+        report["failure_reason"] = str(error)
         # Ownership loss must never turn into a broad cleanup. The resources
         # were born with closed sockets/no ports; retain them if proof fails.
         try:
+            if hasattr(owner, "save_logs"):
+                owner.save_logs(output_dir)
             owner.cleanup()
             report["cleanup_verified"] = True
         except (DrillError, capture.CheckpointError, plan.RestorePlanError, OSError, ValueError, KeyError):
