@@ -3823,10 +3823,10 @@ index 933a67d1..a4e7f3ec 100644
  
 diff --git a/internal/application/access/nextcloud_history.go b/internal/application/access/nextcloud_history.go
 new file mode 100644
-index 00000000..92d4b240
+index 00000000..269a7aae
 --- /dev/null
 +++ b/internal/application/access/nextcloud_history.go
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,200 @@
 +package access
 +
 +import (
@@ -3849,13 +3849,18 @@ index 00000000..92d4b240
 +	HasEverNextcloudSourceForTenant(context.Context, uint64) (bool, error)
 +}
 +
++type historicalInstanceSourceLookup interface {
++	HasEverNextcloudSourceGlobally(context.Context) (bool, error)
++}
++
 +// NextcloudHistoryGuard checks persisted answer provenance. A saved answer is
 +// a copy of source content and must be authorized again at every read, even if
 +// the original search or connector sync was authorized at generation time.
 +type NextcloudHistoryGuard struct {
-+	knowledge   historicalKnowledgeLookup
-+	sources     HistoricalSourceLookup
-+	publication *NextcloudPublicationGuard
++	knowledge       historicalKnowledgeLookup
++	sources         HistoricalSourceLookup
++	instanceSources historicalInstanceSourceLookup
++	publication     *NextcloudPublicationGuard
 +}
 +
 +func NewNextcloudHistoryGuard(
@@ -3864,7 +3869,8 @@ index 00000000..92d4b240
 +	publication *NextcloudPublicationGuard,
 +) *NextcloudHistoryGuard {
 +	historical, _ := sources.(HistoricalSourceLookup)
-+	return &NextcloudHistoryGuard{knowledge: knowledge, sources: historical, publication: publication}
++	instance, _ := sources.(historicalInstanceSourceLookup)
++	return &NextcloudHistoryGuard{knowledge: knowledge, sources: historical, instanceSources: instance, publication: publication}
 +}
 +
 +// CheckMessage returns nil for user-authored text and ordinary answers. For
@@ -4001,6 +4007,25 @@ index 00000000..92d4b240
 +	// rule. Ordinary KBs still pass; a Nextcloud KB or all-mode Agent waits
 +	// for a provenance event before any answer or tool output is emitted.
 +	return g.CheckMessage(ctx, message)
++}
++
++// CheckAgentHistoryReplay admits model history only on an instance positively
++// verified never to have contained a Nextcloud source. Per-message citations
++// cannot prove that newer paraphrases or compaction summaries are independent
++// of an older revoked turn. This conservative barrier is an interim fallback
++// until complete transitive lineage can be persisted and reauthorized.
++func (g *NextcloudHistoryGuard) CheckAgentHistoryReplay(ctx context.Context) error {
++	if g == nil || g.instanceSources == nil {
++		return ErrNextcloudPublicationUnavailable
++	}
++	seen, err := g.instanceSources.HasEverNextcloudSourceGlobally(ctx)
++	if err != nil {
++		return fmt.Errorf("%w: Agent source history lookup failed: %v", ErrNextcloudPublicationUnavailable, err)
++	}
++	if seen {
++		return fmt.Errorf("%w: Agent history has no exhaustive transitive source lineage", ErrNextcloudPublicationDenied)
++	}
++	return nil
 +}
 diff --git a/internal/application/access/nextcloud_history_test.go b/internal/application/access/nextcloud_history_test.go
 new file mode 100644
@@ -5210,7 +5235,7 @@ index c8c518ac..3124c329 100644
  
  	snapshot := &types.ChunkRevision{
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
-index c3b2f58e..c0a174b0 100644
+index c3b2f58e..39595e7e 100644
 --- a/internal/application/repository/datasource_repo.go
 +++ b/internal/application/repository/datasource_repo.go
 @@ -3,10 +3,15 @@ package repository
@@ -5320,7 +5345,7 @@ index c3b2f58e..c0a174b0 100644
  // FindByID retrieves a data source by ID
  func (r *DataSourceRepository) FindByID(ctx context.Context, id string) (*types.DataSource, error) {
  	if id == "" {
-@@ -77,6 +152,36 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
+@@ -77,6 +152,73 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
  	return dataSources, nil
  }
  
@@ -5354,10 +5379,47 @@ index c3b2f58e..c0a174b0 100644
 +	return count > 0, err
 +}
 +
++// HasEverNextcloudSourceGlobally is the interim admission barrier for Agent
++// histories and compaction summaries, whose transitive provenance is not yet
++// persisted. Scope is the whole instance: shared KBs, tools and previous Agent
++// turns can cross tenant boundaries. Every evidence table is required, and
++// sticky KB markers and pairing tombstones survive source removal.
++func (r *DataSourceRepository) HasEverNextcloudSourceGlobally(ctx context.Context) (bool, error) {
++	if r == nil || r.db == nil {
++		return false, errors.New("source history database is unavailable")
++	}
++	var seen bool
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var malformed int64
++		if err := tx.Table("knowledge_bases").Where("ever_had_nextcloud_source IS NULL OR ever_had_nextcloud_source NOT IN (?, ?)", false, true).Count(&malformed).Error; err != nil {
++			return err
++		}
++		if malformed != 0 {
++			return errors.New("knowledge base provenance is malformed")
++		}
++		var sources, markers, pairings, aborts int64
++		if err := tx.Unscoped().Model(&types.DataSource{}).Where("type = ?", types.ConnectorTypeNextcloud).Count(&sources).Error; err != nil {
++			return err
++		}
++		if err := tx.Table("knowledge_bases").Where("ever_had_nextcloud_source = ?", true).Count(&markers).Error; err != nil {
++			return err
++		}
++		if err := tx.Table("nextcloud_source_pairings").Count(&pairings).Error; err != nil {
++			return err
++		}
++		if err := tx.Table("nextcloud_source_pairing_aborts").Count(&aborts).Error; err != nil {
++			return err
++		}
++		seen = sources > 0 || markers > 0 || pairings > 0 || aborts > 0
++		return nil
++	})
++	return seen, err
++}
++
  // Update updates an existing data source
  func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource) error {
  	if ds == nil {
-@@ -86,6 +191,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -86,6 +228,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  		return errors.New("data source id is empty")
  	}
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -5392,7 +5454,7 @@ index c3b2f58e..c0a174b0 100644
  		if err := tx.Model(ds).Updates(ds).Error; err != nil {
  			return err
  		}
-@@ -97,6 +230,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -97,6 +267,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  	})
  }
  
@@ -5459,7 +5521,7 @@ index c3b2f58e..c0a174b0 100644
  // UpdateSyncState updates only fields managed by sync execution. GORM's
  // Updates(struct) skips zero values, so use a map here to persist cleared error
  // messages without broadening the generic Update method.
-@@ -123,11 +316,68 @@ func (r *DataSourceRepository) UpdateSyncState(ctx context.Context, ds *types.Da
+@@ -123,11 +353,68 @@ func (r *DataSourceRepository) UpdateSyncState(ctx context.Context, ds *types.Da
  	return nil
  }
  
@@ -5528,7 +5590,7 @@ index c3b2f58e..c0a174b0 100644
  	if err := r.db.WithContext(ctx).
  		Where("id = ?", id).
  		Delete(&types.DataSource{}).Error; err != nil {
-@@ -166,6 +416,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
+@@ -166,6 +453,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
  		return errors.New("sync log is nil")
  	}
  	if err := r.db.WithContext(ctx).Create(log).Error; err != nil {
@@ -5538,7 +5600,7 @@ index c3b2f58e..c0a174b0 100644
  		return err
  	}
  	return nil
-@@ -246,6 +499,81 @@ func (r *SyncLogRepository) HasRunningSync(ctx context.Context, dsID string) (bo
+@@ -246,6 +536,81 @@ func (r *SyncLogRepository) HasRunningSync(ctx context.Context, dsID string) (bo
  	return count > 0, nil
  }
  
@@ -15293,6 +15355,52 @@ index 00000000..f5a8121f
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_items (job_id, kind, object_ref, state)
 +		VALUES ('job', 'sqlite_embedding', '123', 'pending')`).Error)
 +}
+diff --git a/internal/application/repository/nextcloud_global_history_test.go b/internal/application/repository/nextcloud_global_history_test.go
+new file mode 100644
+index 00000000..e69fe150
+--- /dev/null
++++ b/internal/application/repository/nextcloud_global_history_test.go
+@@ -0,0 +1,40 @@
++package repository
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++func TestNextcloudGlobalHistoryAdmissionIncludesAllPersistentEvidence(t *testing.T) {
++	for _, kind := range []string{"none", "source-soft-deleted-other-tenant", "sticky-deleted-kb", "pairing", "abort", "malformed-marker", "missing-table"} {
++		t.Run(kind, func(t *testing.T) {
++			db := provenanceTestDB(t)
++			require.NoError(t, db.Exec("INSERT INTO knowledge_bases(id, tenant_id) VALUES('kb', 99)").Error)
++			switch kind {
++			case "source-soft-deleted-other-tenant":
++				ds := &types.DataSource{ID: "ds", TenantID: 99, KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud}
++				require.NoError(t, db.Create(ds).Error)
++				require.NoError(t, db.Delete(ds).Error)
++			case "sticky-deleted-kb":
++				require.NoError(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source=TRUE, deleted_at=CURRENT_TIMESTAMP").Error)
++			case "pairing":
++				require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "pair"}).Error)
++			case "abort":
++				require.NoError(t, db.Create(&NextcloudSourcePairingAbort{OperationID: "abort"}).Error)
++			case "malformed-marker":
++				require.NoError(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source=2").Error)
++			case "missing-table":
++				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_pairing_aborts").Error)
++			}
++			ever, err := (&DataSourceRepository{db: db}).HasEverNextcloudSourceGlobally(context.Background())
++			if kind == "malformed-marker" || kind == "missing-table" {
++				require.Error(t, err)
++				return
++			}
++			require.NoError(t, err)
++			require.Equal(t, kind != "none", ever)
++		})
++	}
++}
 diff --git a/internal/application/repository/nextcloud_indexed_withdrawal.go b/internal/application/repository/nextcloud_indexed_withdrawal.go
 new file mode 100644
 index 00000000..a4ea190c
@@ -22158,6 +22266,336 @@ index f89b9463..7374fe5e 100644
  // DeleteByChunkIDList deletes indices by chunk IDs
  func (g *pgRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
  	logger.GetLogger(ctx).Infof("[Postgres] Deleting indices by chunk IDs, count: %d", len(chunkIDList))
+diff --git a/internal/application/service/agent_history.go b/internal/application/service/agent_history.go
+index 78bca685..ffbf2d7d 100644
+--- a/internal/application/service/agent_history.go
++++ b/internal/application/service/agent_history.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/agent/compaction"
+ 	agenttoken "github.com/Tencent/WeKnora/internal/agent/token"
+ 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
++	"github.com/Tencent/WeKnora/internal/application/access"
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/models/chat"
+ 	"github.com/Tencent/WeKnora/internal/types"
+@@ -30,6 +31,10 @@ const agentHistoryMaxRows = 5000
+ 
+ var agentHistoryThinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
+ 
++type AgentHistoryAdmission interface {
++	CheckAgentHistoryReplay(context.Context) error
++}
++
+ // LoadAgentHistory rebuilds the multi-turn LLM context for an Agent-mode
+ // session directly from the persistent messages table. The result is a
+ // chronologically ordered list of chat.Message entries suitable for prepending
+@@ -75,7 +80,14 @@ func LoadAgentHistory(
+ 	sessionID string,
+ 	tokenBudget int,
+ 	retainRetrievalHistory bool,
++	admission AgentHistoryAdmission,
+ ) ([]chat.Message, float64, error) {
++	if admission == nil {
++		return nil, 0, access.ErrNextcloudPublicationUnavailable
++	}
++	if err := admission.CheckAgentHistoryReplay(ctx); err != nil {
++		return nil, 0, err
++	}
+ 	if tokenBudget <= 0 {
+ 		return []chat.Message{}, 0, nil
+ 	}
+@@ -84,7 +96,10 @@ func LoadAgentHistory(
+ 		return nil, 0, fmt.Errorf("load agent history: %w", err)
+ 	}
+ 
+-	checkpoint := loadContextCheckpoint(ctx, messageRepo, sessionID)
++	checkpoint, err := loadContextCheckpoint(ctx, messageRepo, sessionID)
++	if err != nil {
++		return nil, 0, err
++	}
+ 	out := []chat.Message{}
+ 	if checkpoint != nil {
+ 		out = append(out, compaction.SummaryMessage(checkpoint.ContextCheckpoint.Summary))
+@@ -153,6 +168,9 @@ func LoadAgentHistory(
+ 		logger.Warnf(ctx, "Agent history after checkpoint %s exceeds the budget; "+
+ 			"older turns after it were dropped", checkpointID)
+ 	}
++	if err := admission.CheckAgentHistoryReplay(ctx); err != nil {
++		return nil, 0, err
++	}
+ 	return out, scale, nil
+ }
+ 
+@@ -351,22 +369,20 @@ func (r *historyReplay) newestWithin(turns []*agentHistoryTurn) ([]*agentHistory
+ 	return turns, false
+ }
+ 
+-// loadContextCheckpoint returns the session's newest usable checkpoint, or nil.
+-// A failed lookup degrades to history without one: the turn still runs, it
+-// just pays for compaction again.
+-func loadContextCheckpoint(
+-	ctx context.Context, messageRepo interfaces.MessageRepository, sessionID string,
+-) *types.Message {
++// loadContextCheckpoint requires a successful lookup before admitting any
++// summary. A nonnil malformed checkpoint is not evidence of absence.
++func loadContextCheckpoint(ctx context.Context, messageRepo interfaces.MessageRepository, sessionID string) (*types.Message, error) {
+ 	msg, err := messageRepo.GetLatestContextCheckpoint(ctx, sessionID)
+ 	if err != nil {
+-		logger.Warnf(ctx, "Failed to load the context checkpoint of session %s, "+
+-			"loading history without it: %v", sessionID, err)
+-		return nil
++		return nil, fmt.Errorf("load Agent context checkpoint: %w", err)
+ 	}
+-	if msg == nil || msg.ContextCheckpoint == nil || strings.TrimSpace(msg.ContextCheckpoint.Summary) == "" {
+-		return nil
++	if msg == nil {
++		return nil, nil
+ 	}
+-	return msg
++	if msg.ID == "" || msg.Role != "assistant" || msg.ContextCheckpoint == nil || strings.TrimSpace(msg.ContextCheckpoint.Summary) == "" {
++		return nil, access.ErrNextcloudPublicationUnavailable
++	}
++	return msg, nil
+ }
+ 
+ // turnsAfterCheckpoint drops the turns a checkpoint already covers: its own
+diff --git a/internal/application/service/agent_history_cadence_test.go b/internal/application/service/agent_history_cadence_test.go
+index ed27cd36..5fa835cc 100644
+--- a/internal/application/service/agent_history_cadence_test.go
++++ b/internal/application/service/agent_history_cadence_test.go
+@@ -99,7 +99,7 @@ func runSessionCadenceWith(
+ 	var compacted []int
+ 	for i := 1; i <= turns; i++ {
+ 		ctx := context.Background()
+-		history, loadedScale, err := LoadAgentHistory(ctx, repo, "s1", agent.HistoryTokenBudget(cfg), false)
++		history, loadedScale, err := LoadAgentHistory(ctx, repo, "s1", agent.HistoryTokenBudget(cfg), false, allowAgentHistory{})
+ 		require.NoError(t, err)
+ 		est.SetScale(loadedScale)
+ 		requireNoGapAfterCheckpoint(t, repo, history, i)
+diff --git a/internal/application/service/agent_history_checkpoint_test.go b/internal/application/service/agent_history_checkpoint_test.go
+index afc994e9..00922c4c 100644
+--- a/internal/application/service/agent_history_checkpoint_test.go
++++ b/internal/application/service/agent_history_checkpoint_test.go
+@@ -18,15 +18,20 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
++type allowAgentHistory struct{}
++
++func (allowAgentHistory) CheckAgentHistoryReplay(context.Context) error { return nil }
++
+ // historyRepo pages a fixed message list backwards the way the database does
+ // and serves one checkpoint lookup.
+ type historyRepo struct {
+ 	interfaces.MessageRepository
+-	rows          []*types.Message
+-	checkpoint    *types.Message
+-	checkpointErr error
+-	updates       []string
+-	pages         int
++	rows            []*types.Message
++	checkpoint      *types.Message
++	checkpointErr   error
++	updates         []string
++	pages           int
++	checkpointReads int
+ }
+ 
+ func (r *historyRepo) ListMessagesBySessionBeforeCursor(
+@@ -52,6 +57,7 @@ func (r *historyRepo) ListMessagesBySessionBeforeCursor(
+ func (r *historyRepo) GetLatestContextCheckpoint(
+ 	context.Context, string,
+ ) (*types.Message, error) {
++	r.checkpointReads++
+ 	return r.checkpoint, r.checkpointErr
+ }
+ 
+@@ -123,7 +129,7 @@ const unlimitedBudget = 1 << 30
+ func TestLoadAgentHistoryTagsEveryMessageWithItsTurn(t *testing.T) {
+ 	repo := &historyRepo{rows: storedTurns(2)}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 
+ 	require.Equal(t, []string{"question 1", "answer 1", "question 2", "answer 2"}, contents(got))
+@@ -137,7 +143,7 @@ func TestLoadAgentHistoryTagsEveryMessageWithItsTurn(t *testing.T) {
+ func TestLoadAgentHistoryIsNotCappedByTurnCount(t *testing.T) {
+ 	repo := &historyRepo{rows: storedTurns(40)}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 	assert.Len(t, questions(got), 40)
+ }
+@@ -148,7 +154,7 @@ func TestLoadAgentHistoryResumesFromTheCheckpoint(t *testing.T) {
+ 	rows := storedTurns(4)
+ 	repo := &historyRepo{rows: rows, checkpoint: checkpointOn(rows[3], "## Goal\nturns one and two")}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 
+ 	require.Len(t, got, 5)
+@@ -167,7 +173,7 @@ func TestLoadAgentHistoryStopsReadingAtTheCheckpoint(t *testing.T) {
+ 	rows := storedTurns(300) // 600 rows, three pages
+ 	repo := &historyRepo{rows: rows, checkpoint: checkpointOn(rows[2*250-1], "## Goal\nthe first 250 turns")}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 
+ 	assert.Equal(t, 1, repo.pages)
+@@ -181,7 +187,7 @@ func TestLoadAgentHistoryStopsReadingAtTheCheckpoint(t *testing.T) {
+ func TestLoadAgentHistoryStopsReadingOnceTheBudgetIsFull(t *testing.T) {
+ 	repo := &historyRepo{rows: storedTurnsOfSize(300, 1000)}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 5500, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 5500, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 
+ 	assert.Equal(t, 1, repo.pages)
+@@ -194,7 +200,7 @@ func TestLoadAgentHistoryStopsReadingOnceTheBudgetIsFull(t *testing.T) {
+ func TestLoadAgentHistoryKeepsAnOversizedNewestTurn(t *testing.T) {
+ 	repo := &historyRepo{rows: storedTurnsOfSize(3, 1000)}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 100, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 100, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 	assert.Equal(t, []string{"question 3"}, questions(got))
+ }
+@@ -205,7 +211,7 @@ func TestLoadAgentHistoryBudgetsTurnsAfterTheCheckpoint(t *testing.T) {
+ 	rows := storedTurnsOfSize(6, 1000)
+ 	repo := &historyRepo{rows: rows, checkpoint: checkpointOn(rows[1], "## Goal\nturn one")}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 2500, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 2500, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 
+ 	assert.Equal(t, chat.MessageKindCompactionSummary, got[0].Kind)
+@@ -245,13 +251,13 @@ func TestLoadAgentHistoryReturnsTurnsAsTheEngineSendsThem(t *testing.T) {
+ 		return ""
+ 	}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 1500, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 1500, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 	assert.Len(t, questions(got), 5, "redacted pages cost a line each, so every turn fits")
+ 	assert.NotContains(t, toolContent(got), "page page", "the page is not held, only its marker")
+ 	assert.Equal(t, "a5", got[len(got)-1].TurnID, "redaction keeps the turn tag")
+ 
+-	got, _, err = LoadAgentHistory(context.Background(), repo, "s1", 1500, true)
++	got, _, err = LoadAgentHistory(context.Background(), repo, "s1", 1500, true, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 	assert.Equal(t, []string{"question 5"}, questions(got),
+ 		"retained pages are sent in full and priced in full")
+@@ -306,7 +312,7 @@ func TestCompleteHistoryTurnsLeavesOutATurnCutByTheRead(t *testing.T) {
+ func TestLoadAgentHistoryWithoutABudgetLoadsNothing(t *testing.T) {
+ 	repo := &historyRepo{rows: storedTurns(2)}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 0, false)
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 0, false, allowAgentHistory{})
+ 	require.NoError(t, err)
+ 	assert.Empty(t, got)
+ 	assert.Zero(t, repo.pages)
+@@ -316,18 +322,18 @@ func TestLoadAgentHistoryWithoutABudgetLoadsNothing(t *testing.T) {
+ func TestLoadAgentHistoryWithoutACheckpointWhenTheLookupFails(t *testing.T) {
+ 	repo := &historyRepo{rows: storedTurns(2), checkpointErr: errors.New("db down")}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false)
+-	require.NoError(t, err)
+-	assert.Equal(t, []string{"question 1", "answer 1", "question 2", "answer 2"}, contents(got))
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false, allowAgentHistory{})
++	require.Error(t, err)
++	assert.Empty(t, got)
+ }
+ 
+ func TestLoadAgentHistoryIgnoresAnEmptyCheckpoint(t *testing.T) {
+ 	rows := storedTurns(2)
+ 	repo := &historyRepo{rows: rows, checkpoint: checkpointOn(rows[1], "  ")}
+ 
+-	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false)
+-	require.NoError(t, err)
+-	assert.Equal(t, []string{"question 1", "answer 1", "question 2", "answer 2"}, contents(got))
++	got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false, allowAgentHistory{})
++	require.Error(t, err)
++	assert.Empty(t, got)
+ }
+ 
+ func TestMessageCheckpointSinkWritesThroughTheSession(t *testing.T) {
+diff --git a/internal/application/service/agent_history_nextcloud_test.go b/internal/application/service/agent_history_nextcloud_test.go
+new file mode 100644
+index 00000000..3f7ad7a3
+--- /dev/null
++++ b/internal/application/service/agent_history_nextcloud_test.go
+@@ -0,0 +1,67 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++type instanceHistorySources struct {
++	interfaces.DataSourceRepository
++	ever           bool
++	err            error
++	calls          int
++	becomeSourceAt int
++}
++
++func (s *instanceHistorySources) HasEverNextcloudSourceGlobally(context.Context) (bool, error) {
++	s.calls++
++	return s.ever || (s.becomeSourceAt > 0 && s.calls >= s.becomeSourceAt), s.err
++}
++func TestAgentHistoryAdmissionBeforeCheckpointAndTokenPage(t *testing.T) {
++	for _, scenario := range []string{"revoked-older-than-page", "checkpoint", "unavailable", "missing-verifier"} {
++		t.Run(scenario, func(t *testing.T) {
++			rows := storedTurnsOfSize(250, 100)
++			rows[1].KnowledgeReferences = types.References{{KnowledgeID: "old-denied-source", KnowledgeChannel: types.ConnectorTypeNextcloud}}
++			rows[len(rows)-1].Content = "new paraphrase without citations"
++			repo := &historyRepo{rows: rows, checkpoint: checkpointOn(rows[1], "secret compressed source")}
++			sources := &instanceHistorySources{ever: true}
++			guard := access.NewNextcloudHistoryGuard(nil, sources, nil)
++			if scenario == "unavailable" {
++				sources.ever = false
++				sources.err = errors.New("DB unavailable")
++			}
++			if scenario == "missing-verifier" {
++				guard = access.NewNextcloudHistoryGuard(nil, nil, nil)
++			}
++			got, _, err := LoadAgentHistory(context.Background(), repo, "s1", 100, false, guard)
++			require.Error(t, err)
++			require.Empty(t, got)
++			require.Zero(t, repo.pages)
++			require.Zero(t, repo.checkpointReads)
++		})
++	}
++}
++func TestAgentHistoryAdmissionAllowsOrdinaryCheckpointAndRechecks(t *testing.T) {
++	rows := storedTurns(3)
++	for _, changed := range []bool{false, true} {
++		repo := &historyRepo{rows: rows, checkpoint: checkpointOn(rows[1], "ordinary checkpoint")}
++		sources := &instanceHistorySources{}
++		if changed {
++			sources.becomeSourceAt = 2
++		}
++		got, _, err := LoadAgentHistory(context.Background(), repo, "s1", unlimitedBudget, false, access.NewNextcloudHistoryGuard(nil, sources, nil))
++		require.Equal(t, 2, sources.calls)
++		if changed {
++			require.ErrorIs(t, err, access.ErrNextcloudPublicationDenied)
++			require.Empty(t, got)
++		} else {
++			require.NoError(t, err)
++			require.Contains(t, got[0].Content, "ordinary checkpoint")
++		}
++	}
++}
 diff --git a/internal/application/service/agent_service.go b/internal/application/service/agent_service.go
 index a1dc8aae..7a569657 100644
 --- a/internal/application/service/agent_service.go
@@ -28247,6 +28685,56 @@ index ebfe6542..ea7fc6ae 100644
  	return NewResourceCatalog(repository.NewResourceRepository(db)), db
  }
  
+diff --git a/internal/application/service/session.go b/internal/application/service/session.go
+index 252356ba..2f5445d2 100644
+--- a/internal/application/service/session.go
++++ b/internal/application/service/session.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
++	"github.com/Tencent/WeKnora/internal/application/access"
+ 	"github.com/Tencent/WeKnora/internal/application/repository"
+ 	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
+ 	"github.com/Tencent/WeKnora/internal/config"
+@@ -110,6 +111,7 @@ func generateEventID(suffix string) string {
+ // (see service.LoadAgentHistory and chat_pipeline history loading) — there is no
+ // separate cross-turn cache layer.
+ type sessionService struct {
++	historyGuard          *access.NextcloudHistoryGuard
+ 	cfg                   *config.Config                         // Application configuration
+ 	sessionRepo           interfaces.SessionRepository           // Repository for session data
+ 	messageRepo           interfaces.MessageRepository           // Repository for message data
+@@ -176,8 +178,11 @@ func NewSessionService(cfg *config.Config,
+ 	sandboxConfigRepo repository.TenantSandboxConfigRepository,
+ 	tenantSkillRepo repository.TenantSkillRepository,
+ 	busyGate *SessionBusyGate,
++	dataSources interfaces.DataSourceRepository,
++	publicationGuard *access.NextcloudPublicationGuard,
+ ) interfaces.SessionService {
+ 	return &sessionService{
++		historyGuard:          access.NewNextcloudHistoryGuard(knowledgeService, dataSources, publicationGuard),
+ 		cfg:                   cfg,
+ 		sessionRepo:           sessionRepo,
+ 		messageRepo:           messageRepo,
+diff --git a/internal/application/service/session_agent_qa.go b/internal/application/service/session_agent_qa.go
+index 81c0016c..88c444fd 100644
+--- a/internal/application/service/session_agent_qa.go
++++ b/internal/application/service/session_agent_qa.go
+@@ -157,11 +157,10 @@ func (s *sessionService) AgentQA(
+ 	if agentConfig.MultiTurnEnabled {
+ 		budget := agent.HistoryTokenBudget(agentConfig)
+ 		llmContext, agentConfig.ContextTokenScale, err = LoadAgentHistory(
+-			ctx, s.messageRepo, sessionID, budget, agentConfig.RetainRetrievalHistory,
++			ctx, s.messageRepo, sessionID, budget, agentConfig.RetainRetrievalHistory, s.historyGuard,
+ 		)
+ 		if err != nil {
+-			logger.Warnf(ctx, "Failed to load agent history from DB: %v, continuing without history", err)
+-			llmContext = []chat.Message{}
++			return fmt.Errorf("cannot admit Agent history: %w", err)
+ 		}
+ 		logger.Infof(ctx, "Loaded %d history messages from DB (budget=%d tokens, token scale=%.2f)",
+ 			len(llmContext), budget, agentConfig.ContextTokenScale)
 diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
 index 068265c4..927f7222 100644
 --- a/internal/application/service/session_knowledge_qa.go

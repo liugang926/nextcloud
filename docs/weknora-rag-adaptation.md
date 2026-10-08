@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`6d2fa3dffda1b97c7d0eca9d1f8cef6229933641b482fa1b798cda7c5d5a5d37`.
+`d4f15c7c82f45747a4ad3e3e786003bb94a0380429f270b4898e6bd70f8e1db5`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`7f9c7f6a0027e42a4dd01b33366051ee7533aeddb9369653b83653165d5b5517`.
+`827ab202d675914594c512e056e0952d6311fe36913216f181284b9e4604bcc9`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict
