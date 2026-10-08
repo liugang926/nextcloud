@@ -62,7 +62,7 @@ python3 scripts/ops/pilot-original-volume.py run \
   --pilot-10k-100gb --workers 2 --upload-impact-samples 20
 ```
 
-The full run has not been executed as part of adding this harness. A smaller
+The full run was executed on 2026-10-08; see the bounded results below. A smaller
 passing corpus must not be recorded as 100-GB acceptance. Custom corpora above
 100 files or 100 MiB require `--allow-large-pilot`; this never bypasses capacity
 checks. The script accepts at most four simultaneous uploads and uses container
@@ -126,9 +126,40 @@ The separate 20-PUT phases measured nearest-rank P95 of 510.892 ms with the
 app disabled and 376.176 ms with it enabled. The phase order, cache and
 concurrent local workloads prevent interpreting this as a general speedup
 or sustained performance acceptance. Only 1-KiB synthetic originals were
-measured. The 100-GB preset remains unexecuted. Seventeen offline safety
+measured. That small run did not execute the 100-GB preset. Seventeen offline safety
 tests also pass, including bounded generation, exact Content-Length transfer,
 system-proxy bypass, ownership failures, cleanup, interrupt handling and
 safe generated password prefixes. After the run, a separate Docker inventory
 confirmed zero owned containers, volumes and networks; private credentials
 were absent. Shared development stacks were not modified.
+
+## Full original-volume verification, 2026-10-08
+
+The [10,000-file report](../../docs/evidence/pilot-original-volume-100gb-2026-10-08.json)
+has SHA-256 `68843df9cab5ca98fe3b50b6ac0a9a76d6792f333086cb36d78cea71ff306f50`.
+The fixture used source `00f9c87`, Nextcloud 34.0.4/app 0.4.37 and a Docker
+Desktop arm64 VM with 10 CPUs and 8,319,504,384 bytes of memory. Two upload
+workers sent exactly 10,000 new originals of 10,000,000 bytes each. Native
+regular files, PostgreSQL filecache and 50 manifest pages agreed on
+100,000,000,000 logical bytes and 10,000 unique file IDs. Four original SHA-256
+samples matched; allocated file bytes were 100,025,606,144. Each department
+contained exactly 5,000 files and 50,000,000,000 logical bytes.
+
+All 20 local staff principals were allowed for a sample in their own department
+and denied for a sample in the other department. Both sibling machine-key
+reads were denied. Uploading the corpus took 2,520.502 seconds (about 42 minutes),
+with observed PUT P95 669.469 ms and mean logical throughput 39.67 MB/s.
+A separate UI image build ran near the end, so these corpus timings describe
+this run's workload rather than an isolated or sustained performance baseline.
+
+The earlier unbound-folder comparison had 20 PUTs per phase: P95 573.611 ms
+with the app disabled and 509.492 ms enabled. Phase order, cache and lack of
+signed-event/parser load prevent treating that observation as acceptance of
+the PRD's upload-overhead target. The binary corpus did not exercise WeKnora
+parsing, embeddings, event-to-job/ready latency, real AD/Team Folder ACLs,
+20-user concurrency, physical derived cleanup or coordinated recovery.
+
+Cleanup and a subsequent independent Docker inventory found zero owned
+containers, volumes and networks; private credentials and Compose configuration
+were absent. The source report recorded 151,303,557,120 host free bytes after
+cleanup. Shared development stacks were not modified by this pilot.

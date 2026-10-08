@@ -1436,3 +1436,24 @@ These are source and frontend validation results. The frozen 7f images and
 schema 131 runtime do not contain this source update. No new full image build,
 shared migration, physical GC activation or complete V1 acceptance is claimed
 by this dependency integration.
+
+## 2026-10-08 complete isolated original-volume preset
+
+The [full original-volume report](evidence/pilot-original-volume-100gb-2026-10-08.json)
+records 10,000 new 10-MB synthetic originals: exactly 100,000,000,000 bytes.
+Native regular files, PostgreSQL filecache and 50 complete manifest pages
+agreed on counts and bytes, with 10,000 unique file IDs and four sample digest
+matches. Two local department groups of ten staff users had 20 own-department
+allows, 20 cross-department denials and two cross-binding machine denials.
+The two upload workers completed the corpus in 2,520.502 seconds; a separate
+UI build near the end makes corpus timings observational. The earlier
+20-sample disabled/enabled comparison also retains phase-order/cache limits.
+See the [harness record](../scripts/ops/PILOT-original-volume.md) for exact
+image IDs, capacity samples and metric scope. All owned resources and private
+credentials were removed, verified by a second Docker inventory.
+
+This closes the isolated original count/storage preset. It does not accept
+WeKnora parsing/indexing, event latency, real AD/Team Folder ACLs, sustained
+upload impact, 20 concurrent users, physical derived cleanup or complete
+recovery. Earlier entries stating that the preset was unexecuted describe
+their earlier verification dates.
