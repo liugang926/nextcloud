@@ -3814,10 +3814,10 @@ index 933a67d1..a4e7f3ec 100644
  
 diff --git a/internal/application/access/nextcloud_history.go b/internal/application/access/nextcloud_history.go
 new file mode 100644
-index 00000000..269a7aae
+index 00000000..4a5b6595
 --- /dev/null
 +++ b/internal/application/access/nextcloud_history.go
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,253 @@
 +package access
 +
 +import (
@@ -3838,6 +3838,7 @@ index 00000000..269a7aae
 +type HistoricalSourceLookup interface {
 +	FindByKnowledgeBaseIncludingDeleted(context.Context, string) ([]*types.DataSource, error)
 +	HasEverNextcloudSourceForTenant(context.Context, uint64) (bool, error)
++	HasEverNextcloudSourceForKnowledgeBase(context.Context, string) (bool, error)
 +}
 +
 +type historicalInstanceSourceLookup interface {
@@ -3870,11 +3871,19 @@ index 00000000..269a7aae
 +// against an entire KB does not carry an exhaustive list of every retrieved
 +// chunk, so checking only its visible citations would be unsafe.
 +func (g *NextcloudHistoryGuard) CheckMessage(ctx context.Context, message *types.Message) error {
++	return g.checkMessage(ctx, message, true)
++}
++func (g *NextcloudHistoryGuard) checkMessage(ctx context.Context, message *types.Message, saved bool) error {
 +	if message == nil {
 +		return ErrNextcloudPublicationDenied
 +	}
 +	if message.Role != "assistant" {
 +		return nil
++	}
++	if saved && IsAgentDerivedHistory(message) {
++		if err := g.CheckAgentHistoryReplay(ctx); err != nil {
++			return err
++		}
 +	}
 +	seenDocuments := make(map[string]struct{})
 +	checkDocument := func(id string, marked bool) error {
@@ -3936,6 +3945,14 @@ index 00000000..269a7aae
 +		if g == nil || g.sources == nil {
 +			return ErrNextcloudPublicationUnavailable
 +		}
++		ever, err := g.sources.HasEverNextcloudSourceForKnowledgeBase(ctx, kbID)
++		if err != nil {
++			return fmt.Errorf("%w: KB source history unavailable: %v", ErrNextcloudPublicationUnavailable, err)
++		}
++		if ever {
++			return fmt.Errorf("%w: answer has non-exhaustive Nextcloud KB scope", ErrNextcloudPublicationDenied)
++		}
++
 +		sources, err := g.sources.FindByKnowledgeBaseIncludingDeleted(ctx, kbID)
 +		if err != nil {
 +			return fmt.Errorf("%w: historical source lookup failed: %v", ErrNextcloudPublicationUnavailable, err)
@@ -3951,7 +3968,7 @@ index 00000000..269a7aae
 +	// query the whole tenant. When any Nextcloud source has ever existed in that
 +	// tenant, an answer lacking an exhaustive source list must remain hidden.
 +	mode := message.ExecutionContext.AgentKBSelectionMode
-+	if message.AgentID != "" && (mode == "" || mode == "all") {
++	if IsAgentDerivedHistory(message) && (mode == "" || mode == "all") {
 +		tenantID := message.AgentTenantID
 +		if tenantID == 0 {
 +			tenantID = types.CallerFromContext(ctx).TenantID
@@ -3986,7 +4003,9 @@ index 00000000..269a7aae
 +	copy.ExecutionContext.TagScopes = nil
 +	copy.ExecutionContext.AgentKBSelectionMode = "none"
 +	copy.AgentID = ""
-+	if err := g.CheckMessage(ctx, &copy); err != nil {
++	copy.AgentSteps = nil
++	copy.ContextCheckpoint = nil
++	if err := g.checkMessage(ctx, &copy, false); err != nil {
 +		return err
 +	}
 +	for _, ref := range message.KnowledgeReferences {
@@ -3997,7 +4016,10 @@ index 00000000..269a7aae
 +	// With no observed source document, preserve the historical fail-closed
 +	// rule. Ordinary KBs still pass; a Nextcloud KB or all-mode Agent waits
 +	// for a provenance event before any answer or tool output is emitted.
-+	return g.CheckMessage(ctx, message)
++	scope := *message
++	scope.AgentSteps = nil
++	scope.ContextCheckpoint = nil
++	return g.checkMessage(ctx, &scope, false)
 +}
 +
 +// CheckAgentHistoryReplay admits model history only on an instance positively
@@ -4006,10 +4028,17 @@ index 00000000..269a7aae
 +// of an older revoked turn. This conservative barrier is an interim fallback
 +// until complete transitive lineage can be persisted and reauthorized.
 +func (g *NextcloudHistoryGuard) CheckAgentHistoryReplay(ctx context.Context) error {
-+	if g == nil || g.instanceSources == nil {
++	if g == nil {
 +		return ErrNextcloudPublicationUnavailable
 +	}
-+	seen, err := g.instanceSources.HasEverNextcloudSourceGlobally(ctx)
++	lookup := g.instanceSources
++	if lookup == nil {
++		lookup, _ = g.sources.(historicalInstanceSourceLookup)
++	}
++	if lookup == nil {
++		return ErrNextcloudPublicationUnavailable
++	}
++	seen, err := lookup.HasEverNextcloudSourceGlobally(ctx)
 +	if err != nil {
 +		return fmt.Errorf("%w: Agent source history lookup failed: %v", ErrNextcloudPublicationUnavailable, err)
 +	}
@@ -4018,12 +4047,36 @@ index 00000000..269a7aae
 +	}
 +	return nil
 +}
++
++// IsAgentDerivedHistory distinguishes model-issued tool work from the
++// synthetic KnowledgeQA timeline. User text is always independently readable.
++func IsAgentDerivedHistory(message *types.Message) bool {
++	if message == nil || message.Role != "assistant" {
++		return false
++	}
++	if message.ContextCheckpoint != nil {
++		return true
++	}
++	hasPipeline := false
++	for _, step := range message.AgentSteps {
++		for _, call := range step.ToolCalls {
++			if types.IsPipelineToolCallID(call.ID) {
++				hasPipeline = true
++				continue
++			}
++			if call.Name != "final_answer" {
++				return true
++			}
++		}
++	}
++	return message.AgentID != "" && !hasPipeline
++}
 diff --git a/internal/application/access/nextcloud_history_test.go b/internal/application/access/nextcloud_history_test.go
 new file mode 100644
-index 00000000..fee41ef6
+index 00000000..c7b6f210
 --- /dev/null
 +++ b/internal/application/access/nextcloud_history_test.go
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,175 @@
 +package access
 +
 +import (
@@ -4163,6 +4216,41 @@ index 00000000..fee41ef6
 +	if err := history.CheckLiveMessage(ctx, message); err != nil {
 +		t.Fatalf("ordinary KB should stream normally: %v", err)
 +	}
++}
++
++func (s historicalSourceStub) HasEverNextcloudSourceGlobally(context.Context) (bool, error) {
++	return false, s.err
++}
++
++type globallyMarkedLiveSources struct{ historicalSourceStub }
++
++func (globallyMarkedLiveSources) HasEverNextcloudSourceGlobally(context.Context) (bool, error) {
++	return true, nil
++}
++func TestNextcloudLiveAgentWithoutHistoryPreservesOrdinaryAnswer(t *testing.T) {
++	sources := globallyMarkedLiveSources{}
++	guard := &NextcloudHistoryGuard{sources: sources, instanceSources: sources}
++	ctx := types.WithCaller(context.Background(), types.Caller{TenantID: 12, UserID: "person"})
++	message := &types.Message{Role: "assistant", AgentID: "agent", AgentTenantID: 12, ExecutionContext: types.MessageExecutionContext{AgentKBSelectionMode: "none"}}
++	if err := guard.CheckLiveMessage(ctx, message); err != nil {
++		t.Fatalf("ordinary live no-history turn denied: %v", err)
++	}
++	if err := guard.CheckMessage(ctx, message); !errors.Is(err, ErrNextcloudPublicationDenied) {
++		t.Fatalf("saved same shape must remain blocked: %v", err)
++	}
++	message.AgentSteps = types.AgentSteps{{ToolCalls: []types.ToolCall{{ID: types.PipelineToolCallIDPrefix + "step", Name: "search_knowledge"}}}}
++	if err := guard.CheckMessage(ctx, message); err != nil {
++		t.Fatalf("ordinary synthetic KnowledgeQA timeline denied: %v", err)
++	}
++}
++
++func (s historicalSourceStub) HasEverNextcloudSourceForKnowledgeBase(_ context.Context, id string) (bool, error) {
++	for _, source := range s.byKB[id] {
++		if source != nil && source.Type == types.ConnectorTypeNextcloud {
++			return true, s.err
++		}
++	}
++	return false, s.err
 +}
 diff --git a/internal/application/access/nextcloud_publication.go b/internal/application/access/nextcloud_publication.go
 new file mode 100644
@@ -5226,7 +5314,7 @@ index c8c518ac..3124c329 100644
  
  	snapshot := &types.ChunkRevision{
 diff --git a/internal/application/repository/datasource_repo.go b/internal/application/repository/datasource_repo.go
-index c3b2f58e..39595e7e 100644
+index c3b2f58e..02e09855 100644
 --- a/internal/application/repository/datasource_repo.go
 +++ b/internal/application/repository/datasource_repo.go
 @@ -3,10 +3,15 @@ package repository
@@ -5336,7 +5424,7 @@ index c3b2f58e..39595e7e 100644
  // FindByID retrieves a data source by ID
  func (r *DataSourceRepository) FindByID(ctx context.Context, id string) (*types.DataSource, error) {
  	if id == "" {
-@@ -77,6 +152,73 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
+@@ -77,6 +152,105 @@ func (r *DataSourceRepository) FindByKnowledgeBase(ctx context.Context, kbID str
  	return dataSources, nil
  }
  
@@ -5363,11 +5451,43 @@ index c3b2f58e..39595e7e 100644
 +	if tenantID == 0 {
 +		return false, errors.New("tenant id is empty")
 +	}
-+	var count int64
-+	err := r.db.WithContext(ctx).Unscoped().Model(&types.DataSource{}).
-+		Where("tenant_id = ? AND type = ?", tenantID, types.ConnectorTypeNextcloud).
-+		Count(&count).Error
-+	return count > 0, err
++	return r.hasEverNextcloudSourceInScope(ctx, "tenant_id = ?", tenantID)
++}
++
++func (r *DataSourceRepository) HasEverNextcloudSourceForKnowledgeBase(ctx context.Context, kbID string) (bool, error) {
++	if kbID == "" {
++		return false, errors.New("knowledge base id is empty")
++	}
++	// Data-source and pairing scopes use knowledge_base_id; KB scope uses id.
++	return r.hasEverNextcloudSourceInScope(ctx, "knowledge_base_id = ?", kbID)
++}
++func (r *DataSourceRepository) hasEverNextcloudSourceInScope(ctx context.Context, scope string, id interface{}) (bool, error) {
++	if r == nil || r.db == nil {
++		return false, errors.New("source history database is unavailable")
++	}
++	var seen bool
++	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var sources, markers, pairings, aborts int64
++		if err := tx.Unscoped().Model(&types.DataSource{}).Where(scope, id).Where("type = ?", types.ConnectorTypeNextcloud).Count(&sources).Error; err != nil {
++			return err
++		}
++		kbScope := scope
++		if scope == "knowledge_base_id = ?" {
++			kbScope = "id = ?"
++		}
++		if err := tx.Table("knowledge_bases").Where(kbScope, id).Where("ever_had_nextcloud_source = ? OR ever_had_nextcloud_source IS NULL OR ever_had_nextcloud_source NOT IN (?, ?)", true, false, true).Count(&markers).Error; err != nil {
++			return err
++		}
++		if err := tx.Table("nextcloud_source_pairings").Where(scope, id).Count(&pairings).Error; err != nil {
++			return err
++		}
++		if err := tx.Table("nextcloud_source_pairing_aborts").Where(scope, id).Count(&aborts).Error; err != nil {
++			return err
++		}
++		seen = sources > 0 || markers > 0 || pairings > 0 || aborts > 0
++		return nil
++	})
++	return seen, err
 +}
 +
 +// HasEverNextcloudSourceGlobally is the interim admission barrier for Agent
@@ -5410,7 +5530,7 @@ index c3b2f58e..39595e7e 100644
  // Update updates an existing data source
  func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource) error {
  	if ds == nil {
-@@ -86,6 +228,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -86,6 +260,34 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  		return errors.New("data source id is empty")
  	}
  	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -5445,7 +5565,7 @@ index c3b2f58e..39595e7e 100644
  		if err := tx.Model(ds).Updates(ds).Error; err != nil {
  			return err
  		}
-@@ -97,6 +267,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
+@@ -97,6 +299,66 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
  	})
  }
  
@@ -5512,7 +5632,7 @@ index c3b2f58e..39595e7e 100644
  // UpdateSyncState updates only fields managed by sync execution. GORM's
  // Updates(struct) skips zero values, so use a map here to persist cleared error
  // messages without broadening the generic Update method.
-@@ -123,11 +353,68 @@ func (r *DataSourceRepository) UpdateSyncState(ctx context.Context, ds *types.Da
+@@ -123,11 +385,68 @@ func (r *DataSourceRepository) UpdateSyncState(ctx context.Context, ds *types.Da
  	return nil
  }
  
@@ -5581,7 +5701,7 @@ index c3b2f58e..39595e7e 100644
  	if err := r.db.WithContext(ctx).
  		Where("id = ?", id).
  		Delete(&types.DataSource{}).Error; err != nil {
-@@ -166,6 +453,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
+@@ -166,6 +485,9 @@ func (r *SyncLogRepository) Create(ctx context.Context, log *types.SyncLog) erro
  		return errors.New("sync log is nil")
  	}
  	if err := r.db.WithContext(ctx).Create(log).Error; err != nil {
@@ -5591,7 +5711,7 @@ index c3b2f58e..39595e7e 100644
  		return err
  	}
  	return nil
-@@ -246,6 +536,81 @@ func (r *SyncLogRepository) HasRunningSync(ctx context.Context, dsID string) (bo
+@@ -246,6 +568,81 @@ func (r *SyncLogRepository) HasRunningSync(ctx context.Context, dsID string) (bo
  	return count > 0, nil
  }
  
@@ -15346,12 +15466,65 @@ index 00000000..f5a8121f
 +	require.NoError(t, db.Exec(`INSERT INTO nextcloud_gc_items (job_id, kind, object_ref, state)
 +		VALUES ('job', 'sqlite_embedding', '123', 'pending')`).Error)
 +}
+diff --git a/internal/application/repository/nextcloud_global_history_pg_test.go b/internal/application/repository/nextcloud_global_history_pg_test.go
+new file mode 100644
+index 00000000..79ab7554
+--- /dev/null
++++ b/internal/application/repository/nextcloud_global_history_pg_test.go
+@@ -0,0 +1,47 @@
++package repository
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++func TestPostgresNextcloudGlobalAndScopedHistoryAdmission(t *testing.T) {
++	for _, kind := range []string{"none", "source", "sticky", "pairing", "abort", "unavailable"} {
++		t.Run(kind, func(t *testing.T) {
++			db := leaseTestPostgres(t)
++			require.NoError(t, db.Exec(`CREATE TABLE knowledge_bases(id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, ever_had_nextcloud_source BOOLEAN NOT NULL DEFAULT FALSE, deleted_at TIMESTAMPTZ)`).Error)
++			require.NoError(t, db.AutoMigrate(&types.DataSource{}, &NextcloudSourcePairing{}, &NextcloudSourcePairingAbort{}))
++			require.NoError(t, db.Exec("INSERT INTO knowledge_bases(id,tenant_id) VALUES('kb',99)").Error)
++			switch kind {
++			case "source":
++				row := &types.DataSource{ID: "source", TenantID: 99, KnowledgeBaseID: "kb", Type: types.ConnectorTypeNextcloud}
++				require.NoError(t, db.Create(row).Error)
++				require.NoError(t, db.Delete(row).Error)
++			case "sticky":
++				require.NoError(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source=TRUE,deleted_at=CURRENT_TIMESTAMP").Error)
++			case "pairing":
++				require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "pair", KnowledgeBaseID: "kb", TenantID: 99}).Error)
++			case "abort":
++				require.NoError(t, db.Create(&NextcloudSourcePairingAbort{OperationID: "abort", KnowledgeBaseID: "kb", TenantID: 99}).Error)
++			case "unavailable":
++				require.NoError(t, db.Exec("DROP TABLE nextcloud_source_pairing_aborts").Error)
++			}
++			repo := &DataSourceRepository{db: db}
++			for _, check := range []func() (bool, error){
++				func() (bool, error) { return repo.HasEverNextcloudSourceGlobally(context.Background()) },
++				func() (bool, error) { return repo.HasEverNextcloudSourceForTenant(context.Background(), 99) },
++				func() (bool, error) { return repo.HasEverNextcloudSourceForKnowledgeBase(context.Background(), "kb") },
++			} {
++				ever, err := check()
++				if kind == "unavailable" {
++					require.Error(t, err)
++				} else {
++					require.NoError(t, err)
++					require.Equal(t, kind != "none", ever)
++				}
++			}
++		})
++	}
++}
 diff --git a/internal/application/repository/nextcloud_global_history_test.go b/internal/application/repository/nextcloud_global_history_test.go
 new file mode 100644
-index 00000000..e69fe150
+index 00000000..8cdd6fb3
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_global_history_test.go
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,74 @@
 +package repository
 +
 +import (
@@ -15391,6 +15564,40 @@ index 00000000..e69fe150
 +			require.Equal(t, kind != "none", ever)
 +		})
 +	}
++}
++
++func TestNextcloudScopedHistoryRetainsDeletedKBAndPairingEvidence(t *testing.T) {
++	for _, kind := range []string{"sticky", "pairing", "abort"} {
++		t.Run(kind, func(t *testing.T) {
++			db := provenanceTestDB(t)
++			require.NoError(t, db.Exec("INSERT INTO knowledge_bases(id,tenant_id) VALUES('kb',99)").Error)
++			switch kind {
++			case "sticky":
++				require.NoError(t, db.Exec("UPDATE knowledge_bases SET ever_had_nextcloud_source=TRUE,deleted_at=CURRENT_TIMESTAMP").Error)
++			case "pairing":
++				require.NoError(t, db.Create(&NextcloudSourcePairing{OperationID: "p", KnowledgeBaseID: "kb", TenantID: 99}).Error)
++			case "abort":
++				require.NoError(t, db.Create(&NextcloudSourcePairingAbort{OperationID: "p", KnowledgeBaseID: "kb", TenantID: 99}).Error)
++			}
++			repo := &DataSourceRepository{db: db}
++			ever, err := repo.HasEverNextcloudSourceForKnowledgeBase(context.Background(), "kb")
++			require.NoError(t, err)
++			require.True(t, ever)
++			ever, err = repo.HasEverNextcloudSourceForTenant(context.Background(), 99)
++			require.NoError(t, err)
++			require.True(t, ever)
++		})
++	}
++}
++
++func TestNextcloudHistoryNilRepositoryFailsClosed(t *testing.T) {
++	var repo *DataSourceRepository
++	_, err := repo.HasEverNextcloudSourceGlobally(context.Background())
++	require.Error(t, err)
++	_, err = repo.HasEverNextcloudSourceForTenant(context.Background(), 1)
++	require.Error(t, err)
++	_, err = repo.HasEverNextcloudSourceForKnowledgeBase(context.Background(), "kb")
++	require.Error(t, err)
 +}
 diff --git a/internal/application/repository/nextcloud_indexed_withdrawal.go b/internal/application/repository/nextcloud_indexed_withdrawal.go
 new file mode 100644
@@ -22514,6 +22721,96 @@ index afc994e9..00922c4c 100644
  }
  
  func TestMessageCheckpointSinkWritesThroughTheSession(t *testing.T) {
+diff --git a/internal/application/service/agent_history_live_fallback_test.go b/internal/application/service/agent_history_live_fallback_test.go
+new file mode 100644
+index 00000000..29e0ca23
+--- /dev/null
++++ b/internal/application/service/agent_history_live_fallback_test.go
+@@ -0,0 +1,84 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/models/rerank"
++	"github.com/Tencent/WeKnora/internal/sandbox"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++type safeCurrentTurnEngine struct {
++	interfaces.AgentEngine
++	contexts        [][]chat.Message
++	queries         []string
++	checkpointCalls int
++}
++
++func (e *safeCurrentTurnEngine) Execute(_ context.Context, _, _, query string, history []chat.Message, _ ...[]string) (*types.AgentState, error) {
++	e.contexts = append(e.contexts, history)
++	e.queries = append(e.queries, query)
++	return &types.AgentState{IsComplete: true}, nil
++}
++func (e *safeCurrentTurnEngine) SetContextCheckpointSink(types.ContextCheckpointSink) {
++	e.checkpointCalls++
++}
++
++type safeCurrentTurnAgent struct {
++	interfaces.AgentService
++	engine        *safeCurrentTurnEngine
++	memoryEnabled *bool
++	excluded      bool
++	sandboxCalls  int
++}
++
++func (a *safeCurrentTurnAgent) CreateAgentEngine(_ context.Context, cfg *types.AgentConfig, _ chat.Chat, _ rerank.Reranker, _ *event.EventBus, _, _ string) (interfaces.AgentEngine, error) {
++	a.memoryEnabled = cfg.MemoryEnabled
++	a.excluded = cfg.ExcludeHistoricalContext
++	return a.engine, nil
++}
++func (a *safeCurrentTurnAgent) sessionSandboxInputStore(context.Context, string, string) (sandbox.SessionFileStore, error) {
++	a.sandboxCalls++
++	return nil, nil
++}
++func (a *safeCurrentTurnAgent) stageSessionAttachments(context.Context, string, string, uint64, types.MessageAttachments) ([]stagedSessionAttachment, error) {
++	return nil, nil
++}
++func TestAgentHistoryAdmissionRejectedContextStillRunsCurrentAgentQA(t *testing.T) {
++	for _, scenario := range []string{"ever-source", "lookup-unavailable", "missing-policy"} {
++		t.Run(scenario, func(t *testing.T) {
++			sources := &instanceHistorySources{ever: scenario == "ever-source"}
++			if scenario == "lookup-unavailable" {
++				sources.err = errors.New("source state unavailable")
++			}
++			guard := access.NewNextcloudHistoryGuard(nil, sources, nil)
++			if scenario == "missing-policy" {
++				guard = nil
++			}
++			repo := &historyRepo{rows: storedTurns(5), checkpoint: checkpointOn(storedTurns(5)[1], "secret old checkpoint")}
++			engine := &safeCurrentTurnEngine{}
++			agentSvc := &safeCurrentTurnAgent{engine: engine}
++			svc := &sessionService{cfg: &config.Config{}, historyGuard: guard, messageRepo: repo, agentService: agentSvc, modelService: &stubModelService{modelsByID: map[string]*types.Model{"chat": {ID: "chat", Type: types.ModelTypeKnowledgeQA}}}}
++			ctx := context.WithValue(context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1)), types.TenantInfoContextKey, &types.Tenant{ID: 1})
++			req := &types.QARequest{Session: &types.Session{ID: "session", TenantID: 1}, AssistantMessageID: "new", Query: "new user question", TurnLeaseHeld: true, CustomAgent: &types.CustomAgent{ID: "agent", TenantID: 1, Config: types.CustomAgentConfig{ModelID: "chat", KBSelectionMode: "none", WebSearchProviderID: "unused", AllowedTools: []string{"thinking"}, MultiTurnEnabled: true}}}
++			require.NoError(t, svc.AgentQA(ctx, req, event.NewEventBus()))
++			require.Len(t, engine.contexts, 1)
++			require.Empty(t, engine.contexts[0])
++			require.Equal(t, []string{"new user question"}, engine.queries)
++			require.Zero(t, repo.pages)
++			require.Zero(t, repo.checkpointReads)
++			require.Zero(t, engine.checkpointCalls)
++			require.NotNil(t, agentSvc.memoryEnabled)
++			require.False(t, *agentSvc.memoryEnabled)
++			require.True(t, agentSvc.excluded)
++			require.Zero(t, agentSvc.sandboxCalls)
++		})
++	}
++}
 diff --git a/internal/application/service/agent_history_nextcloud_test.go b/internal/application/service/agent_history_nextcloud_test.go
 new file mode 100644
 index 00000000..0d46cad2
@@ -22586,11 +22883,263 @@ index 00000000..0d46cad2
 +		}
 +	}
 +}
+diff --git a/internal/application/service/agent_history_workspace_test.go b/internal/application/service/agent_history_workspace_test.go
+new file mode 100644
+index 00000000..fe21f8e6
+--- /dev/null
++++ b/internal/application/service/agent_history_workspace_test.go
+@@ -0,0 +1,173 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/agent/tools"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/sandbox"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"strings"
++	"testing"
++	"time"
++)
++
++const protectedHistoryFileMarker = "previous-turn-protected-nextcloud-workspace-marker"
++
++type historyBoundaryFileStore struct {
++	stubSessionFileStore
++	reads int
++}
++
++func (s *historyBoundaryFileStore) ReadSessionFile(context.Context, string, string) ([]byte, error) {
++	s.reads++
++	return []byte(protectedHistoryFileMarker), nil
++}
++func (s *historyBoundaryFileStore) StatSessionFile(context.Context, string, string) (*sandbox.RemoteStatEntry, error) {
++	return &sandbox.RemoteStatEntry{Type: sandbox.RemoteEntryFile, Size: int64(len(protectedHistoryFileMarker))}, nil
++}
++
++type historyBoundaryShell struct{ calls int }
++
++func (s *historyBoundaryShell) ExecShellCommand(context.Context, string, string, string, time.Duration, map[string]string) (*sandbox.ExecuteResult, error) {
++	s.calls++
++	return &sandbox.ExecuteResult{Stdout: protectedHistoryFileMarker}, nil
++}
++
++type historyBoundaryModel struct {
++	fakeAgentChatModel
++	calls     int
++	offered   []string
++	sawMarker bool
++}
++
++func (m *historyBoundaryModel) ChatStream(_ context.Context, messages []chat.Message, opts *chat.ChatOptions) (<-chan types.StreamResponse, error) {
++	m.calls++
++	for _, message := range messages {
++		if strings.Contains(message.Content, protectedHistoryFileMarker) {
++			m.sawMarker = true
++		}
++	}
++	if opts != nil {
++		for _, tool := range opts.Tools {
++			m.offered = append(m.offered, tool.Function.Name)
++		}
++	}
++	response := types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "new plain answer", Done: true, FinishReason: "stop"}
++	if m.calls == 1 {
++		response = types.StreamResponse{Done: true, FinishReason: "tool_calls", ToolCalls: []types.LLMToolCall{
++			{ID: "read-old", Type: "function", Function: types.FunctionCall{Name: tools.ToolReadFile, Arguments: `{"path":"/workspace/output/old-protected.txt"}`}},
++			{ID: "exec-old", Type: "function", Function: types.FunctionCall{Name: tools.ToolShellExec, Arguments: `{"command":"cat /workspace/output/old-protected.txt"}`}},
++		}}
++	}
++	if m.sawMarker {
++		response.Content = protectedHistoryFileMarker
++	}
++	out := make(chan types.StreamResponse, 1)
++	out <- response
++	close(out)
++	return out, nil
++}
++func TestAgentHistoryAdmissionFallbackBlocksOldWorkspaceReadAndExec(t *testing.T) {
++	for _, exclude := range []bool{false, true} {
++		t.Run(fmt.Sprintf("exclude-history-%t", exclude), func(t *testing.T) {
++			files := &historyBoundaryFileStore{}
++			shell := &historyBoundaryShell{}
++			model := &historyBoundaryModel{}
++			svc := &agentService{sandboxResolver: stubSandboxResolver{mgr: &capableManager{typ: sandbox.SandboxTypeCube, shell: shell, files: files}}}
++			cfg := &types.AgentConfig{ExcludeHistoricalContext: exclude, SkillsEnabled: true, SandboxConfigID: "old-sandbox", AllowedTools: []string{tools.ToolThinking, tools.ToolReadFile, tools.ToolShellExec, tools.ToolSearchConversations, tools.ToolDataAnalysis}, MaxIterations: 3, MCPSelectionMode: "none"}
++			bus := event.NewEventBus()
++			var output strings.Builder
++			for _, kind := range []event.EventType{event.EventAgentToolResult, event.EventAgentFinalAnswer} {
++				bus.On(kind, func(_ context.Context, evt event.Event) error { fmt.Fprint(&output, evt.Data); return nil })
++			}
++			ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1))
++			engine, err := svc.CreateAgentEngine(ctx, cfg, model, nil, bus, "old-session", "new-message")
++			require.NoError(t, err)
++			_, err = engine.Execute(ctx, "old-session", "new-message", "new user question", nil)
++			require.NoError(t, err)
++			if exclude {
++				require.Zero(t, files.reads)
++				require.Zero(t, shell.calls)
++				require.False(t, model.sawMarker)
++				require.NotContains(t, output.String(), protectedHistoryFileMarker)
++				for _, tool := range []string{tools.ToolReadFile, tools.ToolShellExec, tools.ToolListSandboxFiles, tools.ToolSearchConversations, tools.ToolDataAnalysis} {
++					require.NotContains(t, model.offered, tool)
++				}
++				require.Contains(t, output.String(), "new plain answer")
++			} else {
++				require.Positive(t, files.reads)
++				require.Positive(t, shell.calls)
++				require.True(t, model.sawMarker)
++				require.Contains(t, output.String(), protectedHistoryFileMarker)
++			}
++		})
++	}
++}
++
++type retainedContextHistoryRepo struct {
++	historyRepo
++	attachmentLoads int
++}
++
++func (r *retainedContextHistoryRepo) GetSessionAttachments(context.Context, string) (types.MessageAttachments, error) {
++	r.attachmentLoads++
++	return nil, nil
++}
++func TestAgentHistoryAdmissionBothModesIsolateRetainedWorkspaceAtAgentQA(t *testing.T) {
++	for _, multiTurn := range []bool{false, true} {
++		for _, scenario := range []string{"ever-source", "lookup-unavailable", "missing-policy", "ordinary-no-source"} {
++			t.Run(fmt.Sprintf("multi-turn-%t/%s", multiTurn, scenario), func(t *testing.T) {
++				files := &historyBoundaryFileStore{}
++				shell := &historyBoundaryShell{}
++				model := &historyBoundaryModel{}
++				sources := &instanceHistorySources{ever: scenario == "ever-source"}
++				if scenario == "lookup-unavailable" {
++					sources.err = errors.New("source history lookup unavailable")
++				}
++				guard := access.NewNextcloudHistoryGuard(nil, sources, nil)
++				if scenario == "missing-policy" {
++					guard = nil
++				}
++				repo := &retainedContextHistoryRepo{historyRepo: historyRepo{rows: storedTurns(3)}}
++				agents := &agentService{cfg: &config.Config{}, sandboxResolver: stubSandboxResolver{mgr: &capableManager{typ: sandbox.SandboxTypeCube, shell: shell, files: files}}}
++				var agentInterface interfaces.AgentService = agents
++				svc := &sessionService{cfg: &config.Config{}, historyGuard: guard, messageRepo: repo, agentService: agentInterface, modelService: &stubModelService{chatModel: model, modelsByID: map[string]*types.Model{"chat": {ID: "chat", Type: types.ModelTypeKnowledgeQA}}}}
++				ctx := context.WithValue(context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1)), types.TenantInfoContextKey, &types.Tenant{ID: 1})
++				req := &types.QARequest{Session: &types.Session{ID: "same-old-session", TenantID: 1}, AssistantMessageID: "new-message", Query: "new user question", TurnLeaseHeld: true, CustomAgent: &types.CustomAgent{ID: "agent", TenantID: 1, Config: types.CustomAgentConfig{ModelID: "chat", KBSelectionMode: "none", WebSearchProviderID: "unused", MCPSelectionMode: "none", SkillsSelectionMode: "all", SandboxConfigID: "old-sandbox", AllowedTools: []string{tools.ToolThinking, tools.ToolReadFile, tools.ToolShellExec}, MultiTurnEnabled: multiTurn}}}
++				bus := event.NewEventBus()
++				var output strings.Builder
++				for _, kind := range []event.EventType{event.EventAgentToolResult, event.EventAgentFinalAnswer} {
++					bus.On(kind, func(_ context.Context, evt event.Event) error { fmt.Fprint(&output, evt.Data); return nil })
++				}
++				require.NoError(t, svc.AgentQA(ctx, req, bus))
++				require.Equal(t, multiTurn, req.CustomAgent.Config.MultiTurnEnabled, "the single-turn case must not be defaulted into multi-turn")
++				if scenario == "ordinary-no-source" {
++					require.Positive(t, repo.attachmentLoads)
++					require.Positive(t, files.reads)
++					require.Positive(t, shell.calls)
++					require.True(t, model.sawMarker)
++					require.Contains(t, output.String(), protectedHistoryFileMarker)
++				} else {
++					require.Zero(t, repo.attachmentLoads)
++					require.Zero(t, repo.pages)
++					require.Zero(t, repo.checkpointReads)
++					require.Zero(t, files.reads)
++					require.Zero(t, shell.calls)
++					require.False(t, model.sawMarker)
++					require.NotContains(t, output.String(), protectedHistoryFileMarker)
++					require.Contains(t, output.String(), "new plain answer")
++					for _, tool := range []string{tools.ToolReadFile, tools.ToolShellExec, tools.ToolListSandboxFiles} {
++						require.NotContains(t, model.offered, tool)
++					}
++				}
++			})
++		}
++	}
++}
 diff --git a/internal/application/service/agent_service.go b/internal/application/service/agent_service.go
-index a1dc8aae..7a569657 100644
+index a1dc8aae..aafdfc49 100644
 --- a/internal/application/service/agent_service.go
 +++ b/internal/application/service/agent_service.go
-@@ -1231,6 +1231,16 @@ func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string
+@@ -187,6 +187,10 @@ func (s *agentService) CreateAgentEngine(
+ ) (interfaces.AgentEngine, error) {
+ 	logger.Infof(ctx, "Creating agent engine with custom EventBus")
+ 
++	if config != nil && config.ExcludeHistoricalContext {
++		config = withoutHistoricalAgentContext(config)
++	}
++
+ 	// 1. Validate config
+ 	if err := s.ValidateConfig(config); err != nil {
+ 		return nil, fmt.Errorf("invalid agent config: %w", err)
+@@ -213,9 +217,11 @@ func (s *agentService) CreateAgentEngine(
+ 	// Register the shell first: file discovery needs a separate tool only
+ 	// when no shell is available. File access still follows the sandbox
+ 	// capability independently of the existing SkillsEnabled execution gate.
+-	s.registerSandboxShellIfAllowed(ctx, toolRegistry, sessionID, config)
+-	s.registerSandboxFileTools(ctx, toolRegistry, sessionID, config)
+-	s.registerWebPageFiles(ctx, toolRegistry, config, sessionID, assistantMessageID)
++	if !config.ExcludeHistoricalContext {
++		s.registerSandboxShellIfAllowed(ctx, toolRegistry, sessionID, config)
++		s.registerSandboxFileTools(ctx, toolRegistry, sessionID, config)
++		s.registerWebPageFiles(ctx, toolRegistry, config, sessionID, assistantMessageID)
++	}
+ 	// Advertise cached service summaries independently of @mentions. Concrete
+ 	// tool definitions are published after describe, before the next model request.
+ 	toolRegistry.PrepareMCPTools(ctx)
+@@ -267,7 +273,7 @@ func (s *agentService) CreateAgentEngine(
+ 	// the installed-skill list and the read_file / shell_exec environment. A sandbox whose skills are still installing —
+ 	// or that simply has none yet — therefore gets a shell without an
+ 	// empty skills manager or skill tools that cannot succeed.
+-	offerSkills := config.SkillsEnabled &&
++	offerSkills := !config.ExcludeHistoricalContext && config.SkillsEnabled &&
+ 		(len(config.SkillDirs) > 0 || len(config.TenantSkills) > 0)
+ 	if offerSkills {
+ 		skillsManager, err := s.initializeSkillsManager(ctx, sessionID, config, toolRegistry)
+@@ -295,6 +301,37 @@ func (s *agentService) CreateAgentEngine(
+ 	return engine, nil
+ }
+ 
++// Keep a denied/unknown history out of every model-visible session capability,
++// not just llmContext. Current grounded retrieval and plain Q&A still run; the
++// next positively verified no-source turn retains its original capabilities.
++func withoutHistoricalAgentContext(config *types.AgentConfig) *types.AgentConfig {
++	copy := *config
++	copy.SkillsEnabled = false
++	copy.SkillDirs = nil
++	copy.AllowedSkills = nil
++	copy.TenantSkills = nil
++	copy.LocalBrowserEnabled = false
++	copy.MCPSelectionMode = "none"
++	copy.MCPServices = nil
++	copy.PinnedMCPServiceIDs = nil
++	copy.PinnedSkillNames = nil
++	copy.SandboxConfigID = ""
++	disabledMemory := false
++	copy.MemoryEnabled = &disabledMemory
++	allowed := copy.AllowedTools
++	if len(allowed) == 0 {
++		allowed = tools.DefaultAllowedTools()
++	}
++	safe := map[string]bool{tools.ToolThinking: true, tools.ToolSearchKnowledge: true, tools.ToolReadDocument: true, tools.ToolListDocuments: true, tools.ToolQueryKnowledgeGraph: true, tools.ToolWebSearch: true, tools.ToolWebFetch: true}
++	copy.AllowedTools = []string{tools.ToolThinking}
++	for _, name := range tools.NormalizeAllowedTools(allowed) {
++		if safe[name] && name != tools.ToolThinking {
++			copy.AllowedTools = append(copy.AllowedTools, name)
++		}
++	}
++	return &copy
++}
++
+ // registerMCPTools registers MCP tools from enabled services for this tenant.
+ func (s *agentService) registerMCPTools(
+ 	ctx context.Context,
+@@ -1231,6 +1268,16 @@ func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string
  			logger.Debugf(ctx, "Skipping temporary knowledge base %s (%s) from prompt", kb.ID, kb.Name)
  			continue
  		}
@@ -27224,7 +27773,7 @@ index a47bbb12..1cea1ec0 100644
  	for _, k := range rows {
  		appendAllowed(k)
 diff --git a/internal/application/service/message.go b/internal/application/service/message.go
-index 04e1b0ea..d0764a35 100644
+index 04e1b0ea..db2693a5 100644
 --- a/internal/application/service/message.go
 +++ b/internal/application/service/message.go
 @@ -9,6 +9,7 @@ import (
@@ -27373,7 +27922,7 @@ index 04e1b0ea..d0764a35 100644
  // sessionTenantIDForLookup returns the tenant ID to use for session lookup.
  // When SessionTenantIDContextKey is set (e.g. pipeline with shared agent), use it so session/message belong to session owner.
  func sessionTenantIDForLookup(ctx context.Context) (uint64, bool) {
-@@ -125,6 +240,9 @@ func (s *messageService) GetMessage(ctx context.Context, sessionID string, messa
+@@ -125,9 +240,64 @@ func (s *messageService) GetMessage(ctx context.Context, sessionID string, messa
  	}
  
  	logger.Info(ctx, "Message retrieved successfully")
@@ -27383,7 +27932,62 @@ index 04e1b0ea..d0764a35 100644
  	return s.clarifyReadArtifactVersions(ctx, sessionID, []*types.Message{message})[0], nil
  }
  
-@@ -155,6 +273,10 @@ func (s *messageService) GetMessagesBySession(ctx context.Context,
++// GetMessageForControl is an owner-only metadata lookup used to stop or steer
++// a running turn. It never returns saved content, tool outputs or references,
++// and does not require permission to read content that may have been revoked.
++func (s *messageService) GetMessageForControl(ctx context.Context, sessionID, messageID string) (*types.Message, error) {
++	tenantID := types.MustTenantIDFromContext(ctx)
++	owner := types.SessionOwnerIDFromContext(ctx)
++	if owner == "" || types.CallerFromContext(ctx).TenantID != tenantID {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	session, err := s.sessionRepo.Get(ctx, tenantID, owner, sessionID)
++	if err != nil {
++		return nil, err
++	}
++	if session == nil || session.UserID != owner || session.TenantID != tenantID || session.ID != sessionID {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	message, err := s.messageRepo.GetMessage(ctx, sessionID, messageID)
++	if err != nil {
++		return nil, err
++	}
++	if message == nil || message.ID != messageID || message.SessionID != sessionID {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	return &types.Message{ID: message.ID, SessionID: message.SessionID, RequestID: message.RequestID, Role: message.Role, IsCompleted: message.IsCompleted, AgentID: message.AgentID, AgentTenantID: message.AgentTenantID}, nil
++}
++
++// GetMessageForStream is private to the guarded SSE sender. Public saved
++// message reads continue to apply the historical guard, including incomplete
++// rows. SSE needs the running scope before it can learn tool provenance.
++func (s *messageService) GetMessageForStream(ctx context.Context, sessionID, messageID string) (*types.Message, error) {
++	tenantID := types.MustTenantIDFromContext(ctx)
++	owner := types.SessionOwnerIDFromContext(ctx)
++	if owner == "" || types.CallerFromContext(ctx).TenantID != tenantID {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	session, err := s.sessionRepo.Get(ctx, tenantID, owner, sessionID)
++	if err != nil {
++		return nil, err
++	}
++	if session == nil || session.UserID != owner || session.TenantID != tenantID || session.ID != sessionID {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	message, err := s.messageRepo.GetMessage(ctx, sessionID, messageID)
++	if err != nil {
++		return nil, err
++	}
++	if message == nil || message.ID != messageID || message.SessionID != sessionID {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	return message, nil
++}
++
+ // GetMessagesBySession retrieves paginated messages for a specific session
+ func (s *messageService) GetMessagesBySession(ctx context.Context,
+ 	sessionID string, page int, pageSize int,
+@@ -155,6 +325,10 @@ func (s *messageService) GetMessagesBySession(ctx context.Context,
  	}
  
  	logger.Infof(ctx, "Retrieved %d messages successfully", len(messages))
@@ -27394,7 +27998,7 @@ index 04e1b0ea..d0764a35 100644
  	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
  }
  
-@@ -188,6 +310,10 @@ func (s *messageService) GetRecentMessagesBySession(ctx context.Context,
+@@ -188,6 +362,10 @@ func (s *messageService) GetRecentMessagesBySession(ctx context.Context,
  	}
  
  	logger.Infof(ctx, "Retrieved %d recent messages successfully", len(messages))
@@ -27405,7 +28009,7 @@ index 04e1b0ea..d0764a35 100644
  	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
  }
  
-@@ -222,6 +348,10 @@ func (s *messageService) GetMessagesBySessionBeforeTime(ctx context.Context,
+@@ -222,6 +400,10 @@ func (s *messageService) GetMessagesBySessionBeforeTime(ctx context.Context,
  	}
  
  	logger.Infof(ctx, "Retrieved %d messages before time successfully", len(messages))
@@ -27416,7 +28020,7 @@ index 04e1b0ea..d0764a35 100644
  	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
  }
  
-@@ -656,6 +786,10 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
+@@ -656,6 +838,10 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
  
  	// Step 4: Fetch partner messages (Q&A counterparts) to ensure complete pairs
  	items = s.fetchPartnerMessages(ctx, items)
@@ -27427,7 +28031,7 @@ index 04e1b0ea..d0764a35 100644
  
  	// Step 5: Group by request_id to merge Q&A pairs
  	grouped := groupByRequestID(items)
-@@ -674,6 +808,43 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
+@@ -674,6 +860,43 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
  	return result, nil
  }
  
@@ -27537,10 +28141,10 @@ index 00000000..e6a0f595
 +}
 diff --git a/internal/application/service/message_nextcloud_history_test.go b/internal/application/service/message_nextcloud_history_test.go
 new file mode 100644
-index 00000000..704b094f
+index 00000000..a467c96b
 --- /dev/null
 +++ b/internal/application/service/message_nextcloud_history_test.go
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,90 @@
 +package service
 +
 +import (
@@ -27603,6 +28207,165 @@ index 00000000..704b094f
 +	if !errors.Is(err, access.ErrNextcloudPublicationUnavailable) {
 +		t.Fatalf("unavailable verifier must not serve answer: %v", err)
 +	}
++}
++
++func (s messageHistorySources) HasEverNextcloudSourceForKnowledgeBase(_ context.Context, id string) (bool, error) {
++	for _, source := range s.byKB[id] {
++		if source != nil && source.Type == types.ConnectorTypeNextcloud {
++			return true, s.err
++		}
++	}
++	return false, s.err
++}
++
++type legacyHistorySourceLookup struct {
++	interfaces.DataSourceRepository
++}
++
++func (legacyHistorySourceLookup) FindByKnowledgeBaseIncludingDeleted(context.Context, string) ([]*types.DataSource, error) {
++	return nil, nil
++}
++func (legacyHistorySourceLookup) HasEverNextcloudSourceForTenant(context.Context, uint64) (bool, error) {
++	return false, nil
++}
++func TestHistoryFilteringNeedsDurableKBSourceVerifier(t *testing.T) {
++	s := &messageService{historyGuard: access.NewNextcloudHistoryGuard(nil, legacyHistorySourceLookup{}, nil)}
++	_, err := s.filterHistoryMessages(context.Background(), []*types.Message{{Role: "assistant", ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}}})
++	if !errors.Is(err, access.ErrNextcloudPublicationUnavailable) {
++		t.Fatalf("legacy DS-only verifier admitted saved broad history: %v", err)
++	}
++}
+diff --git a/internal/application/service/message_saved_agent_test.go b/internal/application/service/message_saved_agent_test.go
+new file mode 100644
+index 00000000..c1383654
+--- /dev/null
++++ b/internal/application/service/message_saved_agent_test.go
+@@ -0,0 +1,126 @@
++package service
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"testing"
++	"time"
++)
++
++type savedAgentSessions struct {
++	interfaces.SessionRepository
++	gotOwner string
++	calls    int
++}
++
++func (r *savedAgentSessions) Get(_ context.Context, tenant uint64, owner, id string) (*types.Session, error) {
++	r.calls++
++	r.gotOwner = owner
++	return &types.Session{ID: id, TenantID: tenant, UserID: owner}, nil
++}
++func (r *savedAgentSessions) GetIMPlatform(context.Context, uint64, string) (string, error) {
++	return "", nil
++}
++
++type savedAgentRows struct {
++	interfaces.MessageRepository
++	rows []*types.Message
++}
++
++func (r *savedAgentRows) GetMessage(_ context.Context, _, id string) (*types.Message, error) {
++	for _, row := range r.rows {
++		if row.ID == id {
++			return row, nil
++		}
++	}
++	return nil, access.ErrNextcloudPublicationDenied
++}
++func (r *savedAgentRows) GetMessagesBySession(context.Context, string, int, int) ([]*types.Message, error) {
++	return r.rows, nil
++}
++func (r *savedAgentRows) GetRecentMessagesBySession(context.Context, string, int) ([]*types.Message, error) {
++	return r.rows, nil
++}
++func (r *savedAgentRows) GetMessagesBySessionBeforeTime(context.Context, string, time.Time, int) ([]*types.Message, error) {
++	return r.rows, nil
++}
++func (r *savedAgentRows) SearchMessagesByKeyword(context.Context, uint64, string, string, []string, int) ([]*types.MessageWithSession, error) {
++	var out []*types.MessageWithSession
++	for _, row := range r.rows {
++		out = append(out, &types.MessageWithSession{Message: *row})
++	}
++	return out, nil
++}
++func (r *savedAgentRows) OwnedSessionIDs(context.Context, uint64, string, []string) (map[string]bool, error) {
++	return map[string]bool{"session": true}, nil
++}
++func (r *savedAgentRows) GetMessagesByRequestIDs(context.Context, string, []string) ([]*types.MessageWithSession, error) {
++	return nil, nil
++}
++func savedAgentFixture() (*messageService, *savedAgentSessions, context.Context) {
++	sessions := &savedAgentSessions{}
++	rows := &savedAgentRows{rows: []*types.Message{
++		{ID: "q", SessionID: "session", RequestID: "turn", Role: "user", Content: "my text"},
++		{ID: "a", SessionID: "session", RequestID: "turn", Role: "assistant", AgentID: "agent", Content: "old secret paraphrase", ExecutionContext: types.MessageExecutionContext{AgentKBSelectionMode: "none"}, AgentSteps: types.AgentSteps{{ToolCalls: []types.ToolCall{{ID: "real-call", Name: "opaque_tool", Result: &types.ToolResult{Output: "old tool secret"}}}}}},
++		{ID: "ordinary", SessionID: "session", RequestID: "ordinary", Role: "assistant", Content: "ordinary RAG text", AgentSteps: types.AgentSteps{{ToolCalls: []types.ToolCall{{ID: types.PipelineToolCallIDPrefix + "search", Name: "search_knowledge", Result: &types.ToolResult{Output: "normal timeline"}}}}}},
++	}}
++	ctx := context.WithValue(context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1)), types.UserIDContextKey, "person")
++	return &messageService{messageRepo: rows, sessionRepo: sessions, historyGuard: access.NewNextcloudHistoryGuard(nil, &instanceHistorySources{ever: true}, nil)}, sessions, ctx
++}
++func TestSavedAgentHistoryGetListAndSearchGuard(t *testing.T) {
++	s, _, ctx := savedAgentFixture()
++	got, err := s.GetMessage(ctx, "session", "a")
++	require.ErrorIs(t, err, access.ErrNextcloudPublicationDenied)
++	require.Nil(t, got)
++	for _, load := range []func() ([]*types.Message, error){
++		func() ([]*types.Message, error) { return s.GetMessagesBySession(ctx, "session", 1, 10) },
++		func() ([]*types.Message, error) { return s.GetRecentMessagesBySession(ctx, "session", 10) },
++		func() ([]*types.Message, error) {
++			return s.GetMessagesBySessionBeforeTime(ctx, "session", time.Now(), 10)
++		},
++	} {
++		rows, err := load()
++		require.NoError(t, err)
++		require.Len(t, rows, 2)
++		require.Equal(t, "my text", rows[0].Content)
++		require.Equal(t, "ordinary RAG text", rows[1].Content)
++	}
++	result, err := s.SearchMessages(ctx, &types.MessageSearchParams{Query: "text", Mode: types.MessageSearchModeKeyword})
++	require.NoError(t, err)
++	require.Equal(t, 1, result.Total)
++	require.Equal(t, "ordinary", result.Items[0].RequestID)
++}
++func TestSavedAgentControlLookupKeepsOwnerScopeAndReturnsNoContent(t *testing.T) {
++	s, sessions, ctx := savedAgentFixture()
++	ctx = context.WithValue(ctx, types.SessionTenantIDContextKey, uint64(99))
++	row, err := s.GetMessageForControl(ctx, "session", "a")
++	require.NoError(t, err)
++	require.Equal(t, "person", sessions.gotOwner)
++	require.Empty(t, row.Content)
++	require.Empty(t, row.AgentSteps)
++	require.Empty(t, row.KnowledgeReferences)
++	row, err = s.GetMessageForStream(ctx, "session", "a")
++	require.NoError(t, err)
++	require.Equal(t, "old secret paraphrase", row.Content)
++	missing := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1))
++	_, err = s.GetMessageForControl(missing, "session", "a")
++	require.Error(t, err)
++	_, err = s.GetMessageForStream(types.WithCaller(ctx, types.Caller{TenantID: 2, UserID: "person"}), "session", "a")
++	require.Error(t, err)
++}
++func TestSavedAgentHistoryUnavailableAndOpaqueToolFailClosed(t *testing.T) {
++	s, _, ctx := savedAgentFixture()
++	s.historyGuard = access.NewNextcloudHistoryGuard(nil, nil, nil)
++	_, err := s.GetMessage(ctx, "session", "a")
++	require.ErrorIs(t, err, access.ErrNextcloudPublicationUnavailable)
++	row := s.messageRepo.(*savedAgentRows).rows[1]
++	row.AgentID = ""
++	_, err = s.GetMessage(ctx, "session", "a")
++	require.ErrorIs(t, err, access.ErrNextcloudPublicationUnavailable)
++	ordinary, err := s.GetMessage(ctx, "session", "ordinary")
++	require.NoError(t, err)
++	require.Equal(t, "ordinary RAG text", ordinary.Content)
 +}
 diff --git a/internal/application/service/nextcloud_derived_policy.go b/internal/application/service/nextcloud_derived_policy.go
 new file mode 100644
@@ -28708,23 +29471,125 @@ index 252356ba..2f5445d2 100644
  		sessionRepo:           sessionRepo,
  		messageRepo:           messageRepo,
 diff --git a/internal/application/service/session_agent_qa.go b/internal/application/service/session_agent_qa.go
-index 81c0016c..88c444fd 100644
+index 81c0016c..69ee2559 100644
 --- a/internal/application/service/session_agent_qa.go
 +++ b/internal/application/service/session_agent_qa.go
-@@ -157,11 +157,10 @@ func (s *sessionService) AgentQA(
- 	if agentConfig.MultiTurnEnabled {
+@@ -153,20 +153,31 @@ func (s *sessionService) AgentQA(
+ 	// tried last turn — except final_answer, which is replayed as the trailing
+ 	// canonical assistant message. History is sized by the window, not by a
+ 	// turn count: compaction and its persisted checkpoints keep it in bounds.
++
+ 	var llmContext []chat.Message
+-	if agentConfig.MultiTurnEnabled {
++	historyAdmitted := true
++	excludeHistoricalContext := func(reason error) {
++		logger.Warnf(ctx, "Agent retained context rejected; continuing current turn without historical capabilities: %v", reason)
++		llmContext = []chat.Message{}
++		agentConfig.ContextTokenScale = 0
++		historyAdmitted = false
++		agentConfig.ExcludeHistoricalContext = true
++		disabledMemory := false
++		agentConfig.MemoryEnabled = &disabledMemory
++	}
++	// A single-turn Agent can still reuse the session workspace, attachments,
++	// memory and tools. Admission is independent from message replay settings.
++	if err := s.historyGuard.CheckAgentHistoryReplay(ctx); err != nil {
++		excludeHistoricalContext(err)
++	}
++	if historyAdmitted && agentConfig.MultiTurnEnabled {
  		budget := agent.HistoryTokenBudget(agentConfig)
- 		llmContext, agentConfig.ContextTokenScale, err = LoadAgentHistory(
+-		llmContext, agentConfig.ContextTokenScale, err = LoadAgentHistory(
 -			ctx, s.messageRepo, sessionID, budget, agentConfig.RetainRetrievalHistory,
-+			ctx, s.messageRepo, sessionID, budget, agentConfig.RetainRetrievalHistory, s.historyGuard,
- 		)
+-		)
++		llmContext, agentConfig.ContextTokenScale, err = LoadAgentHistory(ctx, s.messageRepo, sessionID, budget, agentConfig.RetainRetrievalHistory, s.historyGuard)
  		if err != nil {
 -			logger.Warnf(ctx, "Failed to load agent history from DB: %v, continuing without history", err)
 -			llmContext = []chat.Message{}
-+			return fmt.Errorf("cannot admit Agent history: %w", err)
++			excludeHistoricalContext(err)
  		}
- 		logger.Infof(ctx, "Loaded %d history messages from DB (budget=%d tokens, token scale=%.2f)",
- 			len(llmContext), budget, agentConfig.ContextTokenScale)
+-		logger.Infof(ctx, "Loaded %d history messages from DB (budget=%d tokens, token scale=%.2f)",
+-			len(llmContext), budget, agentConfig.ContextTokenScale)
++		logger.Infof(ctx, "Loaded %d history messages from DB (budget=%d tokens, token scale=%.2f)", len(llmContext), budget, agentConfig.ContextTokenScale)
+ 	} else {
+-		logger.Infof(ctx, "Multi-turn disabled for this agent, running without history")
+ 		llmContext = []chat.Message{}
+ 	}
+ 
+@@ -175,7 +186,7 @@ func (s *sessionService) AgentQA(
+ 	// the first resolve: if the previous turn left a stale mark, that is
+ 	// where the new image is picked up. HTTP send already holds the lease it
+ 	// took before persisting the turn, so only direct callers take one here.
+-	if !req.TurnLeaseHeld {
++	if historyAdmitted && !req.TurnLeaseHeld {
+ 		releaseTurn, err := s.holdSandboxTurn(ctx, sessionID, agentConfig.SandboxConfigID)
+ 		if err != nil {
+ 			return err
+@@ -189,26 +200,29 @@ func (s *sessionService) AgentQA(
+ 	// source of truth. Gated on the sandbox manager advertising a session
+ 	// filesystem capability so provider-neutral remote wiring stays here.
+ 	var stagedAttachments []stagedSessionAttachment
+-	stager, ok := s.agentService.(sessionAttachmentStager)
+-	if !ok {
+-		return errors.New("agent service does not support session attachment staging")
+-	}
+-	// Probe the backend this session's sandbox actually runs on. Gating on the
+-	// process-wide manager instead could inspect a different backend than the
+-	// named workspace config selected by this agent.
+-	inputStore, storeErr := stager.sessionSandboxInputStore(ctx, sessionID, agentConfig.SandboxConfigID)
+-	if storeErr != nil {
+-		return fmt.Errorf("resolve sandbox file store for session %s: %w", sessionID, storeErr)
+-	}
+-	if inputStore != nil {
+-		sessionAttachments, loadErr := s.messageRepo.GetSessionAttachments(ctx, sessionID)
+-		if loadErr != nil {
+-			return fmt.Errorf("load session attachments for sandbox staging: %w", loadErr)
++	if historyAdmitted {
++		stager, ok := s.agentService.(sessionAttachmentStager)
++		if !ok {
++			return errors.New("agent service does not support session attachment staging")
+ 		}
+-		stagedAttachments, err = stager.stageSessionAttachments(ctx, sessionID, agentConfig.SandboxConfigID, req.Session.TenantID, sessionAttachments)
+-		if err != nil {
+-			return fmt.Errorf("restore session attachments into sandbox: %w", err)
++		// Probe the backend this session's sandbox actually runs on. Gating on the
++		// process-wide manager instead could inspect a different backend than the
++		// named workspace config selected by this agent.
++		inputStore, storeErr := stager.sessionSandboxInputStore(ctx, sessionID, agentConfig.SandboxConfigID)
++		if storeErr != nil {
++			return fmt.Errorf("resolve sandbox file store for session %s: %w", sessionID, storeErr)
+ 		}
++		if inputStore != nil {
++			sessionAttachments, loadErr := s.messageRepo.GetSessionAttachments(ctx, sessionID)
++			if loadErr != nil {
++				return fmt.Errorf("load session attachments for sandbox staging: %w", loadErr)
++			}
++			stagedAttachments, err = stager.stageSessionAttachments(ctx, sessionID, agentConfig.SandboxConfigID, req.Session.TenantID, sessionAttachments)
++			if err != nil {
++				return fmt.Errorf("restore session attachments into sandbox: %w", err)
++			}
++		}
++
+ 	}
+ 
+ 	// Create agent engine with EventBus
+@@ -243,7 +257,7 @@ func (s *sessionService) AgentQA(
+ 	// Recall long-term memory for this turn. Like the RAG path this is a
+ 	// no-model read, and an agent may opt out of it entirely.
+ 	memoryCtx := types.ApplyAgentMemoryPreference(ctx, agentConfig.MemoryEnabled)
+-	if s.memoryService != nil {
++	if historyAdmitted && s.memoryService != nil {
+ 		recall := s.memoryService.Recall(memoryCtx, req.Query)
+ 		if recall.Prompt != "" {
+ 			engine.SetMemoryPrompt(recall.Prompt)
+@@ -269,7 +283,7 @@ func (s *sessionService) AgentQA(
+ 	// A compaction that ends on a stored turn is written back onto it, so the
+ 	// next turn loads the summary instead of summarizing the same history
+ 	// again. Without multi-turn there is no stored history to end on.
+-	if agentConfig.MultiTurnEnabled {
++	if historyAdmitted && agentConfig.MultiTurnEnabled {
+ 		engine.SetContextCheckpointSink(messageCheckpointSink{repo: s.messageRepo, sessionID: sessionID})
+ 	}
+ 
 diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
 index 04a5c8d0..6bd8ec72 100644
 --- a/internal/application/service/session_knowledge_qa.go
@@ -43283,6 +44148,21 @@ index 00000000..69209282
 +	require.NotContains(t, string(aborted.NewConfig), "discarded-secret")
 +	require.Equal(t, "{}", string(aborted.NewConfig))
 +}
+diff --git a/internal/handler/session/continue_stream_resource_urls_test.go b/internal/handler/session/continue_stream_resource_urls_test.go
+index f8424512..79a7eedb 100644
+--- a/internal/handler/session/continue_stream_resource_urls_test.go
++++ b/internal/handler/session/continue_stream_resource_urls_test.go
+@@ -178,3 +178,10 @@ func TestContinueStream_RejectsInvalidResourceURLMode(t *testing.T) {
+ 	assert.Equal(t, http.StatusBadRequest, code, body)
+ 	assert.Contains(t, body, "resource_urls")
+ }
++
++func (s *stubMessageServiceForStream) CheckLiveMessagePublication(context.Context, *types.Message) error {
++	return nil
++}
++func (s *stubMessageServiceForStream) CheckMessagePublication(context.Context, *types.Message) error {
++	return nil
++}
 diff --git a/internal/handler/session/handler.go b/internal/handler/session/handler.go
 index c72dcfc5..e540ebae 100644
 --- a/internal/handler/session/handler.go
@@ -43979,6 +44859,27 @@ index 544e45aa..d4701cb1 100644
  }
  
  // runVLMAnalysisIfNeeded runs VLM image analysis within the async goroutine,
+diff --git a/internal/handler/session/resource_urls_test.go b/internal/handler/session/resource_urls_test.go
+index 302c5bd7..c0fe242a 100644
+--- a/internal/handler/session/resource_urls_test.go
++++ b/internal/handler/session/resource_urls_test.go
+@@ -222,14 +222,14 @@ func TestEmitStreamEvent_FlushesHeldContentOnError(t *testing.T) {
+ // A user-requested stop ends the stream without a completion event, and the text
+ // generated before it is still the user's content.
+ func TestHandleAgentEventsForSSE_FlushesHeldContentOnStop(t *testing.T) {
+-	h := &Handler{streamManager: &stubStreamManager{events: []interfaces.StreamEvent{
++	h := &Handler{messageService: &stubMessageServiceForStream{}, streamManager: &stubStreamManager{events: []interfaces.StreamEvent{
+ 		{ID: "answer-1", Type: types.ResponseTypeAnswer, Content: "tail ![fig](resource://xifDo7"},
+ 		{ID: "stop-1", Type: types.ResponseType(event.EventStop), Done: true},
+ 	}}}
+ 	c, recorder := newTestGinContext(t, "?resource_urls=public")
+ 
+ 	h.handleAgentEventsForSSE(
+-		context.Background(), c, "sess1", "msg1", "req-1", nil, false, publicStreamRewriter())
++		context.Background(), c, "sess1", "msg1", "req-1", nil, false, publicStreamRewriter(), &types.Message{Role: "assistant"})
+ 
+ 	body := recorder.Body.String()
+ 	assert.Contains(t, body, `![fig](resource://xifDo7`, "the tail must not be swallowed")
 diff --git a/internal/handler/session/search_knowledge_resource_urls_test.go b/internal/handler/session/search_knowledge_resource_urls_test.go
 index b114042d..dabe9352 100644
 --- a/internal/handler/session/search_knowledge_resource_urls_test.go
@@ -44041,8 +44942,21 @@ index b114042d..dabe9352 100644
  	}
  	r.POST("/knowledge-search", h.SearchKnowledge)
  
+diff --git a/internal/handler/session/steer.go b/internal/handler/session/steer.go
+index 19a36ad8..ac73c9c7 100644
+--- a/internal/handler/session/steer.go
++++ b/internal/handler/session/steer.go
+@@ -324,7 +324,7 @@ func (h *Handler) liveAgentRun(ctx context.Context, sessionID string) (string, e
+ 		return "", nil
+ 	}
+ 
+-	msg, err := h.messageService.GetMessage(ctx, sessionID, assistantID)
++	msg, err := getMessageForControl(ctx, h.messageService, sessionID, assistantID)
+ 	if err != nil {
+ 		return "", err
+ 	}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d6183..014a3c2b 100644
+index 734d6183..ef9de491 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -7,6 +7,7 @@ import (
@@ -44053,9 +44967,12 @@ index 734d6183..014a3c2b 100644
  	"github.com/Tencent/WeKnora/internal/errors"
  	"github.com/Tencent/WeKnora/internal/event"
  	"github.com/Tencent/WeKnora/internal/logger"
-@@ -79,6 +80,14 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -77,8 +78,16 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+ 	}
+ 
  	// Get the incomplete message
- 	message, err := h.messageService.GetMessage(ctx, sessionID, messageID)
+-	message, err := h.messageService.GetMessage(ctx, sessionID, messageID)
++	message, err := getMessageForStream(ctx, h.messageService, sessionID, messageID)
  	if err != nil {
 +		if stderrors.Is(err, access.ErrNextcloudPublicationDenied) {
 +			c.Error(errors.NewForbiddenError("Current Nextcloud file access is required"))
@@ -44068,29 +44985,66 @@ index 734d6183..014a3c2b 100644
  		if stderrors.Is(err, errors.ErrSessionNotFound) {
  			// PR #1309 plumbed user-scope into messageService.GetMessage's
  			// session existence check; non-owner / wrong-user lookups now
-@@ -128,6 +137,10 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -128,6 +137,18 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  		})
  		return
  	}
-+	if err := checkReplayPublication(ctx, h.messageService, message, events); err != nil {
-+		c.Error(replayPublicationHTTPError(err))
-+		return
++	if message.IsCompleted {
++		if err := checkReplayPublication(ctx, h.messageService, message, events); err != nil {
++			c.Error(replayPublicationHTTPError(err))
++			return
++		}
++	} else {
++		events, err = protectLiveStreamBatch(ctx, h.messageService, message, events)
++		if err != nil {
++			c.Error(replayPublicationHTTPError(err))
++			return
++		}
 +	}
  
  	logger.Infof(
  		ctx, "Preparing to replay %d events and continue streaming, session ID: %s, message ID: %s",
-@@ -179,6 +192,10 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -149,7 +170,12 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+ 	// Replay existing events, a segment's worth of chunks per frame
+ 	replay := coalesceReplayEvents(events)
+ 	logger.Debugf(ctx, "Replaying %d existing events as %d frames", len(events), len(replay))
+-	for _, evt := range replay {
++	for index, evt := range replay {
++		if index > 0 && (message.IsCompleted || liveBatchNeedsPublicationCheck([]interfaces.StreamEvent{evt})) {
++			if err := checkReplayPublication(ctx, h.messageService, message, nil); err != nil {
++				return
++			}
++		}
+ 		emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter)
+ 	}
+ 
+@@ -179,10 +205,24 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  				flushHeldStreamContent(ctx, c, message.RequestID, resourceRewriter)
  				return
  			}
-+			if err := checkReplayPublication(ctx, h.messageService, message, newEvents); err != nil {
++			if message.IsCompleted {
++				err = checkReplayPublication(ctx, h.messageService, message, newEvents)
++			} else {
++				newEvents, err = protectLiveStreamBatch(ctx, h.messageService, message, newEvents)
++			}
++			if err != nil {
 +				logger.Warnf(ctx, "Stopped stream replay after source authorization changed: %v", err)
 +				return
 +			}
  
  			// Send new events
  			streamCompletedNow := false
-@@ -204,6 +221,44 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+-			for _, evt := range newEvents {
++			for index, evt := range newEvents {
++				if index > 0 && (message.IsCompleted || liveBatchNeedsPublicationCheck([]interfaces.StreamEvent{evt})) {
++					if err := checkReplayPublication(ctx, h.messageService, message, nil); err != nil {
++						return
++					}
++				}
+ 				// Check for completion event
+ 				if evt.Type == "complete" {
+ 					streamCompletedNow = true
+@@ -204,6 +244,95 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	}
  }
  
@@ -44102,27 +45056,78 @@ index 734d6183..014a3c2b 100644
 +	ctx context.Context, service interfaces.MessageService,
 +	message *types.Message, events []interfaces.StreamEvent,
 +) error {
++	if message == nil {
++		return access.ErrNextcloudPublicationUnavailable
++	}
++	if !message.IsCompleted {
++		return checkLiveStreamPublication(ctx, service, message, events)
++	}
 +	verifier, ok := service.(replayPublicationVerifier)
-+	if !ok || message == nil {
-+		return nil
++	if !ok {
++		return access.ErrNextcloudPublicationUnavailable
 +	}
 +	copy := *message
 +	copy.KnowledgeReferences = append(types.References(nil), message.KnowledgeReferences...)
-+	for _, event := range events {
-+		if event.Type != types.ResponseTypeReferences {
-+			continue
++	for _, streamEvent := range events {
++		if streamEvent.Type == types.ResponseTypeReferences {
++			response := buildStreamResponse(streamEvent, message.RequestID)
++			copy.KnowledgeReferences = append(copy.KnowledgeReferences, response.KnowledgeReferences...)
 +		}
-+		response := buildStreamResponse(event, message.RequestID)
-+		copy.KnowledgeReferences = append(copy.KnowledgeReferences, response.KnowledgeReferences...)
++		// Old Redis frames may contain tool output not yet copied to the row.
++		// Such a saved Agent replay remains globally guarded even without AgentID.
++		if streamEvent.Type == types.ResponseTypeToolResult || streamEvent.Type == types.ResponseTypeToolCall {
++			name, _ := streamEvent.Data["tool_name"].(string)
++			id, _ := streamEvent.Data["tool_call_id"].(string)
++			if !types.IsPipelineToolCallID(id) && !syntheticHistoryStreamCall(message, id) && name != "final_answer" {
++				copy.AgentSteps = append(copy.AgentSteps, types.AgentStep{ToolCalls: []types.ToolCall{{ID: id, Name: name}}})
++			}
++		}
 +	}
 +	if err := verifier.CheckMessagePublication(ctx, &copy); err != nil {
 +		return err
 +	}
-+	// Keep references learned from earlier SSE events for every later poll.
-+	// Otherwise a later source withdrawal would pass once a poll carried no
-+	// new references and the persisted message had not yet been updated.
 +	message.KnowledgeReferences = copy.KnowledgeReferences
++	message.AgentSteps = copy.AgentSteps
 +	return nil
++}
++
++// KnowledgeQA records ragpipe-prefixed calls in the message, while its SSE
++// frame carries the original ID. Match the persisted synthetic call so the
++// ordinary fast-answer timeline is not mistaken for an opaque Agent round.
++func syntheticHistoryStreamCall(message *types.Message, id string) bool {
++	if message == nil || id == "" {
++		return false
++	}
++	for _, step := range message.AgentSteps {
++		for _, call := range step.ToolCalls {
++			if call.ID == types.PipelineToolCallIDPrefix+id {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++type controlMessageLookup interface {
++	GetMessageForControl(context.Context, string, string) (*types.Message, error)
++}
++
++func getMessageForControl(ctx context.Context, service interfaces.MessageService, sessionID, messageID string) (*types.Message, error) {
++	if lookup, ok := service.(controlMessageLookup); ok {
++		return lookup.GetMessageForControl(ctx, sessionID, messageID)
++	}
++	return service.GetMessage(ctx, sessionID, messageID)
++}
++
++type streamMessageLookup interface {
++	GetMessageForStream(context.Context, string, string) (*types.Message, error)
++}
++
++func getMessageForStream(ctx context.Context, service interfaces.MessageService, sessionID, messageID string) (*types.Message, error) {
++	if lookup, ok := service.(streamMessageLookup); ok {
++		return lookup.GetMessageForStream(ctx, sessionID, messageID)
++	}
++	return service.GetMessage(ctx, sessionID, messageID)
 +}
 +
 +func replayPublicationHTTPError(err error) error {
@@ -44135,7 +45140,16 @@ index 734d6183..014a3c2b 100644
  // StopSession godoc
  // @Summary      停止生成
  // @Description  停止当前正在进行的生成任务
-@@ -335,6 +390,7 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -249,7 +378,7 @@ func (h *Handler) StopSession(c *gin.Context) {
+ 	tenantIDUint := tenantID.(uint64)
+ 
+ 	// Verify message ownership and status
+-	message, err := h.messageService.GetMessage(ctx, sessionID, assistantMessageID)
++	message, err := getMessageForControl(ctx, h.messageService, sessionID, assistantMessageID)
+ 	if err != nil {
+ 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+ 			"session_id": sessionID,
+@@ -335,6 +464,7 @@ func (h *Handler) handleAgentEventsForSSE(
  	eventBus *event.EventBus,
  	waitForTitle bool,
  	resourceRewriter *storageurl.StreamRewriter,
@@ -44143,7 +45157,7 @@ index 734d6183..014a3c2b 100644
  ) {
  	ticker := time.NewTicker(100 * time.Millisecond)
  	defer ticker.Stop()
-@@ -343,6 +399,10 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -343,6 +473,10 @@ func (h *Handler) handleAgentEventsForSSE(
  	log := logger.GetLogger(ctx)
  
  	log.Infof("Starting pull-based SSE streaming for session=%s, message=%s", sessionID, assistantMessageID)
@@ -44154,15 +45168,14 @@ index 734d6183..014a3c2b 100644
  
  	for {
  		select {
-@@ -362,11 +422,26 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -362,11 +496,25 @@ func (h *Handler) handleAgentEventsForSSE(
  				log.Warnf("Failed to get events from stream: %v", err)
  				continue
  			}
-+			if liveBatchNeedsPublicationCheck(events) {
-+				if err := checkLiveStreamPublication(ctx, h.messageService, liveMessage, events); err != nil {
-+					stopLiveStreamForPublication(ctx, c, eventBus, sessionID, assistantMessageID, requestID, err)
-+					return
-+				}
++			events, err = protectLiveStreamBatch(ctx, h.messageService, liveMessage, events)
++			if err != nil {
++				stopLiveStreamForPublication(ctx, c, eventBus, sessionID, assistantMessageID, requestID, err)
++				return
 +			}
  
  			// Send any new events
@@ -44182,7 +45195,7 @@ index 734d6183..014a3c2b 100644
  				// Check for stop event
  				if evt.Type == types.ResponseType(event.EventStop) {
  					log.Infof("Detected stop event, triggering stop via EventBus for session=%s", sessionID)
-@@ -449,7 +524,17 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -449,7 +597,17 @@ func (h *Handler) handleAgentEventsForSSE(
  								break titleWaitLoop
  							}
  							if len(events) > 0 {
@@ -44201,7 +45214,7 @@ index 734d6183..014a3c2b 100644
  									emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
  									// If we got the title, we can exit
  									if evt.Type == types.ResponseTypeSessionTitle {
-@@ -473,3 +558,222 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -473,3 +631,278 @@ func (h *Handler) handleAgentEventsForSSE(
  		}
  	}
  }
@@ -44213,7 +45226,7 @@ index 734d6183..014a3c2b 100644
 +func liveBatchNeedsPublicationCheck(events []interfaces.StreamEvent) bool {
 +	for _, evt := range events {
 +		switch evt.Type {
-+		case types.ResponseTypeAgentQuery, types.ResponseTypeToolCall, types.ResponseType(event.EventStop):
++		case types.ResponseTypeAgentQuery, types.ResponseType(event.EventStop):
 +			continue
 +		default:
 +			return true
@@ -44222,13 +45235,46 @@ index 734d6183..014a3c2b 100644
 +	return false
 +}
 +
++// Preparatory tool arguments can contain source-derived text. When a broad
++// Nextcloud turn has not identified documents yet, omit only tool-call frames
++// while retrieval continues. Content/result frames still fail closed. Once any
++// reference is known, every later tool argument is checked against those refs.
++func protectLiveStreamBatch(ctx context.Context, service interfaces.MessageService, message *types.Message, events []interfaces.StreamEvent) ([]interfaces.StreamEvent, error) {
++	if !liveBatchNeedsPublicationCheck(events) {
++		return events, nil
++	}
++	err := checkLiveStreamPublication(ctx, service, message, events)
++	if err == nil {
++		return events, nil
++	}
++	if !stderrors.Is(err, access.ErrNextcloudPublicationDenied) || message == nil || len(message.KnowledgeReferences) > 0 {
++		return nil, err
++	}
++	var filtered []interfaces.StreamEvent
++	hasToolCall := false
++	for _, evt := range events {
++		switch evt.Type {
++		case types.ResponseTypeToolCall:
++			hasToolCall = true
++		case types.ResponseTypeAgentQuery, types.ResponseType(event.EventStop):
++			filtered = append(filtered, evt)
++		default:
++			return nil, err
++		}
++	}
++	if !hasToolCall {
++		return nil, err
++	}
++	return filtered, nil
++}
++
 +func checkLiveStreamPublication(
 +	ctx context.Context, service interfaces.MessageService,
 +	message *types.Message, events []interfaces.StreamEvent,
 +) error {
 +	verifier, ok := service.(livePublicationVerifier)
 +	if !ok {
-+		return nil
++		return access.ErrNextcloudPublicationUnavailable
 +	}
 +	if message == nil {
 +		return access.ErrNextcloudPublicationUnavailable
@@ -44323,6 +45369,29 @@ index 734d6183..014a3c2b 100644
 +				"page", "page_size", "keyword", "next_page"} {
 +				allowed[key] = true
 +			}
++		case "query_knowledge_graph":
++			if evt.Content != "No relevant graph information found." || !emptyKnowledgeResultList(data["results"]) {
++				return false
++			}
++			if _, ok := data["query"].(string); !ok {
++				return false
++			}
++			if _, ok := data["knowledge_base_ids"]; !ok {
++				return false
++			}
++			if _, ok := data["graph_configs"]; !ok {
++				return false
++			}
++			if _, ok := data["graph_config"]; !ok {
++				return false
++			}
++			if _, ok := data["errors"]; !ok {
++				return false
++			}
++			for _, key := range []string{"knowledge_base_ids", "query", "results", "graph_configs", "graph_config", "errors"} {
++				allowed[key] = true
++			}
++
 +		default:
 +			return false
 +		}
@@ -44373,7 +45442,7 @@ index 734d6183..014a3c2b 100644
 +func isKnowledgeSourceTool(data map[string]interface{}) bool {
 +	name, _ := data["tool_name"].(string)
 +	switch name {
-+	case "search_knowledge", "read_document", "list_documents":
++	case "search_knowledge", "read_document", "list_documents", "query_knowledge_graph":
 +		return true
 +	default:
 +		return false
@@ -44426,10 +45495,10 @@ index 734d6183..014a3c2b 100644
 +}
 diff --git a/internal/handler/session/stream_nextcloud_history_test.go b/internal/handler/session/stream_nextcloud_history_test.go
 new file mode 100644
-index 00000000..2f541e8f
+index 00000000..f5753a3f
 --- /dev/null
 +++ b/internal/handler/session/stream_nextcloud_history_test.go
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,71 @@
 +package session
 +
 +import (
@@ -44496,6 +45565,10 @@ index 00000000..2f541e8f
 +	if body := w.Body.String(); strings.Contains(body, "secret answer") || strings.Contains(body, "nextcloud-document") {
 +		t.Fatalf("replay leaked source content: %s", body)
 +	}
++}
++
++func (s *replayHistoryMessageService) CheckLiveMessagePublication(ctx context.Context, message *types.Message) error {
++	return s.CheckMessagePublication(ctx, message)
 +}
 diff --git a/internal/handler/session/stream_nextcloud_live_test.go b/internal/handler/session/stream_nextcloud_live_test.go
 new file mode 100644
@@ -44808,6 +45881,219 @@ index 00000000..1a97c59b
 +			}
 +		})
 +	}
++}
+diff --git a/internal/handler/session/stream_saved_agent_test.go b/internal/handler/session/stream_saved_agent_test.go
+new file mode 100644
+index 00000000..5bd6fa57
+--- /dev/null
++++ b/internal/handler/session/stream_saved_agent_test.go
+@@ -0,0 +1,207 @@
++package session
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/middleware"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++type guardedReplayMessages struct {
++	interfaces.MessageService
++	completed                  bool
++	historicalCalls, liveCalls int
++}
++
++func (s *guardedReplayMessages) GetMessage(context.Context, string, string) (*types.Message, error) {
++	return nil, access.ErrNextcloudPublicationDenied
++}
++func (s *guardedReplayMessages) GetMessageForStream(_ context.Context, session, id string) (*types.Message, error) {
++	return &types.Message{ID: id, SessionID: session, RequestID: "turn", Role: "assistant", AgentID: "agent", IsCompleted: s.completed, ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"nc-kb"}}}, nil
++}
++func (s *guardedReplayMessages) GetMessageForControl(_ context.Context, session, id string) (*types.Message, error) {
++	return &types.Message{ID: id, SessionID: session, Role: "assistant"}, nil
++}
++func (s *guardedReplayMessages) CheckMessagePublication(context.Context, *types.Message) error {
++	s.historicalCalls++
++	return access.ErrNextcloudPublicationDenied
++}
++func (s *guardedReplayMessages) CheckLiveMessagePublication(_ context.Context, m *types.Message) error {
++	s.liveCalls++
++	if len(m.KnowledgeReferences) == 0 {
++		return access.ErrNextcloudPublicationDenied
++	}
++	for _, ref := range m.KnowledgeReferences {
++		if ref.KnowledgeID == "revoked" {
++			return access.ErrNextcloudPublicationDenied
++		}
++	}
++	return nil
++}
++
++type guardedReplayStream struct {
++	stubStreamManager
++	stopCalls   int
++	preparatory bool
++}
++
++func (s *guardedReplayStream) GetEvents(ctx context.Context, session, id string, offset int) ([]interfaces.StreamEvent, int, error) {
++	if s.preparatory && offset == 0 {
++		return []interfaces.StreamEvent{{Type: types.ResponseTypeToolCall, Content: "secret argument", Data: map[string]interface{}{"tool_name": "search_knowledge", "arguments": "secret argument"}}}, 1, nil
++	}
++	if s.preparatory && offset == 1 {
++		return []interfaces.StreamEvent{
++			{Type: types.ResponseTypeToolResult, Content: "authorized result", Data: map[string]interface{}{"tool_name": "search_knowledge", "results": []map[string]interface{}{{"knowledge_id": "current"}}}},
++			{Type: types.ResponseTypeAnswer, Content: "authorized answer"}, {Type: types.ResponseTypeComplete, Done: true}}, 4, nil
++	}
++	return s.stubStreamManager.GetEvents(ctx, session, id, offset)
++}
++func (s *guardedReplayStream) AppendEvent(context.Context, string, string, interfaces.StreamEvent) error {
++	s.stopCalls++
++	return nil
++}
++func (s *guardedReplayStream) GetLiveRun(context.Context, string) (string, string, error) {
++	return "a", "turn", nil
++}
++
++type guardedOwnedSessions struct{ stubSessionService }
++
++func (s *guardedOwnedSessions) GetOwnedSession(_ context.Context, id string) (*types.Session, error) {
++	return &types.Session{ID: id, TenantID: 1, UserID: "person"}, nil
++}
++func TestContinueStreamUnfinishedUsesLiveSourceToolResults(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	for _, scenario := range []string{"before-references", "after-tool-results", "completed"} {
++		t.Run(scenario, func(t *testing.T) {
++			messages := &guardedReplayMessages{completed: scenario == "completed"}
++			stream := &guardedReplayStream{preparatory: scenario == "before-references", stubStreamManager: stubStreamManager{events: []interfaces.StreamEvent{
++				{Type: types.ResponseTypeToolResult, Content: "source output", Data: map[string]interface{}{"tool_name": "query_knowledge_graph", "results": []map[string]interface{}{{"knowledge_id": "current"}}}},
++				{Type: types.ResponseTypeAnswer, Content: "authorized answer"}, {Type: types.ResponseTypeComplete, Done: true}}}}
++			h := &Handler{sessionService: &guardedOwnedSessions{}, messageService: messages, streamManager: stream}
++			r := gin.New()
++			r.Use(middleware.ErrorHandler())
++			r.GET("/sessions/continue-stream/:session_id", h.ContinueStream)
++			w := httptest.NewRecorder()
++			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/sessions/continue-stream/session?message_id=a", nil))
++			if scenario == "completed" {
++				require.Equal(t, http.StatusForbidden, w.Code)
++				require.Equal(t, 1, messages.historicalCalls)
++				require.Zero(t, messages.liveCalls)
++			} else {
++				require.Equal(t, http.StatusOK, w.Code)
++				require.Zero(t, messages.historicalCalls)
++				require.Contains(t, w.Body.String(), "authorized answer")
++				require.NotContains(t, w.Body.String(), "secret argument")
++			}
++		})
++	}
++}
++func TestLiveSSEGraphResultChecksNewDocumentAfterEarlierReference(t *testing.T) {
++	messages := &guardedReplayMessages{}
++	m := &types.Message{Role: "assistant", KnowledgeReferences: types.References{{KnowledgeID: "current"}}}
++	err := checkLiveStreamPublication(context.Background(), messages, m, []interfaces.StreamEvent{{Type: types.ResponseTypeToolResult, Content: "revoked graph content", Data: map[string]interface{}{"tool_name": "query_knowledge_graph", "results": []map[string]interface{}{{"knowledge_id": "revoked"}}}}})
++	require.ErrorIs(t, err, access.ErrNextcloudPublicationDenied)
++	require.Len(t, m.KnowledgeReferences, 1)
++}
++func TestLiveSSEMissingVerifierFailsClosed(t *testing.T) {
++	require.ErrorIs(t, checkLiveStreamPublication(context.Background(), &stubNoVerifierMessages{}, &types.Message{Role: "assistant"}, nil), access.ErrNextcloudPublicationUnavailable)
++	require.ErrorIs(t, checkReplayPublication(context.Background(), &stubNoVerifierMessages{}, &types.Message{Role: "assistant", IsCompleted: true}, nil), access.ErrNextcloudPublicationUnavailable)
++}
++
++type stubNoVerifierMessages struct{ interfaces.MessageService }
++
++func TestStopSessionAndSteerCanControlRevokedSavedContent(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	messages := &guardedReplayMessages{}
++	stream := &guardedReplayStream{}
++	h := &Handler{sessionService: &guardedOwnedSessions{}, messageService: messages, streamManager: stream}
++	r := gin.New()
++	r.Use(func(c *gin.Context) { c.Set(types.TenantIDContextKey.String(), uint64(1)); c.Next() })
++	r.POST("/sessions/:session_id/stop", h.StopSession)
++	w := httptest.NewRecorder()
++	req := httptest.NewRequest(http.MethodPost, "/sessions/session/stop", strings.NewReader(`{"message_id":"a"}`))
++	req.Header.Set("Content-Type", "application/json")
++	r.ServeHTTP(w, req)
++	require.Equal(t, http.StatusOK, w.Code)
++	require.Equal(t, 1, stream.stopCalls)
++	require.Zero(t, messages.historicalCalls)
++	id, err := h.liveAgentRun(context.Background(), "session")
++	require.NoError(t, err)
++	require.Equal(t, "a", id)
++}
++func TestLiveSSEPreparatoryToolCallDoesNotBypassUnavailableVerifier(t *testing.T) {
++	messages := &liveHistoryMessageService{denyAt: 1}
++	events := []interfaces.StreamEvent{{Type: types.ResponseTypeToolCall, Content: "hidden arguments"}}
++	filtered, err := protectLiveStreamBatch(context.Background(), messages, &types.Message{Role: "assistant"}, events)
++	require.NoError(t, err)
++	require.Empty(t, filtered)
++	_, err = protectLiveStreamBatch(context.Background(), &stubNoVerifierMessages{}, &types.Message{Role: "assistant"}, events)
++	require.True(t, errors.Is(err, access.ErrNextcloudPublicationUnavailable))
++}
++
++type revokeDuringReplayMessages struct {
++	stubMessageServiceForStream
++	checks int
++}
++
++func (s *revokeDuringReplayMessages) GetMessageForStream(_ context.Context, session, id string) (*types.Message, error) {
++	return &types.Message{ID: id, SessionID: session, Role: "assistant", IsCompleted: true}, nil
++}
++func (s *revokeDuringReplayMessages) CheckMessagePublication(context.Context, *types.Message) error {
++	s.checks++
++	if s.checks >= 2 {
++		return access.ErrNextcloudPublicationDenied
++	}
++	return nil
++}
++func TestContinueStreamRechecksBetweenFramesOfOneBatch(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	messages := &revokeDuringReplayMessages{}
++	stream := &stubStreamManager{events: []interfaces.StreamEvent{
++		{Type: types.ResponseTypeAnswer, Content: "first authorized frame"},
++		{Type: types.ResponseTypeToolResult, Content: "later revoked output", Data: map[string]interface{}{"tool_name": "read_document", "knowledge_id": "current"}},
++		{Type: types.ResponseTypeComplete, Done: true}}}
++	h := &Handler{sessionService: &stubSessionService{}, messageService: messages, streamManager: stream}
++	r := gin.New()
++	r.GET("/sessions/continue-stream/:session_id", h.ContinueStream)
++	w := httptest.NewRecorder()
++	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/sessions/continue-stream/session?message_id=a", nil))
++	require.Contains(t, w.Body.String(), "first authorized frame")
++	require.NotContains(t, w.Body.String(), "later revoked output")
++	require.Equal(t, 2, messages.checks)
++}
++
++type classifySavedReplay struct{ interfaces.MessageService }
++
++func (classifySavedReplay) CheckMessagePublication(_ context.Context, message *types.Message) error {
++	if access.IsAgentDerivedHistory(message) {
++		return access.ErrNextcloudPublicationDenied
++	}
++	return nil
++}
++func TestContinueStreamPreservesSyntheticKnowledgeQATimeline(t *testing.T) {
++	message := &types.Message{Role: "assistant", IsCompleted: true, AgentSteps: types.AgentSteps{{ToolCalls: []types.ToolCall{{ID: types.PipelineToolCallIDPrefix + "search-1", Name: "hybrid_search"}}}}}
++	events := []interfaces.StreamEvent{{Type: types.ResponseTypeToolResult, Data: map[string]interface{}{"tool_call_id": "search-1", "tool_name": "hybrid_search"}, Content: "ordinary pipeline content"}}
++	require.NoError(t, checkReplayPublication(context.Background(), classifySavedReplay{}, message, events))
++}
++
++func TestLiveSSEEmptyGraphResultStillRechecksEarlierSource(t *testing.T) {
++	evt := interfaces.StreamEvent{Type: types.ResponseTypeToolResult, Content: "No relevant graph information found.", Data: map[string]interface{}{
++		"tool_name": "query_knowledge_graph", "success": true, "results": []interface{}{}, "query": "user query", "knowledge_base_ids": []string{"ordinary"}, "graph_configs": map[string]interface{}{}, "graph_config": map[string]interface{}{}, "errors": []string{}}}
++	require.True(t, contentlessKnowledgeToolResult(evt))
++	messages := &liveHistoryMessageService{}
++	require.NoError(t, checkLiveStreamPublication(context.Background(), messages, &types.Message{Role: "assistant"}, []interfaces.StreamEvent{evt}))
++	require.Equal(t, 1, messages.checks)
++	require.ErrorIs(t, checkLiveStreamPublication(context.Background(), &guardedReplayMessages{}, &types.Message{Role: "assistant", KnowledgeReferences: types.References{{KnowledgeID: "revoked"}}}, []interfaces.StreamEvent{evt}), access.ErrNextcloudPublicationDenied)
++	evt.Content = "opaque graph secret"
++	require.False(t, contentlessKnowledgeToolResult(evt))
++	require.ErrorIs(t, checkLiveStreamPublication(context.Background(), messages, &types.Message{Role: "assistant"}, []interfaces.StreamEvent{evt}), access.ErrNextcloudPublicationDenied)
 +}
 diff --git a/internal/handler/wiki_page.go b/internal/handler/wiki_page.go
 index fb44a997..e59164cc 100644
@@ -47155,6 +48441,21 @@ index fe0e240f..be563336 100644
  	mux.HandleFunc(types.TypeKnowledgeBaseProfile, params.KnowledgeBaseProfile.Handle)
  
  	// Register data source sync handler
+diff --git a/internal/types/agent.go b/internal/types/agent.go
+index e4e3b035..b01e789a 100644
+--- a/internal/types/agent.go
++++ b/internal/types/agent.go
+@@ -102,6 +102,10 @@ const UnlimitedMaxIterations = -1
+ // AgentConfig represents the full agent configuration (used at tenant level and runtime)
+ // This includes all configuration parameters for agent execution
+ type AgentConfig struct {
++	// ExcludeHistoricalContext is set only by server-side history admission.
++	// It prevents a denied history from re-entering via persistent workspace,
++	// skills, memory, conversation search, browser state or MCP capabilities.
++	ExcludeHistoricalContext bool `json:"-"`
+ 	// MaxIterations caps ReAct rounds. Zero is unset (filled with a default);
+ 	// a negative value is unlimited — the loop runs until the model stops,
+ 	// the user cancels, or another guard fires. See UnlimitedMaxIterations.
 diff --git a/internal/types/context_helpers.go b/internal/types/context_helpers.go
 index 01b6709f..29c6eaa5 100644
 --- a/internal/types/context_helpers.go

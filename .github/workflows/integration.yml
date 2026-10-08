@@ -170,7 +170,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo 'd4f15c7c82f45747a4ad3e3e786003bb94a0380429f270b4898e6bd70f8e1db5  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '49c18b24f8639fba6e0a5bb181af2174e9298b5ddecd9bc41f0764cc6ec14a21  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -186,7 +186,7 @@ jobs:
       - name: Compile and test Nextcloud integration paths
         working-directory: weknora
         run: |
-          go test -p 2 -run 'AgentHistoryAdmission|LoadAgentHistory|Nextcloud|KnowledgeBaseProfile|GlobalKnowledgeSearch|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
+          go test -p 2 -run 'SavedAgent|HistoryFiltering|StopSessionAndSteer|AgentHistoryAdmission|LoadAgentHistory|Nextcloud|KnowledgeBaseProfile|GlobalKnowledgeSearch|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
@@ -239,7 +239,7 @@ jobs:
           WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
           WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
         run: |
-          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(GlobalAndScopedHistoryAdmission|EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
       - name: Verify full PostgreSQL migrations and concurrent index roundtrip
@@ -281,7 +281,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo '827ab202d675914594c512e056e0952d6311fe36913216f181284b9e4604bcc9  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo 'b274b2074c1b5532d52e7f084e6c87306290adf29950478e102e6435c73ac797  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -297,7 +297,7 @@ jobs:
       - name: Test patched RAG authorization paths
         working-directory: weknora-rag
         run: |
-          go test -p 2 -run 'Test(AgentHistoryAdmission|LoadAgentHistory|Nextcloud|SQLiteNextcloudSourceRegistrationFencesGeneratedProfileWrite|KnowledgeBaseProfile|ManualNextcloud|GlobalKnowledgeSearch|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
+          go test -p 2 -run 'Test(SavedAgent|HistoryFiltering|StopSessionAndSteer|AgentHistoryAdmission|LoadAgentHistory|Nextcloud|SQLiteNextcloudSourceRegistrationFencesGeneratedProfileWrite|KnowledgeBaseProfile|ManualNextcloud|GlobalKnowledgeSearch|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
             ./internal/application/access \
             ./internal/application/readlease \
             ./internal/application/repository \
@@ -310,7 +310,7 @@ jobs:
             ./internal/router \
             ./internal/container \
             ./internal/mcpserver
-          go test -p 2 ./internal/handler/session -run '^Test(LiveSSE|ContinueStream)' -count=1
+          go test -p 2 ./internal/handler/session -run '^Test(LiveSSE|ContinueStream|StopSessionAndSteer)' -count=1
           go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
           go test -p 2 ./internal/agent/tools -run '^TestQueryKnowledgeGraph' -count=1
 
@@ -321,7 +321,7 @@ jobs:
           WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
           WEKNORA_INDEXED_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
         run: |
-          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories|ProfileWriteWaitsForSourceMarker)' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(GlobalAndScopedHistoryAdmission|EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories|ProfileWriteWaitsForSourceMarker)' -count=1
           go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
 
       - name: Verify full PostgreSQL migrations and concurrent index roundtrip

@@ -1,5 +1,7 @@
 # WeKnora RAG baseline adaptation
 
+当前补丁包含 Agent 历史准入的临时保护、保存消息/SSE 检查和所有者控制查询。限制与验证范围见 [Agent 历史来源准入](nextcloud-agent-history-admission-2026-10-08.md)；曾接入 Nextcloud 的实例会排除 Agent 旧历史，用空历史继续本次新提问，完整传递来源尚未实现。
+
 `integration/weknora.patch` remains the reproducible patch for WeKnora commit
 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` used by the fixed-baseline
 Docker integration build. `integration/weknora-rag-77c97fd7.patch` is a complete,
@@ -7,7 +9,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`d4f15c7c82f45747a4ad3e3e786003bb94a0380429f270b4898e6bd70f8e1db5`.
+`49c18b24f8639fba6e0a5bb181af2174e9298b5ddecd9bc41f0764cc6ec14a21`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +19,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`827ab202d675914594c512e056e0952d6311fe36913216f181284b9e4604bcc9`.
+`b274b2074c1b5532d52e7f084e6c87306290adf29950478e102e6435c73ac797`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict
