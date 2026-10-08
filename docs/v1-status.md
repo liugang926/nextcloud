@@ -1632,3 +1632,24 @@ was run. Maintenance is off, no DB upgrade is pending, and CA-verified DAV207
 passed. The cold checkpoint now fingerprints/archives the actual source bind,
 with all app processes required to agree. See [source isolation and evidence](
 nextcloud-runtime-app-source.md). New candidate deployment remains pending.
+
+## 2026-10-09 local capacity write-intent candidate
+
+The isolated capacity148/SQLite67 module is included in both candidate patches.
+Actual local partial files, registration/staging failures, two concurrent writers
+and subprocess crashes are recovered through durable write/inode receipts and
+the owner CLI. Unknown/legacy objects remain unavailable; orphan bytes stay
+charged to the target KB. The root combination passed398 cases per profile and
+full Go compilation, with four failure nodes caused by an old HTTP fixture not
+loading schema67. Loading that migration resolved all eight tests in the affected
+HTTP class on each profile; production code did not change for that repair.
+
+The sourcepin commit0cb7738 PR CI passed all six jobs, but its push RAG candidate
+failed the10,000-entry HTTP fixture with context cancellation around a heartbeat.
+The fixture now uses production WAL/busy settings, and actual concurrent capture
+and lease renewal plus the10,000-entry response passed on both profiles. The
+original failure is retained; rollback-journal contention is an inference from
+the observed timing, not yet an isolated reproduction of that exact CI failure.
+The new matrix adds actual PG/SQLite capacity intents and owner CLI checks.
+Actual objectGC fencing, full parent/read coverage and complete backend capacity
+remain pending; the shared app is the fixed0.4.37 runtime snapshot.

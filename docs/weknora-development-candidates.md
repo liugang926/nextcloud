@@ -49,8 +49,14 @@ The capacity prototype measures the actual local filesystem, serializes
 admission across knowledge bases sharing a disk, retains pending reservations,
 and exposes admin policy/status controls. The default watermarks are 80% warning
 and 90% paused AI ingestion. It counts registered retained original objects;
-failed-write reconciliation, derived/index accounting, bucket capacity adapters
-and overdue-GC prioritization remain incomplete.
+local source-file write intents now retain exact inode/object identity across
+partial writes, failures, concurrent attempts and process crashes. An owner-only
+CLI reconciles actual storage/catalog state; orphan bytes remain charged to the
+KB, and legacy/unknown objects cannot be adopted as a new intent. SQLite and PG
+crash/retry contracts passed. Derived/index accounting, bucket adapters and
+overdue-GC prioritization remain incomplete. The older isolated capacity probe
+still formats its source and overwrites its evidence; root verification uses a
+separate read-only source runner and the probe needs that safer output contract.
 
 ## Measured scope and remaining gates
 

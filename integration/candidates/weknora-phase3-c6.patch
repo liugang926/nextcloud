@@ -13,6 +13,251 @@ index e18b1ae924bb5fb618f5e04c2feabf5fa6394960..8df286cd2182222f90b2fbbeb456c436
  
  # #####################################################################
  # I. 可观测性（Langfuse，可选）
+diff --git a/cmd/capacity-reconcile/main.go b/cmd/capacity-reconcile/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6e1db7018b7a7c432f5e76d3ad7cfdc5277894c
+--- /dev/null
++++ b/cmd/capacity-reconcile/main.go
+@@ -0,0 +1,239 @@
++// capacity-reconcile is an owner-only maintenance command. It deletes no file.
++package main
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"flag"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/application/service"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"gorm.io/driver/postgres"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	"gorm.io/gorm/logger"
++	"io"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"time"
++)
++
++func privatePath(path string) error {
++	if !filepath.IsAbs(path) {
++		return errors.New("absolute private path required")
++	}
++	clean, e := filepath.EvalSymlinks(path)
++	if e != nil || clean != filepath.Clean(path) {
++		return errors.New("symlink path refused")
++	}
++	for _, p := range []string{filepath.Dir(path), path} {
++		info, e := os.Lstat(p)
++		if e != nil {
++			return e
++		}
++		stat, ok := info.Sys().(*syscall.Stat_t)
++		expected := os.FileMode(0600)
++		if p == filepath.Dir(path) {
++			expected = 0700
++		}
++		if !ok || int(stat.Uid) != os.Geteuid() || info.Mode().Perm() != expected || (p == path && (!info.Mode().IsRegular() || stat.Nlink != 1)) {
++			return errors.New("private DB owner file required")
++		}
++	}
++	return nil
++}
++
++func privateFile(path string) ([]byte, error) {
++	if e := privatePath(path); e != nil {
++		return nil, e
++	}
++	fd, e := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
++	if e != nil {
++		return nil, e
++	}
++	f := os.NewFile(uintptr(fd), path)
++	defer f.Close()
++	return ioReadBounded(f)
++}
++func ioReadBounded(f *os.File) ([]byte, error) {
++	info, e := f.Stat()
++	if e != nil {
++		return nil, e
++	}
++	stat, ok := info.Sys().(*syscall.Stat_t)
++	if !ok || int(stat.Uid) != os.Geteuid() || info.Mode().Perm() != 0600 || !info.Mode().IsRegular() || stat.Nlink != 1 || info.Size() > 16<<20 {
++		return nil, errors.New("unsafe private input")
++	}
++	data, e := io.ReadAll(io.LimitReader(f, 16<<20+1))
++	if e != nil || len(data) > 16<<20 {
++		return nil, errors.New("oversize private input")
++	}
++	return data, nil
++}
++func reservePrivate(path string) (*os.File, error) {
++	if !filepath.IsAbs(path) {
++		return nil, errors.New("absolute private output required")
++	}
++	dir := filepath.Dir(path)
++	resolved, e := filepath.EvalSymlinks(dir)
++	if e != nil || resolved != dir {
++		return nil, errors.New("output directory symlink refused")
++	}
++	info, e := os.Stat(dir)
++	if e != nil {
++		return nil, e
++	}
++	stat, ok := info.Sys().(*syscall.Stat_t)
++	if !ok || int(stat.Uid) != os.Geteuid() || info.Mode().Perm() != 0700 {
++		return nil, errors.New("private owned output directory required")
++	}
++	fd, e := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW, 0600)
++	if e != nil {
++		return nil, e
++	}
++	return os.NewFile(uintptr(fd), path), nil
++}
++func writePrivate(path string, data []byte) error {
++	f, e := reservePrivate(path)
++	if e != nil {
++		return e
++	}
++	defer f.Close()
++	if _, e = f.Write(data); e != nil {
++		return e
++	}
++	return f.Sync()
++}
++func run() error {
++	mode := flag.String("mode", "", "inspect or reconcile")
++	sqlitePath := flag.String("sqlite-db", "", "private owned SQLite DB")
++	connection := flag.String("postgres-connection-file", "", "private owner-role DSN")
++	token := flag.String("reservation-token", "", "exact persisted reservation token")
++	root := flag.String("local-storage-base-dir", "", "original configured local storage base")
++	output := flag.String("output", "", "new private output")
++	flag.Parse()
++	if *token == "" || *output == "" || (*mode != "inspect" && *mode != "reconcile") || (*sqlitePath == "") == (*connection == "") {
++		return errors.New("maintenance scope required")
++	}
++	out, e := reservePrivate(*output)
++	if e != nil {
++		return e
++	}
++	complete := false
++	defer func() {
++		out.Close()
++		if !complete {
++			_ = os.Remove(*output)
++		}
++	}()
++	var dialect gorm.Dialector
++	if *sqlitePath != "" {
++		if e = privatePath(*sqlitePath); e != nil {
++			return e
++		}
++		u := url.URL{Scheme: "file", Path: *sqlitePath}
++		dialect = sqlite.Open(u.String() + "?_busy_timeout=5000&_foreign_keys=on")
++	} else {
++		b, e := privateFile(*connection)
++		if e != nil {
++			return e
++		}
++		dialect = postgres.Open(strings.TrimSpace(string(b)))
++	}
++	db, e := gorm.Open(dialect, &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++	if e != nil {
++		return errors.New("maintenance DB unavailable")
++	}
++	sql, e := db.DB()
++	if e != nil {
++		return e
++	}
++	defer sql.Close()
++	sql.SetMaxOpenConns(2)
++	if *connection != "" {
++		var owner bool
++		if e = db.Raw("SELECT current_user=pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()").Scan(&owner).Error; e != nil || !owner {
++			return errors.New("database owner role required")
++		}
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
++	defer cancel()
++	var r repository.NextcloudCapacityReservation
++	if e = db.WithContext(ctx).Where("token=?", *token).Take(&r).Error; e != nil {
++		return e
++	}
++	store := repository.NewNextcloudCapacityStore(db)
++	if *mode == "reconcile" {
++		var kb types.KnowledgeBase
++		if e = db.WithContext(ctx).Where("id=? AND tenant_id=?", r.KnowledgeBaseID, r.TenantID).Take(&kb).Error; e != nil {
++			return e
++		}
++		var tenant types.Tenant
++		if e = db.WithContext(ctx).Where("id=?", r.TenantID).Take(&tenant).Error; e != nil {
++			return e
++		}
++		backends := repository.NewStorageBackendRepository(db)
++		backend, e := backends.GetByID(ctx, r.TenantID, r.BackendID)
++		if e != nil || backend == nil || backend.Provider != "local" || backend.Status != types.StorageBackendStatusActive {
++			return repository.ErrNextcloudCapacityUnavailable
++		}
++		resolver := service.NewStorageBackendService(backends, db, service.NewResourceCatalog(repository.NewResourceRepository(db)))
++		admission := service.NewNextcloudCapacityAdmission(store, func(ctx context.Context, kb *types.KnowledgeBase) (interfaces.FileService, error) {
++			fs, provider, e := resolver.ResolveFileService(ctx, &tenant, r.BackendID, "local", *root)
++			if e != nil || provider != "local" {
++				return nil, repository.ErrNextcloudCapacityUnavailable
++			}
++			return fs, nil
++		})
++		if e = admission.Reconcile(ctx, &kb, &r); e != nil {
++			return e
++		}
++	}
++	if e = db.WithContext(ctx).Where("token=?", r.Token).Take(&r).Error; e != nil {
++		return e
++	}
++	intent, e := store.Intent(ctx, &r)
++	if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
++		return e
++	}
++	if errors.Is(e, gorm.ErrRecordNotFound) && r.ProtocolVersion != 1 {
++		return e
++	}
++	var intentValue *repository.NextcloudCapacityWriteIntent
++	if e == nil {
++		intentValue = &intent
++	}
++	value := struct {
++		Reservation       repository.NextcloudCapacityReservation  `json:"reservation"`
++		Intent            *repository.NextcloudCapacityWriteIntent `json:"intent"`
++		DeletionPerformed bool                                     `json:"deletion_performed"`
++	}{r, intentValue, false}
++	b, e := json.Marshal(value)
++	if e != nil {
++		return e
++	}
++	if _, e = out.Write(b); e != nil {
++		return e
++	}
++	if e = out.Sync(); e != nil {
++		return e
++	}
++	complete = true
++	digest := sha256.Sum256(b)
++	fmt.Println("evidence_sha256=" + hex.EncodeToString(digest[:]))
++	return nil
++}
++func main() {
++	if e := run(); e != nil {
++		fmt.Fprintln(os.Stderr, "Capacity reconciliation unavailable; retained charges and objects require owner review")
++		os.Exit(1)
++	}
++}
 diff --git a/cmd/download/duckdb/duckdb.go b/cmd/download/duckdb/duckdb.go
 index 083275214a9968e56a95569ab0895df84f77c030..8a2d11e028021572b0c3ba279dc56bbaaaabfadf 100644
 --- a/cmd/download/duckdb/duckdb.go
@@ -466,6 +711,85 @@ index 0000000000000000000000000000000000000000..3153cdd1038a3dac28043ec9085b1384
 +signed publication checker. The parser/index payloads were fixture rows, so the
 +test establishes this CLI/repository boundary and does not accept full deployed
 +app/index recovery or reopen global ingress.
+diff --git a/docs/evidence/capacity-write-intents-20261009.json b/docs/evidence/capacity-write-intents-20261009.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..23e08b9cbea770e617dc8ba8b3e69c12342aac2c
+--- /dev/null
++++ b/docs/evidence/capacity-write-intents-20261009.json
+@@ -0,0 +1,73 @@
++{
++  "acceptance_boundary": "production Nextcloud ingestion entry + real local SaveFile/resource catalog and owner CLI; queue/parser/source-version adapters controlled; derived/index/bucket capacity and actual physical GC reader/build integration remain required",
++  "cleanup_verified": true,
++  "crash": "actual subprocess os.Exit(77) without End cleanup, SQLite and PostgreSQL",
++  "go_container_id": "2e4bc7cdbd05d390255b645e5861df41a2402548d80cb169a7e2c10f3a5df5a1",
++  "go_image": "weknora-go-test@sha256:5a74e8b5137496d3e22c72c01d862c4cbb1fe6ce476ddf5616fd9a807d6ae9ac",
++  "host_ports": false,
++  "internal_network": true,
++  "limits": {
++    "go": "1 CPU/2 GiB",
++    "postgres": "1 CPU/512 MiB/tmpfs"
++  },
++  "network_id": "1ce36a1fe6c0e3ddf45d1079f7e5a7b8fe51961b6954e8a981d2c25a3f1e1ccb",
++  "no_physical_deletion": true,
++  "owned_previous_attempts": [
++    {
++      "cleanup_verified": true,
++      "go_container_id": "a134d3ce6156b3826cb940a19854b4fd6549f0ca12f7c81afe826e8909d34756",
++      "pg_container_id": "690aea16cb08bb4f3c4723db79d181abda6716ec76bbc2e54e7b06aeed206e40",
++      "result": "fixture setup refused PostgreSQL JSON Valuer under test simple protocol; corrected test to production extended protocol"
++    },
++    {
++      "cleanup_verified": true,
++      "go_container_id": "37b8ecff789dff0e75b05bbc12f9d0627c4b857a90f51a2286fd3049e22fce38",
++      "pg_container_id": "70a0e5bb9d1748b2a451026fc44b477eb0f16708b88cd14991c2b6a4cc3de4eb",
++      "result": "PASS before final concurrent-writer addition"
++    }
++  ],
++  "parent": "a7680b69f2a65859eb256b25cdb0f9c28cd89208",
++  "passed_capacity_tests": [
++    "TestCapacityIntentActualSQLiteIngestion",
++    "TestPostgresCapacityIntentActualIngestion",
++    "TestCapacityIntentWriterFenceAndUnknown",
++    "TestCapacityIntentAbsentLinkedRootSharedAndScope",
++    "TestCapacityIntentCannotAdoptExistingLegacyObject",
++    "TestCapacityIntentConcurrentActualWritersSQLite",
++    "TestPostgresCapacityIntentConcurrentActualWriters",
++    "TestCapacityIntentActualSQLiteProcessCrash",
++    "TestPostgresCapacityIntentActualProcessCrash",
++    "TestNextcloudCapacityActualIngestAndPausedNoSideEffects",
++    "TestPostgresNextcloudCapacityConcurrentPhysicalAndQuota",
++    "TestNextcloudCapacityWatermarkQuotaAndCurrentVersionsPreserved",
++    "TestNextcloudCapacityExpiredReservationsRemainCharged",
++    "TestNextcloudCapacityConcurrentReservationsAndObjectReceipt"
++  ],
++  "pg_container_id": "7f2d3f5cd8b81c657ffa03bccac8035527f734442201b5a77cef6e5be9467f21",
++  "physical_source_files": "real local filesystem files, full uploads and partial files retained by original intent",
++  "postgres_image": "postgres@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416",
++  "reconciliation": "actual owner-only capacity-reconcile CLI after the crash",
++  "remaining_nonce_schemas": 0,
++  "revision_provenance": "The owned probe ran against the recorded parent plus this implementation delta; final gofmt made formatting-only changes.",
++  "shared_target_modified": false,
++  "status": "PASS",
++  "tests": {
++    "actual_owner_cli_after_subprocess_crash_sqlite_and_pg": true,
++    "before_io_failure_cancel_and_retry": true,
++    "cross_root_backend_kb_denied": true,
++    "exact_absence_no_owner_fenced_release": true,
++    "expired_current_writer_cannot_reconcile": true,
++    "fresh_upgrade_sqlite_schema67": true,
++    "late_writer_and_catalog_denied": true,
++    "legacy_existing_file_and_protocol_zero_not_adopted": true,
++    "partial_file_actual_bytes_orphan_kb_quota_and_status": true,
++    "postgres_actual_ingestion": true,
++    "register_fail_original_retained": true,
++    "same_token_two_actual_writers": true,
++    "shared_resource_owners_preserved": true,
++    "sqlite_actual_ingestion": true,
++    "stage_fail_original_retained_duplicate_retry_no_new_charge": true,
++    "symlink_and_knowledge_path_escape_denied": true
++  },
++  "tests_log_sha256": "d8b1b742cc648f6ab16ba226516177225af8dec351843ad078e4e31cc3e53504"
++}
 diff --git a/docs/evidence/publication-recovery-20261009.md b/docs/evidence/publication-recovery-20261009.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..579802e53fe1a4ad617c3bd4c34b246b4ba8c70f
@@ -622,6 +946,105 @@ index 0000000000000000000000000000000000000000..b7f336b9e6b1d2fdfffb9c11a732ee34
 +frontend type checking and package compilation. A full two-user AD-to-citation
 +LAN run must still be performed against the built patch and app before
 +claiming the PRD's end-to-end question/citation acceptance.
+diff --git a/docs/nextcloud-capacity-write-intents.md b/docs/nextcloud-capacity-write-intents.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..17f376473fb7ff953370cbe5ad3ac77b88acd323
+--- /dev/null
++++ b/docs/nextcloud-capacity-write-intents.md
+@@ -0,0 +1,93 @@
++# Durable capacity for local original files
++
++Migration PostgreSQL148 / SQLite67 adds a durable relationship between a new
++capacity reservation, its exact future knowledge ID, backend, filesystem/root
++identity, unique physical path and the resource catalog row. Old reservations
++retain protocol version zero; absence of an intent does not prove that their
++historical upload never started.
++
++The actual Nextcloud ingestion path installs a server write session before
++retry admission, file save, catalog registration and staging. New reservations
++are allowed only for providers that implement the local intent protocol. Unknown,
++remote bucket and unsupported platform providers remain unavailable without
++writing. The actual selected file provider is checked again before SaveFile.
++
++A local write takes an exclusive cross-process flock and persists `prepared`
++before creating the object. Every path component uses directory FDs with
++NOFOLLOW; the lock directory/file must be private, owned and unlinked. The file
++name contains the reservation UUID and creation is exclusive. Only a successful
++actual create records its device/inode identity and transitions to `writing`.
++Bytes cannot be written before that durable receipt. An existing legacy object
++at the planned name is never adopted. A crash between create and its receipt
++retains the unknown charge for owner review.
++
++Each write chunk and catalog boundary rechecks the actual reservation, writer,
++scope and lease. Successful local writes fsync the file and directory entries,
++record actual bytes/hash, and bind the actual catalog resource. The OS fence
++remains held through catalog registration, knowledge creation, source staging
++and Finish. It is released only when the ingestion invocation exits. Closed,
++expired or reconciled workers cannot resume writes/catalog operations.
++
++Every normal failure invokes conservative cleanup. A new-protocol reservation
++with no pre-IO intent can be cancelled under the reservation lock. A failure
++that entered the physical path retains the object. Catalog/knowledge failure
++cleanup skips physical deletion for this session. Reconciliation obtains the
++same exclusive provider fence, re-reads the DB state and KB/backend binding,
++observes the actual exact file/inode/hash, and locks/rechecks its actual catalog
++resources and owner bindings. A current writer remains a refusal even if its
++reservation lease expired.
++
++An actually absent file with no catalog owner may release its reservation.
++An existing retained original is charged to its real resource/KB. An actual
++partial or unregistered object becomes a committed orphan charge for its
++observed bytes, retained against the original KB. This orphan amount is included
++in logical retained bytes, retention quota and capacity status. A fresh provider
++measurement supersedes the temporary disk reservation buffer. Reconciliation
++does not delete a file or resource, remove an owner, create a GC claim, or
++authorize publication. Shared ownership, mismatched backend/KB/root, linked
++paths and changed bytes/inodes are handled conservatively.
++
++The persisted orphan row retains the exact object location and identity for a
++future coordinated GC inventory. That future deletion and charge retirement
++workflow is not implemented here. Until it exists, retained orphan bytes remain
++charged. Full local original files still count through the actual catalog.
++
++After a crashed process, use the local DB-owner maintenance command with the
++same configured storage base, tenant/backend registry and schema:
++
++```sh
++capacity-reconcile --mode=reconcile \
++  --postgres-connection-file=/absolute/private/database.dsn \
++  --reservation-token=<exact-original-token> \
++  --local-storage-base-dir=/absolute/original/local-storage-base \
++  --output=/absolute/private/new-reconciliation-receipt.json
++```
++
++`--sqlite-db` accepts an owned mode0600 DB in a mode0700 directory. DSN inputs
++and outputs use the same owner/private restrictions; outputs are reserved with
++O_EXCL before any DB mutation. `--mode=inspect` returns current persisted evidence
++for the exact token. Outputs include internal object paths and must stay private.
++No ordinary HTTP endpoint, actor grant or deletion option is introduced.
++
++Run the bounded owned verification fixture:
++
++```sh
++python3 scripts/ops/isolated-capacity-write-intents.py
++```
++
++It uses stock PG16 on a nonce internal network with no host ports, 1CPU/512MiB
++tmpfs, and a 1CPU/2GiB Go1.26 runner. Tests execute the production Nextcloud
++ingestion entry point, actual local SaveFile and resource catalog, and actual
++owner CLI on SQLite and PG after subprocess `os.Exit(77)` without normal cleanup.
++Queue/parser and source-version outcomes are controlled fixture adapters.
++Before-IO failure, real partial bytes, register/stage failure, duplicate retry,
++two competing actual writers, expired active writer, late writer/catalog,
++shared owners, linked paths, cross root/backend/KB and legacy unknown cases are
++covered. Fixture schemas, files and Docker resources are removed afterwards;
++existing Go caches and shared application resources are preserved.
++
++This covers local original source-file admission and failed/crashed write
++accounting. Derived assets, index/backend writes and bucket capacity require
++their own durable intents. The existing actual RunDue/physical GC path still
++needs complete reader/build coverage and content-fence integration; this module
++does not infer that protection from a separate dormant GC helper.
 diff --git a/docs/nextcloud-content-leases.md b/docs/nextcloud-content-leases.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..22b74a2d826767a097b6691d81abfb8b5819158b
@@ -22330,10 +22753,10 @@ index 0000000000000000000000000000000000000000..53783ba85afc0a5a759f43d9992678fb
 +}
 diff --git a/internal/application/repository/nextcloud_capacity.go b/internal/application/repository/nextcloud_capacity.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d80867587515d1c6f2
+index 0000000000000000000000000000000000000000..5a52a670b381af3b8aa5085900c7f968ae71e992
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_capacity.go
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,344 @@
 +package repository
 +
 +import (
@@ -22387,6 +22810,7 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +	LeaseUntilMS    int64
 +	CreatedAtMS     int64
 +	CommittedAtMS   int64
++	ProtocolVersion int
 +}
 +
 +func (NextcloudCapacityReservation) TableName() string { return "nextcloud_capacity_reservations" }
@@ -22425,6 +22849,12 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +// Reserve serializes disk-wide and KB quota admissions. A measurement failure
 +// closes new AI work, without deleting any active or retained object.
 +func (s *NextcloudCapacityStore) Reserve(ctx context.Context, tenant uint64, kb, backend, key string, bytes int64, m types.StorageCapacity) (*NextcloudCapacityReservation, error) {
++	return s.reserve(ctx, tenant, kb, backend, key, bytes, m, 0)
++}
++func (s *NextcloudCapacityStore) ReserveDurable(ctx context.Context, tenant uint64, kb, backend, key string, bytes int64, m types.StorageCapacity) (*NextcloudCapacityReservation, error) {
++	return s.reserve(ctx, tenant, kb, backend, key, bytes, m, 1)
++}
++func (s *NextcloudCapacityStore) reserve(ctx context.Context, tenant uint64, kb, backend, key string, bytes int64, m types.StorageCapacity, protocol int) (*NextcloudCapacityReservation, error) {
 +	if s == nil || s.db == nil || tenant == 0 || kb == "" || backend == "" || key == "" || len(key) > 512 || bytes <= 0 {
 +		return nil, ErrNextcloudCapacityUnavailable
 +	}
@@ -22467,7 +22897,7 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +		err = tx.Where("tenant_id=? AND knowledge_base_id=? AND request_key=?", tenant, kb, key).Take(&existing).Error
 +		duplicate := err == nil
 +		if duplicate {
-+			if existing.ScopeID != m.ScopeID || existing.BackendID != backend || existing.Bytes != bytes || existing.State != "pending" || existing.LeaseUntilMS <= nowMS {
++			if existing.ProtocolVersion != protocol || existing.ScopeID != m.ScopeID || existing.BackendID != backend || existing.Bytes != bytes || existing.State != "pending" || existing.LeaseUntilMS <= nowMS {
 +				return ErrNextcloudCapacityUnavailable
 +			}
 +		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -22507,6 +22937,14 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +		if err := tx.Raw(`SELECT COALESCE(SUM(r.size),0) FROM resources r WHERE r.tenant_id=? AND r.storage_backend_id=? AND r.state<>'deleted' AND EXISTS (SELECT 1 FROM resource_bindings b JOIN knowledges k ON k.id=b.owner_id AND k.tenant_id=r.tenant_id WHERE b.resource_id=r.id AND b.owner_type='knowledge' AND k.knowledge_base_id=?)`, tenant, backend, kb).Scan(&logical).Error; err != nil {
 +			return err
 +		}
++		var orphan int64
++		if err := tx.Raw("SELECT COALESCE(SUM(i.orphan_charge_bytes),0) FROM nextcloud_capacity_write_intents i JOIN nextcloud_capacity_reservations r ON r.token=i.token WHERE r.tenant_id=? AND r.knowledge_base_id=? AND i.state='charged'", tenant, kb).Scan(&orphan).Error; err != nil {
++			return err
++		}
++		logical, err = addBytes(logical, orphan)
++		if err != nil {
++			return err
++		}
 +		retained, err := addBytes(logical, kbPending)
 +		if err != nil {
 +			return err
@@ -22525,7 +22963,7 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +			result = &existing
 +			return nil
 +		}
-+		reservation := NextcloudCapacityReservation{Token: uuid.NewString(), ScopeID: m.ScopeID, TenantID: tenant, KnowledgeBaseID: kb, BackendID: backend, RequestKey: key, Bytes: bytes, State: "pending", LeaseUntilMS: now.Add(15 * time.Minute).UnixMilli(), CreatedAtMS: nowMS}
++		reservation := NextcloudCapacityReservation{Token: uuid.NewString(), ScopeID: m.ScopeID, TenantID: tenant, KnowledgeBaseID: kb, BackendID: backend, RequestKey: key, Bytes: bytes, State: "pending", LeaseUntilMS: now.Add(15 * time.Minute).UnixMilli(), CreatedAtMS: nowMS, ProtocolVersion: protocol}
 +		if err := tx.Create(&reservation).Error; err != nil {
 +			return err
 +		}
@@ -22536,6 +22974,9 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +}
 +
 +func (s *NextcloudCapacityStore) Finish(ctx context.Context, r *NextcloudCapacityReservation, knowledge string, success bool) error {
++	if r != nil && r.ProtocolVersion == 1 {
++		return s.FinishDurable(ctx, r, knowledge, success)
++	}
 +	if r == nil || r.Token == "" {
 +		return ErrNextcloudCapacityUnavailable
 +	}
@@ -22602,6 +23043,7 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +	PendingBytes         int64                   `json:"reserved_bytes"`
 +	State                string                  `json:"state"`
 +	LogicalRetainedBytes int64                   `json:"logical_retained_bytes"`
++	OrphanChargeBytes    int64                   `json:"orphan_charge_bytes"`
 +}
 +
 +func (s *NextcloudCapacityStore) Status(ctx context.Context, tenant uint64, kb, backend string, m types.StorageCapacity) (NextcloudCapacityStatus, error) {
@@ -22631,6 +23073,13 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +		if err := tx.Raw(`SELECT COALESCE(SUM(r.size),0) FROM resources r WHERE r.tenant_id=? AND r.storage_backend_id=? AND r.state<>'deleted' AND EXISTS (SELECT 1 FROM resource_bindings b JOIN knowledges k ON k.id=b.owner_id AND k.tenant_id=r.tenant_id WHERE b.resource_id=r.id AND b.owner_type='knowledge' AND k.knowledge_base_id=?)`, tenant, backend, kb).Scan(&result.LogicalRetainedBytes).Error; err != nil {
 +			return err
 +		}
++		if err := tx.Raw("SELECT COALESCE(SUM(i.orphan_charge_bytes),0) FROM nextcloud_capacity_write_intents i JOIN nextcloud_capacity_reservations r ON r.token=i.token WHERE r.tenant_id=? AND r.knowledge_base_id=? AND i.state='charged'", tenant, kb).Scan(&result.OrphanChargeBytes).Error; err != nil {
++			return err
++		}
++		result.LogicalRetainedBytes, err = addBytes(result.LogicalRetainedBytes, result.OrphanChargeBytes)
++		if err != nil {
++			return err
++		}
 +		projected, err := addBytes(m.TotalBytes-m.AvailableBytes, result.PendingBytes)
 +		if err != nil {
 +			return err
@@ -22641,16 +23090,378 @@ index 0000000000000000000000000000000000000000..bbd7ae4b832995e3a22ac4d808675875
 +		} else if projected >= threshold(m.TotalBytes, result.Policy.WarningPercent) {
 +			result.State = "warning"
 +		}
++		if quota := result.Policy.RetentionQuotaBytes; quota > 0 {
++			if result.LogicalRetainedBytes >= quota {
++				result.State = "paused"
++			} else if result.State == "normal" && result.LogicalRetainedBytes >= threshold(quota, result.Policy.WarningPercent) {
++				result.State = "warning"
++			}
++		}
 +		return nil
 +	})
 +	return result, err
 +}
+diff --git a/internal/application/repository/nextcloud_capacity_intents.go b/internal/application/repository/nextcloud_capacity_intents.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..eabaaede2fa4f9e99dcadb67906030cae2bbcd87
+--- /dev/null
++++ b/internal/application/repository/nextcloud_capacity_intents.go
+@@ -0,0 +1,349 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"strconv"
++	"strings"
++)
++
++type NextcloudCapacityWriteIntent struct {
++	Token                                                             string `gorm:"primaryKey"`
++	KnowledgeID, WriterID, PhysicalPath, RootIdentity, ScopeID, State string
++	ObservedBytes                                                     int64
++	SHA256                                                            string `gorm:"column:sha256"`
++	ObjectIdentity                                                    string
++	ResourceID                                                        string
++	OrphanChargeBytes, UpdatedAtMS                                    int64
++}
++
++func (NextcloudCapacityWriteIntent) TableName() string { return "nextcloud_capacity_write_intents" }
++func (s *NextcloudCapacityStore) lockDurable(tx *gorm.DB, r *NextcloudCapacityReservation) (NextcloudCapacityReservation, int64, error) {
++	var row NextcloudCapacityReservation
++	if r == nil {
++		return row, 0, ErrNextcloudCapacityUnavailable
++	}
++	// A writer lock is obtained on SQLite before reading state as well.
++	if e := tx.Model(&NextcloudCapacityReservation{}).Where("token=?", r.Token).UpdateColumn("token", gorm.Expr("token")).Error; e != nil {
++		return row, 0, e
++	}
++	if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("token=?", r.Token).Take(&row).Error; e != nil {
++		return row, 0, e
++	}
++	if row.ProtocolVersion != 1 || row.TenantID != r.TenantID || row.KnowledgeBaseID != r.KnowledgeBaseID || row.BackendID != r.BackendID || row.ScopeID != r.ScopeID {
++		return row, 0, ErrNextcloudCapacityUnavailable
++	}
++	var kb types.KnowledgeBase
++	if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=?", row.KnowledgeBaseID, row.TenantID).Take(&kb).Error; e != nil {
++		return row, 0, e
++	}
++	if kb.StorageBackendID == nil || *kb.StorageBackendID != row.BackendID {
++		return row, 0, ErrNextcloudCapacityUnavailable
++	}
++	now, e := nextcloudLeaseNowMS(tx)
++	return row, now, e
++}
++func (s *NextcloudCapacityStore) PrepareLocal(ctx context.Context, r *NextcloudCapacityReservation, writer, knowledge, path, root, scope string, size int64) error {
++	backend, inner, ok := types.ParseStorageBackendPath(path)
++	if r == nil || writer == "" || knowledge == "" || !ok || backend != r.BackendID || !strings.HasPrefix(inner, "local://") || len(root) != 64 || scope != r.ScopeID || size != r.Bytes {
++		return ErrNextcloudCapacityUnavailable
++	}
++	parts := strings.Split(strings.TrimPrefix(inner, "local://"), "/")
++	if len(parts) != 3 || parts[0] != strconv.FormatUint(r.TenantID, 10) || parts[1] != knowledge || !strings.HasPrefix(parts[2], "capacity-"+r.Token) {
++		return ErrNextcloudCapacityUnavailable
++	}
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State != "pending" || row.LeaseUntilMS <= now {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var count int64
++		if e = tx.Model(&NextcloudCapacityWriteIntent{}).Where("token=?", r.Token).Count(&count).Error; e != nil {
++			return e
++		}
++		if count != 0 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		return tx.Create(&NextcloudCapacityWriteIntent{Token: r.Token, KnowledgeID: knowledge, WriterID: writer, PhysicalPath: path, RootIdentity: root, ScopeID: scope, State: "prepared", UpdatedAtMS: now}).Error
++	})
++}
++func (s *NextcloudCapacityStore) ValidateWriter(ctx context.Context, r *NextcloudCapacityReservation, writer, path, knowledge string) error {
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State != "pending" || row.LeaseUntilMS <= now {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var i NextcloudCapacityWriteIntent
++		if e = tx.Where("token=?", r.Token).Take(&i).Error; e != nil {
++			return e
++		}
++		if i.WriterID != writer || i.PhysicalPath != path || (knowledge != "" && i.KnowledgeID != knowledge) || (i.State != "prepared" && i.State != "writing" && i.State != "written" && i.State != "cataloged") {
++			return ErrNextcloudCapacityUnavailable
++		}
++		return nil
++	})
++}
++func (s *NextcloudCapacityStore) LocalCreated(ctx context.Context, r *NextcloudCapacityReservation, writer, path, identity string) error {
++	if len(identity) != 64 {
++		return ErrNextcloudCapacityUnavailable
++	}
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State != "pending" || row.LeaseUntilMS <= now {
++			return ErrNextcloudCapacityUnavailable
++		}
++		u := tx.Model(&NextcloudCapacityWriteIntent{}).Where("token=? AND writer_id=? AND physical_path=? AND state='prepared' AND object_identity=''", row.Token, writer, path).Updates(map[string]any{"state": "writing", "object_identity": identity, "updated_at_ms": now})
++		if u.Error != nil {
++			return u.Error
++		}
++		if u.RowsAffected != 1 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		return nil
++	})
++}
++func (s *NextcloudCapacityStore) PhysicalWritten(ctx context.Context, r *NextcloudCapacityReservation, writer, path string, size int64, hash string) error {
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State != "pending" || row.LeaseUntilMS <= now || size != row.Bytes || len(hash) != 64 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		update := tx.Model(&NextcloudCapacityWriteIntent{}).Where("token=? AND writer_id=? AND physical_path=? AND state='writing'", r.Token, writer, path).Updates(map[string]any{"state": "written", "observed_bytes": size, "sha256": hash, "updated_at_ms": now})
++		if update.Error != nil {
++			return update.Error
++		}
++		if update.RowsAffected != 1 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		return nil
++	})
++}
++func (s *NextcloudCapacityStore) Cataloged(ctx context.Context, r *NextcloudCapacityReservation, writer, path, knowledge, ref string) error {
++	handle, ok := types.ParseResourcePath(ref)
++	if !ok {
++		return ErrNextcloudCapacityUnavailable
++	}
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State != "pending" || row.LeaseUntilMS <= now {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var resource types.StoredResource
++		if e = tx.Where("handle=? AND tenant_id=? AND storage_backend_id=? AND physical_path=? AND provider='local' AND state='active'", handle, row.TenantID, row.BackendID, path).Take(&resource).Error; e != nil {
++			return e
++		}
++		if resource.Size != row.Bytes {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var count int64
++		if e = tx.Model(&types.ResourceBinding{}).Where("resource_id=? AND tenant_id=? AND owner_type='knowledge' AND owner_id=? AND relation='source_file'", resource.ID, row.TenantID, knowledge).Count(&count).Error; e != nil {
++			return e
++		}
++		if count != 1 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		u := tx.Model(&NextcloudCapacityWriteIntent{}).Where("token=? AND writer_id=? AND physical_path=? AND knowledge_id=? AND state='written'", row.Token, writer, path, knowledge).Updates(map[string]any{"state": "cataloged", "resource_id": resource.ID, "updated_at_ms": now})
++		if u.Error != nil {
++			return u.Error
++		}
++		if u.RowsAffected != 1 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		return nil
++	})
++}
++
++// Cancel is proof from the new protocol's absence of a pre-IO intent. Old
++// reservations remain unknown and can never be retrospectively certified.
++func (s *NextcloudCapacityStore) CancelUnstarted(ctx context.Context, r *NextcloudCapacityReservation) error {
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, _, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State == "cancelled" {
++			return nil
++		}
++		if row.State != "pending" {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var n int64
++		if e = tx.Model(&NextcloudCapacityWriteIntent{}).Where("token=?", row.Token).Count(&n).Error; e != nil {
++			return e
++		}
++		if n != 0 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		return tx.Model(&row).Update("state", "cancelled").Error
++	})
++}
++func (s *NextcloudCapacityStore) MarkWriteFailed(ctx context.Context, r *NextcloudCapacityReservation, writer string) error {
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State != "pending" {
++			return nil
++		}
++		return tx.Model(&NextcloudCapacityWriteIntent{}).Where("token=? AND writer_id=? AND state IN ('prepared','writing','written','cataloged')", row.Token, writer).Updates(map[string]any{"state": "failed", "updated_at_ms": now}).Error
++	})
++}
++func (s *NextcloudCapacityStore) Intent(ctx context.Context, r *NextcloudCapacityReservation) (NextcloudCapacityWriteIntent, error) {
++	var i NextcloudCapacityWriteIntent
++	if r == nil || r.ProtocolVersion != 1 {
++		return i, ErrNextcloudCapacityUnavailable
++	}
++	e := s.db.WithContext(ctx).Where("token=?", r.Token).Take(&i).Error
++	return i, e
++}
++
++// Called only while the exact local provider holds its exclusive OS fence.
++// An object is never deleted here. Existing owner claims stay authoritative.
++func (s *NextcloudCapacityStore) ReconcileLocal(ctx context.Context, r *NextcloudCapacityReservation, expected NextcloudCapacityWriteIntent, o types.CapacityLocalObject) error {
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		var i NextcloudCapacityWriteIntent
++		if e = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("token=?", row.Token).Take(&i).Error; e != nil {
++			return e
++		}
++		if i.Token != expected.Token || i.WriterID != expected.WriterID || i.KnowledgeID != expected.KnowledgeID || i.PhysicalPath != expected.PhysicalPath || i.RootIdentity != o.RootIdentity || i.ScopeID != o.ScopeID || o.Token != row.Token || o.BackendID != row.BackendID || o.PhysicalPath != i.PhysicalPath || o.Size < 0 || o.Size > row.Bytes {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var resources []types.StoredResource
++		if e = tx.Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).Where("physical_path=?", i.PhysicalPath).Find(&resources).Error; e != nil {
++			return e
++		}
++		if len(resources) > 1 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var owners int64
++		own := false
++		resourceID := ""
++		for _, resource := range resources {
++			if resource.TenantID != row.TenantID || resource.StorageBackendID != row.BackendID || resource.Provider != "local" {
++				return ErrNextcloudCapacityUnavailable
++			}
++			if e = tx.Model(&types.ResourceBinding{}).Where("resource_id=?", resource.ID).Count(&owners).Error; e != nil {
++				return e
++			}
++			var k types.Knowledge
++			ke := tx.Where("id=? AND tenant_id=? AND knowledge_base_id=?", i.KnowledgeID, row.TenantID, row.KnowledgeBaseID).Take(&k).Error
++			var count int64
++			if e = tx.Model(&types.ResourceBinding{}).Where("resource_id=? AND tenant_id=? AND owner_type='knowledge' AND owner_id=? AND relation='source_file'", resource.ID, row.TenantID, i.KnowledgeID).Count(&count).Error; e != nil {
++				return e
++			}
++			own = ke == nil && count == 1 && resource.State == types.ResourceStateActive && resource.Size == o.Size && k.FilePath == types.BuildResourcePath(resource.Handle)
++			if ke != nil && !errors.Is(ke, gorm.ErrRecordNotFound) {
++				return ke
++			}
++			resourceID = resource.ID
++		}
++		if o.Exists && (i.ObjectIdentity == "" || i.ObjectIdentity != o.ObjectIdentity || (i.SHA256 != "" && i.SHA256 != o.SHA256)) {
++			return ErrNextcloudCapacityUnavailable
++		}
++		if i.State == "charged" {
++			if row.State != "committed" {
++				return ErrNextcloudCapacityUnavailable
++			}
++			if !o.Exists || o.Size != i.ObservedBytes || o.SHA256 != i.SHA256 {
++				return ErrNextcloudCapacityUnavailable
++			}
++			return nil
++		}
++		if i.State == "released" {
++			if row.State != "released" {
++				return ErrNextcloudCapacityUnavailable
++			}
++			if o.Exists || owners != 0 {
++				return ErrNextcloudCapacityUnavailable
++			}
++			return nil
++		}
++		if row.State != "pending" {
++			return ErrNextcloudCapacityUnavailable
++		}
++		if !o.Exists {
++			if owners != 0 {
++				return ErrNextcloudCapacityUnavailable
++			}
++			if e = tx.Model(&i).Updates(map[string]any{"state": "released", "updated_at_ms": now}).Error; e != nil {
++				return e
++			}
++			return tx.Model(&row).Update("state", "released").Error
++		}
++		orphan := o.Size
++		if own {
++			orphan = 0
++		}
++		if e = tx.Model(&i).Updates(map[string]any{"state": "charged", "observed_bytes": o.Size, "sha256": o.SHA256, "resource_id": resourceID, "orphan_charge_bytes": orphan, "updated_at_ms": now}).Error; e != nil {
++			return e
++		}
++		// Keep the original reserved bytes as an immutable admission receipt. A
++		// fresh provider measurement supersedes its temporary disk buffer; the
++		// exact orphan object remains charged to the original KB indefinitely.
++		return tx.Model(&row).Updates(map[string]any{"state": "committed", "committed_at_ms": now}).Error
++	})
++}
++func (s *NextcloudCapacityStore) FinishDurable(ctx context.Context, r *NextcloudCapacityReservation, k string, success bool) error {
++	if !success {
++		return s.CancelUnstarted(ctx, r)
++	}
++	i, e := s.Intent(ctx, r)
++	if errors.Is(e, gorm.ErrRecordNotFound) {
++		return s.CancelUnstarted(ctx, r)
++	}
++	if e != nil {
++		return e
++	}
++	if i.KnowledgeID != k || i.State != "cataloged" {
++		return ErrNextcloudCapacityUnavailable
++	}
++	// The writer still holds the provider lock. The catalog must match the
++	// intended knowledge and physical object; recovery uses fresh observation.
++	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		row, now, e := s.lockDurable(tx, r)
++		if e != nil {
++			return e
++		}
++		if row.State != "pending" || row.LeaseUntilMS <= now {
++			return ErrNextcloudCapacityUnavailable
++		}
++		var count int64
++		var resource types.StoredResource
++		if e = tx.Where("id=?", i.ResourceID).Take(&resource).Error; e != nil {
++			return e
++		}
++		if e = tx.Raw("SELECT COUNT(*) FROM resources s JOIN resource_bindings b ON b.resource_id=s.id JOIN knowledges k ON k.id=b.owner_id AND k.tenant_id=s.tenant_id WHERE s.id=? AND s.tenant_id=? AND s.storage_backend_id=? AND s.physical_path=? AND s.state='active' AND s.size=? AND b.owner_type='knowledge' AND b.relation='source_file' AND k.id=? AND k.knowledge_base_id=? AND k.file_path=?", i.ResourceID, row.TenantID, row.BackendID, i.PhysicalPath, i.ObservedBytes, k, row.KnowledgeBaseID, types.BuildResourcePath(resource.Handle)).Scan(&count).Error; e != nil {
++			return e
++		}
++		if count != 1 {
++			return ErrNextcloudCapacityUnavailable
++		}
++		if e = tx.Model(&i).Updates(map[string]any{"state": "charged", "orphan_charge_bytes": 0, "updated_at_ms": now}).Error; e != nil {
++			return e
++		}
++		return tx.Model(&row).Updates(map[string]any{"state": "committed", "committed_at_ms": now}).Error
++	})
++}
 diff --git a/internal/application/repository/nextcloud_capacity_pg_test.go b/internal/application/repository/nextcloud_capacity_pg_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..67d57b4c1a77e0254a0054b96512bb3ace4e3495
+index 0000000000000000000000000000000000000000..3a91f3fcbaa6e4f335d17b5951faab9740da3c98
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_capacity_pg_test.go
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,40 @@
 +package repository
 +
 +import (
@@ -22667,6 +23478,9 @@ index 0000000000000000000000000000000000000000..67d57b4c1a77e0254a0054b96512bb3a
 +	sql, err := os.ReadFile("../../../migrations/versioned/000146_nextcloud_capacity_admission.up.sql")
 +	require.NoError(t, err)
 +	require.NoError(t, db.Exec(string(sql)).Error)
++	intentSQL, intentErr := os.ReadFile("../../../migrations/versioned/000148_nextcloud_capacity_write_intents.up.sql")
++	require.NoError(t, intentErr)
++	require.NoError(t, db.Exec(string(intentSQL)).Error)
 +	backend := "backend"
 +	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb", TenantID: 7, StorageBackendID: &backend}).Error)
 +	s := NewNextcloudCapacityStore(db)
@@ -22690,10 +23504,10 @@ index 0000000000000000000000000000000000000000..67d57b4c1a77e0254a0054b96512bb3a
 +}
 diff --git a/internal/application/repository/nextcloud_capacity_test.go b/internal/application/repository/nextcloud_capacity_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..22f295c37d21e7dd0c29e6f1d20a94abe60a12e3
+index 0000000000000000000000000000000000000000..65944bdc30d6655dd8507af370427f8281f837c1
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_capacity_test.go
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,93 @@
 +package repository
 +
 +import (
@@ -22717,6 +23531,9 @@ index 0000000000000000000000000000000000000000..22f295c37d21e7dd0c29e6f1d20a94ab
 +	script, err := os.ReadFile("../../../migrations/sqlite/000065_nextcloud_capacity_admission.up.sql")
 +	require.NoError(t, err)
 +	require.NoError(t, db.Exec(string(script)).Error)
++	intentSQL, intentErr := os.ReadFile("../../../migrations/sqlite/000067_nextcloud_capacity_write_intents.up.sql")
++	require.NoError(t, intentErr)
++	require.NoError(t, db.Exec(string(intentSQL)).Error)
 +	backend := "backend"
 +	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb", TenantID: 7, StorageBackendID: &backend}).Error)
 +	return NewNextcloudCapacityStore(db), db
@@ -46219,7 +47036,7 @@ index b4087b96a812ee0bd32ffe3481db6c77f1764c48..60ad2a04d6cc2aa1354f881faca6388a
  		ID:           "log-pending",
  		DataSourceID: ds.ID,
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241aafd826a3394af4e5008eb1a73e57001..867ea29b70f655ec828463611cb57d58fd325190 100644
+index c0b24241aafd826a3394af4e5008eb1a73e57001..b1a5bd5322b9738af65cd40b3061d8cdce919e1c 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -14,6 +14,7 @@ import (
@@ -47413,7 +48230,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..867ea29b70f655ec828463611cb57d58
  					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
  				}
  				isUpdate = true
-@@ -1407,6 +2085,90 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1407,6 +2085,92 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	return isUpdate, fmt.Errorf("item has neither content nor URL")
  }
  
@@ -47454,6 +48271,8 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..867ea29b70f655ec828463611cb57d58
 +	if capacityErr != nil {
 +		return false, capacityErr
 +	}
++	ctx = s.capacityAdmission.WriteContext(ctx, reservation)
++	defer s.capacityAdmission.End(ctx, reservation, capacityKB)
 +	if err := versions.AdmitNextcloudCandidateRetry(ctx, ds.TenantID,
 +		ds.KnowledgeBaseID, ds.ID, item.ExternalID, etag); err != nil {
 +		return false, err
@@ -50041,10 +50860,10 @@ index 0000000000000000000000000000000000000000..4e8bdc706dd5e2ffffc60527a027c6ae
 +}
 diff --git a/internal/application/service/file/capacity.go b/internal/application/service/file/capacity.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..127883809d83351450a70e9d069f1b36ebf57b6f
+index 0000000000000000000000000000000000000000..6f8a981025cb7eb7ec2b262f06dd356bd532c1e8
 --- /dev/null
 +++ b/internal/application/service/file/capacity.go
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,49 @@
 +package file
 +
 +import (
@@ -50066,6 +50885,33 @@ index 0000000000000000000000000000000000000000..127883809d83351450a70e9d069f1b36
 +}
 +func (s *resourceCatalogFileService) MeasureStorageCapacity(ctx context.Context) (types.StorageCapacity, error) {
 +	return measureWrappedCapacity(ctx, s.inner)
++}
++
++func supportsWrappedIntents(inner interfaces.FileService) bool {
++	provider, ok := inner.(interfaces.LocalCapacityIntentProvider)
++	return ok && provider.SupportsLocalCapacityIntents()
++}
++func inspectWrappedIntent(ctx context.Context, inner interfaces.FileService, o types.CapacityLocalObject, callback func(types.CapacityLocalObject) error) error {
++	provider, ok := inner.(interfaces.LocalCapacityIntentProvider)
++	if !ok || !provider.SupportsLocalCapacityIntents() {
++		return errors.New("local capacity reconciliation unavailable")
++	}
++	return provider.InspectCapacityIntent(ctx, o, callback)
++}
++func (s *backendScopedFileService) SupportsLocalCapacityIntents() bool {
++	return supportsWrappedIntents(s.inner)
++}
++func (s *backendScopedFileService) InspectCapacityIntent(ctx context.Context, o types.CapacityLocalObject, callback func(types.CapacityLocalObject) error) error {
++	if o.BackendID != s.backendID {
++		return errors.New("capacity backend mismatch")
++	}
++	return inspectWrappedIntent(ctx, s.inner, o, callback)
++}
++func (s *resourceCatalogFileService) SupportsLocalCapacityIntents() bool {
++	return supportsWrappedIntents(s.inner)
++}
++func (s *resourceCatalogFileService) InspectCapacityIntent(ctx context.Context, o types.CapacityLocalObject, callback func(types.CapacityLocalObject) error) error {
++	return inspectWrappedIntent(ctx, s.inner, o, callback)
 +}
 diff --git a/internal/application/service/file/capacity_test.go b/internal/application/service/file/capacity_test.go
 new file mode 100644
@@ -50094,6 +50940,346 @@ index 0000000000000000000000000000000000000000..eb29f56f6fbc7ebeee526c313ca2e79c
 +	again, err := wrapped.MeasureStorageCapacity(context.Background())
 +	require.NoError(t, err)
 +	require.Equal(t, measured.ScopeID, again.ScopeID)
++}
+diff --git a/internal/application/service/file/local.go b/internal/application/service/file/local.go
+index 3707f25a57ca5653a5c39b7abdc3db6827d43d21..c47af0498799635c6231b1d4ea3ac95d0cb48fa5 100644
+--- a/internal/application/service/file/local.go
++++ b/internal/application/service/file/local.go
+@@ -11,6 +11,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/Tencent/WeKnora/internal/logger"
++	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	secutils "github.com/Tencent/WeKnora/internal/utils"
+ )
+@@ -51,6 +52,9 @@ func NewLocalFileService(baseDir, externalURL string) interfaces.FileService {
+ func (s *localFileService) SaveFile(ctx context.Context,
+ 	file *multipart.FileHeader, tenantID uint64, knowledgeID string,
+ ) (string, error) {
++	if types.CapacityWriteSessionFromContext(ctx) != nil {
++		return s.saveCapacityFile(ctx, file, tenantID, knowledgeID)
++	}
+ 	logger.Info(ctx, "Starting to save file locally")
+ 	logger.Infof(ctx, "File information: name=%s, size=%d, tenant ID=%d, knowledge ID=%s",
+ 		file.Filename, file.Size, tenantID, knowledgeID)
+diff --git a/internal/application/service/file/local_capacity_intents_other.go b/internal/application/service/file/local_capacity_intents_other.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..92765c02f4c513dbc6c2cfe3b3de93f28afc6f9c
+--- /dev/null
++++ b/internal/application/service/file/local_capacity_intents_other.go
+@@ -0,0 +1,18 @@
++//go:build !linux && !darwin
++
++package file
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/types"
++	"mime/multipart"
++)
++
++func (s *localFileService) SupportsLocalCapacityIntents() bool { return false }
++func (s *localFileService) saveCapacityFile(context.Context, *multipart.FileHeader, uint64, string) (string, error) {
++	return "", errors.New("durable capacity writers unavailable on this platform")
++}
++func (s *localFileService) InspectCapacityIntent(context.Context, types.CapacityLocalObject, func(types.CapacityLocalObject) error) error {
++	return errors.New("durable capacity reconciliation unavailable on this platform")
++}
+diff --git a/internal/application/service/file/local_capacity_intents_unix.go b/internal/application/service/file/local_capacity_intents_unix.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f60f18b9f47cce8dfe008219338b440fc050c888
+--- /dev/null
++++ b/internal/application/service/file/local_capacity_intents_unix.go
+@@ -0,0 +1,288 @@
++//go:build linux || darwin
++
++package file
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/types"
++	"golang.org/x/sys/unix"
++	"io"
++	"mime/multipart"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strconv"
++	"strings"
++)
++
++var capacitySegment = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
++var capacityToken = regexp.MustCompile(`^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$`)
++
++func (s *localFileService) SupportsLocalCapacityIntents() bool { return true }
++func (s *localFileService) capacityRoot() (int, string, string, error) {
++	root, e := filepath.Abs(s.baseDir)
++	if e != nil {
++		return -1, "", "", e
++	}
++	actual, e := filepath.EvalSymlinks(root)
++	if e != nil || actual != root {
++		return -1, "", "", errors.New("capacity storage root is linked or unavailable")
++	}
++	fd, e := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
++	if e != nil {
++		return -1, "", "", e
++	}
++	var st unix.Stat_t
++	if e = unix.Fstat(fd, &st); e != nil {
++		unix.Close(fd)
++		return -1, "", "", e
++	}
++	rootSHA := sha256.Sum256([]byte(root + "\n" + strconv.FormatUint(uint64(st.Dev), 10) + "\n" + strconv.FormatUint(uint64(st.Ino), 10)))
++	scopeSHA := sha256.Sum256([]byte("local-filesystem:" + strconv.FormatUint(uint64(st.Dev), 10)))
++	return fd, hex.EncodeToString(rootSHA[:]), hex.EncodeToString(scopeSHA[:]), nil
++}
++func capacityDirectory(parent int, name string, create bool) (int, error) {
++	if create {
++		if e := unix.Mkdirat(parent, name, 0700); e != nil && !errors.Is(e, unix.EEXIST) {
++			return -1, e
++		}
++	}
++	return unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
++}
++func capacityWriterLock(root int, token string) (*os.File, error) {
++	if !capacityToken.MatchString(token) {
++		return nil, errors.New("invalid capacity token")
++	}
++	locks, e := capacityDirectory(root, ".capacity-intents", true)
++	if e != nil {
++		return nil, e
++	}
++	defer unix.Close(locks)
++	var directory unix.Stat_t
++	if e = unix.Fstat(locks, &directory); e != nil || int(directory.Uid) != os.Geteuid() || directory.Mode&0777 != 0700 {
++		return nil, errors.New("capacity lock directory is not private and owned")
++	}
++	fd, e := unix.Openat(locks, token+".lock", unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW, 0600)
++	if e != nil {
++		return nil, e
++	}
++	var st unix.Stat_t
++	if e = unix.Fstat(fd, &st); e != nil || st.Nlink != 1 || st.Mode&unix.S_IFMT != unix.S_IFREG || int(st.Uid) != os.Geteuid() || st.Mode&0777 != 0600 {
++		unix.Close(fd)
++		return nil, errors.New("unsafe capacity writer lock")
++	}
++	if e = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); e != nil {
++		unix.Close(fd)
++		return nil, fmt.Errorf("capacity writer still active: %w", e)
++	}
++	return os.NewFile(uintptr(fd), "capacity writer fence"), nil
++}
++func capacityParts(path, backend, knowledge, token string) ([]string, error) {
++	id, inner, ok := types.ParseStorageBackendPath(path)
++	if !ok || id != backend || !strings.HasPrefix(inner, "local://") {
++		return nil, errors.New("capacity provider/backend mismatch")
++	}
++	parts := strings.Split(strings.TrimPrefix(inner, "local://"), "/")
++	if len(parts) != 3 || !capacitySegment.MatchString(parts[0]) || !capacitySegment.MatchString(parts[1]) || parts[1] != knowledge || !strings.HasPrefix(parts[2], "capacity-"+token) || filepath.Base(parts[2]) != parts[2] || strings.ContainsAny(parts[2], `\`) {
++		return nil, errors.New("capacity object scope mismatch")
++	}
++	return parts, nil
++}
++func (s *localFileService) saveCapacityFile(ctx context.Context, header *multipart.FileHeader, tenant uint64, knowledge string) (string, error) {
++	session := types.CapacityWriteSessionFromContext(ctx)
++	if session == nil || tenant == 0 || !capacitySegment.MatchString(knowledge) || header == nil || header.Size <= 0 {
++		return "", errors.New("invalid capacity file scope")
++	}
++	ext := filepath.Ext(header.Filename)
++	if strings.ContainsAny(ext, `/\`) || len(ext) > 32 {
++		return "", errors.New("invalid capacity file extension")
++	}
++	root, identity, scope, e := s.capacityRoot()
++	if e != nil {
++		return "", e
++	}
++	defer unix.Close(root)
++	lock, e := capacityWriterLock(root, session.Token())
++	if e != nil {
++		return "", e
++	}
++	if e = session.RetainWriterLock(lock); e != nil {
++		lock.Close()
++		return "", e
++	}
++	src, e := header.Open()
++	if e != nil {
++		return "", e
++	}
++	defer src.Close()
++	filename := "capacity-" + session.Token() + ext
++	inner := fmt.Sprintf("local://%d/%s/%s", tenant, knowledge, filename)
++	physical := types.BuildStorageBackendPath(session.Backend(), inner)
++	if e = session.PrepareLocal(ctx, knowledge, physical, identity, scope, header.Size); e != nil {
++		return "", e
++	}
++	tenantFD, e := capacityDirectory(root, strconv.FormatUint(tenant, 10), true)
++	if e != nil {
++		return "", e
++	}
++	defer unix.Close(tenantFD)
++	knowledgeFD, e := capacityDirectory(tenantFD, knowledge, true)
++	if e != nil {
++		return "", e
++	}
++	defer unix.Close(knowledgeFD)
++	if e = session.ValidateCatalog(ctx, physical, knowledge); e != nil {
++		return "", e
++	}
++	fd, e := unix.Openat(knowledgeFD, filename, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW, 0600)
++	if e != nil {
++		return "", e
++	}
++	dst := os.NewFile(uintptr(fd), filename)
++	defer dst.Close()
++	var created unix.Stat_t
++	if e = unix.Fstat(fd, &created); e != nil {
++		return "", e
++	}
++	objectIdentity := sha256.Sum256([]byte(strconv.FormatUint(uint64(created.Dev), 10) + "\n" + strconv.FormatUint(uint64(created.Ino), 10)))
++	if e = session.LocalCreated(ctx, physical, hex.EncodeToString(objectIdentity[:])); e != nil {
++		return "", e
++	}
++	hash := sha256.New()
++	var written int64
++	reader := io.LimitReader(src, header.Size)
++	buffer := make([]byte, 32<<10)
++	for {
++		if e = ctx.Err(); e != nil {
++			return "", e
++		}
++		if e = session.ValidateCatalog(ctx, physical, knowledge); e != nil {
++			return "", e
++		}
++		n, readErr := reader.Read(buffer)
++		if n > 0 {
++			w, writeErr := dst.Write(buffer[:n])
++			written += int64(w)
++			hash.Write(buffer[:w])
++			if writeErr != nil {
++				return "", writeErr
++			}
++			if w != n {
++				return "", io.ErrShortWrite
++			}
++		}
++		if readErr == io.EOF {
++			break
++		}
++		if readErr != nil {
++			return "", readErr
++		}
++	}
++	var extra [1]byte
++	extraN, readErr := src.Read(extra[:])
++	if written != header.Size || extraN != 0 || (readErr != nil && readErr != io.EOF) {
++		return "", errors.New("capacity upload size changed")
++	}
++	if e = dst.Sync(); e != nil {
++		return "", e
++	}
++	for _, dir := range []int{knowledgeFD, tenantFD, root} {
++		if e = unix.Fsync(dir); e != nil {
++			return "", e
++		}
++	}
++	if e = session.PhysicalWritten(ctx, physical, written, hex.EncodeToString(hash.Sum(nil))); e != nil {
++		return "", e
++	}
++	return inner, nil
++}
++func (s *localFileService) InspectCapacityIntent(ctx context.Context, o types.CapacityLocalObject, callback func(types.CapacityLocalObject) error) error {
++	if callback == nil {
++		return errors.New("capacity reconciliation callback required")
++	}
++	parts, e := capacityParts(o.PhysicalPath, o.BackendID, o.TenantKnowledgeID, o.Token)
++	if e != nil {
++		return e
++	}
++	root, identity, scope, e := s.capacityRoot()
++	if e != nil {
++		return e
++	}
++	defer unix.Close(root)
++	if identity != o.RootIdentity || scope != o.ScopeID {
++		return errors.New("capacity root/filesystem identity changed")
++	}
++	lock, e := capacityWriterLock(root, o.Token)
++	if e != nil {
++		return e
++	}
++	defer lock.Close()
++	// NOFOLLOW applies to every path component, including missing/linked
++	// directories. An unavailable path is not classified as an absent object.
++	tenantFD, e := capacityDirectory(root, parts[0], false)
++	if errors.Is(e, unix.ENOENT) {
++		o.Exists = false
++		o.Size = 0
++		return callback(o)
++	}
++	if e != nil {
++		return e
++	}
++	defer unix.Close(tenantFD)
++	knowledgeFD, e := capacityDirectory(tenantFD, parts[1], false)
++	if errors.Is(e, unix.ENOENT) {
++		o.Exists = false
++		o.Size = 0
++		return callback(o)
++	}
++	if e != nil {
++		return e
++	}
++	defer unix.Close(knowledgeFD)
++	fd, e := unix.Openat(knowledgeFD, parts[2], unix.O_RDONLY|unix.O_NOFOLLOW, 0)
++	if errors.Is(e, unix.ENOENT) {
++		o.Exists = false
++		o.Size = 0
++		return callback(o)
++	}
++	if e != nil {
++		return e
++	}
++	file := os.NewFile(uintptr(fd), parts[2])
++	defer file.Close()
++	var before, after unix.Stat_t
++	if e = unix.Fstat(fd, &before); e != nil {
++		return e
++	}
++	if before.Nlink != 1 || before.Mode&unix.S_IFMT != unix.S_IFREG {
++		return errors.New("capacity object is linked or nonregular")
++	}
++	hash := sha256.New()
++	bytes, e := io.Copy(hash, file)
++	if e != nil {
++		return e
++	}
++	if e = unix.Fstat(fd, &after); e != nil {
++		return e
++	}
++	var current unix.Stat_t
++	if e = unix.Fstatat(knowledgeFD, parts[2], &current, unix.AT_SYMLINK_NOFOLLOW); e != nil {
++		return e
++	}
++	if before.Dev != after.Dev || before.Ino != after.Ino || before.Size != after.Size || before.Size != bytes || current.Ino != before.Ino || current.Dev != before.Dev || current.Nlink != 1 {
++		return errors.New("capacity object changed during observation")
++	}
++	if e = ctx.Err(); e != nil {
++		return e
++	}
++	o.Exists = true
++	objectIdentity := sha256.Sum256([]byte(strconv.FormatUint(uint64(before.Dev), 10) + "\n" + strconv.FormatUint(uint64(before.Ino), 10)))
++	o.ObjectIdentity = hex.EncodeToString(objectIdentity[:])
++	o.Size = bytes
++	o.SHA256 = hex.EncodeToString(hash.Sum(nil))
++	return callback(o)
 +}
 diff --git a/internal/application/service/file/local_capacity_other.go b/internal/application/service/file/local_capacity_other.go
 new file mode 100644
@@ -50180,7 +51366,7 @@ index 0000000000000000000000000000000000000000..35d97bb05632623c307e732a83d0a9db
 +	return types.StorageCapacity{ScopeID: hex.EncodeToString(digest[:]), TotalBytes: total, AvailableBytes: available, MeasuredAt: time.Now().UTC()}, nil
 +}
 diff --git a/internal/application/service/file/resource_catalog.go b/internal/application/service/file/resource_catalog.go
-index 34a376d4db87b9e2339d0480b1235999b477925d..4e28972cc3d98543d3eaa5b1896f15d8fb5ad532 100644
+index 34a376d4db87b9e2339d0480b1235999b477925d..32bbb8952afe7c41b5eef1b79ca3965159dd3c38 100644
 --- a/internal/application/service/file/resource_catalog.go
 +++ b/internal/application/service/file/resource_catalog.go
 @@ -13,16 +13,19 @@ import (
@@ -50228,7 +51414,7 @@ index 34a376d4db87b9e2339d0480b1235999b477925d..4e28972cc3d98543d3eaa5b1896f15d8
  }
  
  func (s *resourceCatalogFileService) CheckConnectivity(ctx context.Context) error {
-@@ -70,12 +78,13 @@ func (s *resourceCatalogFileService) register(
+@@ -70,15 +78,18 @@ func (s *resourceCatalogFileService) register(
  ) (string, error) {
  	kind, mimeType := resourceKind(name)
  	ref, err := s.catalog.Register(ctx, tenantID, physical, interfaces.ResourceRegistration{
@@ -50247,8 +51433,52 @@ index 34a376d4db87b9e2339d0480b1235999b477925d..4e28972cc3d98543d3eaa5b1896f15d8
 +		SourceProvenance: types.ResourceProvenanceFromContext(ctx),
  	})
  	if err != nil {
- 		_ = s.inner.DeleteFile(ctx, physical)
-@@ -136,6 +145,57 @@ func (s *resourceCatalogFileService) GetFile(ctx context.Context, filePath strin
+-		_ = s.inner.DeleteFile(ctx, physical)
++		if types.CapacityWriteSessionFromContext(ctx) == nil {
++			_ = s.inner.DeleteFile(ctx, physical)
++		}
+ 		return "", fmt.Errorf("register stored resource: %w", err)
+ 	}
+ 	return ref, nil
+@@ -90,20 +101,36 @@ func (s *resourceCatalogFileService) SaveFile(
+ 	tenantID uint64,
+ 	knowledgeID string,
+ ) (string, error) {
++	if types.CapacityWriteSessionFromContext(ctx) != nil && !supportsWrappedIntents(s.inner) {
++		return "", fmt.Errorf("durable capacity provider unavailable")
++	}
+ 	physical, err := s.inner.SaveFile(ctx, file, tenantID, knowledgeID)
+ 	if err != nil {
+ 		return "", err
+ 	}
++	session := types.CapacityWriteSessionFromContext(ctx)
++	if session != nil {
++		if err := session.ValidateCatalog(ctx, physical, knowledgeID); err != nil {
++			return "", err
++		}
++	}
+ 	ref, err := s.register(ctx, physical, tenantID, file.Filename, file.Size, false, "")
+ 	if err != nil {
+ 		return "", err
+ 	}
+ 	if knowledgeID != "" {
+ 		if err := s.catalog.Bind(ctx, ref, types.ResourceOwnerKnowledge, knowledgeID, types.ResourceRelationSourceFile); err != nil {
+-			_ = s.DeleteFile(ctx, ref)
++			if types.CapacityWriteSessionFromContext(ctx) == nil {
++				_ = s.DeleteFile(ctx, ref)
++			}
+ 			return "", fmt.Errorf("bind stored resource: %w", err)
+ 		}
+ 	}
++	if session != nil {
++		if err := session.Cataloged(ctx, physical, knowledgeID, ref); err != nil {
++			return "", err
++		}
++	}
+ 	return ref, nil
+ }
+ 
+@@ -136,6 +163,57 @@ func (s *resourceCatalogFileService) GetFile(ctx context.Context, filePath strin
  }
  
  func (s *resourceCatalogFileService) GetFileURL(ctx context.Context, filePath string) (string, error) {
@@ -50306,7 +51536,7 @@ index 34a376d4db87b9e2339d0480b1235999b477925d..4e28972cc3d98543d3eaa5b1896f15d8
  	physical, isResource, err := s.resolve(ctx, filePath)
  	if err != nil {
  		return "", err
-@@ -170,10 +230,15 @@ func (s *resourceCatalogFileService) CopyFile(
+@@ -170,10 +248,15 @@ func (s *resourceCatalogFileService) CopyFile(
  	tenantID uint64,
  	knowledgeID string,
  ) (string, error) {
@@ -50323,6 +51553,17 @@ index 34a376d4db87b9e2339d0480b1235999b477925d..4e28972cc3d98543d3eaa5b1896f15d8
  	copied, err := s.inner.CopyFile(ctx, physical, tenantID, knowledgeID)
  	if err != nil {
  		return "", err
+@@ -184,7 +267,9 @@ func (s *resourceCatalogFileService) CopyFile(
+ 	}
+ 	if knowledgeID != "" {
+ 		if err := s.catalog.Bind(ctx, ref, types.ResourceOwnerKnowledge, knowledgeID, types.ResourceRelationSourceFile); err != nil {
+-			_ = s.DeleteFile(ctx, ref)
++			if types.CapacityWriteSessionFromContext(ctx) == nil {
++				_ = s.DeleteFile(ctx, ref)
++			}
+ 			return "", fmt.Errorf("bind copied resource: %w", err)
+ 		}
+ 	}
 diff --git a/internal/application/service/file/resource_catalog_test.go b/internal/application/service/file/resource_catalog_test.go
 index 735ca948acd7770229dca8e33670f196fa4db0ba..8cd81d63e926fb7e2d5a4690635e3fa2d291c8d5 100644
 --- a/internal/application/service/file/resource_catalog_test.go
@@ -51876,10 +53117,10 @@ index 0000000000000000000000000000000000000000..c2b4248a059fbab03452abbd1c921b47
 +	return out, nil
 +}
 diff --git a/internal/application/service/knowledge_create.go b/internal/application/service/knowledge_create.go
-index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73aa24c122d 100644
+index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..cee76fff6cdba37f9a20bfabcd077d586903703e 100644
 --- a/internal/application/service/knowledge_create.go
 +++ b/internal/application/service/knowledge_create.go
-@@ -10,6 +10,7 @@ import (
+@@ -10,12 +10,14 @@ import (
  	"strings"
  	"time"
  
@@ -51887,7 +53128,14 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  	werrors "github.com/Tencent/WeKnora/internal/errors"
  	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
  	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
-@@ -100,6 +101,9 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
+ 	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	secutils "github.com/Tencent/WeKnora/internal/utils"
+ 	"github.com/google/uuid"
+ 	"github.com/hibiken/asynq"
+@@ -100,6 +102,9 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
  	if usesSourceIdentityDuplicateCheck(channel) {
  		checkParams.DataSourceID = metadata["datasource_id"]
  		checkParams.ExternalID = metadata["external_id"]
@@ -51897,7 +53145,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  	}
  	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, tenantID, kbID, checkParams)
  	if err != nil {
-@@ -189,7 +193,15 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
+@@ -189,7 +194,21 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
  	// Save the file to storage (use KB-level storage engine if configured)
  	logger.Infof(ctx, "Saving file, knowledge ID: %s", knowledge.ID)
  	fileSvc := s.resolveFileService(ctx, kb)
@@ -51910,11 +53158,17 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
 +	if markedNextcloud {
 +		provenance = types.ResourceProvenanceNextcloud
 +	}
++	if types.CapacityWriteSessionFromContext(ctx) != nil {
++		provider, ok := fileSvc.(interfaces.LocalCapacityIntentProvider)
++		if !ok || !provider.SupportsLocalCapacityIntents() {
++			return nil, repository.ErrNextcloudCapacityUnavailable
++		}
++	}
 +	filePath, err := fileSvc.SaveFile(types.WithResourceProvenance(ctx, provenance), file, knowledge.TenantID, knowledge.ID)
  	if err != nil {
  		logger.Errorf(ctx, "Failed to save file, knowledge ID: %s, error: %v", knowledge.ID, err)
  		return nil, err
-@@ -198,7 +210,13 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
+@@ -198,10 +217,18 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
  
  	// Save knowledge record to database after the file is safely stored.
  	logger.Info(ctx, "Saving knowledge record to database")
@@ -51927,9 +53181,16 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
 +	ctx, createErr = s.createAdmittedKnowledge(ctx, knowledge, artifact)
 +	if err := createErr; err != nil {
  		logger.Errorf(ctx, "Failed to create knowledge record, ID: %s, error: %v", knowledge.ID, err)
- 		if deleteErr := fileSvc.DeleteFile(ctx, filePath); deleteErr != nil {
- 			logger.Errorf(ctx, "Failed to delete saved file after knowledge creation failed, path: %s, error: %v", filePath, deleteErr)
-@@ -223,6 +241,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
+-		if deleteErr := fileSvc.DeleteFile(ctx, filePath); deleteErr != nil {
+-			logger.Errorf(ctx, "Failed to delete saved file after knowledge creation failed, path: %s, error: %v", filePath, deleteErr)
++		if types.CapacityWriteSessionFromContext(ctx) == nil {
++			if deleteErr := fileSvc.DeleteFile(ctx, filePath); deleteErr != nil {
++				logger.Errorf(ctx, "Failed to delete saved file after knowledge creation failed, path: %s, error: %v", filePath, deleteErr)
++			}
+ 		}
+ 		return nil, err
+ 	}
+@@ -223,6 +250,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
  
  	lang := types.LanguageFromContextOrDefault(ctx)
  	taskPayload := types.DocumentProcessPayload{
@@ -51937,7 +53198,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  		TenantID:                 tenantID,
  		KnowledgeID:              knowledge.ID,
  		KnowledgeBaseID:          kbID,
-@@ -814,7 +833,9 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
+@@ -814,7 +842,9 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
  		}
  	}
  
@@ -51948,7 +53209,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  		logger.Errorf(ctx, "Failed to create manual knowledge record: %v", err)
  		return nil, err
  	}
-@@ -912,7 +933,9 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
+@@ -912,7 +942,9 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
  
  	// Save knowledge record
  	logger.Infof(ctx, "Saving knowledge record to database, ID: %s", knowledge.ID)
@@ -51959,7 +53220,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  		logger.Errorf(ctx, "Failed to create knowledge record: %v", err)
  		return nil, err
  	}
-@@ -942,6 +965,7 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
+@@ -942,6 +974,7 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
  
  		lang := types.LanguageFromContextOrDefault(ctx)
  		taskPayload := types.DocumentProcessPayload{
@@ -51967,7 +53228,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  			TenantID:                 tenantID,
  			KnowledgeID:              knowledge.ID,
  			KnowledgeBaseID:          kbID,
-@@ -1067,9 +1091,20 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
+@@ -1067,9 +1100,20 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
  	if status == types.ManualKnowledgeStatusDraft {
  		existing.ParseStatus = types.ManualKnowledgeStatusDraft
  		existing.Description = ""
@@ -51989,7 +53250,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  			logger.Errorf(ctx, "Failed to persist manual draft: %v", err)
  			return nil, err
  		}
-@@ -1084,13 +1119,24 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
+@@ -1084,13 +1128,24 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
  	// Publish: persist pending status and enqueue async task for cleanup + re-indexing
  	existing.ParseStatus = "pending"
  	existing.Description = ""
@@ -52015,7 +53276,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  		logger.Errorf(ctx, "Failed to persist manual knowledge before indexing: %v", err)
  		return nil, err
  	}
-@@ -1124,6 +1170,7 @@ func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
+@@ -1124,6 +1179,7 @@ func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
  ) (string, error) {
  	requestID, _ := types.RequestIDFromContext(ctx)
  	payload := types.ManualProcessPayload{
@@ -52023,7 +53284,7 @@ index 1b19f5a6bd0d113aaba9001f02e1cd05dab816c5..7667cabadba8c984736efece0944f73a
  		RequestId:       requestID,
  		TenantID:        knowledge.TenantID,
  		KnowledgeID:     knowledge.ID,
-@@ -1163,7 +1210,7 @@ func (s *knowledgeService) markKnowledgeEnqueueFailed(ctx context.Context, knowl
+@@ -1163,7 +1219,7 @@ func (s *knowledgeService) markKnowledgeEnqueueFailed(ctx context.Context, knowl
  
  func usesSourceIdentityDuplicateCheck(channel string) bool {
  	switch channel {
@@ -59661,10 +60922,10 @@ index 6b66d51a2364e70de575a8048070b4f67a7ba07b..4abc5bd0e51664b010eed50cf4375855
  
 diff --git a/internal/application/service/nextcloud_capacity.go b/internal/application/service/nextcloud_capacity.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..fe7eda7a2df240f0287299c59835c19cd8ad856c
+index 0000000000000000000000000000000000000000..12119091df8d3dd9c6d6966a0ad3f8efd1abd2ca
 --- /dev/null
 +++ b/internal/application/service/nextcloud_capacity.go
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,169 @@
 +package service
 +
 +import (
@@ -59673,6 +60934,10 @@ index 0000000000000000000000000000000000000000..fe7eda7a2df240f0287299c59835c19c
 +	"encoding/hex"
 +	"errors"
 +	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"io"
++	"sync"
++	"time"
 +
 +	"github.com/Tencent/WeKnora/internal/application/repository"
 +	"github.com/Tencent/WeKnora/internal/types"
@@ -59700,6 +60965,10 @@ index 0000000000000000000000000000000000000000..fe7eda7a2df240f0287299c59835c19c
 +	if !ok {
 +		return nil, repository.ErrNextcloudCapacityUnavailable
 +	}
++	local, ok := fs.(interfaces.LocalCapacityIntentProvider)
++	if !ok || !local.SupportsLocalCapacityIntents() {
++		return nil, repository.ErrNextcloudCapacityUnavailable
++	}
 +	measured, err := provider.MeasureStorageCapacity(ctx)
 +	if err != nil {
 +		return nil, errors.Join(repository.ErrNextcloudCapacityUnavailable, err)
@@ -59708,10 +60977,96 @@ index 0000000000000000000000000000000000000000..fe7eda7a2df240f0287299c59835c19c
 +		return nil, err
 +	}
 +	key := sha256.Sum256([]byte(ds + "\x00" + external + "\x00" + etag + "\x00" + uuid.NewString()))
-+	return a.store.Reserve(ctx, kb.TenantID, kb.ID, *kb.StorageBackendID, hex.EncodeToString(key[:]), bytes, measured)
++	return a.store.ReserveDurable(ctx, kb.TenantID, kb.ID, *kb.StorageBackendID, hex.EncodeToString(key[:]), bytes, measured)
 +}
 +func (a *NextcloudCapacityAdmission) Finish(ctx context.Context, r *repository.NextcloudCapacityReservation, k string, ok bool) error {
 +	return a.store.Finish(ctx, r, k, ok)
++}
++
++type capacityWriteSession struct {
++	store       *repository.NextcloudCapacityStore
++	reservation *repository.NextcloudCapacityReservation
++	writer      string
++	mutex       sync.Mutex
++	lock        io.Closer
++	closed      bool
++}
++
++func (s *capacityWriteSession) Token() string   { return s.reservation.Token }
++func (s *capacityWriteSession) Backend() string { return s.reservation.BackendID }
++func (s *capacityWriteSession) RetainWriterLock(lock io.Closer) error {
++	s.mutex.Lock()
++	defer s.mutex.Unlock()
++	if s.closed || s.lock != nil {
++		return repository.ErrNextcloudCapacityUnavailable
++	}
++	s.lock = lock
++	return nil
++}
++func (s *capacityWriteSession) PrepareLocal(ctx context.Context, k, path, root, scope string, size int64) error {
++	return s.store.PrepareLocal(ctx, s.reservation, s.writer, k, path, root, scope, size)
++}
++func (s *capacityWriteSession) LocalCreated(ctx context.Context, path, identity string) error {
++	return s.store.LocalCreated(ctx, s.reservation, s.writer, path, identity)
++}
++func (s *capacityWriteSession) PhysicalWritten(ctx context.Context, path string, size int64, sha string) error {
++	return s.store.PhysicalWritten(ctx, s.reservation, s.writer, path, size, sha)
++}
++func (s *capacityWriteSession) ValidateCatalog(ctx context.Context, path, k string) error {
++	return s.store.ValidateWriter(ctx, s.reservation, s.writer, path, k)
++}
++func (s *capacityWriteSession) Cataloged(ctx context.Context, path, k, ref string) error {
++	return s.store.Cataloged(ctx, s.reservation, s.writer, path, k, ref)
++}
++func (a *NextcloudCapacityAdmission) WriteContext(ctx context.Context, r *repository.NextcloudCapacityReservation) context.Context {
++	return types.WithCapacityWriteSession(ctx, &capacityWriteSession{store: a.store, reservation: r, writer: uuid.NewString()})
++}
++
++// End runs on every ingestion exit, including failures before Stage. The
++// original-object writer lock spans storage, catalog, knowledge and staging.
++func (a *NextcloudCapacityAdmission) End(ctx context.Context, r *repository.NextcloudCapacityReservation, kb *types.KnowledgeBase) {
++	session, ok := types.CapacityWriteSessionFromContext(ctx).(*capacityWriteSession)
++	if !ok {
++		return
++	}
++	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
++	defer cancel()
++	_ = a.store.MarkWriteFailed(cleanup, r, session.writer)
++	session.mutex.Lock()
++	if session.lock != nil {
++		_ = session.lock.Close()
++		session.lock = nil
++	}
++	session.closed = true
++	session.mutex.Unlock()
++	if e := a.store.CancelUnstarted(cleanup, r); e == nil {
++		return
++	}
++	// A failure can leave a real partial file or an intact retained generation.
++	// Reconciliation observes that exact object; errors leave its charge intact.
++	_ = a.Reconcile(cleanup, kb, r)
++}
++func (a *NextcloudCapacityAdmission) Reconcile(ctx context.Context, kb *types.KnowledgeBase, r *repository.NextcloudCapacityReservation) error {
++	if a == nil || kb == nil || r == nil || kb.TenantID != r.TenantID || kb.ID != r.KnowledgeBaseID || kb.StorageBackendID == nil || *kb.StorageBackendID != r.BackendID {
++		return repository.ErrNextcloudCapacityUnavailable
++	}
++	intent, e := a.store.Intent(ctx, r)
++	if errors.Is(e, gorm.ErrRecordNotFound) {
++		return a.store.CancelUnstarted(ctx, r)
++	}
++	if e != nil {
++		return e
++	}
++	fs, e := a.resolve(ctx, kb)
++	if e != nil {
++		return e
++	}
++	provider, ok := fs.(interfaces.LocalCapacityIntentProvider)
++	if !ok || !provider.SupportsLocalCapacityIntents() {
++		return repository.ErrNextcloudCapacityUnavailable
++	}
++	expected := types.CapacityLocalObject{Token: r.Token, TenantKnowledgeID: intent.KnowledgeID, BackendID: r.BackendID, PhysicalPath: intent.PhysicalPath, RootIdentity: intent.RootIdentity, ScopeID: r.ScopeID}
++	return provider.InspectCapacityIntent(ctx, expected, func(o types.CapacityLocalObject) error { return a.store.ReconcileLocal(ctx, r, intent, o) })
 +}
 +func ConfigureDataSourceCapacityAdmission(source interfaces.DataSourceService, admission *NextcloudCapacityAdmission) {
 +	if service, ok := source.(*DataSourceService); ok {
@@ -59740,12 +61095,534 @@ index 0000000000000000000000000000000000000000..fe7eda7a2df240f0287299c59835c19c
 +	}
 +	return a.store.Status(ctx, kb.TenantID, kb.ID, *kb.StorageBackendID, m)
 +}
+diff --git a/internal/application/service/nextcloud_capacity_intent_test.go b/internal/application/service/nextcloud_capacity_intent_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..87ad461e460076701945f6b4efcf2200dac46afd
+--- /dev/null
++++ b/internal/application/service/nextcloud_capacity_intent_test.go
+@@ -0,0 +1,516 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	storagefile "github.com/Tencent/WeKnora/internal/application/service/file"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	"gorm.io/gorm/logger"
++	"mime/multipart"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++type capacityFailureCatalog struct {
++	interfaces.ResourceCatalog
++	fail bool
++}
++
++func (c *capacityFailureCatalog) Register(ctx context.Context, tenant uint64, path string, meta interfaces.ResourceRegistration) (string, error) {
++	if c.fail {
++		return "", errors.New("actual catalog registration unavailable")
++	}
++	return c.ResourceCatalog.Register(ctx, tenant, path, meta)
++}
++
++type capacityIntentKnowledge struct {
++	interfaces.KnowledgeService
++	repo      interfaces.KnowledgeRepository
++	db        *gorm.DB
++	fs        interfaces.FileService
++	mode      string
++	candidate *types.Knowledge
++}
++
++func (k *capacityIntentKnowledge) GetRepository() interfaces.KnowledgeRepository { return k.repo }
++func (k *capacityIntentKnowledge) CreateKnowledgeFromFile(ctx context.Context, kb string, h *multipart.FileHeader, metadata map[string]string, _ *bool, _ string, _ []string, _ string, _ *types.KnowledgeProcessOverrides) (*types.Knowledge, error) {
++	if k.mode == "duplicate" {
++		return k.candidate, types.NewDuplicateFileError(k.candidate)
++	}
++	bytes, _ := json.Marshal(metadata)
++	row := &types.Knowledge{ID: uuid.NewString(), TenantID: 7, KnowledgeBaseID: kb, Channel: types.ConnectorTypeNextcloud, Type: "file", Metadata: bytes, ParseStatus: types.ParseStatusPending}
++	if e := k.db.Create(row).Error; e != nil {
++		return nil, e
++	}
++	k.candidate = row
++	if k.mode == "partial" {
++		short, e := bytesToFileHeader([]byte("part"), h.Filename)
++		if e != nil {
++			return nil, e
++		}
++		short.Size = h.Size
++		h = short
++	}
++	path, e := k.fs.SaveFile(types.WithResourceProvenance(ctx, types.ResourceProvenanceNextcloud), h, 7, row.ID)
++	if e != nil {
++		return nil, e
++	}
++	row.FilePath = path
++	e = k.db.Model(row).Update("file_path", path).Error
++	return row, e
++}
++
++type capacityIntentFixture struct {
++	db                *gorm.DB
++	store             *repository.NextcloudCapacityStore
++	admission         *NextcloudCapacityAdmission
++	kb                *types.KnowledgeBase
++	fs                interfaces.FileService
++	base, dsn, driver string
++	catalog           *capacityFailureCatalog
++}
++
++func newCapacityIntentFixture(t *testing.T, pg bool) *capacityIntentFixture {
++	t.Helper()
++	f := &capacityIntentFixture{base: t.TempDir(), driver: "sqlite"}
++	if pg {
++		dsn := os.Getenv("WEKNORA_CAPACITY_TEST_POSTGRES_DSN")
++		if dsn == "" {
++			t.Skip("owned stock PG capacity fixture required")
++		}
++		admin, e := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++		require.NoError(t, e)
++		schema := "capacity_intent_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
++		require.NoError(t, admin.Exec(`CREATE SCHEMA "`+schema+`"`).Error)
++		f.dsn = dsn + " search_path=" + schema
++		f.driver = "postgres"
++		t.Cleanup(func() {
++			_ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`).Error
++			sql, _ := admin.DB()
++			_ = sql.Close()
++		})
++		f.db, e = gorm.Open(postgres.Open(f.dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++		require.NoError(t, e)
++	} else {
++		f.dsn = filepath.Join(t.TempDir(), "capacity.sqlite") + "?_busy_timeout=5000&_foreign_keys=on"
++		var e error
++		f.db, e = gorm.Open(sqlite.Open(f.dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++		require.NoError(t, e)
++	}
++	sql, e := f.db.DB()
++	require.NoError(t, e)
++	sql.SetMaxOpenConns(4)
++	t.Cleanup(func() { _ = sql.Close() })
++	require.NoError(t, f.db.AutoMigrate(&types.KnowledgeBase{}, &types.Knowledge{}, &types.StoredResource{}, &types.ResourceBinding{}, &types.ResourceAccessGrant{}, &types.Tenant{}, &types.StorageBackend{}))
++	migrations := []string{"sqlite/000065_nextcloud_capacity_admission", "sqlite/000067_nextcloud_capacity_write_intents"}
++	if pg {
++		migrations = []string{"versioned/000146_nextcloud_capacity_admission", "versioned/000148_nextcloud_capacity_write_intents"}
++	}
++	for _, name := range migrations {
++		b, e := os.ReadFile("../../../migrations/" + name + ".up.sql")
++		require.NoError(t, e)
++		require.NoError(t, f.db.Exec(string(b)).Error)
++	}
++	backend := "backend"
++	f.kb = &types.KnowledgeBase{ID: "kb", TenantID: 7, StorageBackendID: &backend}
++	require.NoError(t, f.db.Create(f.kb).Error)
++	require.NoError(t, f.db.Create(&types.Tenant{ID: 7, Name: "owned capacity fixture", DefaultStorageBackendID: &backend}).Error)
++	require.NoError(t, f.db.Create(&types.StorageBackend{ID: backend, TenantID: 7, Name: "owned local backend", Provider: "local", Status: types.StorageBackendStatusActive}).Error)
++	f.store = repository.NewNextcloudCapacityStore(f.db)
++	f.catalog = &capacityFailureCatalog{ResourceCatalog: NewResourceCatalog(repository.NewResourceRepository(f.db))}
++	f.fs = storagefile.NewResourceCatalogFileService(storagefile.NewBackendScopedFileService(backend, storagefile.NewLocalFileService(f.base, "")), f.catalog)
++	f.admission = NewNextcloudCapacityAdmission(f.store, func(context.Context, *types.KnowledgeBase) (interfaces.FileService, error) { return f.fs, nil })
++	return f
++}
++func (f *capacityIntentFixture) ingest(t *testing.T, mode string, stageErr, admitErr error) (*capacityIntentKnowledge, error) {
++	t.Helper()
++	version := &deletionLookupKnowledgeRepo{stageErr: stageErr, admitErr: admitErr}
++	knowledge := &capacityIntentKnowledge{repo: version, db: f.db, fs: f.fs, mode: mode}
++	source := &DataSourceService{knowledgeService: knowledge, kbService: &processSyncKBService{kb: f.kb}, capacityAdmission: f.admission}
++	item := &types.FetchedItem{ExternalID: "nextcloud:instance:77", FileName: "source.txt", Content: []byte("actual retained original source bytes")}
++	_, e := source.ingestNextcloudItem(context.Background(), &types.DataSource{ID: "ds", TenantID: 7, KnowledgeBaseID: "kb"}, item, map[string]string{"datasource_id": "ds", "external_id": item.ExternalID, "nextcloud_etag": "opaque-etag"}, nil)
++	return knowledge, e
++}
++func capacityIntentIngestionContract(t *testing.T, pg bool) {
++	for _, mode := range []string{"before-io", "partial", "register-fail", "stage-fail", "success"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newCapacityIntentFixture(t, pg)
++			ctx := context.Background()
++			var stageErr, admitErr error
++			if mode == "before-io" {
++				admitErr = errors.New("current candidate retry denied before IO")
++			}
++			if mode == "stage-fail" {
++				stageErr = errors.New("stage crash boundary")
++			}
++			f.catalog.fail = mode == "register-fail"
++			k, e := f.ingest(t, mode, stageErr, admitErr)
++			if mode == "success" {
++				require.NoError(t, e)
++			} else {
++				require.Error(t, e)
++			}
++			var reservations []repository.NextcloudCapacityReservation
++			require.NoError(t, f.db.Find(&reservations).Error)
++			require.Len(t, reservations, 1)
++			r := reservations[0]
++			var intents []repository.NextcloudCapacityWriteIntent
++			require.NoError(t, f.db.Find(&intents).Error)
++			if mode == "before-io" {
++				require.Equal(t, "cancelled", r.State)
++				require.Empty(t, intents)
++			} else {
++				require.Equal(t, "committed", r.State)
++				require.Len(t, intents, 1)
++				i := intents[0]
++				require.Equal(t, "charged", i.State)
++				id, path, ok := types.ParseStorageBackendPath(i.PhysicalPath)
++				require.True(t, ok)
++				require.Equal(t, "backend", id)
++				raw := filepath.Join(f.base, strings.TrimPrefix(path, "local://"))
++				actual, e := os.ReadFile(raw)
++				require.NoError(t, e)
++				expected := []byte("actual retained original source bytes")
++				if mode == "partial" {
++					expected = []byte("part")
++				}
++				require.Equal(t, expected, actual)
++				require.Equal(t, int64(len(actual)), i.ObservedBytes)
++				if mode == "partial" || mode == "register-fail" {
++					require.Equal(t, i.ObservedBytes, i.OrphanChargeBytes)
++				} else {
++					require.Zero(t, i.OrphanChargeBytes)
++				}
++				require.Error(t, f.store.ValidateWriter(ctx, &r, i.WriterID, i.PhysicalPath, i.KnowledgeID), "late writer/catalog after charge must fail")
++				require.NoError(t, f.admission.Reconcile(ctx, f.kb, &r), "an identical actual observation is idempotent")
++				wrong := r
++				wrong.BackendID = "foreign"
++				require.Error(t, f.admission.Reconcile(ctx, f.kb, &wrong))
++				wrong = r
++				wrong.KnowledgeBaseID = "foreign"
++				require.Error(t, f.admission.Reconcile(ctx, f.kb, &wrong))
++			}
++			m, e := f.fs.(interfaces.StorageCapacityProvider).MeasureStorageCapacity(ctx)
++			require.NoError(t, e)
++			status, e := f.store.Status(ctx, 7, "kb", "backend", m)
++			require.NoError(t, e)
++			if mode == "partial" {
++				require.Equal(t, int64(4), status.OrphanChargeBytes)
++				require.Equal(t, int64(4), status.LogicalRetainedBytes)
++			}
++			// A failed partial upload is charged for its actual retained four bytes,
++			// permitting a real retry under a quota that would reject the old full hold.
++			if mode == "partial" || mode == "before-io" || mode == "register-fail" {
++				f.catalog.fail = false
++				quota := int64(len("actual retained original source bytes")) + status.OrphanChargeBytes
++				require.NoError(t, f.store.SetPolicy(ctx, repository.NextcloudCapacityPolicy{TenantID: 7, KnowledgeBaseID: "kb", RetentionQuotaBytes: quota, WarningPercent: 80, PausePercent: 90}))
++				_, retryErr := f.ingest(t, "success", nil, nil)
++				require.NoError(t, retryErr)
++				var pending int64
++				require.NoError(t, f.db.Model(&repository.NextcloudCapacityReservation{}).Where("state='pending'").Count(&pending).Error)
++				require.Zero(t, pending)
++				finalStatus, statusErr := f.store.Status(ctx, 7, "kb", "backend", mustCapacityMeasure(t, f.fs))
++				require.NoError(t, statusErr)
++				require.Equal(t, quota, finalStatus.LogicalRetainedBytes)
++				require.Equal(t, "paused", finalStatus.State)
++			}
++			if mode == "stage-fail" {
++				// Retry uses the retained exact same node; no second physical write or
++				// reservation charge is fabricated for a duplicate catalog object.
++				version := &deletionLookupKnowledgeRepo{}
++				k.mode = "duplicate"
++				k.repo = version
++				source := &DataSourceService{knowledgeService: k, kbService: &processSyncKBService{kb: f.kb}, capacityAdmission: f.admission}
++				_, e = source.ingestNextcloudItem(ctx, &types.DataSource{ID: "ds", TenantID: 7, KnowledgeBaseID: "kb"}, &types.FetchedItem{ExternalID: "nextcloud:instance:77", FileName: "source.txt", Content: []byte("actual retained original source bytes")}, map[string]string{"nextcloud_etag": "opaque-etag"}, nil)
++				require.NoError(t, e)
++				var count int64
++				require.NoError(t, f.db.Model(&repository.NextcloudCapacityWriteIntent{}).Count(&count).Error)
++				require.Equal(t, int64(1), count)
++			}
++		})
++	}
++}
++func TestCapacityIntentActualSQLiteIngestion(t *testing.T) { capacityIntentIngestionContract(t, false) }
++func TestPostgresCapacityIntentActualIngestion(t *testing.T) {
++	capacityIntentIngestionContract(t, true)
++}
++
++func TestCapacityIntentWriterFenceAndUnknown(t *testing.T) {
++	f := newCapacityIntentFixture(t, false)
++	ctx := context.Background()
++	r, e := f.admission.Begin(ctx, f.kb, "ds", "node", "etag", 6)
++	require.NoError(t, e)
++	writeCtx := f.admission.WriteContext(ctx, r)
++	header, e := bytesToFileHeader([]byte("actual"), "file.txt")
++	require.NoError(t, e)
++	_, e = f.fs.SaveFile(writeCtx, header, 7, "candidate")
++	require.NoError(t, e)
++	require.Error(t, f.admission.Reconcile(ctx, f.kb, r), "actual current writer OS fence must prevent reconciliation even if expired")
++	require.NoError(t, f.db.Model(&repository.NextcloudCapacityReservation{}).Where("token=?", r.Token).Update("lease_until_ms", 1).Error)
++	require.Error(t, f.admission.Reconcile(ctx, f.kb, r))
++	i, e := f.store.Intent(ctx, r)
++	require.NoError(t, e)
++	require.Error(t, types.CapacityWriteSessionFromContext(writeCtx).ValidateCatalog(ctx, i.PhysicalPath, "candidate"))
++	f.admission.End(writeCtx, r, f.kb)
++	require.NoError(t, f.db.Where("token=?", r.Token).Take(r).Error)
++	require.Equal(t, "committed", r.State)
++	_, e = f.fs.SaveFile(writeCtx, header, 7, "late-candidate")
++	require.Error(t, e)
++	legacy, e := f.store.Reserve(ctx, 7, "kb", "backend", "legacy", 1, mustCapacityMeasure(t, f.fs))
++	require.NoError(t, e)
++	require.Error(t, f.store.CancelUnstarted(ctx, legacy))
++	require.Error(t, f.admission.Reconcile(ctx, f.kb, legacy))
++}
++func mustCapacityMeasure(t *testing.T, fs interfaces.FileService) types.StorageCapacity {
++	m, e := fs.(interfaces.StorageCapacityProvider).MeasureStorageCapacity(context.Background())
++	require.NoError(t, e)
++	return m
++}
++
++func TestCapacityIntentAbsentLinkedRootSharedAndScope(t *testing.T) {
++	f := newCapacityIntentFixture(t, false)
++	ctx := context.Background()
++	r, e := f.admission.Begin(ctx, f.kb, "ds", "node", "etag", 6)
++	require.NoError(t, e)
++	writeCtx := f.admission.WriteContext(ctx, r)
++	require.NoError(t, os.MkdirAll(filepath.Join(f.base, "7"), 0700))
++	outside := t.TempDir()
++	require.NoError(t, os.Symlink(outside, filepath.Join(f.base, "7", "candidate")))
++	header, e := bytesToFileHeader([]byte("actual"), "file.txt")
++	require.NoError(t, e)
++	_, e = f.fs.SaveFile(writeCtx, header, 7, "candidate")
++	require.Error(t, e)
++	f.admission.End(writeCtx, r, f.kb)
++	require.NoError(t, f.db.Where("token=?", r.Token).Take(r).Error)
++	require.Equal(t, "pending", r.State, "linked directory cannot prove absence")
++	require.NoError(t, os.Remove(filepath.Join(f.base, "7", "candidate")))
++	require.NoError(t, f.admission.Reconcile(ctx, f.kb, r))
++	require.NoError(t, f.db.Where("token=?", r.Token).Take(r).Error)
++	require.Equal(t, "released", r.State, "exclusive fence + actual absence + no catalog owners proves release")
++	// A different configured root on the very same filesystem is not the object.
++	f2 := newCapacityIntentFixture(t, false)
++	r2, e := f2.admission.Begin(ctx, f2.kb, "ds", "node", "etag", 6)
++	require.NoError(t, e)
++	w2 := f2.admission.WriteContext(ctx, r2)
++	path, e := f2.fs.SaveFile(w2, header, 7, "candidate")
++	require.NoError(t, e)
++	s := types.CapacityWriteSessionFromContext(w2).(*capacityWriteSession)
++	s.mutex.Lock()
++	require.NoError(t, s.lock.Close())
++	s.lock = nil
++	s.closed = true
++	s.mutex.Unlock()
++	changed := NewNextcloudCapacityAdmission(f2.store, func(context.Context, *types.KnowledgeBase) (interfaces.FileService, error) {
++		return storagefile.NewBackendScopedFileService("backend", storagefile.NewLocalFileService(t.TempDir(), "")), nil
++	})
++	require.Error(t, changed.Reconcile(ctx, f2.kb, r2))
++	require.NoError(t, f2.db.Where("token=?", r2.Token).Take(r2).Error)
++	require.Equal(t, "pending", r2.State)
++	// Other KB/message ownership is kept; this reconciliation never deletes.
++	var actual types.StoredResource
++	require.NoError(t, f2.db.Where("physical_path LIKE ?", "%capacity-"+r2.Token+"%").Take(&actual).Error)
++	backend := "backend"
++	require.NoError(t, f2.db.Create(&types.KnowledgeBase{ID: "other-kb", TenantID: 7, StorageBackendID: &backend}).Error)
++	other := types.Knowledge{ID: "other-owner", TenantID: 7, KnowledgeBaseID: "other-kb", FilePath: path}
++	require.NoError(t, f2.db.Create(&other).Error)
++	require.NoError(t, f2.db.Create(&types.ResourceBinding{ResourceID: actual.ID, TenantID: 7, OwnerType: "knowledge", OwnerID: other.ID, Relation: "source_file"}).Error)
++	require.NoError(t, f2.admission.Reconcile(ctx, f2.kb, r2))
++	require.NoError(t, f2.db.Where("id=?", actual.ID).Take(&actual).Error)
++	require.Equal(t, "active", actual.State)
++	reader, e := f2.fs.GetFile(ctx, path)
++	require.NoError(t, e)
++	require.NoError(t, reader.Close())
++	var count int64
++	require.NoError(t, f2.db.Model(&types.ResourceBinding{}).Where("resource_id=?", actual.ID).Count(&count).Error)
++	require.Equal(t, int64(2), count)
++	wrong := *r2
++	wrong.KnowledgeBaseID = "other-kb"
++	require.Error(t, f2.store.CancelUnstarted(ctx, &wrong))
++	missing, e := f2.admission.Begin(ctx, f2.kb, "ds", "missing", "etag", 1)
++	require.NoError(t, e)
++	writeMissing := f2.admission.WriteContext(ctx, missing)
++	_, e = f2.fs.SaveFile(writeMissing, header, 7, "../escaped")
++	require.Error(t, e)
++	f2.admission.End(writeMissing, missing, f2.kb)
++	require.NoError(t, f2.db.Where("token=?", missing.Token).Take(missing).Error)
++	require.Equal(t, "cancelled", missing.State)
++	unsupported := NewNextcloudCapacityAdmission(f2.store, func(context.Context, *types.KnowledgeBase) (interfaces.FileService, error) {
++		return capacityMeasuredFile{FileService: &createKnowledgeFileServiceStub{}, measurement: mustCapacityMeasure(t, f2.fs)}, nil
++	})
++	_, e = unsupported.Begin(ctx, f2.kb, "ds", "unknown", "etag", 1)
++	require.Error(t, e)
++}
++
++func TestCapacityIntentCannotAdoptExistingLegacyObject(t *testing.T) {
++	f := newCapacityIntentFixture(t, false)
++	ctx := context.Background()
++	r, e := f.admission.Begin(ctx, f.kb, "ds", "node", "etag", 6)
++	require.NoError(t, e)
++	dir := filepath.Join(f.base, "7", "candidate")
++	require.NoError(t, os.MkdirAll(dir, 0700))
++	physical := filepath.Join(dir, "capacity-"+r.Token+".txt")
++	require.NoError(t, os.WriteFile(physical, []byte("legacy"), 0600))
++	writeCtx := f.admission.WriteContext(ctx, r)
++	h, e := bytesToFileHeader([]byte("actual"), "file.txt")
++	require.NoError(t, e)
++	_, e = f.fs.SaveFile(writeCtx, h, 7, "candidate")
++	require.Error(t, e)
++	f.admission.End(writeCtx, r, f.kb)
++	require.NoError(t, f.db.Where("token=?", r.Token).Take(r).Error)
++	require.Equal(t, "pending", r.State)
++	i, e := f.store.Intent(ctx, r)
++	require.NoError(t, e)
++	require.Empty(t, i.ObjectIdentity)
++	require.Error(t, f.admission.Reconcile(ctx, f.kb, r))
++	actual, e := os.ReadFile(physical)
++	require.NoError(t, e)
++	require.Equal(t, []byte("legacy"), actual)
++}
++
++func capacityConcurrentWriterContract(t *testing.T, pg bool) {
++	f := newCapacityIntentFixture(t, pg)
++	ctx := context.Background()
++	r, e := f.admission.Begin(ctx, f.kb, "ds", "same-node", "etag", 6)
++	require.NoError(t, e)
++	h, e := bytesToFileHeader([]byte("actual"), "source.txt")
++	require.NoError(t, e)
++	type outcome struct {
++		ctx  context.Context
++		path string
++		err  error
++	}
++	start := make(chan struct{})
++	results := make(chan outcome, 2)
++	for n := 0; n < 2; n++ {
++		writer := f.admission.WriteContext(ctx, r)
++		go func() {
++			<-start
++			path, err := f.fs.SaveFile(writer, h, 7, "same-knowledge")
++			results <- outcome{writer, path, err}
++		}()
++	}
++	close(start)
++	first, second := <-results, <-results
++	var winner, loser outcome
++	if first.err == nil {
++		winner, loser = first, second
++	} else {
++		winner, loser = second, first
++	}
++	require.NoError(t, winner.err)
++	require.Error(t, loser.err)
++	f.admission.End(loser.ctx, r, f.kb)
++	require.NoError(t, f.db.Where("token=?", r.Token).Take(r).Error)
++	require.Equal(t, "pending", r.State, "failed concurrent retry cannot close the active writer")
++	k := &types.Knowledge{ID: "same-knowledge", TenantID: 7, KnowledgeBaseID: "kb", FilePath: winner.path}
++	require.NoError(t, f.db.Create(k).Error)
++	require.NoError(t, f.admission.Finish(winner.ctx, r, k.ID, true))
++	f.admission.End(winner.ctx, r, f.kb)
++	var count int64
++	require.NoError(t, f.db.Model(&repository.NextcloudCapacityWriteIntent{}).Count(&count).Error)
++	require.Equal(t, int64(1), count)
++	require.NoError(t, f.db.Where("token=?", r.Token).Take(r).Error)
++	require.Equal(t, "committed", r.State)
++}
++func TestCapacityIntentConcurrentActualWritersSQLite(t *testing.T) {
++	capacityConcurrentWriterContract(t, false)
++}
++func TestPostgresCapacityIntentConcurrentActualWriters(t *testing.T) {
++	capacityConcurrentWriterContract(t, true)
++}
++
++func TestCapacityCrashChild(t *testing.T) {
++	if os.Getenv("WEKNORA_CAPACITY_CRASH_CHILD") != "1" {
++		t.Skip("owned subprocess crash fixture")
++	}
++	var d struct{ Driver, DSN, Base, Output string }
++	b, e := os.ReadFile(os.Getenv("WEKNORA_CAPACITY_CRASH_DESCRIPTOR"))
++	require.NoError(t, e)
++	require.NoError(t, json.Unmarshal(b, &d))
++	var db *gorm.DB
++	if d.Driver == "postgres" {
++		db, e = gorm.Open(postgres.Open(d.DSN), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++	} else {
++		db, e = gorm.Open(sqlite.Open(d.DSN), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
++	}
++	require.NoError(t, e)
++	fs := storagefile.NewResourceCatalogFileService(storagefile.NewBackendScopedFileService("backend", storagefile.NewLocalFileService(d.Base, "")), NewResourceCatalog(repository.NewResourceRepository(db)))
++	a := NewNextcloudCapacityAdmission(repository.NewNextcloudCapacityStore(db), func(context.Context, *types.KnowledgeBase) (interfaces.FileService, error) { return fs, nil })
++	backend := "backend"
++	kb := &types.KnowledgeBase{ID: "kb", TenantID: 7, StorageBackendID: &backend}
++	r, e := a.Begin(context.Background(), kb, "ds", "crash-node", "etag", 32)
++	require.NoError(t, e)
++	raw, e := json.Marshal(r)
++	require.NoError(t, e)
++	require.NoError(t, os.WriteFile(d.Output, raw, 0600))
++	h, e := bytesToFileHeader([]byte("crash"), "source.txt")
++	require.NoError(t, e)
++	h.Size = 32
++	_, e = fs.SaveFile(a.WriteContext(context.Background(), r), h, 7, "crash-candidate")
++	require.Error(t, e)
++	os.Exit(77) // No End/defer: leaves a durable partial object and writing intent.
++}
++func capacityCrashContract(t *testing.T, pg bool) {
++	f := newCapacityIntentFixture(t, pg)
++	dir := t.TempDir()
++	descriptor := filepath.Join(dir, "descriptor")
++	output := filepath.Join(dir, "reservation")
++	b, e := json.Marshal(map[string]string{"Driver": f.driver, "DSN": f.dsn, "Base": f.base, "Output": output})
++	require.NoError(t, e)
++	require.NoError(t, os.WriteFile(descriptor, b, 0600))
++	child := exec.Command(os.Args[0], "-test.run=^TestCapacityCrashChild$", "-test.v")
++	child.Env = append(os.Environ(), "WEKNORA_CAPACITY_CRASH_CHILD=1", "WEKNORA_CAPACITY_CRASH_DESCRIPTOR="+descriptor)
++	err := child.Run()
++	var exit *exec.ExitError
++	require.ErrorAs(t, err, &exit)
++	require.Equal(t, 77, exit.ExitCode())
++	var r repository.NextcloudCapacityReservation
++	b, e = os.ReadFile(output)
++	require.NoError(t, e)
++	require.NoError(t, json.Unmarshal(b, &r))
++	i, e := f.store.Intent(context.Background(), &r)
++	require.NoError(t, e)
++	require.Equal(t, "writing", i.State)
++	if cli := os.Getenv("WEKNORA_CAPACITY_RECONCILE_CLI"); cli != "" {
++		private := t.TempDir()
++		require.NoError(t, os.Chmod(private, 0700))
++		args := []string{"--mode=reconcile", "--reservation-token=" + r.Token, "--local-storage-base-dir=" + f.base, "--output=" + filepath.Join(private, "receipt")}
++		if f.driver == "postgres" {
++			dsnFile := filepath.Join(private, "dsn")
++			require.NoError(t, os.WriteFile(dsnFile, []byte(f.dsn), 0600))
++			args = append(args, "--postgres-connection-file="+dsnFile)
++		} else {
++			path := strings.Split(f.dsn, "?")[0]
++			require.NoError(t, os.Chmod(path, 0600))
++			require.NoError(t, os.Chmod(filepath.Dir(path), 0700))
++			args = append(args, "--sqlite-db="+path)
++		}
++		command := exec.Command(cli, args...)
++		result, err := command.CombinedOutput()
++		require.NoError(t, err, string(result))
++	} else {
++		require.NoError(t, f.admission.Reconcile(context.Background(), f.kb, &r))
++	}
++	require.NoError(t, f.db.Where("token=?", r.Token).Take(&r).Error)
++	require.Equal(t, "committed", r.State)
++	i, e = f.store.Intent(context.Background(), &r)
++	require.NoError(t, e)
++	require.Equal(t, int64(5), i.OrphanChargeBytes)
++	require.Error(t, f.store.ValidateWriter(context.Background(), &r, i.WriterID, i.PhysicalPath, i.KnowledgeID))
++	require.NoError(t, f.store.SetPolicy(context.Background(), repository.NextcloudCapacityPolicy{TenantID: 7, KnowledgeBaseID: "kb", RetentionQuotaBytes: 42, WarningPercent: 80, PausePercent: 90}))
++	_, e = f.ingest(t, "success", nil, nil)
++	require.NoError(t, e, "crash partial bytes must not retain an inflated full reservation forever")
++}
++func TestCapacityIntentActualSQLiteProcessCrash(t *testing.T)   { capacityCrashContract(t, false) }
++func TestPostgresCapacityIntentActualProcessCrash(t *testing.T) { capacityCrashContract(t, true) }
 diff --git a/internal/application/service/nextcloud_capacity_test.go b/internal/application/service/nextcloud_capacity_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c30fa17be1f5f276759cb9f46699d441b9f7494
+index 0000000000000000000000000000000000000000..3fbdf7e9473c0afddfaa80703500602d1d4f2462
 --- /dev/null
 +++ b/internal/application/service/nextcloud_capacity_test.go
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,119 @@
 +package service
 +
 +import (
@@ -59771,6 +61648,13 @@ index 0000000000000000000000000000000000000000..8c30fa17be1f5f276759cb9f46699d44
 +	measurement types.StorageCapacity
 +}
 +
++func (f capacityMeasuredFile) SupportsLocalCapacityIntents() bool {
++	p, ok := f.FileService.(interfaces.LocalCapacityIntentProvider)
++	return ok && p.SupportsLocalCapacityIntents()
++}
++func (f capacityMeasuredFile) InspectCapacityIntent(ctx context.Context, o types.CapacityLocalObject, callback func(types.CapacityLocalObject) error) error {
++	return f.FileService.(interfaces.LocalCapacityIntentProvider).InspectCapacityIntent(ctx, o, callback)
++}
 +func (f capacityMeasuredFile) MeasureStorageCapacity(context.Context) (types.StorageCapacity, error) {
 +	return f.measurement, nil
 +}
@@ -59791,7 +61675,11 @@ index 0000000000000000000000000000000000000000..8c30fa17be1f5f276759cb9f46699d44
 +	if requireErr != nil {
 +		return nil, requireErr
 +	}
-+	_, err := s.fs.SaveFile(ctx, header, 7, row.ID)
++	path, err := s.fs.SaveFile(ctx, header, 7, row.ID)
++	if err == nil {
++		row.FilePath = path
++		err = s.db.Model(row).Update("file_path", path).Error
++	}
 +	return row, err
 +}
 +func TestNextcloudCapacityActualIngestAndPausedNoSideEffects(t *testing.T) {
@@ -59803,6 +61691,9 @@ index 0000000000000000000000000000000000000000..8c30fa17be1f5f276759cb9f46699d44
 +			sql, err := os.ReadFile("../../../migrations/sqlite/000065_nextcloud_capacity_admission.up.sql")
 +			require.NoError(t, err)
 +			require.NoError(t, db.Exec(string(sql)).Error)
++			intentSQL, intentErr := os.ReadFile("../../../migrations/sqlite/000067_nextcloud_capacity_write_intents.up.sql")
++			require.NoError(t, intentErr)
++			require.NoError(t, db.Exec(string(intentSQL)).Error)
 +			backend := "backend"
 +			kb := &types.KnowledgeBase{ID: "kb", TenantID: 7, StorageBackendID: &backend}
 +			require.NoError(t, db.Create(kb).Error)
@@ -59814,6 +61705,9 @@ index 0000000000000000000000000000000000000000..8c30fa17be1f5f276759cb9f46699d44
 +			knowledge := &capacityIngestKnowledge{repo: version, db: db, fs: fs}
 +			source := &DataSourceService{knowledgeService: knowledge, kbService: &processSyncKBService{kb: kb}}
 +			measure := types.StorageCapacity{ScopeID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", TotalBytes: 100000, AvailableBytes: 90000, MeasuredAt: time.Now().UTC()}
++			actualMeasure, actualErr := fs.(interfaces.StorageCapacityProvider).MeasureStorageCapacity(context.Background())
++			require.NoError(t, actualErr)
++			measure.ScopeID = actualMeasure.ScopeID
 +			if mode == "paused" {
 +				measure.AvailableBytes = 9000
 +			}
@@ -64858,7 +66752,7 @@ index 0000000000000000000000000000000000000000..9ba9dc9353ef814bbe745ce4f20260c0
 +	requireSourceTombstone(t, db, dialect, 8, "datasource", "new-source", 1)
 +}
 diff --git a/internal/database/migration_sqlite_versioned_schema_test.go b/internal/database/migration_sqlite_versioned_schema_test.go
-index 9cc4e5155bd1100fcfe2170f968d29d0b2c008fd..79d65a4c4ffea75f5bb77db3112be093415b4619 100644
+index 9cc4e5155bd1100fcfe2170f968d29d0b2c008fd..3fbcdd264eb4ed73fe66f5b901bd0e9aec310015 100644
 --- a/internal/database/migration_sqlite_versioned_schema_test.go
 +++ b/internal/database/migration_sqlite_versioned_schema_test.go
 @@ -15,7 +15,7 @@ import (
@@ -64870,7 +66764,7 @@ index 9cc4e5155bd1100fcfe2170f968d29d0b2c008fd..79d65a4c4ffea75f5bb77db3112be093
  var versionedSQLiteTables = []string{
  	"memory_extraction_sessions",
  	"task_pending_ops",
-@@ -39,31 +39,189 @@ var versionedSQLiteTables = []string{
+@@ -39,31 +39,192 @@ var versionedSQLiteTables = []string{
  	"resource_access_policies",
  	"resource_group_grants",
  	"directory_permission_versions",
@@ -64885,6 +66779,7 @@ index 9cc4e5155bd1100fcfe2170f968d29d0b2c008fd..79d65a4c4ffea75f5bb77db3112be093
 +	"nextcloud_pair_rebuild_history",
 +	"nextcloud_source_revisions",
 +	"nextcloud_source_tombstones",
++	"nextcloud_capacity_write_intents",
  }
  
  // versionedSQLiteColumns maps each existing table to the columns that the
@@ -64897,13 +66792,15 @@ index 9cc4e5155bd1100fcfe2170f968d29d0b2c008fd..79d65a4c4ffea75f5bb77db3112be093
 -	"knowledges":      {"pending_subtasks_count", "profile"},                                // 000056, 000101
 -	"knowledge_bases": {"profile_config", "generated_profile"},                              // 000101
 -	"messages":        {"attachments", "usage", "sandbox_checkpoint", "context_checkpoint"}, // 000034/085/097/105
-+	"memory_subjects": {"extraction_state"},                                                                   // 000094
-+	"memory_items":    {"replaces_id"},                                                                        // 000094
-+	"tenants":         {"api_principal_config"},                                                               // 000064
-+	"users":           {"is_system_admin"},                                                                    // 000053
-+	"knowledges":      {"pending_subtasks_count", "profile"},                                                  // 000056, 000101
-+	"knowledge_bases": {"profile_config", "generated_profile"},                                                // 000101
-+	"messages":        {"attachments", "usage", "sandbox_checkpoint", "context_checkpoint", "source_lineage"}, // 000034/085/097/105/132
++	"nextcloud_capacity_reservations":  {"protocol_version"},
++	"nextcloud_capacity_write_intents": {"physical_path", "object_identity", "orphan_charge_bytes"},
++	"memory_subjects":                  {"extraction_state"},                                                                   // 000094
++	"memory_items":                     {"replaces_id"},                                                                        // 000094
++	"tenants":                          {"api_principal_config"},                                                               // 000064
++	"users":                            {"is_system_admin"},                                                                    // 000053
++	"knowledges":                       {"pending_subtasks_count", "profile"},                                                  // 000056, 000101
++	"knowledge_bases":                  {"profile_config", "generated_profile"},                                                // 000101
++	"messages":                         {"attachments", "usage", "sandbox_checkpoint", "context_checkpoint", "source_lineage"}, // 000034/085/097/105/132
  	"sessions": {
 +		"title_source_lineage", "description_source_lineage", "title_revision", // PostgreSQL133/SQLite52
  		"parent_session_id", "forked_from_message_id", "fork_bootstrap", // 000097
@@ -64926,7 +66823,7 @@ index 9cc4e5155bd1100fcfe2170f968d29d0b2c008fd..79d65a4c4ffea75f5bb77db3112be093
  }
  
 -const expectedSQLiteMigrationVersion = 28
-+const expectedSQLiteMigrationVersion = 65
++const expectedSQLiteMigrationVersion = 67
 +
 +func TestSQLiteNextcloudRevisionUpgradeFrom43PreservesUnknownHistory(t *testing.T) {
 +	repoRoot := sqliteRepoRoot(t)
@@ -65074,7 +66971,7 @@ index 9cc4e5155bd1100fcfe2170f968d29d0b2c008fd..79d65a4c4ffea75f5bb77db3112be093
  
  func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
  	repoRoot := sqliteRepoRoot(t)
-@@ -200,6 +358,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
+@@ -200,6 +361,64 @@ func TestSQLiteMigrationsUpgradeV16AddsSessionForkColumns(t *testing.T) {
  	require.True(t, sqliteColumnExists(t, db, "messages", "sandbox_checkpoint"))
  }
  
@@ -70909,6 +72806,43 @@ index 0000000000000000000000000000000000000000..934c9a749f514ba3fa5f1e1204e34a6c
 +		})
 +	}
 +}
+diff --git a/internal/handler/collection_read_heartbeat_test.go b/internal/handler/collection_read_heartbeat_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f196f83c381d9ddd2915f23df4b18cf59b335e90
+--- /dev/null
++++ b/internal/handler/collection_read_heartbeat_test.go
+@@ -0,0 +1,31 @@
++package handler
++
++import (
++	"net/http"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// Force the real durable heartbeat to overlap the actual capture/authorization
++// path; the large fixture can cross its 30-second interval on slower CI hosts.
++func TestKnowledgeCollectionHTTPHeartbeatDuringCaptureAndOutput(t *testing.T) {
++	h, db, _, _, _, _ := collectionHTTPFixture(t)
++	h.leaseHeartbeat = time.Millisecond
++	var overlapped atomic.Bool
++	require.NoError(t, db.Callback().Query().After("gorm:query").Register("collection-read-heartbeat-overlap", func(tx *gorm.DB) {
++		_, inTransaction := tx.Statement.ConnPool.(gorm.TxCommitter)
++		if inTransaction && tx.Statement.Table == "knowledge_bases" && overlapped.CompareAndSwap(false, true) {
++			time.Sleep(40 * time.Millisecond)
++		}
++	}))
++	w := serveCollectionHTTP(h, "/knowledge-bases/kb/knowledge?page_size=1", false)
++	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
++	var updated int64
++	require.True(t, overlapped.Load())
++	require.NoError(t, db.Table("nextcloud_content_leases").Where("expires_at_ms>created_at_ms+? AND released_at_ms IS NOT NULL", nextcloudHTTPReadLeaseTTL.Milliseconds()).Count(&updated).Error)
++	require.Positive(t, updated)
++}
 diff --git a/internal/handler/collection_read_lease.go b/internal/handler/collection_read_lease.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..fcb922c47203d0bd3ce4a409effc29462d306a96
@@ -73374,7 +75308,7 @@ index 0000000000000000000000000000000000000000..d5703a86f95cf8c6505320f37920f4b2
 +}
 diff --git a/internal/handler/knowledge_collection_output_test.go b/internal/handler/knowledge_collection_output_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d881cc735b7531465e1070857dcff78f6bdba6d
+index 0000000000000000000000000000000000000000..2daf71a99825f05a823939383bb712aa069dd6eb
 --- /dev/null
 +++ b/internal/handler/knowledge_collection_output_test.go
 @@ -0,0 +1,375 @@
@@ -73459,7 +75393,7 @@ index 0000000000000000000000000000000000000000..7d881cc735b7531465e1070857dcff78
 +
 +func collectionHTTPFixture(t *testing.T) (*KnowledgeHandler, *gorm.DB, *repository.KnowledgeInputProvenanceStore, *outputHTTPGroups, *collectionHTTPShare, *collectionHTTPAgents) {
 +	t.Helper()
-+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "collection.db")), &gorm.Config{})
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "collection.db")+"?_journal_mode=WAL&_busy_timeout=5000"), &gorm.Config{})
 +	require.NoError(t, err)
 +	sqlDB, err := db.DB()
 +	require.NoError(t, err)
@@ -75499,10 +77433,10 @@ index 0000000000000000000000000000000000000000..8d9f7a8a8b2a7352019cea0fc855fb29
 +}
 diff --git a/internal/handler/nextcloud_capacity_test.go b/internal/handler/nextcloud_capacity_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..6acab3a0e07a5b1079392604a89a9d8d4062efab
+index 0000000000000000000000000000000000000000..40ca2868d979db49b06be87abd77884d9be00777
 --- /dev/null
 +++ b/internal/handler/nextcloud_capacity_test.go
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,101 @@
 +package handler
 +
 +import (
@@ -75538,6 +77472,9 @@ index 0000000000000000000000000000000000000000..6acab3a0e07a5b1079392604a89a9d8d
 +			_, db, actor, _, _, _ := collectionHTTPFixture(t)
 +			require.NoError(t, db.AutoMigrate(&types.StoredResource{}, &types.ResourceBinding{}))
 +			sql, err := os.ReadFile("../../migrations/sqlite/000065_nextcloud_capacity_admission.up.sql")
++			require.NoError(t, err)
++			require.NoError(t, db.Exec(string(sql)).Error)
++			sql, err = os.ReadFile("../../migrations/sqlite/000067_nextcloud_capacity_write_intents.up.sql")
 +			require.NoError(t, err)
 +			require.NoError(t, db.Exec(string(sql)).Error)
 +			backend := "backend"
@@ -88864,6 +90801,47 @@ index 0000000000000000000000000000000000000000..9465cbde501ee31ce982dc060170b1b7
 +	}
 +	return !r.RequireFullAccess && len(r.Capabilities) == 0
 +}
+diff --git a/internal/types/capacity_write.go b/internal/types/capacity_write.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4aecb8e7956cc342da73dd5f0cc88a53f8a45790
+--- /dev/null
++++ b/internal/types/capacity_write.go
+@@ -0,0 +1,35 @@
++package types
++
++import (
++	"context"
++	"io"
++)
++
++// Only server-side Nextcloud admission installs this context. It is not a
++// reader principal and grants no permission to delete a physical resource.
++type CapacityWriteSession interface {
++	Token() string
++	Backend() string
++	RetainWriterLock(io.Closer) error
++	PrepareLocal(context.Context, string, string, string, string, int64) error
++	LocalCreated(context.Context, string, string) error
++	PhysicalWritten(context.Context, string, int64, string) error
++	ValidateCatalog(context.Context, string, string) error
++	Cataloged(context.Context, string, string, string) error
++}
++type capacityWriteKey struct{}
++
++func WithCapacityWriteSession(ctx context.Context, s CapacityWriteSession) context.Context {
++	return context.WithValue(ctx, capacityWriteKey{}, s)
++}
++func CapacityWriteSessionFromContext(ctx context.Context) CapacityWriteSession {
++	s, _ := ctx.Value(capacityWriteKey{}).(CapacityWriteSession)
++	return s
++}
++
++type CapacityLocalObject struct {
++	Token, TenantKnowledgeID, BackendID, PhysicalPath, RootIdentity, ScopeID, ObjectIdentity string
++	Size                                                                                     int64
++	Exists                                                                                   bool
++	SHA256                                                                                   string
++}
 diff --git a/internal/types/chat.go b/internal/types/chat.go
 index b208f5a3bc9a25b2210ac21c16eb4823cbd69fcb..79a23e66e572227bc13931c315870b09f75744dd 100644
 --- a/internal/types/chat.go
@@ -90047,10 +92025,10 @@ index 0000000000000000000000000000000000000000..d5938ce0763fb77e95190466a2bcc807
 +}
 diff --git a/internal/types/interfaces/storage_capacity.go b/internal/types/interfaces/storage_capacity.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..b3d1605be9d899dae36e5f90cd5c2d70aabef0a0
+index 0000000000000000000000000000000000000000..8f58972edba5d1b308919797b875a24e039a0e3a
 --- /dev/null
 +++ b/internal/types/interfaces/storage_capacity.go
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,18 @@
 +package interfaces
 +
 +import (
@@ -90061,6 +92039,13 @@ index 0000000000000000000000000000000000000000..b3d1605be9d899dae36e5f90cd5c2d70
 +// Implemented only by providers that can measure their actual quota/filesystem.
 +type StorageCapacityProvider interface {
 +	MeasureStorageCapacity(context.Context) (types.StorageCapacity, error)
++}
++
++// The provider holds the same exclusive process-wide writer fence while the
++// callback validates catalog/state and records a conservative charge/release.
++type LocalCapacityIntentProvider interface {
++	SupportsLocalCapacityIntents() bool
++	InspectCapacityIntent(context.Context, types.CapacityLocalObject, func(types.CapacityLocalObject) error) error
 +}
 diff --git a/internal/types/interfaces/stream_manager.go b/internal/types/interfaces/stream_manager.go
 index aa5f69512229e71b28599a85b8567e8a9fdeaa80..056d93681149a1d3e78beb53c322db300cc8c112 100644
@@ -94348,6 +96333,30 @@ index 0000000000000000000000000000000000000000..3a577741ad938f7b093494701b63b816
 +CREATE TABLE nextcloud_capacity_policies (tenant_id BIGINT NOT NULL,knowledge_base_id TEXT NOT NULL,retention_quota_bytes BIGINT NOT NULL DEFAULT 0,warning_percent INTEGER NOT NULL DEFAULT 80,pause_percent INTEGER NOT NULL DEFAULT 90,PRIMARY KEY(tenant_id,knowledge_base_id),CHECK(retention_quota_bytes>=0 AND warning_percent>0 AND warning_percent<pause_percent AND pause_percent<=100));
 +CREATE TABLE nextcloud_capacity_reservations (token TEXT PRIMARY KEY,scope_id TEXT NOT NULL REFERENCES nextcloud_capacity_scopes(scope_id),tenant_id BIGINT NOT NULL,knowledge_base_id TEXT NOT NULL,backend_id TEXT NOT NULL,request_key TEXT NOT NULL,bytes BIGINT NOT NULL CHECK(bytes>0),state TEXT NOT NULL,lease_until_ms BIGINT NOT NULL,created_at_ms BIGINT NOT NULL,committed_at_ms BIGINT NOT NULL DEFAULT 0,UNIQUE(tenant_id,knowledge_base_id,request_key));
 +CREATE INDEX nextcloud_capacity_pending ON nextcloud_capacity_reservations(scope_id,state,lease_until_ms);
+diff --git a/migrations/sqlite/000067_nextcloud_capacity_write_intents.down.sql b/migrations/sqlite/000067_nextcloud_capacity_write_intents.down.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3165e6372c294933efa23d2eaf791d4bf13a897
+--- /dev/null
++++ b/migrations/sqlite/000067_nextcloud_capacity_write_intents.down.sql
+@@ -0,0 +1 @@
++SELECT RAISE(ABORT,'capacity write intent evidence cannot be rolled back');
+diff --git a/migrations/sqlite/000067_nextcloud_capacity_write_intents.up.sql b/migrations/sqlite/000067_nextcloud_capacity_write_intents.up.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0785f5545f00a3602d93dba34bd6b6cf74e5eea
+--- /dev/null
++++ b/migrations/sqlite/000067_nextcloud_capacity_write_intents.up.sql
+@@ -0,0 +1,11 @@
++ALTER TABLE nextcloud_capacity_reservations ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 0;
++CREATE TABLE nextcloud_capacity_write_intents (
++ token TEXT PRIMARY KEY REFERENCES nextcloud_capacity_reservations(token) ON DELETE RESTRICT,
++ knowledge_id TEXT NOT NULL,writer_id TEXT NOT NULL,
++ physical_path TEXT NOT NULL UNIQUE,root_identity TEXT NOT NULL,scope_id TEXT NOT NULL,
++ state TEXT NOT NULL CHECK(state IN ('prepared','writing','written','cataloged','failed','charged','released')),
++ observed_bytes BIGINT NOT NULL DEFAULT 0 CHECK(observed_bytes>=0),object_identity TEXT NOT NULL DEFAULT '',sha256 TEXT NOT NULL DEFAULT '',resource_id TEXT NOT NULL DEFAULT '',
++ orphan_charge_bytes BIGINT NOT NULL DEFAULT 0 CHECK(orphan_charge_bytes>=0),updated_at_ms BIGINT NOT NULL
++);
++CREATE TRIGGER nextcloud_capacity_intent_identity BEFORE UPDATE ON nextcloud_capacity_write_intents WHEN NEW.token<>OLD.token OR NEW.knowledge_id<>OLD.knowledge_id OR NEW.writer_id<>OLD.writer_id OR NEW.physical_path<>OLD.physical_path OR NEW.root_identity<>OLD.root_identity OR NEW.scope_id<>OLD.scope_id OR OLD.state IN ('charged','released') OR (OLD.object_identity<>'' AND NEW.object_identity<>OLD.object_identity) BEGIN SELECT RAISE(ABORT,'capacity_write_intent_immutable'); END;
++CREATE TRIGGER nextcloud_capacity_intent_delete BEFORE DELETE ON nextcloud_capacity_write_intents BEGIN SELECT RAISE(ABORT,'capacity_write_intent_immutable'); END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 0000000000000000000000000000000000000000..cf1f675ae0a5da3ee5e5f52554fdd2ef362f59d3
@@ -96716,6 +98725,92 @@ index 0000000000000000000000000000000000000000..3a577741ad938f7b093494701b63b816
 +CREATE TABLE nextcloud_capacity_policies (tenant_id BIGINT NOT NULL,knowledge_base_id TEXT NOT NULL,retention_quota_bytes BIGINT NOT NULL DEFAULT 0,warning_percent INTEGER NOT NULL DEFAULT 80,pause_percent INTEGER NOT NULL DEFAULT 90,PRIMARY KEY(tenant_id,knowledge_base_id),CHECK(retention_quota_bytes>=0 AND warning_percent>0 AND warning_percent<pause_percent AND pause_percent<=100));
 +CREATE TABLE nextcloud_capacity_reservations (token TEXT PRIMARY KEY,scope_id TEXT NOT NULL REFERENCES nextcloud_capacity_scopes(scope_id),tenant_id BIGINT NOT NULL,knowledge_base_id TEXT NOT NULL,backend_id TEXT NOT NULL,request_key TEXT NOT NULL,bytes BIGINT NOT NULL CHECK(bytes>0),state TEXT NOT NULL,lease_until_ms BIGINT NOT NULL,created_at_ms BIGINT NOT NULL,committed_at_ms BIGINT NOT NULL DEFAULT 0,UNIQUE(tenant_id,knowledge_base_id,request_key));
 +CREATE INDEX nextcloud_capacity_pending ON nextcloud_capacity_reservations(scope_id,state,lease_until_ms);
+diff --git a/migrations/versioned/000148_nextcloud_capacity_write_intents.down.sql b/migrations/versioned/000148_nextcloud_capacity_write_intents.down.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..67a3ee7272cf1467d7e9ceca3a5d80fa116f6973
+--- /dev/null
++++ b/migrations/versioned/000148_nextcloud_capacity_write_intents.down.sql
+@@ -0,0 +1 @@
++DO $$ BEGIN RAISE EXCEPTION 'capacity write intent evidence cannot be rolled back'; END $$;
+diff --git a/migrations/versioned/000148_nextcloud_capacity_write_intents.up.sql b/migrations/versioned/000148_nextcloud_capacity_write_intents.up.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6acc5b009a0a0c55e9c2898d335c561e8206191
+--- /dev/null
++++ b/migrations/versioned/000148_nextcloud_capacity_write_intents.up.sql
+@@ -0,0 +1,15 @@
++ALTER TABLE nextcloud_capacity_reservations ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 0;
++CREATE TABLE nextcloud_capacity_write_intents (
++ token TEXT PRIMARY KEY REFERENCES nextcloud_capacity_reservations(token) ON DELETE RESTRICT,
++ knowledge_id TEXT NOT NULL,writer_id TEXT NOT NULL,
++ physical_path TEXT NOT NULL UNIQUE,root_identity TEXT NOT NULL,scope_id TEXT NOT NULL,
++ state TEXT NOT NULL CHECK(state IN ('prepared','writing','written','cataloged','failed','charged','released')),
++ observed_bytes BIGINT NOT NULL DEFAULT 0 CHECK(observed_bytes>=0),
++ object_identity TEXT NOT NULL DEFAULT '',sha256 TEXT NOT NULL DEFAULT '',resource_id TEXT NOT NULL DEFAULT '',
++ orphan_charge_bytes BIGINT NOT NULL DEFAULT 0 CHECK(orphan_charge_bytes>=0),
++ updated_at_ms BIGINT NOT NULL
++);
++CREATE FUNCTION nextcloud_capacity_intent_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $guard$ BEGIN
++ IF TG_OP='DELETE' OR NEW.token IS DISTINCT FROM OLD.token OR NEW.knowledge_id IS DISTINCT FROM OLD.knowledge_id OR NEW.writer_id IS DISTINCT FROM OLD.writer_id OR NEW.physical_path IS DISTINCT FROM OLD.physical_path OR NEW.root_identity IS DISTINCT FROM OLD.root_identity OR NEW.scope_id IS DISTINCT FROM OLD.scope_id OR OLD.state IN ('charged','released') OR (OLD.object_identity<>'' AND NEW.object_identity<>OLD.object_identity) THEN RAISE EXCEPTION 'capacity_write_intent_immutable'; END IF; RETURN NEW;
++END $guard$;
++CREATE TRIGGER nextcloud_capacity_intent_identity BEFORE UPDATE OR DELETE ON nextcloud_capacity_write_intents FOR EACH ROW EXECUTE FUNCTION nextcloud_capacity_intent_identity_immutable();
+diff --git a/scripts/ops/isolated-capacity-write-intents.py b/scripts/ops/isolated-capacity-write-intents.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..d716201842922141599fa09c27b54081e374e19e
+--- /dev/null
++++ b/scripts/ops/isolated-capacity-write-intents.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python3
++"""Run real local original-file capacity crash/retry tests in owned stock PG.
++
++Creates only nonce-labelled internal/no-port PG and Go fixtures and preserves
++existing module/build caches. The suite creates and removes nonce schemas.
++"""
++import json,secrets,subprocess,time,os
++from pathlib import Path
++root=Path(__file__).resolve().parents[2]
++nonce=secrets.token_hex(8);name='capacity-intent-'+nonce;label='org.weknora.capacity.intent.owner='+nonce
++pgimage='postgres@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416'
++goimage='weknora-go-test@sha256:5a74e8b5137496d3e22c72c01d862c4cbb1fe6ce476ddf5616fd9a807d6ae9ac'
++def run(*args):
++ r=subprocess.run(args,capture_output=True,text=True,timeout=600)
++ if r.returncode:raise RuntimeError(args[0]+' failed, exit '+str(r.returncode))
++ return r.stdout.strip()
++contexts=json.loads(run('docker','context','inspect'));assert contexts[0]['Endpoints']['docker']['Host'].startswith('unix://')
++assert not os.environ.get('DOCKER_HOST') or os.environ['DOCKER_HOST'].startswith('unix://')
++run('docker','stats','--no-stream','--format','{{.Name}} {{.CPUPerc}} {{.MemUsage}}')
++network=run('docker','network','create','--internal','--label',label,name)
++pg=None;go=None
++try:
++ password='x'+secrets.token_urlsafe(20)
++ pg=run('docker','run','-d','--name',name+'-pg','--label',label,'--cpus','1','--memory','512m','--network',network,'--network-alias','capacity-db','--tmpfs','/var/lib/postgresql/data:size=256m,mode=700','-e','POSTGRES_USER=capacity','-e','POSTGRES_DB=capacity','-e','POSTGRES_PASSWORD='+password,pgimage)
++ for i in range(60):
++  ready=subprocess.run(['docker','exec',pg,'pg_isready','-U','capacity','-d','capacity'],capture_output=True)
++  if ready.returncode==0:break
++  time.sleep(.5)
++ else:raise RuntimeError('owned PG not ready')
++ inspect=json.loads(run('docker','inspect',pg))[0];assert inspect['HostConfig']['Memory']==512*1024**2 and inspect['HostConfig']['NanoCpus']==10**9 and not inspect['HostConfig']['PortBindings']
++ assert json.loads(run('docker','network','inspect',network))[0]['Internal'] is True
++ dsn='host=capacity-db user=capacity dbname=capacity password='+password+' sslmode=disable'
++ script='gofmt -w cmd/capacity-reconcile/main.go internal/application/repository/nextcloud_capacity_intents.go internal/application/repository/nextcloud_capacity.go internal/application/service/nextcloud_capacity_intent_test.go && go build -buildvcs=false -p 1 -o /tmp/capacity-reconcile ./cmd/capacity-reconcile && WEKNORA_CAPACITY_RECONCILE_CLI=/tmp/capacity-reconcile go test -p 1 ./internal/application/service ./internal/application/repository ./internal/application/service/file ./internal/database -run "Test(CapacityIntent|PostgresCapacityIntent|CapacityCrashChild|NextcloudCapacity|PostgresNextcloudCapacity|SQLite|MigrationDirectoriesLoad|Local|ResourceCatalog|BackendScoped|CreateKnowledgeFromFile)" -count=1 -v'
++ go=run('docker','run','-d','--name',name+'-go','--label',label,'--cpus','1','--memory','2g','--network',network,'-v',str(root)+':/app','-v','weknora-go-mod:/go/pkg/mod:ro','-v','weknora-go-build:/root/.cache/go-build','-w','/app','-e','WEKNORA_CAPACITY_TEST_POSTGRES_DSN='+dsn,'-e','WEKNORA_LEASE_TEST_POSTGRES_DSN='+dsn,goimage,'sh','-c',script)
++ exit_code=run('docker','wait',go)
++ logs=subprocess.run(['docker','logs',go],capture_output=True,text=True)
++ out=(logs.stdout+logs.stderr).replace(password,'[redacted]')
++ Path('/tmp/capacity-intent-owned-tests-20261009.log').write_text(out)
++ remaining=run('docker','exec',pg,'psql','-U','capacity','-d','capacity','-At','-c',"SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'capacity_intent_%' OR nspname LIKE 'content_lease_%'")
++ assert remaining=='0'
++ evidence={'status':'PASS' if exit_code=='0' else 'FAIL','parent':'a7680b69f2a65859eb256b25cdb0f9c28cd89208','go_image':goimage,'postgres_image':pgimage,'go_container_id':go,'pg_container_id':pg,'network_id':network,'internal_network':True,'host_ports':False,'limits':{'go':'1 CPU/2 GiB','postgres':'1 CPU/512 MiB/tmpfs'},'remaining_nonce_schemas':int(remaining),'physical_source_files':'real local filesystem files, full uploads and partial files retained by original intent','crash':'actual subprocess os.Exit(77) without End cleanup, SQLite and PostgreSQL','reconciliation':'actual owner-only capacity-reconcile CLI after the crash','shared_target_modified':False,'tests_log_sha256':__import__('hashlib').sha256(out.encode()).hexdigest()}
++ print(json.dumps({'status':evidence['status'],'pg_id':pg,'go_id':go,'remaining_schemas':remaining}))
++ if exit_code!='0':print('Focused tests failed; retained private log: /tmp/capacity-intent-owned-tests-20261009.log')
++finally:
++ for cid in (go,pg):
++  if cid:
++   item=json.loads(run('docker','inspect',cid))[0];assert item['Config']['Labels']['org.weknora.capacity.intent.owner']==nonce
++   run('docker','rm','-f',cid)
++ item=json.loads(run('docker','network','inspect',network))[0];assert item['Labels']['org.weknora.capacity.intent.owner']==nonce and not item['Containers'];run('docker','network','rm',network)
++ if 'evidence' in globals():
++  evidence['cleanup_verified']=True
++  path=root/'docs/evidence/capacity-write-intents-20261009.json';path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(evidence,indent=2)+'\n')
 diff --git a/tests/evidence/graph-lineage-c6-20261008.jsonl b/tests/evidence/graph-lineage-c6-20261008.jsonl
 new file mode 100644
 index 0000000000000000000000000000000000000000..8226d7a166a7133d23b21da0be72c7e0e1fe00c6
