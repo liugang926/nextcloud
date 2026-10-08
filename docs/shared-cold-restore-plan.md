@@ -81,9 +81,12 @@ using a target volume or network, including stopped containers. The current
 containers must match their current resolved Compose mounts, ports,
 environment and image references; their creation-time Compose config-hash
 labels must equal the hashes calculated from that current configuration. Only
-the documented Docker Desktop stopped representation of an additional
-same-container-port address becoming an empty loopback binding is accepted.
-Unrelated or nonempty port changes are refused. The checkpoint must include
+the documented Docker Desktop stopped representation of a single fixed
+RFC1918 IPv4 LAN binding, or an additional same-container-port LAN binding
+beside a surviving loopback binding, becoming an empty `127.0.0.1` binding is
+accepted. Public, wildcard, loopback, IPv6, unrelated or nonempty port changes
+are refused. Duplicate raw requested or actual port records are rejected before
+set comparison, including duplicate stopped placeholders. The checkpoint must include
 the original running port bindings and creation-time service hashes;
 checkpoints predating those fields are refused by this verifier. The restore
 mounts must equal the captured mounts. Current service IDs and images may differ after an upgrade. Both the

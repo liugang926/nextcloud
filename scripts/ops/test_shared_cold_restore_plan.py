@@ -402,6 +402,64 @@ class RestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(restore.RestorePlanError, "ports"):
             self.target()
 
+    def set_stopped_ports(self, ports, bindings):
+        self.checked = copy.deepcopy(self.checked)
+        service = self.configs[capture.NC_PROJECT]["services"]["nextcloud"]
+        service["ports"] = ports
+        self.checked["configs"][capture.NC_PROJECT]["services"]["nextcloud"]["ports"] = copy.deepcopy(ports)
+        item = self.objects[("container", f"{capture.NC_PROJECT}-nextcloud-1")]
+        item["HostConfig"]["PortBindings"] = bindings
+        item["Config"]["Labels"]["com.docker.compose.config-hash"] = hashlib.sha256(
+            json.dumps(service, sort_keys=True).encode()).hexdigest()
+        return item
+
+    def test_single_rfc1918_stopped_lan_binding_accepted_via_helper(self):
+        for address in ("10.106.105.121", "172.16.1.10", "192.168.1.10"):
+            with self.subTest(address=address):
+                self.set_stopped_ports(
+                    [{"target": 80, "protocol": "tcp", "host_ip": address, "published": "18082"}],
+                    {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": ""}]})
+                self.target()
+
+    def test_single_public_wildcard_loopback_ipv6_and_missing_ports_refused(self):
+        for address in ("8.8.8.8", "0.0.0.0", "127.0.0.1", "169.254.1.1", "192.0.2.2", "::1", "fd00::1"):
+            with self.subTest(address=address):
+                self.set_stopped_ports(
+                    [{"target": 80, "protocol": "tcp", "host_ip": address, "published": "18082"}],
+                    {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": ""}]})
+                with self.assertRaisesRegex(restore.RestorePlanError, "ports"):
+                    self.target()
+        ports = [{"target": 80, "protocol": "tcp", "host_ip": "10.106.105.121", "published": "18082"}]
+        for bindings in ({}, {"80/tcp": [{"HostIp": "::1", "HostPort": ""}]},
+                         {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "28082"}]}):
+            with self.subTest(bindings=bindings):
+                self.set_stopped_ports(ports, bindings)
+                with self.assertRaisesRegex(restore.RestorePlanError, "ports"):
+                    self.target()
+
+    def test_duplicate_actual_stopped_and_duplicate_current_requested_ports_refused(self):
+        lan = {"target": 80, "protocol": "tcp", "host_ip": "10.106.105.121", "published": "18082"}
+        loopback = {"target": 80, "protocol": "tcp", "host_ip": "127.0.0.1", "published": "18082"}
+        cases = [
+            ([lan], {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": ""}] * 2}),
+            ([loopback, lan], {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18082"},
+                                        {"HostIp": "127.0.0.1", "HostPort": ""},
+                                        {"HostIp": "127.0.0.1", "HostPort": ""}]}),
+            ([lan, lan], {"80/tcp": [{"HostIp": "10.106.105.121", "HostPort": "18082"}]}),
+        ]
+        for ports, bindings in cases:
+            with self.subTest(ports=ports, bindings=bindings):
+                self.set_stopped_ports(ports, bindings)
+                with self.assertRaisesRegex(restore.RestorePlanError, "ports"):
+                    self.target()
+
+    def test_duplicate_saved_compose_and_frozen_running_ports_refused(self):
+        port = {"target": 80, "protocol": "tcp", "host_ip": "10.106.105.121", "published": "18082"}
+        with self.assertRaisesRegex(restore.RestorePlanError, "duplicate raw"):
+            restore.expected_port_bindings({"ports": [port, port]})
+        with self.assertRaisesRegex(restore.RestorePlanError, "duplicate entries"):
+            restore.frozen_port_bindings({"80/tcp": [{"HostIp": "10.106.105.121", "HostPort": "18082"}] * 2})
+
     def test_frozen_running_bindings_and_creation_hash_required_in_checkpoint(self):
         identity = self.manifest["projects"][capture.NC_PROJECT]["containers"]["nextcloud"]
         identity["running_port_bindings"] = {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18082"}]}

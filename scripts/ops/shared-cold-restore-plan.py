@@ -410,9 +410,12 @@ def verify_checkpoint(directory: Path, nc_dir: Path, wk_dir: Path,
 
 
 def expected_port_bindings(service: dict) -> set[tuple[str, str, str]]:
-    return {(f"{port['target']}/{port.get('protocol', 'tcp')}",
-             str(port.get("host_ip", "0.0.0.0")), str(port["published"]))
-            for port in service.get("ports", [])}
+    ports = service.get("ports", [])
+    result = {(f"{port['target']}/{port.get('protocol', 'tcp')}",
+               str(port.get("host_ip", "0.0.0.0")), str(port["published"]))
+              for port in ports}
+    require(len(result) == len(ports), "saved Compose contains duplicate raw port bindings")
+    return result
 
 
 def frozen_port_bindings(bindings: dict) -> set[tuple[str, str, str]]:
