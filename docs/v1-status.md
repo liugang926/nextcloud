@@ -1552,3 +1552,23 @@ count. [Failure record](
 evidence/nextcloud-bootstrap-job-registration-2026-10-08.json) preserves the
 original job and log digest. A new full CI run must verify this ordering; the
 shared local runtime was not bootstrapped by this source change.
+
+
+## 2026-10-08 captured application recovery and RAG baseline
+
+The [captured application restore drill](shared-application-restore-drill.md)
+now passed actual Nextcloud, WeKnora and LDAP startup in owned closed resources.
+All eight volume archives were compared before database startup; application
+identity, bindings and source versions remained unchanged. Thirty containers,
+ten volumes and one internal network were precisely removed. External
+withdrawal/ACL ledger replay and reopening remain unaccepted. The imported
+implementation passed 82 offline safety contracts; one optional Docker test
+is skipped by default.
+
+The [RAG build baseline](weknora-rag-adaptation.md) now pins b6ea8b56, including
+the upstream runtime-package retry fix and explicit evaluation model selection.
+The complete integration patch is byte-identical to the preceding 77c97 patch
+and has exact-tree apply/reverse proof on the new baseline. Local focused
+checks passed 149 tests/subtests with one optional PostgreSQL fixture skipped.
+New baseline remote CI and an actual candidate image are separate checks.
+The shared schema-131 backend and the private Phase 3 candidates remain separate.

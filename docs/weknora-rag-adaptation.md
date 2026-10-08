@@ -1,5 +1,25 @@
 # WeKnora RAG baseline adaptation
 
+## 2026-10-08 RAG build baseline update
+
+The build script and RAG CI now pin `b6ea8b560b886cef77fb32fb2e092123cdce4ed3`
+and its complete `integration/weknora-rag-b6ea8b56.patch`. This upstream
+baseline includes the bounded runtime-package retry fix and explicit model
+selection for controlled evaluations. The preceding 77c97 patch remains a
+historical artifact. The integration changes were reapplied to a clean new
+baseline and regenerated as a complete patch; no Phase 3 candidate code is
+enabled by this update.
+
+Local checks passed 149 focused tests/subtests with one optional PostgreSQL
+fixture skipped, plus six offline runtime-package retry contracts. The
+complete patch has unchanged bytes, but its new upstream baseline has its
+own exact-tree apply/reverse proof. [Baseline evidence](evidence/weknora-rag-f-baseline-2026-10-08.json)
+records the source commit, tree and log hashes.
+
+The shared backend remains at its previously deployed source and schema 131.
+New baseline CI and candidate image validation are separate gates; earlier
+77c97 results do not establish them.
+
 The complete pinned patches now also contain the independently reviewed,
 unused Phase 2 source-lineage resolver and authorizer. The final check reloads
 fresh grants, then checks the captured caller's directory identity and all
@@ -31,9 +51,9 @@ schema131 deployment remain separate; see
 
 `integration/weknora.patch` remains the reproducible patch for WeKnora commit
 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` used by the fixed-baseline
-Docker integration build. `integration/weknora-rag-77c97fd7.patch` is a complete,
+Docker integration build. `integration/weknora-rag-b6ea8b56.patch` is a complete,
 separate patch for the RAG branch at commit
-`77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
+`b6ea8b560b886cef77fb32fb2e092123cdce4ed3`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
 `dbf8c4926f9b8fa1e9e5adefd38affc0f0e00281f2c44a570c3d345bbdd13d09`.
@@ -41,8 +61,8 @@ The fixed-baseline patch SHA-256 is
 From a clean WeKnora worktree at that exact RAG commit:
 
 ```sh
-git apply --check /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
-git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
+git apply --check /path/to/nextcloud/integration/weknora-rag-b6ea8b56.patch
+git apply /path/to/nextcloud/integration/weknora-rag-b6ea8b56.patch
 ```
 
 The RAG patch SHA-256 is
