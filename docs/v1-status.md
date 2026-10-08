@@ -1329,4 +1329,9 @@ The migration and real writer/reader transaction contract passed in an
 isolated, networkless PHP container with an in-memory SQLite database,
 including legacy `0`, rollback after either audit or pointer write failure,
 and mismatch rejection. The existing controller hint-failure contract also
-passed. No shared Nextcloud installation or WeKnora service was changed.
+passed. After a private 7 MB PostgreSQL dump, the shared local Nextcloud test
+stack upgraded successfully to integration app 0.4.37. `occ status` reported
+maintenance off and no pending DB upgrade, the new PostgreSQL column existed,
+and the LAN HTTPS status endpoint returned 200 with a valid test-CA chain.
+This shared upgrade did not exercise a live withdrawal/republish transition or
+change the WeKnora runtime image.
