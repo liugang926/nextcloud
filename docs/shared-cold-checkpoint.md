@@ -72,7 +72,8 @@ An independent, owned Nginx fixture then exercised both shapes on Docker
 the placeholders and restarting restored the original bindings. Both containers
 and their private network were removed. The [sanitized lifecycle evidence](
 evidence/docker-stopped-port-probe-2026-10-08.json) records these results.
-Thirteen offline tests also reject running placeholders, requested loopback,
+Fourteen offline tests also reject duplicate raw bindings before set normalization,
+running placeholders, requested loopback,
 wildcard or public-address loss, nonempty port changes, missing bindings,
 target/protocol changes and identity/image/hash/mount/environment drift.
 

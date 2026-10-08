@@ -20,6 +20,25 @@ SPEC.loader.exec_module(checkpoint)
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_duplicate_raw_port_rows_are_rejected_before_set_comparison(self):
+        service = {"ports": [{"target": 443, "host_ip": "10.0.0.2", "published": "18482"}]}
+        config = {"volumes": {}, "networks": {}}
+        item = {"Mounts": [], "Config": {"Env": []}, "State": {"Running": False},
+                "HostConfig": {"PortBindings": {"443/tcp": [
+                    {"HostIp": "127.0.0.1", "HostPort": ""}]}}}
+        self.assertTrue(checkpoint.container_runtime_matches(
+            item, service, config, allow_stopped_port_loss=True))
+        item["HostConfig"]["PortBindings"]["443/tcp"].append(
+            {"HostIp": "127.0.0.1", "HostPort": ""})
+        self.assertFalse(checkpoint.container_runtime_matches(
+            item, service, config, allow_stopped_port_loss=True))
+        service["ports"][0]["host_ip"] = "127.0.0.1"
+        item["State"]["Running"] = True
+        item["HostConfig"]["PortBindings"]["443/tcp"] = [
+            {"HostIp": "127.0.0.1", "HostPort": "18482"},
+            {"HostIp": "127.0.0.1", "HostPort": "18482"}]
+        self.assertFalse(checkpoint.container_runtime_matches(item, service, config))
+
     def test_single_lan_stopped_placeholder_is_exact(self):
         placeholder = {("443/tcp", "127.0.0.1", "")}
         self.assertTrue(checkpoint.known_stopped_port_loss(

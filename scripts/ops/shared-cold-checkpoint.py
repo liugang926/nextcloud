@@ -241,6 +241,11 @@ def container_runtime_matches(item: dict, service: dict, config: dict, *,
                     for target, mappings in
                     (item.get("HostConfig", {}).get("PortBindings") or {}).items()
                     for binding in mappings or []}
+    actual_count = sum(len(mappings or []) for mappings in
+                       (item.get("HostConfig", {}).get("PortBindings") or {}).values())
+    if (len(expected_ports) != len(service.get("ports", [])) or
+            len(actual_ports) != actual_count):
+        return False
     if expected_ports != actual_ports:
         if (not allow_stopped_port_loss or item.get("State", {}).get("Running") is not False or
                 not known_stopped_port_loss(expected_ports, actual_ports)):
