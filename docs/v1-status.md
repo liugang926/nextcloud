@@ -1223,4 +1223,7 @@ authenticated Nextcloud HTTPS DAV `PROPFIND` returned 207. Nextcloud remains
 backend/frontend image digests are unchanged from the 2026-10-02 entry.
 An independent Docker bridge client with the test CA also reached both HTTPS
 endpoints and received 200. A second physical LAN client and enterprise AD
-have not been tested.
+have not been tested. The later `scripts/rotate-lan-ip.py` helper passed 13
+offline tests and read-only checks against the current Compose overlays,
+running image/config hashes and certificate. Its mutating path has not been
+exercised on the shared stack; this address change was performed manually.

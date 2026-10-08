@@ -19,6 +19,9 @@ the replacement certificate must include the chosen `NEXTCLOUD_LAN_HOST` in
 its SAN. `NEXTCLOUD_HTTPS_PORT` defaults to `18482`. Pass `--ca-file` to the
 helper if the replacement certificate has a different trust root.
 
+This address is the host's current private DHCP lease, verified on
+2026-10-08. Substitute the actual host address after a lease change.
+
 ## Start and configure
 
 First run `scripts/allow-lan-access.sh 10.106.105.121` if LAN access has not
@@ -65,6 +68,30 @@ For a different LAN address or HTTPS port, substitute it in the commands and
 ensure it remains in `trusted_domains`. The gateway does not redirect the old
 HTTP endpoint or emit HSTS; HSTS would make a browser try HTTPS on port
 `18082`, where only HTTP is served.
+
+## When the host's LAN address changes
+
+Start Docker Desktop and confirm the new private IPv4 address is assigned to
+the host. From this checkout, first run the read-only preflight, then apply
+the coordinated change:
+
+```bash
+python3 scripts/rotate-lan-ip.py --old-ip OLD_LAN_IP --new-ip NEW_LAN_IP
+python3 scripts/rotate-lan-ip.py --old-ip OLD_LAN_IP --new-ip NEW_LAN_IP --apply
+```
+
+The helper requires the saved old IP to match both stacks, checks the local
+Docker daemon, exact Compose overlays and running WeKnora image/configuration,
+and verifies the existing local CA and leaf certificate keys. It signs a new
+leaf certificate with the existing test CA, backs up the affected files and
+Nextcloud settings with mode `0600` under ignored
+`dist/lan-ip-rotation-backups/`, then updates both gateways and browser URLs.
+It recreates the WeKnora frontend after the app so its Nginx upstream resolves
+the new app container. No CA or server private key is replaced. If a step
+fails after the backup, the helper reports its directory; use its manifest
+to restore the files and Nextcloud settings, then recreate the affected
+containers. It does not attempt an automatic runtime rollback. The preflight
+deliberately refuses a rotation already completed by hand.
 
 ## Verify
 
