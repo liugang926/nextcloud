@@ -177,7 +177,31 @@ def inspect(kind: str, name: str, nc_dir: Path) -> dict:
     return data[0]
 
 
-def container_runtime_matches(item: dict, service: dict, config: dict) -> bool:
+def known_stopped_port_loss(expected: set, actual: set) -> bool:
+    """Docker Desktop can clear an additional same-port address while stopped.
+
+    Only accept an empty port that copies a surviving binding's address, for
+    the same container port and published port. Any nonempty changed binding
+    or missing binding still fails. The caller also freezes container identity
+    and its creation-time Compose configuration hash.
+    """
+    missing, extra = expected - actual, actual - expected
+    if not missing or len(expected) != len(actual) or len(missing) != len(extra):
+        return False
+    for target, address, published in extra:
+        if published != "" or address != "127.0.0.1":
+            return False
+        candidates = {(t, host, port) for t, host, port in missing
+                      if t == target and host != address and port and
+                      (target, address, port) in expected & actual}
+        if len(candidates) != 1:
+            return False
+        missing -= candidates
+    return not missing
+
+
+def container_runtime_matches(item: dict, service: dict, config: dict, *,
+                              allow_stopped_port_loss: bool = False) -> bool:
     """Compare the mounted checkout and every runtime input to resolved Compose."""
     expected_mounts = set()
     for mount in service.get("volumes", []):
@@ -208,7 +232,9 @@ def container_runtime_matches(item: dict, service: dict, config: dict) -> bool:
                     (item.get("HostConfig", {}).get("PortBindings") or {}).items()
                     for binding in mappings or []}
     if expected_ports != actual_ports:
-        return False
+        if (not allow_stopped_port_loss or item.get("State", {}).get("Running") is not False or
+                not known_stopped_port_loss(expected_ports, actual_ports)):
+            return False
 
     expected_env = service.get("environment") or {}
     actual_env = dict(line.split("=", 1) for line in
@@ -236,6 +262,14 @@ def inventory_stack(nc_dir: Path, wk_dir: Path, project: str) -> dict:
     validate_config(config, project, nc_dir, wk_dir)
     expected_services = NC_SERVICES if project == NC_PROJECT else WK_SERVICES
     expected_volumes = NC_VOLUMES if project == NC_PROJECT else WK_VOLUMES
+    hashes = {}
+    for line in run(command + ["config", "--hash", "*"], cwd=cwd).decode().splitlines():
+        fields = line.split()
+        require(len(fields) == 2 and fields[0] not in hashes and
+                re.fullmatch(r"[0-9a-f]{64}", fields[1]) is not None,
+                f"{project} Compose hash output is invalid")
+        hashes[fields[0]] = fields[1]
+    require(set(hashes) == expected_services, f"{project} Compose hash scopes changed")
     ids = set(run(["docker", "ps", "-aq", "--no-trunc", "--filter",
                    f"label=com.docker.compose.project={project}"],
                   cwd=nc_dir).decode().split())
@@ -254,8 +288,13 @@ def inventory_stack(nc_dir: Path, wk_dir: Path, project: str) -> dict:
                 f"{project}/{service} mounts, ports, environment or networks differ from Compose")
         require(re.fullmatch(r"sha256:[0-9a-f]{64}", item.get("Image", "")) is not None,
                 f"{project}/{service} running image ID is invalid")
+        compose_hash = labels.get("com.docker.compose.config-hash", "")
+        require(compose_hash == hashes[service],
+                f"{project}/{service} creation-time Compose hash differs from configuration")
         containers[service] = {"id": item["Id"], "image_id": item["Image"],
-                               "image_tag": item["Config"]["Image"]}
+                               "image_tag": item["Config"]["Image"],
+                               "compose_config_hash": compose_hash,
+                               "running_port_bindings": item.get("HostConfig", {}).get("PortBindings") or {}}
     require(ids == {item["id"] for item in containers.values()},
             f"{project} has an unrecognized Compose container")
     volume_info = {}
@@ -369,8 +408,12 @@ def ensure_state(stack: dict, nc_dir: Path, *, stopped: set[str]) -> None:
                 item.get("Image") == original["image_id"] and
                 item.get("State", {}).get("Running") is (service not in stopped),
                 f"{stack['project']}/{service} changed state during checkpoint")
+        require((item.get("Config", {}).get("Labels") or {}).get(
+                    "com.docker.compose.config-hash") == original["compose_config_hash"],
+                f"{stack['project']}/{service} creation-time Compose hash changed")
         require(container_runtime_matches(item, stack["config"]["services"][service],
-                                          stack["config"]),
+                                          stack["config"],
+                                          allow_stopped_port_loss=service in stopped),
                 f"{stack['project']}/{service} runtime inputs changed during checkpoint")
 
 

@@ -50,6 +50,18 @@ interrupted attempt must be treated as incomplete, and the stacks should remain
 stopped for operator review. The script never tries to restart or clean up an
 uncertain state.
 
+The first real capture on 2026-10-08 stopped the applications but failed before
+database export: Docker Desktop changed a stopped container's additional
+same-port LAN binding into a loopback binding with an empty published port.
+Starting the original container restored both original bindings. The helper
+now records the verified running bindings and creation-time Compose hash,
+checks that hash against the current configuration, and accepts only this
+specific stopped representation with unchanged container/image/hash, mounts
+and environment. Running-port validation remains exact. A nonempty port change,
+different address, missing binding or replaced container still fails. This
+does not change the configured publish addresses or authorize reopening without
+checking the restored runtime ports.
+
 The checkpoint contains local passwords, TLS private keys, JWT/AES material,
 and document contents. Restrict access to the entire directory. It records
 image IDs but does not export image layers or external LLM, object-store, or

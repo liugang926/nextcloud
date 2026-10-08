@@ -20,6 +20,79 @@ SPEC.loader.exec_module(checkpoint)
 
 
 class CheckpointTests(unittest.TestCase):
+    def stopped_port_fixture(self):
+        config = {"volumes": {}, "networks": {"default": {"name": "nc_default"}}}
+        service = {"environment": {"KEY": "value"}, "volumes": [],
+                   "ports": [{"target": 80, "host_ip": "127.0.0.1", "published": "18082"},
+                             {"target": 80, "host_ip": "10.0.0.2", "published": "18082"}],
+                   "networks": {"default": None}}
+        item = {"Id": "container", "Image": "sha256:" + "a" * 64,
+                "Mounts": [], "State": {"Running": False},
+                "Config": {"Env": ["KEY=value"],
+                           "Labels": {"com.docker.compose.config-hash": "b" * 64}},
+                "HostConfig": {"PortBindings": {"80/tcp": [
+                    {"HostIp": "127.0.0.1", "HostPort": "18082"},
+                    {"HostIp": "127.0.0.1", "HostPort": ""}]}}}
+        return item, service, config
+
+    def test_stopped_multi_address_port_loss_is_narrow(self):
+        item, service, config = self.stopped_port_fixture()
+        self.assertFalse(checkpoint.container_runtime_matches(item, service, config))
+        self.assertTrue(checkpoint.container_runtime_matches(
+            item, service, config, allow_stopped_port_loss=True))
+        for running in (True, None):
+            changed = json.loads(json.dumps(item))
+            changed["State"]["Running"] = running
+            self.assertFalse(checkpoint.container_runtime_matches(
+                changed, service, config, allow_stopped_port_loss=True))
+        for key, value in (("HostPort", "18083"), ("HostIp", "0.0.0.0"),
+                           ("HostIp", "::1")):
+            changed = json.loads(json.dumps(item))
+            changed["HostConfig"]["PortBindings"]["80/tcp"][1][key] = value
+            self.assertFalse(checkpoint.container_runtime_matches(
+                changed, service, config, allow_stopped_port_loss=True))
+        changed = json.loads(json.dumps(item))
+        changed["Config"]["Env"] = ["KEY=changed"]
+        self.assertFalse(checkpoint.container_runtime_matches(
+            changed, service, config, allow_stopped_port_loss=True))
+        changed = json.loads(json.dumps(item))
+        changed["Mounts"] = [{"Type": "bind", "Source": "/tmp/foreign",
+                              "Destination": "/foreign", "RW": True}]
+        self.assertFalse(checkpoint.container_runtime_matches(
+            changed, service, config, allow_stopped_port_loss=True))
+        for target in ("81/tcp", "80/udp"):
+            changed = json.loads(json.dumps(item))
+            changed["HostConfig"]["PortBindings"][target] = changed["HostConfig"]["PortBindings"].pop("80/tcp")
+            self.assertFalse(checkpoint.container_runtime_matches(
+                changed, service, config, allow_stopped_port_loss=True))
+        changed = json.loads(json.dumps(item))
+        changed["HostConfig"]["PortBindings"]["80/tcp"] = changed["HostConfig"]["PortBindings"]["80/tcp"][:1]
+        self.assertFalse(checkpoint.container_runtime_matches(
+            changed, service, config, allow_stopped_port_loss=True))
+        one_port = json.loads(json.dumps(service))
+        one_port["ports"] = one_port["ports"][:1]
+        self.assertFalse(checkpoint.container_runtime_matches(
+            item, one_port, config, allow_stopped_port_loss=True))
+
+    def test_stopped_port_loss_still_requires_original_identity_and_compose_hash(self):
+        item, service, config = self.stopped_port_fixture()
+        config["services"] = {"nextcloud": service}
+        stack = {"project": "nc", "config": config,
+                 "containers": {"nextcloud": {"id": item["Id"], "image_id": item["Image"],
+                                              "compose_config_hash": "b" * 64}}}
+        with mock.patch.object(checkpoint, "inspect", return_value=item):
+            checkpoint.ensure_state(stack, Path("/tmp"), stopped={"nextcloud"})
+        for field, value in (("Id", "replacement"), ("Image", "sha256:" + "c" * 64)):
+            changed = json.loads(json.dumps(item)); changed[field] = value
+            with mock.patch.object(checkpoint, "inspect", return_value=changed):
+                with self.assertRaises(checkpoint.CheckpointError):
+                    checkpoint.ensure_state(stack, Path("/tmp"), stopped={"nextcloud"})
+        changed = json.loads(json.dumps(item))
+        changed["Config"]["Labels"]["com.docker.compose.config-hash"] = "c" * 64
+        with mock.patch.object(checkpoint, "inspect", return_value=changed):
+            with self.assertRaisesRegex(checkpoint.CheckpointError, "Compose hash changed"):
+                checkpoint.ensure_state(stack, Path("/tmp"), stopped={"nextcloud"})
+
     def test_running_checkout_mount_must_match_compose_exactly(self):
         source = "/Users/example/nextcloud/apps/integration_weknora"
         config = {"volumes": {"nextcloud-html": {"name": "nc_nextcloud-html"}},
