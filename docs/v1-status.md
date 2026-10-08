@@ -1221,5 +1221,6 @@ requests returned 200, Nextcloud HTTP login returned 200, and an
 authenticated Nextcloud HTTPS DAV `PROPFIND` returned 207. Nextcloud remains
 34.0.4 with integration app 0.4.36 and maintenance mode off. The WeKnora
 backend/frontend image digests are unchanged from the 2026-10-02 entry.
-These requests originated on the host against its LAN address; a second
-physical client and enterprise AD have not been tested.
+An independent Docker bridge client with the test CA also reached both HTTPS
+endpoints and received 200. A second physical LAN client and enterprise AD
+have not been tested.

@@ -49,8 +49,7 @@ in the repository and both handler packages passed for both preceding pinned
 patches; the 27-route OpenAPI checker passed after applying each to a clean
 source archive. At that stage, the full suite and an exact pinned-`77c97fd7`
 RAG runtime image had not yet been verified for that patch revision. The
-subsequent 2026-10-02 full image build is recorded below and in
-[V1 status](v1-status.md).
+subsequent 2026-10-02 full image build is recorded in [V1 status](v1-status.md).
 
 The current receiver also records each signed event's ETag and relative path.
 File ACK requires the exact version and publication proof; broad and excluded
