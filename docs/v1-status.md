@@ -1345,7 +1345,9 @@ accept only the producer's explicit empty search/list shape or a diagnostic-only
 tool failure. They still run the current message/reference and KB-grant check,
 and continue to deny opaque or nonempty content without document identity.
 The incremental fix had focused access/service/session and complete session
-package tests on merged-main plus the preceding RAG patch source. The two
-pinned combined patches passed static apply checks; their CI tests and a
-runtime image switch are pending. The shared LAN WeKnora image still predates
-this correction, so a live chat repair is not yet claimed.
+package tests on merged-main plus the preceding RAG patch source. Both pinned
+combined patches passed static apply checks and the GitHub patch suites; the
+`c1c45cf` run passed all eight CI jobs, including the isolated Nextcloud
+Docker smoke and direct upgrade. A runtime image switch is still pending. The
+shared LAN WeKnora image predates this correction, so a live chat repair is
+not yet claimed.
