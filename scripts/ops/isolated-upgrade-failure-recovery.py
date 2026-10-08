@@ -208,7 +208,7 @@ def replace_app(source: Path, target: Path) -> None:
 
 
 def inject_failure(app_dir: Path) -> None:
-    migration = app_dir / "lib/Migration/Version0021Date20261008000000.php"
+    migration = app_dir / "lib/Migration/Version0022Date20261009000000.php"
     latest = sorted((app_dir / "lib/Migration").glob("Version*.php"))[-1]
     require(latest == migration,
             "the final app migration changed; update the failure injection")
@@ -498,6 +498,9 @@ def main() -> None:
                         "table_name='oc_weknora_pub_state' AND "
                         "column_name='decision_audit_id';") == "1",
                     "injected failure did not apply the current final schema")
+            for table in ("oc_weknora_recovery_head", "oc_weknora_recovery_log", "oc_weknora_recovery_apply"):
+                require(sql("SELECT COUNT(*) FROM pg_tables WHERE tablename='" + table + "';") == "1",
+                        "injected final failure did not apply recovery journal schema")
             require(sql("SELECT state FROM oc_weknora_pub_state WHERE "
                         f"binding_id='recovery-probe' AND file_id={file_id};") == "withdrawn",
                     "prior plugin row disappeared during failed upgrade")

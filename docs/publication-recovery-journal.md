@@ -97,3 +97,12 @@ disable/re-enable and restart checks passed, and the disposable stack was remove
 The package and source evidence record the exact tested revision; later changes
 require their own checks. Python tests cover signature/path/sequence/fork/head
 commitment failures; the real PHP/PDO contract covers atomic rollback and pagination.
+
+
+The first submitted CI's failure-recovery fixture refused its stale hard-coded
+migration 21 pin. The repair moves the deliberate failure to migration 22 and
+asserts all three recovery tables before restoration. An actual isolated
+0.4.6→0.4.38 failed upgrade returned exit 5 at the injected marker, then cold
+restoration recovered the exact instance, file ID/bytes, plugin state/config
+and administrator route; all owned resources were removed. [Evidence](evidence/upgrade-recovery-migration22-2026-10-09.json)
+retains the original failed job and the precise local repair scope.
