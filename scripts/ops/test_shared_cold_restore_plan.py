@@ -279,6 +279,30 @@ class RestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(restore.RestorePlanError, "crosses"):
             restore.archive_inventory(path, allowed_roots={"dir", "payload", "copy"})
 
+    def test_archive_inventory_preserves_sticky_permissions(self):
+        path = self.root / "sticky.tar"
+        with tarfile.open(path, "w") as archive:
+            for name, kind, mode in [(".", tarfile.DIRTYPE, 0o1777),
+                                      ("restricted", tarfile.DIRTYPE, 0o1700),
+                                      ("restricted/payload", tarfile.REGTYPE, 0o1640)]:
+                member = tarfile.TarInfo(name)
+                member.type, member.mode = kind, mode
+                member.size = 1 if kind == tarfile.REGTYPE else 0
+                archive.addfile(member, io.BytesIO(b"x") if member.isfile() else None)
+        modes = {name: entry["mode"] for name, entry in restore.archive_inventory(path)["entries"].items()}
+        self.assertEqual({"": 0o1777, "restricted": 0o1700, "restricted/payload": 0o1640}, modes)
+
+    def test_sticky_permission_preservation_does_not_allow_setuid_or_setgid(self):
+        path = self.root / "privileged.tar"
+        for mode in (0o4640, 0o2640, 0o6640, 0o7640):
+            with self.subTest(mode=oct(mode)):
+                with tarfile.open(path, "w") as archive:
+                    member = tarfile.TarInfo("payload")
+                    member.mode, member.size = mode, 1
+                    archive.addfile(member, io.BytesIO(b"x"))
+                with self.assertRaisesRegex(restore.RestorePlanError, "privileged"):
+                    restore.archive_inventory(path)
+
     def test_runtime_archive_missing_extra_and_cross_root_refused(self):
         path = self.evidence / "runtime-inputs.tar"
         self.tar(path, [("weknora-local/.env", "file", b"x")])

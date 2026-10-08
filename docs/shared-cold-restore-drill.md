@@ -41,7 +41,9 @@ image applies `chown -h` to each already validated archived symlink, using
 quoted paths and never following the link. The complete restored volume is
 then rearchived through a read-only mount. Every normalized member must match;
 extra or missing files are errors. The comparison includes file SHA-256/size,
-UID/GID, modes, raw symlink targets and hardlink equivalence groups. Different
+UID/GID, modes, raw symlink targets and hardlink equivalence groups.
+The permitted sticky permission bit is included in the comparison; setuid and
+setgid entries continue to be refused before restoration. Different
 tar choices of the first hardlinked member are allowed only when the same
 inode-sharing group and bytes are preserved. Unsupported member types never
 pass by omission.

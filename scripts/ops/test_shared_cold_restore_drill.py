@@ -34,6 +34,19 @@ def sample_inventory():
 
 
 class InventoryTests(unittest.TestCase):
+    def test_sticky_bit_loss_is_rejected_from_actual_archive_inventories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inventories = []
+            for index, mode in enumerate((0o1777, 0o777)):
+                path = Path(temp) / f"volume-{index}.tar"
+                with tarfile.open(path, "w") as archive:
+                    member = tarfile.TarInfo(".")
+                    member.type, member.mode = tarfile.DIRTYPE, mode
+                    archive.addfile(member)
+                inventories.append(drill.plan.archive_inventory(path))
+            with self.assertRaisesRegex(drill.DrillError, "mode"):
+                drill.compare_inventory(*inventories)
+
     def test_exact_inventory_and_reordered_hardlink_members_pass(self):
         original = sample_inventory()
         reversed_links = copy.deepcopy(original)

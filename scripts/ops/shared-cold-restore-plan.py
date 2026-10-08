@@ -141,7 +141,9 @@ def archive_inventory(path: Path, *, allowed_roots: set[str] | None = None) -> d
                     require(any(name == root or name.startswith(root + "/")
                                 for root in allowed_roots),
                             "archive contains an unexpected runtime input")
-                entry = {"kind": "directory", "mode": member.mode & 0o777,
+                # setuid/setgid were rejected above. Preserve the permitted
+                # sticky bit so restored directory/file modes compare exactly.
+                entry = {"kind": "directory", "mode": member.mode & 0o1777,
                          "uid": member.uid, "gid": member.gid, "size": member.size}
                 if member.isfile():
                     require(member.size >= 0, "archive file size is invalid")
