@@ -36,7 +36,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`3662b15840610041b6a8df55d3f1ebed8751b4d02e74d45b7593203952a154ef`.
+`dbf8c4926f9b8fa1e9e5adefd38affc0f0e00281f2c44a570c3d345bbdd13d09`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -46,7 +46,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`46da62e72ebeca8c81b1582bce2d1438a8d56846a1113bd92fb1cd42f5a3fe1b`.
+`8bbffc98f1fbdc03f08be0e7f6d959da61536b17b1b75b8b3a4258b914e612ae`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict
@@ -290,3 +290,7 @@ embedding and chat services were used; scanned-PDF OCR, real AD and enterprise
 answer quality remain unaccepted.
 
 The current complete patch hashes include the subsequent raw-search ranking/denial correction. Earlier policy integration evidence retains the exact hashes tested there; the policy itself is unchanged. See [raw-search correction](nextcloud-raw-search-ranked-metadata-2026-10-08.md).
+
+The current complete patch also includes the independently reproduced
+[stream poll failure correction](nextcloud-stream-poll-failure-authorization-2026-10-08.md).
+Earlier measured evidence preserves its original source hashes.

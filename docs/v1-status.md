@@ -1519,3 +1519,17 @@ nextcloud-raw-search-ranked-metadata-2026-10-08.md) for source hashes and scope.
 These are source checks; the shared backend remains RAG77 + 7f/schema131.
 No new image deployment, live event acceptance, full lineage rollout or
 physical derived cleanup is implied.
+
+## 2026-10-08 stream poll-error authorization correction
+
+A real `ContinueStream` counterexample reproduced a protected buffered tail
+being emitted after withdrawal during an event-store read failure. The error
+branch now rechecks the message's current publication before releasing that
+tail; denial, unavailable authorization and cancellation discard it, while a
+still-authorized request retains its tail. The original controls and all three
+negative cases were reused, red before the correction and green afterwards.
+Both pinned complete source profiles passed their whole session package
+(370 test/subtest results, zero fail/skip) and vet. Full patch reconstruction
+and reverse checks passed. [Source evidence](
+nextcloud-stream-poll-failure-authorization-2026-10-08.md) records the exact
+hashes. Runtime and full lineage/GC acceptance remain unchanged.

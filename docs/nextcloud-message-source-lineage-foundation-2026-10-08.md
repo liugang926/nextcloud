@@ -10,8 +10,8 @@ deployed frontend security update remain separate; see the
 
 | Complete patch | Pinned WeKnora base | SHA-256 |
 | --- | --- | --- |
-| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `3662b15840610041b6a8df55d3f1ebed8751b4d02e74d45b7593203952a154ef` |
-| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `46da62e72ebeca8c81b1582bce2d1438a8d56846a1113bd92fb1cd42f5a3fe1b` |
+| `integration/weknora.patch` | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `dbf8c4926f9b8fa1e9e5adefd38affc0f0e00281f2c44a570c3d345bbdd13d09` |
+| `integration/weknora-rag-77c97fd7.patch` | `77c97fd72f26e84435503d24eeed88cb5dfe1f01` | `8bbffc98f1fbdc03f08be0e7f6d959da61536b17b1b75b8b3a4258b914e612ae` |
 
 The complete hashes above also include the subsequent frontend security
 updates; see [dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
@@ -121,3 +121,7 @@ remain relevant until all actual inputs, persisted derivatives and output
 boundaries carry and enforce complete lineage.
 
 The current complete patch hashes include the subsequent raw-search ranking/denial correction. Earlier policy integration evidence retains the exact hashes tested there; the policy itself is unchanged. See [raw-search correction](nextcloud-raw-search-ranked-metadata-2026-10-08.md).
+
+The current complete patch also includes the independently reproduced
+[stream poll failure correction](nextcloud-stream-poll-failure-authorization-2026-10-08.md).
+Earlier measured evidence preserves its original source hashes.
