@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`db842d71468fd663347e70898e20db982293a34af599df400bf368abe19a5021`.
+`437e7ddef5d4db17cd2f507d191d8e74539fc693c7302eb50908b6d6911937d7`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,10 +17,24 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`34c560e03bbc20d4eff3c4ce9d652389f2a4f6056e738d01b8cdc0c05ee2c877`.
+`654acaa69f51766a2967a5333d1849eb8f915e13eb11188b59e8d70ea56b7584`.
+These source-only patch revisions reject generic reparse, file replacement and
+image-info edits on Nextcloud source-managed rows before any cleanup, object
+save, queue change, chunk write or index write. The caller receives a conflict
+directing it to the connector's new-candidate flow. New tests are named
+`TestNextcloud*` so both pinned `weknora-patch` CI jobs exercise them. The
+shared WeKnora image has not been switched to these revised patches; no
+derived-GC coverage marker or physical deletion has been enabled.
+
+The local source-only check passed `gofmt`, `git diff --check` and reverse
+patch validation on both pinned worktrees. An offline focused Go service test
+could not start because required modules are absent from the host cache;
+the two pinned CI jobs are the compile/test gate for this revision.
+
 The frontend patch supplies the failed-candidate controls in all five locales
-and uses the theme container token without a hard-coded fallback. The
-2026-10-08 combined pinned RAG source (including the generated-profile write
+and uses the theme container token without a hard-coded fallback. Before this
+service-entry guard revision, the 2026-10-08 combined pinned RAG source
+(including the generated-profile write
 fence) passed 1,217 frontend tests with zero failures, type checking, and the
 production build. The fixed baseline passed 1,213 tests with zero failures,
 type checking, and its production build. Each suite skipped one browser test

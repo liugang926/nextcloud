@@ -25912,7 +25912,7 @@ index 00000000..c8cd1d18
 +	return err
 +}
 diff --git a/internal/application/service/knowledge_process.go b/internal/application/service/knowledge_process.go
-index 41bdd2ff..2c273f29 100644
+index 41bdd2ff..e2993ba9 100644
 --- a/internal/application/service/knowledge_process.go
 +++ b/internal/application/service/knowledge_process.go
 @@ -327,6 +327,14 @@ func (s *knowledgeService) processChunks(ctx context.Context,
@@ -25989,11 +25989,41 @@ index 41bdd2ff..2c273f29 100644
  	finalizeIndexedKnowledgeState(
  		knowledge,
  		totalStorageSize,
+@@ -2598,6 +2637,9 @@ func (s *knowledgeService) ReparseKnowledge(
+ 		logger.Errorf(ctx, "Failed to load knowledge: %v", err)
+ 		return nil, err
+ 	}
++	if err := rejectNextcloudSourceManagedMutation(existing); err != nil {
++		return nil, err
++	}
+ 
+ 	tenantID := existing.TenantID
+ 
+@@ -3091,6 +3133,9 @@ func (s *knowledgeService) UpdateImageInfo(
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := rejectNextcloudSourceManagedMutation(knowledge); err != nil {
++		return err
++	}
+ 	imageInfo = common.CleanInvalidUTF8(imageInfo)
+ 	var images []*types.ImageInfo
+ 	if err := json.Unmarshal([]byte(imageInfo), &images); err != nil {
 diff --git a/internal/application/service/knowledge_replace.go b/internal/application/service/knowledge_replace.go
-index ca20ef9f..a89dda10 100644
+index ca20ef9f..e2329ad5 100644
 --- a/internal/application/service/knowledge_replace.go
 +++ b/internal/application/service/knowledge_replace.go
-@@ -122,7 +122,17 @@ func (s *knowledgeService) ReplaceKnowledgeFile(ctx context.Context,
+@@ -48,6 +48,9 @@ func (s *knowledgeService) ReplaceKnowledgeFile(ctx context.Context,
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if err := rejectNextcloudSourceManagedMutation(existing); err != nil {
++		return nil, err
++	}
+ 	if kb != nil && kb.Type == types.KnowledgeBaseTypeFAQ {
+ 		return nil, werrors.NewBadRequestError("FAQ 知识库不支持文件上传，请使用 FAQ 导入功能")
+ 	}
+@@ -122,7 +125,17 @@ func (s *knowledgeService) ReplaceKnowledgeFile(ctx context.Context,
  	}
  
  	fileSvc := s.resolveFileService(ctx, kb)
@@ -26012,6 +26042,61 @@ index ca20ef9f..a89dda10 100644
  	if err != nil {
  		logger.Errorf(ctx, "Failed to save replacement file for knowledge %s: %v", existing.ID, err)
  		return nil, err
+diff --git a/internal/application/service/knowledge_replace_test.go b/internal/application/service/knowledge_replace_test.go
+index f802cc85..86922717 100644
+--- a/internal/application/service/knowledge_replace_test.go
++++ b/internal/application/service/knowledge_replace_test.go
+@@ -229,6 +229,50 @@ func md5Hex(content string) string {
+ 	return fmt.Sprintf("%x", md5.Sum([]byte(content)))
+ }
+ 
++func TestNextcloudReplaceKnowledgeFileRejectsBeforeFileOrSourceWrite(t *testing.T) {
++	for _, tc := range []struct {
++		name      string
++		channel   string
++		metadata  types.JSON
++		content   string
++		fileName  string
++		replaceMD map[string]string
++	}{
++		{
++			name: "source channel and changed file", channel: types.ConnectorTypeNextcloud,
++			content: "new source body",
++		},
++		{
++			name: "legacy source metadata and changed file", channel: types.ChannelWeb,
++			metadata: types.JSON(`{"nextcloud_file_id":"42","external_id":"notes/a.md"}`),
++			content:  "new source body",
++		},
++		{
++			name: "same file with metadata edit", channel: types.ConnectorTypeNextcloud,
++			content: replaceFileOldContent, fileName: "a.md",
++			replaceMD: map[string]string{"extra": "changed"},
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			h := newReplaceFileHarness(t)
++			h.original.Channel = tc.channel
++			if len(tc.metadata) != 0 {
++				h.original.Metadata = tc.metadata
++			}
++			h.repo.row = h.original
++
++			_, err := h.replace(t, tc.content, tc.fileName, tc.replaceMD)
++			require.ErrorIs(t, err, ErrNextcloudSourceManagedMutation)
++			require.Equal(t, h.original, h.repo.row)
++			require.Zero(t, h.repo.columnsCalls)
++			require.Zero(t, h.store.saved)
++			require.Empty(t, h.store.deleted)
++			require.Empty(t, h.events)
++			require.Empty(t, h.tasks.payloads)
++		})
++	}
++}
++
+ func TestReplaceKnowledgeFilePreservesIDAndReparsesNewContent(t *testing.T) {
+ 	h := newReplaceFileHarness(t)
+ 	content := "# new body"
 diff --git a/internal/application/service/knowledge_transfer.go b/internal/application/service/knowledge_transfer.go
 index 415d3b43..ca765005 100644
 --- a/internal/application/service/knowledge_transfer.go
@@ -27093,10 +27178,10 @@ index 00000000..704b094f
 +}
 diff --git a/internal/application/service/nextcloud_derived_policy.go b/internal/application/service/nextcloud_derived_policy.go
 new file mode 100644
-index 00000000..941b3661
+index 00000000..1dd19286
 --- /dev/null
 +++ b/internal/application/service/nextcloud_derived_policy.go
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,106 @@
 +package service
 +
 +import (
@@ -27105,6 +27190,7 @@ index 00000000..941b3661
 +	"errors"
 +	"fmt"
 +
++	werrors "github.com/Tencent/WeKnora/internal/errors"
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/Tencent/WeKnora/internal/types/interfaces"
 +)
@@ -27112,6 +27198,21 @@ index 00000000..941b3661
 +// A copied or synthesized document has no source authorization link that can
 +// reliably revoke it. These operations remain unavailable for Nextcloud data.
 +var ErrNextcloudDerivedContent = errors.New("Nextcloud source content cannot be copied, shared, or synthesized")
++
++var ErrNextcloudSourceManagedMutation = werrors.NewConflictError(
++	"Nextcloud source-managed files must be rebuilt through a new connector candidate",
++)
++
++func rejectNextcloudSourceManagedMutation(k *types.Knowledge) error {
++	managed, err := isNextcloudKnowledge(k)
++	if err != nil {
++		return err
++	}
++	if managed {
++		return ErrNextcloudSourceManagedMutation
++	}
++	return nil
++}
 +
 +func isNextcloudKnowledge(k *types.Knowledge) (bool, error) {
 +	if k == nil {
@@ -27189,10 +27290,10 @@ index 00000000..941b3661
 +}
 diff --git a/internal/application/service/nextcloud_derived_policy_test.go b/internal/application/service/nextcloud_derived_policy_test.go
 new file mode 100644
-index 00000000..b9c041c1
+index 00000000..32f7f2f1
 --- /dev/null
 +++ b/internal/application/service/nextcloud_derived_policy_test.go
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,230 @@
 +package service
 +
 +import (
@@ -27315,6 +27416,18 @@ index 00000000..b9c041c1
 +		&types.KnowledgeBase{ID: "kb", TenantID: 7},
 +		derivedKnowledgeRepo{err: boom}, derivedDataSourceRepo{})
 +	require.ErrorIs(t, err, boom)
++}
++
++func TestNextcloudSourceManagedMutationGuardAllowsOrdinaryRows(t *testing.T) {
++	require.NoError(t, rejectNextcloudSourceManagedMutation(&types.Knowledge{
++		Channel:  types.ChannelWeb,
++		Metadata: types.JSON(`{"datasource_id":"ordinary","external_id":"doc"}`),
++	}))
++	require.ErrorIs(t, rejectNextcloudSourceManagedMutation(&types.Knowledge{
++		Channel:  types.ChannelWeb,
++		Metadata: types.JSON(`{"nextcloud_file_id":"42"}`),
++	}), ErrNextcloudSourceManagedMutation)
++	require.Equal(t, 409, ErrNextcloudSourceManagedMutation.HTTPCode)
 +}
 +
 +func TestRejectNextcloudDerivedKBRetainsDenialAfterSourceHardDelete(t *testing.T) {
@@ -28048,6 +28161,76 @@ index fefffa4c..57850519 100644
 +	require.NoError(t, err)
 +	require.Equal(t, types.ResourceProvenanceNextcloud, provenance)
 +}
+diff --git a/internal/application/service/resource_review_regression_test.go b/internal/application/service/resource_review_regression_test.go
+index 8bf5c2ab..81be8280 100644
+--- a/internal/application/service/resource_review_regression_test.go
++++ b/internal/application/service/resource_review_regression_test.go
+@@ -39,6 +39,65 @@ func TestReparseRequiresExplicitWriteGrant(t *testing.T) {
+ 	require.Zero(t, f.chunkRepo.writes)
+ }
+ 
++func TestNextcloudReparseRejectsBeforeCleanup(t *testing.T) {
++	for _, tc := range []struct {
++		name     string
++		channel  string
++		metadata types.JSON
++	}{
++		{name: "source channel", channel: types.ConnectorTypeNextcloud, metadata: types.JSON(`{}`)},
++		{name: "legacy source metadata", channel: types.ChannelWeb,
++			metadata: types.JSON(`{"nextcloud_file_id":"42"}`)},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			f := newDocumentWriteFixture(t)
++			require.NoError(t, f.db.Model(&types.Knowledge{}).Where("id = ?", "doc").Updates(map[string]any{
++				"channel": tc.channel, "metadata": tc.metadata, "type": "file",
++				"file_path": "source.md", "parse_status": types.ParseStatusCompleted,
++			}).Error)
++			before, err := f.repo.GetKnowledgeByID(f.ctx, 7, "doc")
++			require.NoError(t, err)
++			beforeChunk, err := f.chunkRepo.GetChunkByID(f.ctx, 7, "chunk")
++			require.NoError(t, err)
++
++			_, err = f.svc.ReparseKnowledge(f.ctx, "doc", nil)
++			require.ErrorIs(t, err, ErrNextcloudSourceManagedMutation)
++			f.requireNoWrites(t)
++			after, err := f.repo.GetKnowledgeByID(f.ctx, 7, "doc")
++			require.NoError(t, err)
++			require.Equal(t, before, after)
++			afterChunk, err := f.chunkRepo.GetChunkByID(f.ctx, 7, "chunk")
++			require.NoError(t, err)
++			require.Equal(t, beforeChunk, afterChunk)
++		})
++	}
++}
++
++func TestNextcloudUpdateImageInfoRejectsBeforeChunkMutation(t *testing.T) {
++	f := newDocumentWriteFixture(t)
++	require.NoError(t, f.db.Model(&types.Knowledge{}).Where("id = ?", "doc").Updates(map[string]any{
++		"channel": types.ChannelWeb, "metadata": types.JSON(`{"nextcloud_file_id":"42"}`),
++	}).Error)
++	before, err := f.repo.GetKnowledgeByID(f.ctx, 7, "doc")
++	require.NoError(t, err)
++	beforeChunk, err := f.chunkRepo.GetChunkByID(f.ctx, 7, "chunk")
++	require.NoError(t, err)
++
++	err = f.svc.UpdateImageInfo(f.ctx, "doc", "chunk",
++		`[{"original_url":"source-image","caption":"must not create a child"}]`)
++	require.ErrorIs(t, err, ErrNextcloudSourceManagedMutation)
++	f.requireNoWrites(t)
++	after, err := f.repo.GetKnowledgeByID(f.ctx, 7, "doc")
++	require.NoError(t, err)
++	require.Equal(t, before, after)
++	afterChunk, err := f.chunkRepo.GetChunkByID(f.ctx, 7, "chunk")
++	require.NoError(t, err)
++	require.Equal(t, beforeChunk, afterChunk)
++	var chunkCount int64
++	require.NoError(t, f.db.Model(&types.Chunk{}).Where("knowledge_id = ?", "doc").Count(&chunkCount).Error)
++	require.EqualValues(t, 1, chunkCount)
++}
++
+ func TestReparseTaskPinsOriginalKBBeforeAnySubmission(t *testing.T) {
+ 	for _, scenario := range []string{"moved", "missing", "mixed legacy", "blank ID", "moving"} {
+ 		t.Run(scenario, func(t *testing.T) {
 diff --git a/internal/application/service/resource_test.go b/internal/application/service/resource_test.go
 index ebfe6542..ea7fc6ae 100644
 --- a/internal/application/service/resource_test.go

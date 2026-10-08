@@ -18,6 +18,15 @@ unrelated RAG reranker/fallback logic; the read-lease lifetime finding is the
 same. No container, full build, runtime race test or production data was used
 in this audit. A static audit cannot establish that all legacy tasks drained.
 
+A follow-up source-only patch now rejects the three generic mutation entries
+identified below (`ReparseKnowledge`, `ReplaceKnowledgeFile`, `UpdateImageInfo`)
+for rows marked by the channel or Nextcloud metadata. Its new fixed/RAG patch
+hashes are `437e7ddef5d4db17cd2f507d191d8e74539fc693c7302eb50908b6d6911937d7`
+and `654acaa69f51766a2967a5333d1849eb8f915e13eb11188b59e8d70ea56b7584`.
+The table records the original audit gap; this narrow mitigation does not
+establish generic repository writer or full derived-GC coverage. The shared
+WeKnora image has not been switched to this follow-up patch.
+
 **Block physical derived deletion.** The collector inventories a
 `derived_index` blocker (`internal/application/repository/nextcloud_gc.go:215-219,
 290-400`). There is no production writer for the required
@@ -69,7 +78,7 @@ publication revocation before serialization. Moving the lease only around
 | Extracted images/objects, `internal/application/service/knowledge_process.go:3790-3815`, `image_resolver.go:80-144,202,395,534,602,734,810`, `file/resource_catalog.go:70-131`, `internal/application/repository/nextcloud_gc.go:224-241`, `nextcloud_gc_objects.go:24-45,208-221` | GC sees image URLs stored on chunks and only deletes local, scoped Nextcloud-provenance objects. | SaveBytes puts the object before catalog registration/chunk persistence; a crash can leave an uninventoried object. The derived image path does not visibly attach the source provenance used for the original file. Cloud/unknown providers remain blocked. Need durable pre-upload intent, exact source ownership and provider acknowledgement or deny source image uploads. |
 | Wiki writes, `internal/application/service/wiki_ingest_batch.go:297-302,935-943`, `wiki_page.go:43-52`, `internal/handler/wiki_page.go:53-82` | Normal ingest/finalize and HTTP routes call the source-derived KB rejection policy. | Some service checks depend on optional interfaces/dependencies; prove mandatory policy at every internal entry and legacy row. Historical external Wiki output needs provenance and deletion acknowledgement. |
 
-The smallest immediate fail-closed code change is at the **service entry**,
+The follow-up fail-closed code change is at the **service entry**,
 before any `OpenAttempt`, metadata update, object save, task dequeue or
 cleanup: reject source-managed rows in `ReparseKnowledge`,
 `ReplaceKnowledgeFile`, and `UpdateImageInfo`. Reuse
@@ -83,7 +92,10 @@ defense against a new bypass. Focused tests should cover each public/service
 entry, batch reparse, a source row with `Channel` rewritten but retained
 Nextcloud metadata, malformed/ambiguous metadata, and an ordinary document.
 For every denied case assert unchanged chunk/index/graph/object/source row and
-no queued work. This is a repair of active mutation risk, **not** permission
+no queued work. The patch adds representative no-side-effect tests on both
+pinned bases; the offline focused Go test could not start because required
+modules are not cached on this host, so CI remains the compile gate. No
+runtime race test was run. This is a repair of active mutation risk, **not** permission
 to activate derived GC.
 
 ## PRD §7.6–7.7 acceptance crosswalk
