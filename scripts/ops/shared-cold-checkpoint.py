@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -178,12 +179,12 @@ def inspect(kind: str, name: str, nc_dir: Path) -> dict:
 
 
 def known_stopped_port_loss(expected: set, actual: set) -> bool:
-    """Docker Desktop can clear an additional same-port address while stopped.
+    """Docker Desktop can clear a fixed LAN address while stopped.
 
-    Only accept an empty port that copies a surviving binding's address, for
-    the same container port and published port. Any nonempty changed binding
-    or missing binding still fails. The caller also freezes container identity
-    and its creation-time Compose configuration hash.
+    Accept only one fixed private-LAN binding, or an additional same-port LAN
+    binding beside a surviving loopback binding. The empty loopback placeholder
+    cannot replace a requested loopback/public/wildcard binding. The caller
+    freezes the verified running bindings, identity and Compose hash.
     """
     missing, extra = expected - actual, actual - expected
     if not missing or len(expected) != len(actual) or len(missing) != len(extra):
@@ -191,9 +192,18 @@ def known_stopped_port_loss(expected: set, actual: set) -> bool:
     for target, address, published in extra:
         if published != "" or address != "127.0.0.1":
             return False
-        candidates = {(t, host, port) for t, host, port in missing
-                      if t == target and host != address and port and
-                      (target, address, port) in expected & actual}
+        candidates = set()
+        for t, host, port in missing:
+            try:
+                requested = ipaddress.IPv4Address(host)
+            except ipaddress.AddressValueError:
+                continue
+            private_lan = any(requested in ipaddress.IPv4Network(network) for network in
+                              ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+            if (t == target and private_lan and port.isdecimal() and
+                    1 <= int(port) <= 65535 and
+                    (len(expected) == 1 or (target, address, port) in expected & actual)):
+                candidates.add((t, host, port))
         if len(candidates) != 1:
             return False
         missing -= candidates

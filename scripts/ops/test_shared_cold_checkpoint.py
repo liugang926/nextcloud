@@ -20,6 +20,21 @@ SPEC.loader.exec_module(checkpoint)
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_single_lan_stopped_placeholder_is_exact(self):
+        placeholder = {("443/tcp", "127.0.0.1", "")}
+        self.assertTrue(checkpoint.known_stopped_port_loss(
+            {("443/tcp", "10.0.0.2", "18482")}, placeholder))
+        for host in ("127.0.0.1", "0.0.0.0", "8.8.8.8", "::1", "localhost"):
+            self.assertFalse(checkpoint.known_stopped_port_loss(
+                {("443/tcp", host, "18482")}, placeholder))
+        for port in ("", "0", "65536", "named"):
+            self.assertFalse(checkpoint.known_stopped_port_loss(
+                {("443/tcp", "10.0.0.2", port)}, placeholder))
+        self.assertFalse(checkpoint.known_stopped_port_loss(
+            {("443/tcp", "10.0.0.2", "18482")}, {("443/tcp", "127.0.0.1", "18483")}))
+        self.assertFalse(checkpoint.known_stopped_port_loss(
+            {("443/tcp", "10.0.0.2", "18482")}, {("80/tcp", "127.0.0.1", "")}))
+
     def stopped_port_fixture(self):
         config = {"volumes": {}, "networks": {"default": {"name": "nc_default"}}}
         service = {"environment": {"KEY": "value"}, "volumes": [],

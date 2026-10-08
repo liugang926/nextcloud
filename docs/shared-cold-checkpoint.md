@@ -55,12 +55,26 @@ database export: Docker Desktop changed a stopped container's additional
 same-port LAN binding into a loopback binding with an empty published port.
 Starting the original container restored both original bindings. The helper
 now records the verified running bindings and creation-time Compose hash,
-checks that hash against the current configuration, and accepts only this
-specific stopped representation with unchanged container/image/hash, mounts
-and environment. Running-port validation remains exact. A nonempty port change,
+checks that hash against the current configuration, and accepts only a fixed
+RFC1918 IPv4 LAN binding represented as an empty loopback port while stopped,
+either alone or beside its unchanged same-port loopback binding. It still
+requires unchanged container/image/hash, mounts and environment.
+Running-port validation remains exact. A nonempty port change,
 different address, missing binding or replaced container still fails. This
 does not change the configured publish addresses or authorize reopening without
 checking the restored runtime ports.
+
+The second capture identified the same representation on the single-binding
+HTTPS gateways and also stopped before export. Both failed capture directories
+remain incomplete; their original containers were restarted and verified.
+An independent, owned Nginx fixture then exercised both shapes on Docker
+29.8.0. Its container IDs and Compose hashes stayed unchanged; stopping produced
+the placeholders and restarting restored the original bindings. Both containers
+and their private network were removed. The [sanitized lifecycle evidence](
+evidence/docker-stopped-port-probe-2026-10-08.json) records these results.
+Thirteen offline tests also reject running placeholders, requested loopback,
+wildcard or public-address loss, nonempty port changes, missing bindings,
+target/protocol changes and identity/image/hash/mount/environment drift.
 
 The checkpoint contains local passwords, TLS private keys, JWT/AES material,
 and document contents. Restrict access to the entire directory. It records
