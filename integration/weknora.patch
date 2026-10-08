@@ -7360,10 +7360,10 @@ index 00000000..53783ba8
 +}
 diff --git a/internal/application/repository/nextcloud_content_leases.go b/internal/application/repository/nextcloud_content_leases.go
 new file mode 100644
-index 00000000..ebdad363
+index 00000000..9ddbe2dd
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_content_leases.go
-@@ -0,0 +1,819 @@
+@@ -0,0 +1,850 @@
 +package repository
 +
 +import (
@@ -8000,6 +8000,55 @@ index 00000000..ebdad363
 +	return nil
 +}
 +
++// Keep the coverage row locked until the claim or exact delete transaction
++// commits. If an operator revokes coverage after discovering an uncovered path,
++// a claimant must not complete a delete using an earlier coverage observation.
++// Call after taking the KB sentinel lock.
++func nextcloudRequireContentLeaseCoverage(tx *gorm.DB, scope NextcloudContentScope, nowMS int64) error {
++	locked := tx.Exec(`UPDATE nextcloud_content_lease_coverage
++		SET activated_at_ms = activated_at_ms
++		WHERE tenant_id = ? AND knowledge_base_id = ?`,
++		scope.TenantID, scope.KnowledgeBaseID)
++	if locked.Error != nil {
++		return locked.Error
++	}
++	if locked.RowsAffected != 1 {
++		return ErrNextcloudContentGCUncovered
++	}
++	var coverage struct {
++		ActivatedAtMS     int64  `gorm:"column:activated_at_ms"`
++		LegacyDrainedAtMS int64  `gorm:"column:legacy_drained_at_ms"`
++		ReaderRevision    string `gorm:"column:reader_revision"`
++		BuilderRevision   string `gorm:"column:builder_revision"`
++	}
++	if err := tx.Table("nextcloud_content_lease_coverage").
++		Where("tenant_id = ? AND knowledge_base_id = ?", scope.TenantID, scope.KnowledgeBaseID).
++		Take(&coverage).Error; err != nil {
++		return ErrNextcloudContentGCUncovered
++	}
++	if coverage.ActivatedAtMS <= 0 || coverage.LegacyDrainedAtMS < coverage.ActivatedAtMS ||
++		coverage.LegacyDrainedAtMS > nowMS || coverage.ReaderRevision == "" ||
++		coverage.BuilderRevision == "" {
++		return ErrNextcloudContentGCUncovered
++	}
++	return nil
++}
++
++func nextcloudRequireNoActiveContentLeases(tx *gorm.DB, scope NextcloudContentScope, nowMS int64) error {
++	var active int64
++	if err := tx.Table("nextcloud_content_leases").Where(`tenant_id = ? AND
++		knowledge_base_id = ? AND knowledge_id IN ('', ?) AND
++		released_at_ms IS NULL AND expires_at_ms > ?`,
++		scope.TenantID, scope.KnowledgeBaseID, scope.KnowledgeID, nowMS).
++		Count(&active).Error; err != nil {
++		return err
++	}
++	if active != 0 {
++		return ErrNextcloudContentGCBusy
++	}
++	return nil
++}
++
 +// ClaimKnowledgeGC is an admission fence only. No physical deletion is wired
 +// to it. Coverage is absent by default; a future rollout must establish full
 +// reader/build coverage and drain pre-rollout work before inserting the marker.
@@ -8022,21 +8071,8 @@ index 00000000..ebdad363
 +		if _, err := nextcloudLockKBFence(tx, scope.TenantID, scope.KnowledgeBaseID, nowMS); err != nil {
 +			return err
 +		}
-+		var coverage struct {
-+			ActivatedAtMS     int64  `gorm:"column:activated_at_ms"`
-+			LegacyDrainedAtMS int64  `gorm:"column:legacy_drained_at_ms"`
-+			ReaderRevision    string `gorm:"column:reader_revision"`
-+			BuilderRevision   string `gorm:"column:builder_revision"`
-+		}
-+		if err := tx.Table("nextcloud_content_lease_coverage").
-+			Where("tenant_id = ? AND knowledge_base_id = ?", scope.TenantID, scope.KnowledgeBaseID).
-+			Take(&coverage).Error; err != nil {
-+			return ErrNextcloudContentGCUncovered
-+		}
-+		if coverage.ActivatedAtMS <= 0 || coverage.LegacyDrainedAtMS < coverage.ActivatedAtMS ||
-+			coverage.LegacyDrainedAtMS > nowMS || coverage.ReaderRevision == "" ||
-+			coverage.BuilderRevision == "" {
-+			return ErrNextcloudContentGCUncovered
++		if err := nextcloudRequireContentLeaseCoverage(tx, scope, nowMS); err != nil {
++			return err
 +		}
 +		fence, err := nextcloudLockExactFence(tx, scope, nowMS, false)
 +		if err != nil {
@@ -8055,16 +8091,8 @@ index 00000000..ebdad363
 +		if fence.State == "deleting" && fence.ClaimUntilMS != nil && *fence.ClaimUntilMS > nowMS {
 +			return ErrNextcloudContentGCBusy
 +		}
-+		var active int64
-+		if err := tx.Table("nextcloud_content_leases").Where(`tenant_id = ? AND
-+			knowledge_base_id = ? AND knowledge_id IN ('', ?) AND
-+			released_at_ms IS NULL AND expires_at_ms > ?`,
-+			scope.TenantID, scope.KnowledgeBaseID, scope.KnowledgeID, nowMS).
-+			Count(&active).Error; err != nil {
++		if err := nextcloudRequireNoActiveContentLeases(tx, scope, nowMS); err != nil {
 +			return err
-+		}
-+		if active != 0 {
-+			return ErrNextcloudContentGCBusy
 +		}
 +		claim = NextcloudContentGCClaim{Token: uuid.NewString(), Scope: scope,
 +			Epoch: fence.Epoch + 1, ExpiresAt: time.UnixMilli(nowMS + ttlMS).UTC()}
@@ -8103,13 +8131,16 @@ index 00000000..ebdad363
 +		claim.Scope.KnowledgeBaseID, nowMS); err != nil {
 +		return err
 +	}
++	if err := nextcloudRequireContentLeaseCoverage(tx, claim.Scope, nowMS); err != nil {
++		return err
++	}
 +	fence, err := nextcloudLockExactFence(tx, claim.Scope, nowMS, false)
 +	if err != nil || fence.State != "deleting" || fence.Epoch != claim.Epoch ||
 +		fence.ClaimToken != claim.Token || fence.ClaimUntilMS == nil ||
 +		*fence.ClaimUntilMS <= nowMS {
 +		return ErrNextcloudContentLeaseDenied
 +	}
-+	return nil
++	return nextcloudRequireNoActiveContentLeases(tx, claim.Scope, nowMS)
 +}
 +
 +// RenewGCClaim extends a still-live claim for bounded external cleanup.
@@ -8366,10 +8397,10 @@ index 00000000..35e1b99a
 +}
 diff --git a/internal/application/repository/nextcloud_content_leases_test.go b/internal/application/repository/nextcloud_content_leases_test.go
 new file mode 100644
-index 00000000..6e857c47
+index 00000000..ad37281c
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_content_leases_test.go
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,378 @@
 +package repository
 +
 +import (
@@ -8576,6 +8607,54 @@ index 00000000..6e857c47
 +	fresh, err := store.ClaimKnowledgeGC(ctx, scope, notBefore, time.Minute)
 +	require.NoError(t, err)
 +	require.NoError(t, store.FinishGCClaim(ctx, fresh, true))
++}
++
++// A valid token is insufficient at the row-delete boundary if coverage was
++// revoked or an active read/build lease appeared after claim admission.
++func TestNextcloudContentLeaseSQLiteGCFinalCheckRechecksCoverageAndLeases(t *testing.T) {
++	db := leaseTestSQLite(t)
++	store := NewNextcloudContentLeaseStore(db)
++	ctx := context.Background()
++	scope := leaseTestScope("final-check")
++	require.NoError(t, store.RetireKnowledge(ctx, scope))
++	leaseTestCoverKB(t, db, scope)
++	claim, err := store.ClaimKnowledgeGC(ctx, scope, leaseTestNotBefore(t, db, scope), time.Minute)
++	require.NoError(t, err)
++	validate := func() error {
++		return db.Transaction(func(tx *gorm.DB) error {
++			return store.ValidateGCClaimInTx(ctx, tx, claim)
++		})
++	}
++	require.NoError(t, validate())
++
++	require.NoError(t, db.Exec(`DELETE FROM nextcloud_content_lease_coverage
++		WHERE tenant_id = ? AND knowledge_base_id = ?`,
++		scope.TenantID, scope.KnowledgeBaseID).Error)
++	require.ErrorIs(t, validate(), ErrNextcloudContentGCUncovered)
++	leaseTestCoverKB(t, db, scope)
++
++	nowMS, err := nextcloudLeaseNowMS(db)
++	require.NoError(t, err)
++	addLateLease := func(knowledgeID string, kind NextcloudContentLeaseKind) NextcloudContentLease {
++		t.Helper()
++		lease, insertErr := nextcloudInsertLease(db, scope.TenantID, scope.KnowledgeBaseID,
++			knowledgeID, kind, 1, "late-worker", nowMS, time.Minute.Milliseconds())
++		require.NoError(t, insertErr)
++		return lease
++	}
++	for _, candidate := range []struct {
++		knowledgeID string
++		kind        NextcloudContentLeaseKind
++	}{
++		{scope.KnowledgeID, NextcloudContentBuildLease},
++		{"", NextcloudContentReadLease},
++	} {
++		late := addLateLease(candidate.knowledgeID, candidate.kind)
++		require.ErrorIs(t, validate(), ErrNextcloudContentGCBusy)
++		require.NoError(t, store.ReleaseLease(ctx, late.ID))
++	}
++	require.NoError(t, validate())
++	require.NoError(t, store.FinishGCClaim(ctx, claim, false))
 +}
 +
 +func TestNextcloudContentLeaseSQLiteKBFenceBlocksNewWork(t *testing.T) {
@@ -13684,10 +13763,10 @@ index 0000000..5741a55
 +}
 diff --git a/internal/application/repository/nextcloud_gc_chunks_test.go b/internal/application/repository/nextcloud_gc_chunks_test.go
 new file mode 100644
-index 0000000..99be88a
+index 00000000..aad52ebe
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_gc_chunks_test.go
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,160 @@
 +package repository
 +
 +import (
@@ -13739,6 +13818,22 @@ index 0000000..99be88a
 +	require.NoError(t, leases.ReleaseLease(ctx, reader.ID))
 +	claim, err := leases.ClaimKnowledgeGC(ctx, scope, notBefore, time.Minute)
 +	require.NoError(t, err)
++
++	// Revoking coverage after claim must stop the dormant exact delete before
++	// either the physical row or its item receipt can change.
++	require.NoError(t, db.Exec(`DELETE FROM nextcloud_content_lease_coverage
++		WHERE tenant_id = ? AND knowledge_base_id = ?`,
++		scope.TenantID, scope.KnowledgeBaseID).Error)
++	require.ErrorIs(t, store.DeleteNextcloudExactChunkForGC(ctx, claim, job.ID, "chunk-old"),
++		ErrNextcloudContentGCUncovered)
++	var blockedChunk int64
++	require.NoError(t, db.Table("chunks").Where("id = ?", "chunk-old").Count(&blockedChunk).Error)
++	require.EqualValues(t, 1, blockedChunk)
++	var blockedItem nextcloudGCItem
++	require.NoError(t, db.Where("job_id = ? AND kind = ? AND object_ref = ?",
++		job.ID, "derived_chunk", "chunk-old").Take(&blockedItem).Error)
++	require.Equal(t, "blocked", blockedItem.State)
++	leaseTestCoverKB(t, db, scope)
 +
 +	// A forged item cannot authorize another tenant's chunk.
 +	require.NoError(t, db.Create(&types.Chunk{ID: "foreign", TenantID: 8,

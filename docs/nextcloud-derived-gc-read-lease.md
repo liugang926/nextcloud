@@ -86,6 +86,15 @@ this helper, and no coverage marker is created. A count of foreign revisions
 cannot fence an unknown writer inserting a new revision concurrently;
 complete writer and reader coverage remains a prerequisite.
 
+The 2026-10-08 patch tightens the final SQL delete boundary. After a GC
+claim is admitted, each validation now locks and rechecks the KB coverage
+marker and counts live exact and KB-wide read/build leases in the same
+transaction as the row delete and receipt. Removing the test coverage marker
+or introducing a late lease therefore denies the dormant exact-chunk delete
+without changing its chunk or item receipt. Focused SQLite tests passed on
+both pinned WeKnora bases. This final check does not prove full path coverage,
+insert a production coverage marker, or call the physical delete helpers.
+
 ## Proposed durable protocol
 
 1. Add a per-knowledge fence keyed by `(tenant_id, knowledge_base_id, knowledge_id)` with source tuple, `epoch`, state `open | retired | deleting`, and retirement time. The state is never reopened for an old generation; restoration creates a new knowledge/version ID.
