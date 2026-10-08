@@ -1335,3 +1335,17 @@ maintenance off and no pending DB upgrade, the new PostgreSQL column existed,
 and the LAN HTTPS status endpoint returned 200 with a valid test-CA chain.
 This shared upgrade did not exercise a live withdrawal/republish transition or
 change the WeKnora runtime image.
+
+## 2026-10-08 ordinary empty-result chat guard correction (source patches)
+
+An isolated diagnosis of a normal document-KB chat found that an empty
+`search_knowledge` result was treated as missing source identity and stopped
+the live answer before the model request. The current fixed/RAG patches now
+accept only the producer's explicit empty search/list shape or a diagnostic-only
+tool failure. They still run the current message/reference and KB-grant check,
+and continue to deny opaque or nonempty content without document identity.
+The incremental fix had focused access/service/session and complete session
+package tests on merged-main plus the preceding RAG patch source. The two
+pinned combined patches passed static apply checks; their CI tests and a
+runtime image switch are pending. The shared LAN WeKnora image still predates
+this correction, so a live chat repair is not yet claimed.

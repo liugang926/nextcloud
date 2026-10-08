@@ -7,7 +7,7 @@ separate patch for the RAG branch at commit
 `77c97fd72f26e84435503d24eeed88cb5dfe1f01`. Apply **one** patch to its
 matching base; the RAG patch is not a delta to the fixed-baseline patch.
 The fixed-baseline patch SHA-256 is
-`437e7ddef5d4db17cd2f507d191d8e74539fc693c7302eb50908b6d6911937d7`.
+`6d2fa3dffda1b97c7d0eca9d1f8cef6229933641b482fa1b798cda7c5d5a5d37`.
 
 From a clean WeKnora worktree at that exact RAG commit:
 
@@ -17,7 +17,7 @@ git apply /path/to/nextcloud/integration/weknora-rag-77c97fd7.patch
 ```
 
 The RAG patch SHA-256 is
-`654acaa69f51766a2967a5333d1849eb8f915e13eb11188b59e8d70ea56b7584`.
+`7f9c7f6a0027e42a4dd01b33366051ee7533aeddb9369653b83653165d5b5517`.
 These source-only patch revisions reject generic reparse, file replacement and
 image-info edits on Nextcloud source-managed rows before any cleanup, object
 save, queue change, chunk write or index write. The caller receives a conflict
@@ -30,6 +30,19 @@ The local source-only check passed `gofmt`, `git diff --check` and reverse
 patch validation on both pinned worktrees. An offline focused Go service test
 could not start because required modules are absent from the host cache;
 the two pinned CI jobs are the compile/test gate for this revision.
+
+The current patches also incorporate the independently tested
+`stream-empty-result-fix.patch` (SHA-256
+`bb1a9bebcd58cb7e993e9c8e4d94f3bfe2689ed80f5fcd329339cd3edf1310db`).
+The live-stream guard accepts only producer-shaped empty search/list results
+and diagnostic-only tool failures without a source document. It still checks
+the message's earlier references and current knowledge-base grants; opaque
+or nonempty output without source identity remains denied. Focused access,
+service and session tests, plus the complete session package, passed on the
+merged-main plus preceding RAG patch source. Both pinned patches accepted the
+incremental diff and passed reverse patch/static checks. The fixed and RAG
+CI jobs must still compile and test this combined revision before it is
+treated as validated on those baselines. The shared runtime image is unchanged.
 
 The frontend patch supplies the failed-candidate controls in all five locales
 and uses the theme container token without a hard-coded fallback. Before this

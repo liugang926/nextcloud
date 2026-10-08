@@ -167,7 +167,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo '437e7ddef5d4db17cd2f507d191d8e74539fc693c7302eb50908b6d6911937d7  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '6d2fa3dffda1b97c7d0eca9d1f8cef6229933641b482fa1b798cda7c5d5a5d37  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -278,7 +278,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo '654acaa69f51766a2967a5333d1849eb8f915e13eb11188b59e8d70ea56b7584  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
+          echo '7f9c7f6a0027e42a4dd01b33366051ee7533aeddb9369653b83653165d5b5517  nextcloud/integration/weknora-rag-77c97fd7.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-77c97fd7.patch
           git -C weknora-rag diff --check
@@ -307,6 +307,7 @@ jobs:
             ./internal/router \
             ./internal/container \
             ./internal/mcpserver
+          go test -p 2 ./internal/handler/session -run '^Test(LiveSSE|ContinueStream)' -count=1
           go test -p 2 ./internal/database -run '^TestSQLite(Migrations|NextcloudPairing)' -count=1
           go test -p 2 ./internal/agent/tools -run '^TestQueryKnowledgeGraph' -count=1
 
