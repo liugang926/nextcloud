@@ -134,6 +134,86 @@ jobs:
             go test -p 2 ./internal/datasource/connector/nextcloud \
               -run TestLiveSignedNextcloudMachineRequests -count=1
 
+  weknora-development-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: c6
+            base: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          - profile: rag
+            base: b6ea8b560b886cef77fb32fb2e092123cdce4ed3
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+        env:
+          POSTGRES_PASSWORD: candidate-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          path: nextcloud
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: ${{ matrix.base }}
+          path: candidate
+          persist-credentials: false
+      - name: Verify complete candidate patch and exact trees
+        run: |
+          python3 nextcloud/scripts/ops/verify-weknora-candidate.py --profile=${{ matrix.profile }} --source-repo=candidate
+          git -C candidate apply ../nextcloud/integration/candidates/weknora-phase3-${{ matrix.profile }}.patch
+          git -C candidate diff --check
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: candidate/go.sum
+      - name: Prepare isolated test databases
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          for kind in lease migration sourcehealth pairing auto faq; do
+            docker exec "$PG_CONTAINER" createdb -U postgres "candidate_$kind"
+          done
+      - name: Test candidate producers and recovery contracts
+        working-directory: candidate
+        env:
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_lease sslmode=disable
+          WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:candidate-test-only@127.0.0.1:5432/candidate_migration?sslmode=disable&options=-c%20app.skip_embedding%3Dtrue
+          WEKNORA_SOURCE_HEALTH_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_sourcehealth sslmode=disable
+          WEKNORA_PAIRING_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_pairing sslmode=disable
+          WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_auto sslmode=disable
+          WEKNORA_FAQ_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_faq sslmode=disable
+        run: |
+          go test -json -p 1 ./internal/config ./internal/application/repository ./internal/application/service ./internal/handler ./internal/container ./internal/database ./cmd/publication-recovery \
+            -run 'FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
+          go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: candidate/frontend/package-lock.json
+      - name: Typecheck and build candidate capacity UI
+        working-directory: candidate/frontend
+        run: |
+          npm ci
+          npx vue-tsc --noEmit
+          npm run build
+      - name: Retain candidate test logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: weknora-development-${{ matrix.profile }}
+          path: candidate/candidate-*.jsonl
+
   weknora-patch:
     runs-on: ubuntu-latest
     timeout-minutes: 45

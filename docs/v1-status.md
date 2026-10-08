@@ -1587,3 +1587,20 @@ and [measured evidence](evidence/publication-recovery-journal-2026-10-09.json)
 record the exact package and post-measurement validation change. Shared runtime
 still uses app 0.4.37. WeKnora closure, authoritative full reconciliation and
 reopening remain separate incomplete gates.
+
+## 2026-10-09 reproducible WeKnora development candidates
+
+Two separately pinned complete candidate patches are now submitted under
+`integration/candidates/`, with an exact-tree verifier and their own CI matrix.
+The [candidate description](weknora-development-candidates.md) separates the
+measured source gates from outstanding full-app, physical-GC, capacity and
+performance acceptance. FAQ/enrichment tests passed 317 cases per profile,
+with no failures or skips, and both complete source trees compiled. The final
+recovery/default-prompt gate passed another 17 cases per profile and full compile.
+The shared schema131 stack and default build selections are unchanged.
+
+The [live joint recovery evidence](evidence/coordinated-recovery-live-20261009.json)
+records actual dual PostgreSQL rollback, exact external plan replay, closed
+receipts and fresh signed source reconciliation using live Nextcloud and nested
+synthetic LDAP. Its WeKnora parser/index rows are fixtures; global ingress
+reopening and full external-index/application recovery remain unaccepted.
