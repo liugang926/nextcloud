@@ -1,0 +1,64 @@
+{
+  "backend_image_id": "sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d",
+  "backend_image_unchanged": true,
+  "backend_patch_sha256": "7f9c7f6a0027e42a4dd01b33366051ee7533aeddb9369653b83653165d5b5517",
+  "browser_login_page": "fresh hidden Codex in-app browser rendered login heading, local/Tianji AD selectors, email/password fields and login button",
+  "build": "normal pinned frontend/Dockerfile; Linux arm64; terminal exit0",
+  "checks": {
+    "local_account_login": {
+      "status": 200,
+      "success": true,
+      "tls_ca_verified": true
+    },
+    "nextcloud_status": {
+      "status": 200,
+      "tls_ca_verified": true
+    },
+    "weknora_lan_login": {
+      "status": 200,
+      "tls_ca_verified": true
+    }
+  },
+  "frontend_base": "77c97fd72f26e84435503d24eeed88cb5dfe1f01",
+  "frontend_business_source_diff_from_running_7f": [
+    "package.json",
+    "package-lock.json",
+    "src/utils/markdownDependencySecurity.test.ts"
+  ],
+  "frontend_image_id": "sha256:3e5feb7e70f4fda72f270435a85a60656615689df14a02572e57e6996586d1ca",
+  "frontend_patch_sha256": "ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea",
+  "isolated_frame_contract": {
+    "backend": "local frame-policy contract stub only",
+    "checks": {
+      "/embed/artifact-check": {
+        "content_security_policy": "frame-ancestors 'self' https://artifact-check.invalid",
+        "status": 200
+      },
+      "/embed/denied": {
+        "content_security_policy": null,
+        "status": 403
+      },
+      "/login": {
+        "content_security_policy": null,
+        "status": 200
+      }
+    },
+    "image_id": "sha256:3e5feb7e70f4fda72f270435a85a60656615689df14a02572e57e6996586d1ca",
+    "network": "none",
+    "owned_container_removed": true,
+    "published_ports": 0,
+    "real_backend_authorization_proven": false,
+    "result": "passed"
+  },
+  "limitations": [
+    "Frontend dependency update only; backend remains the existing RAG77+7f image and database schema131.",
+    "New Agent history and source-lineage schema132 code has not been deployed.",
+    "The isolated frame-policy stub is not proof of real channel authorization.",
+    "Frontend source security suites and zero audits are recorded separately; login/HTTP checks do not prove complete V1 or real AD acceptance."
+  ],
+  "private_frame_result_sha256": "65ced5aba3c8a8fc105e2b9e5ae1a25229cd819b999661fbd94df2d779ccc444",
+  "recorded_at": "2026-10-08T07:46:15.513359+00:00",
+  "rollback_image": "weknora-ldap-ui:pre-security-20261008",
+  "source_commit": "ce24e562825193c3c641c932c27106318297a15d",
+  "static_artifacts": "passed; expected HTML, entrypoint, compiled seven-character base commit and frame-policy directive"
+}

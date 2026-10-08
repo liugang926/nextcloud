@@ -1457,3 +1457,23 @@ WeKnora parsing/indexing, event latency, real AD/Team Folder ACLs, sustained
 upload impact, 20 concurrent users, physical derived cleanup or complete
 recovery. Earlier entries stating that the preset was unexecuted describe
 their earlier verification dates.
+
+## 2026-10-08 frontend dependency candidate deployed
+
+The shared UI now runs `sha256:3e5feb7e70f4fda72f270435a85a60656615689df14a02572e57e6996586d1ca`,
+built with the normal pinned frontend Dockerfile from RAG77 plus source patch
+`ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea`.
+Compared with the previously running 7f frontend, only package.json,
+package-lock.json and the dependency security regression differ; application
+page source is unchanged. The old UI remains under `pre-security-20261008`.
+Static artifacts and an isolated Nginx frame-policy contract passed, including
+200 with exact CSP for the allowed page and 403 for the denied page.
+
+The fresh hidden browser rendered the login page and its local/AD selectors.
+LAN HTTPS login/status and the local administrator's API authentication
+returned 200 with CA validation. [Runtime evidence](
+evidence/weknora-frontend-security-runtime-2026-10-08.json) binds these checks
+to the actual image. The backend remains
+`sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d`
+(RAG77 + 7f), with schema131. This frontend deployment does not activate the
+new Agent-history backend or schema132 lineage producers/readers.
