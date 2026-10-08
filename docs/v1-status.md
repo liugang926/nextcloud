@@ -1248,7 +1248,7 @@ container ran the repository event-delivery command in an owned, manually
 launched five-second loop because the synthetic fixture has no dedicated
 event-worker service. The existing WeKnora image carries patch SHA-256
 `176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`,
-while this worktree's `integration/weknora.patch` is
+while the fixture checkout at `d1c48929` had `integration/weknora.patch` SHA-256
 `b81174da65cbfcc4bebe72d9b49e78a60bfc58e56c97d500236c32f2f70b07c2`.
 The [redacted per-file evidence](evidence/isolated-mixed-format-load-2026-10-08.json)
 has SHA-256 `2bd5f8fd12b5e4c58e6aedb0ff68c48e5c0efb25785341e2a6682c4b40610863`.
