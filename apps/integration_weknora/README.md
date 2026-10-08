@@ -66,7 +66,7 @@ Administrator endpoints (browser session and CSRF protected):
 - `POST /admin/bindings/{id}/source-pairing`: prepare an intent with JSON `operation_id` (UUID), `tenant_id` (canonical decimal string), and `knowledge_base_id`. The first HTTP 201 returns `{pairing, token}`. The `key_id` in `pairing` is derived from the operation ID. An exact retry returns HTTP 200 and never repeats the token.
 - `GET /admin/bindings/{id}/source-pairing`: return the latest source-pairing status without a token.
 - `DELETE /admin/bindings/{id}/source-pairing`: abort a pending operation with JSON `operation_id` and atomically revoke its prepared key. An active pair cannot be aborted this way.
-- `GET /admin/bindings/{id}/files/{fileId}/publication`: current `eligible` or `withdrawn` state.
+- `GET /admin/bindings/{id}/files/{fileId}/publication`: current `eligible` or `withdrawn` state and `decision_audit_id`. A value of `0` means no linked local decision is known (including pre-0.4.37 rows); a positive ID identifies the exact current local audit row. It is not a WeKnora applied checkpoint.
 - `POST /admin/bindings/{id}/files/{fileId}/withdraw`: persist exclusion from the manifest and content API.
 - `POST /admin/bindings/{id}/files/{fileId}/republish`: explicitly clear the exclusion.
 

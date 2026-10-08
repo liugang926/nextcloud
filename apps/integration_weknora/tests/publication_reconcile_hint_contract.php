@@ -70,6 +70,9 @@ namespace OCA\IntegrationWeknora\Service {
 
         public function hasRecordedState(string $bindingId, int $fileId): bool { return $this->writes > 0; }
         public function getState(string $bindingId, int $fileId): string { return $this->state; }
+        public function getDecision(string $bindingId, int $fileId): array {
+            return ['state' => $this->state, 'decision_audit_id' => $this->writes];
+        }
         public function withdraw(string $bindingId, int $fileId, string $actorUid): void {
             $this->state = 'withdrawn';
             $this->writes++;
@@ -161,7 +164,8 @@ namespace {
     );
 
     $state = $controller->state('test-binding', 77);
-    expect($state->getStatus() === 200 && $state->getData()['state'] === 'eligible',
+    expect($state->getStatus() === 200 && $state->getData()['state'] === 'eligible' &&
+        $state->getData()['decision_audit_id'] === 0,
         'read-only state failed');
     expect(!array_key_exists('reconcile_hint_recorded', $state->getData()) && !$outbox->attempts,
         'read-only state emitted a hint');
@@ -170,6 +174,7 @@ namespace {
     $withdraw = $controller->withdraw('test-binding', 77);
     expect($withdraw->getStatus() === 200 && $withdraw->getData()['state'] === 'withdrawn' &&
         $withdraw->getData()['excluded'] === true &&
+        $withdraw->getData()['decision_audit_id'] === 1 &&
         $withdraw->getData()['reconcile_hint_recorded'] === false,
         'post-commit hint failure hid the committed withdrawal');
     expect($states->writes === 1 && count($outbox->attempts) === 1 && !$outbox->recorded,

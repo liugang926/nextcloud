@@ -47,26 +47,60 @@ final class FilePublicationStateService {
     }
 
     public function getState(string $bindingId, int $fileId): string {
+        return $this->getDecision($bindingId, $fileId)['state'];
+    }
+
+    /**
+     * The audit ID is a local administrative decision revision, not a remote
+     * publication or applied-consumer checkpoint. Zero means no linked audit
+     * row is known, including decisions that predate migration 21.
+     *
+     * @return array{state: string, decision_audit_id: int}
+     */
+    public function getDecision(string $bindingId, int $fileId): array {
         self::assertIdentity($bindingId, $fileId);
         $query = $this->db->getQueryBuilder();
-        $query->select('state')
+        $query->select('state', 'actor_uid', 'updated_at', 'decision_audit_id')
             ->from('weknora_pub_state')
             ->where($query->expr()->eq('binding_id', $query->createNamedParameter($bindingId)))
             ->andWhere($query->expr()->eq('file_id', $query->createNamedParameter($fileId)));
         $result = $query->executeQuery();
         try {
-            $state = $result->fetchOne();
+            $row = $result->fetchAssociative();
         } finally {
             $result->closeCursor();
         }
-        if ($state === false) {
-            return self::STATE_ELIGIBLE;
+        if ($row === false) {
+            return ['state' => self::STATE_ELIGIBLE, 'decision_audit_id' => 0];
         }
+        $state = (string)$row['state'];
         if ($state !== self::STATE_ELIGIBLE && $state !== self::STATE_WITHDRAWN) {
             // Unknown stored states must never expose source content.
             throw new \UnexpectedValueException('Invalid publication state');
         }
-        return $state;
+        $auditId = (int)$row['decision_audit_id'];
+        if ($auditId < 0) {
+            throw new \UnexpectedValueException('Invalid decision audit ID');
+        }
+        if ($auditId > 0) {
+            $audit = $this->db->getQueryBuilder();
+            $audit->select('binding_id', 'file_id', 'action', 'actor_uid', 'created_at')
+                ->from('weknora_pub_audit')
+                ->where($audit->expr()->eq('id', $audit->createNamedParameter($auditId)));
+            $auditResult = $audit->executeQuery();
+            try {
+                $linked = $auditResult->fetchAssociative();
+            } finally {
+                $auditResult->closeCursor();
+            }
+            if ($linked === false || $linked['binding_id'] !== $bindingId ||
+                (int)$linked['file_id'] !== $fileId || $linked['action'] !== $state ||
+                $linked['actor_uid'] !== $row['actor_uid'] ||
+                (int)$linked['created_at'] !== (int)$row['updated_at']) {
+                throw new \UnexpectedValueException('Current publication decision audit mismatch');
+            }
+        }
+        return ['state' => $state, 'decision_audit_id' => $auditId];
     }
 
     public function hasRecordedState(string $bindingId, int $fileId): bool {
@@ -129,15 +163,6 @@ final class FilePublicationStateService {
                 'actor_uid' => $actorUid,
                 'updated_at' => $timestamp,
             ]);
-            $update = $this->db->getQueryBuilder();
-            $update->update('weknora_pub_state')
-                ->set('state', $update->createNamedParameter($state))
-                ->set('actor_uid', $update->createNamedParameter($actorUid))
-                ->set('updated_at', $update->createNamedParameter($timestamp))
-                ->where($update->expr()->eq('binding_id', $update->createNamedParameter($bindingId)))
-                ->andWhere($update->expr()->eq('file_id', $update->createNamedParameter($fileId)));
-            $update->executeStatement();
-
             $query = $this->db->getQueryBuilder();
             $query->insert('weknora_pub_audit')->values([
                 'binding_id' => $query->createNamedParameter($bindingId),
@@ -147,6 +172,23 @@ final class FilePublicationStateService {
                 'created_at' => $query->createNamedParameter($timestamp),
             ]);
             $query->executeStatement();
+            $auditId = (int)$this->db->lastInsertId('weknora_pub_audit');
+            if ($auditId < 1) {
+                throw new \UnexpectedValueException('Publication audit ID was not allocated');
+            }
+
+            $update = $this->db->getQueryBuilder();
+            $changed = $update->update('weknora_pub_state')
+                ->set('state', $update->createNamedParameter($state))
+                ->set('actor_uid', $update->createNamedParameter($actorUid))
+                ->set('updated_at', $update->createNamedParameter($timestamp))
+                ->set('decision_audit_id', $update->createNamedParameter($auditId))
+                ->where($update->expr()->eq('binding_id', $update->createNamedParameter($bindingId)))
+                ->andWhere($update->expr()->eq('file_id', $update->createNamedParameter($fileId)))
+                ->executeStatement();
+            if ($changed !== 1) {
+                throw new \UnexpectedValueException('Publication state row changed unexpectedly');
+            }
             $this->db->commit();
             if (isset($this->excludedByBinding[$bindingId])) {
                 if ($state === self::STATE_WITHDRAWN) {

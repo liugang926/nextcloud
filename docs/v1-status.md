@@ -1299,3 +1299,34 @@ These are source and test results. The shared LAN WeKnora containers still
 run the 2026-10-02 image built from patch SHA-256
 `176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`;
 no current patch image switch or full production acceptance is claimed.
+
+## 2026-10-08 local publication-decision audit pointer (proposed 0.4.37)
+
+Nextcloud migration 21 adds `decision_audit_id` to each current file
+publication state. A withdraw or republish now writes its audit row and updates
+the current-state pointer in the same database transaction, under the existing
+publication ordering lock. The administrator state response exposes that local
+audit ID; a point read rejects a missing or mismatched audit row (source,
+action, actor, or timestamp). Existing rows retain `0`, meaning that their
+current decision has no proven audit link; the next administrator action
+establishes one. The migration
+does not infer history from old audit rows.
+
+`weknora_pub_audit` currently has no retention job. Its current referenced
+row must remain available for the pointer check. Any future 90-day metadata
+retention implementation must preserve referenced rows or replace the pointer
+and its verification in one safe migration; the PRD's 90-day policy is not
+implemented here. The controller still appends its reconciliation hint after
+the state transaction; a hint failure leaves a committed withdrawal in place,
+and an exact retry can append another hint. The outbox remains a separately
+retained hint feed, and its consumer watermark is not this decision ID. This
+local link does not record automatic source deletion, permission generations,
+document content revisions, consumer publication, or a restore checkpoint.
+Backup recovery still requires an external post-checkpoint withdrawal record
+and full reconciliation while reads remain denied.
+
+The migration and real writer/reader transaction contract passed in an
+isolated, networkless PHP container with an in-memory SQLite database,
+including legacy `0`, rollback after either audit or pointer write failure,
+and mismatch rejection. The existing controller hint-failure contract also
+passed. No shared Nextcloud installation or WeKnora service was changed.

@@ -104,12 +104,14 @@ final class PublicationController extends Controller {
                     }
                 }
             }
-            $state = $this->states->getState($id, $fileId);
+            $decision = $this->states->getDecision($id, $fileId);
+            $state = $decision['state'];
             $response = [
                 'binding_id' => $id,
                 'file_id' => $fileId,
                 'state' => $state,
                 'excluded' => $state === 'withdrawn',
+                'decision_audit_id' => $decision['decision_audit_id'],
             ];
             if ($hintRecorded !== null) {
                 $response['reconcile_hint_recorded'] = $hintRecorded;
