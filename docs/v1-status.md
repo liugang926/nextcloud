@@ -1620,3 +1620,15 @@ and frontend builds per profile. The newer source is separately pinned in the
 [candidate manifest](../integration/candidates/manifest.json). Cross-KB parent
 read coverage and the actual local-object `RunDue` adapter remain pending; this
 update does not enable physical derived GC or change the shared runtime.
+
+## 2026-10-09 running Nextcloud source isolated from development
+
+LAN verification observed `needsDbUpgrade=true`: the source checkout had
+advanced to app0.4.38 through its direct bind while the database stayed0.4.37.
+Earlier shared-runtime observations described their check time and did not
+account for this later bind-source drift. The running app and all three workers
+now use an exact separate0.4.37 snapshot, matching the database; no migration
+was run. Maintenance is off, no DB upgrade is pending, and CA-verified DAV207
+passed. The cold checkpoint now fingerprints/archives the actual source bind,
+with all app processes required to agree. See [source isolation and evidence](
+nextcloud-runtime-app-source.md). New candidate deployment remains pending.

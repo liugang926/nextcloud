@@ -138,6 +138,21 @@ def git_identity(nc_dir: Path) -> str:
     return head
 
 
+def runtime_app_code(config: dict, nc_dir: Path) -> Path:
+    mounts = config.get('services', {}).get('nextcloud', {}).get('volumes', [])
+    sources = [Path(m.get('source', '')) for m in mounts
+               if m.get('type') == 'bind' and
+               m.get('target') == '/var/www/html/custom_apps/integration_weknora']
+    require(len(sources) == 1 and sources[0].is_absolute(), 'Nextcloud app code bind mount changed')
+    require(not sources[0].is_symlink(), 'Nextcloud app code bind cannot use a symlink')
+    source = sources[0].resolve()
+    default = (nc_dir / 'apps/integration_weknora').resolve()
+    runtime_root = (nc_dir / 'dist/runtime-apps').resolve()
+    require(source == default or runtime_root in source.parents,
+            'Nextcloud app code bind must use checkout or dedicated runtime snapshot')
+    return source
+
+
 def validate_config(config: dict, project: str, nc_dir: Path, wk_dir: Path) -> None:
     services = NC_SERVICES if project == NC_PROJECT else WK_SERVICES
     volumes = NC_VOLUMES if project == NC_PROJECT else WK_VOLUMES
@@ -172,8 +187,8 @@ def validate_config(config: dict, project: str, nc_dir: Path, wk_dir: Path) -> N
             any(redis_command[i:i + 2] == ["--appendonly", "yes"]
                 for i in range(len(redis_command) - 1)),
             f"{project} Redis must persist its AOF before the cold archive")
-    nc_app = (nc_dir / "apps/integration_weknora").resolve()
     if project == NC_PROJECT:
+        nc_app = runtime_app_code(config, nc_dir)
         for service in ("nextcloud", "cron", "event-worker", "event-status-worker"):
             mounts = config["services"][service].get("volumes", [])
             require(any(m.get("type") == "bind" and
@@ -370,7 +385,7 @@ def database_has_no_other_clients(container: str, user: str, database: str,
 
 
 def input_paths(stacks: list[dict], nc_dir: Path, wk_dir: Path) -> dict[str, Path]:
-    app_code = nc_dir / "apps/integration_weknora"
+    app_code = runtime_app_code(stacks[0]['config'], nc_dir)
     paths: set[Path] = set()
     for stack in stacks:
         for service in stack["config"]["services"].values():
@@ -564,8 +579,8 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
     private_file(incomplete, data=b"Checkpoint capture is incomplete; do not restore from it.\n")
     try:
         inputs = input_paths(stacks, nc_dir, wk_dir)
-        all_bind_inputs = {**inputs,
-                           "nextcloud-app-code": nc_dir / "apps/integration_weknora"}
+        app_code = runtime_app_code(stacks[0]['config'], nc_dir)
+        all_bind_inputs = {**inputs, "nextcloud-app-code": app_code}
         before_inputs = source_fingerprint(all_bind_inputs)
         estimated = estimate_volume_bytes(stacks, nc_dir)
         required = int(estimated * 1.25) + MIN_FREE_BYTES
@@ -583,14 +598,14 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
         if recovery_journal is not None:
             path, key, pin = recovery_journal
             recovery_anchor = recovery_journal_module().checkpoint_anchor(path, key, pin,
-                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *all_bind_inputs.values()])
             verify_recovery_anchor_source(stacks[0], recovery_anchor, nc_dir)
         inventory_binding = None
         if weknora_inventory is not None:
             require(recovery_anchor is not None, 'WeKnora recovery inventory requires the external Nextcloud anchor')
             inventory_path, inventory_pin = weknora_inventory
             inventory_binding = recovery_gate_module().inventory_binding(recovery_anchor, inventory_path, inventory_pin,
-                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *all_bind_inputs.values()])
             verify_weknora_inventory_source(stacks[1], inventory_binding, nc_dir)
         reject_foreign_volume_users(stacks, nc_dir)
         for stack in stacks:
@@ -654,8 +669,7 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
         stages.append("all_eight_cold_volumes_archived")
 
         code_path = evidence / "nextcloud-app-code.tar"
-        host_archive(code_path, {"apps/integration_weknora":
-                                 nc_dir / "apps/integration_weknora"})
+        host_archive(code_path, {"apps/integration_weknora": app_code})
         artifacts[code_path.name] = sha256(code_path)
         inputs_path = evidence / "runtime-inputs.tar"
         host_archive(inputs_path, inputs)
@@ -697,12 +711,12 @@ def checkpoint(stacks: list[dict], nc_dir: Path, wk_dir: Path,
         if recovery_anchor is not None:
             path, key, pin = recovery_journal
             current_anchor = recovery_journal_module().checkpoint_anchor(path, key, pin,
-                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *all_bind_inputs.values()])
             require(current_anchor == recovery_anchor, 'external recovery anchor changed during capture')
             manifest['external_recovery_anchor'] = recovery_anchor
         if inventory_binding is not None:
             current_inventory = recovery_gate_module().inventory_binding(recovery_anchor, inventory_path, inventory_pin,
-                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *inputs.values()])
+                [nc_dir, wk_dir, evidence, nc_dir.parent / 'WeKnora-ldap-ad', *all_bind_inputs.values()])
             require(current_inventory == inventory_binding, 'external WeKnora recovery inventory changed during capture')
             manifest['weknora_recovery_inventory'] = inventory_binding
         private_file(evidence / "manifest.json",
@@ -793,7 +807,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"--apply requires --confirm-pair {PAIR_CONFIRMATION}")
         require(args.evidence_dir is not None,
                 "--apply requires a new absolute --evidence-dir")
-        safe_evidence_location(args.evidence_dir, nc_dir, wk_dir, inputs)
+        safe_evidence_location(args.evidence_dir, nc_dir, wk_dir,
+                               {**inputs, 'nextcloud-app-code': runtime_app_code(stacks[0]['config'], nc_dir)})
         recovery_values = (args.recovery_journal, args.recovery_key_file, args.recovery_record_sha256)
         require(all(value is not None for value in recovery_values) or all(value is None for value in recovery_values),
                 'all three external journal options are required together')

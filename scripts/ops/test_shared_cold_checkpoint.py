@@ -216,6 +216,57 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(checkpoint.CheckpointError, "app code bind"):
                 checkpoint.validate_config(config, checkpoint.NC_PROJECT, nc, wk)
 
+    def test_pinned_runtime_code_is_captured_instead_of_development_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            nc, wk = root / 'nextcloud', root / 'weknora-ldap-local'
+            checkout = nc / 'apps/integration_weknora'
+            snapshot = nc / 'dist/runtime-apps/pinned-037'
+            for path in (checkout, snapshot, wk):
+                path.mkdir(parents=True)
+            (checkout / 'version.txt').write_text('new development source')
+            (snapshot / 'version.txt').write_text('installed runtime source')
+            services = {name: {'image': 'example:fixed', 'volumes': []}
+                        for name in checkpoint.NC_SERVICES}
+            services['redis']['command'] = ['redis-server', '--appendonly', 'yes']
+            for name in ('nextcloud', 'cron', 'event-worker', 'event-status-worker'):
+                services[name]['volumes'] = [{'type': 'bind', 'source': str(snapshot),
+                    'target': '/var/www/html/custom_apps/integration_weknora'}]
+            config = {'name': checkpoint.NC_PROJECT, 'services': services,
+                      'volumes': {role: {'name': f'{checkpoint.NC_PROJECT}_{role}'}
+                                  for role in checkpoint.NC_VOLUMES}}
+            checkpoint.validate_config(config, checkpoint.NC_PROJECT, nc, wk)
+            actual = checkpoint.runtime_app_code(config, nc)
+            self.assertEqual(actual, snapshot)
+            archive = root / 'actual-app.tar'
+            checkpoint.host_archive(archive, {'apps/integration_weknora': actual})
+            with tarfile.open(archive) as tar:
+                self.assertEqual(tar.extractfile('apps/integration_weknora/version.txt').read(),
+                                 b'installed runtime source')
+            with self.assertRaises(checkpoint.CheckpointError):
+                checkpoint.safe_evidence_location(snapshot / 'backup', nc, wk,
+                                                  {'actual-runtime-code': actual})
+            services['cron']['volumes'][0]['source'] = str(checkout)
+            with self.assertRaisesRegex(checkpoint.CheckpointError, 'app code bind'):
+                checkpoint.validate_config(config, checkpoint.NC_PROJECT, nc, wk)
+
+    def test_runtime_code_rejects_arbitrary_directory_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nc = Path(directory) / 'nextcloud'
+            arbitrary = nc / 'another-app'
+            arbitrary.mkdir(parents=True)
+            config = {'services': {'nextcloud': {'volumes': [{'type': 'bind',
+                'source': str(arbitrary), 'target': '/var/www/html/custom_apps/integration_weknora'}]}}}
+            with self.assertRaisesRegex(checkpoint.CheckpointError, 'dedicated runtime snapshot'):
+                checkpoint.runtime_app_code(config, nc)
+            snapshot = nc / 'dist/runtime-apps/pinned'
+            snapshot.mkdir(parents=True)
+            linked = snapshot.parent / 'linked'
+            linked.symlink_to(snapshot, target_is_directory=True)
+            config['services']['nextcloud']['volumes'][0]['source'] = str(linked)
+            with self.assertRaisesRegex(checkpoint.CheckpointError, 'symlink'):
+                checkpoint.runtime_app_code(config, nc)
+
     def test_private_file_is_exclusive_and_mode_600(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "secret"
@@ -284,7 +335,9 @@ class CheckpointTests(unittest.TestCase):
             stacks.append({
                 "project": project, "cwd": cwd,
                 "command": ["docker", "compose", "-p", project],
-                "config_bytes": b"{}", "config": {"services": {}},
+                "config_bytes": b"{}", "config": {"services": {
+                    "nextcloud": {"volumes": [{"type": "bind", "source": str(cwd / "apps/integration_weknora"),
+                    "target": "/var/www/html/custom_apps/integration_weknora"}]}}} if project == checkpoint.NC_PROJECT else {"services": {}},
                 "containers": {s: {"id": project + "-" + s,
                                    "image_id": "sha256:" + "a" * 64,
                                    "image_tag": "example"} for s in services},

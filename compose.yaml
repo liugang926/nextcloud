@@ -56,7 +56,7 @@ services:
       PHP_UPLOAD_LIMIT: 512M
     volumes:
       - nextcloud-html:/var/www/html
-      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ${NEXTCLOUD_APP_SOURCE_DIR:-./apps/integration_weknora}:/var/www/html/custom_apps/integration_weknora:ro
     depends_on:
       db:
         condition: service_healthy
@@ -85,7 +85,7 @@ services:
       WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
     volumes:
       - nextcloud-html:/var/www/html
-      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ${NEXTCLOUD_APP_SOURCE_DIR:-./apps/integration_weknora}:/var/www/html/custom_apps/integration_weknora:ro
     depends_on:
       nextcloud:
         condition: service_healthy
@@ -107,7 +107,7 @@ services:
       WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
     volumes:
       - nextcloud-html:/var/www/html
-      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ${NEXTCLOUD_APP_SOURCE_DIR:-./apps/integration_weknora}:/var/www/html/custom_apps/integration_weknora:ro
       - ./scripts/weknora-event-worker.sh:/srv/weknora-event-worker.sh:ro
     depends_on:
       nextcloud:
@@ -130,7 +130,7 @@ services:
       WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: ${WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY:-0}
     volumes:
       - nextcloud-html:/var/www/html
-      - ./apps/integration_weknora:/var/www/html/custom_apps/integration_weknora:ro
+      - ${NEXTCLOUD_APP_SOURCE_DIR:-./apps/integration_weknora}:/var/www/html/custom_apps/integration_weknora:ro
       - ./scripts/weknora-event-status-worker.sh:/srv/weknora-event-status-worker.sh:ro
     depends_on:
       nextcloud:
