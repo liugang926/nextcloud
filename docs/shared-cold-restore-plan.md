@@ -77,7 +77,12 @@ extras or database/document contents.
 The live target must contain exactly the fifteen stopped Compose services and
 eight owned local volumes. It rejects extra services or volumes, non-local
 volume drivers/options, foreign network ownership, and any other container
-using a target volume or network, including stopped containers. The current
+using a target volume or network, including stopped containers. The only
+external Compose network permitted is WeKnora's `nextcloud-dev` alias targeting
+`nextcloud-weknora-dev_default`, which must be owned by the other approved
+project with the `default` network label. Its live membership may include only
+the fifteen owned pair services. Other external names, aliases or reverse
+bridges are refused. The current
 containers must match their current resolved Compose mounts, ports,
 environment and image references; their creation-time Compose config-hash
 labels must equal the hashes calculated from that current configuration. Only
@@ -143,3 +148,9 @@ Offline tamper, ownership and ordering tests:
 python3 scripts/ops/test_shared_cold_restore_plan.py
 python3 scripts/ops/test_shared_cold_checkpoint.py
 ```
+
+The [2026-10-08 source verification record](evidence/shared-cold-restore-source-2026-10-08.json)
+records a successful read-only pass over the finalized local checkpoint with
+an externally supplied manifest pin. It covers all sixteen artifacts and
+eight volume archives, the captured app code and the approved pair bridge.
+It does not verify live target state, actual restoration or external replay.

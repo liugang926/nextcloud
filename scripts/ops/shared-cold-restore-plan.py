@@ -301,6 +301,34 @@ def verify_code(code: dict, commit: str, nc_dir: Path) -> dict:
             "captured_build_extra_entries": len(extras)}
 
 
+def approved_network_owners(configs: dict) -> dict[str, tuple[str, str]]:
+    """Allow the pair's owned networks and exactly its WK-to-NC bridge."""
+    owners = {}
+    for project in PROJECTS:
+        config = configs[project]
+        require(isinstance(config.get("networks"), dict) and bool(config["networks"]),
+                "Compose network topology is unavailable")
+        for role, definition in config["networks"].items():
+            require(isinstance(definition, dict) and isinstance(definition.get("name"), str),
+                    "Compose network definition is invalid")
+            name = definition["name"]
+            if definition.get("external"):
+                nc_default = configs[capture.NC_PROJECT].get("networks", {}).get("default", {})
+                require(project == capture.WK_PROJECT and role == "nextcloud-dev" and
+                        definition.get("external") is True and
+                        name == capture.NC_PROJECT + "_default" and
+                        nc_default.get("name") == name and not nc_default.get("external"),
+                        "Compose uses an unapproved external network")
+                owner = (capture.NC_PROJECT, "default")
+            else:
+                require(name.startswith(project + "_"), "Compose uses a foreign network")
+                owner = (project, role)
+            require(name not in owners or owners[name] == owner,
+                    "Compose network name has conflicting ownership")
+            owners[name] = owner
+    return owners
+
+
 def verify_checkpoint(directory: Path, nc_dir: Path, wk_dir: Path,
                       expected_manifest: str | None = None) -> dict:
     plain_owned(directory, 0o700, directory=True)
@@ -362,12 +390,6 @@ def verify_checkpoint(directory: Path, nc_dir: Path, wk_dir: Path,
                 "checkpoint resolved configuration digest is inconsistent")
         config = json_object(config_path.read_bytes(), "saved resolved Compose")
         capture.validate_config(config, project, nc_dir, wk_dir)
-        require(isinstance(config.get("networks"), dict) and bool(config["networks"]),
-                "saved Compose network topology is unavailable")
-        for definition in config["networks"].values():
-            require(isinstance(definition.get("name"), str) and
-                    definition["name"].startswith(project + "_") and not definition.get("external"),
-                    "saved Compose uses a foreign or external network")
         for service, identity in saved["containers"].items():
             require(config["services"][service]["image"] == identity["image_tag"],
                     "saved Compose image reference differs from captured container")
@@ -379,6 +401,7 @@ def verify_checkpoint(directory: Path, nc_dir: Path, wk_dir: Path,
                     expected_port_bindings(config["services"][service]),
                     "captured running port bindings differ from saved Compose")
         configs[project] = config
+    approved_network_owners(configs)
     code = archive_inventory(directory / "nextcloud-app-code.tar",
                              allowed_roots={"apps/integration_weknora"})
     code_verification = verify_code(code, commit, nc_dir)
@@ -517,17 +540,17 @@ def verify_stopped_target(checked: dict, nc_dir: Path, wk_dir: Path) -> dict:
                        "config": config, "cwd": cwd, "command": command,
                        "service_hashes": service_hashes})
     names = {name for stack in stacks for name in stack["volumes"].values()}
-    networks = {entry["name"] for stack in stacks
-                for entry in stack["config"].get("networks", {}).values()}
-    for stack in stacks:
-        for role, definition in stack["config"].get("networks", {}).items():
-            require(definition.get("name", "").startswith(stack["project"] + "_"),
-                    "target uses a foreign or external network")
-            network = capture.inspect("network", definition["name"], nc_dir)
-            labels = network.get("Labels") or {}
-            require(labels.get("com.docker.compose.project") == stack["project"] and
-                    labels.get("com.docker.compose.network") == role,
-                    "target network does not have exact Compose ownership")
+    network_owners = approved_network_owners({stack["project"]: stack["config"] for stack in stacks})
+    networks = set(network_owners)
+    for name, (project, role) in network_owners.items():
+        network = capture.inspect("network", name, nc_dir)
+        labels = network.get("Labels") or {}
+        require(labels.get("com.docker.compose.project") == project and
+                labels.get("com.docker.compose.network") == role,
+                "target network does not have exact Compose ownership")
+        members = network.get("Containers") or {}
+        require(isinstance(members, dict) and set(members).issubset(current_ids),
+                "target network has a non-owned container member")
     all_ids = set(capture.run(["docker", "ps", "-aq", "--no-trunc"], cwd=nc_dir).decode().split())
     for container_id in all_ids - current_ids:
         item = capture.inspect("container", container_id, nc_dir)

@@ -495,6 +495,53 @@ class RestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(restore.RestorePlanError, "extra or missing"):
             self.target()
 
+    def add_pair_bridge(self):
+        wk = self.configs[capture.WK_PROJECT]
+        wk["networks"]["nextcloud-dev"] = {"name": capture.NC_PROJECT + "_default", "external": True}
+        wk["services"]["app"]["networks"]["nextcloud-dev"] = None
+        identity = self.projects[capture.WK_PROJECT]["containers"]["app"]
+        identity["compose_config_hash"] = hashlib.sha256(json.dumps(wk["services"]["app"], sort_keys=True).encode()).hexdigest()
+        path = self.evidence / "weknora-resolved-compose.json"
+        self.write_private(path, json.dumps(wk).encode())
+        digest = capture.sha256(path)
+        self.manifest["artifact_sha256"][path.name] = digest
+        self.projects[capture.WK_PROJECT]["resolved_compose_sha256"] = digest
+        self.save_manifest()
+        self.objects = self.target_objects()
+
+    def test_exact_approved_pair_bridge_source_and_target_allowed(self):
+        self.add_pair_bridge()
+        self.verify()
+        owner = self.objects[("network", capture.NC_PROJECT + "_default")]
+        owner["Containers"] = {self.projects[capture.WK_PROJECT]["containers"]["app"]["id"]: {}}
+        self.target()
+
+    def test_arbitrary_external_name_alias_or_reverse_bridge_refused(self):
+        self.add_pair_bridge()
+        for name, alias in (("foreign_default", "nextcloud-dev"),
+                            (capture.NC_PROJECT + "_default", "unapproved")):
+            with self.subTest(name=name, alias=alias):
+                configs = copy.deepcopy(self.configs)
+                configs[capture.WK_PROJECT]["networks"] = {"default": self.configs[capture.WK_PROJECT]["networks"]["default"],
+                                                          alias: {"name": name, "external": True}}
+                with self.assertRaisesRegex(restore.RestorePlanError, "unapproved external"):
+                    restore.approved_network_owners(configs)
+        configs = copy.deepcopy(self.configs)
+        configs[capture.NC_PROJECT]["networks"]["weknora-dev"] = {"name": capture.WK_PROJECT + "_default", "external": True}
+        with self.assertRaisesRegex(restore.RestorePlanError, "unapproved external"):
+            restore.approved_network_owners(configs)
+
+    def test_approved_bridge_requires_actual_nextcloud_owner_and_only_pair_members(self):
+        self.add_pair_bridge()
+        network = self.objects[("network", capture.NC_PROJECT + "_default")]
+        network["Labels"]["com.docker.compose.project"] = capture.WK_PROJECT
+        with self.assertRaisesRegex(restore.RestorePlanError, "network.*ownership"):
+            self.target()
+        network["Labels"]["com.docker.compose.project"] = capture.NC_PROJECT
+        network["Containers"] = {"f" * 64: {}}
+        with self.assertRaisesRegex(restore.RestorePlanError, "non-owned container member"):
+            self.target()
+
     def test_foreign_stopped_volume_or_network_user_refused(self):
         outsider = {"Id": "f" * 64, "Config": {"Labels": {}}, "Mounts": [
             {"Type": "volume", "Name": f"{capture.WK_PROJECT}_app-data"}], "NetworkSettings": {"Networks": {}}}
