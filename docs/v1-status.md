@@ -29,6 +29,14 @@ compilation; [the recorded logs](evidence/steer-original-material-20261009.json)
 were independently rechecked. Old request JSON/digests and unknown legacy
 history remain unchanged. The new normal application run is still pending.
 
+The `fc2682b` push CI completed all six jobs. Its actual retained logs were
+rechecked for both profiles: 1043 selected producer/recovery test nodes, 59
+session nodes, 35 local-derived nodes and 11 native-vector nodes passed per
+profile, with zero failed or skipped selected tests and full compile for
+155 packages. The required after, migration, JSON-contract and actual Redis
+tests were confirmed present in the [CI evidence](evidence/steer-candidate-ci-20261009.json).
+These checks do not accept the upcoming normal application or full restore.
+
 Old parent-body copies still need the original dependencies of later generated
 fields included in their retention scope before cleanup can be accepted. That
 source preparation has been combined with the final Steer source in an isolated
