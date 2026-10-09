@@ -3737,6 +3737,61 @@ index 0000000000000000000000000000000000000000..fa7e3d220d5aa9f843d69cf6977b2894
 +replay denial, explicit NULL/zero saves and a failure after the final generated
 +field update proving full transaction rollback. Tests use cached Go with one
 +CPU; no full images or shared runtime are changed.
+diff --git a/docs/source-lineage-saved-message-materials.md b/docs/source-lineage-saved-message-materials.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..9012f4519e8f7caf4630571b216aac5c1bc68a16
+--- /dev/null
++++ b/docs/source-lineage-saved-message-materials.md
+@@ -0,0 +1,49 @@
++# Saved message original materials: core producer/read closure
++
++Parent: a9d31fb4e2f8164cbf382f9b1ec5c26c6c8f3a20. This module is a core checkpoint, not a claim that every history consumer is covered.
++
++## Actual producer and receipts
++
++Production DI configures the actual message repository/service after construction. A new user message and an empty assistant placeholder create `message_generation_origins`. Only the same actual producer, current owner and actor may advance its previous immutable material receipt. A foreign partial write or body/control ABA cannot be certified by loading the row and calling Update. Completed source envelopes retain the original previous sources. Initial empty code placeholders are the only completion transition with zero previously consumed body.
++
++151 (PostgreSQL) / 70 (SQLite) create generation origins, immutable material admissions, current receipt pointers and monotonic body, owner and membership counters. Legacy rows receive counters, no receipts. `message_generation_origins.initial_input` is original JSON body; receipt digests are not retained body copies. Current messages are loaded only after metadata plans and durable read leases are checked in the same SQL transaction.
++
++The raw author projection has an explicit own producer field list: IDs, role, request, authored Content, completion, creation and execution selectors. Generated rendered context, captions, attachments, memories and checkpoints are not loaded or emitted by that projection. Updating these unconsumed user fields does not certify them or invalidate the raw author receipt. Assistant material has no such body projection.
++
++Create receipts use the actual persisted SQL row, including PostgreSQL timestamp normalization. Update validates the last actual receipt before its atomic write and seals the persisted result. Current user/key/member/role/group/share/Agent authority runs through transaction-bound production repositories; source HTTP checks remain outside SQL transactions. SQLite production's single connection is unchanged.
++
++## Read and output paths implemented
++
++| Actual path | Core behavior |
++| --- | --- |
++| Message Create/Update | Exact actual arguments, current owner/actor, immutable generation and prior material continuity |
++| GetMessage / paginated / recent / before-time | Typed original capture; user raw field projection; legacy unavailable |
++| HTTP LoadMessages | Holds actual scopes through serialization, final original-source/actor recheck and releases leases |
++| IndexMessageToKB | Ignores caller Q/A strings; captures original assistant plus unique original user; current writable destination only |
++| Actual queued ProcessDocument | Restores original current actor, acquires actual history parent scopes and holds them through producer/model/chunk writes |
++| Ordinary KnowledgeOutput / KnowledgeCollection | Metadata read sets expand immutable history parents and bind all message plans before body capture |
++| FAQ entry/read/export and FAQ progress/LastResult | Original knowledge parent plans expand saved history parent/source scopes; existing HTTP lease helper acquires them |
++
++Read plans contain receipt/control metadata, no message body. Multiple session plans are copied into a private registry. The body transaction validates the exact original plans and actual durable lease rows (owner, scope, epoch, kind, expiry and fences). A changed candidate/body/owner invalidates an old plan. Source access is checked independently; an open physical lease never grants permission.
++
++## Retention interface
++
++`ConfigureMessageOriginalBodyAvailability(store, MessageOriginalBodyAvailabilityCheck)` accepts `func(context.Context,*gorm.DB,string,string) error`. It is called with the existing body transaction, table `message_generation_origins` and immutable generation ID before original capture, and again on recheck/producer continuity. Retention owner 152/71 must install the actual vault plus external purge-journal checker. This parent does not yet contain that owner; nil is not a claim of purge coverage. Unavailable originals become SourceLineageUnknown and are never reconstructed from current message contents.
++
++Immutable triggers: PostgreSQL `message_generation_origins_immutable`, `message_material_admissions_immutable`, function `message_material_immutable`; SQLite each table has `_immutable_update` and `_immutable_delete`.
++
++## Actual acceptance
++
++SQLite pool1 with bounded deadlines: actual service Create user → Create assistant placeholder → Update completion → actual IndexMessageToKB → queued ProcessDocument → chunks/enabled knowledge → original output capture/SourceGuard. HTTP ordinary and signed Nextcloud-derived saved-message positives; personal source revoke while exact physical read lease remains open rejects output. Body, execution, membership and owner ABA, same-role different caller, current user/member/key/group/organization share revokes reject. Previous actor integration fixtures now use actual producers and plans. Old repository raw completed-row “positives” now assert that a global verifier/current JSON cannot mint receipts.
++
++PostgreSQL fresh 151, pool1 and bounded deadline: actual producer/read → new ordinary destination → queued chunks → two actual scope leases → KnowledgeOutput capture/SourceGuard → parent body ABA rejects. Tests use deterministic local callbacks and owned PostgreSQL, no paid models.
++
++## Remaining coverage: continue work
++
++- Agent `LoadAgentHistory` directly reads checkpoint/reverse pages via the repository. It still needs exact candidate/selection control receipts and lease lifetime through the actual Agent model loop.
++- RAG history adapters need leases through asynchronous model and final HTTP emission; synchronous service reads without an output boundary currently close their guard before the caller consumes the returned text. This is not complete model lifetime coverage.
++- `GetMessageForStream` / ContinueStream currently read saved bodies via the direct repository and replay cached Redis frames. They need original completed-frame/material receipts or authoritative reconstruction, plus actual held source/parent leases. Current source envelopes alone do not authenticate cached frame text.
++- Session clone/fork/rewind/steer/import/export and IM/MCP/skill callers require their actual original candidate/control and body consumption audit. Same trusted service Create/Update is only the producer core.
++- Direct partial image/rendered/checkpoint/artifact writes are not new generated-field origins. Assistant partial writes invalidate the whole prior material; raw user generated fields remain unknown and omitted. Typed actual field producers must be added for supported consumption.
++- Message search/reconstructed pairs, artifact download/list, memory extraction's direct cursor readers and transcript consumers are not claimed covered by this checkpoint. Memory text is never certified by current message metadata.
++- Actual cross-tenant Agent-share histories and all native saved/reconnect/continue/model endpoints still need positive/revoke/ABA tests. Existing actual organization sharing and key/group gates cover the core only.
 diff --git a/docs/source-lineage-session-text.md b/docs/source-lineage-session-text.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..17333c6c010227a5f67d5d83d24cbe0dd19567db
@@ -15186,10 +15241,10 @@ index 77ed065c34d81ff848c6e73849c054ba36df0136..cbfff2db85fdb7c05c2a6dcb8e3bbf3e
  	repo := NewDataSourceRepository(db)
 diff --git a/internal/application/repository/faq_import_output.go b/internal/application/repository/faq_import_output.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d0602b965b8c9fc22830008980cf7543e66ee06
+index 0000000000000000000000000000000000000000..23d696c0ddd0496f4f4a51215cb498923aeb30fa
 --- /dev/null
 +++ b/internal/application/repository/faq_import_output.go
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,475 @@
 +package repository
 +
 +import (
@@ -15287,7 +15342,21 @@ index 0000000000000000000000000000000000000000..3d0602b965b8c9fc22830008980cf754
 +		}
 +	}
 +	lineages := []*types.SourceLineage{&lineage}
++	messagePlans := []*types.MessageMaterialReadPlan{}
 +	for _, original := range originals {
++		historyPlan, err := s.peekHistoryMaterialPlanForProofInTx(tx, original)
++		if err != nil {
++			return nil, err
++		}
++		if historyPlan != nil {
++			messagePlans = append(messagePlans, historyPlan)
++			for _, scope := range historyPlan.Scopes {
++				if err := add(scope.TenantID, scope.KBID); err != nil {
++					return nil, err
++				}
++			}
++			lineages = append(lineages, historyPlan.SourceLineage)
++		}
 +		if original == nil || original.BodyDigest == "" || original.SourceLineage.RequireComplete() != nil {
 +			return nil, types.ErrSourceLineageUnknown
 +		}
@@ -15313,7 +15382,7 @@ index 0000000000000000000000000000000000000000..3d0602b965b8c9fc22830008980cf754
 +	if err != nil {
 +		return nil, err
 +	}
-+	plan := &types.FAQImportOutputReadPlan{Request: actualRequest, AdmissionID: row.ID, HeadRevision: row.Revision, MetadataDigest: digest, SourceLineage: complete}
++	plan := &types.FAQImportOutputReadPlan{Request: actualRequest, AdmissionID: row.ID, HeadRevision: row.Revision, MetadataDigest: digest, SourceLineage: complete, MessagePlans: messagePlans}
 +	keys := make([]string, 0, len(scopes))
 +	for key := range scopes {
 +		keys = append(keys, key)
@@ -15338,6 +15407,10 @@ index 0000000000000000000000000000000000000000..3d0602b965b8c9fc22830008980cf754
 +	}
 +	var copy types.FAQImportOutputReadPlan
 +	if err := json.Unmarshal(encoded, &copy); err != nil {
++		return ctx, err
++	}
++	ctx, err = WithMessageMaterialReadPlans(ctx, copy.MessagePlans)
++	if err != nil {
 +		return ctx, err
 +	}
 +	return context.WithValue(ctx, faqImportOutputReadPlanKey{}, &copy), nil
@@ -15649,10 +15722,10 @@ index 0000000000000000000000000000000000000000..3d0602b965b8c9fc22830008980cf754
 +var _ interfaces.FAQImportOutputInputReader = (*KnowledgeInputProvenanceStore)(nil)
 diff --git a/internal/application/repository/faq_import_read_set_plan.go b/internal/application/repository/faq_import_read_set_plan.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..5415f6ec39b1ff900739eedb0a1f6e80c1cd9390
+index 0000000000000000000000000000000000000000..23b508f3ff2af237417c37d7d7876aa0bd89fd6c
 --- /dev/null
 +++ b/internal/application/repository/faq_import_read_set_plan.go
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,220 @@
 +package repository
 +
 +import (
@@ -15677,6 +15750,16 @@ index 0000000000000000000000000000000000000000..5415f6ec39b1ff900739eedb0a1f6e80
 +	var actual types.FAQImportOutputReadSetPlan
 +	if err = json.Unmarshal(encoded, &actual); err != nil {
 +		return ctx, err
++	}
++	ctx, err = WithMessageMaterialReadPlans(ctx, actual.MessagePlans)
++	if err != nil {
++		return ctx, err
++	}
++	for _, entry := range actual.Plans {
++		ctx, err = WithMessageMaterialReadPlans(ctx, entry.MessagePlans)
++		if err != nil {
++			return ctx, err
++		}
 +	}
 +	return context.WithValue(ctx, faqImportReadSetPlanKey{}, &actual), nil
 +}
@@ -15749,6 +15832,40 @@ index 0000000000000000000000000000000000000000..5415f6ec39b1ff900739eedb0a1f6e80
 +		plan.Scopes = append(plan.Scopes, current.Scopes...)
 +		lineages = append(lineages, current.SourceLineage)
 +	}
++	// Also probe the immutable saved-history parents of actual ordinary rows.
++	hq := tx.Table("knowledge_input_material_receipts r").Select("a.admission_id,a.tenant_id,a.knowledge_base_id,a.knowledge_id,a.input_digest,a.build_generation").Joins("JOIN knowledge_input_admissions a ON a.admission_id=r.admission_id AND a.knowledge_id=r.row_id").Joins("JOIN knowledges k ON k.id=a.knowledge_id AND k.deleted_at IS NULL").Where("r.row_kind='knowledge' AND a.origin_kind='history'")
++	if len(ids) > 0 {
++		hq = hq.Where("k.id IN ?", ids)
++	} else {
++		conditions := ""
++		args := []any{}
++		for _, scope := range scopes {
++			if conditions != "" {
++				conditions += " OR "
++			}
++			conditions += "(k.tenant_id=? AND k.knowledge_base_id=?)"
++			args = append(args, scope.TenantID, scope.KBID)
++		}
++		hq = hq.Where(conditions, args...)
++	}
++	var histories []knowledgeInputAdmission
++	if err := hq.Order("a.knowledge_id").Scan(&histories).Error; err != nil {
++		return nil, err
++	}
++	for _, entry := range histories {
++		proof := &types.KnowledgeBuildInputProof{AdmissionID: entry.AdmissionID, TenantID: entry.TenantID, KnowledgeBaseID: entry.KnowledgeBaseID, KnowledgeID: entry.KnowledgeID, InputDigest: entry.InputDigest, BuildGeneration: entry.BuildGeneration}
++		historyPlan, err := s.peekHistoryMaterialPlanForProofInTx(tx, proof)
++		if err != nil {
++			return nil, err
++		}
++		if historyPlan == nil {
++			return nil, ErrKnowledgeInputChanged
++		}
++		plan.MessagePlans = append(plan.MessagePlans, historyPlan)
++		plan.Scopes = append(plan.Scopes, types.KnowledgeSearchScope{TenantID: proof.TenantID, KBID: proof.KnowledgeBaseID})
++		plan.Scopes = append(plan.Scopes, historyPlan.Scopes...)
++		lineages = append(lineages, historyPlan.SourceLineage)
++	}
 +	// This code probe consumed zero FAQ facts. It does not certify any
 +	// document body; those retain their independent original-source guards.
 +	if len(lineages) == 0 {
@@ -15792,7 +15909,7 @@ index 0000000000000000000000000000000000000000..5415f6ec39b1ff900739eedb0a1f6e80
 +	if !faqInputEqual(expected, actual) {
 +		return ErrKnowledgeInputChanged
 +	}
-+	if len(actual.Plans) == 0 && len(actual.Scopes) == 0 {
++	if len(actual.Plans) == 0 && len(actual.MessagePlans) == 0 && len(actual.Scopes) == 0 {
 +		return nil
 +	}
 +	return validateFAQReadLeaseCoverageInTx(tx, actual.Scopes, actual.SourceLineage)
@@ -15831,10 +15948,10 @@ index 0000000000000000000000000000000000000000..5415f6ec39b1ff900739eedb0a1f6e80
 +}
 diff --git a/internal/application/repository/faq_input.go b/internal/application/repository/faq_input.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b31eac478eb3c60f60aced1961056194d587bbd
+index 0000000000000000000000000000000000000000..1a9bf81297809122c68db739f0ebed7c9ceafe83
 --- /dev/null
 +++ b/internal/application/repository/faq_input.go
-@@ -0,0 +1,984 @@
+@@ -0,0 +1,982 @@
 +package repository
 +
 +import (
@@ -16662,10 +16779,8 @@ index 0000000000000000000000000000000000000000..3b31eac478eb3c60f60aced196105619
 +		return nil, types.ErrSourceLineageUnknown
 +	}
 +	authority := *configured
-+	// The current factory's message verifier is inherited from the global
-+	// service. It cannot safely read inside this transaction. History parents
-+	// stay unknown until a transaction-bound verifier is supplied explicitly.
-+	authority.messageVerifier = nil
++	// Committed history verification now uses original SQL material and the
++	// transaction-bound authority, never the inherited global message service.
 +	return &authority, nil
 +}
 +
@@ -17248,10 +17363,10 @@ index 0000000000000000000000000000000000000000..053a714e30da46c2bbd11cceef6ae46c
 +}
 diff --git a/internal/application/repository/faq_read_plan.go b/internal/application/repository/faq_read_plan.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d582040ecd70ac3fe0adcb90dad75ed1c26dbe5b
+index 0000000000000000000000000000000000000000..45c095cedb0a23f42593eac36871753fc90d593a
 --- /dev/null
 +++ b/internal/application/repository/faq_read_plan.go
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,285 @@
 +package repository
 +
 +import (
@@ -17281,6 +17396,10 @@ index 0000000000000000000000000000000000000000..d582040ecd70ac3fe0adcb90dad75ed1
 +	}
 +	var actual types.FAQInputReadPlan
 +	if err = json.Unmarshal(body, &actual); err != nil {
++		return ctx, err
++	}
++	ctx, err = WithMessageMaterialReadPlans(ctx, actual.MessagePlans)
++	if err != nil {
 +		return ctx, err
 +	}
 +	return context.WithValue(ctx, faqInputReadPlanKey{}, &faqInputReadPlanBinding{Plan: &actual}), nil
@@ -17364,6 +17483,7 @@ index 0000000000000000000000000000000000000000..d582040ecd70ac3fe0adcb90dad75ed1
 +	}
 +	scopes := map[string]types.KnowledgeSearchScope{}
 +	var lineages []*types.SourceLineage
++	messagePlans := []*types.MessageMaterialReadPlan{}
 +	add := func(tenant uint64, kb string) error {
 +		if tenant == 0 || kb == "" {
 +			return types.ErrSourceLineageUnknown
@@ -17459,6 +17579,19 @@ index 0000000000000000000000000000000000000000..d582040ecd70ac3fe0adcb90dad75ed1
 +			return nil, types.ErrSourceLineageLimit
 +		}
 +		for _, parent := range parents {
++			historyPlan, err := s.peekHistoryMaterialPlanForProofInTx(tx, parent)
++			if err != nil {
++				return nil, err
++			}
++			if historyPlan != nil {
++				messagePlans = append(messagePlans, historyPlan)
++				for _, scope := range historyPlan.Scopes {
++					if err := add(scope.TenantID, scope.KBID); err != nil {
++						return nil, err
++					}
++				}
++				lineages = append(lineages, historyPlan.SourceLineage)
++			}
 +			if parent == nil || parent.BodyDigest == "" || parent.Projection != "" || parent.SourceLineage.RequireComplete() != nil {
 +				return nil, types.ErrSourceLineageUnknown
 +			}
@@ -17508,7 +17641,7 @@ index 0000000000000000000000000000000000000000..d582040ecd70ac3fe0adcb90dad75ed1
 +	if err != nil {
 +		return nil, err
 +	}
-+	plan := &types.FAQInputReadPlan{Request: request, MetadataDigest: digest, SourceLineage: lineage}
++	plan := &types.FAQInputReadPlan{Request: request, MetadataDigest: digest, SourceLineage: lineage, MessagePlans: messagePlans}
 +	keys := make([]string, 0, len(scopes))
 +	for key := range scopes {
 +		keys = append(keys, key)
@@ -19445,10 +19578,10 @@ index 0000000000000000000000000000000000000000..334064e47bbcd0fef1d579b7d07ef645
 +}
 diff --git a/internal/application/repository/knowledge_display_input.go b/internal/application/repository/knowledge_display_input.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..5325dad619c43742901e6fa6767b1160aa2414c5
+index 0000000000000000000000000000000000000000..b2ec595ec2df0a52007272a52a5bf72add54b5bc
 --- /dev/null
 +++ b/internal/application/repository/knowledge_display_input.go
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,484 @@
 +package repository
 +
 +import (
@@ -19499,6 +19632,9 @@ index 0000000000000000000000000000000000000000..5325dad619c43742901e6fa6767b1160
 +			actual := baseFactory(tx)
 +			if actual != nil && actual.messageVerifier == nil {
 +				actual.messageVerifier = store.messageVerifier
++			}
++			if actual != nil {
++				actual.messageBodyAvailability = store.messageBodyAvailability
 +			}
 +			return actual
 +		}
@@ -21193,10 +21329,10 @@ index 0000000000000000000000000000000000000000..93352b6d860be49b9cabeb66b82c2cf1
 +}
 diff --git a/internal/application/repository/knowledge_history_input.go b/internal/application/repository/knowledge_history_input.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e9276208b214
+index 0000000000000000000000000000000000000000..985018f39b6e1bc2f2567a6e705b7aef965cdf58
 --- /dev/null
 +++ b/internal/application/repository/knowledge_history_input.go
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,268 @@
 +package repository
 +
 +import (
@@ -21241,6 +21377,13 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +	}{message.ID, message.SessionID, message.RequestID, message.Role, message.Content, message.AgentID, message.ModelID, message.AgentTenantID, message.IsCompleted, message.SourceLineage, message.ExecutionContext})
 +}
 +func historyMessageInputRevision(tx *gorm.DB, id string) (uint64, error) {
++	var identity struct{ Role string }
++	if err := tx.Table("messages").Select("role").Where("id=? AND deleted_at IS NULL", id).Take(&identity).Error; err != nil {
++		return 0, err
++	}
++	if identity.Role == "user" {
++		return messageVersion(tx, "message_material_versions", "message_id", id)
++	}
 +	var row struct{ Revision uint64 }
 +	if err := tx.Table("knowledge_input_message_versions").Where("message_id = ?", id).Take(&row).Error; err != nil {
 +		return 0, err
@@ -21252,16 +21395,16 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +}
 +
 +func (s *KnowledgeInputProvenanceStore) verifyCommittedHistoryParents(tx *gorm.DB, k *types.Knowledge, a *knowledgeInputAdmission) error {
-+	batch, ok := s.messageVerifier.(interfaces.MessageSourceLineageBatchVerifier)
-+	if !ok {
-+		return types.ErrSourceLineageUnknown
-+	}
 +	var parent knowledgeInputHistoryParents
 +	if err := tx.Where("admission_id = ? AND tenant_id = ?", a.AdmissionID, k.TenantID).Take(&parent).Error; err != nil {
 +		return err
 +	}
 +	var session types.Session
-+	if err := tx.Where("id = ? AND tenant_id = ?", parent.SessionID, parent.TenantID).Take(&session).Error; err != nil {
++	if err := tx.Select("id,user_id,tenant_id,deleted_at").Where("id = ? AND tenant_id = ?", parent.SessionID, parent.TenantID).Take(&session).Error; err != nil {
++		return err
++	}
++	req := types.MessageMaterialReadRequest{TenantID: parent.TenantID, SessionID: parent.SessionID, MessageIDs: []string{parent.AssistantMessageID, parent.UserMessageID}}
++	if err := s.checkMessageMaterialPlanInTx(tx, req); err != nil {
 +		return err
 +	}
 +	messages := make([]*types.Message, 0, 2)
@@ -21269,14 +21412,24 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +		ID, Role, Digest string
 +		Revision         uint64
 +	}{{parent.AssistantMessageID, "assistant", parent.AssistantDigest, parent.AssistantRevision}, {parent.UserMessageID, "user", parent.UserDigest, parent.UserRevision}} {
-+		var message types.Message
-+		if err := tx.Where("id = ? AND session_id = ? AND request_id = ? AND role = ?", item.ID, parent.SessionID, parent.RequestID, item.Role).Take(&message).Error; err != nil {
++		message, err := readMessageMaterialBodyInTx(tx, item.ID, parent.SessionID, item.Role)
++		if err != nil {
 +			return err
 +		}
-+		if !message.IsCompleted || message.SourceLineage.RequireComplete() != nil || (item.Role == "assistant" && message.KnowledgeID != k.ID) {
++		if message.RequestID != parent.RequestID {
 +			return ErrKnowledgeInputChanged
 +		}
-+		digest, err := historyMessageInputDigest(&message)
++		if !message.IsCompleted || (item.Role == "assistant" && message.SourceLineage.RequireComplete() != nil) || (item.Role == "assistant" && message.KnowledgeID != k.ID) {
++			return ErrKnowledgeInputChanged
++		}
++		if item.Role == "user" {
++			rawProof, err := s.verifyMessageMaterialInTx(tx, message)
++			if err != nil {
++				return err
++			}
++			message.SourceLineage = rawProof.SourceLineage
++		}
++		digest, err := historyMessageInputDigest(message)
 +		if err != nil {
 +			return err
 +		}
@@ -21287,9 +21440,14 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +		if digest != item.Digest || revision != item.Revision {
 +			return ErrKnowledgeInputChanged
 +		}
-+		messages = append(messages, &message)
++		messages = append(messages, message)
 +	}
-+	return batch.CheckMessagePublications(tx.Statement.Context, messages)
++	for _, message := range messages {
++		if _, err := s.verifyMessageMaterialInTx(tx, message); err != nil {
++			return err
++		}
++	}
++	return nil
 +}
 +
 +var historyInputThinkBlocks = regexp.MustCompile(`(?s)<think>.*?</think>`)
@@ -21298,8 +21456,7 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +// unique original paired user, binds their exact envelopes/revisions, creates
 +// the child and links the message in one transaction. No caller text is used.
 +func (s *KnowledgeInputProvenanceStore) CreateCommittedHistoryKnowledgeInput(ctx context.Context, request types.CommittedHistoryKnowledgeInputRequest) (*types.CommittedHistoryKnowledgeInput, error) {
-+	batch, ok := s.messageVerifier.(interfaces.MessageSourceLineageBatchVerifier)
-+	if !ok || request.TenantID == 0 || request.KnowledgeBaseID == "" || request.SessionID == "" || request.AssistantMessageID == "" {
++	if request.TenantID == 0 || request.KnowledgeBaseID == "" || request.SessionID == "" || request.AssistantMessageID == "" {
 +		return nil, types.ErrSourceLineageUnknown
 +	}
 +	options := &sql.TxOptions{}
@@ -21308,8 +21465,16 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +	}
 +	var result *types.CommittedHistoryKnowledgeInput
 +	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		plan := findMessageMaterialReadPlan(ctx, types.MessageMaterialReadRequest{TenantID: request.TenantID, SessionID: request.SessionID, MessageIDs: []string{request.AssistantMessageID}})
++		if plan == nil {
++			return ErrNextcloudContentGCUncovered
++		}
++		if err := s.checkMessageMaterialPlanInTx(tx, plan.Request); err != nil {
++			return err
++		}
++
 +		var session types.Session
-+		if err := tx.Where("id = ? AND tenant_id = ?", request.SessionID, request.TenantID).Take(&session).Error; err != nil {
++		if err := tx.Select("id,user_id,tenant_id,deleted_at").Where("id = ? AND tenant_id = ?", request.SessionID, request.TenantID).Take(&session).Error; err != nil {
 +			return err
 +		}
 +		var assistant types.Message
@@ -21320,17 +21485,24 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +			return nilHistoryInputError()
 +		}
 +		var users []*types.Message
-+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("session_id = ? AND request_id = ? AND role = 'user'", request.SessionID, assistant.RequestID).Limit(2).Find(&users).Error; err != nil {
++		if err := tx.Select(messageRawAuthorFields).Clauses(clause.Locking{Strength: "UPDATE"}).Where("session_id = ? AND request_id = ? AND role = 'user'", request.SessionID, assistant.RequestID).Limit(2).Find(&users).Error; err != nil {
 +			return err
 +		}
-+		if len(users) != 1 || !users[0].IsCompleted || users[0].SourceLineage.RequireComplete() != nil {
++		if len(users) != 1 || !users[0].IsCompleted {
 +			return nilHistoryInputError()
 +		}
 +		user := users[0]
-+		if err := batch.CheckMessagePublications(ctx, []*types.Message{&assistant, user}); err != nil {
++		for _, parent := range []*types.Message{&assistant, user} {
++			if _, err := s.verifyMessageMaterialInTx(tx, parent); err != nil {
++				return err
++			}
++		}
++		userProof, err := s.verifyMessageMaterialInTx(tx, user)
++		if err != nil {
 +			return err
 +		}
-+		lineage, err := types.UnionSourceLineage(assistant.SourceLineage, user.SourceLineage)
++		user.SourceLineage = userProof.SourceLineage
++		lineage, err := types.UnionSourceLineage(assistant.SourceLineage, userProof.SourceLineage)
 +		if err != nil {
 +			return err
 +		}
@@ -21338,6 +21510,15 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +		if err := tx.Where("id = ? AND tenant_id = ?", request.KnowledgeBaseID, request.TenantID).Take(&kb).Error; err != nil {
 +			return err
 +		}
++		authority, err := s.messageAuthorityInTx(tx)
++		if err != nil {
++			return err
++		}
++		current, err := authority.AuthorizeCurrentKnowledgeInputWrite(ctx, &kb)
++		if err != nil {
++			return err
++		}
++		ctx = current
 +		answer := strings.TrimSpace(historyInputThinkBlocks.ReplaceAllString(assistant.Content, ""))
 +		passages := []string{fmt.Sprintf("[Session: %s]\nQ: %s\nA: %s", session.ID, user.Content, answer)}
 +		knowledge := &types.Knowledge{ID: uuid.NewString(), TenantID: request.TenantID, KnowledgeBaseID: kb.ID, Type: "passage", Channel: "internal_history", ParseStatus: types.ParseStatusPending, EnableStatus: "disabled", EmbeddingModelID: kb.EmbeddingModelID, CustomMetadata: types.JSON(`{}`)}
@@ -21388,12 +21569,44 @@ index 0000000000000000000000000000000000000000..ff2d2233ca7e7db09b88eb7bd635e927
 +	return result, nil
 +}
 +func nilHistoryInputError() error { return ErrKnowledgeInputChanged }
++
++func (s *KnowledgeInputProvenanceStore) KnowledgeHistoryMaterialRequest(ctx context.Context, proof *types.KnowledgeBuildInputProof) (*types.MessageMaterialReadRequest, error) {
++	if proof == nil {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	var row knowledgeInputAdmission
++	if err := s.db.WithContext(ctx).Where("admission_id=? AND knowledge_id=? AND tenant_id=?", proof.AdmissionID, proof.KnowledgeID, proof.TenantID).Take(&row).Error; err != nil {
++		return nil, err
++	}
++	if row.OriginKind != "history" {
++		return nil, nil
++	}
++	if row.InputDigest != proof.InputDigest || row.BuildGeneration != proof.BuildGeneration {
++		return nil, ErrKnowledgeInputChanged
++	}
++	var parent knowledgeInputHistoryParents
++	if err := s.db.WithContext(ctx).Where("admission_id=? AND tenant_id=?", proof.AdmissionID, proof.TenantID).Take(&parent).Error; err != nil {
++		return nil, err
++	}
++	return &types.MessageMaterialReadRequest{TenantID: parent.TenantID, SessionID: parent.SessionID, MessageIDs: []string{parent.AssistantMessageID, parent.UserMessageID}}, nil
++}
++
++// Current source verification is deliberately outside the material SQL tx.
++// This method grants no original-body admission and cannot replace the tx-local
++// receipts, versions, owner and read-lease checks.
++func (s *KnowledgeInputProvenanceStore) CheckKnowledgeHistoryOriginalSources(ctx context.Context, messages []*types.Message) error {
++	verifier, ok := s.messageVerifier.(interfaces.MessageSourceLineageBatchVerifier)
++	if !ok {
++		return nil
++	}
++	return verifier.CheckMessagePublications(ctx, messages)
++}
 diff --git a/internal/application/repository/knowledge_history_input_test.go b/internal/application/repository/knowledge_history_input_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..21f4a6378655875b0363f7f01c58bd854163a4bb
+index 0000000000000000000000000000000000000000..78f8f051ddd67a843fa6f510f96b3b6d5753124a
 --- /dev/null
 +++ b/internal/application/repository/knowledge_history_input_test.go
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,144 @@
 +package repository
 +
 +import (
@@ -21452,58 +21665,40 @@ index 0000000000000000000000000000000000000000..21f4a6378655875b0363f7f01c58bd85
 +	return types.CommittedHistoryKnowledgeInputRequest{TenantID: 7, KnowledgeBaseID: "kb", SessionID: assistant.SessionID, AssistantMessageID: assistant.ID}
 +}
 +
++// These rows were written directly to SQL. Current JSON and a permissive
++// global source verifier cannot mint original material receipts. Production
++// positive/ABA/atomic-write acceptance lives in message_material_input_test.go.
 +func checkKnowledgeHistoryExecutionContextABA(t *testing.T, store *KnowledgeInputProvenanceStore, db *gorm.DB) {
 +	t.Helper()
 +	_, assistant := createHistoryInputParents(t, store, db)
-+	input, err := store.CreateCommittedHistoryKnowledgeInput(historyInputAdmissionContext(), historyInputRequest(assistant))
-+	require.NoError(t, err)
-+	ctx := WithKnowledgeBuildInputProof(historyInputAdmissionContext(), store, input.Proof)
-+	require.NoError(t, store.RecheckKnowledgeBuildInputs(ctx, input.Proof))
++	_, err := store.CreateCommittedHistoryKnowledgeInput(historyInputAdmissionContext(), historyInputRequest(assistant))
++	require.ErrorIs(t, err, ErrNextcloudContentGCUncovered)
 +	original := assistant.ExecutionContext
-+	require.NoError(t, db.Model(&types.Message{}).Where("id = ?", assistant.ID).Update("execution_context", types.MessageExecutionContext{KnowledgeBaseIDs: []string{"changed-scope"}}).Error)
-+	require.Error(t, store.RecheckKnowledgeBuildInputs(ctx, input.Proof))
-+	require.NoError(t, db.Model(&types.Message{}).Where("id = ?", assistant.ID).Update("execution_context", original).Error)
-+	require.Error(t, store.RecheckKnowledgeBuildInputs(ctx, input.Proof), "restored JSON cannot revive an original parent execution scope revision")
++	require.NoError(t, db.Model(assistant).Update("execution_context", types.MessageExecutionContext{KnowledgeBaseIDs: []string{"changed-scope"}}).Error)
++	require.NoError(t, db.Model(assistant).Update("execution_context", original).Error)
++	_, err = store.CreateCommittedHistoryKnowledgeInput(historyInputAdmissionContext(), historyInputRequest(assistant))
++	require.ErrorIs(t, err, ErrNextcloudContentGCUncovered)
++	var count int64
++	require.NoError(t, db.Table("knowledge_input_history_parents").Count(&count).Error)
++	require.Zero(t, count)
 +}
-+
 +func TestKnowledgeHistoryExecutionContextABA(t *testing.T) {
 +	store, db := knowledgeInputFixture(t)
 +	checkKnowledgeHistoryExecutionContextABA(t, store, db)
 +}
-+
 +func TestPostgresKnowledgeHistoryExecutionContextABA(t *testing.T) {
 +	store, db := knowledgeInputPostgresFixture(t)
 +	checkKnowledgeHistoryExecutionContextABA(t, store, db)
 +}
-+
-+func TestKnowledgeHistoryActualCommittedPairAtomicLinkAndHydration(t *testing.T) {
++func TestKnowledgeHistoryRawCommittedPairCannotBeSignedByCurrentJSON(t *testing.T) {
 +	store, db := knowledgeInputFixture(t)
-+	user, assistant := createHistoryInputParents(t, store, db)
++	_, assistant := createHistoryInputParents(t, store, db)
 +	result, err := store.CreateCommittedHistoryKnowledgeInput(historyInputAdmissionContext(), historyInputRequest(assistant))
-+	require.NoError(t, err)
-+	require.Contains(t, result.Passages[0], user.Content)
-+	require.Contains(t, result.Passages[0], "actual committed answer")
-+	require.NotContains(t, result.Passages[0], "private reasoning")
-+	require.NotContains(t, result.Passages[0], user.RenderedContent)
-+	var linked types.Message
-+	require.NoError(t, db.Where("id = ?", assistant.ID).Take(&linked).Error)
-+	require.Equal(t, result.Knowledge.ID, linked.KnowledgeID)
-+	ctx := WithKnowledgeBuildInputProof(context.Background(), store, result.Proof)
-+	c := &types.Chunk{ID: "history-chunk", TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: result.Knowledge.ID, Content: result.Passages[0], ChunkType: "text", IsEnabled: true, IndexStatus: "ready"}
-+	require.NoError(t, NewChunkRepository(db).CreateChunks(ctx, []*types.Chunk{c}))
-+	result.Knowledge.ParseStatus = types.ParseStatusCompleted
-+	result.Knowledge.EnableStatus = "enabled"
-+	require.NoError(t, NewKnowledgeRepository(db).UpdateKnowledge(ctx, result.Knowledge))
-+	input, err := store.CaptureKnowledgeBuildInputs(ctx, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: result.Knowledge.ID, ChunkIDs: []string{c.ID}})
-+	require.NoError(t, err)
-+	require.NoError(t, store.RecheckKnowledgeBuildInputs(ctx, input.Proof))
-+	rows, err := NewRAGChunkSnapshotReader(db, store).HydrateRAGChunkSnapshots(ctx, []RAGChunkReadRequest{{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: result.Knowledge.ID, ChunkIDs: []string{c.ID}}})
-+	require.NoError(t, err)
-+	require.NoError(t, rows[0].SourceLineage.RequireComplete())
-+	oldAnswer := assistant.Content
-+	require.NoError(t, db.Model(&types.Message{}).Where("id = ?", assistant.ID).Update("content", "changed answer").Error)
-+	require.NoError(t, db.Model(&types.Message{}).Where("id = ?", assistant.ID).Update("content", oldAnswer).Error)
-+	require.Error(t, store.RecheckKnowledgeBuildInputs(ctx, input.Proof), "parent text ABA cannot restore the original committed version")
++	require.ErrorIs(t, err, ErrNextcloudContentGCUncovered)
++	require.Nil(t, result)
++	var count int64
++	require.NoError(t, db.Table("knowledge_input_admissions").Where("origin_kind='history'").Count(&count).Error)
++	require.Zero(t, count)
 +}
 +
 +func TestKnowledgeHistoryLegacyUnpairedAndFailedLinkNeverAdmitOrphans(t *testing.T) {
@@ -21546,20 +21741,15 @@ index 0000000000000000000000000000000000000000..21f4a6378655875b0363f7f01c58bd85
 +	}
 +}
 +
-+func TestPostgresKnowledgeHistoryAtomicPairAndParentWithdrawal(t *testing.T) {
++func TestPostgresKnowledgeHistoryRawPairCannotBeSignedByGlobalVerifier(t *testing.T) {
 +	store, db := knowledgeInputPostgresFixture(t)
 +	_, assistant := createHistoryInputParents(t, store, db)
 +	result, err := store.CreateCommittedHistoryKnowledgeInput(historyInputAdmissionContext(), historyInputRequest(assistant))
-+	require.NoError(t, err)
-+	ctx := WithKnowledgeBuildInputProof(context.Background(), store, result.Proof)
-+	c := &types.Chunk{ID: "history-pg-chunk", TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: result.Knowledge.ID, Content: result.Passages[0], ChunkType: "text", IsEnabled: true, IndexStatus: "ready"}
-+	require.NoError(t, NewChunkRepository(db).CreateChunks(ctx, []*types.Chunk{c}))
-+	input, err := store.CaptureKnowledgeBuildInputs(ctx, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: result.Knowledge.ID, ChunkIDs: []string{c.ID}})
-+	require.NoError(t, err)
-+	oldAnswer := assistant.Content
-+	require.NoError(t, db.Model(assistant).Update("content", "changed").Error)
-+	require.NoError(t, db.Model(assistant).Update("content", oldAnswer).Error)
-+	require.Error(t, store.RecheckKnowledgeBuildInputs(ctx, input.Proof))
++	require.ErrorIs(t, err, ErrNextcloudContentGCUncovered)
++	require.Nil(t, result)
++	var count int64
++	require.NoError(t, db.Table("knowledge_input_history_parents").Count(&count).Error)
++	require.Zero(t, count)
 +}
 diff --git a/internal/application/repository/knowledge_input_content_lease.go b/internal/application/repository/knowledge_input_content_lease.go
 new file mode 100644
@@ -21802,10 +21992,10 @@ index 0000000000000000000000000000000000000000..c80dd5240da2eedebef9d143ee021e66
 +}
 diff --git a/internal/application/repository/knowledge_input_provenance.go b/internal/application/repository/knowledge_input_provenance.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..79c6e1debfb74af1cc886a58c4cd86f24d3c4052
+index 0000000000000000000000000000000000000000..6418b07a7e041130fc6a9505099ba4c7b21aba1a
 --- /dev/null
 +++ b/internal/application/repository/knowledge_input_provenance.go
-@@ -0,0 +1,846 @@
+@@ -0,0 +1,855 @@
 +package repository
 +
 +import (
@@ -21903,6 +22093,8 @@ index 0000000000000000000000000000000000000000..79c6e1debfb74af1cc886a58c4cd86f2
 +	messageVerifier         interfaces.MessageSourceLineageVerifier
 +	actorGroups             interfaces.GroupAccessService
 +	actorShares             access.KBShareLookup
++	messageActorAgents      interfaces.AgentShareService
++	messageBodyAvailability MessageOriginalBodyAvailabilityCheck
 +	originalInputSources    KnowledgeOriginalInputSourceVerifier
 +}
 +
@@ -22538,7 +22730,14 @@ index 0000000000000000000000000000000000000000..79c6e1debfb74af1cc886a58c4cd86f2
 +		if !ok {
 +			return ErrKnowledgeInputChanged
 +		}
-+		a, _, _, err := (&KnowledgeInputProvenanceStore{db: tx, messageVerifier: store.messageVerifier}).admissionInTx(tx, &k, guard.proof)
++		authority := &KnowledgeInputProvenanceStore{db: tx, messageVerifier: store.messageVerifier}
++		if store.displayAuthorityFactory != nil {
++			authority = store.displayAuthorityFactory(tx)
++			if authority == nil || authority.db != tx {
++				return ErrKnowledgeInputChanged
++			}
++		}
++		a, _, _, err := authority.admissionInTx(tx, &k, guard.proof)
 +		if err != nil {
 +			return err
 +		}
@@ -23966,13 +24165,91 @@ index 0a35e402459a359a8d755dfc74556c177f66be01..4bf221f5f1a6c1d731ce0c6190764ce8
      wiki_config TEXT,
      indexing_strategy TEXT,
 diff --git a/internal/application/repository/message.go b/internal/application/repository/message.go
-index 1adef0851e46b2add14f1dd4a1555cc32a93facb..905016cdb7d8ea7005d3fbd5533e58b9d83e26e3 100644
+index 1adef0851e46b2add14f1dd4a1555cc32a93facb..162c1ab40621b2da756122a916bf73ff921b31fa 100644
 --- a/internal/application/repository/message.go
 +++ b/internal/application/repository/message.go
-@@ -267,6 +267,13 @@ func (r *messageRepository) UpdateMessage(ctx context.Context, message *types.Me
+@@ -10,11 +10,13 @@ import (
+ 
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
+ )
+ 
+ // messageRepository implements the message repository interface
+ type messageRepository struct {
+-	db *gorm.DB
++	materialStore *KnowledgeInputProvenanceStore
++	db            *gorm.DB
+ }
+ 
+ // NewMessageRepository creates a new message repository
+@@ -29,10 +31,37 @@ func (r *messageRepository) CreateMessage(
+ 	ctx context.Context, message *types.Message,
+ ) (*types.Message, error) {
+ 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		// Material writer IDs are resolved before the immutable new generation.
++		if message.ID == "" {
++			message.ID = uuid.NewString()
++		}
++		var origin *messageGenerationOrigin
++		if r.materialStore != nil {
++			var err error
++			origin, err = r.materialStore.beginMessageProducerInTx(tx, message, true)
++			if err != nil {
++				return err
++			}
++		}
+ 		if err := tx.Create(message).Error; err != nil {
+ 			return err
+ 		}
+-		return insertMessageArtifacts(tx, []*types.Message{message})
++		if err := insertMessageArtifacts(tx, []*types.Message{message}); err != nil {
++			return err
++		}
++		if origin != nil {
++			var actual types.Message
++			if err := tx.Where("id=? AND session_id=?", message.ID, message.SessionID).Take(&actual).Error; err != nil {
++				return err
++			}
++			if err := r.materialStore.sealMessageMaterialInTx(tx, origin, &actual); err != nil {
++				return err
++			}
++			message.CreatedAt = actual.CreatedAt
++			message.UpdatedAt = actual.UpdatedAt
++			return nil
++		}
++		return nil
+ 	})
+ 	if err != nil {
+ 		return nil, err
+@@ -262,12 +291,47 @@ func (r *messageRepository) ListAssistantCheckpointsUpTo(
+ // when message.Artifacts is non-nil (see writeMessageArtifacts).
+ func (r *messageRepository) UpdateMessage(ctx context.Context, message *types.Message) error {
+ 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var origin *messageGenerationOrigin
++		if r.materialStore != nil {
++			var err error
++			origin, err = r.materialStore.beginMessageProducerInTx(tx, message, false)
++			if err != nil {
++				return err
++			}
++		}
++		if origin != nil && origin.PriorSources != nil && message.Role == "user" && message.SourceLineage.RequireComplete() != nil {
++			message.SourceLineage = origin.PriorSources
++		}
++		if origin != nil && origin.PriorSources != nil && message.SourceLineage.RequireComplete() == nil {
++			inherited, err := types.UnionSourceLineage(origin.PriorSources, message.SourceLineage)
++			if err != nil {
++				return err
++			}
++			message.SourceLineage = inherited
++		}
+ 		if err := tx.Model(&types.Message{}).Where(
+ 			"id = ? AND session_id = ?", message.ID, message.SessionID,
  		).Updates(message).Error; err != nil {
  			return err
  		}
+-		return writeMessageArtifacts(tx, message)
 +		// Explicit generated fields include empty values and NULL lineage. The
 +		// transaction must not pair a new body with a skipped old proof. Separate
 +		// checkpoint updates retain their own lineage and are preserved here.
@@ -23980,10 +24257,21 @@ index 1adef0851e46b2add14f1dd4a1555cc32a93facb..905016cdb7d8ea7005d3fbd5533e58b9
 +			Select("content", "is_completed", "source_lineage", "agent_steps", "knowledge_references", "updated_at", "is_fallback").Updates(message).Error; err != nil {
 +			return err
 +		}
- 		return writeMessageArtifacts(tx, message)
++		if err := writeMessageArtifacts(tx, message); err != nil {
++			return err
++		}
++		if origin != nil {
++			var actual types.Message
++			if err := tx.Where("id=? AND session_id=?", message.ID, message.SessionID).Take(&actual).Error; err != nil {
++				return err
++			}
++			return r.materialStore.sealMessageMaterialInTx(tx, origin, &actual)
++		}
++		return nil
  	})
  }
-@@ -378,7 +385,7 @@ func (r *messageRepository) SearchMessagesByKeyword(
+ 
+@@ -378,7 +442,7 @@ func (r *messageRepository) SearchMessagesByKeyword(
  
  	query := r.db.WithContext(ctx).
  		Table("messages").
@@ -23992,7 +24280,7 @@ index 1adef0851e46b2add14f1dd4a1555cc32a93facb..905016cdb7d8ea7005d3fbd5533e58b9
  		Joins("INNER JOIN sessions ON sessions.id = messages.session_id AND sessions.deleted_at IS NULL").
  		Where("sessions.tenant_id = ?", tenantID).
  		Where("messages.deleted_at IS NULL").
-@@ -445,7 +452,7 @@ func (r *messageRepository) GetMessagesByKnowledgeIDs(
+@@ -445,7 +509,7 @@ func (r *messageRepository) GetMessagesByKnowledgeIDs(
  	var results []*types.MessageWithSession
  	if err := r.db.WithContext(ctx).
  		Table("messages").
@@ -24001,7 +24289,7 @@ index 1adef0851e46b2add14f1dd4a1555cc32a93facb..905016cdb7d8ea7005d3fbd5533e58b9
  		Joins("INNER JOIN sessions ON sessions.id = messages.session_id AND sessions.deleted_at IS NULL").
  		Where("messages.deleted_at IS NULL").
  		Where("messages.knowledge_id IN ?", knowledgeIDs).
-@@ -469,7 +476,7 @@ func (r *messageRepository) GetMessagesByRequestIDs(
+@@ -469,7 +533,7 @@ func (r *messageRepository) GetMessagesByRequestIDs(
  	var results []*types.MessageWithSession
  	if err := r.db.WithContext(ctx).
  		Table("messages").
@@ -24010,6 +24298,802 @@ index 1adef0851e46b2add14f1dd4a1555cc32a93facb..905016cdb7d8ea7005d3fbd5533e58b9
  		Joins("INNER JOIN sessions ON sessions.id = messages.session_id AND sessions.deleted_at IS NULL").
  		Where("messages.deleted_at IS NULL").
  		Where("messages.session_id = ?", sessionID).
+diff --git a/internal/application/repository/message_material.go b/internal/application/repository/message_material.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d761af93f009dce491f530f69a7ecc6e92f9f17c
+--- /dev/null
++++ b/internal/application/repository/message_material.go
+@@ -0,0 +1,296 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	stderrors "errors"
++	"fmt"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++type messageGenerationOrigin struct {
++	PriorSources                                                        *types.SourceLineage `gorm:"-"`
++	ID                                                                  string               `gorm:"primaryKey"`
++	MessageID, SessionID, OwnerID, RequestID, Role, Actor, InitialInput string
++	TenantID, OwnerRevision                                             uint64
++}
++
++func (messageGenerationOrigin) TableName() string { return "message_generation_origins" }
++
++type messageMaterialAdmission struct {
++	ID                                                                                                string `gorm:"primaryKey"`
++	GenerationID, MessageID, SessionID, OwnerID, BodyDigest, SourceLineage, ExecutionContext, AgentID string
++	TenantID, OwnerRevision, Revision, AgentTenantID                                                  uint64
++}
++
++func (messageMaterialAdmission) TableName() string { return "message_material_admissions" }
++
++type messageMaterialReceipt struct {
++	MessageID   string `gorm:"primaryKey"`
++	AdmissionID string
++}
++
++func (messageMaterialReceipt) TableName() string { return "message_material_receipts" }
++
++type messageProducerBoundaryKey struct{}
++type messageProducerBoundary struct {
++	Store  *KnowledgeInputProvenanceStore
++	Digest string
++	Create bool
++}
++
++// This marker is minted only by the actual authenticated message service over
++// the new producer's exact arguments. A JSON field cannot carry it.
++func (s *KnowledgeInputProvenanceStore) WithMessageProducerInput(ctx context.Context, message *types.Message, create bool) (context.Context, error) {
++	if message != nil && create {
++		if err := message.BeforeCreate(nil); err != nil {
++			return ctx, err
++		}
++	}
++	if message == nil || message.SessionID == "" || message.RequestID == "" || message.Role != "user" && message.Role != "assistant" {
++		return ctx, types.ErrSourceLineageUnknown
++	}
++	digest, err := messageMaterialDigest(message)
++	if err != nil {
++		return ctx, err
++	}
++	return context.WithValue(ctx, messageProducerBoundaryKey{}, messageProducerBoundary{s, digest, create}), nil
++}
++func messageMaterialDigest(message *types.Message) (string, error) {
++	if message == nil {
++		return "", types.ErrSourceLineageUnknown
++	}
++	if message.Role == "user" {
++		// Only this actual producer's immutable raw authored field list is covered.
++		// Rendered context, images, attachments, memories and checkpoints remain
++		// separate unknown material and are never loaded or emitted by this read.
++		return KnowledgeInputDigest(struct {
++			ID, Session, Request, Role, Content, Agent string
++			AgentTenant                                uint64
++			Complete                                   bool
++			Created                                    time.Time
++			Execution                                  types.MessageExecutionContext
++		}{message.ID, message.SessionID, message.RequestID, message.Role, message.Content, message.AgentID, message.AgentTenantID, message.IsCompleted, message.CreatedAt, message.ExecutionContext})
++	}
++	body := *message
++	body.KnowledgeID = ""
++	body.UpdatedAt = time.Time{}
++	body.Artifacts = nil
++	return KnowledgeInputDigest(struct {
++		Body        *types.Message
++		Lineage     *types.SourceLineage
++		Execution   types.MessageExecutionContext
++		AgentTenant uint64
++		Rendered    string
++		Context     *types.ContextCheckpoint
++	}{&body, body.SourceLineage, body.ExecutionContext, body.AgentTenantID, body.RenderedContent, body.ContextCheckpoint})
++}
++func messageVersion(tx *gorm.DB, table, column, id string) (uint64, error) {
++	var row struct{ Revision uint64 }
++	if err := tx.Table(table).Where(column+"=?", id).Take(&row).Error; err != nil {
++		return 0, err
++	}
++	if row.Revision == 0 {
++		return 0, ErrKnowledgeInputChanged
++	}
++	return row.Revision, nil
++}
++func (s *KnowledgeInputProvenanceStore) messageAuthorityInTx(tx *gorm.DB) (*KnowledgeInputProvenanceStore, error) {
++	if s.db != nil && s.db.Statement.ConnPool == tx.Statement.ConnPool && s.actorGroups != nil {
++		return s, nil
++	}
++	if s.displayAuthorityFactory == nil {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	actual := s.displayAuthorityFactory(tx)
++	if actual == nil || actual.db != tx || actual.actorGroups == nil {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	return actual, nil
++}
++func (s *KnowledgeInputProvenanceStore) currentMessageOwnerInTx(tx *gorm.DB, sessionID string) (context.Context, *types.Session, uint64, error) {
++	var session types.Session
++	if err := tx.Select("id,user_id,tenant_id,deleted_at").Where("id=?", sessionID).Take(&session).Error; err != nil {
++		return nil, nil, 0, err
++	}
++	authority, err := s.messageAuthorityInTx(tx)
++	if err != nil {
++		return nil, nil, 0, err
++	}
++	fresh, err := authority.RefreshCurrentReadActor(types.WithExecutionTenant(tx.Statement.Context, session.TenantID))
++	if err != nil {
++		return nil, nil, 0, err
++	}
++	owner := types.SessionOwnerIDFromContext(fresh)
++	principal, _ := types.PrincipalFromContext(fresh)
++	if principal.Type == types.PrincipalWebUser {
++		owner = principal.ID
++	}
++	if owner == "" || session.UserID != owner {
++		return nil, nil, 0, fmt.Errorf("%w: session owner does not match current actor", ErrKnowledgeInputChanged)
++	}
++	revision, err := messageVersion(tx, "message_session_owner_versions", "session_id", session.ID)
++	return fresh, &session, revision, err
++}
++func (s *KnowledgeInputProvenanceStore) beginMessageProducerInTx(tx *gorm.DB, message *types.Message, create bool) (*messageGenerationOrigin, error) {
++	boundary, ok := tx.Statement.Context.Value(messageProducerBoundaryKey{}).(messageProducerBoundary)
++	digest, err := messageMaterialDigest(message)
++	if err != nil {
++		return nil, err
++	}
++	if !ok || boundary.Store != s || boundary.Create != create || boundary.Digest != digest {
++		return nil, fmt.Errorf("%w: exact message producer arguments changed", types.ErrSourceLineageUnknown)
++	}
++	fresh, session, ownerRevision, err := s.currentMessageOwnerInTx(tx, message.SessionID)
++	if err != nil {
++		return nil, err
++	}
++	actor, err := captureKnowledgeActorSelector(fresh, "")
++	if err != nil {
++		return nil, err
++	}
++	actorJSON, err := json.Marshal(actor)
++	if err != nil {
++		return nil, err
++	}
++	if create {
++		if message.Role == "assistant" && (message.Content != "" || message.IsCompleted) {
++			return nil, types.ErrSourceLineageUnknown
++		}
++		input, err := json.Marshal(message)
++		if err != nil {
++			return nil, err
++		}
++		row := &messageGenerationOrigin{ID: uuid.NewString(), MessageID: message.ID, SessionID: message.SessionID, TenantID: session.TenantID, OwnerID: session.UserID, OwnerRevision: ownerRevision, RequestID: message.RequestID, Role: message.Role, Actor: string(actorJSON), InitialInput: string(input)}
++		if err := tx.Create(row).Error; err != nil {
++			return nil, err
++		}
++		return row, nil
++	}
++	var row messageGenerationOrigin
++	if err := tx.Where("message_id=? AND session_id=?", message.ID, message.SessionID).Take(&row).Error; err != nil {
++		return nil, err
++	}
++	if row.Actor != string(actorJSON) || row.RequestID != message.RequestID || row.Role != message.Role || row.OwnerID != session.UserID || row.OwnerRevision != ownerRevision || row.TenantID != session.TenantID {
++		return nil, ErrKnowledgeInputChanged
++	}
++	// A full producer update can advance only its own last immutable material.
++	// An unrelated partial write or ABA never becomes admitted by loading it.
++	var prior messageMaterialAdmission
++	if err := tx.Table("message_material_admissions a").Select("a.*").Joins("JOIN message_material_receipts r ON r.admission_id=a.id AND r.message_id=a.message_id").Where("a.message_id=? AND a.generation_id=?", message.ID, row.ID).Take(&prior).Error; err != nil {
++		return nil, err
++	}
++	original, err := readMessageMaterialBodyInTx(tx, message.ID, message.SessionID, message.Role)
++	if err != nil {
++		return nil, err
++	}
++	priorDigest, err := messageMaterialDigest(original)
++	if err != nil {
++		return nil, err
++	}
++	priorRevision, err := messageVersion(tx, "message_material_versions", "message_id", message.ID)
++	if err != nil {
++		return nil, err
++	}
++	if prior.BodyDigest != priorDigest || prior.Revision != priorRevision {
++		return nil, ErrKnowledgeInputChanged
++	}
++	var originalSources types.SourceLineage
++	if err := json.Unmarshal([]byte(prior.SourceLineage), &originalSources); err != nil {
++		return nil, err
++	}
++	if originalSources.RequireComplete() != nil {
++		// Only this generation's actual initial empty placeholder has no consumed
++		// body. A partial unknown completion cannot be certified by a later update.
++		if original.IsCompleted || original.Content != "" || len(original.AgentSteps) > 0 || len(original.KnowledgeReferences) > 0 || len(original.Images) > 0 || len(original.Attachments) > 0 || original.ContextCheckpoint != nil {
++			return nil, types.ErrSourceLineageUnknown
++		}
++		empty, _ := types.NewCompleteSourceLineage()
++		row.PriorSources = empty
++	} else {
++		row.PriorSources = &originalSources
++	}
++
++	if err := s.checkMessageOriginalBodyAvailability(tx, row.ID); err != nil {
++		return nil, err
++	}
++	return &row, nil
++}
++func (s *KnowledgeInputProvenanceStore) sealMessageMaterialInTx(tx *gorm.DB, origin *messageGenerationOrigin, message *types.Message) error {
++	// Incomplete or unknown material is recorded for this producer continuity,
++	// but saved-body readers still require completed, complete original lineage.
++	digest, err := messageMaterialDigest(message)
++	if err != nil {
++		return err
++	}
++	revision, err := messageVersion(tx, "message_material_versions", "message_id", message.ID)
++	if err != nil {
++		return err
++	}
++	source, err := json.Marshal(message.SourceLineage)
++	if err != nil {
++		return err
++	}
++	execution, err := json.Marshal(message.ExecutionContext)
++	if err != nil {
++		return err
++	}
++	row := messageMaterialAdmission{ID: uuid.NewString(), GenerationID: origin.ID, MessageID: message.ID, SessionID: message.SessionID, TenantID: origin.TenantID, OwnerID: origin.OwnerID, OwnerRevision: origin.OwnerRevision, Revision: revision, BodyDigest: digest, SourceLineage: string(source), ExecutionContext: string(execution), AgentID: message.AgentID, AgentTenantID: message.AgentTenantID}
++	if err := tx.Create(&row).Error; err != nil {
++		return err
++	}
++	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "message_id"}}, DoUpdates: clause.AssignmentColumns([]string{"admission_id"})}).Create(&messageMaterialReceipt{message.ID, row.ID}).Error
++}
++
++func ConfigureMessageMaterialWriters(repo interface{}, store *KnowledgeInputProvenanceStore) {
++	if r, ok := repo.(*messageRepository); ok {
++		r.materialStore = store
++	}
++}
++
++func ConfigureMessageMaterialAgentShares(store *KnowledgeInputProvenanceStore, agents interface{}) {
++	if actual, ok := agents.(interfaces.AgentShareService); ok {
++		store.messageActorAgents = actual
++	}
++}
++
++// The retention owner supplies the actual vault and external purge-journal
++// checker. A digest or current message body never substitutes for unavailable
++// original generation material.
++type MessageOriginalBodyAvailabilityCheck func(context.Context, *gorm.DB, string, string) error
++
++func ConfigureMessageOriginalBodyAvailability(store *KnowledgeInputProvenanceStore, check MessageOriginalBodyAvailabilityCheck) {
++	store.messageBodyAvailability = check
++}
++func (s *KnowledgeInputProvenanceStore) checkMessageOriginalBodyAvailability(tx *gorm.DB, generationID string) error {
++	if generationID == "" {
++		return types.ErrSourceLineageUnknown
++	}
++	if s.messageBodyAvailability != nil {
++		if err := s.messageBodyAvailability(tx.Statement.Context, tx, "message_generation_origins", generationID); err != nil {
++			return stderrors.Join(types.ErrSourceLineageUnknown, err)
++		}
++		return nil
++	}
++	return nil // Retention is not installed in this module's parent; this is not purge authorization.
++}
++
++const messageRawAuthorFields = "id,session_id,request_id,role,content,is_completed,created_at,agent_id,agent_tenant_id,execution_context"
++
++func readMessageMaterialBodyInTx(tx *gorm.DB, id, session, role string) (*types.Message, error) {
++	var message types.Message
++	q := tx.Where("id=? AND session_id=? AND role=?", id, session, role)
++	if role == "user" {
++		q = q.Select(messageRawAuthorFields)
++	}
++	if err := q.Take(&message).Error; err != nil {
++		return nil, err
++	}
++	return &message, nil
++}
+diff --git a/internal/application/repository/message_material_read.go b/internal/application/repository/message_material_read.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7647a61f8026a3ae6f1af4fcc3d8a88ed36ad2be
+--- /dev/null
++++ b/internal/application/repository/message_material_read.go
+@@ -0,0 +1,488 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"sort"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++type messageMaterialPlanKey struct{}
++
++func WithMessageMaterialReadPlan(ctx context.Context, plan *types.MessageMaterialReadPlan) (context.Context, error) {
++	if plan == nil || plan.MetadataDigest == "" || plan.SourceLineage.RequireComplete() != nil {
++		return ctx, types.ErrSourceLineageUnknown
++	}
++	encoded, err := json.Marshal(plan)
++	if err != nil {
++		return ctx, err
++	}
++	var actual types.MessageMaterialReadPlan
++	if err = json.Unmarshal(encoded, &actual); err != nil {
++		return ctx, err
++	}
++	plans, _ := ctx.Value(messageMaterialPlanKey{}).([]*types.MessageMaterialReadPlan)
++	plans = append(append([]*types.MessageMaterialReadPlan{}, plans...), &actual)
++	return context.WithValue(ctx, messageMaterialPlanKey{}, plans), nil
++}
++
++func (s *KnowledgeInputProvenanceStore) PeekMessageMaterialReadPlan(ctx context.Context, req types.MessageMaterialReadRequest) (*types.MessageMaterialReadPlan, error) {
++	var result *types.MessageMaterialReadPlan
++	err := s.collectionTransaction(ctx, func(tx *gorm.DB) error {
++		var err error
++		result, err = s.peekMessageMaterialReadPlanInTx(tx, req)
++		return err
++	})
++	return result, err
++}
++
++func (s *KnowledgeInputProvenanceStore) CommittedMessageParentRequest(ctx context.Context, tenant uint64, sessionID, assistantID string) (types.MessageMaterialReadRequest, error) {
++	req := types.MessageMaterialReadRequest{TenantID: tenant, SessionID: sessionID}
++	var origin messageGenerationOrigin
++	if err := s.db.WithContext(ctx).Where("message_id=? AND session_id=? AND tenant_id=? AND role='assistant'", assistantID, sessionID, tenant).Take(&origin).Error; err != nil {
++		return req, err
++	}
++	var users []struct{ MessageID string }
++	if err := s.db.WithContext(ctx).Table("message_generation_origins").Select("message_id").Where("session_id=? AND tenant_id=? AND request_id=? AND role='user'", sessionID, tenant, origin.RequestID).Limit(2).Scan(&users).Error; err != nil {
++		return req, err
++	}
++	if len(users) != 1 {
++		return req, ErrKnowledgeInputChanged
++	}
++	req.MessageIDs = []string{assistantID, users[0].MessageID}
++	sort.Strings(req.MessageIDs)
++	return req, nil
++}
++
++func (s *KnowledgeInputProvenanceStore) MessagePageMaterialRequest(ctx context.Context, tenant uint64, sessionID string, before time.Time, limit, page int, descending bool) (types.MessageMaterialReadRequest, error) {
++	req := types.MessageMaterialReadRequest{TenantID: tenant, SessionID: sessionID, MessageIDs: []string{}}
++	q := s.db.WithContext(ctx).Table("messages").Select("id").Where("session_id=? AND deleted_at IS NULL", sessionID)
++	if !before.IsZero() {
++		q = q.Where("created_at < ?", before)
++	}
++	if descending {
++		q = q.Order("created_at DESC,id DESC")
++	} else {
++		q = q.Order("created_at ASC,id ASC")
++	}
++	if limit > 0 {
++		q = q.Limit(limit)
++	}
++	if page > 1 {
++		q = q.Offset((page - 1) * limit)
++	}
++	var rows []struct{ ID string }
++	if err := q.Scan(&rows).Error; err != nil {
++		return req, err
++	}
++	for _, row := range rows {
++		req.MessageIDs = append(req.MessageIDs, row.ID)
++	}
++	sort.Strings(req.MessageIDs)
++	return req, nil
++}
++func (s *KnowledgeInputProvenanceStore) peekMessageMaterialReadPlanInTx(tx *gorm.DB, req types.MessageMaterialReadRequest) (*types.MessageMaterialReadPlan, error) {
++	req.MessageIDs = append([]string{}, req.MessageIDs...)
++	sort.Strings(req.MessageIDs)
++	if req.TenantID == 0 || req.SessionID == "" || !req.AllSession && len(req.MessageIDs) == 0 {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	var session struct {
++		ID, UserID string
++		TenantID   uint64
++		DeletedAt  gorm.DeletedAt
++	}
++	if err := tx.Table("sessions").Select("id,user_id,tenant_id,deleted_at").Where("id=? AND tenant_id=? AND deleted_at IS NULL", req.SessionID, req.TenantID).Take(&session).Error; err != nil {
++		return nil, err
++	}
++	ownerRevision, err := messageVersion(tx, "message_session_owner_versions", "session_id", session.ID)
++	if err != nil {
++		return nil, err
++	}
++	membership, err := messageVersion(tx, "message_session_membership_versions", "session_id", session.ID)
++	if err != nil {
++		return nil, err
++	}
++	var ids []struct{ ID string }
++	query := tx.Table("messages").Select("id").Where("session_id=? AND deleted_at IS NULL", req.SessionID)
++	if !req.AllSession {
++		query = query.Where("id IN ?", req.MessageIDs)
++	}
++	if err = query.Order("id").Scan(&ids).Error; err != nil {
++		return nil, err
++	}
++	if !req.AllSession && len(ids) != len(req.MessageIDs) {
++		return nil, ErrKnowledgeInputChanged
++	}
++	facts := []messageMaterialAdmission{}
++	lineages := []*types.SourceLineage{}
++	scopes := map[string]types.KnowledgeSearchScope{}
++	add := func(tenant uint64, kb string) error {
++		if tenant == 0 || kb == "" {
++			return types.ErrSourceLineageUnknown
++		}
++		scopes[fmt.Sprintf("%d:%s", tenant, kb)] = types.KnowledgeSearchScope{TenantID: tenant, KBID: kb}
++		return nil
++	}
++	for _, id := range ids {
++		var fact messageMaterialAdmission
++		if err := tx.Table("message_material_admissions a").Select("a.*").Joins("JOIN message_material_receipts r ON r.admission_id=a.id AND r.message_id=a.message_id").Where("a.message_id=? AND a.session_id=? AND a.tenant_id=?", id.ID, req.SessionID, req.TenantID).Take(&fact).Error; err != nil {
++			return nil, err
++		}
++		revision, err := messageVersion(tx, "message_material_versions", "message_id", id.ID)
++		if err != nil {
++			return nil, err
++		}
++		if revision != fact.Revision || fact.OwnerID != session.UserID || fact.OwnerRevision != ownerRevision {
++			return nil, ErrKnowledgeInputChanged
++		}
++		var lineage types.SourceLineage
++		if err := json.Unmarshal([]byte(fact.SourceLineage), &lineage); err != nil {
++			return nil, err
++		}
++		if err := lineage.RequireComplete(); err != nil {
++			return nil, err
++		}
++		lineages = append(lineages, &lineage)
++		for _, source := range lineage.Sources {
++			if err := add(source.TenantID, source.KnowledgeBaseID); err != nil {
++				return nil, err
++			}
++		}
++		var execution types.MessageExecutionContext
++		if err := json.Unmarshal([]byte(fact.ExecutionContext), &execution); err != nil {
++			return nil, err
++		}
++		kbIDs := append(append([]string{}, execution.KnowledgeBaseIDs...), execution.AgentKnowledgeBaseIDs...)
++		for _, tag := range execution.TagScopes {
++			kbIDs = append(kbIDs, tag.KnowledgeBaseID)
++		}
++		for _, knowledgeID := range execution.KnowledgeIDs {
++			var row struct{ KnowledgeBaseID string }
++			if err := tx.Table("knowledges").Select("knowledge_base_id").Where("id=? AND deleted_at IS NULL", knowledgeID).Take(&row).Error; err != nil {
++				return nil, err
++			}
++			kbIDs = append(kbIDs, row.KnowledgeBaseID)
++		}
++		for _, kbID := range kbIDs {
++			var kb struct{ TenantID uint64 }
++			if err := tx.Table("knowledge_bases").Select("tenant_id").Where("id=? AND deleted_at IS NULL", kbID).Take(&kb).Error; err != nil {
++				return nil, err
++			}
++			if err := add(kb.TenantID, kbID); err != nil {
++				return nil, err
++			}
++		}
++		facts = append(facts, fact)
++	}
++	if len(lineages) == 0 {
++		empty, _ := types.NewCompleteSourceLineage()
++		lineages = append(lineages, empty)
++	}
++	lineage, err := types.UnionSourceLineage(lineages...)
++	if err != nil {
++		return nil, err
++	}
++	digest, err := KnowledgeInputDigest(struct {
++		Request           types.MessageMaterialReadRequest
++		Session           any
++		Owner, Membership uint64
++		Facts             []messageMaterialAdmission
++	}{req, session, ownerRevision, membership, facts})
++	if err != nil {
++		return nil, err
++	}
++	result := &types.MessageMaterialReadPlan{Request: req, MetadataDigest: digest, SourceLineage: lineage}
++	for _, scope := range scopes {
++		result.Scopes = append(result.Scopes, scope)
++	}
++	sort.Slice(result.Scopes, func(i, j int) bool {
++		if result.Scopes[i].TenantID != result.Scopes[j].TenantID {
++			return result.Scopes[i].TenantID < result.Scopes[j].TenantID
++		}
++		return result.Scopes[i].KBID < result.Scopes[j].KBID
++	})
++	return result, nil
++}
++func (s *KnowledgeInputProvenanceStore) checkMessageMaterialPlanInTx(tx *gorm.DB, req types.MessageMaterialReadRequest) error {
++	req.MessageIDs = append([]string{}, req.MessageIDs...)
++	sort.Strings(req.MessageIDs)
++	expected := findMessageMaterialReadPlan(tx.Statement.Context, req)
++	if expected == nil {
++		return ErrNextcloudContentGCUncovered
++	}
++	if expected.Request.SessionID != req.SessionID || expected.Request.TenantID != req.TenantID {
++		return ErrKnowledgeInputChanged
++	}
++	current, err := s.peekMessageMaterialReadPlanInTx(tx, expected.Request)
++	if err != nil {
++		return err
++	}
++	if !faqInputEqual(current, expected) {
++		return ErrKnowledgeInputChanged
++	}
++	if len(current.Scopes) == 0 {
++		return nil
++	}
++	return validateFAQReadLeaseCoverageInTx(tx, current.Scopes, current.SourceLineage)
++}
++
++// SQL-local authority runs on the caller's existing transaction. No global
++// message service/source HTTP/second database connection is called here.
++func (s *KnowledgeInputProvenanceStore) verifyMessageMaterialInTx(tx *gorm.DB, message *types.Message) (*types.MessageMaterialProof, error) {
++	fresh, session, ownerRevision, err := s.currentMessageOwnerInTx(tx, message.SessionID)
++	if err != nil {
++		return nil, err
++	}
++	var fact messageMaterialAdmission
++	if err := tx.Table("message_material_admissions a").Select("a.*").Joins("JOIN message_material_receipts r ON r.admission_id=a.id AND r.message_id=a.message_id").Where("a.message_id=? AND a.session_id=? AND a.tenant_id=?", message.ID, session.ID, session.TenantID).Take(&fact).Error; err != nil {
++		return nil, err
++	}
++	if err := s.checkMessageOriginalBodyAvailability(tx, fact.GenerationID); err != nil {
++		return nil, err
++	}
++	revision, err := messageVersion(tx, "message_material_versions", "message_id", message.ID)
++	if err != nil {
++		return nil, err
++	}
++	digest, err := messageMaterialDigest(message)
++	if err != nil {
++		return nil, err
++	}
++	if !message.IsCompleted || fact.BodyDigest != digest || fact.Revision != revision || fact.OwnerID != session.UserID || fact.OwnerRevision != ownerRevision {
++		return nil, ErrKnowledgeInputChanged
++	}
++	var lineage types.SourceLineage
++	if err := json.Unmarshal([]byte(fact.SourceLineage), &lineage); err != nil {
++		return nil, err
++	}
++	if err := lineage.RequireComplete(); err != nil {
++		return nil, err
++	}
++	if err := verifyKnowledgeInheritedSources(tx, &lineage); err != nil {
++		return nil, err
++	}
++	authority, err := s.messageAuthorityInTx(tx)
++	if err != nil {
++		return nil, err
++	}
++	var execution types.MessageExecutionContext
++	if err := json.Unmarshal([]byte(fact.ExecutionContext), &execution); err != nil {
++		return nil, err
++	}
++	// Resolve current Agent existence/share using its original selector.
++	if fact.AgentID != "" {
++		var agent types.CustomAgent
++		if err := tx.Where("id=? AND tenant_id=?", fact.AgentID, fact.AgentTenantID).Take(&agent).Error; err != nil {
++			return nil, err
++		}
++		if fact.AgentTenantID != types.CallerFromContext(fresh).TenantID {
++			if authority.messageActorAgents == nil {
++				return nil, types.ErrSourceLineageUnknown
++			}
++			shared, err := authority.messageActorAgents.GetSharedAgentForTenant(fresh, types.CallerFromContext(fresh).TenantID, types.CallerFromContext(fresh).Role, fact.AgentID, fact.AgentTenantID)
++			if err != nil {
++				return nil, err
++			}
++			if shared == nil {
++				return nil, access.ErrForbidden
++			}
++		}
++		permission, err := authority.actorGroups.EffectivePermission(fresh, fact.AgentTenantID, types.GroupResourceTypeAgent, fact.AgentID, types.ResourceActionUse, time.Now().UTC())
++		if err != nil {
++			return nil, err
++		}
++		if !permission.Allowed {
++			return nil, access.ErrForbidden
++		}
++	}
++	kbIDs := append(append([]string{}, execution.KnowledgeBaseIDs...), execution.AgentKnowledgeBaseIDs...)
++	for _, source := range lineage.Sources {
++		kbIDs = append(kbIDs, source.KnowledgeBaseID)
++	}
++	for _, tag := range execution.TagScopes {
++		kbIDs = append(kbIDs, tag.KnowledgeBaseID)
++	}
++	for _, id := range execution.KnowledgeIDs {
++		var row struct{ KnowledgeBaseID string }
++		if err := tx.Table("knowledges").Select("knowledge_base_id").Where("id=? AND deleted_at IS NULL", id).Take(&row).Error; err != nil {
++			return nil, err
++		}
++		kbIDs = append(kbIDs, row.KnowledgeBaseID)
++	}
++	if types.CallerFromContext(fresh).TenantID != session.TenantID && len(kbIDs) == 0 {
++		return nil, access.ErrForbidden
++	}
++	for _, id := range kbIDs {
++		var kb types.KnowledgeBase
++		if err := tx.Where("id=?", id).Take(&kb).Error; err != nil {
++			return nil, err
++		}
++		caller := types.CallerFromContext(fresh)
++		_, err := access.ResolveKB(fresh, access.KBRequest{Caller: caller}, &kb, types.OrgRoleViewer, authority.actorShares, authority.messageActorAgents)
++		if err != nil && fact.AgentID != "" && authority.messageActorAgents != nil {
++			agent, e := authority.messageActorAgents.GetSharedAgentForTenant(fresh, caller.TenantID, caller.Role, fact.AgentID, fact.AgentTenantID)
++			if e == nil && agent != nil && types.SharedAgentIncludesKB(agent, &kb) {
++				err = nil
++			}
++		}
++		if err != nil {
++			return nil, err
++		}
++		permission, err := authority.actorGroups.EffectivePermission(fresh, kb.TenantID, types.GroupResourceTypeKnowledgeBase, kb.ID, types.ResourceActionRead, time.Now().UTC())
++		if err != nil {
++			return nil, err
++		}
++		if !permission.Allowed {
++			return nil, access.ErrForbidden
++		}
++	}
++	return &types.MessageMaterialProof{AdmissionID: fact.ID, GenerationID: fact.GenerationID, MessageID: fact.MessageID, SessionID: fact.SessionID, TenantID: fact.TenantID, OwnerID: fact.OwnerID, OwnerRevision: fact.OwnerRevision, Revision: fact.Revision, BodyDigest: fact.BodyDigest, SourceLineage: &lineage, Execution: execution, AgentID: fact.AgentID, AgentTenantID: fact.AgentTenantID}, nil
++}
++func (s *KnowledgeInputProvenanceStore) captureMessageMaterialInTx(tx *gorm.DB, req types.MessageMaterialReadRequest) (*types.MessageMaterialSnapshot, error) {
++	req.MessageIDs = append([]string{}, req.MessageIDs...)
++	sort.Strings(req.MessageIDs)
++	if err := s.checkMessageMaterialPlanInTx(tx, req); err != nil {
++		return nil, err
++	}
++	// Resolve only receipt identities and availability before the first body read.
++	var generations []struct{ GenerationID string }
++	gq := tx.Table("message_material_admissions a").Select("a.generation_id").Joins("JOIN message_material_receipts r ON r.admission_id=a.id AND r.message_id=a.message_id").Where("a.session_id=? AND a.tenant_id=?", req.SessionID, req.TenantID)
++	if !req.AllSession {
++		gq = gq.Where("a.message_id IN ?", req.MessageIDs)
++	}
++	if err := gq.Scan(&generations).Error; err != nil {
++		return nil, err
++	}
++	for _, generation := range generations {
++		if err := s.checkMessageOriginalBodyAvailability(tx, generation.GenerationID); err != nil {
++			return nil, err
++		}
++	}
++	_, session, ownerRevision, err := s.currentMessageOwnerInTx(tx, req.SessionID)
++	if err != nil {
++		return nil, err
++	}
++	membership, err := messageVersion(tx, "message_session_membership_versions", "session_id", req.SessionID)
++	if err != nil {
++		return nil, err
++	}
++	q := tx.Where("session_id=?", req.SessionID)
++	if !req.AllSession {
++		q = q.Where("id IN ?", req.MessageIDs)
++	}
++	result := &types.MessageMaterialSnapshot{Request: req, SessionOwnerID: session.UserID, SessionOwnerRevision: ownerRevision, MembershipRevision: membership, Messages: []*types.Message{}, Proofs: []*types.MessageMaterialProof{}}
++	var identities []struct{ ID, Role string }
++	if err := q.Model(&types.Message{}).Select("id,role").Order("created_at,id").Scan(&identities).Error; err != nil {
++		return nil, err
++	}
++	for _, identity := range identities {
++		message, err := readMessageMaterialBodyInTx(tx, identity.ID, req.SessionID, identity.Role)
++		if err != nil {
++			return nil, err
++		}
++		result.Messages = append(result.Messages, message)
++	}
++	for _, message := range result.Messages {
++		proof, err := s.verifyMessageMaterialInTx(tx, message)
++		if err != nil {
++			return nil, err
++		}
++		if message.Role == "user" {
++			message.SourceLineage = proof.SourceLineage
++		}
++		result.Proofs = append(result.Proofs, proof)
++	}
++	expected := findMessageMaterialReadPlan(tx.Statement.Context, req)
++	result.MetadataDigest = expected.MetadataDigest
++	return result, nil
++}
++func (s *KnowledgeInputProvenanceStore) CaptureMessageMaterialInputs(ctx context.Context, req types.MessageMaterialReadRequest) (*types.MessageMaterialSnapshot, error) {
++	var result *types.MessageMaterialSnapshot
++	err := s.collectionTransaction(ctx, func(tx *gorm.DB) error {
++		var err error
++		result, err = s.captureMessageMaterialInTx(tx, req)
++		return err
++	})
++	return result, err
++}
++func (s *KnowledgeInputProvenanceStore) RecheckMessageMaterialInputs(ctx context.Context, expected *types.MessageMaterialSnapshot) error {
++	if expected == nil {
++		return types.ErrSourceLineageUnknown
++	}
++	return s.collectionTransaction(ctx, func(tx *gorm.DB) error {
++		actual, err := s.captureMessageMaterialInTx(tx, expected.Request)
++		if err != nil {
++			return err
++		} // KnowledgeID linkage and UpdatedAt are independent code bookkeeping.
++		a, b := *actual, *expected
++		a.Messages = nil
++		b.Messages = nil
++		if !faqInputEqual(&a, &b) {
++			return ErrKnowledgeInputChanged
++		}
++		return nil
++	})
++}
++
++func WithMessageMaterialReadPlans(ctx context.Context, plans []*types.MessageMaterialReadPlan) (context.Context, error) {
++	var err error
++	for _, plan := range plans {
++		ctx, err = WithMessageMaterialReadPlan(ctx, plan)
++		if err != nil {
++			return ctx, err
++		}
++	}
++	return ctx, nil
++}
++func findMessageMaterialReadPlan(ctx context.Context, req types.MessageMaterialReadRequest) *types.MessageMaterialReadPlan {
++	plans, _ := ctx.Value(messageMaterialPlanKey{}).([]*types.MessageMaterialReadPlan)
++	for _, plan := range plans {
++		if plan.Request.TenantID != req.TenantID || plan.Request.SessionID != req.SessionID {
++			continue
++		}
++		covered := plan.Request.AllSession
++		if !covered {
++			ids := map[string]bool{}
++			for _, id := range plan.Request.MessageIDs {
++				ids[id] = true
++			}
++			covered = !req.AllSession
++			for _, id := range req.MessageIDs {
++				if !ids[id] {
++					covered = false
++					break
++				}
++			}
++		}
++		if covered {
++			return plan
++		}
++	}
++	return nil
++}
++func (s *KnowledgeInputProvenanceStore) peekHistoryMaterialPlanForProofInTx(tx *gorm.DB, proof *types.KnowledgeBuildInputProof) (*types.MessageMaterialReadPlan, error) {
++	if proof == nil {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	var admission knowledgeInputAdmission
++	if err := tx.Select("admission_id,tenant_id,knowledge_base_id,knowledge_id,origin_kind,input_digest,build_generation").Where("admission_id=? AND tenant_id=? AND knowledge_id=?", proof.AdmissionID, proof.TenantID, proof.KnowledgeID).Take(&admission).Error; err != nil {
++		return nil, err
++	}
++	if admission.InputDigest != proof.InputDigest || admission.BuildGeneration != proof.BuildGeneration {
++		return nil, ErrKnowledgeInputChanged
++	}
++	if admission.OriginKind != "history" {
++		return nil, nil
++	}
++	var parent knowledgeInputHistoryParents
++	if err := tx.Where("admission_id=? AND tenant_id=?", admission.AdmissionID, admission.TenantID).Take(&parent).Error; err != nil {
++		return nil, err
++	}
++	return s.peekMessageMaterialReadPlanInTx(tx, types.MessageMaterialReadRequest{TenantID: parent.TenantID, SessionID: parent.SessionID, MessageIDs: []string{parent.AssistantMessageID, parent.UserMessageID}})
++}
 diff --git a/internal/application/repository/nextcloud_ask_target.go b/internal/application/repository/nextcloud_ask_target.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..ee8d28cac6ae98628567c01a3137f8e578340bb3
@@ -58580,7 +59664,7 @@ index 05b7b390b4eb85ee2654d6dbc06bd3cf833792d7..be4d50b031befc2bbefb011c2da8bdf4
  	var highest types.OrgMemberRole
  	isShared := false
 diff --git a/internal/application/service/knowledge.go b/internal/application/service/knowledge.go
-index 320c0a1436ebc77cfef6f584eb1a9202135e4b90..0da1d31b0647b905357ad1d3518ed837ca593463 100644
+index 320c0a1436ebc77cfef6f584eb1a9202135e4b90..7cd99f81e0f77f17319c8aca1aabf19b66edbce3 100644
 --- a/internal/application/service/knowledge.go
 +++ b/internal/application/service/knowledge.go
 @@ -12,6 +12,7 @@ import (
@@ -58591,7 +59675,7 @@ index 320c0a1436ebc77cfef6f584eb1a9202135e4b90..0da1d31b0647b905357ad1d3518ed837
  	"github.com/Tencent/WeKnora/internal/application/repository"
  	"github.com/Tencent/WeKnora/internal/application/service/retriever"
  	"github.com/Tencent/WeKnora/internal/config"
-@@ -46,30 +47,36 @@ var (
+@@ -46,30 +47,37 @@ var (
  // knowledgeService implements the knowledge service interface
  // service 实现知识服务接口
  type knowledgeService struct {
@@ -58619,40 +59703,41 @@ index 320c0a1436ebc77cfef6f584eb1a9202135e4b90..0da1d31b0647b905357ad1d3518ed837
 -	groupAccess     interfaces.GroupAccessService
 -	imageResolver   *docparser.ImageResolver
 -	taskPendingRepo interfaces.TaskPendingOpsRepository
-+	config               *config.Config
-+	retrieveEngine       interfaces.RetrieveEngineRegistry
-+	ownership            retriever.TenantStoreOwnership
-+	repo                 interfaces.KnowledgeRepository
-+	kbService            interfaces.KnowledgeBaseService
-+	tenantRepo           interfaces.TenantRepository
-+	tenantService        interfaces.TenantService
-+	documentReader       interfaces.DocumentReader
-+	chunkService         interfaces.ChunkService
-+	chunkRepo            interfaces.ChunkRepository
-+	tagRepo              interfaces.KnowledgeTagRepository
-+	tagService           interfaces.KnowledgeTagService
-+	fileSvc              interfaces.FileService
-+	storageResolver      interfaces.StorageBackendResolver
-+	resourceCatalog      interfaces.ResourceCatalog
-+	modelService         interfaces.ModelService
-+	task                 interfaces.TaskEnqueuer
-+	taskInspector        interfaces.TaskInspector
-+	graphEngine          interfaces.RetrieveGraphRepository
-+	redisClient          *redis.Client
-+	kbShareService       interfaces.KBShareService
-+	groupAccess          interfaces.GroupAccessService
-+	publicationGuard     *access.NextcloudPublicationGuard
-+	contentLeases        *repository.NextcloudContentLeaseStore
-+	knowledgeInputs      interfaces.KnowledgeBuildInputReader
-+	knowledgeInputWriter interfaces.KnowledgeInputWriter
-+	faqInputs            *repository.KnowledgeInputProvenanceStore
-+	faqLineageChecker    knowledgeOutputLineageChecker
-+	imageResolver        *docparser.ImageResolver
-+	taskPendingRepo      interfaces.TaskPendingOpsRepository
++	config                  *config.Config
++	retrieveEngine          interfaces.RetrieveEngineRegistry
++	ownership               retriever.TenantStoreOwnership
++	repo                    interfaces.KnowledgeRepository
++	kbService               interfaces.KnowledgeBaseService
++	tenantRepo              interfaces.TenantRepository
++	tenantService           interfaces.TenantService
++	documentReader          interfaces.DocumentReader
++	chunkService            interfaces.ChunkService
++	chunkRepo               interfaces.ChunkRepository
++	tagRepo                 interfaces.KnowledgeTagRepository
++	tagService              interfaces.KnowledgeTagService
++	fileSvc                 interfaces.FileService
++	storageResolver         interfaces.StorageBackendResolver
++	resourceCatalog         interfaces.ResourceCatalog
++	modelService            interfaces.ModelService
++	task                    interfaces.TaskEnqueuer
++	taskInspector           interfaces.TaskInspector
++	graphEngine             interfaces.RetrieveGraphRepository
++	redisClient             *redis.Client
++	kbShareService          interfaces.KBShareService
++	groupAccess             interfaces.GroupAccessService
++	publicationGuard        *access.NextcloudPublicationGuard
++	contentLeases           *repository.NextcloudContentLeaseStore
++	historyMaterialMessages *messageService
++	knowledgeInputs         interfaces.KnowledgeBuildInputReader
++	knowledgeInputWriter    interfaces.KnowledgeInputWriter
++	faqInputs               *repository.KnowledgeInputProvenanceStore
++	faqLineageChecker       knowledgeOutputLineageChecker
++	imageResolver           *docparser.ImageResolver
++	taskPendingRepo         interfaces.TaskPendingOpsRepository
  
  	// In-memory fallbacks for Lite mode (no Redis)
  	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
-@@ -162,38 +169,49 @@ func NewKnowledgeService(
+@@ -162,38 +170,49 @@ func NewKnowledgeService(
  	taskPendingRepo interfaces.TaskPendingOpsRepository,
  	spanTracker SpanTracker,
  	audit interfaces.AuditLogService,
@@ -58729,7 +59814,7 @@ index 320c0a1436ebc77cfef6f584eb1a9202135e4b90..0da1d31b0647b905357ad1d3518ed837
  // tracker returns a usable SpanTracker — falls back to a no-op when the
  // service was constructed without one (test harness, lite mode w/o repo).
  // All pipeline call sites go through this so they never need a nil check.
-@@ -280,6 +298,11 @@ func finalizeSubtaskDetached(
+@@ -280,6 +299,11 @@ func finalizeSubtaskDetached(
  	if !willDrain {
  		return
  	}
@@ -58741,7 +59826,7 @@ index 320c0a1436ebc77cfef6f584eb1a9202135e4b90..0da1d31b0647b905357ad1d3518ed837
  	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout)
  	defer cancel()
  	if _, _, err := repo.FinalizeSubtask(dctx, knowledgeID); err != nil {
-@@ -836,7 +859,7 @@ func (s *knowledgeService) UpdateKnowledge(ctx context.Context, knowledge *types
+@@ -836,7 +860,7 @@ func (s *knowledgeService) UpdateKnowledge(ctx context.Context, knowledge *types
  		return err
  	}
  	if metadataChanged && record.SummaryStatus != "" && record.SummaryStatus != types.SummaryStatusNone {
@@ -62531,10 +63616,10 @@ index 0000000000000000000000000000000000000000..29b5f549d95cdb073420315dd5d81d12
 +}
 diff --git a/internal/application/service/knowledge_history_actor_integration_test.go b/internal/application/service/knowledge_history_actor_integration_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..a38cb32f4f0e5e7f2b0979eb71d526bbe45232dc
+index 0000000000000000000000000000000000000000..58b540b1cdf11aef390709bf7352168cbd980a2a
 --- /dev/null
 +++ b/internal/application/service/knowledge_history_actor_integration_test.go
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,339 @@
 +package service
 +
 +import (
@@ -62564,9 +63649,20 @@ index 0000000000000000000000000000000000000000..a38cb32f4f0e5e7f2b0979eb71d526bb
 +	groups := NewGroupAccessService(repository.NewGroupAccessRepository(db))
 +	repository.ConfigureKnowledgeInputActorGroupAccess(store, groups)
 +	repository.ConfigureKnowledgeCurrentReadActor(service.repo, store)
++	require.NoError(t, db.Exec("ALTER TABLE messages ADD COLUMN artifacts TEXT").Error)
++	for _, name := range []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql", "000046_nextcloud_content_leases.up.sql", "000070_message_original_materials.up.sql"} {
++		ddl, err := os.ReadFile("../../../migrations/sqlite/" + name)
++		require.NoError(t, err)
++		require.NoError(t, db.Exec(string(ddl)).Error)
++	}
++	repository.ConfigureKnowledgeDisplayInputWriters(store, repository.NewKnowledgeTagRepository(db), service.repo, func(tx *gorm.DB) *repository.KnowledgeInputProvenanceStore {
++		actual := repository.NewKnowledgeInputProvenanceStore(tx)
++		repository.ConfigureKnowledgeInputActorGroupAccess(actual, NewGroupAccessService(repository.NewGroupAccessRepository(tx)))
++		return actual
++	})
 +	kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(db)}
 +	guard := access.NewNextcloudSourceLineageGuard(service.repo.(access.NextcloudLineageSnapshotLookup), kbs, nil, nil, groups, nil)
-+	verifier := &messageService{sourceLineageGuard: guard, kbService: kbs, knowService: service}
++	verifier := &messageService{sourceLineageGuard: guard, kbService: kbs, knowService: service, messageRepo: repository.NewMessageRepository(db), sessionRepo: repository.NewSessionRepository(db)}
 +	repository.ConfigureKnowledgeInputHistoryVerifier(store, verifier)
 +	var ctx context.Context
 +	var user *types.User
@@ -62586,13 +63682,30 @@ index 0000000000000000000000000000000000000000..a38cb32f4f0e5e7f2b0979eb71d526bb
 +		ctx = types.WithTenantAPIKeyScope(ctx, types.TenantAPIKeyScope{KeyID: key.ID, ScopeType: key.ScopeType, KnowledgeBaseIDs: key.KnowledgeBaseIDs, Capabilities: key.Capabilities})
 +	}
 +	ctx = types.WithExecutionTenant(ctx, 7)
-+	session := &types.Session{TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++	if user != nil {
++		ctx = context.WithValue(ctx, types.UserIDContextKey, user.ID)
++	}
++	ConfigureMessageMaterialProvenance(verifier, store)
++	session := &types.Session{TenantID: 7, UserID: types.SessionOwnerIDFromContext(ctx)}
 +	require.NoError(t, db.Create(session).Error)
 +	lineage, _ := types.NewCompleteSourceLineage()
 +	userMessage := &types.Message{SessionID: session.ID, RequestID: "actual-request", Role: "user", Content: "actual plain user question", IsCompleted: true, SourceLineage: lineage, ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}}
 +	answer := &types.Message{SessionID: session.ID, RequestID: "actual-request", Role: "assistant", Content: "actual committed answer from plain text", IsCompleted: true, SourceLineage: lineage, ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}}
-+	require.NoError(t, db.Create(userMessage).Error)
-+	require.NoError(t, db.Create(answer).Error)
++	_, err = verifier.CreateMessage(ctx, userMessage)
++	require.NoError(t, err)
++	answer.IsCompleted = false
++	answer.Content = ""
++	_, err = verifier.CreateMessage(ctx, answer)
++	require.NoError(t, err)
++	answer.IsCompleted = true
++	answer.Content = "actual committed answer from plain text"
++	require.NoError(t, verifier.UpdateMessage(ctx, answer))
++	request, err := store.CommittedMessageParentRequest(ctx, 7, session.ID, answer.ID)
++	require.NoError(t, err)
++	held, err := verifier.beginMessageMaterialRead(ctx, request)
++	require.NoError(t, err)
++	t.Cleanup(held.Close)
++	ctx = context.WithValue(held.Context(), historyMaterialGuardContextKey{}, held)
 +	return service, store, db, ctx, answer, key, user
 +}
 +
@@ -62792,7 +63905,7 @@ index 0000000000000000000000000000000000000000..a38cb32f4f0e5e7f2b0979eb71d526bb
 +	for _, mode := range []string{"allowed", "caller-membership-removed", "share-read-only", "org-member-removed", "proof-owner-swapped"} {
 +		t.Run(mode, func(t *testing.T) {
 +			service, store, db, ctx, answer, _, user := historyActorIntegrationFixture(t, "web")
-+			require.NoError(t, db.AutoMigrate(&types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}))
++			require.NoError(t, db.AutoMigrate(&types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}, &types.DataSource{}))
 +			require.NoError(t, db.Create(&types.Organization{ID: "actor-org", Name: "actual sharing", OwnerID: user.ID, OwnerTenantID: 7}).Error)
 +			require.NoError(t, db.Create(&types.OrganizationTenantMember{ID: "actor-org-owner", OrganizationID: "actor-org", TenantID: 7, Role: types.OrgRoleAdmin}).Error)
 +			require.NoError(t, db.Create(&types.OrganizationTenantMember{ID: "actor-org-caller", OrganizationID: "actor-org", TenantID: 3, Role: types.OrgRoleEditor}).Error)
@@ -62802,10 +63915,18 @@ index 0000000000000000000000000000000000000000..a38cb32f4f0e5e7f2b0979eb71d526bb
 +			ctx = types.WithCaller(ctx, types.Caller{TenantID: 3, UserID: user.ID, Role: types.TenantRoleContributor})
 +			shares := NewKBShareService(repository.NewKBShareRepository(db), repository.NewOrganizationRepository(db), repository.NewKnowledgeBaseRepository(db), service.repo, nil, service.chunkRepo, nil)
 +			repository.ConfigureKnowledgeInputActorShares(store, shares)
++			repository.ConfigureKnowledgeDisplayInputWriters(store, repository.NewKnowledgeTagRepository(db), service.repo, func(tx *gorm.DB) *repository.KnowledgeInputProvenanceStore {
++				actual := repository.NewKnowledgeInputProvenanceStore(tx)
++				repository.ConfigureKnowledgeInputActorGroupAccess(actual, NewGroupAccessService(repository.NewGroupAccessRepository(tx)))
++				repository.ConfigureKnowledgeInputActorShares(actual, NewKBShareService(repository.NewKBShareRepository(tx), repository.NewOrganizationRepository(tx), repository.NewKnowledgeBaseRepository(tx), repository.NewKnowledgeRepository(tx), repository.NewDataSourceRepository(tx), repository.NewChunkRepository(tx), nil))
++				return actual
++			})
 +			groups := NewGroupAccessService(repository.NewGroupAccessRepository(db))
 +			kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(db), kbShareService: shares}
 +			guard := access.NewNextcloudSourceLineageGuard(service.repo.(access.NextcloudLineageSnapshotLookup), kbs, shares, nil, groups, nil)
 +			repository.ConfigureKnowledgeInputHistoryVerifier(store, &messageService{sourceLineageGuard: guard, kbService: kbs, knowService: service})
++			service.historyMaterialMessages.sourceLineageGuard = guard
++			service.historyMaterialMessages.kbService = kbs
 +			input, err := store.CreateCommittedHistoryKnowledgeInput(ctx, types.CommittedHistoryKnowledgeInputRequest{TenantID: 7, KnowledgeBaseID: "kb", SessionID: answer.SessionID, AssistantMessageID: answer.ID})
 +			require.NoError(t, err)
 +			switch mode {
@@ -62840,10 +63961,10 @@ index 0000000000000000000000000000000000000000..a38cb32f4f0e5e7f2b0979eb71d526bb
 +}
 diff --git a/internal/application/service/knowledge_history_input.go b/internal/application/service/knowledge_history_input.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..f175168404a6d67d84de9ccb4b8bb73df0f3032c
+index 0000000000000000000000000000000000000000..45ac46529c31936df863fc41d042f332eeae2f34
 --- /dev/null
 +++ b/internal/application/service/knowledge_history_input.go
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,71 @@
 +package service
 +
 +import (
@@ -62874,8 +63995,25 @@ index 0000000000000000000000000000000000000000..f175168404a6d67d84de9ccb4b8bb73d
 +	if err := access.RequireKBWrite(ctx, kb); err != nil {
 +		return nil, err
 +	}
++
++	if s.historyMaterialMessages == nil || s.historyMaterialMessages.materialStore == nil {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	parentRequest, err := s.historyMaterialMessages.materialStore.CommittedMessageParentRequest(ctx, request.TenantID, request.SessionID, request.AssistantMessageID)
++	if err != nil {
++		return nil, err
++	}
++	material, err := s.historyMaterialMessages.beginMessageMaterialRead(ctx, parentRequest)
++	if err != nil {
++		return nil, err
++	}
++	defer material.Close()
++	ctx = material.Context()
 +	result, err := writer.CreateCommittedHistoryKnowledgeInput(ctx, request)
 +	if err != nil {
++		return nil, err
++	}
++	if err := material.Recheck(); err != nil {
 +		return nil, err
 +	}
 +	ctx = repository.WithKnowledgeBuildInputProof(ctx, s.knowledgeInputs, result.Proof)
@@ -62936,10 +64074,10 @@ index 0000000000000000000000000000000000000000..8208021f05b517270bc73f07e3c6064e
 +}
 diff --git a/internal/application/service/knowledge_input_producer.go b/internal/application/service/knowledge_input_producer.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..59aa0fe01d80370f2f9a5dfd75a9a32bd4c8c987
+index 0000000000000000000000000000000000000000..453772c0c0b4402db2a8f1f2f4cd59577a391ac8
 --- /dev/null
 +++ b/internal/application/service/knowledge_input_producer.go
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,154 @@
 +package service
 +
 +import (
@@ -63005,7 +64143,24 @@ index 0000000000000000000000000000000000000000..59aa0fe01d80370f2f9a5dfd75a9a32b
 +}
 +
 +func (s *knowledgeService) restoreKnowledgeTaskActor(ctx context.Context, proof *types.KnowledgeBuildInputProof) (context.Context, error) {
-+	return repository.RestoreKnowledgeBuildActorIfRequired(ctx, s.knowledgeInputs, proof)
++	current, err := repository.RestoreKnowledgeBuildActorIfRequired(ctx, s.knowledgeInputs, proof)
++	if err != nil {
++		return ctx, err
++	}
++	if s.historyMaterialMessages != nil && s.historyMaterialMessages.materialStore != nil && current.Value(historyMaterialGuardContextKey{}) == nil {
++		request, err := s.historyMaterialMessages.materialStore.KnowledgeHistoryMaterialRequest(current, proof)
++		if err != nil {
++			return ctx, err
++		}
++		if request != nil {
++			guard, err := s.historyMaterialMessages.beginMessageMaterialRead(current, *request)
++			if err != nil {
++				return ctx, err
++			}
++			current = context.WithValue(guard.Context(), historyMaterialGuardContextKey{}, guard)
++		}
++	}
++	return current, nil
 +}
 +
 +func requireActualKnowledgeBuildInput(ctx context.Context) error {
@@ -64747,7 +65902,7 @@ index af8eae867f46ed188ab277d16f106941ea827ae3..509f43bc836db12bf4394a4da1f0d19f
 +	return snapshot.Proof, nil
 +}
 diff --git a/internal/application/service/knowledge_process.go b/internal/application/service/knowledge_process.go
-index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b3c2a1937 100644
+index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..16baed23b6e482ad68ff569f7900110f4fbefccc 100644
 --- a/internal/application/service/knowledge_process.go
 +++ b/internal/application/service/knowledge_process.go
 @@ -327,6 +327,14 @@ func (s *knowledgeService) processChunks(ctx context.Context,
@@ -65482,7 +66637,15 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  	// Re-check abort status right before marking processing — see the same
  	// note in ProcessDocument for the cancel race this guards.
  	if aborted, status := s.isKnowledgeAborted(ctx, knowledge.TenantID, knowledge.ID); aborted {
-@@ -3477,6 +3789,18 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
+@@ -3378,6 +3690,7 @@ func (s *knowledgeService) ProcessManualUpdate(ctx context.Context, t *asynq.Tas
+ 
+ // ProcessDocument handles Asynq document processing tasks
+ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) error {
++	defer func() { closeHistoryMaterialGuard(ctx) }()
+ 	var payload types.DocumentProcessPayload
+ 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+ 		logger.Errorf(ctx, "failed to unmarshal document process task payload: %v", err)
+@@ -3477,6 +3790,18 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
  		return fmt.Errorf("invalid processing scope: %v: %w", err, asynq.SkipRetry)
  	}
  
@@ -65501,7 +66664,7 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  	processOverrides, _ := knowledge.ProcessOverrides()
  	eff := ResolveProcessConfig(kb, processOverrides)
  
-@@ -3676,6 +4000,15 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
+@@ -3676,6 +4001,15 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
  		}
  	}
  
@@ -65517,7 +66680,7 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  	// Step 1.5: ASR transcription for audio files
  	if convertResult != nil && convertResult.IsAudio && len(convertResult.AudioData) > 0 {
  		if !eff.ASRConfig.IsASREnabled() {
-@@ -3876,6 +4209,7 @@ func (s *knowledgeService) convert(
+@@ -3876,6 +4210,7 @@ func (s *knowledgeService) convert(
  		"file_type": payload.FileType,
  		"is_url":    payload.URL != "",
  	}
@@ -65525,7 +66688,7 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  	if payload.URL != "" {
  		docInput["url"] = payload.URL
  	}
-@@ -3956,11 +4290,45 @@ func (s *knowledgeService) convert(
+@@ -3956,11 +4291,45 @@ func (s *knowledgeService) convert(
  				werrors.ErrCodeDocReaderParseFailed, "failed to read file", err)
  			return s.failKnowledge(ctx, knowledge, isLastRetry, "failed to read file: %v", err)
  		}
@@ -65571,7 +66734,7 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  	result, err := s.callDocReaderWithTimeout(ctx, reader, req)
  	if err != nil {
  		// Distinguish DocReader timeout (a knowable user-facing
-@@ -3974,6 +4342,13 @@ func (s *knowledgeService) convert(
+@@ -3974,6 +4343,13 @@ func (s *knowledgeService) convert(
  			code, "document read failed", err)
  		return s.failKnowledge(ctx, knowledge, isLastRetry, "document read failed: %v", err)
  	}
@@ -65585,7 +66748,7 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  	sanitizeReadResult(result)
  	if result.Error != "" {
  		logger.Errorf(ctx, "[convert] parser returned error kb=%s knowledge=%s file=%q type=%s engine=%q: %s",
-@@ -4143,6 +4518,7 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
+@@ -4143,6 +4519,7 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
  		}
  
  		payload := types.ImageMultimodalPayload{
@@ -65593,7 +66756,7 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  			TenantID:        knowledge.TenantID,
  			KnowledgeID:     knowledge.ID,
  			KnowledgeBaseID: kb.ID,
-@@ -4156,6 +4532,24 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
+@@ -4156,6 +4533,24 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
  			ImageIndex:      idx,
  		}
  
@@ -65618,7 +66781,7 @@ index 41bdd2ffc92e8f2e65b366c159e9f725502cb38d..c810f69dc284cd20e25c59ba1c8af49b
  		langfuse.InjectTracing(ctx, &payload)
  		payloadBytes, err := json.Marshal(payload)
  		if err != nil {
-@@ -4313,6 +4707,7 @@ func (s *knowledgeService) enqueueKnowledgePostProcessTask(
+@@ -4313,6 +4708,7 @@ func (s *knowledgeService) enqueueKnowledgePostProcessTask(
  		return
  	}
  	payload := types.KnowledgePostProcessPayload{
@@ -67123,10 +68286,10 @@ index 0000000000000000000000000000000000000000..b48b20b68fd17630a4c1cd1fe4bd07be
 +	require.Greater(t, policy.batches, 0)
 +}
 diff --git a/internal/application/service/message.go b/internal/application/service/message.go
-index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e10ab93ccc 100644
+index 04e1b0ea2f479a48f034472835aa8db64b40a110..fe2ef2e8569da2d6588d619765506329ad1db536 100644
 --- a/internal/application/service/message.go
 +++ b/internal/application/service/message.go
-@@ -4,31 +4,30 @@ import (
+@@ -4,31 +4,32 @@ import (
  	"context"
  	"errors"
  	"fmt"
@@ -67136,6 +68299,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  	"time"
  
 +	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
  	"github.com/Tencent/WeKnora/internal/logger"
  	"github.com/Tencent/WeKnora/internal/types"
  	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -67156,6 +68320,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
 -	knowService    interfaces.KnowledgeService     // Service for knowledge operations (index/delete passages)
 -	modelService   interfaces.ModelService         // Service for model operations (rerank model)
 -	suggestionRepo interfaces.MessageSuggestionRepository
++	materialStore      *repository.KnowledgeInputProvenanceStore
 +	sourceLineageGuard access.SourceLineageAuthorizer
 +	messageRepo        interfaces.MessageRepository    // Repository for message storage operations
 +	sessionRepo        interfaces.SessionRepository    // Repository for session validation
@@ -67168,7 +68333,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  }
  
  // NewMessageService creates a new message service instance with the required repositories
-@@ -39,6 +38,8 @@ func NewMessageService(messageRepo interfaces.MessageRepository,
+@@ -39,6 +40,8 @@ func NewMessageService(messageRepo interfaces.MessageRepository,
  	knowService interfaces.KnowledgeService,
  	modelService interfaces.ModelService,
  	suggestionRepo interfaces.MessageSuggestionRepository,
@@ -67177,7 +68342,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  ) interfaces.MessageService {
  	return &messageService{
  		messageRepo:    messageRepo,
-@@ -48,7 +49,124 @@ func NewMessageService(messageRepo interfaces.MessageRepository,
+@@ -48,7 +51,124 @@ func NewMessageService(messageRepo interfaces.MessageRepository,
  		knowService:    knowService,
  		modelService:   modelService,
  		suggestionRepo: suggestionRepo,
@@ -67256,7 +68421,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
 +			return access.ErrNextcloudPublicationDenied
 +		}
 +		addKB(knowledge.KnowledgeBaseID)
- 	}
++	}
 +	if len(kbIDs) == 0 {
 +		return nil
 +	}
@@ -67279,7 +68444,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
 +	}
 +	if err := checker.CheckNextcloudReadTargets(ctx, targets); err != nil {
 +		return fmt.Errorf("%w: knowledge base read grant changed: %v", access.ErrNextcloudPublicationDenied, err)
-+	}
+ 	}
 +	return nil
 +}
 +
@@ -67302,7 +68467,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  }
  
  // sessionTenantIDForLookup returns the tenant ID to use for session lookup.
-@@ -77,6 +195,9 @@ func sessionUserIDForLookup(ctx context.Context) string {
+@@ -77,6 +197,9 @@ func sessionUserIDForLookup(ctx context.Context) string {
  
  // CreateMessage creates a new message within an existing session
  func (s *messageService) CreateMessage(ctx context.Context, message *types.Message) (*types.Message, error) {
@@ -67312,7 +68477,40 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  	logger.Info(ctx, "Start creating message")
  	logger.Infof(ctx, "Creating message for session ID: %s", message.SessionID)
  
-@@ -125,7 +246,64 @@ func (s *messageService) GetMessage(ctx context.Context, sessionID string, messa
+@@ -88,6 +211,15 @@ func (s *messageService) CreateMessage(ctx context.Context, message *types.Messa
+ 		return nil, err
+ 	}
+ 
++	if s.materialStore != nil {
++		if message.Role == "user" && message.SourceLineage == nil {
++			message.SourceLineage, _ = types.NewCompleteSourceLineage()
++		}
++		ctx, err = s.materialStore.WithMessageProducerInput(ctx, message, true)
++		if err != nil {
++			return nil, err
++		}
++	}
+ 	logger.Info(ctx, "Session exists, creating message")
+ 	createdMessage, err := s.messageRepo.CreateMessage(ctx, message)
+ 	if err != nil {
+@@ -114,6 +246,16 @@ func (s *messageService) GetMessage(ctx context.Context, sessionID string, messa
+ 		return nil, err
+ 	}
+ 
++	if s.materialStore != nil {
++		rows, err := s.admittedMessages(ctx, types.MessageMaterialReadRequest{TenantID: tenantID, SessionID: sessionID, MessageIDs: []string{messageID}})
++		if err != nil {
++			return nil, err
++		}
++		if len(rows) != 1 {
++			return nil, access.ErrNextcloudPublicationDenied
++		}
++		return rows[0], nil
++	}
+ 	logger.Info(ctx, "Session exists, getting message")
+ 	message, err := s.messageRepo.GetMessage(ctx, sessionID, messageID)
+ 	if err != nil {
+@@ -125,7 +267,64 @@ func (s *messageService) GetMessage(ctx context.Context, sessionID string, messa
  	}
  
  	logger.Info(ctx, "Message retrieved successfully")
@@ -67378,7 +68576,17 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  }
  
  // GetMessagesBySession retrieves paginated messages for a specific session
-@@ -155,6 +333,10 @@ func (s *messageService) GetMessagesBySession(ctx context.Context,
+@@ -143,6 +342,9 @@ func (s *messageService) GetMessagesBySession(ctx context.Context,
+ 		return nil, err
+ 	}
+ 
++	if s.materialStore != nil {
++		return s.admittedMessagePage(ctx, sessionID, time.Time{}, pageSize, page, false)
++	}
+ 	logger.Info(ctx, "Session exists, getting messages")
+ 	messages, err := s.messageRepo.GetMessagesBySession(ctx, sessionID, page, pageSize)
+ 	if err != nil {
+@@ -155,6 +357,10 @@ func (s *messageService) GetMessagesBySession(ctx context.Context,
  	}
  
  	logger.Infof(ctx, "Retrieved %d messages successfully", len(messages))
@@ -67389,7 +68597,17 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
  }
  
-@@ -188,6 +370,10 @@ func (s *messageService) GetRecentMessagesBySession(ctx context.Context,
+@@ -177,6 +383,9 @@ func (s *messageService) GetRecentMessagesBySession(ctx context.Context,
+ 		return nil, err
+ 	}
+ 
++	if s.materialStore != nil {
++		return s.admittedMessagePage(ctx, sessionID, time.Time{}, limit, 1, true)
++	}
+ 	logger.Info(ctx, "Session exists, getting recent messages")
+ 	messages, err := s.messageRepo.GetRecentMessagesBySession(ctx, sessionID, limit)
+ 	if err != nil {
+@@ -188,6 +397,10 @@ func (s *messageService) GetRecentMessagesBySession(ctx context.Context,
  	}
  
  	logger.Infof(ctx, "Retrieved %d recent messages successfully", len(messages))
@@ -67400,7 +68618,17 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
  }
  
-@@ -222,11 +408,23 @@ func (s *messageService) GetMessagesBySessionBeforeTime(ctx context.Context,
+@@ -210,6 +423,9 @@ func (s *messageService) GetMessagesBySessionBeforeTime(ctx context.Context,
+ 		return nil, err
+ 	}
+ 
++	if s.materialStore != nil {
++		return s.admittedMessagePage(ctx, sessionID, beforeTime, limit, 1, true)
++	}
+ 	logger.Info(ctx, "Session exists, getting messages before time")
+ 	messages, err := s.messageRepo.GetMessagesBySessionBeforeTime(ctx, sessionID, beforeTime, limit)
+ 	if err != nil {
+@@ -222,11 +438,23 @@ func (s *messageService) GetMessagesBySessionBeforeTime(ctx context.Context,
  	}
  
  	logger.Infof(ctx, "Retrieved %d messages before time successfully", len(messages))
@@ -67424,7 +68652,20 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  	logger.Info(ctx, "Start updating message")
  	logger.Infof(ctx, "Updating message, ID: %s, session ID: %s", message.ID, message.SessionID)
  
-@@ -367,21 +565,36 @@ func (s *messageService) getRetrievalConfig(ctx context.Context) *types.Retrieva
+@@ -238,6 +466,12 @@ func (s *messageService) UpdateMessage(ctx context.Context, message *types.Messa
+ 		return err
+ 	}
+ 
++	if s.materialStore != nil {
++		ctx, err = s.materialStore.WithMessageProducerInput(ctx, message, false)
++		if err != nil {
++			return err
++		}
++	}
+ 	logger.Info(ctx, "Session exists, updating message")
+ 	err = s.messageRepo.UpdateMessage(ctx, message)
+ 	if err != nil {
+@@ -367,21 +601,53 @@ func (s *messageService) getRetrievalConfig(ctx context.Context) *types.Retrieva
  	return tenant.RetrievalConfig
  }
  
@@ -67444,21 +68685,37 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
 -
 -	if strings.TrimSpace(userQuery) == "" && assistantAnswer == "" {
 +func (s *messageService) IndexMessageToKB(ctx context.Context, _ string, _ string, messageID string, sessionID string) {
-+	// Caller Q/A strings never enter this adapter. Controlled history remains
-+	// closed until the inherited multi-parent producer/read closure is wired.
++	// Only the actual immutable saved question and assistant receipts enter this adapter.
 +	tenantID, ok := sessionTenantIDForLookup(ctx)
 +	if !ok || tenantID == 0 || s.sessionRepo == nil || s.messageRepo == nil {
- 		return
- 	}
--
++		return
++	}
 +	if _, err := s.sessionRepo.Get(ctx, tenantID, types.SessionOwnerIDFromContext(ctx), sessionID); err != nil {
 +		return
 +	}
-+	committed, err := s.messageRepo.GetMessage(ctx, sessionID, messageID)
-+	if err != nil || committed == nil || committed.ID != messageID || committed.SessionID != sessionID || committed.Role != "assistant" ||
-+		!types.SourceIndependentDerivativesAllowed(committed) || s.CheckMessagePublication(ctx, committed) != nil {
++	if s.materialStore == nil {
 +		return
 +	}
++	request, err := s.materialStore.CommittedMessageParentRequest(ctx, tenantID, sessionID, messageID)
++	if err != nil {
++		return
++	}
++	material, err := s.beginMessageMaterialRead(ctx, request)
++	if err != nil {
++		return
++	}
++	defer material.Close()
++	ctx = material.Context()
++	var committed *types.Message
++	for _, row := range material.snapshot.Messages {
++		if row.ID == messageID {
++			committed = row
++		}
++	}
++	if committed == nil || committed.Role != "assistant" || s.CheckMessagePublication(ctx, committed) != nil {
+ 		return
+ 	}
+ 
 +	tenant, ok := types.TenantInfoFromContext(ctx)
 +	if !ok || tenant.ID != tenantID {
 +		if s.tenantService == nil {
@@ -67473,7 +68730,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  	cfg := s.getChatHistoryConfig(ctx)
  	if cfg == nil {
  		// Say why, otherwise an operator who enabled indexing in the UI sees
-@@ -393,27 +606,41 @@ func (s *messageService) IndexMessageToKB(ctx context.Context, userQuery string,
+@@ -393,27 +659,41 @@ func (s *messageService) IndexMessageToKB(ctx context.Context, userQuery string,
  		return
  	}
  
@@ -67530,7 +68787,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  }
  
  // describeChatHistorySkip reports which chat-history precondition is missing,
-@@ -519,7 +746,9 @@ func (s *messageService) GetSessionArtifacts(
+@@ -519,7 +799,9 @@ func (s *messageService) GetSessionArtifacts(
  	if sessionID == "" {
  		return types.MessageArtifacts{}, nil
  	}
@@ -67541,7 +68798,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  }
  
  // artifactLibraryMaxPageSize caps one library page; the page renders a card
-@@ -552,6 +781,13 @@ func (s *messageService) ListArtifactLibrary(
+@@ -552,6 +834,13 @@ func (s *messageService) ListArtifactLibrary(
  		return nil, err
  	}
  	for _, item := range items {
@@ -67555,7 +68812,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  		if handle, ok := types.ParseResourcePath(item.URL); ok {
  			item.Handle = types.BuildResourcePath(handle)
  		}
-@@ -656,6 +892,10 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
+@@ -656,6 +945,10 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
  
  	// Step 4: Fetch partner messages (Q&A counterparts) to ensure complete pairs
  	items = s.fetchPartnerMessages(ctx, items)
@@ -67566,7 +68823,7 @@ index 04e1b0ea2f479a48f034472835aa8db64b40a110..40f54da430fd721216dc3b49ebd632e1
  
  	// Step 5: Group by request_id to merge Q&A pairs
  	grouped := groupByRequestID(items)
-@@ -674,6 +914,68 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
+@@ -674,6 +967,68 @@ func (s *messageService) SearchMessages(ctx context.Context, params *types.Messa
  	return result, nil
  }
  
@@ -67858,6 +69115,591 @@ index 0000000000000000000000000000000000000000..e6a0f595116375be41278877381ef3e1
 +	knowledge.revoked = true
 +	require.ErrorIs(t, svc.checkLiveKnowledgeGrants(context.Background(), message),
 +		access.ErrNextcloudPublicationDenied)
++}
+diff --git a/internal/application/service/message_material.go b/internal/application/service/message_material.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cca49eb8db72204b85abe2f4aeff7e2e3d190a42
+--- /dev/null
++++ b/internal/application/service/message_material.go
+@@ -0,0 +1,16 @@
++package service
++
++import (
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++func ConfigureMessageMaterialProvenance(messages interfaces.MessageService, store *repository.KnowledgeInputProvenanceStore) {
++	if actual, ok := messages.(*messageService); ok {
++		actual.materialStore = store
++		repository.ConfigureMessageMaterialWriters(actual.messageRepo, store)
++		if knowledge, ok := actual.knowService.(*knowledgeService); ok {
++			knowledge.historyMaterialMessages = actual
++		}
++	}
++}
+diff --git a/internal/application/service/message_material_guard.go b/internal/application/service/message_material_guard.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..97837f4bdbe4c93605b9a4537f837983347ff3d2
+--- /dev/null
++++ b/internal/application/service/message_material_guard.go
+@@ -0,0 +1,151 @@
++package service
++
++import (
++	"context"
++	"sync"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++)
++
++type historyMaterialGuardContextKey struct{}
++type MessageMaterialGuard struct {
++	store    *repository.KnowledgeInputProvenanceStore
++	verifier *messageService
++	snapshot *types.MessageMaterialSnapshot
++	plan     *types.MessageMaterialReadPlan
++	ctx      context.Context
++	cancel   context.CancelFunc
++	leases   []repository.NextcloudContentLease
++	stop     sync.WaitGroup
++	once     sync.Once
++}
++
++func (s *messageService) beginMessageMaterialRead(ctx context.Context, request types.MessageMaterialReadRequest) (*MessageMaterialGuard, error) {
++	if s.materialStore == nil || s.sourceLineageGuard == nil {
++		return nil, access.ErrNextcloudPublicationUnavailable
++	}
++	plan, err := s.materialStore.PeekMessageMaterialReadPlan(ctx, request)
++	if err != nil {
++		return nil, err
++	}
++	leaseCtx, cancel := context.WithCancel(ctx)
++	guard := &MessageMaterialGuard{store: s.materialStore, verifier: s, plan: plan, ctx: leaseCtx, cancel: cancel, leases: []repository.NextcloudContentLease{}}
++	store := s.materialStore.ContentLeaseStore()
++	owner := uuid.NewString()
++	broad := map[types.KnowledgeSearchScope]repository.NextcloudContentLease{}
++	for _, scope := range plan.Scopes {
++		lease, err := store.AcquireKBRead(leaseCtx, scope.TenantID, scope.KBID, owner, 2*time.Minute)
++		if err != nil {
++			guard.Close()
++			return nil, err
++		}
++		broad[scope] = lease
++		guard.leases = append(guard.leases, lease)
++	}
++	for _, source := range plan.SourceLineage.Sources {
++		kb, ok := broad[types.KnowledgeSearchScope{TenantID: source.TenantID, KBID: source.KnowledgeBaseID}]
++		if !ok {
++			guard.Close()
++			return nil, repository.ErrNextcloudContentGCUncovered
++		}
++		lease, err := store.UpgradeKBRead(leaseCtx, kb.ID, repository.NextcloudContentScope{TenantID: source.TenantID, KnowledgeBaseID: source.KnowledgeBaseID, KnowledgeID: source.KnowledgeID, DataSourceID: source.DataSourceID, ExternalID: source.ExternalID}, owner, 2*time.Minute)
++		if err != nil {
++			guard.Close()
++			return nil, err
++		}
++		guard.leases = append(guard.leases, lease)
++		if uint64(lease.Epoch) != source.Revision {
++			guard.Close()
++			return nil, repository.ErrKnowledgeInputChanged
++		}
++	}
++	if len(guard.leases) > 0 {
++		leaseCtx, err = repository.WithFAQReadLeaseCoverage(leaseCtx, guard.leases)
++		if err != nil {
++			guard.Close()
++			return nil, err
++		}
++	}
++	leaseCtx, err = repository.WithMessageMaterialReadPlan(leaseCtx, plan)
++	if err != nil {
++		guard.Close()
++		return nil, err
++	}
++	guard.ctx = leaseCtx
++	guard.snapshot, err = s.materialStore.CaptureMessageMaterialInputs(leaseCtx, request)
++	if err != nil {
++		guard.Close()
++		return nil, err
++	}
++	if err = guard.Recheck(); err != nil {
++		guard.Close()
++		return nil, err
++	}
++	guard.stop.Add(1)
++	go func() {
++		defer guard.stop.Done()
++		ticker := time.NewTicker(30 * time.Second)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-guard.ctx.Done():
++				return
++			case <-ticker.C:
++				if guard.Recheck() != nil {
++					guard.cancel()
++					return
++				}
++			}
++		}
++	}()
++	return guard, nil
++}
++func (g *MessageMaterialGuard) Context() context.Context { return g.ctx }
++func (g *MessageMaterialGuard) Recheck() error {
++	if g == nil || g.snapshot == nil {
++		return access.ErrNextcloudPublicationUnavailable
++	}
++	if err := g.ctx.Err(); err != nil {
++		return err
++	}
++	for _, lease := range g.leases {
++		if _, err := g.store.ContentLeaseStore().RenewLease(g.ctx, lease.ID, 2*time.Minute); err != nil {
++			return err
++		}
++	}
++	// Remote/current actor checks happen outside the body SQL transaction.
++	if err := g.verifier.CheckMessagePublications(g.ctx, g.snapshot.Messages); err != nil {
++		return err
++	}
++	if err := g.store.CheckKnowledgeHistoryOriginalSources(g.ctx, g.snapshot.Messages); err != nil {
++		return err
++	}
++	if err := g.store.RecheckMessageMaterialInputs(g.ctx, g.snapshot); err != nil {
++		return err
++	}
++	return g.verifier.CheckMessagePublications(g.ctx, g.snapshot.Messages)
++}
++func (g *MessageMaterialGuard) Close() {
++	if g == nil {
++		return
++	}
++	g.once.Do(func() {
++		g.cancel()
++		g.stop.Wait()
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		for i := len(g.leases) - 1; i >= 0; i-- {
++			_ = g.store.ContentLeaseStore().ReleaseLease(ctx, g.leases[i].ID)
++		}
++	})
++}
++
++func closeHistoryMaterialGuard(ctx context.Context) {
++	if guard, ok := ctx.Value(historyMaterialGuardContextKey{}).(*MessageMaterialGuard); ok {
++		guard.Close()
++	}
++}
+diff --git a/internal/application/service/message_material_input_test.go b/internal/application/service/message_material_input_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..27c904d8c3ba2972b3438367d963fea35fb100b9
+--- /dev/null
++++ b/internal/application/service/message_material_input_test.go
+@@ -0,0 +1,291 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/hibiken/asynq"
++
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func messageMaterialActualFixture(t *testing.T) (*messageService, *knowledgeService, *repository.KnowledgeInputProvenanceStore, *gorm.DB, context.Context, *types.Session) {
++	t.Helper()
++	kg, store, db, ctx, _, _, _ := historyActorIntegrationFixture(t, "web")
++	closeHistoryMaterialGuard(ctx)
++	ctx = types.WithExecutionTenant(types.WithPrincipal(types.WithCaller(context.Background(), types.CallerFromContext(ctx)), types.Principal{Type: types.PrincipalWebUser, ID: types.CallerFromContext(ctx).UserID}), 7)
++	if !db.Migrator().HasColumn(&types.Message{}, "artifacts") {
++		require.NoError(t, db.Exec("ALTER TABLE messages ADD COLUMN artifacts TEXT").Error)
++	}
++	for _, name := range []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql", "000046_nextcloud_content_leases.up.sql", "000070_message_original_materials.up.sql"} {
++		table := map[string]string{"000023_message_artifacts_table.up.sql": "message_artifacts", "000026_message_artifacts_deleted_at.up.sql": "message_artifacts", "000046_nextcloud_content_leases.up.sql": "nextcloud_content_leases", "000070_message_original_materials.up.sql": "message_generation_origins"}[name]
++		if db.Migrator().HasTable(table) {
++			continue
++		}
++		ddl, err := os.ReadFile("../../../migrations/sqlite/" + name)
++		require.NoError(t, err)
++		require.NoError(t, db.Exec(string(ddl)).Error)
++	}
++	groups := NewGroupAccessService(repository.NewGroupAccessRepository(db))
++	factory := func(tx *gorm.DB) *repository.KnowledgeInputProvenanceStore {
++		authority := repository.NewKnowledgeInputProvenanceStore(tx)
++		repository.ConfigureKnowledgeInputActorGroupAccess(authority, NewGroupAccessService(repository.NewGroupAccessRepository(tx)))
++		return authority
++	}
++	repository.ConfigureKnowledgeDisplayInputWriters(store, repository.NewKnowledgeTagRepository(db), kg.repo, factory)
++	kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(db)}
++	guard := access.NewNextcloudSourceLineageGuard(kg.repo.(access.NextcloudLineageSnapshotLookup), kbs, nil, nil, groups, nil, store)
++	messages := &messageService{messageRepo: repository.NewMessageRepository(db), sessionRepo: repository.NewSessionRepository(db), sourceLineageGuard: guard, kbService: kbs, knowService: kg}
++	ConfigureMessageMaterialProvenance(messages, store)
++	ctx = context.WithValue(ctx, types.UserIDContextKey, types.CallerFromContext(ctx).UserID)
++	session := &types.Session{ID: "actual-new-message-session", TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++	require.NoError(t, db.Create(session).Error)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	sqlDB.SetMaxIdleConns(1)
++	var kb types.KnowledgeBase
++	require.NoError(t, db.Where("id='kb'").Take(&kb).Error)
++	grant, err := access.ResolveKB(ctx, access.KBRequest{Caller: types.CallerFromContext(ctx)}, &kb, types.OrgRoleEditor, nil, nil)
++	require.NoError(t, err)
++	ctx = grant.Context(ctx)
++	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
++	t.Cleanup(cancel)
++	return messages, kg, store, db, ctx, session
++}
++func produceActualMessagePair(t *testing.T, messages *messageService, ctx context.Context, session *types.Session) (*types.Message, *types.Message) {
++	t.Helper()
++	user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-material-request", Role: "user", Content: "new actual original question", IsCompleted: true, ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}})
++	require.NoError(t, err)
++	assistant, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: user.RequestID, Role: "assistant", IsCompleted: false, ExecutionContext: user.ExecutionContext})
++	require.NoError(t, err)
++	assistant.Content = "new actual original generated answer"
++	assistant.IsCompleted = true
++	assistant.SourceLineage, _ = types.NewCompleteSourceLineage()
++	require.NoError(t, messages.UpdateMessage(ctx, assistant))
++	return user, assistant
++}
++func TestMessageMaterialActualProducerReadAndDerivedKnowledgeSingleConnection(t *testing.T) {
++	messages, kg, store, db, ctx, session := messageMaterialActualFixture(t)
++	_, assistant := produceActualMessagePair(t, messages, ctx, session)
++	request, err := store.CommittedMessageParentRequest(ctx, 7, session.ID, assistant.ID)
++	require.NoError(t, err)
++	guard, err := messages.beginMessageMaterialRead(ctx, request)
++	require.NoError(t, err)
++	require.NoError(t, guard.Recheck())
++	guard.Close()
++	tenant, _ := types.TenantInfoFromContext(ctx)
++	if tenant == nil {
++		tenant = kg.tenantRepo.(knowledgeInputTenantRepo).tenant
++	}
++	tenant.ChatHistoryConfig = &types.ChatHistoryConfig{Enabled: true, KnowledgeBaseID: "kb", EmbeddingModelID: "embed"}
++	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
++	messages.IndexMessageToKB(ctx, "foreign cached question", "foreign cached answer", assistant.ID, session.ID)
++	queue := kg.task.(*knowledgeInputQueue)
++	require.Len(t, queue.tasks, 1)
++	var payload types.DocumentProcessPayload
++	require.NoError(t, json.Unmarshal(queue.tasks[0].Payload(), &payload))
++	require.Contains(t, payload.Passages[0], assistant.Content)
++	require.NotContains(t, payload.Passages[0], "foreign cached")
++	result := &types.CommittedHistoryKnowledgeInput{Knowledge: &types.Knowledge{ID: payload.KnowledgeID}, Passages: payload.Passages, Proof: payload.OriginalInput}
++	require.NoError(t, kg.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, queue.tasks[0].Payload())))
++	var persisted types.Knowledge
++	require.NoError(t, db.Where("id=?", result.Knowledge.ID).Take(&persisted).Error)
++	t.Logf("postworker status=%s error=%s", persisted.ParseStatus, persisted.ErrorMessage)
++	debugCtx, debugErr := kg.resumeKnowledgeInput(context.Background(), result.Proof, result.Passages)
++	require.NoError(t, debugErr)
++	require.NoError(t, requireActualKnowledgeBuildInput(debugCtx), "after actual chunks")
++	closeHistoryMaterialGuard(debugCtx)
++	var count int64
++	require.NoError(t, db.Model(&types.Chunk{}).Where("knowledge_id=?", result.Knowledge.ID).Count(&count).Error)
++	require.Positive(t, count)
++	originalRead, err := messages.beginMessageMaterialRead(ctx, request)
++	require.NoError(t, err)
++	var ids []string
++	require.NoError(t, db.Model(&types.Chunk{}).Where("knowledge_id=?", result.Knowledge.ID).Pluck("id", &ids).Error)
++	snapshot, err := store.CaptureKnowledgeBuildInputs(originalRead.Context(), types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: result.Knowledge.ID, ChunkIDs: ids, Expected: result.Proof})
++	require.NoError(t, err)
++	require.NoError(t, snapshot.Proof.SourceLineage.RequireComplete())
++	require.NotEmpty(t, snapshot.Chunks)
++	require.Equal(t, "enabled", snapshot.Knowledge.EnableStatus)
++	require.NoError(t, messages.sourceLineageGuard.Check(originalRead.Context(), snapshot.Proof.SourceLineage, access.LineageReadScope{Targets: []*types.SearchTarget{{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: "kb", TenantID: 7}}}))
++	originalRead.Close()
++	require.NoError(t, db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&count).Error)
++	require.Zero(t, count)
++}
++func TestMessageMaterialActualProducerLegacyAndBodyOwnerABAReject(t *testing.T) {
++	for _, change := range []string{"legacy", "content-ABA", "owner-ABA", "caller", "user-revoked", "member-revoked", "execution-ABA", "membership-ABA"} {
++		t.Run(change, func(t *testing.T) {
++			messages, _, store, db, ctx, session := messageMaterialActualFixture(t)
++			_, assistant := produceActualMessagePair(t, messages, ctx, session)
++			request, err := store.CommittedMessageParentRequest(ctx, 7, session.ID, assistant.ID)
++			require.NoError(t, err)
++			guard, err := messages.beginMessageMaterialRead(ctx, request)
++			require.NoError(t, err)
++			defer guard.Close()
++			switch change {
++			case "legacy":
++				legacy := *assistant
++				legacy.ID = "old-unadmitted-message"
++				legacy.RequestID = "old-request"
++				require.NoError(t, db.Create(&legacy).Error)
++				_, err = messages.beginMessageMaterialRead(ctx, types.MessageMaterialReadRequest{TenantID: 7, SessionID: session.ID, MessageIDs: []string{legacy.ID}})
++				require.Error(t, err)
++				return
++			case "execution-ABA":
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", assistant.ID).Update("execution_context", types.MessageExecutionContext{KnowledgeBaseIDs: []string{"foreign-kb"}}).Error)
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", assistant.ID).Update("execution_context", assistant.ExecutionContext).Error)
++			case "membership-ABA":
++				other, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "new-foreign-candidate", Role: "user", Content: "new human candidate", IsCompleted: true})
++				require.NoError(t, err)
++				require.NoError(t, db.Delete(other).Error)
++			case "content-ABA":
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", assistant.ID).Update("content", "foreign transient").Error)
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", assistant.ID).Update("content", assistant.Content).Error)
++			case "owner-ABA":
++				owner := session.UserID
++				require.NoError(t, db.Model(session).Update("user_id", "other-user").Error)
++				require.NoError(t, db.Model(session).Update("user_id", owner).Error)
++			case "caller":
++				user := &types.User{ID: "same-role-other", TenantID: 7, Username: "other", Email: "other@isolated.test", IsActive: true}
++				require.NoError(t, db.Create(user).Error)
++				require.NoError(t, db.Create(&types.TenantMember{UserID: user.ID, TenantID: 7, Role: types.TenantRoleContributor, Status: types.TenantMemberStatusActive}).Error)
++				other := types.WithPrincipal(types.WithCaller(ctx, types.Caller{TenantID: 7, UserID: user.ID, Role: types.TenantRoleContributor}), types.Principal{Type: types.PrincipalWebUser, ID: user.ID})
++				_, err = messages.beginMessageMaterialRead(other, request)
++				require.Error(t, err)
++				return
++			case "user-revoked":
++				require.NoError(t, db.Model(&types.User{}).Where("id='actual-user'").Update("is_active", false).Error)
++			case "member-revoked":
++				require.NoError(t, db.Model(&types.TenantMember{}).Where("user_id='actual-user' AND tenant_id=7").Update("status", types.TenantMemberStatusSuspended).Error)
++			}
++			require.Error(t, guard.Recheck())
++		})
++	}
++}
++
++func TestMessageMaterialActualSavedReadBoundarySingleConnection(t *testing.T) {
++	messages, _, _, db, ctx, session := messageMaterialActualFixture(t)
++	_, assistant := produceActualMessagePair(t, messages, ctx, session)
++	ctx = WithMessageMaterialOutputBoundary(ctx)
++	defer CloseMessageMaterialOutputBoundary(ctx)
++	rows, err := messages.GetRecentMessagesBySession(ctx, session.ID, 20)
++	require.NoError(t, err)
++	require.Len(t, rows, 2)
++	require.Equal(t, assistant.Content, rows[1].Content)
++	require.NoError(t, CheckMessageMaterialOutputBoundary(ctx))
++	var count int64
++	require.NoError(t, db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&count).Error)
++	require.Positive(t, count)
++	rows[1].Content = "foreign output"
++	require.Error(t, CheckMessageMaterialOutputBoundary(ctx))
++	rows[1].Content = assistant.Content
++	require.NoError(t, db.Model(&types.Message{}).Where("id=?", assistant.ID).Update("content", "foreign transient").Error)
++	require.NoError(t, db.Model(&types.Message{}).Where("id=?", assistant.ID).Update("content", assistant.Content).Error)
++	require.Error(t, CheckMessageMaterialOutputBoundary(ctx))
++	require.Error(t, messages.UpdateMessage(ctx, assistant), "a full producer cannot re-seal a foreign partial ABA")
++}
++
++func TestMessageMaterialRawUserFieldsSurviveUnconsumedGeneratedUpdates(t *testing.T) {
++	messages, _, store, db, ctx, session := messageMaterialActualFixture(t)
++	user, assistant := produceActualMessagePair(t, messages, ctx, session)
++	request, err := store.CommittedMessageParentRequest(ctx, 7, session.ID, assistant.ID)
++	require.NoError(t, err)
++	guard, err := messages.beginMessageMaterialRead(ctx, request)
++	require.NoError(t, err)
++	defer guard.Close()
++	require.NoError(t, messages.UpdateMessageRenderedContent(ctx, session.ID, user.ID, "unadmitted generated controlled context"))
++	require.NoError(t, messages.UpdateMessageImages(ctx, session.ID, user.ID, types.MessageImages{{Caption: "unadmitted generated caption"}}))
++	require.NoError(t, guard.Recheck())
++	var raw types.Message
++	require.NoError(t, db.Where("id=?", user.ID).Take(&raw).Error)
++	require.NotEmpty(t, raw.RenderedContent)
++	rows, err := messages.GetMessage(ctx, session.ID, user.ID)
++	require.NoError(t, err)
++	require.Equal(t, user.Content, rows.Content)
++	require.Empty(t, rows.RenderedContent)
++	require.Empty(t, rows.Images)
++}
++
++func TestMessageMaterialPostgresActualProducerReadDerivedKnowledgeSingleConnection(t *testing.T) {
++	kg, store, db, ctx := faqPostgresActualFixture(t)
++	kg.graphEngine = parentChildGraphRepo{}
++	require.NoError(t, db.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"").Error)
++	require.NoError(t, db.Exec("ALTER TABLE messages ADD COLUMN artifacts JSONB").Error)
++	for _, name := range []string{"000103_message_artifacts_table.up.sql", "000107_message_artifacts_deleted_at.up.sql", "000127_nextcloud_content_leases.up.sql", "000151_message_original_materials.up.sql"} {
++		ddl, err := os.ReadFile("../../../migrations/versioned/" + name)
++		require.NoError(t, err)
++		require.NoError(t, db.Exec(string(ddl)).Error)
++	}
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	sqlDB.SetMaxIdleConns(1)
++	ctx = context.WithValue(ctx, types.UserIDContextKey, types.CallerFromContext(ctx).UserID)
++	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
++	defer cancel()
++	kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(db)}
++	groups := NewGroupAccessService(repository.NewGroupAccessRepository(db))
++	guard := access.NewNextcloudSourceLineageGuard(kg.repo.(access.NextcloudLineageSnapshotLookup), kbs, nil, nil, groups, nil, store)
++	messages := &messageService{messageRepo: repository.NewMessageRepository(db), sessionRepo: repository.NewSessionRepository(db), sourceLineageGuard: guard, kbService: kbs, knowService: kg}
++	ConfigureMessageMaterialProvenance(messages, store)
++	session := &types.Session{TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++	require.NoError(t, db.Create(session).Error)
++	_, assistant := produceActualMessagePair(t, messages, ctx, session)
++	request, err := store.CommittedMessageParentRequest(ctx, 7, session.ID, assistant.ID)
++	require.NoError(t, err)
++	original, err := messages.beginMessageMaterialRead(ctx, request)
++	require.NoError(t, err)
++	require.NoError(t, original.Recheck())
++	original.Close()
++	target := &types.KnowledgeBase{ID: "history-pg-target", TenantID: 7, Type: types.KnowledgeBaseTypeDocument, Name: "actual new history target", ChunkingConfig: types.ChunkingConfig{ChunkSize: 512}, IndexingStrategy: types.IndexingStrategy{VectorEnabled: true}, EmbeddingModelID: "embed"}
++	require.NoError(t, store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeBaseNameInput(repository.WithIndependentKnowledgeInput(ctx), "", target.Name), target))
++	kg.kbService = &createKnowledgeFileKBServiceStub{kb: target}
++	grant, err := access.ResolveKB(ctx, access.KBRequest{Caller: types.CallerFromContext(ctx)}, target, types.OrgRoleEditor, nil, nil)
++	require.NoError(t, err)
++	ctx = grant.Context(ctx)
++	result, err := kg.CreateCommittedHistoryKnowledgeInput(ctx, types.CommittedHistoryKnowledgeInputRequest{TenantID: 7, KnowledgeBaseID: target.ID, SessionID: session.ID, AssistantMessageID: assistant.ID})
++	require.NoError(t, err)
++	queue := kg.task.(*knowledgeInputQueue)
++	require.Len(t, queue.tasks, 1)
++	require.NoError(t, kg.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, queue.tasks[0].Payload())))
++	var chunks []*types.Chunk
++	require.NoError(t, db.Where("knowledge_id=?", result.Knowledge.ID).Find(&chunks).Error)
++	require.NotEmpty(t, chunks)
++	plan, err := store.PeekFAQImportOutputReadSetPlan(ctx, nil, []string{result.Knowledge.ID})
++	require.NoError(t, err)
++	require.Len(t, plan.MessagePlans, 1)
++	require.Len(t, plan.Scopes, 2)
++	leases := []repository.NextcloudContentLease{}
++	for _, scope := range plan.Scopes {
++		lease, err := store.ContentLeaseStore().AcquireKBRead(ctx, scope.TenantID, scope.KBID, "actual-PG-history-output", time.Minute)
++		require.NoError(t, err)
++		leases = append(leases, lease)
++	}
++	covered, err := repository.WithFAQReadLeaseCoverage(ctx, leases)
++	require.NoError(t, err)
++	covered, err = repository.WithFAQImportOutputReadSetPlan(covered, plan)
++	require.NoError(t, err)
++	output, err := store.CaptureKnowledgeOutputInputs(covered, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: target.ID, KnowledgeID: result.Knowledge.ID, ChunkIDs: []string{chunks[0].ID}})
++	require.NoError(t, err)
++	require.NoError(t, output.Proof.SourceLineage.RequireComplete())
++	require.NoError(t, guard.Check(covered, output.Proof.SourceLineage, access.LineageReadScope{Targets: []*types.SearchTarget{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: target.ID}}}))
++	require.NoError(t, db.Exec("UPDATE messages SET content=? WHERE id=?", "foreign transient", assistant.ID).Error)
++	require.NoError(t, db.Exec("UPDATE messages SET content=? WHERE id=?", assistant.Content, assistant.ID).Error)
++	_, err = store.CaptureKnowledgeOutputInputs(covered, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: target.ID, KnowledgeID: result.Knowledge.ID})
++	require.Error(t, err)
++	for _, lease := range leases {
++		require.NoError(t, store.ContentLeaseStore().ReleaseLease(context.Background(), lease.ID))
++	}
++	var live int64
++	require.NoError(t, db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++	require.Zero(t, live, fmt.Sprint("actual PostgreSQL material leases cleaned"))
++}
+diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9af81edafd34c2c07b4040d7ba5a1b17e07cd399
+--- /dev/null
++++ b/internal/application/service/message_material_output.go
+@@ -0,0 +1,103 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++type messageMaterialOutputKey struct{}
++type messageMaterialOutputSlot struct {
++	Guards       []*MessageMaterialGuard
++	Bodies       []string
++	Outputs      [][]*types.Message
++	OutputBodies []string
++}
++
++func WithMessageMaterialOutputBoundary(ctx context.Context) context.Context {
++	return context.WithValue(ctx, messageMaterialOutputKey{}, &messageMaterialOutputSlot{})
++}
++func CloseMessageMaterialOutputBoundary(ctx context.Context) {
++	if slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot); ok {
++		for _, guard := range slot.Guards {
++			guard.Close()
++		}
++	}
++}
++func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok {
++		return access.ErrNextcloudPublicationUnavailable
++	}
++	for i, guard := range slot.Guards {
++		if err := guard.Recheck(); err != nil {
++			return err
++		}
++		body, err := json.Marshal(guard.snapshot.Messages)
++		if err != nil {
++			return err
++		}
++		if string(body) != slot.Bodies[i] {
++			return access.ErrNextcloudPublicationDenied
++		}
++	}
++	for i, output := range slot.Outputs {
++		body, err := json.Marshal(output)
++		if err != nil {
++			return err
++		}
++		if string(body) != slot.OutputBodies[i] {
++			return access.ErrNextcloudPublicationDenied
++		}
++	}
++	return nil
++}
++func (s *messageService) admittedMessagePage(ctx context.Context, sessionID string, before time.Time, limit, page int, descending bool) ([]*types.Message, error) {
++	tenant, ok := sessionTenantIDForLookup(ctx)
++	if !ok {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	request, err := s.materialStore.MessagePageMaterialRequest(ctx, tenant, sessionID, before, limit, page, descending)
++	if err != nil {
++		return nil, err
++	}
++	if len(request.MessageIDs) == 0 {
++		return []*types.Message{}, nil
++	}
++	return s.admittedMessages(ctx, request)
++}
++func (s *messageService) admittedMessages(ctx context.Context, request types.MessageMaterialReadRequest) ([]*types.Message, error) {
++	guard, err := s.beginMessageMaterialRead(ctx, request)
++	if err != nil {
++		return nil, err
++	}
++	if slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot); ok {
++		body, err := json.Marshal(guard.snapshot.Messages)
++		if err != nil {
++			guard.Close()
++			return nil, err
++		}
++		slot.Guards = append(slot.Guards, guard)
++		slot.Bodies = append(slot.Bodies, string(body))
++	} else {
++		defer guard.Close()
++	}
++	copied, err := cloneCollection(guard.snapshot.Messages)
++	if err != nil {
++		guard.Close()
++		return nil, err
++	}
++	copied = rawUserContentOnly(copied)
++	if slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot); ok {
++		slot.Outputs = append(slot.Outputs, copied)
++		body, err := json.Marshal(copied)
++		if err != nil {
++			return nil, err
++		}
++		slot.OutputBodies = append(slot.OutputBodies, string(body))
++	}
++	return copied, nil
 +}
 diff --git a/internal/application/service/message_nextcloud_history_test.go b/internal/application/service/message_nextcloud_history_test.go
 new file mode 100644
@@ -73707,7 +75549,7 @@ index 0000000000000000000000000000000000000000..e76484a82203b819b643b3c51924cf9f
 +	return types.BindGraphPromptTemplateOrigin(literal, independent)
 +}
 diff --git a/internal/container/container.go b/internal/container/container.go
-index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d92bec427 100644
+index 57dc3b668f2d3498676689d425fa1b427156c49d..d027ce78808bf65c3e27caea494325ff12e4145d 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -34,6 +34,7 @@ import (
@@ -73768,7 +75610,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  	logger.Debugf(ctx, "[Container] Data source sync framework registered")
  	must(container.Invoke(startAuditLogRetention))
  	logger.Debugf(ctx, "[Container] Audit log retention runner registered")
-@@ -480,10 +509,91 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -480,10 +509,93 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Invoke(startHousekeepingService))
  	logger.Debugf(ctx, "[Container] Knowledge housekeeping runner registered")
  	must(container.Provide(chatpipeline.NewEventManager))
@@ -73805,6 +75647,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
 +			authority := repository.NewKnowledgeInputProvenanceStore(tx)
 +			repository.ConfigureKnowledgeInputActorGroupAccess(authority, service.NewGroupAccessService(repository.NewGroupAccessRepository(tx)))
 +			repository.ConfigureKnowledgeInputActorShares(authority, service.NewKBShareService(repository.NewKBShareRepository(tx), repository.NewOrganizationRepository(tx), repository.NewKnowledgeBaseRepository(tx), repository.NewKnowledgeRepository(tx), repository.NewDataSourceRepository(tx), repository.NewChunkRepository(tx), nil))
++			repository.ConfigureMessageMaterialAgentShares(authority, service.NewAgentShareService(repository.NewAgentShareRepository(tx), repository.NewTenantDisabledSharedAgentRepository(tx), repository.NewOrganizationRepository(tx), repository.NewCustomAgentRepository(tx), repository.NewUserRepository(tx), repository.NewWebSearchProviderRepository(tx), repository.NewKnowledgeBaseRepository(tx), repository.NewKnowledgeRepository(tx), repository.NewDataSourceRepository(tx)))
 +			return authority
 +		})
 +	}))
@@ -73842,6 +75685,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
 +
 +	must(container.Invoke(service.ConfigureKnowledgeBaseInputProvenance))
 +	must(container.Invoke(service.ConfigureMessageSourceLineage))
++	must(container.Invoke(service.ConfigureMessageMaterialProvenance))
 +	must(container.Invoke(func(store *repository.KnowledgeInputProvenanceStore, messages interfaces.MessageService) {
 +		verifier, ok := messages.(interfaces.MessageSourceLineageVerifier)
 +		if !ok {
@@ -73860,7 +75704,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  	must(container.Invoke(chatpipeline.NewPluginDataAnalysis))
  	must(container.Invoke(chatpipeline.NewPluginIntoChatMessage))
  	must(container.Invoke(chatpipeline.NewPluginChatCompletion))
-@@ -512,6 +622,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -512,6 +624,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Invoke(mcpserver.ConfigureGroupAccess))
  	logger.Debugf(ctx, "[Container] MCP group-access overlay registered")
  	must(container.Invoke(service.ConfigureKnowledgeGroupAccess))
@@ -73868,7 +75712,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  	logger.Debugf(ctx, "[Container] Knowledge group-access overlay registered")
  	must(container.Invoke(service.ConfigureGroupAccessDirectoryRuntime))
  	logger.Debugf(ctx, "[Container] Directory feature switch registered for group access")
-@@ -537,6 +648,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -537,6 +650,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Provide(handler.NewKnowledgeHandler))
  	must(container.Provide(handler.NewChunkHandler))
  	must(container.Provide(handler.NewFAQHandler))
@@ -73876,7 +75720,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  	must(container.Provide(handler.NewTagHandler))
  	must(container.Provide(session.NewHandler))
  	must(container.Provide(handler.NewMessageHandler))
-@@ -566,6 +678,12 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -566,6 +680,12 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Provide(handler.NewGroupAccessHandler))
  	must(container.Invoke(handler.ConfigureGroupAccessResourceCatalog))
  	must(container.Invoke(handler.ConfigureKnowledgeHandlerGroupAccess))
@@ -73889,7 +75733,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  	must(container.Provide(handler.NewSystemHandler))
  	// Dig resolves exact types; adapt the registered service to the handler's
  	// narrower SharedAgentLookup interface at the composition boundary.
-@@ -583,6 +701,11 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -583,6 +703,11 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	must(container.Provide(handler.NewModelCredentialsHandler))
  	must(container.Provide(handler.NewWebSearchProviderCredentialsHandler))
  	must(container.Provide(handler.NewDataSourceCredentialsHandler))
@@ -73901,7 +75745,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  	must(container.Invoke(handler.ConfigureDataSourceCredentialsGroupAccess))
  	must(container.Provide(handler.NewWebSearchHandler))
  	must(container.Provide(handler.NewWebSearchProviderHandler))
-@@ -634,6 +757,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
+@@ -634,6 +759,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
  	// persistence succeeded immediately before trigger enqueue failed). Re-arm
  	// them only after the matching handlers are ready.
  	must(container.Invoke(recoverPendingWikiTasks))
@@ -73910,7 +75754,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  
  	logger.Infof(ctx, "[Container] Container initialization completed successfully")
  	return container
-@@ -1138,12 +1263,15 @@ func syncSequences(db *gorm.DB) {
+@@ -1138,12 +1265,15 @@ func syncSequences(db *gorm.DB) {
  // Returns:
  //   - Configured file service implementation
  //   - Error if initialization fails
@@ -73928,7 +75772,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  }
  
  func initRawFileService(_ *config.Config) (interfaces.FileService, error) {
-@@ -1880,6 +2008,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
+@@ -1880,6 +2010,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
  	if err := registry.Register(gitlabConnector.NewConnector()); err != nil {
  		errs = errors.Join(errs, fmt.Errorf("register gitlab connector: %w", err))
  	}
@@ -73938,7 +75782,7 @@ index 57dc3b668f2d3498676689d425fa1b427156c49d..062aa51ae3f8e28a2e35552d39c34d8d
  
  	// Future connectors will be registered here:
  	// if err := registry.Register(githubConnector.NewConnector()); err != nil { ... }
-@@ -1902,6 +2033,123 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
+@@ -1902,6 +2035,123 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
  	})
  }
  
@@ -83077,7 +84921,7 @@ index 0000000000000000000000000000000000000000..68f39b3b5b3c56ea946cad631c36386c
 +}
 diff --git a/internal/handler/faq_read_leases.go b/internal/handler/faq_read_leases.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..9a6832b74b1033c9a5ae639ec02712e5ea61d3dd
+index 0000000000000000000000000000000000000000..da41f87b5098f7542819d19cf5f53e4c31948559
 --- /dev/null
 +++ b/internal/handler/faq_read_leases.go
 @@ -0,0 +1,199 @@
@@ -83239,7 +85083,7 @@ index 0000000000000000000000000000000000000000..9a6832b74b1033c9a5ae639ec02712e5
 +	if err != nil {
 +		return ctx, nil, knowledgeOutputHTTPError(err)
 +	}
-+	if len(plan.Plans) == 0 {
++	if len(plan.Plans) == 0 && len(plan.MessagePlans) == 0 {
 +		return ctx, func() {}, nil
 +	}
 +	group, err := acquireFAQReadPlanLeases(ctx, h.contentLeases, plan.Scopes, plan.SourceLineage, h.leaseHeartbeat)
@@ -86636,22 +88480,34 @@ index 0000000000000000000000000000000000000000..872b67759620637162bda69c8b5bafc2
 +	assertLeaseReleased(t, db)
 +}
 diff --git a/internal/handler/message.go b/internal/handler/message.go
-index 991bcbc5cbadcc7b543b6b29d77db76352de5a53..c09f455a1904b926d15950991fc6f7ea4fadb710 100644
+index 991bcbc5cbadcc7b543b6b29d77db76352de5a53..d7240d62bb55d74ac8ea947dc8a8a371ea06a058 100644
 --- a/internal/handler/message.go
 +++ b/internal/handler/message.go
-@@ -10,6 +10,7 @@ import (
+@@ -10,6 +10,9 @@ import (
  	"github.com/gin-gonic/gin"
  	"gorm.io/gorm"
  
 +	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/application/service"
  	"github.com/Tencent/WeKnora/internal/errors"
  	"github.com/Tencent/WeKnora/internal/logger"
  	"github.com/Tencent/WeKnora/internal/storageurl"
-@@ -65,6 +66,16 @@ func (h *MessageHandler) resolveResourceRewriter(c *gin.Context) (*storageurl.Re
+@@ -65,6 +68,26 @@ func (h *MessageHandler) resolveResourceRewriter(c *gin.Context) (*storageurl.Re
  	return storageurl.NewRequestRewriter(ctx, mode, h.FileService, h.StorageResolver), nil
  }
  
++func messageHistoryReadErrorOrNil(err error) error {
++	if err == nil {
++		return nil
++	}
++	return messageHistoryReadError(err)
++}
 +func messageHistoryReadError(err error) error {
++	if stderrors.Is(err, repository.ErrKnowledgeInputChanged) || stderrors.Is(err, types.ErrSourceLineageUnknown) || stderrors.Is(err, repository.ErrNextcloudContentGCUncovered) || stderrors.Is(err, gorm.ErrRecordNotFound) {
++		return errors.NewServiceUnavailableError("Saved message original material is unavailable")
++	}
++
 +	if stderrors.Is(err, access.ErrNextcloudPublicationUnavailable) {
 +		return errors.NewServiceUnavailableError("Cannot verify current Nextcloud file access")
 +	}
@@ -86664,7 +88520,21 @@ index 991bcbc5cbadcc7b543b6b29d77db76352de5a53..c09f455a1904b926d15950991fc6f7ea
  // LoadMessages godoc
  // @Summary      加载消息历史
  // @Description  加载会话的消息历史，支持分页和时间筛选
-@@ -122,7 +133,7 @@ func (h *MessageHandler) LoadMessages(c *gin.Context) {
+@@ -81,7 +104,12 @@ func (h *MessageHandler) resolveResourceRewriter(c *gin.Context) (*storageurl.Re
+ // @Security     ApiKeyAuth
+ // @Router       /messages/{session_id}/load [get]
+ func (h *MessageHandler) LoadMessages(c *gin.Context) {
+-	ctx := c.Request.Context()
++	ctx := service.WithMessageMaterialOutputBoundary(c.Request.Context())
++	c.Request = c.Request.WithContext(ctx)
++	defer service.CloseMessageMaterialOutputBoundary(ctx)
++	prior := c.Writer
++	c.Writer = &knowledgeCollectionAuthorizationWriter{ResponseWriter: prior, check: func() error { return messageHistoryReadErrorOrNil(service.CheckMessageMaterialOutputBoundary(ctx)) }}
++	defer func() { c.Writer = prior }()
+ 
+ 	logger.Info(ctx, "Start loading messages")
+ 
+@@ -122,7 +150,7 @@ func (h *MessageHandler) LoadMessages(c *gin.Context) {
  				return
  			}
  			logger.ErrorWithFields(ctx, err, nil)
@@ -86673,7 +88543,7 @@ index 991bcbc5cbadcc7b543b6b29d77db76352de5a53..c09f455a1904b926d15950991fc6f7ea
  			return
  		}
  
-@@ -162,7 +173,7 @@ func (h *MessageHandler) LoadMessages(c *gin.Context) {
+@@ -162,7 +190,7 @@ func (h *MessageHandler) LoadMessages(c *gin.Context) {
  			return
  		}
  		logger.ErrorWithFields(ctx, err, nil)
@@ -86682,7 +88552,7 @@ index 991bcbc5cbadcc7b543b6b29d77db76352de5a53..c09f455a1904b926d15950991fc6f7ea
  		return
  	}
  
-@@ -275,7 +286,7 @@ func (h *MessageHandler) SearchMessages(c *gin.Context) {
+@@ -275,7 +303,7 @@ func (h *MessageHandler) SearchMessages(c *gin.Context) {
  	result, err := h.MessageService.SearchMessages(ctx, params)
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, nil)
@@ -86691,6 +88561,209 @@ index 991bcbc5cbadcc7b543b6b29d77db76352de5a53..c09f455a1904b926d15950991fc6f7ea
  		return
  	}
  
+diff --git a/internal/handler/message_material_actual_http_test.go b/internal/handler/message_material_actual_http_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..83dd062a8e701e58436a7618cd12abeae6e81ddd
+--- /dev/null
++++ b/internal/handler/message_material_actual_http_test.go
+@@ -0,0 +1,197 @@
++package handler
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/application/service"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	apperrors "github.com/Tencent/WeKnora/internal/errors"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func TestMessageMaterialActualHTTPProducerReadSingleConnection(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "message.db")), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
++	require.NoError(t, err)
++	require.NoError(t, db.AutoMigrate(&types.User{}, &types.TenantMember{}, &types.TenantAPIKey{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Session{}, &types.Message{}))
++	require.NoError(t, db.Exec("PRAGMA journal_mode=WAL").Error)
++	require.NoError(t, db.Exec("ALTER TABLE messages ADD COLUMN artifacts TEXT").Error)
++	for _, file := range []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql", "000028_directory_group_access.up.sql", "000046_nextcloud_content_leases.up.sql", "000070_message_original_materials.up.sql"} {
++		ddl, err := os.ReadFile("../../migrations/sqlite/" + file)
++		require.NoError(t, err)
++		require.NoError(t, db.Exec(string(ddl)).Error)
++	}
++	require.NoError(t, db.Exec("CREATE TABLE im_channel_sessions(id TEXT,session_id TEXT,platform TEXT)").Error)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	defer sqlDB.Close()
++	sqlDB.SetMaxOpenConns(1)
++	sqlDB.SetMaxIdleConns(1)
++	store := repository.NewKnowledgeInputProvenanceStore(db)
++	groups := service.NewGroupAccessService(repository.NewGroupAccessRepository(db))
++	repository.ConfigureKnowledgeInputActorGroupAccess(store, groups)
++	knowledge := repository.NewKnowledgeRepository(db)
++	kbrepo := repository.NewKnowledgeBaseRepository(db)
++	chunks := repository.NewChunkRepository(db)
++	repository.ConfigureKnowledgeDisplayInputWriters(store, nil, knowledge, func(tx *gorm.DB) *repository.KnowledgeInputProvenanceStore {
++		actual := repository.NewKnowledgeInputProvenanceStore(tx)
++		repository.ConfigureKnowledgeInputActorGroupAccess(actual, service.NewGroupAccessService(repository.NewGroupAccessRepository(tx)))
++		return actual
++	})
++	leases := store.ContentLeaseStore()
++	kbs := service.NewKnowledgeBaseService(kbrepo, knowledge, chunks, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, leases)
++	sourceGuard := access.NewNextcloudSourceLineageGuard(knowledge.(access.NextcloudLineageSnapshotLookup), kbs, nil, nil, groups, nil, store)
++	messages := service.NewMessageService(repository.NewMessageRepository(db), repository.NewSessionRepository(db), nil, kbs, nil, nil, nil, nil, nil)
++	service.ConfigureMessageSourceLineage(messages, nil, &service.SessionForkService{}, &chatpipeline.EventManager{}, sourceGuard)
++	service.ConfigureMessageMaterialProvenance(messages, store)
++	user := &types.User{ID: "actual-http-user", TenantID: 7, Username: "actual", Email: "actual@isolated.test", IsActive: true}
++	require.NoError(t, db.Create(user).Error)
++	require.NoError(t, db.Create(&types.TenantMember{UserID: user.ID, TenantID: 7, Role: types.TenantRoleContributor, Status: types.TenantMemberStatusActive}).Error)
++	kb := &types.KnowledgeBase{ID: "actual-http-kb", TenantID: 7, Name: "actual"}
++	require.NoError(t, db.Create(kb).Error)
++	ctx := types.WithExecutionTenant(context.Background(), 7)
++	ctx = types.WithCaller(ctx, types.Caller{TenantID: 7, UserID: user.ID, Role: types.TenantRoleContributor})
++	ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalWebUser, ID: user.ID})
++	ctx = context.WithValue(ctx, types.UserIDContextKey, user.ID)
++	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
++	defer cancel()
++	session := &types.Session{TenantID: 7, UserID: user.ID}
++	require.NoError(t, db.Create(session).Error)
++	question, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-http-turn", Role: "user", Content: "actual new human question", IsCompleted: true, ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{kb.ID}}})
++	require.NoError(t, err)
++	answer, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: question.RequestID, Role: "assistant", ExecutionContext: question.ExecutionContext})
++	require.NoError(t, err)
++	answer.Content = "actual new generated saved answer"
++	answer.IsCompleted = true
++	answer.SourceLineage, _ = types.NewCompleteSourceLineage()
++	require.NoError(t, messages.UpdateMessage(ctx, answer))
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(func(c *gin.Context) {
++		c.Request = c.Request.WithContext(ctx)
++		c.Next()
++		if len(c.Errors) > 0 && !c.Writer.Written() {
++			code := http.StatusInternalServerError
++			if app, ok := apperrors.IsAppError(c.Errors.Last().Err); ok {
++				code = app.HTTPCode
++			}
++			c.JSON(code, gin.H{"error": c.Errors.Last().Err.Error()})
++		}
++	})
++	router.GET("/messages/:session_id/load", NewMessageHandler(messages, nil, nil).LoadMessages)
++	request := func() *httptest.ResponseRecorder {
++		w := httptest.NewRecorder()
++		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/messages/"+session.ID+"/load?limit=20", nil))
++		return w
++	}
++	response := request()
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	require.Contains(t, response.Body.String(), answer.Content)
++	var live int64
++	require.NoError(t, db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++	require.Zero(t, live)
++	require.NoError(t, db.Model(&types.Message{}).Where("id=?", answer.ID).Update("content", "foreign transient").Error)
++	require.NoError(t, db.Model(&types.Message{}).Where("id=?", answer.ID).Update("content", answer.Content).Error)
++	response = request()
++	require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
++	require.NotContains(t, response.Body.String(), answer.Content)
++}
++
++func TestMessageMaterialActualControlledSavedHTTPAndCurrentSourceRevoke(t *testing.T) {
++	f := faqAllReadLeaseFixture(t, "personal_revoke_before_write")
++	f.calls.Store(-10000)
++	require.NoError(t, f.db.Exec("ALTER TABLE messages ADD COLUMN artifacts TEXT").Error)
++	for _, file := range []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql", "000070_message_original_materials.up.sql"} {
++		ddl, err := os.ReadFile("../../migrations/sqlite/" + file)
++		require.NoError(t, err)
++		require.NoError(t, f.db.Exec(string(ddl)).Error)
++	}
++	require.NoError(t, f.db.Exec("CREATE TABLE im_channel_sessions(id TEXT,session_id TEXT,platform TEXT)").Error)
++	ctx := context.WithValue(f.ctx, types.UserIDContextKey, types.CallerFromContext(f.ctx).UserID)
++	req := types.FAQInputReadRequest{TenantID: 7, KnowledgeBaseID: "faq-derived", ChunkIDs: []string{f.entry.ChunkID}}
++	plan, err := f.store.PeekFAQInputReadPlan(ctx, req)
++	require.NoError(t, err)
++	held, err := acquireFAQReadPlanLeases(ctx, f.store.ContentLeaseStore(), plan.Scopes, plan.SourceLineage, 0)
++	require.NoError(t, err)
++	defer held.Close()
++	ctx, err = repository.WithFAQInputReadPlan(held.Context(ctx), plan)
++	require.NoError(t, err)
++	actual, err := f.store.CaptureFAQInputs(ctx, req)
++	require.NoError(t, err)
++	require.Len(t, actual.Chunks, 1)
++	require.Len(t, actual.Proofs, 1)
++	require.Len(t, actual.Proofs[0].SourceLineage.Sources, 1)
++	messages := service.NewMessageService(repository.NewMessageRepository(f.db), repository.NewSessionRepository(f.db), nil, f.knowledge.kbService, f.knowledge.kgService, nil, nil, nil, nil)
++	service.ConfigureMessageSourceLineage(messages, nil, &service.SessionForkService{}, &chatpipeline.EventManager{}, f.guard)
++	service.ConfigureMessageMaterialProvenance(messages, f.store)
++	session := &types.Session{TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++	require.NoError(t, f.db.Create(session).Error)
++	question, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-controlled-message-turn", Role: "user", Content: "new human question", IsCompleted: true, ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}})
++	require.NoError(t, err)
++	answer, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: question.RequestID, Role: "assistant", ExecutionContext: question.ExecutionContext})
++	require.NoError(t, err)
++	// The deterministic producer consumes the actual captured original field.
++	answer.Content = "new saved derivative: " + actual.Chunks[0].Content
++	answer.IsCompleted = true
++	answer.SourceLineage = actual.Proofs[0].SourceLineage
++	require.NoError(t, messages.UpdateMessage(ctx, answer))
++	// A later full update cannot remove the original controlled origins.
++	answer.SourceLineage, _ = types.NewCompleteSourceLineage()
++	answer.Content += " preserved original fields"
++	require.NoError(t, messages.UpdateMessage(ctx, answer))
++	require.Len(t, answer.SourceLineage.Sources, 1)
++	held.Close()
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(func(c *gin.Context) {
++		c.Request = c.Request.WithContext(f.ctx)
++		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), types.UserIDContextKey, types.CallerFromContext(f.ctx).UserID))
++		c.Next()
++		if len(c.Errors) > 0 && !c.Writer.Written() {
++			code := http.StatusInternalServerError
++			if app, ok := apperrors.IsAppError(c.Errors.Last().Err); ok {
++				code = app.HTTPCode
++			}
++			c.JSON(code, gin.H{"error": c.Errors.Last().Err.Error()})
++		}
++	})
++	router.GET("/messages/:session_id/load", NewMessageHandler(messages, nil, nil).LoadMessages)
++	call := func() *httptest.ResponseRecorder {
++		w := httptest.NewRecorder()
++		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/messages/"+session.ID+"/load", nil))
++		return w
++	}
++	response := call()
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	var decoded struct{ Data []*types.Message }
++	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &decoded))
++	require.Len(t, decoded.Data, 2)
++	require.Equal(t, answer.Content, decoded.Data[1].Content)
++	observed := false
++	f.groups.Hook = func(context.Context) {
++		observed = true
++		var count int64
++		require.NoError(t, f.db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL AND knowledge_id='source'").Count(&count).Error)
++		require.Positive(t, count)
++	}
++	f.calls.Store(2)
++	response = call()
++	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
++	require.NotContains(t, response.Body.String(), "new saved derivative")
++	require.True(t, observed)
++	var live int64
++	require.NoError(t, f.db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++	require.Zero(t, live)
++}
 diff --git a/internal/handler/nextcloud_ask_target.go b/internal/handler/nextcloud_ask_target.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..d36d64e86d1cc1ab692de6b43a21a6d7fce17c6d
@@ -100865,10 +102938,10 @@ index 019c883252560551e5b0449857331fbad4901571..bc74b58e9c99e331ac837c970eb0d9c5
  // NameSpace represents the name space of the knowledge base and knowledge
 diff --git a/internal/types/faq_import_output.go b/internal/types/faq_import_output.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..771bbdb5f624b11bddfdbed66bc7317c134ff440
+index 0000000000000000000000000000000000000000..f5617515a2555bfd1d3faba4c8d42e42b212f8c0
 --- /dev/null
 +++ b/internal/types/faq_import_output.go
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,43 @@
 +package types
 +
 +// The receipt is private server state. Progress and LastFAQImportResult are
@@ -100893,6 +102966,7 @@ index 0000000000000000000000000000000000000000..771bbdb5f624b11bddfdbed66bc7317c
 +	Result                  *FAQImportResult
 +}
 +type FAQImportOutputReadPlan struct {
++	MessagePlans   []*MessageMaterialReadPlan
 +	Request        FAQImportOutputReadRequest
 +	AdmissionID    string
 +	HeadRevision   uint64
@@ -100903,6 +102977,7 @@ index 0000000000000000000000000000000000000000..771bbdb5f624b11bddfdbed66bc7317c
 +
 +// A metadata-only plan for every actual FAQ result in scoped/explicit-ID outputs.
 +type FAQImportOutputReadSetPlan struct {
++	MessagePlans    []*MessageMaterialReadPlan
 +	KnowledgeScopes []KnowledgeSearchScope
 +	KnowledgeIDs    []string
 +	Plans           []*FAQImportOutputReadPlan
@@ -100912,10 +102987,10 @@ index 0000000000000000000000000000000000000000..771bbdb5f624b11bddfdbed66bc7317c
 +}
 diff --git a/internal/types/faq_input.go b/internal/types/faq_input.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d65e6a9031902c4e0563a8f0f78d069ab30dc1d9
+index 0000000000000000000000000000000000000000..a01010372fcfc4c05241a95906473cc8af630b09
 --- /dev/null
 +++ b/internal/types/faq_input.go
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,68 @@
 +package types
 +
 +// FAQEntryInputProof identifies this entry's immutable original producer.
@@ -100978,6 +103053,7 @@ index 0000000000000000000000000000000000000000..d65e6a9031902c4e0563a8f0f78d069a
 +// FAQInputReadPlan contains only original receipt metadata. A caller can acquire
 +// every scope before reading entry/config/tag material, then bind this plan.
 +type FAQInputReadPlan struct {
++	MessagePlans   []*MessageMaterialReadPlan
 +	Request        FAQInputReadRequest
 +	MetadataDigest string
 +	Scopes         []KnowledgeSearchScope
@@ -101757,6 +103833,24 @@ index 0000000000000000000000000000000000000000..a692157885741aae647f9e945d48c9fd
 +	CaptureKnowledgeOutputAuxiliary(context.Context, []*types.KnowledgeBuildInputProof, []types.KnowledgeOutputDisplaySelection) (*types.KnowledgeOutputAuxiliaryInputSnapshot, error)
 +	RecheckKnowledgeOutputAuxiliary(context.Context, *types.KnowledgeOutputAuxiliaryInputSnapshot) error
 +}
+diff --git a/internal/types/interfaces/message_material.go b/internal/types/interfaces/message_material.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..819da339364f784d0e6387253ab5e5650a2d6062
+--- /dev/null
++++ b/internal/types/interfaces/message_material.go
+@@ -0,0 +1,12 @@
++package interfaces
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++type MessageMaterialReader interface {
++	PeekMessageMaterialReadPlan(context.Context, types.MessageMaterialReadRequest) (*types.MessageMaterialReadPlan, error)
++	CaptureMessageMaterialInputs(context.Context, types.MessageMaterialReadRequest) (*types.MessageMaterialSnapshot, error)
++	RecheckMessageMaterialInputs(context.Context, *types.MessageMaterialSnapshot) error
++}
 diff --git a/internal/types/interfaces/rag_chunk_snapshot.go b/internal/types/interfaces/rag_chunk_snapshot.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..59c4d34ab6c68b6a5a93664e97fa33ee0c9db792
@@ -102347,7 +104441,7 @@ index 0000000000000000000000000000000000000000..9664df0a80cd9df9066d7b863a12fb07
 +	}
 +}
 diff --git a/internal/types/message.go b/internal/types/message.go
-index 28d5c1610c82e11bb24610cf36c629fb5f82342b..ade6e9d6da34a9b3eb77a2526d9d485c32f4401b 100644
+index 28d5c1610c82e11bb24610cf36c629fb5f82342b..b50b8690b02df804f0f7c1ba9a1cf19a24b797f9 100644
 --- a/internal/types/message.go
 +++ b/internal/types/message.go
 @@ -17,10 +17,11 @@ import (
@@ -102389,7 +104483,18 @@ index 28d5c1610c82e11bb24610cf36c629fb5f82342b..ade6e9d6da34a9b3eb77a2526d9d485c
  	QuestionSuggestions   *QuestionSuggestionConfig `json:"question_suggestions,omitempty"`
  	KnowledgeBaseIDs      []string                  `json:"knowledge_base_ids,omitempty"`
  	KnowledgeIDs          []string                  `json:"knowledge_ids,omitempty"`
-@@ -585,7 +593,8 @@ type MessageSearchParams struct {
+@@ -531,7 +539,9 @@ func (a *AgentSteps) Scan(value interface{}) error {
+ // Returns:
+ //   - error: Any error encountered during the hook execution
+ func (m *Message) BeforeCreate(tx *gorm.DB) (err error) {
+-	m.ID = uuid.New().String()
++	if m.ID == "" {
++		m.ID = uuid.New().String()
++	}
+ 	if m.KnowledgeReferences == nil {
+ 		m.KnowledgeReferences = make(References, 0)
+ 	}
+@@ -585,7 +595,8 @@ type MessageSearchParams struct {
  type MessageWithSession struct {
  	Message
  	// Title of the session this message belongs to
@@ -102399,6 +104504,44 @@ index 28d5c1610c82e11bb24610cf36c629fb5f82342b..ade6e9d6da34a9b3eb77a2526d9d485c
  }
  
  // MessageSearchResultItem represents a single search result item (internal, pre-merge)
+diff --git a/internal/types/message_material.go b/internal/types/message_material.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff9acc4c6778add5c9b558857c48fc31daf37aec
+--- /dev/null
++++ b/internal/types/message_material.go
+@@ -0,0 +1,32 @@
++package types
++
++// MessageMaterialProof is a private immutable producer receipt for original
++// text/execution material. It is never reconstructed from current row metadata.
++type MessageMaterialProof struct {
++	AdmissionID, GenerationID, MessageID, SessionID, OwnerID, BodyDigest string
++	TenantID, Revision, OwnerRevision                                    uint64
++	SourceLineage                                                        *SourceLineage
++	Execution                                                            MessageExecutionContext
++	AgentID                                                              string
++	AgentTenantID                                                        uint64
++}
++type MessageMaterialReadRequest struct {
++	TenantID   uint64
++	SessionID  string
++	MessageIDs []string
++	AllSession bool
++}
++type MessageMaterialReadPlan struct {
++	Request        MessageMaterialReadRequest
++	MetadataDigest string
++	Scopes         []KnowledgeSearchScope
++	SourceLineage  *SourceLineage
++}
++type MessageMaterialSnapshot struct {
++	Request                                  MessageMaterialReadRequest
++	MetadataDigest                           string
++	SessionOwnerID                           string
++	SessionOwnerRevision, MembershipRevision uint64
++	Messages                                 []*Message
++	Proofs                                   []*MessageMaterialProof
++}
 diff --git a/internal/types/rag_chunk_snapshot.go b/internal/types/rag_chunk_snapshot.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..e778767a20e386f40accc47e8d56c53e1e7a9eee
@@ -106400,6 +108543,52 @@ index 0000000000000000000000000000000000000000..4260fb295513f2c8f6a629270851dc22
 +CREATE TABLE nextcloud_derived_new_knowledges(knowledge_id TEXT PRIMARY KEY,created_at_ms BIGINT NOT NULL);
 +CREATE TRIGGER nextcloud_derived_knowledge_witness AFTER INSERT ON knowledges WHEN NEW.channel='nextcloud' BEGIN INSERT INTO nextcloud_derived_new_knowledges VALUES(NEW.id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)); END;
 +CREATE INDEX nextcloud_derived_artifact_ref ON nextcloud_derived_write_artifacts(item_kind,object_ref);
+diff --git a/migrations/sqlite/000070_message_original_materials.down.sql b/migrations/sqlite/000070_message_original_materials.down.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1fc250ea8729128e4b3b11d724d5e4ec24d40a1
+--- /dev/null
++++ b/migrations/sqlite/000070_message_original_materials.down.sql
+@@ -0,0 +1,13 @@
++DROP TRIGGER IF EXISTS message_material_insert;
++DROP TRIGGER IF EXISTS message_material_update;
++DROP TRIGGER IF EXISTS message_material_membership_update;
++DROP TRIGGER IF EXISTS message_material_delete;
++DROP TRIGGER IF EXISTS message_session_owner_insert;
++DROP TRIGGER IF EXISTS message_session_owner_update;
++DROP TRIGGER IF EXISTS message_session_owner_delete;
++DROP TABLE IF EXISTS message_material_receipts;
++DROP TABLE IF EXISTS message_material_admissions;
++DROP TABLE IF EXISTS message_generation_origins;
++DROP TABLE IF EXISTS message_material_versions;
++DROP TABLE IF EXISTS message_session_owner_versions;
++DROP TABLE IF EXISTS message_session_membership_versions;
+diff --git a/migrations/sqlite/000070_message_original_materials.up.sql b/migrations/sqlite/000070_message_original_materials.up.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..a666fb739beec0b298cce6b69a73b665ad966bc5
+--- /dev/null
++++ b/migrations/sqlite/000070_message_original_materials.up.sql
+@@ -0,0 +1,21 @@
++-- Only actual new message producers mint admissions. Legacy receives counters.
++CREATE TABLE message_generation_origins (id TEXT PRIMARY KEY,message_id TEXT NOT NULL UNIQUE,session_id TEXT NOT NULL,tenant_id BIGINT NOT NULL,owner_id TEXT NOT NULL,owner_revision BIGINT NOT NULL,request_id TEXT NOT NULL,role TEXT NOT NULL,actor TEXT NOT NULL,initial_input TEXT NOT NULL);
++CREATE TABLE message_material_admissions (id TEXT PRIMARY KEY,generation_id TEXT NOT NULL REFERENCES message_generation_origins(id),message_id TEXT NOT NULL,session_id TEXT NOT NULL,tenant_id BIGINT NOT NULL,owner_id TEXT NOT NULL,owner_revision BIGINT NOT NULL,revision BIGINT NOT NULL,body_digest TEXT NOT NULL,source_lineage TEXT NOT NULL,execution_context TEXT NOT NULL,agent_id TEXT NOT NULL,agent_tenant_id BIGINT NOT NULL);
++CREATE TABLE message_material_receipts (message_id TEXT PRIMARY KEY,admission_id TEXT NOT NULL REFERENCES message_material_admissions(id));
++CREATE TABLE message_material_versions (message_id TEXT PRIMARY KEY,revision BIGINT NOT NULL CHECK(revision>0));
++CREATE TABLE message_session_owner_versions (session_id TEXT PRIMARY KEY,revision BIGINT NOT NULL CHECK(revision>0));
++CREATE TABLE message_session_membership_versions (session_id TEXT PRIMARY KEY,revision BIGINT NOT NULL CHECK(revision>0));
++INSERT INTO message_material_versions SELECT id,1 FROM messages;
++INSERT INTO message_session_owner_versions SELECT id,1 FROM sessions;
++INSERT INTO message_session_membership_versions SELECT id,1 FROM sessions;
++CREATE TRIGGER message_generation_origins_immutable_update BEFORE UPDATE ON message_generation_origins BEGIN SELECT RAISE(ABORT,'immutable original message producer'); END;
++CREATE TRIGGER message_generation_origins_immutable_delete BEFORE DELETE ON message_generation_origins BEGIN SELECT RAISE(ABORT,'immutable original message producer'); END;
++CREATE TRIGGER message_material_admissions_immutable_update BEFORE UPDATE ON message_material_admissions BEGIN SELECT RAISE(ABORT,'immutable original message producer'); END;
++CREATE TRIGGER message_material_admissions_immutable_delete BEFORE DELETE ON message_material_admissions BEGIN SELECT RAISE(ABORT,'immutable original message producer'); END;
++CREATE TRIGGER message_material_insert AFTER INSERT ON messages BEGIN INSERT INTO message_material_versions VALUES(NEW.id,1) ON CONFLICT(message_id) DO UPDATE SET revision=revision+1; INSERT INTO message_session_membership_versions VALUES(NEW.session_id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; END;
++CREATE TRIGGER message_material_update AFTER UPDATE ON messages WHEN (OLD.role='user' AND NEW.role='user' AND (OLD.session_id IS NOT NEW.session_id OR OLD.request_id IS NOT NEW.request_id OR OLD.role IS NOT NEW.role OR OLD.content IS NOT NEW.content OR OLD.is_completed IS NOT NEW.is_completed OR OLD.created_at IS NOT NEW.created_at OR OLD.deleted_at IS NOT NEW.deleted_at OR OLD.agent_id IS NOT NEW.agent_id OR OLD.agent_tenant_id IS NOT NEW.agent_tenant_id OR OLD.execution_context IS NOT NEW.execution_context)) OR ((OLD.role!='user' OR NEW.role!='user') AND (OLD.session_id IS NOT NEW.session_id OR OLD.request_id IS NOT NEW.request_id OR OLD.content IS NOT NEW.content OR OLD.role IS NOT NEW.role OR OLD.knowledge_references IS NOT NEW.knowledge_references OR OLD.source_lineage IS NOT NEW.source_lineage OR OLD.agent_steps IS NOT NEW.agent_steps OR OLD.mentioned_items IS NOT NEW.mentioned_items OR OLD.images IS NOT NEW.images OR OLD.attachments IS NOT NEW.attachments OR OLD.is_completed IS NOT NEW.is_completed OR OLD.is_fallback IS NOT NEW.is_fallback OR OLD.agent_duration_ms IS NOT NEW.agent_duration_ms OR OLD.usage IS NOT NEW.usage OR OLD.rendered_content IS NOT NEW.rendered_content OR OLD.channel IS NOT NEW.channel OR OLD.agent_id IS NOT NEW.agent_id OR OLD.agent_tenant_id IS NOT NEW.agent_tenant_id OR OLD.model_id IS NOT NEW.model_id OR OLD.execution_context IS NOT NEW.execution_context OR OLD.used_memories IS NOT NEW.used_memories OR OLD.sandbox_checkpoint IS NOT NEW.sandbox_checkpoint OR OLD.context_checkpoint IS NOT NEW.context_checkpoint OR OLD.created_at IS NOT NEW.created_at OR OLD.deleted_at IS NOT NEW.deleted_at)) BEGIN INSERT INTO message_material_versions VALUES(NEW.id,1) ON CONFLICT(message_id) DO UPDATE SET revision=revision+1; END;
++CREATE TRIGGER message_material_membership_update AFTER UPDATE ON messages WHEN OLD.session_id IS NOT NEW.session_id OR OLD.created_at IS NOT NEW.created_at OR OLD.deleted_at IS NOT NEW.deleted_at BEGIN INSERT INTO message_session_membership_versions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; INSERT INTO message_session_membership_versions VALUES(NEW.session_id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; END;
++CREATE TRIGGER message_material_delete AFTER DELETE ON messages BEGIN INSERT INTO message_material_versions VALUES(OLD.id,1) ON CONFLICT(message_id) DO UPDATE SET revision=revision+1; INSERT INTO message_session_membership_versions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; END;
++CREATE TRIGGER message_session_owner_insert AFTER INSERT ON sessions BEGIN INSERT INTO message_session_owner_versions VALUES(NEW.id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; INSERT INTO message_session_membership_versions VALUES(NEW.id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; END;
++CREATE TRIGGER message_session_owner_update AFTER UPDATE ON sessions WHEN OLD.tenant_id IS NOT NEW.tenant_id OR OLD.user_id IS NOT NEW.user_id OR OLD.deleted_at IS NOT NEW.deleted_at BEGIN INSERT INTO message_session_owner_versions VALUES(NEW.id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; END;
++CREATE TRIGGER message_session_owner_delete AFTER DELETE ON sessions BEGIN INSERT INTO message_session_owner_versions VALUES(OLD.id,1) ON CONFLICT(session_id) DO UPDATE SET revision=revision+1; END;
 diff --git a/migrations/versioned/000110_resource_source_provenance.down.sql b/migrations/versioned/000110_resource_source_provenance.down.sql
 new file mode 100644
 index 0000000000000000000000000000000000000000..cf1f675ae0a5da3ee5e5f52554fdd2ef362f59d3
@@ -108900,6 +111089,52 @@ index 0000000000000000000000000000000000000000..3d34d413d6e503174de69661cc0be9c6
 +CREATE FUNCTION nextcloud_derived_new_knowledge() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.channel='nextcloud' THEN INSERT INTO nextcloud_derived_new_knowledges VALUES(NEW.id,(extract(epoch FROM clock_timestamp())*1000)::bigint); END IF; RETURN NEW; END $$;
 +CREATE TRIGGER nextcloud_derived_knowledge_witness AFTER INSERT ON knowledges FOR EACH ROW EXECUTE FUNCTION nextcloud_derived_new_knowledge();
 +CREATE INDEX nextcloud_derived_artifact_ref ON nextcloud_derived_write_artifacts(item_kind,object_ref);
+diff --git a/migrations/versioned/000151_message_original_materials.down.sql b/migrations/versioned/000151_message_original_materials.down.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..0682312755c4fe11949876f42d598d78daea7d82
+--- /dev/null
++++ b/migrations/versioned/000151_message_original_materials.down.sql
+@@ -0,0 +1,11 @@
++DROP TRIGGER IF EXISTS message_material_checkpoint ON messages;
++DROP TRIGGER IF EXISTS message_session_owner_checkpoint ON sessions;
++DROP FUNCTION IF EXISTS message_material_checkpoint();
++DROP FUNCTION IF EXISTS message_session_owner_checkpoint();
++DROP TABLE IF EXISTS message_material_receipts;
++DROP TABLE IF EXISTS message_material_admissions;
++DROP TABLE IF EXISTS message_generation_origins;
++DROP TABLE IF EXISTS message_material_versions;
++DROP TABLE IF EXISTS message_session_owner_versions;
++DROP TABLE IF EXISTS message_session_membership_versions;
++DROP FUNCTION IF EXISTS message_material_immutable();
+diff --git a/migrations/versioned/000151_message_original_materials.up.sql b/migrations/versioned/000151_message_original_materials.up.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..46f8ec85fe4bd023a3a06b8be6d17cbf845dc8a2
+--- /dev/null
++++ b/migrations/versioned/000151_message_original_materials.up.sql
+@@ -0,0 +1,23 @@
++-- Only actual new message producers mint admissions. Legacy receives counters.
++CREATE TABLE message_generation_origins (id TEXT PRIMARY KEY,message_id TEXT NOT NULL UNIQUE,session_id TEXT NOT NULL,tenant_id BIGINT NOT NULL,owner_id TEXT NOT NULL,owner_revision BIGINT NOT NULL,request_id TEXT NOT NULL,role TEXT NOT NULL,actor TEXT NOT NULL,initial_input TEXT NOT NULL);
++CREATE TABLE message_material_admissions (id TEXT PRIMARY KEY,generation_id TEXT NOT NULL REFERENCES message_generation_origins(id),message_id TEXT NOT NULL,session_id TEXT NOT NULL,tenant_id BIGINT NOT NULL,owner_id TEXT NOT NULL,owner_revision BIGINT NOT NULL,revision BIGINT NOT NULL,body_digest TEXT NOT NULL,source_lineage TEXT NOT NULL,execution_context TEXT NOT NULL,agent_id TEXT NOT NULL,agent_tenant_id BIGINT NOT NULL);
++CREATE TABLE message_material_receipts (message_id TEXT PRIMARY KEY,admission_id TEXT NOT NULL REFERENCES message_material_admissions(id));
++CREATE TABLE message_material_versions (message_id TEXT PRIMARY KEY,revision BIGINT NOT NULL CHECK(revision>0));
++CREATE TABLE message_session_owner_versions (session_id TEXT PRIMARY KEY,revision BIGINT NOT NULL CHECK(revision>0));
++CREATE TABLE message_session_membership_versions (session_id TEXT PRIMARY KEY,revision BIGINT NOT NULL CHECK(revision>0));
++INSERT INTO message_material_versions SELECT id,1 FROM messages;
++INSERT INTO message_session_owner_versions SELECT id,1 FROM sessions;
++INSERT INTO message_session_membership_versions SELECT id,1 FROM sessions;
++CREATE FUNCTION message_material_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'immutable original message producer'; END $$;
++CREATE TRIGGER message_generation_origins_immutable BEFORE UPDATE OR DELETE ON message_generation_origins FOR EACH ROW EXECUTE FUNCTION message_material_immutable();
++CREATE TRIGGER message_material_admissions_immutable BEFORE UPDATE OR DELETE ON message_material_admissions FOR EACH ROW EXECUTE FUNCTION message_material_immutable();
++CREATE FUNCTION message_material_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE target TEXT; BEGIN
++ target:=CASE WHEN TG_OP='DELETE' THEN OLD.id ELSE NEW.id END;
++ IF TG_OP!='UPDATE' OR (OLD.role='user' AND NEW.role='user' AND jsonb_build_array(OLD.id,OLD.session_id,OLD.request_id,OLD.role,OLD.content,OLD.is_completed,OLD.created_at,OLD.deleted_at,OLD.agent_id,OLD.agent_tenant_id,OLD.execution_context) IS DISTINCT FROM jsonb_build_array(NEW.id,NEW.session_id,NEW.request_id,NEW.role,NEW.content,NEW.is_completed,NEW.created_at,NEW.deleted_at,NEW.agent_id,NEW.agent_tenant_id,NEW.execution_context)) OR ((OLD.role!='user' OR NEW.role!='user') AND ((to_jsonb(OLD)-'knowledge_id'-'updated_at') IS DISTINCT FROM (to_jsonb(NEW)-'knowledge_id'-'updated_at'))) THEN INSERT INTO message_material_versions VALUES(target,1) ON CONFLICT(message_id) DO UPDATE SET revision=message_material_versions.revision+1; END IF;
++ IF TG_OP!='UPDATE' OR OLD.session_id IS DISTINCT FROM NEW.session_id OR OLD.created_at IS DISTINCT FROM NEW.created_at OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at THEN
++ IF TG_OP!='INSERT' THEN INSERT INTO message_session_membership_versions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET revision=message_session_membership_versions.revision+1; END IF;
++ IF TG_OP!='DELETE' AND (TG_OP='INSERT' OR OLD.session_id IS DISTINCT FROM NEW.session_id) THEN INSERT INTO message_session_membership_versions VALUES(NEW.session_id,1) ON CONFLICT(session_id) DO UPDATE SET revision=message_session_membership_versions.revision+1; END IF; END IF;
++ RETURN COALESCE(NEW,OLD); END $$;
++CREATE TRIGGER message_material_checkpoint AFTER INSERT OR UPDATE OR DELETE ON messages FOR EACH ROW EXECUTE FUNCTION message_material_checkpoint();
++CREATE FUNCTION message_session_owner_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF TG_OP='INSERT' THEN INSERT INTO message_session_membership_versions VALUES(NEW.id,1) ON CONFLICT(session_id) DO UPDATE SET revision=message_session_membership_versions.revision+1; END IF; IF TG_OP!='UPDATE' OR OLD.tenant_id IS DISTINCT FROM NEW.tenant_id OR OLD.user_id IS DISTINCT FROM NEW.user_id OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at THEN INSERT INTO message_session_owner_versions VALUES(CASE WHEN TG_OP='DELETE' THEN OLD.id ELSE NEW.id END,1) ON CONFLICT(session_id) DO UPDATE SET revision=message_session_owner_versions.revision+1; END IF; RETURN COALESCE(NEW,OLD); END $$;
++CREATE TRIGGER message_session_owner_checkpoint AFTER INSERT OR UPDATE OR DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION message_session_owner_checkpoint();
 diff --git a/scripts/ops/isolated-capacity-write-intents.py b/scripts/ops/isolated-capacity-write-intents.py
 new file mode 100755
 index 0000000000000000000000000000000000000000..e5cd4ecb3dbfd003b89d359d7130a43de46a5577

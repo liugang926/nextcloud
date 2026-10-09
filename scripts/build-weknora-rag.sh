@@ -116,8 +116,29 @@ if [[ "$candidate_mode" == 1 ]]; then
 fi
 
 build_dir="$(mktemp -d "$workspace_dir/.weknora-rag-build.XXXXXXXX")"
-trap 'rm -rf -- "$build_dir"' EXIT
+build_meta_dir="$(mktemp -d "$workspace_dir/.weknora-rag-metadata.XXXXXXXX")"
+trap 'rm -rf -- "$build_dir" "$build_meta_dir"' EXIT
 git -C "$source_dir" archive --format=tar "$base_commit" | tar -xf - -C "$build_dir"
+# Freeze the exact patch and manifest used for this build before either image.
+# A later checkout update cannot silently change the app/UI pair mid-build.
+cp "$patch_file" "$build_meta_dir/source.patch"
+patch_file="$build_meta_dir/source.patch"
+if [[ "$candidate_mode" == 1 ]]; then
+  cp "$project_dir/integration/candidates/manifest.json" "$build_meta_dir/manifest.json"
+  python3 - "$build_meta_dir/manifest.json" "$base_commit" "$expected_patch_sha" "$candidate_tree" "$candidate_commit" <<'PYVERIFY'
+import json
+import sys
+entry = json.load(open(sys.argv[1]))['profiles']['rag']
+actual = [entry[key] for key in ('base', 'patch_sha256', 'candidate_tree', 'candidate_commit')]
+if actual != sys.argv[2:]:
+    raise SystemExit('Candidate manifest changed before the frozen build snapshot')
+PYVERIFY
+fi
+frozen_patch_sha="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$patch_file")"
+if [[ "$frozen_patch_sha" != "$expected_patch_sha" ]]; then
+  echo 'Source patch changed before the frozen build snapshot.' >&2
+  exit 1
+fi
 git -C "$build_dir" apply --check "$patch_file"
 git -C "$build_dir" apply "$patch_file"
 

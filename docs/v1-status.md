@@ -1703,3 +1703,19 @@ The previous frontend typecheck selected only the empty root configuration;
 new CI explicitly checks the app project, which passed in the new owned source.
 Full personal history/machine pipeline modules and candidate application
 build/restore/performance are still open; shared services remain pinned.
+
+
+## 2026-10-09 original saved-message core candidate
+
+151/70 message origins, material receipts, owner/body/membership counters and
+metadata-only parent read sets now connect the actual message service, saved
+HTTP reads and queued history-to-knowledge indexing. Current actor/share checks
+use transaction-local repositories, and saved output holds source leases and
+rechecks current authorization. Both integrated candidates passed285 selected
+cases with0fail/skip across actual PG/SQLite/message/HTTP/FAQ/collection/local
+GC paths. The owner's broader core compile passed154 packages; two old PG
+negative skips in its earlier log are explicitly retained, and the root run
+executed them. [Core paths and remaining consumers](source-lineage-saved-message-materials.md)
+list Agent/model lifetime, Continue/cache, clone/steer/memory/artifact and partial
+field writers still underway.152 is only a hook until its actual module freezes.
+The candidate is not deployed or accepted as full V1.

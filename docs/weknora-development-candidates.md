@@ -183,3 +183,26 @@ with zero failures/skips, and complete Go compilation. Its old root-only
 `vue-tsc --noEmit` command did not select the app project. The new candidate CI
 uses `vue-tsc --noEmit -p tsconfig.app.json`; Vite builds were actual throughout.
 The current GC candidates149b2a9f/523a123b need a fresh full CI run.
+
+
+## Saved message producer core
+
+The next candidate includes151/70 actual message generation/material receipts,
+current owner/body/membership counters, transaction-local actor/share authority,
+and metadata-only parent read plans. Saved HTTP reads retain actual leases and
+source authorization through output. IndexMessageToKB consumes the original
+committed pair rather than caller-supplied Q/A text; its actual queued worker
+holds all history parent scopes through chunk writes. The core's raw user
+projection covers only authored fields and does not certify generated captions,
+checkpoints or attachments.
+
+[Core scope and remaining consumers](source-lineage-saved-message-materials.md)
+separates those paths from Agent model lifetimes, completed cached stream frames,
+clone/steer/artifact/memory and partial generated-field writers still underway.
+The owner's raw targeted log had80 pass/2 skip: two repository PG legacy-negative
+cases lacked the lease DSN. Its actual PG151 producer/worker/output path passed;
+those facts do not turn the skipped cases into passes. Root combination sets
+all owned DSNs. Its actual combined message/FAQ/collection/local-index/admin
+GC gate passed285 cases per profile with no failures or skips; both integrated
+source trees stayed clean and exact owned resources were removed.152 is an availability
+hook only until the body vault/journal module is integrated and verified.
