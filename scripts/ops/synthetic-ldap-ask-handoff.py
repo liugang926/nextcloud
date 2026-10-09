@@ -9,6 +9,7 @@ only booleans, IDs and timing, never passwords, tokens, source text or SSE.
 import argparse
 import base64
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -105,6 +106,120 @@ def citation_url(project, knowledge_id, file_id, nc_base):
     return raw
 
 
+def parse_sse_events(content):
+    """Parse actual HTTP bytes; neither references nor transport EOF are answers."""
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise RuntimeError("question stream contains invalid UTF-8") from None
+    events = []
+    for line in lines:
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == "[DONE]":
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            raise RuntimeError("question stream contains invalid JSON") from None
+        require(isinstance(event, dict), "question stream contains a non-object event")
+        events.append(event)
+    return events
+
+
+def reference_metadata(refs, knowledge_id, human_url):
+    require(isinstance(refs, list) and refs and all(isinstance(ref, dict) for ref in refs),
+            "actual answer has no structured citations")
+    require(all(ref.get("knowledge_id") == knowledge_id for ref in refs),
+            "answer cited a document outside the selected file")
+    require(any(isinstance(ref.get("metadata"), dict) and
+                ref["metadata"].get("nextcloud_human_url") == human_url for ref in refs),
+            "answer did not cite the original Files URL")
+    return {"citation_sha256": hashlib.sha256(human_url.encode()).hexdigest(),
+            "references_sha256": hashlib.sha256(json.dumps(
+                refs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()}
+
+
+def completed_answer_metadata(row, knowledge_id, human_url):
+    require(isinstance(row, dict) and row.get("role") == "assistant" and
+            row.get("is_completed") is True and isinstance(row.get("id"), str) and row["id"],
+            "actual saved answer is not a completed assistant")
+    require(isinstance(row.get("request_id"), str) and row["request_id"] and
+            isinstance(row.get("session_id"), str) and row["session_id"],
+            "actual saved answer has no producer identity")
+    content = row.get("content")
+    require(isinstance(content, str) and MARKER in content,
+            "actual saved assistant content lacks the controlled answer")
+    result = reference_metadata(row.get("knowledge_references"), knowledge_id, human_url)
+    result.update(message_id=row["id"], request_id=row["request_id"], session_id=row["session_id"],
+                  answer_sha256=hashlib.sha256(content.encode()).hexdigest(),
+                  answer_bytes=len(content.encode()))
+    return result
+
+
+def answer_stream_metadata(events, knowledge_id, human_url, saved_content=None, native_replay=False):
+    require(isinstance(events, list) and all(isinstance(event, dict) for event in events),
+            "actual answer stream events are invalid")
+    require(not any(event.get("response_type") == "error" for event in events),
+            "actual answer stream emitted an error")
+    require(not any(event.get("finish_reason") == "incomplete" or
+                    (isinstance(event.get("data"), dict) and event["data"].get("finish_reason") == "incomplete")
+                    for event in events),
+            "actual answer stream has an incomplete finish reason")
+    complete = [event for event in events if event.get("response_type") == "complete"
+                and event.get("done") is True]
+    require(len(complete) == 1, "actual answer stream did not reach one successful complete terminal")
+    complete_index = next(index for index, event in enumerate(events) if event is complete[0])
+    business_types = {"answer", "references", "thinking", "tool_call", "tool_result", "reflection", "agent_query",
+                      "user_message_injected", "context_compacted"}
+    require(not any(event.get("response_type") in business_types | {"complete"} or event.get("content")
+                    for event in events[complete_index + 1:]),
+            "actual answer stream emitted business content after complete")
+    business = [event for event in events if event.get("response_type") in business_types | {"complete"}]
+    require(all(isinstance(event.get("id"), str) and event["id"] for event in business) and
+            len({event["id"] for event in business}) == 1, "actual answer stream mixed producer request IDs")
+    queries = [event for event in events if event.get("response_type") == "agent_query"]
+    require(queries and all(isinstance(event.get("session_id"), str) and event["session_id"] and
+                            isinstance(event.get("assistant_message_id"), str) and event["assistant_message_id"]
+                            for event in queries), "actual answer stream has no producer message identity")
+    require(len({(event["session_id"], event["assistant_message_id"]) for event in queries}) == 1,
+            "actual answer stream mixed producer message IDs")
+    answers = [event for event in events if event.get("response_type") == "answer"]
+    require(answers and all(isinstance(event.get("content"), str) for event in answers),
+            "actual answer stream has no text answer frames")
+    content = "".join(event["content"] for event in answers)
+    require(MARKER in content, "actual answer frames lack the controlled answer")
+    data = complete[0].get("data") or {}
+    require(isinstance(data, dict), "actual complete terminal data is invalid")
+    if native_replay or "final_content" in data:
+        require(data.get("final_content") == content,
+                "actual native complete terminal differs from its answer frames")
+    if saved_content is not None:
+        require(content == saved_content, "actual replay answer differs from the saved original answer")
+    refs = []
+    for event in events:
+        if event.get("response_type") == "references":
+            ref_data = event.get("data") or {}
+            require(isinstance(ref_data, dict), "actual reference event data is invalid")
+            current = ref_data.get("references") or event.get("knowledge_references") or []
+            require(isinstance(current, list), "actual reference event list is invalid")
+            refs.extend(current)
+    result = reference_metadata(refs, knowledge_id, human_url)
+    result.update(answer_sha256=hashlib.sha256(content.encode()).hexdigest(),
+                  answer_bytes=len(content.encode()), successful_complete_terminal=True,
+                  request_id=business[0]["id"], session_id=queries[0]["session_id"],
+                  message_id=queries[0]["assistant_message_id"])
+    return result
+
+
+def require_same_answer_material(stream, saved):
+    require(all(stream.get(key) == saved.get(key) for key in
+                ("message_id", "request_id", "session_id", "answer_sha256", "answer_bytes",
+                 "citation_sha256", "references_sha256")),
+            "actual stream differs from its saved original producer answer or citations")
+
+
 def sse(wk_base, session_id, token, knowledge_id, model_id):
     payload = json.dumps({"query": "What is the synthetic approval code?",
                           "knowledge_ids": [knowledge_id], "agent_enabled": False,
@@ -121,17 +236,7 @@ def sse(wk_base, session_id, token, knowledge_id, model_id):
         error.read()
         raise RuntimeError(f"question stream returned HTTP {error.code}") from None
     require(len(content) <= 2 * 1024 * 1024, "question stream exceeded probe bound")
-    events = []
-    for line in content.decode("utf-8", "replace").splitlines():
-        if not line.startswith("data:"):
-            continue
-        raw = line[5:].strip()
-        if raw and raw != "[DONE]":
-            try:
-                events.append(json.loads(raw))
-            except json.JSONDecodeError:
-                raise RuntimeError("question stream contains invalid JSON") from None
-    return events
+    return parse_sse_events(content)
 
 
 def answer_and_citation(wk_base, token, runtime, human_url):
@@ -143,28 +248,24 @@ def answer_and_citation(wk_base, token, runtime, human_url):
                  runtime["chat_model_id"])
     # Inspect both the live event and its persistence. The deterministic model
     # answers the marker only when the selected source text reaches its prompt.
-    require(any(MARKER in json.dumps(item, ensure_ascii=False) for item in events
-                if item.get("response_type") == "answer"),
-            "file-scoped answer did not contain the synthetic marker")
-    refs = []
-    for event in events:
-        if event.get("response_type") == "references":
-            data = event.get("data") or {}
-            refs.extend(data.get("references") or event.get("knowledge_references") or [])
-    require(refs, "file-scoped answer emitted no citation")
-    require(all(ref.get("knowledge_id") == runtime["knowledge_id"] for ref in refs),
-            "answer cited a document outside the selected file")
-    require(any((ref.get("metadata") or {}).get("nextcloud_human_url") == human_url
-                for ref in refs), "answer did not cite the original Files URL")
+    actual_stream = answer_stream_metadata(events, runtime["knowledge_id"], human_url)
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         history_code, history = e2e["http_json"](
             wk_base, "GET", f"/api/v1/messages/{session_id}/load?limit=20",
             token=token)
         if history_code == 200:
-            raw_history = json.dumps(history, ensure_ascii=False)
-            if MARKER in raw_history and human_url in raw_history:
-                break
+            rows = history.get("data") if isinstance(history, dict) else None
+            completed = [row for row in rows if isinstance(row, dict) and row.get("role") == "assistant"
+                         and row.get("is_completed") is True] if isinstance(rows, list) else []
+            if len(completed) == 1:
+                try:
+                    saved = completed_answer_metadata(completed[0], runtime["knowledge_id"], human_url)
+                except RuntimeError:
+                    pass
+                else:
+                    require_same_answer_material(actual_stream, saved)
+                    break
         time.sleep(1)
     else:
         raise RuntimeError("authorized answer and citation were not persisted in history")

@@ -26,18 +26,29 @@ require = probe["require"]
 MARKER = probe["MARKER"]
 
 
-def history(base, session_id, token, expected):
+def history(base, session_id, token, expected, knowledge_id=None, human_url=None):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         status, response = e2e["http_json"](
             base, "GET", f"/api/v1/messages/{session_id}/load?limit=20", token=token)
         rows = response.get("data") if isinstance(response, dict) else None
         if status == 200 and isinstance(rows, list):
-            completed = [row for row in rows if row.get("role") == "assistant"
+            completed = [row for row in rows if isinstance(row, dict) and row.get("role") == "assistant"
                          and row.get("is_completed") is True]
-            if len(completed) == expected and all(
-                    MARKER in json.dumps(row, ensure_ascii=False) for row in completed):
-                return completed
+            if len(completed) == expected and len({row.get("id") for row in completed}) == expected:
+                try:
+                    for row in completed:
+                        require(row.get("session_id") == session_id,
+                                "completed answer belongs to another session")
+                        if knowledge_id is not None and human_url is not None:
+                            probe["completed_answer_metadata"](row, knowledge_id, human_url)
+                        else:
+                            require(isinstance(row.get("content"), str) and MARKER in row["content"],
+                                    "actual saved assistant content lacks the controlled answer")
+                except RuntimeError:
+                    pass
+                else:
+                    return completed
         time.sleep(0.5)
     raise RuntimeError("actual completed history did not reach the expected QA count")
 
@@ -71,11 +82,7 @@ def rejected_generation(base, session_id, token, runtime):
     except urllib.error.HTTPError as error:
         status, content = error.code, error.read(2 * 1024 * 1024 + 1)
     require(len(content) <= 2 * 1024 * 1024, "rejected QA exceeded probe bound")
-    events = []
-    if status == 200:
-        for line in content.decode("utf-8").splitlines():
-            if line.startswith("data:") and line[5:].strip() not in {"", "[DONE]"}:
-                events.append(json.loads(line[5:].strip()))
+    events = probe["parse_sse_events"](content) if status == 200 else []
     return status, content, events
 
 
@@ -92,24 +99,36 @@ def run(scratch, revoke):
     human = probe["citation_url"](state["project"], runtime["knowledge_id"],
                                   runtime["file_id"], nc_base)
     session = probe["answer_and_citation"](base, token, runtime, human)
-    first = history(base, session, token, 1)
+    first = history(base, session, token, 1, runtime["knowledge_id"], human)
+    first_material = probe["completed_answer_metadata"](first[0], runtime["knowledge_id"], human)
     events = probe["sse"](base, session, token, runtime["knowledge_id"],
                           runtime["chat_model_id"])
-    require(any(item.get("response_type") == "answer" and
-                MARKER in json.dumps(item, ensure_ascii=False) for item in events),
-            "second actual QA did not emit the controlled marker")
-    second = history(base, session, token, 2)
+    second_stream = probe["answer_stream_metadata"](events, runtime["knowledge_id"], human)
+    second = history(base, session, token, 2, runtime["knowledge_id"], human)
     require(first[0]["id"] in {row["id"] for row in second},
             "second QA replaced the first saved answer")
+    first_after = next(row for row in second if row["id"] == first[0]["id"])
+    require(probe["completed_answer_metadata"](first_after, runtime["knowledge_id"], human) == first_material,
+            "second QA changed the first original answer or citations")
+    new_answer = next(row for row in second if row["id"] != first[0]["id"])
+    probe["require_same_answer_material"](second_stream,
+        probe["completed_answer_metadata"](new_answer, runtime["knowledge_id"], human))
     for row in second:
         status, content = replay(base, session, row["id"], token)
-        require(status == 200 and MARKER.encode() in content and human.encode() in content,
-                "completed native replay did not return the original answer and citation")
+        require(status == 200, "completed native replay did not return HTTP200")
+        replay_material = probe["answer_stream_metadata"](probe["parse_sse_events"](content), runtime["knowledge_id"], human,
+                                                            saved_content=row["content"], native_replay=True)
+        probe["require_same_answer_material"](replay_material,
+            probe["completed_answer_metadata"](row, runtime["knowledge_id"], human))
     result = {"checked_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
               "project": state["project"], "ldap_mode": state["mode"],
               "session_id": session, "actual_qa_rounds": 2,
               "completed_history_count": len(second), "completed_replays": len(second),
-              "original_citations": True, "source_revocation_checked": False}
+              "original_citations": True, "source_revocation_checked": False,
+              "first_answer_preserved": True, "live_qa_complete_terminals": 2,
+              "completed_history_messages": sorted([
+                  probe["completed_answer_metadata"](row, runtime["knowledge_id"], human) for row in second],
+                  key=lambda row: row["message_id"]), "running_replay_accepted": False}
     if revoke:
         probe["revoke_source_share"](nc_base, passwords, runtime["share_id"])
         deadline = time.monotonic() + 60

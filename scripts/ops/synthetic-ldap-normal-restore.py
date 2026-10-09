@@ -137,6 +137,16 @@ def nc_application_provenance(repository=ROOT):
         'source_files':len(entries)}
 
 
+def actual_two_round_baseline(baseline,project):
+    require(isinstance(baseline,dict) and baseline.get('project')==project and
+            type(baseline.get('actual_qa_rounds')) is int and baseline['actual_qa_rounds']==2 and
+            type(baseline.get('completed_history_count')) is int and baseline['completed_history_count']==2 and
+            baseline.get('first_answer_preserved') is True and baseline.get('live_qa_complete_terminals')==2,
+            'baseline_actual_two_round_history_required')
+    require(isinstance(baseline.get('session_id'),str) and
+            str(uuid.UUID(baseline['session_id']))==baseline['session_id'],'baseline_session_id_invalid')
+
+
 class Restore:
     def __init__(self,scratch,manifest,profile,evidence):
         self.directory,self.state=owner['owned_state'](scratch)
@@ -284,23 +294,34 @@ class Restore:
 
     def token(self):return qa['wait_ldap_login'](self.wk_base,'alice',self.passwords['alice'])
     def history_receipt(self,create=False,original=None,baseline=None):
+        if baseline:actual_two_round_baseline(baseline,self.project)
         token=self.token();human=qa['citation_url'](self.project,self.runtime['knowledge_id'],self.runtime['file_id'],self.nc_base)
         if create:
             session=qa['answer_and_citation'](self.wk_base,token,self.runtime,human);expected=1
         elif baseline:
-            require(baseline.get('project')==self.project and type(baseline.get('completed_history_count')) is int and
-                0<baseline['completed_history_count']<=10,'baseline_history_fixture_or_count_invalid')
             session=baseline['session_id'];expected=baseline['completed_history_count']
         else:session=original['session_id'];expected=original['completed_count']
-        rows=history['history'](self.wk_base,session,token,expected)
+        rows=history['history'](self.wk_base,session,token,expected,self.runtime['knowledge_id'],human)
         ids=sorted(row['id'] for row in rows)
+        answer_materials=sorted([qa['completed_answer_metadata'](row,self.runtime['knowledge_id'],human)
+                                for row in rows],key=lambda row:row['message_id'])
+        if baseline:
+            require(answer_materials==baseline.get('completed_history_messages'),
+                    'actual_baseline_answer_or_citation_changed')
         if original:
             require(ids==original['message_ids'] and hashlib.sha256(human.encode()).hexdigest()==original['citation_sha256'],
                     'original_completed_message_ids_or_citation_changed')
+            require(answer_materials==original.get('actual_answer_materials'),
+                    'restored_original_http_answer_or_citations_changed')
         replay_facts={}
         for message in ids:
             code,raw=history['replay'](self.wk_base,session,message,token)
-            require(code==200 and qa['MARKER'].encode() in raw and human.encode() in raw,'original_native_replay_or_citation_failed')
+            require(code==200,'original_native_replay_http_failed')
+            message_row=next(row for row in rows if row['id']==message)
+            replay_material=qa['answer_stream_metadata'](qa['parse_sse_events'](raw),self.runtime['knowledge_id'],human,
+                                                       saved_content=message_row['content'],native_replay=True)
+            qa['require_same_answer_material'](replay_material,
+                qa['completed_answer_metadata'](message_row,self.runtime['knowledge_id'],human))
             replay_facts[message]={'http_status':code,'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)}
         # Actual original admissions, generation origins and body heads are
         # required; HTTP success/prepared state cannot replace these facts.
@@ -327,6 +348,7 @@ class Restore:
         return {'session_id':session,'message_ids':ids,'completed_count':len(ids),
             'citation_sha256':hashlib.sha256(human.encode()).hexdigest(),'original_body_proof':proof,
             'material_receipts':originals,'message_body_heads':body_heads,'replay_metadata':replay_facts,
+            'actual_answer_materials':answer_materials,
             'history_original':True,'native_completed_replay_original':True}
 
     def anchor_volume_facts(self):

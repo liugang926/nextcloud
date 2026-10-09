@@ -32,6 +32,14 @@ including required HTTP, PostgreSQL, Redis and summary regressions. The
 verified against both preceding candidate CI artifacts and preserved real
 failure logs. This does not establish full application or V1 acceptance.
 
+The history/clean-restore probes now pin the actual producer identities,
+assistant content and structured citations across live generation, saved
+history, completed replay and restoration. They require successful terminals
+and an actual two-round baseline. The
+[criterion regressions](evidence/actual-history-criteria-20261009.json)
+passed, while running replay and the next full application trial remain
+unaccepted.
+
 The remaining V1 work includes the full normal QA/source-revocation loop;
 clean and stale-publication recovery plus real pending-Auto fault recovery;
 Steer and other exposed consumer original-material/lifetime coverage; old
