@@ -70,6 +70,16 @@ unaccepted. Candidate CI's complete compile and frontend checks now have a
 55-minute outer budget after an observed 35-minute timeout interrupted the C6
 frontend step; the selected Go test timeout and assertions are unchanged.
 
+The clean restore driver now restores the actual private control files and
+requires a genuine Nextcloud `default_language` fault to change `config.php`.
+The checkpoint must contain that exact file in its cold `nc-html` archive;
+after full data restoration, PHP and `occ` must prove the original configuration
+hash and value returned. The driver checks the same owner, source, candidate,
+image, model and resource profile before and after restoring controls, and
+excludes CURRENT body/publication anchors. [Preparation checks](evidence/configuration-restore-preparation-20261009.json)
+passed 70 tests, including actual temporary-file restoration; the complete
+application configuration fault and restore have not yet run.
+
 The remaining V1 work includes the full normal QA/source-revocation loop;
 clean and stale-publication recovery plus real pending-Auto fault recovery;
 Steer and other exposed consumer original-material/lifetime coverage; old

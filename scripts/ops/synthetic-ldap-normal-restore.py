@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -86,6 +87,178 @@ def write_json(path,data):
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
 
+def private_control_bytes(path):
+    """Read one private control without following a replaced path or hardlink."""
+    path=plain(path);before=path.lstat()
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'rb') as stream:
+        opened=os.fstat(stream.fileno())
+        require((opened.st_dev,opened.st_ino)==(before.st_dev,before.st_ino) and
+                opened.st_uid==os.getuid() and stat.S_ISREG(opened.st_mode) and
+                stat.S_IMODE(opened.st_mode)==0o600 and opened.st_nlink==1,
+                'private_control_changed_during_read')
+        require(opened.st_size<=10*1024*1024,'private_control_size_limit')
+        raw=stream.read(10*1024*1024+1)
+        after=os.fstat(stream.fileno())
+    require(len(raw)==opened.st_size and after.st_uid==os.getuid() and
+            stat.S_ISREG(after.st_mode) and stat.S_IMODE(after.st_mode)==0o600 and after.st_nlink==1 and
+            (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==
+            (opened.st_dev,opened.st_ino,opened.st_size,opened.st_mtime_ns) and
+            path.lstat()==after,'private_control_changed_during_read')
+    return raw
+
+def control_identity(state):
+    return {'project':state['project'],
+        'owner_token_sha256':hashlib.sha256(state['owner_token'].encode()).hexdigest(),
+        'compose_fingerprint':state['compose_fingerprint'],
+        'app_image_id':state['weknora_image_id'],'ui_image_id':state.get('weknora_ui_image_id'),
+        'mock_model_code_sha256':state.get('mock_model_code_sha256'),
+        'mock_chat_stream_delay_max_seconds':state.get('mock_chat_stream_delay_max_seconds',0),
+        'resource_profile':state.get('resource_profile','default')}
+
+def checked_checkpoint_controls(directory,evidence,state,checkpoint,provenance,control_fault=None):
+    """Pin current ownership before permitting only the recorded query fault.
+
+    This never repairs ownership, Compose/image pins, model code, runtime source
+    IDs or keys from a backup. Their exact current bytes must already match.
+    CURRENT body/publication anchors are outside the explicit control whitelist.
+    """
+    directory=plain(directory,True);evidence=plain(evidence,True)
+    require(directory!=evidence and directory not in evidence.parents and evidence not in directory.parents,
+            'control_backup_must_be_independent')
+    current_directory,current_state=owner['owned_state'](directory)
+    require(current_directory==directory and current_state==state,'current_control_owner_changed')
+    identity=control_identity(state)
+    require(checkpoint.get('project')==state['project'] and
+            checkpoint.get('owner_token_sha256')==identity['owner_token_sha256'] and
+            checkpoint.get('candidate')==provenance and
+            checkpoint.get('configuration_control_identity')==identity,'checkpoint_control_owner_candidate_changed')
+    require(provenance.get('app',{}).get('image_id')==state['weknora_image_id'] and
+            (not state.get('weknora_ui_image') or
+             provenance.get('ui',{}).get('image_id')==state['weknora_ui_image_id']),
+            'checkpoint_control_immutable_image_changed')
+    names=control_files_for_state(state)
+    artifacts=checkpoint['artifacts']
+    require({name for name in artifacts if name.startswith('control-')}=={'control-'+name for name in names},
+            'checkpoint_control_inventory_changed')
+    saved={};current={};facts={}
+    for name in names:
+        raw=private_control_bytes(evidence/('control-'+name));entry=artifacts['control-'+name]
+        digest=hashlib.sha256(raw).hexdigest()
+        require(entry.get('sha256')==digest and type(entry.get('bytes')) is int and entry['bytes']==len(raw),
+                'checkpoint_control_artifact_changed')
+        saved[name]=raw;current[name]=private_control_bytes(directory/name)
+        facts[name]={'checkpoint_sha256':digest,'current_sha256':hashlib.sha256(current[name]).hexdigest(),
+                     'bytes':len(raw)}
+    require(json.loads(saved['state.json'])==state,'checkpoint_control_state_changed')
+    saved_compose=json.loads(saved['compose.yaml'])
+    require(owner['compose_fingerprint'](saved_compose)==state['compose_fingerprint'],
+            'checkpoint_control_compose_changed')
+    owner['assert_state_matches_compose'](state,saved_compose)
+    if state.get('mock_model_code_sha256'):
+        require(hashlib.sha256(saved['mock_embedding.py']).hexdigest()==state['mock_model_code_sha256'],
+                'checkpoint_control_model_changed')
+    for name in names:
+        if name!='fixture.json' or control_fault is None:
+            require(current[name]==saved[name],'unrecorded_current_control_change')
+            continue
+        require(isinstance(control_fault,dict) and control_fault.get('file')=='fixture.json' and
+                control_fault.get('field')=='synthetic_query' and
+                control_fault.get('checkpoint_sha256')==facts[name]['checkpoint_sha256'] and
+                control_fault.get('fault_sha256')==facts[name]['current_sha256'] and
+                facts[name]['checkpoint_sha256']!=facts[name]['current_sha256'],'recorded_control_fault_changed')
+        before=json.loads(saved[name]);after=json.loads(current[name])
+        query=after.get('synthetic_query')
+        require(isinstance(query,str) and query.startswith('owned restore control fault ') and
+                query!=before.get('synthetic_query'),'recorded_control_fault_query_missing')
+        after['synthetic_query']=before.get('synthetic_query')
+        require(after==before,'control_fault_changed_original_identity')
+    return saved,facts
+
+def replace_private_control(path,raw,expected_current_sha256):
+    """Atomically write exact checkpoint bytes, refusing a changed destination."""
+    require(path.name in CONTROL_FILES+('mock_embedding.py',),'refused_unknown_control_restore')
+    plain(path.parent,True)
+    require(hashlib.sha256(private_control_bytes(path)).hexdigest()==expected_current_sha256,
+            'current_control_changed_before_restore')
+    fd,name=tempfile.mkstemp(dir=path.parent,prefix='.restore-control-')
+    temporary=Path(name)
+    try:
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        require(hashlib.sha256(private_control_bytes(path)).hexdigest()==expected_current_sha256,
+                'current_control_changed_before_restore')
+        os.replace(temporary,path)
+        fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        require(private_control_bytes(path)==raw,'actual_control_restore_bytes_changed')
+    finally:temporary.unlink(missing_ok=True)
+
+def restore_checkpoint_controls(directory,evidence,state,checkpoint,provenance,control_fault):
+    """Actual private file restoration; callers must also fence live resources."""
+    saved,before=checked_checkpoint_controls(directory,evidence,state,checkpoint,provenance,control_fault)
+    require(control_fault is not None,'actual_nonanchor_control_fault_required')
+    for name,raw in saved.items():
+        replace_private_control(directory/name,raw,before[name]['current_sha256'])
+    _,after=checked_checkpoint_controls(directory,evidence,state,checkpoint,provenance)
+    return {'actual_checkpoint_controls_restored':True,'control_identity':control_identity(state),
+            'files':after,'fault_file':'fixture.json','fault_field':'synthetic_query',
+            'fault_before_restore_sha256':before['fixture.json']['current_sha256'],
+            'fault_absent_after_restore':after['fixture.json']['current_sha256']==before['fixture.json']['checkpoint_sha256']}
+
+def fault_checkpoint_control(directory,evidence,state,checkpoint,provenance):
+    saved,facts=checked_checkpoint_controls(directory,evidence,state,checkpoint,provenance)
+    fixture=json.loads(saved['fixture.json'])
+    require(isinstance(fixture.get('synthetic_query'),str),'checkpoint_control_query_missing')
+    fixture['synthetic_query']='owned restore control fault '+uuid.uuid4().hex
+    raw=json.dumps(fixture,sort_keys=True,indent=2).encode()+b'\n'
+    replace_private_control(directory/'fixture.json',raw,facts['fixture.json']['current_sha256'])
+    fault={'file':'fixture.json','field':'synthetic_query',
+           'checkpoint_sha256':facts['fixture.json']['checkpoint_sha256'],
+           'fault_sha256':hashlib.sha256(raw).hexdigest()}
+    checked_checkpoint_controls(directory,evidence,state,checkpoint,provenance,fault)
+    return fault
+
+NC_CONFIG_ABSENT='__NORMAL_RESTORE_ABSENT__'
+NC_CONFIG_FACT_SCRIPT="""$path='/var/www/html/config/config.php';
+if (!is_file($path) || is_link($path)) {exit(1);}
+$CONFIG=[];require $path;
+$present=array_key_exists('default_language',$CONFIG);
+$other=$CONFIG;unset($other['default_language']);
+echo json_encode(['config_php_sha256'=>hash_file('sha256',$path),
+ 'configuration_except_language_sha256'=>hash('sha256',serialize($other)),
+ 'default_language_present'=>$present,
+ 'config_php_default_language'=>$present?$CONFIG['default_language']:null],JSON_THROW_ON_ERROR);
+"""
+
+def checked_nc_configuration(facts):
+    require(isinstance(facts,dict) and set(facts)=={'config_php_sha256','configuration_except_language_sha256','default_language_present',
+            'config_php_default_language','occ_default_language'} and
+            isinstance(facts.get('config_php_sha256'),str) and HASH.fullmatch(facts['config_php_sha256']) and
+            isinstance(facts.get('configuration_except_language_sha256'),str) and HASH.fullmatch(facts['configuration_except_language_sha256']) and
+            type(facts.get('default_language_present')) is bool,'actual_nc_configuration_metadata_invalid')
+    for key in ('config_php_default_language','occ_default_language'):
+        value=facts[key]
+        require(value is None or isinstance(value,str) and re.fullmatch(r'[A-Za-z]{2,8}(?:[_-][A-Za-z0-9]{2,8})?',value),
+                'actual_nc_configuration_language_invalid')
+    require(facts['default_language_present']==(facts['config_php_default_language'] is not None),
+            'actual_nc_configuration_presence_invalid')
+    return facts
+
+def nc_configuration_fault_guard(checkpoint,current,fault):
+    checked_nc_configuration(checkpoint);checked_nc_configuration(current)
+    require(isinstance(fault,dict) and fault.get('setting')=='default_language' and
+            fault.get('value') in ('fr','de') and
+            fault.get('checkpoint_config_php_sha256')==checkpoint['config_php_sha256'] and
+            fault.get('fault_config_php_sha256')==current['config_php_sha256'] and
+            current['config_php_sha256']!=checkpoint['config_php_sha256'] and
+            current['configuration_except_language_sha256']==checkpoint['configuration_except_language_sha256'] and
+            current['default_language_present'] is True and
+            current['config_php_default_language']==current['occ_default_language']==fault['value'] and
+            current['occ_default_language']!=checkpoint['occ_default_language'],
+            'actual_nc_configuration_fault_not_established')
+
 def command(arguments,stdin=None,stdout=None,timeout=180):
     input_args={'input':stdin} if isinstance(stdin,bytes) else {'stdin':stdin or subprocess.DEVNULL}
     result=subprocess.run(arguments,**input_args,stdout=stdout or subprocess.PIPE,
@@ -106,6 +279,17 @@ def inspect_tar(path):
             if item.issym() or item.islnk():
                 target=Path(item.linkname)
                 require(not target.is_absolute() and '..' not in target.parts,'unsafe_tar_link')
+
+def nc_config_archive_sha256(path):
+    """Prove the actual nc-html restore input contains the pinned config.php."""
+    inspect_tar(path)
+    with tarfile.open(path,'r') as archive:
+        matches=[item for item in archive if Path(item.name)==Path('config/config.php')]
+        require(len(matches)==1 and matches[0].isfile() and matches[0].size<=10*1024*1024,
+                'checkpoint_nc_configuration_archive_missing_or_ambiguous')
+        with archive.extractfile(matches[0]) as stream:raw=stream.read(10*1024*1024+1)
+    require(len(raw)==matches[0].size,'checkpoint_nc_configuration_archive_truncated')
+    return hashlib.sha256(raw).hexdigest()
 
 def pinned_publication(checkpoint):
     current=checkpoint['publication_anchor_current']
@@ -196,6 +380,8 @@ class Restore:
         self.errors=None
 
     def owned(self):
+        directory,state=owner['owned_state'](self.directory)
+        require(directory==self.directory and state==self.state,'current_fixture_control_identity_changed')
         owner['assert_owned_resources'](self.directory,self.state)
         if hasattr(self,'provenance'):
             require(nc_application_provenance(self.nc_source_root)==self.provenance['nextcloud_app'],'nextcloud_application_source_changed')
@@ -421,6 +607,50 @@ cat "$d/output"
             '--name',self.project+'-nextcloud-99','--user','www-data','--entrypoint','php','nextcloud','occ',*args),timeout=120)
         self.owned();return raw
 
+    def nc_configuration(self,offline=False):
+        # Only the known nonsecret setting and config.php hash cross this
+        # boundary. Never emit config:list, file bytes, environment or secrets.
+        if offline:
+            for service in self.actors():self.stopped(service)
+            prefix=owner['compose_command'](self.directory,self.state,'run','-T','--rm','--no-deps',
+                '--name',self.project+'-nextcloud-99','--user','www-data','--entrypoint','php','nextcloud')
+        else:
+            require(owner['docker_inspect']('container',self.nc)['State']['Running'] is True,
+                    'actual_nc_configuration_reader_not_running')
+            prefix=['docker','exec','--user','www-data',self.nc,'php']
+        self.owned();raw=command([*prefix,'-r',NC_CONFIG_FACT_SCRIPT],timeout=120);self.owned()
+        facts=json.loads(raw)
+        self.owned();value=command([*prefix,'occ','config:system:get','default_language',
+            '--default-value='+NC_CONFIG_ABSENT],timeout=120).decode().strip();self.owned()
+        facts['occ_default_language']=None if value==NC_CONFIG_ABSENT else value
+        return checked_nc_configuration(facts)
+
+    def fault_nc_configuration(self,checkpoint):
+        before=self.nc_configuration()
+        require(before==checkpoint['nextcloud_configuration'],'pre_fault_nc_configuration_changed')
+        value='de' if before['occ_default_language']=='fr' else 'fr'
+        self.owned();command(['docker','exec','--user','www-data',self.nc,'php','occ','config:system:set',
+            'default_language','--type=string','--value='+value],timeout=120);self.owned()
+        after=self.nc_configuration()
+        fault={'setting':'default_language','value':value,
+               'checkpoint_config_php_sha256':before['config_php_sha256'],
+               'fault_config_php_sha256':after['config_php_sha256']}
+        nc_configuration_fault_guard(before,after,fault)
+        return fault
+
+    def restored_configuration(self,checkpoint,restored):
+        require(restored.get('actual_nc_configuration_restored') is True and
+                restored.get('nextcloud_configuration')==checkpoint['nextcloud_configuration'] and
+                self.nc_configuration(offline=True)==checkpoint['nextcloud_configuration'],
+                'actual_nc_configuration_restore_missing_or_changed')
+        controls=restored.get('configuration_controls',{})
+        require(controls.get('actual_checkpoint_controls_restored') is True and
+                controls.get('fault_absent_after_restore') is True and
+                controls.get('control_identity')==control_identity(self.state),
+                'actual_control_configuration_restore_missing')
+        _,facts=checked_checkpoint_controls(self.directory,self.evidence,self.state,checkpoint,self.provenance)
+        require(controls.get('files')==facts,'actual_restored_control_bytes_changed')
+
     def nc_recovery(self,plan,key,inspect=False):
         for service in self.actors():self.stopped(service)
         payload=io.BytesIO()
@@ -511,6 +741,7 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         self.idle();identity=self.identity();source=self.source_scope();anchors=self.anchor_volume_facts()
         publication_current=self.publication_current()
         self.stop_actors();self.packaged_tools();self.body_cli('verify')
+        nc_configuration=self.nc_configuration(offline=True)
         inventory=self.original_inventory(publication_current)
         files={}
         for role,container,user,database in [('nc',self.nc_db,'nextcloud','nextcloud'),('wk',self.wk_db,'weknora','weknora')]:
@@ -520,6 +751,8 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         # during storage archives; body volumes stay present and unmodified.
         self.compose('stop','nc-db','wk-db','nc-redis','wk-redis')
         for role in sorted(DATA_VOLUMES):files[role+'.tar']=self.archive(role,self.evidence/(role+'.tar'))
+        require(nc_config_archive_sha256(self.evidence/'nc-html.tar')==nc_configuration['config_php_sha256'],
+                'checkpoint_nc_configuration_archive_changed')
         for name in self.control_files:
             destination=self.evidence/('control-'+name)
             legacy['copy_private'](self.directory/name,destination)
@@ -527,10 +760,12 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         manifest={'schema_version':1,'status':'COMPLETE','project':self.project,
             'owner_token_sha256':hashlib.sha256(self.state['owner_token'].encode()).hexdigest(),
             'candidate':self.provenance,'identity':identity,'source_scope':source,'saved_history':receipt,'artifacts':files,
+            'configuration_control_identity':control_identity(self.state),'nextcloud_configuration':nc_configuration,
             'original_inventory':inventory,'external_recovery_anchor':publication_current['anchor'],
             'weknora_recovery_inventory':inventory['binding'],'all_services_stopped_at_completion':True,
             'body_anchor_volumes_current':anchors,'publication_anchor_current':publication_current,
             'all_apps_readers_builders_stopped':True,'pending_auto_restore_accepted':False}
+        checked_checkpoint_controls(self.directory,self.evidence,self.state,manifest,self.provenance)
         write_json(self.evidence/'checkpoint.json',manifest)
         write_json(Path(publication_current['directory'])/'checkpoint-pin.json',
             {'project':self.project,'checkpoint_sha256':sha(self.evidence/'checkpoint.json'),'candidate':self.provenance})
@@ -539,7 +774,9 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
     def load_checkpoint(self):
         checkpoint=json.loads(plain(self.evidence/'checkpoint.json').read_text())
         require(checkpoint.get('status')=='COMPLETE' and checkpoint.get('project')==self.project and
-            checkpoint.get('candidate')==self.provenance,'checkpoint_owner_candidate_changed')
+            checkpoint.get('candidate')==self.provenance and
+            checkpoint.get('owner_token_sha256')==hashlib.sha256(self.state['owner_token'].encode()).hexdigest(),
+            'checkpoint_owner_candidate_changed')
         for name,entry in checkpoint['artifacts'].items():
             require(Path(name).name==name and HASH.fullmatch(entry['sha256']) and
                 sha(plain(self.evidence/name))==entry['sha256'],'checkpoint_artifact_changed')
@@ -575,9 +812,12 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
             else:raise RuntimeError('restored_health_timeout')
 
     def fault(self,stale=False):
-        # A real unpublished file + real personal session exercise both data
-        # systems without revoking the original source needed for clean replay.
+        # Real NC system configuration, an unpublished file, a WK personal
+        # session and probe controls exercise the actual restore inputs.
         self.resume_checkpoint_for_fault()
+        checkpoint=self.load_checkpoint()
+        checked_checkpoint_controls(self.directory,self.evidence,self.state,checkpoint,self.provenance)
+        configuration_fault=self.fault_nc_configuration(checkpoint)
         basic=base64.b64encode(('devadmin:'+self.passwords['nc_admin']).encode()).decode()
         path=self.nc_base+'/remote.php/dav/files/devadmin/restore-fault-'+uuid.uuid4().hex+'.txt'
         code,_=request(urllib.request.build_opener(),path,'PUT',{'Authorization':'Basic '+basic},b'owned unpublished restore fault bytes')
@@ -593,9 +833,11 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         checkpoint=self.load_checkpoint()
         if not stale:require(self.source_scope()==checkpoint['source_scope'],'fault_changed_original_source_scope')
         self.stop_actors()
+        control_fault=fault_checkpoint_control(self.directory,self.evidence,self.state,checkpoint,self.provenance)
         fault={'source_unchanged':not stale,'mode':'stale_publication' if stale else 'clean','file_path':path,'file_path_sha256':hashlib.sha256(path.encode()).hexdigest(),
-            'wk_session_id':created['data']['id'],'publication_current':current,'body_anchors_retained':self.anchor_volume_facts()}
-        write_json(self.evidence/'actual-fault.json',fault);self.record('actual_unpublished_file_and_personal_session_fault')
+            'wk_session_id':created['data']['id'],'publication_current':current,'body_anchors_retained':self.anchor_volume_facts(),
+            'nextcloud_configuration_fault':configuration_fault,'configuration_control_fault':control_fault}
+        write_json(self.evidence/'actual-fault.json',fault);self.record('actual_unpublished_file_personal_session_and_configuration_fault')
 
     def stale_fault(self):self.fault(True)
 
@@ -604,7 +846,21 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         require(fault.get('mode') in ('clean','stale_publication') and fault['body_anchors_retained']==checkpoint['body_anchor_volumes_current'],
             'actual_fault_scope_or_current_anchor_changed')
         for service in self.actors():self.stopped(service)
+        require(nc_config_archive_sha256(self.evidence/'nc-html.tar')==checkpoint['nextcloud_configuration']['config_php_sha256'],
+                'checkpoint_nc_configuration_archive_changed')
+        nc_configuration_fault_guard(checkpoint['nextcloud_configuration'],self.nc_configuration(offline=True),
+                                     fault.get('nextcloud_configuration_fault'))
         self.no_external_workers();self.compose('stop','nc-db','wk-db','nc-redis','wk-redis')
+        self.owned()
+        configuration_controls=restore_checkpoint_controls(self.directory,self.evidence,self.state,checkpoint,
+            self.provenance,fault.get('configuration_control_fault'))
+        directory,state=owner['owned_state'](self.directory)
+        require(directory==self.directory and state==self.state,'restored_control_owner_changed')
+        require(json.loads(private_control_bytes(self.directory/'runtime.json'))==self.runtime and
+                json.loads(private_control_bytes(self.directory/'passwords.json'))==self.passwords,
+                'restored_source_or_credentials_changed')
+        self.fixture=json.loads(private_control_bytes(self.directory/'fixture.json'))
+        self.owned()
         for role in sorted(DATA_VOLUMES):
             volume_restore_guard(role);source=plain(self.evidence/(role+'.tar'));inspect_tar(source)
             # The entire mount is one exact owned role, never an anchor. No
@@ -635,8 +891,15 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         require(self.sql(f"SELECT count(*) FROM sessions WHERE id='{fault_session}'")==0,
                 'post_checkpoint_personal_session_survived_actual_restore')
         require(self.anchor_volume_facts()==checkpoint['body_anchor_volumes_current'],'current_anchors_replaced')
+        nc_configuration=self.nc_configuration(offline=True)
+        require(nc_configuration==checkpoint['nextcloud_configuration'],'actual_nc_configuration_not_restored')
         write_json(self.evidence/'actual-data-restore.json',{'checkpoint_sha256':sha(self.evidence/'checkpoint.json'),
             'actual_dual_full_pg_restore':True,'actual_original_data_volumes_restored':sorted(DATA_VOLUMES),
+            'actual_nc_configuration_restored':True,'nextcloud_configuration':nc_configuration,
+            'configuration_controls':configuration_controls,
+            'configuration_restore_inputs':{'nextcloud':'nc-html.tar','weknora_runtime':'wk.dump',
+                'private_controls':['control-'+name for name in self.control_files]},
+            'current_body_or_independent_publication_anchors_restored':False,
             'fault_session_absent':True,'body_anchor_volumes_current':self.anchor_volume_facts(),'all_actors_closed':True})
         self.record('application_data_restored_apps_closed',redis_queue_policy='owned_empty_sql_authoritative')
 
@@ -648,6 +911,7 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
                 'actual_dual_restore_boundary_missing')
         self.no_external_workers()
         for service in self.actors():self.stopped(service)
+        self.restored_configuration(checkpoint,restored)
         self.packaged_tools()
         if upgrade:self.body_cli('upgrade-scopes','body_owner_explicit_upgrade')
         self.body_cli('reconcile');self.body_cli('verify')
@@ -753,6 +1017,7 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         restored=json.loads(plain(self.evidence/'actual-data-restore.json').read_text())
         require(restored['checkpoint_sha256']==sha(self.evidence/'checkpoint.json'),'actual_dual_restore_boundary_missing')
         for service in self.actors():self.stopped(service)
+        self.restored_configuration(checkpoint,restored)
         self.no_external_workers();self.packaged_tools()
         plan_fact=json.loads(plain(self.evidence/'actual-stale-plan.json').read_text())
         raw=plain(Path(plan_fact['path'])).read_bytes();require(sha(Path(plan_fact['path']))==plan_fact['sha256'],'retained_plan_changed')
