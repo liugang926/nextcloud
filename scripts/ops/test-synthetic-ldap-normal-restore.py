@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline guard tests; no backups, fixtures or restore claims are produced."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import runpy
@@ -13,6 +14,56 @@ import uuid
 P=runpy.run_path(str(Path(__file__).with_name('synthetic-ldap-normal-restore.py')))
 
 class RestoreGuardTest(unittest.TestCase):
+    def test_roles_compare_normalizes_only_the_matched_restriction_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory=Path(directory).resolve()
+            before=directory/'before.sql';after=directory/'after.sql'
+            roles=(b'CREATE ROLE employee;\n'
+                   b'ALTER ROLE employee WITH NOSUPERUSER LOGIN PASSWORD \'original\';\n'
+                   b'GRANT reader TO employee;\n')
+            original=b'\\restrict RandomOriginalToken\n'+roles+b'\\unrestrict RandomOriginalToken\n'
+            current=b'\\restrict RandomCurrentToken\n'+roles+b'\\unrestrict RandomCurrentToken\n'
+            for path,raw in ((before,original),(after,current)):
+                path.write_bytes(raw);path.chmod(0o600)
+            self.assertNotEqual(P['sha'](before),P['sha'](after))
+            self.assertEqual(P['role_dump_comparison_sha256'](before),P['role_dump_comparison_sha256'](after))
+            for old,new in ((b'NOSUPERUSER',b'SUPERUSER'),(b'original',b'changed'),
+                            (b'GRANT reader',b'GRANT administrator'),(b'employee',b'other')):
+                with self.subTest(change=new):
+                    after.write_bytes(current.replace(old,new))
+                    self.assertNotEqual(P['role_dump_comparison_sha256'](before),P['role_dump_comparison_sha256'](after))
+            self.assertEqual(before.read_bytes(),original)
+
+    def test_roles_compare_rejects_invalid_restriction_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory).resolve()/'roles.sql'
+            for raw in (b'\\restrict OnlyOne\n',b'\\unrestrict Reverse\n\\restrict Reverse\n',
+                        b'\\restrict First\n\\unrestrict Second\n',
+                        b'\\restrict Duplicate\n\\restrict Duplicate\n\\unrestrict Duplicate\n',
+                        b'\\restrict Token --unexpected\n\\unrestrict Token\n'):
+                with self.subTest(raw=raw):
+                    path.write_bytes(raw);path.chmod(0o600)
+                    with self.assertRaisesRegex(RuntimeError,'invalid_role_dump_restrict_pair'):
+                        P['role_dump_comparison_sha256'](path)
+
+    def test_roles_dump_retains_raw_backup_and_its_integrity_hash(self):
+        probe=object.__new__(P['Restore'])
+        globals_=P['Restore'].dump.__globals__
+        raw=b'\\restrict ActualToken\nCREATE ROLE employee;\n\\unrestrict ActualToken\n'
+        def dump_command(arguments,stdout,timeout):
+            self.assertEqual(arguments,['docker','exec','owned-db','pg_dumpall','-U','owned-user','--roles-only'])
+            stdout.write(raw)
+            return b''
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory).resolve()/'roles.sql'
+            with mock.patch.dict(globals_,{'command':dump_command}):
+                facts=probe.dump('owned-db','owned-user','owned-database',path,True)
+            self.assertEqual(path.read_bytes(),raw)
+            self.assertEqual(facts['sha256'],hashlib.sha256(raw).hexdigest())
+            self.assertEqual(facts['role_comparison_sha256'],P['role_dump_comparison_sha256'](path))
+            self.assertEqual(facts['bytes'],len(raw))
+            self.assertEqual(path.stat().st_mode&0o777,0o600)
+
     def test_never_restore_current_anchor_volume(self):
         for role in P['DATA_VOLUMES']:P['volume_restore_guard'](role)
         for role in (*P['BODY_VOLUMES'],'wk-postgres','foreign'):
@@ -44,6 +95,24 @@ class RestoreGuardTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):probe.body_cli('init')
         with self.assertRaises(RuntimeError):probe.body_cli('migrate')
         with self.assertRaises(RuntimeError):probe.body_cli('upgrade')
+        with self.assertRaisesRegex(RuntimeError,'body_upgrade_not_authorized'):probe.body_cli('upgrade-scopes')
+
+    def test_authorized_scope_upgrade_uses_the_actual_packaged_cli_mode(self):
+        probe=object.__new__(P['Restore'])
+        probe.directory=Path('/private/owned');probe.state={'owner':'pinned'};probe.project='nc-synldap-01234567'
+        probe.actors=lambda:['wk-app','nextcloud'];probe.stopped=mock.Mock()
+        probe.owned=mock.Mock();probe.record=mock.Mock()
+        command=mock.Mock(return_value=b'')
+        globals_=P['Restore'].body_cli.__globals__
+        fake_owner=dict(globals_['owner'])
+        fake_owner['compose_command']=lambda directory,state,*args:['owned-compose',*args]
+        with mock.patch.dict(globals_,{'owner':fake_owner,'command':command}):
+            probe.body_cli('upgrade-scopes','body_owner_explicit_upgrade')
+        arguments=command.call_args.args[0]
+        self.assertEqual(arguments[-1],'upgrade-scopes')
+        self.assertIn('original-body-retention -driver postgres -mode "$1"',arguments[-3])
+        self.assertEqual(probe.stopped.call_args_list,[mock.call('wk-app'),mock.call('nextcloud')])
+        probe.record.assert_called_once_with('packaged_body_upgrade-scopes',terminal=0)
 
     def test_actual_stopped_state_is_required_for_cli(self):
         probe=object.__new__(P['Restore'])

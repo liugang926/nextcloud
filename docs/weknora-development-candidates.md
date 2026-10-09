@@ -323,3 +323,30 @@ generated/fork parent-copy leaves remain inventoried and retained when
 original copy/lifecycle proof is insufficient; they are not reported as
 physically cleared. That cleanup protocol, Steer154/73, remaining consumer
 lifetimes, full application acceptance and performance are active work.
+
+## Resumed build and recovery verification — 2026-10-09
+
+Submission `e26b22d` passed all twelve push/PR jobs. Downloaded PR artifacts
+contain, per profile, 934 producer cases, 16 QA terminal cases, 35 local-derived
+cases and 11 native halfvec cases, with zero failures or skips. Complete
+compilation passed 115 packages; the actual frontend app project typecheck and
+build passed. The retained artifact hashes and source identities are in
+`submission_e26b22d_ci` in the evidence JSON. These results cover the preceding
+`4866f7be` / `c39e7e4e` sources.
+
+The resumed normal build initially failed downloading `migrate@latest`, which
+resolved beyond the module's pinned dependency. Candidates `85e29999` /
+`400d4392` now pin the tool to the existing `go.mod` version `v4.19.1` and enable
+the official Go checksum database by default. Both complete patches still
+apply and reverse to their exact Git trees. The normal AnyDoc app/UI build for
+`400d4392` completed with checksum verification enabled, and both image role,
+source, tree and patch labels match the manifest. Shared services were not
+switched. Fresh nested-LDAP application and restore acceptance is in progress.
+
+The normal restore runner now compares role dumps while normalizing only a
+strictly matched PostgreSQL `\\restrict` / `\\unrestrict` token pair; raw SQL
+archives and their integrity hashes are retained. Role/password/grant changes
+still fail the check. Its authorized body upgrade uses the actual packaged
+`upgrade-scopes` mode. Seventeen restore guard cases and eight performance
+method cases passed, and both suites are included in CI. These offline checks
+do not constitute full application restore or measured performance acceptance.

@@ -785,9 +785,27 @@ index 0000000000000000000000000000000000000000..5bae510a14d99a6ba63c15eff8e7814c
 +	require.Equal(t, "receipt", string(b))
 +}
 diff --git a/docker/Dockerfile.app b/docker/Dockerfile.app
-index e2c532d9ea9a8e806544846e294a108a33baf427..d0a778f702cbcefc97326952365ecbaad1f42b2a 100644
+index e2c532d9ea9a8e806544846e294a108a33baf427..aff68e2355fc4151aa9ac80481f406c73bb1cfb4 100644
 --- a/docker/Dockerfile.app
 +++ b/docker/Dockerfile.app
+@@ -37,7 +37,7 @@ WORKDIR /app
+ # 通过构建参数接收敏感信息
+ ARG GOPRIVATE_ARG
+ ARG GOPROXY_ARG
+-ARG GOSUMDB_ARG=off
++ARG GOSUMDB_ARG=sum.golang.org
+ ARG APK_MIRROR_ARG
+ ARG RUSTUP_DIST_SERVER_ARG
+ ARG RUSTUP_UPDATE_ROOT_ARG
+@@ -56,7 +56,7 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+     apt-get install -y git build-essential libsqlite3-dev curl
+ 
+ # Install migrate tool
+-RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
++RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+ 
+ # Copy go mod files. go.mod replace-points anydoc at ./third_party/anydoc-go,
+ # so that module's go.mod must exist before `go mod download`.
 @@ -108,6 +108,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
      else \
          make build-prod; \

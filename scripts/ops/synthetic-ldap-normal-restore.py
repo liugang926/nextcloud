@@ -50,6 +50,26 @@ def sha(path):
         for block in iter(lambda:stream.read(1024*1024),b''):value.update(block)
     return value.hexdigest()
 
+def role_dump_comparison_sha256(path):
+    # Patched pg_dumpall emits a new psql restriction token for every dump.
+    # Retain/hash the original SQL independently and normalize only this exact
+    # matched command pair when comparing otherwise unchanged cluster roles.
+    lines=plain(path).read_bytes().splitlines(keepends=True)
+    commands=[]
+    for index,line in enumerate(lines):
+        if not line.startswith((b'\\restrict',b'\\unrestrict')):continue
+        match=re.fullmatch(rb'(\\(?:un)?restrict) ([A-Za-z0-9]+)(\r?\n)?',line)
+        require(match is not None,'invalid_role_dump_restrict_pair')
+        commands.append((index,match))
+    if commands:
+        require(len(commands)==2 and commands[0][1].group(1)==b'\\restrict' and
+                commands[1][1].group(1)==b'\\unrestrict' and
+                commands[0][1].group(2)==commands[1][1].group(2),
+                'invalid_role_dump_restrict_pair')
+        for index,match in commands:
+            lines[index]=match.group(1)+b' RESTORECOMPARISONTOKEN'+(match.group(3) or b'')
+    return hashlib.sha256(b''.join(lines)).hexdigest()
+
 def plain(path,directory=False):
     path=Path(path)
     require(path.is_absolute() and path.resolve()==path,'noncanonical_private_path')
@@ -320,8 +340,8 @@ class Restore:
         return facts
 
     def body_cli(self,mode,upgrade_authorization=None):
-        require(mode in ('verify','reconcile','upgrade'),'refused_body_initialization_on_restore')
-        if mode=='upgrade':require(upgrade_authorization=='body_owner_explicit_upgrade','body_upgrade_not_authorized')
+        require(mode in ('verify','reconcile','upgrade-scopes'),'refused_body_initialization_on_restore')
+        if mode=='upgrade-scopes':require(upgrade_authorization=='body_owner_explicit_upgrade','body_upgrade_not_authorized')
         for service in self.actors():self.stopped(service)
         script='''set -eu
 cd /app
@@ -412,7 +432,9 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         with os.fdopen(fd,'wb') as target:command(args,stdout=target,timeout=300)
         if not globals_only:
             with plain(path).open('rb') as source:command(['docker','exec','-i',container,'pg_restore','--list'],stdin=source,timeout=60)
-        return {'sha256':sha(path),'bytes':path.stat().st_size}
+        facts={'sha256':sha(path),'bytes':path.stat().st_size}
+        if globals_only:facts['role_comparison_sha256']=role_dump_comparison_sha256(path)
+        return facts
 
     def archive(self,role,path):
         volume_restore_guard(role);self.owned()
@@ -574,7 +596,8 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
             # back/changed before executing actual full database pg_restore.
             role_current=self.evidence/(role+'-roles-current.sql')
             self.dump(container,user,db,role_current,True)
-            require(sha(role_current)==checkpoint['artifacts'][role+'-roles.sql']['sha256'],'cluster_roles_changed')
+            require(role_dump_comparison_sha256(role_current)==
+                    role_dump_comparison_sha256(self.evidence/(role+'-roles.sql')),'cluster_roles_changed')
             with plain(self.evidence/(role+'.dump')).open('rb') as source:
                 command(['docker','exec','-i',container,'pg_restore','-U',user,'-d',db,
                          '--clean','--if-exists','--exit-on-error'],stdin=source,timeout=600)
@@ -600,7 +623,7 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         self.no_external_workers()
         for service in self.actors():self.stopped(service)
         self.packaged_tools()
-        if upgrade:self.body_cli('upgrade','body_owner_explicit_upgrade')
+        if upgrade:self.body_cli('upgrade-scopes','body_owner_explicit_upgrade')
         self.body_cli('reconcile');self.body_cli('verify')
         require(self.identity()==checkpoint['identity'],'restored_source_model_generation_identity_changed')
         pinned_publication(checkpoint)
@@ -712,7 +735,7 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         live=publication['verify'](Path(current['ledger']),Path(current['key']))
         require(live['record_sha256']==plan_fact['current_record_sha256'] and digest==plan_fact['plan_sha256'],
             'retained_current_plan_or_journal_changed')
-        if upgrade:self.body_cli('upgrade','body_owner_explicit_upgrade')
+        if upgrade:self.body_cli('upgrade-scopes','body_owner_explicit_upgrade')
         self.body_cli('reconcile');self.body_cli('verify')
         self.nc_offline('maintenance:mode','--on')
         nc_receipt=self.nc_recovery(raw,key);require(self.nc_recovery(raw,key)==nc_receipt,'actual_nc_replay_not_idempotent')
@@ -756,7 +779,7 @@ def main():
     parser.add_argument('--profile',choices=('c6','rag'),required=True)
     parser.add_argument('--evidence',type=Path,required=True)
     parser.add_argument('--phase',choices=('checkpoint','fault','stale-fault','restore-data','closed-clean','closed-stale','reopen','revoke','stale-plan','pending-auto-plan','cleanup'),required=True)
-    parser.add_argument('--body-upgrade-authorized',action='store_true',help='only after the body owner explicitly declares packaged upgrade required')
+    parser.add_argument('--body-upgrade-authorized',action='store_true',help='only after the body owner explicitly declares packaged upgrade-scopes required')
     parser.add_argument('--baseline-history',type=Path,help='checkpoint: owner-only receipt from the actual existing synthetic history probe; history is re-read, not trusted')
     args=parser.parse_args();probe=None
     try:
