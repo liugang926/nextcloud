@@ -73,7 +73,15 @@ local-derived nodes, plus compilation of 155 packages (115 test packages and
 40 packages with no tests). Root independently verified raw hashes, actual
 required terminals, unchanged before/after source identity and removed owned
 Go containers in the [disk-gate record](evidence/ordinary-qa-full-disk-gates-20261010.json).
-C6 full gates and the actual producer-cancellation regression are still pending;
+C6 `0388c309` subsequently passed the same 1163 selected nodes, all 38 mandatory
+parents, 59 session-terminal nodes, 35 local-derived nodes and compilation of
+155 packages. Root verified the corresponding raw records and exact source
+identities too. The first strengthened StopSession test run had 12 fixture
+failures: its older fixture lacked the real completion-manifest migration,
+and its one-second model-start check preceded actual start. These are
+preparation failures, not a business red or accepted cancellation test. The
+fixture is being upgraded through the real forward migrations while preserving
+the eight-second HTTP bound. Actual producer cancellation is still pending;
 this does not promote the manifest or accept normal images/application/restore.
 
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
