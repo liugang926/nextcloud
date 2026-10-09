@@ -71,7 +71,9 @@ code-owned origins. Legacy custom process-wide YAML prompts remain unknown.
 New KB templates have explicit current-admin/code/derived writers, immutable
 model-input/result receipts and counters. Dedicated read/write/generate routes
 are wired in production; template bodies are hidden from generic KB JSON.
-The Nextcloud auto-tag staging path also has a remaining worker-purpose gate.
+The actual Nextcloud first-upload and completion Auto path now has immutable
+original byte/name/configuration controls. Its production integration and
+remaining complete application gate are recorded below.
 
 Publication recovery captures exact original source identities, retires old
 immutable generations, applies the externally authenticated Nextcloud recovery
@@ -220,3 +222,33 @@ The three mounts cannot be repointed to the DB/data volume or shadowed. Offline
 state/topology tests cover these exact bindings; full application execution is
 pending the frozen body module and normal candidate image. This mode is for
 fresh fixtures, while restore uses retained anchors plus reconcile/verify.
+
+
+## Actual first-upload and classification integration
+
+[Machine input evidence](knowledge-machine-original-input-validation-20261009.md)
+records actual signed ProcessSync→CreateFile/catalog/capacity→Stage→parse/index→
+Summary/Question→Auto→publish→metadata/chunk/RAG/span reads on PG and SQLite.
+150/69 seals actual original bytes and initial grouping-name/configuration,
+queued controls, actual model/tenant digests and revisions. Runtime credentials
+are excluded from persisted snapshots/prompts. Question metadata output gets an
+exact own-producer transition; external edits/ABA remain denied. The root's
+production DI uses the same transaction authority for all three new hooks.
+
+The first root combination passed309 cases but failed60 nodes per profile:
+new149/68 plan schema was absent in the older machine fixture, and an old HTTP
+Auto fixture lacked the new actual queue/model inputs. The source guards refused
+before model work. After installing the real fixture migrations before new
+knowledge and using actual model/ticket writers,84 affected cases per profile
+passed with no failures/skips. These include all machine positives/negatives,
+HTTP Auto span and actual SQLite fresh/upgrade migrations. Original failed logs
+remain pinned. The old CI migration expectation68 versus actual70 was also
+corrected with explicit new table assertions. New complete CI is still required.
+
+A normal AnyDoc core app/UI pair (older sourcee8ca35f3) was actually built and
+started with owned nested LDAP/Nextcloud. Registration/model/KB/pair/signed sync
+produced1 chunk and1 embedding, but authorized personal read returned403. Its
+attached grouping tag had no display origin. That concrete failure is retained;
+the new150 grouping receipt must pass a fresh full application probe. All core
+probe resources were removed. New machine candidate image build is underway.
+No shared service switched and no full V1 completion is claimed.

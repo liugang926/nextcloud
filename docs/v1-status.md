@@ -1719,3 +1719,22 @@ executed them. [Core paths and remaining consumers](source-lineage-saved-message
 list Agent/model lifetime, Continue/cache, clone/steer/memory/artifact and partial
 field writers still underway.152 is only a hook until its actual module freezes.
 The candidate is not deployed or accepted as full V1.
+
+
+## 2026-10-09 actual machine input integration and image probe
+
+150/69 machine original upload/name controls and final Summary/Question→Auto
+origins are integrated with same-transaction production DI. Two candidates
+passed84 affected actualmachine/HTTPspan/SQLitemigration cases after concrete
+fixture repairs; original309pass/60fail combinations and CI migration-tail
+failures remain in the evidence. The [machine gate](knowledge-machine-original-input-validation-20261009.md)
+includes queue/model/tenant/source/actor/body negatives and credentials excluded
+from immutable JSON and ordinary summary logs. Durable completion→queue handoff
+is the next work package, using the existing pending-op mechanism.
+
+Normal AnyDoc core app/UI images were built and an owned nested LDAP/NC/WK
+stack performed real signed sync/indexing. Personal knowledge access failed403
+with an attached tag lacking display origin; this is a retained failed probe,
+not a release acceptance. All owned resources were cleaned. The new machine
+image is being built for the repaired personal positive. Original body152 and
+complete Agent/Continue/partial-field lifetimes remain in independent worktrees.
