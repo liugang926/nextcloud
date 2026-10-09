@@ -55,6 +55,29 @@ pre-existing upstream lines (two Neo4j raw-string indents and a SQLite
 SQL-string trailing space); the generated source
 passes `git diff --check`.
 
+## Ordinary QA and body validation update — 2026-10-10
+
+Current candidates are RAG `1ab47546` and C6 `aac58fa7`. Ordinary progress,
+references and fixed fallback publish checked source lineage and propagate
+consumer refusal. The stream producer reports its actual terminal, cancels and
+joins on failure, releases its original material holder, and ends on successful
+Done even if the provider keeps its channel open. Inline original-body reads
+check all heads once per row and bind the captured/final head sets, external
+journal pin and cancellation; unselected heads and each vault reference remain
+validated.
+
+Each full tested production source (`48ce1d3c` / `0388c309`) passed 1163 selected
+nodes including 38 mandatory parents, 59 session-terminal nodes, 35 local-derived
+nodes and compilation of 155 packages. Final candidate trees add only three
+test files. Their actual ordinary QA target passed 38 nodes per profile,
+including real StopSession/Redis/model cancellation and final original-material
+completion refusal after both delivery loops exit. Root verified source bytes,
+raw logs and exact owned cleanup. See the [full disk-gate record](evidence/ordinary-qa-full-disk-gates-20261010.json)
+and [final stop-chain record](evidence/ordinary-QA-real-stop-chain-20261010.json).
+The original OOM/preparation failures remain preserved; no timeout was widened.
+These are controlled-model source checks. New normal app/UI build, actual
+application QA/replay/restore and P5 have not been accepted for these sources.
+
 ## Included implementation
 
 The candidate extends the default integration with original input receipts and

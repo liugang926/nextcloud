@@ -81829,10 +81829,10 @@ index 0000000000000000000000000000000000000000..e0c81acb2853ad9d4e6b96e1092a5416
 +}
 diff --git a/internal/application/repository/original_body_fields.go b/internal/application/repository/original_body_fields.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..acc45496cdfd8f4a7d46bc697e320918e0488f3e
+index 0000000000000000000000000000000000000000..7ab3bc05dbfb8d7ef65239087ee10f27d3508964
 --- /dev/null
 +++ b/internal/application/repository/original_body_fields.go
-@@ -0,0 +1,802 @@
+@@ -0,0 +1,808 @@
 +package repository
 +
 +import (
@@ -82451,6 +82451,7 @@ index 0000000000000000000000000000000000000000..acc45496cdfd8f4a7d46bc697e320918
 +		if e := bodyInternal(tx).Where("source_table=? AND row_key=?", d.Table, key).Find(&heads).Error; e != nil {
 +			return e
 +		}
++		checkInlineRow := false
 +		for _, head := range heads {
 +			if !bodySelectedField(tx, bodyFieldColumn(head.ColumnName)) {
 +				continue
@@ -82507,13 +82508,18 @@ index 0000000000000000000000000000000000000000..acc45496cdfd8f4a7d46bc697e320918
 +					return e
 +				}
 +			} else {
-+				if e := CheckOriginalBodyAvailableInTx(tx.Statement.Context, tx, d.Table, key); e != nil {
-+					return e
-+				}
++				checkInlineRow = true
 +				if d.Mode == "vault" && raw != "" {
 +					return ErrOriginalBodyUnavailable
 +				} // inline restore of an original snapshot
 +			}
++		}
++		if checkInlineRow {
++			// Validate the whole row, including unselected heads, once at the
++			// final return boundary. This is row-local; no journal/pin result
++			// survives to a different row, SQL operation or request. Each vault
++			// reference still passes its own slot/body/SHA checks above.
++			return checkOriginalBodyAvailableForHeads(tx.Statement.Context, tx, d.Table, key, heads)
 +		}
 +		return nil
 +	})
@@ -82635,6 +82641,272 @@ index 0000000000000000000000000000000000000000..acc45496cdfd8f4a7d46bc697e320918
 +	data, e := json.Marshal(copies)
 +	return string(data), e
 +}
+diff --git a/internal/application/repository/original_body_file_read_cancel_linux_test.go b/internal/application/repository/original_body_file_read_cancel_linux_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..26163a454079593c30ecb3321a5f456a34c57701
+--- /dev/null
++++ b/internal/application/repository/original_body_file_read_cancel_linux_test.go
+@@ -0,0 +1,72 @@
++package repository
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++	"gorm.io/gorm"
++)
++
++// IN_ACCESS observes a real journal-key ReadFile operation after the payload query. The large
++// valid owned bootstrap key gives cancellation a read/verification window;
++// no old pin/proof is re-signed and no body/absence receipt is seeded.
++func runOriginalBodyFileReadCancelActual(t *testing.T, pg bool) {
++	db, store := bodyProtocolFixture(t, pg, bytes.Repeat([]byte("owned-bootstrap-cancel-key-"), 320000))
++	bodyID := bodyProtocolCreate(t, db, "actual-read-cancel", "one")
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	access := make(chan struct{})
++	armed := false
++	fd := -1
++	defer func() {
++		if fd >= 0 {
++			_ = unix.Close(fd)
++		}
++	}()
++	require.NoError(t, db.Callback().Query().After("gorm:query").Register("actual-journal-key-read-cancel", func(tx *gorm.DB) {
++		if armed || tx.Statement.Table != "original_body_payloads" {
++			return
++		}
++		armed = true
++		var err error
++		fd, err = unix.InotifyInit1(unix.IN_CLOEXEC)
++		require.NoError(t, err)
++		_, err = unix.InotifyAddWatch(fd, store.journal.paths.KeyPath, unix.IN_ACCESS)
++		require.NoError(t, err)
++		ready := make(chan struct{})
++		go func() {
++			close(ready)
++			buf := make([]byte, 4096)
++			n, err := unix.Read(fd, buf)
++			if err == nil && n >= unix.SizeofInotifyEvent && binary.LittleEndian.Uint32(buf[4:8])&unix.IN_ACCESS != 0 {
++				cancel()
++				close(access)
++			}
++		}()
++		<-ready
++	}))
++	defer db.Callback().Query().Remove("actual-journal-key-read-cancel")
++	err := CheckOriginalBodyAvailableInTx(ctx, db, "knowledge_auto_tag_input_manifests", "actual-read-cancel")
++	require.True(t, armed, "the payload query armed the real journal-key read observer")
++	select {
++	case <-access:
++	case <-time.After(time.Second):
++		t.Fatal("real journal-key read access was not observed")
++	}
++	require.ErrorIs(t, err, context.Canceled, "cancellation during the observed real journal-key file read cannot return body success")
++	var state string
++	require.NoError(t, bodyInternal(db).Table("original_body_payloads").Select("state").Where("id=?", bodyID).Scan(&state).Error)
++	require.Equal(t, "live", state, "cancel rejection never fabricates a purge/absence receipt")
++}
++
++func TestOriginalBodyFileReadCancelActualSQLite(t *testing.T) {
++	runOriginalBodyFileReadCancelActual(t, false)
++}
++func TestPostgresOriginalBodyFileReadCancelActual(t *testing.T) {
++	runOriginalBodyFileReadCancelActual(t, true)
++}
+diff --git a/internal/application/repository/original_body_inline_row_actual_test.go b/internal/application/repository/original_body_inline_row_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b80bfcbd62df40854beef62478b865cde6b4076
+--- /dev/null
++++ b/internal/application/repository/original_body_inline_row_actual_test.go
+@@ -0,0 +1,182 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func runOriginalBodyInlineRowActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"all-heads-once", "two-rows", "unselected-corrupt", "second-row-pin-change", "sql-head-change", "caller-cancel", "concurrent-purge", "vault-body-digest", "mid-head-and-pin", "last-payload-cancel"} {
++		t.Run(mode, func(t *testing.T) {
++			db, store := bodyProtocolFixture(t, pg)
++			for _, id := range []string{"one", "two"} {
++				require.NoError(t, db.Model(&types.Knowledge{}).Where("id=?", id).Updates(map[string]any{
++					"title": "native title " + id, "file_name": "native file " + id, "description": "native description " + id,
++					"profile": types.JSON("{\"gist\":\"native profile " + id + "\"}"), "custom_metadata": types.JSON("{\"native\":\"" + id + "\"}"),
++				}).Error)
++			}
++			checks := 0
++			triggered := false
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			if mode == "unselected-corrupt" {
++				var head originalBodyFieldHead
++				require.NoError(t, bodyInternal(db).Where("source_table='knowledges' AND row_key='one' AND column_name='metadata.manual.content'").Take(&head).Error)
++				require.NoError(t, bodyInternal(db).Model(&originalBodyPayload{}).Where("id=?", head.BodyID).Update("state", "purged").Error)
++			}
++			require.NoError(t, db.Callback().Query().Before("gorm:query").Register("actual-inline-row-count", func(tx *gorm.DB) {
++				if tx.Statement.Table == "original_body_field_heads" {
++					checks++
++				}
++				if tx.Statement.Table != "original_body_journal_heads" {
++					return
++				}
++				if triggered {
++					return
++				}
++				switch mode {
++				case "sql-head-change":
++					triggered = true
++					require.NoError(t, bodyInternal(tx).Exec("UPDATE original_body_journal_heads SET head_sha256=? WHERE id=1", strings.Repeat("0", 64)).Error)
++				case "caller-cancel":
++					triggered = true
++					cancel()
++				}
++			}))
++			defer db.Callback().Query().Remove("actual-inline-row-count")
++			if mode == "second-row-pin-change" {
++				require.NoError(t, db.Callback().Query().After("gorm:query").Before("original_body:resolve").Register("actual-inline-row-transition", func(tx *gorm.DB) {
++					if tx.Statement.Table != "original_body_field_heads" || triggered {
++						return
++					}
++					for _, value := range tx.Statement.Vars {
++						if value == "two" {
++							triggered = true
++							raw, err := os.ReadFile(store.journal.paths.PinPath)
++							require.NoError(t, err)
++							raw[0] = 'x'
++							require.NoError(t, os.WriteFile(store.journal.paths.PinPath, raw, 0600))
++							return
++						}
++					}
++				}))
++				defer db.Callback().Query().Remove("actual-inline-row-transition")
++			}
++			if mode == "concurrent-purge" {
++				require.NoError(t, db.Callback().Query().After("gorm:query").Before("original_body:resolve").Register("actual-inline-row-transition", func(tx *gorm.DB) {
++					if tx.Statement.Table != "knowledges" || triggered || tx.Statement.Context.Value(originalBodyInternalKey{}) != nil {
++						return
++					}
++					triggered = true
++					type outcome struct {
++						count int
++						err   error
++					}
++					done := make(chan outcome, 1)
++					go func() {
++						expr := "datetime('now','-2 hours')"
++						if pg {
++							expr = "CURRENT_TIMESTAMP-INTERVAL '2 hours'"
++						}
++						err := db.Exec("UPDATE knowledges SET deleted_at=" + expr + " WHERE id='one'").Error
++						if err != nil {
++							done <- outcome{err: err}
++							return
++						}
++						purgeCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
++						defer stop()
++						n, err := store.PurgeDue(purgeCtx, 100)
++						done <- outcome{count: n, err: err}
++					}()
++					select {
++					case result := <-done:
++						require.NoError(t, result.err)
++						require.Positive(t, result.count, "a real durable purge commits before cached row resolution")
++					case <-time.After(3 * time.Second):
++						t.Fatal("owned concurrent purge did not finish")
++					}
++				}))
++				defer db.Callback().Query().Remove("actual-inline-row-transition")
++			}
++			if mode == "mid-head-and-pin" || mode == "last-payload-cancel" {
++				var headCount int64
++				require.NoError(t, bodyInternal(db).Table("original_body_field_heads").Where("source_table='knowledges' AND row_key='one'").Count(&headCount).Error)
++				payloadReads := int64(0)
++				require.NoError(t, db.Callback().Query().After("gorm:query").Register("actual-mid-availability-transition", func(tx *gorm.DB) {
++					if tx.Statement.Table != "original_body_payloads" || triggered {
++						return
++					}
++					payloadReads++
++					if mode == "last-payload-cancel" {
++						if payloadReads == headCount {
++							triggered = true
++							cancel()
++						}
++						return
++					}
++					triggered = true
++					// This actual native writer replaces the previously captured head.
++					require.NoError(t, db.Model(&types.Knowledge{}).Where("id='one'").Update("title", "current replacement after earlier body check").Error)
++					// A different closed owner undergoes a real purge, advancing SQL
++					// and external journal facts while this original row is read.
++					bodyProtocolDeleted(t, db, "two", true)
++					n, err := store.PurgeDue(context.Background(), 100)
++					require.NoError(t, err)
++					require.Positive(t, n)
++				}))
++				defer db.Callback().Query().Remove("actual-mid-availability-transition")
++			}
++			if mode == "vault-body-digest" {
++				id := bodyProtocolCreate(t, db, "actual-vault", "two")
++				require.NoError(t, bodyInternal(db).Model(&originalBodyPayload{}).Where("id=?", id).Update("payload", "unproven replacement bytes").Error)
++				var row bodyProtocolRow
++				require.ErrorIs(t, db.Where("manifest_id='actual-vault'").Take(&row).Error, ErrOriginalBodyUnavailable)
++				return
++			}
++			var err error
++			if mode == "two-rows" || mode == "second-row-pin-change" {
++				var rows []*types.Knowledge
++				err = db.WithContext(ctx).Where("id IN ?", []string{"one", "two"}).Order("id").Find(&rows).Error
++				if mode == "two-rows" {
++					require.NoError(t, err)
++					require.Len(t, rows, 2)
++					require.Equal(t, 6, checks, "each row enumerates initial, all-head, and final bound heads independently")
++					return
++				}
++			} else {
++				var row types.Knowledge
++				query := db.WithContext(ctx).Where("id='one'")
++				if mode == "unselected-corrupt" {
++					query = query.Select("id", "title")
++				}
++				err = query.Take(&row).Error
++				if mode == "all-heads-once" {
++					require.NoError(t, err)
++					require.Equal(t, 3, checks, "many inline fields use one all-head check with initial/final head binding")
++					require.Equal(t, "native title one", row.Title)
++					return
++				}
++			}
++			if mode == "caller-cancel" || mode == "last-payload-cancel" {
++				require.True(t, triggered)
++				require.True(t, errors.Is(err, context.Canceled), "cancellation cannot return cached body success")
++			} else {
++				if mode != "unselected-corrupt" {
++					require.True(t, triggered)
++				}
++				require.ErrorIs(t, err, ErrOriginalBodyUnavailable)
++			}
++		})
++	}
++}
++
++func TestOriginalBodyInlineRowActualSQLite(t *testing.T)   { runOriginalBodyInlineRowActual(t, false) }
++func TestPostgresOriginalBodyInlineRowActual(t *testing.T) { runOriginalBodyInlineRowActual(t, true) }
 diff --git a/internal/application/repository/original_body_journal.go b/internal/application/repository/original_body_journal.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..15fe97f6146f19c1c7f87c81e76c935bff3bbdbb
@@ -84030,10 +84302,10 @@ index 0000000000000000000000000000000000000000..032a16bf9ba5c58e0c19d05db1e34b0c
 +}
 diff --git a/internal/application/repository/original_body_protocol_test.go b/internal/application/repository/original_body_protocol_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b66c6d74af215d1e76cfc897ee0fe57a9e7b41b
+index 0000000000000000000000000000000000000000..b5e49e83376f85a5ae7a6ed04fddafbe76250ada
 --- /dev/null
 +++ b/internal/application/repository/original_body_protocol_test.go
-@@ -0,0 +1,572 @@
+@@ -0,0 +1,576 @@
 +package repository
 +
 +import (
@@ -84062,7 +84334,7 @@ index 0000000000000000000000000000000000000000..0b66c6d74af215d1e76cfc897ee0fe57
 +}
 +
 +func (bodyProtocolRow) TableName() string { return "knowledge_auto_tag_input_manifests" }
-+func bodyProtocolFixture(t *testing.T, pg bool) (*gorm.DB, *OriginalBodyRetentionStore) {
++func bodyProtocolFixture(t *testing.T, pg bool, ownedKeys ...[]byte) (*gorm.DB, *OriginalBodyRetentionStore) {
 +	t.Helper()
 +	var db *gorm.DB
 +	var e error
@@ -84109,7 +84381,11 @@ index 0000000000000000000000000000000000000000..0b66c6d74af215d1e76cfc897ee0fe57
 +	require.NoError(t, os.Chmod(dir, 0700))
 +	key := filepath.Join(dir, "key")
 +	pin := filepath.Join(dir, "pin")
-+	require.NoError(t, os.WriteFile(key, []byte(strings.Repeat("owned-secret-", 4)), 0600))
++	keyBytes := []byte(strings.Repeat("owned-secret-", 4))
++	if len(ownedKeys) > 0 {
++		keyBytes = ownedKeys[0]
++	}
++	require.NoError(t, os.WriteFile(key, keyBytes, 0600))
 +	t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY", dir)
 +	t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_KEY", key)
 +	t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_PIN", pin)
@@ -85530,10 +85806,10 @@ index 0000000000000000000000000000000000000000..eaf6eecd2943ad1410e4cb4731689553
 +}
 diff --git a/internal/application/repository/original_body_retention.go b/internal/application/repository/original_body_retention.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..636c05d5d99f818dfa599e541d097b8e9be5ded9
+index 0000000000000000000000000000000000000000..87fce3ee2c6c7130b72f355a791bdb8f88860563
 --- /dev/null
 +++ b/internal/application/repository/original_body_retention.go
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,267 @@
 +package repository
 +
 +import (
@@ -85635,16 +85911,50 @@ index 0000000000000000000000000000000000000000..636c05d5d99f818dfa599e541d097b8e
 +// Shared with actual material/history consumers, including message generation
 +// origins. This never authenticates cached body by loading a newer current row.
 +func CheckOriginalBodyAvailableInTx(ctx context.Context, tx *gorm.DB, table, rowID string) error {
++	return checkOriginalBodyAvailableForHeads(ctx, tx, table, rowID, nil)
++}
++
++func sameOriginalBodyHeads(before, after []originalBodyFieldHead) bool {
++	if len(before) != len(after) {
++		return false
++	}
++	byID := make(map[string]originalBodyFieldHead, len(before))
++	for _, head := range before {
++		byID[head.SlotID] = head
++	}
++	for _, head := range after {
++		if original, ok := byID[head.SlotID]; !ok || original != head {
++			return false
++		}
++	}
++	return true
++}
++
++func checkOriginalBodyAvailableForHeads(ctx context.Context, tx *gorm.DB, table, rowID string, captured []originalBodyFieldHead) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
 +	if !originalBodySchemaPresent(tx) {
-+		return nil
++		// Preserve the legacy no-schema compatibility result, but never hide
++		// caller cancellation as a successful absent-schema probe.
++		return ctx.Err()
 +	}
 +	store := NewOriginalBodyRetentionStore(tx)
 +	if e := store.checkJournalInTx(tx); e != nil {
 +		return e
 +	}
++	var initialJournal originalBodyJournalHead
++	if store.journal != nil {
++		if err := bodyInternal(tx).Where("id=1").Take(&initialJournal).Error; err != nil {
++			return err
++		}
++	}
 +	var heads []originalBodyFieldHead
 +	if e := bodyInternal(tx).Where("source_table=? AND row_key=?", table, rowID).Find(&heads).Error; e != nil {
 +		return e
++	}
++	if captured != nil && !sameOriginalBodyHeads(captured, heads) {
++		return ErrOriginalBodyUnavailable
 +	}
 +	if len(heads) == 0 {
 +		if descriptor, ok := bodyDescriptor(table); ok && descriptor.Mode == "vault" {
@@ -85663,7 +85973,26 @@ index 0000000000000000000000000000000000000000..636c05d5d99f818dfa599e541d097b8e
 +			return e
 +		}
 +	}
-+	return nil
++	var finalHeads []originalBodyFieldHead
++	if err := bodyInternal(tx).Where("source_table=? AND row_key=?", table, rowID).Find(&finalHeads).Error; err != nil {
++		return err
++	}
++	if !sameOriginalBodyHeads(heads, finalHeads) {
++		return ErrOriginalBodyUnavailable
++	}
++	if store.journal != nil {
++		if err := store.checkJournalInTx(tx); err != nil {
++			return err
++		}
++		var finalJournal originalBodyJournalHead
++		if err := bodyInternal(tx).Where("id=1").Take(&finalJournal).Error; err != nil {
++			return err
++		}
++		if initialJournal != finalJournal {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	return ctx.Err()
 +}
 +func (s *OriginalBodyRetentionStore) resolveInTx(tx *gorm.DB, head originalBodyFieldHead, ref originalBodyReference) (string, error) {
 +	if ref.Version != 1 || ref.SlotID != head.SlotID || ref.BodyID != head.BodyID {
@@ -85976,6 +86305,92 @@ index 0000000000000000000000000000000000000000..8caf1926710a261e8a7994eef2e477fa
 +		}
 +	}
 +	return nil
++}
+diff --git a/internal/application/repository/original_body_schema_probe_cancel_actual_test.go b/internal/application/repository/original_body_schema_probe_cancel_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e36cc6ae544100f18598dfc98db11218086c18d
+--- /dev/null
++++ b/internal/application/repository/original_body_schema_probe_cancel_actual_test.go
+@@ -0,0 +1,80 @@
++package repository
++
++import (
++	"context"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++type originalBodySchemaProbeTestKey struct{}
++
++func runOriginalBodySchemaProbeCancelActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"normal-schema", "cancel-at-driver-probe", "real-schema-absent"} {
++		t.Run(mode, func(t *testing.T) {
++			db, _ := bodyProtocolFixture(t, pg)
++			bodyProtocolCreate(t, db, "schema-probe-live", "one")
++			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), originalBodySchemaProbeTestKey{}, "owned-probe"))
++			defer cancel()
++			tx := db.WithContext(ctx)
++			require.NoError(t, ctx.Err())
++			require.True(t, originalBodySchemaPresent(tx), "the real target schema exists before the probe cancellation")
++			if mode == "normal-schema" {
++				require.NoError(t, CheckOriginalBodyAvailableInTx(ctx, tx, "knowledge_auto_tag_input_manifests", "schema-probe-live"))
++				return
++			}
++			if mode == "real-schema-absent" {
++				// This fixture owns its private SQLite file / PostgreSQL schema.
++				// Remove the actual table; do not mock the schema predicate.
++				require.NoError(t, db.Migrator().DropTable(&originalBodyPayload{}))
++				require.False(t, originalBodySchemaPresent(tx))
++				require.NoError(t, ctx.Err())
++				require.NoError(t, CheckOriginalBodyAvailableInTx(ctx, tx, "knowledge_auto_tag_input_manifests", "schema-probe-live"), "actual no-schema compatibility remains unchanged")
++				return
++			}
++			probe := func(tx *gorm.DB) bool {
++				sql := tx.Statement.SQL.String()
++				return tx.Statement.Context.Value(originalBodySchemaProbeTestKey{}) == "owned-probe" &&
++					strings.Contains(sql, "original_body_payloads") &&
++					(strings.Contains(sql, "sqlite_master") || strings.Contains(sql, "information_schema.tables"))
++			}
++			beforeCalls, afterCalls := 0, 0
++			var queryErr error
++			require.NoError(t, db.Callback().Row().Before("gorm:row").Register("actual-body-schema-probe-cancel-before", func(tx *gorm.DB) {
++				if !probe(tx) {
++					return
++				}
++				beforeCalls++
++				require.NoError(t, ctx.Err(), "the API entry reached the real driver probe with a live caller")
++				require.Equal(t, "owned-probe", tx.Statement.Context.Value(originalBodySchemaProbeTestKey{}))
++				cancel()
++			}))
++			defer db.Callback().Row().Remove("actual-body-schema-probe-cancel-before")
++			require.NoError(t, db.Callback().Row().After("gorm:row").Register("actual-body-schema-probe-cancel-after", func(tx *gorm.DB) {
++				if probe(tx) {
++					afterCalls++
++					queryErr = tx.Error
++				}
++			}))
++			defer db.Callback().Row().Remove("actual-body-schema-probe-cancel-after")
++			err := CheckOriginalBodyAvailableInTx(ctx, tx, "knowledge_auto_tag_input_manifests", "schema-probe-live")
++			require.Equal(t, 1, beforeCalls, "cancel at the actual Raw.Scan schema query, not before API entry")
++			require.Equal(t, 1, afterCalls)
++			require.ErrorIs(t, queryErr, context.Canceled, "the real SQL query path reports cancellation; no AddError or predicate stub")
++			require.ErrorIs(t, err, context.Canceled, "a canceled schema probe cannot look like successful no-schema compatibility")
++			require.True(t, originalBodySchemaPresent(db), "the real table was not removed by cancellation")
++			require.Equal(t, 1, beforeCalls, "the separate uncanceled schema check must not retrigger the owned caller's callback")
++			require.Equal(t, 1, afterCalls)
++		})
++	}
++}
++
++func TestOriginalBodySchemaProbeCancelActualSQLite(t *testing.T) {
++	runOriginalBodySchemaProbeCancelActual(t, false)
++}
++
++func TestPostgresOriginalBodySchemaProbeCancelActual(t *testing.T) {
++	runOriginalBodySchemaProbeCancelActual(t, true)
 +}
 diff --git a/internal/application/repository/rag_chunk_snapshot.go b/internal/application/repository/rag_chunk_snapshot.go
 new file mode 100644
@@ -93898,7 +94313,7 @@ index 3a9ded2d9b74e21acd54a9112c44ba1bd94f82fb..fdef2eab5189d7fa4e8801f8f8d33f82
  	return next()
  }
 diff --git a/internal/application/service/chat_pipeline/chat_completion_stream.go b/internal/application/service/chat_pipeline/chat_completion_stream.go
-index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..17c212e77e2371bc0a2f5ca4f74a2147ab7d6d6b 100644
+index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200b6948dc5 100644
 --- a/internal/application/service/chat_pipeline/chat_completion_stream.go
 +++ b/internal/application/service/chat_pipeline/chat_completion_stream.go
 @@ -4,6 +4,7 @@ import (
@@ -93947,89 +94362,223 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..17c212e77e2371bc0a2f5ca4f74a2147
  	responseChan, err := chatModel.ChatStream(ctx, chatMessages, opt)
  	if err != nil {
  		pipelineError(ctx, "Stream", "model_call", map[string]interface{}{
-@@ -107,7 +132,10 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -107,7 +132,32 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  	// and plain answer text to EventAgentFinalAnswer, matching the Agent pipeline.
  	// The goroutine monitors ctx.Done() to avoid leaking when the context is cancelled
  	// and the upstream channel is not closed promptly.
++	var streamDone chan error
++	if types.RAGSourceLineageFromContext(ctx) != nil {
++		streamDone = make(chan error, 1)
++		chatManage.SourceStreamResult = streamDone
++		chatManage.SourceStreamCancel = cancelLineage
++	}
 +	streamStarted = true
  	go func() {
-+		defer types.CloseHistoryMaterialLifetime(ctx)
-+		defer cancelLineage()
++		var streamErr error
++		defer func() {
++			types.CloseHistoryMaterialLifetime(ctx)
++			cancelLineage()
++			if streamDone != nil {
++				streamDone <- streamErr
++				close(streamDone)
++			}
++		}()
++		failStream := func(err error) {
++			streamErr = err
++			// A pure code-origin failure control contains no provider/body/ref
++			// data and never certifies the incomplete assistant. Its private bus
++			// and exact session bind it to this owned producer instance.
++			_ = eventBus.Emit(ctx, types.Event{Type: types.EventType(event.EventError), SessionID: chatManage.SessionID,
++				Data: event.ErrorData{Stage: "source_output", Error: "Source output could not complete", SessionID: chatManage.SessionID}})
++			cancelLineage()
++		}
  		answerDecoder := modelContext.StreamDecoder()
  		thinkingDecoder := modelContext.StreamDecoder()
  		thinkingID := fmt.Sprintf("%s-thinking", uuid.New().String()[:8])
-@@ -119,7 +147,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -115,11 +165,11 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 		thinkingOpen := false
+ 		answerCompleted := false
+ 
+-		closeThinking := func() {
++		closeThinking := func() error {
  			if !thinkingOpen {
- 				return
+-				return
++				return nil
  			}
 -			eventBus.Emit(ctx, types.Event{
-+			emitSourceLineageEvent(ctx, eventBus, types.Event{
++			err := emitSourceLineageEvent(ctx, eventBus, types.Event{
  				ID:        thinkingID,
  				Type:      types.EventType(event.EventAgentThought),
  				SessionID: chatManage.SessionID,
-@@ -136,9 +164,12 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -127,7 +177,11 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 					Done: true,
+ 				},
+ 			})
++			if err != nil {
++				return err
++			}
+ 			thinkingOpen = false
++			return nil
+ 		}
+ 
+ 		// flushDecoders drains any handle suffix the stream decoders held back to
+@@ -135,41 +189,64 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 		// and the cancellation path must call this, otherwise a resource
  		// reference in flight at teardown is silently dropped (and never
  		// persisted, since the assistant message is saved from these events).
- 		flushDecoders := func() {
+-		flushDecoders := func() {
++		flushDecoders := func() error {
 +			if turn := types.RAGSourceLineageFromContext(ctx); turn != nil && turn.Check(ctx) != nil {
-+				return
++				return nil
 +			}
  			thinkingTail := thinkingDecoder.Flush()
  			if thinkingTail != "" {
 -				_ = eventBus.Emit(ctx, types.Event{
-+				_ = emitSourceLineageEvent(ctx, eventBus, types.Event{
++				if err := emitSourceLineageEvent(ctx, eventBus, types.Event{
  					ID:        thinkingID,
  					Type:      types.EventType(event.EventAgentThought),
  					SessionID: chatManage.SessionID,
-@@ -147,7 +178,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 					Data:      event.AgentThoughtData{Content: thinkingTail},
+-				})
++				}); err != nil {
++					return err
++				}
  			}
  			answerTail := answerDecoder.Flush()
  			if answerTail != "" {
 -				_ = eventBus.Emit(ctx, types.Event{
-+				_ = emitSourceLineageEvent(ctx, eventBus, types.Event{
++				if err := emitSourceLineageEvent(ctx, eventBus, types.Event{
  					ID:        answerID,
  					Type:      types.EventType(event.EventAgentFinalAnswer),
  					SessionID: chatManage.SessionID,
-@@ -167,6 +198,12 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 					Data:      event.AgentFinalAnswerData{Content: answerTail},
+-				})
++				}); err != nil {
++					return err
++				}
+ 			}
++			return nil
+ 		}
+ 
+ 		for {
+ 			select {
+ 			case <-ctx.Done():
+-				flushDecoders()
+-				closeThinking()
++				streamErr = ctx.Err()
+ 				pipelineInfo(ctx, "Stream", "context_cancelled", map[string]interface{}{
+ 					"session_id": chatManage.SessionID,
+ 				})
  				return
  
  			case response, ok := <-responseChan:
 +				if turn := types.RAGSourceLineageFromContext(ctx); turn != nil {
 +					if err := turn.Check(ctx); err != nil {
-+						_ = emitSourceLineageEvent(ctx, eventBus, types.Event{Type: types.EventType(event.EventError), SessionID: chatManage.SessionID, Data: event.ErrorData{Stage: "source_lineage", Error: "Source access is no longer available"}})
++						failStream(err)
 +						return
 +					}
 +				}
  				if !ok {
- 					flushDecoders()
- 					closeThinking()
-@@ -181,7 +218,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+-					flushDecoders()
+-					closeThinking()
++					if err := flushDecoders(); err != nil {
++						failStream(err)
++						return
++					}
++					if err := closeThinking(); err != nil {
++						failStream(err)
++						return
++					}
++					if !answerCompleted {
++						failStream(errors.New("model stream closed without terminal answer"))
++						return
++					}
+ 					pipelineInfo(ctx, "Stream", "channel_close", map[string]interface{}{
+ 						"session_id": chatManage.SessionID,
+ 					})
+@@ -181,17 +258,8 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  						"session_id": chatManage.SessionID,
  						"error":      response.Content,
  					})
 -					eventBus.Emit(ctx, types.Event{
-+					emitSourceLineageEvent(ctx, eventBus, types.Event{
- 						ID:        fmt.Sprintf("%s-error", uuid.New().String()[:8]),
- 						Type:      types.EventType(event.EventError),
- 						SessionID: chatManage.SessionID,
-@@ -201,7 +238,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+-						ID:        fmt.Sprintf("%s-error", uuid.New().String()[:8]),
+-						Type:      types.EventType(event.EventError),
+-						SessionID: chatManage.SessionID,
+-						Data: event.ErrorData{
+-							Error:     response.Content,
+-							Stage:     "chat_completion_stream",
+-							SessionID: chatManage.SessionID,
+-						},
+-					})
+-					continue
++					failStream(errors.New("model stream reported failure"))
++					return
+ 				}
+ 
+ 				if response.ResponseType == types.ResponseTypeThinking {
+@@ -201,7 +269,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  					}
  					if response.Content != "" {
  						thinkingOpen = true
 -						eventBus.Emit(ctx, types.Event{
-+						emitSourceLineageEvent(ctx, eventBus, types.Event{
++						if err := emitSourceLineageEvent(ctx, eventBus, types.Event{
  							ID:        thinkingID,
  							Type:      types.EventType(event.EventAgentThought),
  							SessionID: chatManage.SessionID,
-@@ -231,7 +268,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
- 						answerCompleted = true
+@@ -209,10 +277,16 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 								Content: response.Content,
+ 								Done:    false,
+ 							},
+-						})
++						}); err != nil {
++							failStream(err)
++							return
++						}
  					}
- 					closeThinking()
+ 					if response.Done {
+-						closeThinking()
++						if err := closeThinking(); err != nil {
++							failStream(err)
++							return
++						}
+ 					}
+ 					continue
+ 				}
+@@ -228,10 +302,12 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 					response.Content = answerDecoder.Feed(response.Content)
+ 					if response.Done {
+ 						response.Content += answerDecoder.Flush()
+-						answerCompleted = true
+ 					}
+-					closeThinking()
 -					eventBus.Emit(ctx, types.Event{
-+					emitSourceLineageEvent(ctx, eventBus, types.Event{
++					if err := closeThinking(); err != nil {
++						failStream(err)
++						return
++					}
++					if err := emitSourceLineageEvent(ctx, eventBus, types.Event{
  						ID:        answerID,
  						Type:      types.EventType(event.EventAgentFinalAnswer),
  						SessionID: chatManage.SessionID,
+@@ -239,7 +315,17 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+ 							Content: response.Content,
+ 							Done:    response.Done,
+ 						},
+-					})
++					}); err != nil {
++						failStream(err)
++						return
++					}
++					if response.Done {
++						answerCompleted = true
++						// The successful producer terminal is Done, not a later
++						// provider EOF. Stop this owned child stream and release its
++						// source/body pins even if the provider keeps the channel open.
++						return
++					}
+ 				}
+ 			}
+ 		}
 diff --git a/internal/application/service/chat_pipeline/chat_pipeline.go b/internal/application/service/chat_pipeline/chat_pipeline.go
 index 2c8544a2d76966883ae3d56c5089154c8cc244c3..9db995747b2509228cd1b0a5a35f054862301767 100644
 --- a/internal/application/service/chat_pipeline/chat_pipeline.go
@@ -95008,6 +95557,104 @@ index 0000000000000000000000000000000000000000..8414c898ea5c816826f77deff5d1137b
 +		t.Fatalf("stale source reference reached model context: results=%+v content=%q", manage.MergeResult, manage.UserContent)
 +	}
 +}
+diff --git a/internal/application/service/chat_pipeline/progress.go b/internal/application/service/chat_pipeline/progress.go
+index e5425c8280cc5b3bd18b6c303782df04a5a28096..d6419d6ace56599913d2cb02b5bd48bcfd30a036 100644
+--- a/internal/application/service/chat_pipeline/progress.go
++++ b/internal/application/service/chat_pipeline/progress.go
+@@ -24,6 +24,15 @@ const (
+ type StageProgress struct {
+ 	toolCallID string
+ 	toolName   string
++	err        error
++}
++
++// Err reports producer publication failure to the ordinary pipeline caller.
++func (p *StageProgress) Err() error {
++	if p == nil {
++		return nil
++	}
++	return p.err
+ }
+ 
+ // ShouldEmitQueryUnderstandProgress reports whether the query-understand stage
+@@ -92,7 +101,7 @@ func BeginRetrievalProgress(ctx context.Context, chatManage *types.ChatManage) *
+ 		args["query"] = chatManage.Query
+ 	}
+ 
+-	_ = chatManage.EventBus.Emit(ctx, types.Event{
++	emitErr := emitSourceLineageEvent(ctx, chatManage.EventBus, types.Event{
+ 		Type:      types.EventType(event.EventAgentToolCall),
+ 		SessionID: chatManage.SessionID,
+ 		Data: event.AgentToolCallData{
+@@ -102,7 +111,7 @@ func BeginRetrievalProgress(ctx context.Context, chatManage *types.ChatManage) *
+ 		},
+ 	})
+ 
+-	return &StageProgress{toolCallID: toolCallID, toolName: retrievalProgressTool}
++	return &StageProgress{toolCallID: toolCallID, toolName: retrievalProgressTool, err: emitErr}
+ }
+ 
+ // BeginQueryUnderstandProgress emits a pending query_understand tool_call.
+@@ -120,7 +129,7 @@ func BeginQueryUnderstandProgress(ctx context.Context, chatManage *types.ChatMan
+ 		args["has_images"] = true
+ 	}
+ 
+-	_ = chatManage.EventBus.Emit(ctx, types.Event{
++	emitErr := emitSourceLineageEvent(ctx, chatManage.EventBus, types.Event{
+ 		Type:      types.EventType(event.EventAgentToolCall),
+ 		SessionID: chatManage.SessionID,
+ 		Data: event.AgentToolCallData{
+@@ -130,7 +139,7 @@ func BeginQueryUnderstandProgress(ctx context.Context, chatManage *types.ChatMan
+ 		},
+ 	})
+ 
+-	return &StageProgress{toolCallID: toolCallID, toolName: queryUnderstandProgressTool}
++	return &StageProgress{toolCallID: toolCallID, toolName: queryUnderstandProgressTool, err: emitErr}
+ }
+ 
+ // EndQueryUnderstandProgress emits the matching tool_result for query understanding.
+@@ -140,9 +149,9 @@ func EndQueryUnderstandProgress(
+ 	progress *StageProgress,
+ 	start time.Time,
+ 	stageErr *PluginError,
+-) {
++) error {
+ 	if progress == nil || chatManage == nil || chatManage.EventBus == nil {
+-		return
++		return nil
+ 	}
+ 
+ 	success := stageErr == nil
+@@ -156,7 +165,7 @@ func EndQueryUnderstandProgress(
+ 		errMsg = stageErr.Err.Error()
+ 	}
+ 
+-	_ = chatManage.EventBus.Emit(ctx, types.Event{
++	return emitSourceLineageEvent(ctx, chatManage.EventBus, types.Event{
+ 		Type:      types.EventType(event.EventAgentToolResult),
+ 		SessionID: chatManage.SessionID,
+ 		Data: event.AgentToolResultData{
+@@ -177,9 +186,9 @@ func EndRetrievalProgress(
+ 	progress *StageProgress,
+ 	start time.Time,
+ 	stageErr *PluginError,
+-) {
++) error {
+ 	if progress == nil || chatManage == nil || chatManage.EventBus == nil {
+-		return
++		return nil
+ 	}
+ 
+ 	count, docCount, webCount := retrievalResultBreakdown(chatManage)
+@@ -227,7 +236,7 @@ func EndRetrievalProgress(
+ 		errMsg = stageErr.Err.Error()
+ 	}
+ 
+-	_ = chatManage.EventBus.Emit(ctx, types.Event{
++	return emitSourceLineageEvent(ctx, chatManage.EventBus, types.Event{
+ 		Type:      types.EventType(event.EventAgentToolResult),
+ 		SessionID: chatManage.SessionID,
+ 		Data: event.AgentToolResultData{
 diff --git a/internal/application/service/chat_pipeline/query_understand.go b/internal/application/service/chat_pipeline/query_understand.go
 index c8c29777229f2d4af90b89b136d628db4b2e894a..16abd9ac5d21707bd84513d55e6ef8ebe94edc41 100644
 --- a/internal/application/service/chat_pipeline/query_understand.go
@@ -95304,10 +95951,10 @@ index fb8ba98200d3b37b90de50fda3235711b84de53a..6a9b47c4cacb713d0b08ac8b477e601b
  		knowledgeService:     knowledgeService,
 diff --git a/internal/application/service/chat_pipeline/source_lineage.go b/internal/application/service/chat_pipeline/source_lineage.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..abc43424356419df7663141c3e1f7bb4e732f956
+index 0000000000000000000000000000000000000000..81d4d91fb3672c0502336d8507f4659c6864e854
 --- /dev/null
 +++ b/internal/application/service/chat_pipeline/source_lineage.go
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,154 @@
 +package chatpipeline
 +
 +import (
@@ -95454,6 +96101,13 @@ index 0000000000000000000000000000000000000000..abc43424356419df7663141c3e1f7bb4
 +		_ = turn.Add(types.UnknownSourceLineage())
 +	}
 +	return err
++}
++
++// EmitSourceLineageEvent publishes a producer event under the same current
++// material lifetime and original source checks as ordinary answer streaming.
++// Event data and citations never supply or repair the producer's proof.
++func EmitSourceLineageEvent(ctx context.Context, bus types.EventBusInterface, evt types.Event) error {
++	return emitSourceLineageEvent(ctx, bus, evt)
 +}
 diff --git a/internal/application/service/chunk.go b/internal/application/service/chunk.go
 index 8727ca04084ba1b892cbe0ef216ea4d0a1e2ac19..104954a1bfafc5e7ed585f9423bccb8e5b461665 100644
@@ -107221,10 +107875,10 @@ index 0000000000000000000000000000000000000000..0295b83e645d9282327c3bd39f915131
 +}
 diff --git a/internal/application/service/knowledge_machine_pipeline_test.go b/internal/application/service/knowledge_machine_pipeline_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..b717e85f73153bb9b8b8a93a84d8eebb5df0fc13
+index 0000000000000000000000000000000000000000..4a5cc9b2aee65fac0f59dfa5b77d718983297d15
 --- /dev/null
 +++ b/internal/application/service/knowledge_machine_pipeline_test.go
-@@ -0,0 +1,656 @@
+@@ -0,0 +1,672 @@
 +package service
 +
 +import (
@@ -107308,7 +107962,7 @@ index 0000000000000000000000000000000000000000..b717e85f73153bb9b8b8a93a84d8eebb
 +	return newMachinePipelineFixtureWithDocument(t, pg, strings.Repeat("Actual original document about its topic, with enough text for chunking and retrieval. ", 4))
 +}
 +
-+func newMachinePipelineFixtureWithDocument(t *testing.T, pg bool, artifact string) *machinePipelineFixture {
++func newMachinePipelineFixtureWithDocument(t *testing.T, pg bool, artifact string, withMessageMaterials ...bool) *machinePipelineFixture {
 +	t.Helper()
 +	f := newEnrichmentTestFixture(t, pg)
 +	// Remove setup-only ordinary data. Every tested NC knowledge below is
@@ -107328,6 +107982,22 @@ index 0000000000000000000000000000000000000000..b717e85f73153bb9b8b8a93a84d8eebb
 +		require.NoError(t, e)
 +		migration, e = gorm.Open(postgres.New(postgres.Config{Conn: sql, PreferSimpleProtocol: true}), &gorm.Config{})
 +		require.NoError(t, e)
++	}
++	if len(withMessageMaterials) > 0 && withMessageMaterials[0] {
++		// This optional ordinary-HTTP fixture follows the actual material chain
++		// before creating any session/message: 70→71→72→73 / 151→152→153→154.
++		message, body, steer := "000070_message_original_materials", "000071_original_body_retention", "000073_steer_original_materials"
++		if pg {
++			message, body, steer = "000151_message_original_materials", "000152_original_body_retention", "000154_steer_original_materials"
++		}
++		ordered := make([]string, 0, len(names)+2)
++		for _, name := range names {
++			if name == body {
++				ordered = append(ordered, message)
++			}
++			ordered = append(ordered, name)
++		}
++		names = append(ordered, steer)
 +	}
 +	for _, name := range names {
 +		script, e := os.ReadFile("../../../migrations/" + directory + "/" + name + ".up.sql")
@@ -119171,6 +119841,576 @@ index 0000000000000000000000000000000000000000..088d064b72b42688bb30681a53a13bdc
 +	require.Empty(t, listing)
 +	require.False(t, knowledge.listed, "fallback must not read raw Nextcloud titles")
 +}
+diff --git a/internal/application/service/normal_references_http_actual_test.go b/internal/application/service/normal_references_http_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403bd658968
+--- /dev/null
++++ b/internal/application/service/normal_references_http_actual_test.go
+@@ -0,0 +1,317 @@
++package service_test
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/service"
++	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
++	"github.com/Tencent/WeKnora/internal/middleware"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/stream"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++type normalReferencesActualBaseChat interface{ chat.Chat }
++type normalReferencesActualModel struct {
++	normalReferencesActualBaseChat
++	t          *testing.T
++	f          *service.NormalReferencesHTTPFixtureForTest
++	calls      atomic.Int64
++	inputFound atomic.Bool
++	stopped    atomic.Bool
++	mode       string
++	started    chan struct{}
++}
++
++func (m *normalReferencesActualModel) GetModelID() string   { return "normal-reference-model" }
++func (m *normalReferencesActualModel) GetModelName() string { return "controlled final source model" }
++func (m *normalReferencesActualModel) Chat(context.Context, []chat.Message, *chat.ChatOptions) (*types.ChatResponse, error) {
++	return nil, fmt.Errorf("the full ordinary fixture must use final streaming, with rewrite disabled")
++}
++func (m *normalReferencesActualModel) ChatStream(ctx context.Context, input []chat.Message, _ *chat.ChatOptions) (<-chan types.StreamResponse, error) {
++	m.calls.Add(1)
++	defer close(m.started)
++	require.NoError(m.t, types.CheckHistoryMaterialLifetime(ctx))
++	found := false
++	for _, message := range input {
++		require.Equal(m.t, m.f.Lineage, message.SourceLineage, "actual final model uses the original complete collector union")
++		if strings.Contains(message.Content, "Current employee policy") {
++			found = true
++		}
++	}
++	m.inputFound.Store(found)
++	if !found {
++		return nil, fmt.Errorf("production search/merge/prompt did not consume the actual signed document")
++	}
++	var held int64
++	require.NoError(m.t, m.f.DB.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&held).Error)
++	require.Positive(m.t, held, "original source physical pins stay held at model entry")
++	if m.mode == "source-after-start" || m.mode == "source-after-start-open" {
++		m.f.Revoke()
++	}
++	if m.mode == "lease-after-start" {
++		require.NoError(m.t, m.f.DB.Exec("UPDATE nextcloud_content_leases SET expires_at_ms=1 WHERE kind='read' AND released_at_ms IS NULL").Error)
++	}
++	if m.mode == "caller-disconnect" {
++		m.f.Cancel()
++	}
++	out := make(chan types.StreamResponse, 2)
++	if m.mode == "model-error" {
++		out <- types.StreamResponse{ResponseType: types.ResponseTypeError, Content: "untrusted controlled provider diagnostic"}
++		close(out)
++		return out, nil
++	}
++	if m.mode == "eof-no-done" {
++		close(out)
++		return out, nil
++	}
++
++	if m.mode == "source-after-start-open" || m.mode == "producer-stop" {
++		go func() { <-ctx.Done(); m.stopped.Store(true); close(out) }()
++		return out, nil
++	}
++	if m.mode == "thinking-refuse" {
++		out <- types.StreamResponse{ResponseType: types.ResponseTypeThinking, Content: "CONTROLLED CURRENT THINKING", Done: false}
++	}
++	out <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "CURRENT ADMITTED NORMAL ANSWER", Done: true}
++	if m.mode == "done-open" {
++		go func() { <-ctx.Done(); close(out) }()
++	} else {
++		close(out)
++	}
++	return out, nil
++}
++
++func runNormalReferencesActualHTTP(t *testing.T, pg bool, modes ...string) {
++	mode := "current"
++	if len(modes) > 0 {
++		mode = modes[0]
++	}
++	model := &normalReferencesActualModel{t: t, mode: mode, started: make(chan struct{})}
++	f := service.NewNormalReferencesHTTPFixtureForTest(t, pg, model, mode)
++	model.f = f
++	mini := miniredis.RunT(t)
++	redis, err := stream.NewRedisStreamManager(mini.Addr(), "", "", 0, "normal-reference-actual", time.Minute)
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = redis.Close() })
++	observedStream := &normalReferencesObservedStreamForTest{RedisStreamManager: redis, watcher: make(chan context.Context, 1)}
++	var sender interfaces.StreamManager = observedStream
++	if mode == "empty-fixed-refuse" {
++		sender = normalReferencesRefusingSink{StreamManager: observedStream}
++	}
++	h := sessionhandler.NewHandler(f.Sessions, f.Messages, nil, sender, f.Config, f.KBs, nil, nil, nil, nil, nil, nil, nil, f.Models, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(middleware.ErrorHandler())
++	router.Use(func(c *gin.Context) {
++		c.Request = c.Request.WithContext(f.Ctx)
++		c.Set(types.TenantIDContextKey.String(), uint64(7))
++		c.Set(types.RequestIDContextKey.String(), "normal-reference-actual-request")
++		c.Next()
++	})
++	router.POST("/knowledge-chat/:session_id", h.KnowledgeQA)
++	router.POST("/sessions/:session_id/stop", h.StopSession)
++	httpReturned := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
++		if strings.HasPrefix(req.URL.Path, "/knowledge-chat/") {
++			defer close(httpReturned)
++		}
++		router.ServeHTTP(w, req)
++	}))
++	t.Cleanup(server.Close)
++	client := &http.Client{Timeout: 8 * time.Second}
++	started := time.Now()
++	response, err := client.Post(server.URL+"/knowledge-chat/"+f.Session.ID, "application/json", strings.NewReader("{\"query\":\"current employee policy\",\"knowledge_base_ids\":[\"kb\"],\"summary_model_id\":\"normal-reference-model\",\"disable_title\":true}"))
++	require.NoError(t, err)
++	defer response.Body.Close()
++	if mode == "producer-stop" {
++		remaining := 8*time.Second - time.Since(started)
++		require.Positive(t, remaining, "the unchanged HTTP deadline still bounds startup")
++		select {
++		case <-model.started:
++		case <-time.After(remaining):
++			t.Fatal("the real original provider did not start within the unchanged HTTP bound")
++		}
++		var assistant types.Message
++		require.NoError(t, f.DB.Select("id").Where("session_id=? AND role='assistant'", f.Session.ID).Take(&assistant).Error)
++		stopResponse, stopErr := client.Post(server.URL+"/sessions/"+f.Session.ID+"/stop", "application/json", strings.NewReader("{\"message_id\":\""+assistant.ID+"\"}"))
++		require.NoError(t, stopErr)
++		require.Equal(t, http.StatusOK, stopResponse.StatusCode, "actual owner-authorized StopSession route publishes the Redis stop event")
++		stopResponse.Body.Close()
++	}
++	var body bytes.Buffer
++	_, err = body.ReadFrom(response.Body)
++	if mode != "caller-disconnect" {
++		require.NoError(t, err, "actual normal sender must terminate within the unchanged 8-second bound")
++	} else {
++		require.Less(t, time.Since(started), 8*time.Second, "a canceled caller must terminate before the unchanged HTTP deadline")
++	}
++	require.Equal(t, http.StatusOK, response.StatusCode)
++	content := body.String()
++	defer func() {
++		select {
++		case <-f.ProducerReturned:
++		case <-time.After(3 * time.Second):
++			t.Fatal("the actual production KnowledgeQA did not return before final database assertions")
++		}
++		if mode == "producer-stop" {
++			select {
++			case <-httpReturned:
++			case <-time.After(3 * time.Second):
++				t.Fatal("the real owned HTTP sender did not exit")
++			}
++			var watcherCtx context.Context
++			select {
++			case watcherCtx = <-observedStream.watcher:
++			case <-time.After(3 * time.Second):
++				t.Fatal("the real owned stop watcher never called the actual Redis reader")
++			}
++			select {
++			case <-watcherCtx.Done():
++			case <-time.After(3 * time.Second):
++				t.Fatal("the real owned stop watcher did not exit")
++			}
++			select {
++			case <-f.CompletionReturned:
++				require.ErrorIs(t, <-f.CompletionError, access.ErrNextcloudPublicationDenied, "the real completed write was refused by the original output boundary")
++				errors := f.CompletionErrors()
++				require.NotEmpty(t, errors)
++				for _, completionErr := range errors {
++					require.ErrorIs(t, completionErr, access.ErrNextcloudPublicationDenied, "every completed attempt ended with the same original-boundary denial after both delivery loops exited")
++				}
++			case <-time.After(3 * time.Second):
++				t.Fatal("the actual StopSession completion call did not return")
++			}
++		}
++		require.Eventually(t, func() bool {
++			var source, body int64
++			return f.DB.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&source).Error == nil && f.DB.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&body).Error == nil && source == 0 && body == 0
++		}, 3*time.Second, 10*time.Millisecond, "actual terminal releases producer/reader pins before fixture cleanup")
++		var completed, manifests int64
++		require.NoError(t, f.DB.Model(&types.Message{}).Where("session_id=? AND role='assistant' AND is_completed=true", f.Session.ID).Count(&completed).Error)
++		require.NoError(t, f.DB.Table("message_completion_input_manifests c").Joins("JOIN message_material_receipts r ON r.admission_id=c.assistant_admission_id").Joins("JOIN messages m ON m.id=r.message_id").Where("m.session_id=? AND m.role='assistant'", f.Session.ID).Count(&manifests).Error)
++		if mode == "current" || mode == "done-open" || mode == "empty-fixed" || mode == "caller-disconnect" {
++			require.EqualValues(t, 1, completed, "actual permitted background production completed before the final oracle")
++			require.EqualValues(t, 1, manifests, "the current completion receipt has its original immutable input manifest")
++		} else {
++			require.Zero(t, completed, "a refused or truly stopped producer never fabricates a completed assistant after it returns")
++			require.Zero(t, manifests, "a refused or truly stopped producer has no current completion manifest")
++		}
++	}()
++	if mode != "current" && mode != "done-open" && mode != "empty-fixed" && mode != "caller-disconnect" {
++		if mode != "producer-stop" {
++			require.Contains(t, content, "\"response_type\":\"error\"")
++		}
++		require.NotContains(t, content, "CURRENT ADMITTED NORMAL ANSWER")
++		require.NotContains(t, content, "untrusted controlled provider diagnostic")
++		require.NotContains(t, content, "\"response_type\":\"complete\"")
++		wantCalls := int64(0)
++		if mode == "source-after-start" || mode == "source-after-start-open" || mode == "lease-after-start" || mode == "thinking-refuse" || mode == "caller-disconnect" || mode == "model-error" || mode == "eof-no-done" || mode == "producer-stop" {
++			wantCalls = 1
++		}
++		require.Equal(t, wantCalls, model.calls.Load(), "no later model starts after the actual producer boundary fails")
++		if mode == "source-after-start-open" || mode == "producer-stop" {
++			require.Eventually(t, func() bool { return model.stopped.Load() }, time.Second, time.Millisecond, "the started original provider actually receives cancellation and stops")
++		}
++		return
++	}
++	if mode == "empty-fixed" {
++		require.Contains(t, content, "CURRENT FIXED SAFE FALLBACK")
++		require.Contains(t, content, "\"response_type\":\"complete\"")
++		require.NotContains(t, content, "\"response_type\":\"error\"")
++		require.EqualValues(t, 0, model.calls.Load(), "the fixed code-origin fallback needs no model")
++		return
++	}
++	if mode == "caller-disconnect" {
++		require.EqualValues(t, 1, model.calls.Load(), "HTTP caller cancellation preserves the owned background producer")
++		require.True(t, model.inputFound.Load())
++		return
++	}
++	refs := strings.Index(content, "\"response_type\":\"references\"")
++	answer := strings.Index(content, "\"response_type\":\"answer\"")
++	complete := strings.Index(content, "\"response_type\":\"complete\"")
++	require.GreaterOrEqual(t, refs, 0, "actual pre-answer references producer reaches the real subscriber")
++	require.Greater(t, answer, refs)
++	require.Greater(t, complete, answer)
++	require.Contains(t, content, "CURRENT ADMITTED NORMAL ANSWER")
++	require.NotContains(t, content, "\"response_type\":\"error\"")
++	require.NotContains(t, content, "source_lineage")
++	require.EqualValues(t, 1, model.calls.Load())
++	require.True(t, model.inputFound.Load())
++	var assistant types.Message
++	require.NoError(t, f.DB.Where("session_id=? AND role='assistant'", f.Session.ID).Take(&assistant).Error)
++	require.True(t, assistant.IsCompleted)
++	require.Equal(t, f.Lineage, assistant.SourceLineage)
++	require.Len(t, assistant.KnowledgeReferences, 2)
++	require.Eventually(t, func() bool {
++		var source, body int64
++		return f.DB.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&source).Error == nil &&
++			f.DB.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&body).Error == nil && source == 0 && body == 0
++	}, 3*time.Second, 10*time.Millisecond, "real producer and final sender release all owned original pins")
++}
++
++func TestNormalReferencesActualHTTPSQLite(t *testing.T)   { runNormalReferencesActualHTTP(t, false) }
++func TestPostgresNormalReferencesActualHTTP(t *testing.T) { runNormalReferencesActualHTTP(t, true) }
++
++func TestNormalReferencesActualHTTPBoundariesSQLite(t *testing.T) {
++	for _, mode := range []string{"source-before-refs", "actor-before-refs", "lease-before-refs", "unknown-prefix", "references-refuse", "empty-fixed", "empty-fixed-refuse", "source-after-start", "lease-after-start", "thinking-refuse", "done-open", "source-after-start-open"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, false, mode) })
++	}
++}
++func TestPostgresNormalReferencesActualHTTPBoundaries(t *testing.T) {
++	for _, mode := range []string{"source-before-refs", "actor-before-refs", "lease-before-refs", "unknown-prefix", "references-refuse", "empty-fixed", "empty-fixed-refuse", "source-after-start", "lease-after-start", "thinking-refuse", "done-open", "source-after-start-open"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, true, mode) })
++	}
++}
++
++// Inject failure at the real strict handler's output sink before any frame or
++// Done listener is committed; no fake producer event authenticates the body.
++type normalReferencesRefusingSink struct{ interfaces.StreamManager }
++
++func (s normalReferencesRefusingSink) AppendEvent(ctx context.Context, session, message string, frame interfaces.StreamEvent) error {
++	if frame.Type == types.ResponseTypeAnswer {
++		return fmt.Errorf("controlled actual final sender refusal")
++	}
++	return s.StreamManager.AppendEvent(ctx, session, message, frame)
++}
++
++func TestNormalReferencesActualHTTPRemainingAsyncSQLite(t *testing.T) {
++	for _, mode := range []string{"caller-disconnect", "producer-stop", "model-error", "eof-no-done"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, false, mode) })
++	}
++}
++func TestPostgresNormalReferencesActualHTTPRemainingAsync(t *testing.T) {
++	for _, mode := range []string{"caller-disconnect", "producer-stop", "model-error", "eof-no-done"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, true, mode) })
++	}
++}
++
++// Observe the actual production stop watcher's owned context. GetEvents still
++// reads the real Redis queue unchanged; its context is cancelled by the real
++// watcher defer only after its synchronous stop callback returns.
++type normalReferencesObservedStreamForTest struct {
++	*stream.RedisStreamManager
++	watcher chan context.Context
++	once    sync.Once
++}
++
++func (s *normalReferencesObservedStreamForTest) GetEvents(ctx context.Context, session, message string, offset int) ([]interfaces.StreamEvent, int, error) {
++	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > time.Hour {
++		s.once.Do(func() { s.watcher <- ctx })
++	}
++	return s.RedisStreamManager.GetEvents(ctx, session, message, offset)
++}
+diff --git a/internal/application/service/normal_references_http_fixture_test.go b/internal/application/service/normal_references_http_fixture_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..28d0cfa176bab916a75f43e875607974f6dc6db8
+--- /dev/null
++++ b/internal/application/service/normal_references_http_fixture_test.go
+@@ -0,0 +1,241 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"os"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++// This test-only bridge lets the external HTTP tests use the real signed
++// machine ingestion fixture without introducing a service -> handler cycle.
++type NormalReferencesHTTPFixtureForTest struct {
++	DB                 *gorm.DB
++	Store              *repository.KnowledgeInputProvenanceStore
++	Ctx                context.Context
++	Session            *types.Session
++	Sessions           interfaces.SessionService
++	Messages           interfaces.MessageService
++	KBs                interfaces.KnowledgeBaseService
++	Models             interfaces.ModelService
++	Config             *config.Config
++	Lineage            *types.SourceLineage
++	Revoke             func()
++	Cancel             func()
++	ProducerReturned   <-chan struct{}
++	CompletionReturned <-chan struct{}
++	CompletionError    <-chan error
++	CompletionErrors   func() []error
++}
++
++type normalReferencesModelsForTest struct {
++	interfaces.ModelService
++	final chat.Chat
++}
++
++func (m normalReferencesModelsForTest) GetModelByID(context.Context, string) (*types.Model, error) {
++	return &types.Model{ID: "normal-reference-model", TenantID: 7, Name: "controlled final model", Type: types.ModelTypeKnowledgeQA, Status: types.ModelStatusActive}, nil
++}
++func (m normalReferencesModelsForTest) ListModels(context.Context) ([]*types.Model, error) {
++	return []*types.Model{}, nil
++}
++func (m normalReferencesModelsForTest) GetChatModel(context.Context, string) (chat.Chat, error) {
++	return m.final, nil
++}
++func (m normalReferencesModelsForTest) GetEmbeddingModel(context.Context, string) (embedding.Embedder, error) {
++	return parentChildEmbedder{}, nil
++}
++
++func NewNormalReferencesHTTPFixtureForTest(t *testing.T, pg bool, final chat.Chat, modes ...string) *NormalReferencesHTTPFixtureForTest {
++	t.Helper()
++	mode := "current"
++	if len(modes) > 0 {
++		mode = modes[0]
++	}
++	m := newMachinePipelineFixtureWithDocument(t, pg, "Current employee policy: read the approved record, then ask before changing another department's access.", true)
++	k := m.ingest(t)
++	for i := 0; i < len(m.f.queue.tasks); i++ {
++		require.NoError(t, m.run(t, m.f.queue.tasks[i]))
++	}
++	var chunks []*types.Chunk
++	require.NoError(t, m.f.db.Where("knowledge_id=?", k.ID).Order("chunk_index").Find(&chunks).Error)
++	require.Len(t, chunks, 2, "actual signed production sync generated text and summary")
++	migration := m.f.db
++	directory := "sqlite"
++	names := []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql"}
++	artifactType := "TEXT"
++	if pg {
++		directory, artifactType = "versioned", "JSONB"
++		names = []string{"000103_message_artifacts_table.up.sql", "000107_message_artifacts_deleted_at.up.sql"}
++		pool, err := m.f.db.DB()
++		require.NoError(t, err)
++		migration, err = gorm.Open(postgres.New(postgres.Config{Conn: pool, PreferSimpleProtocol: true}), &gorm.Config{})
++		require.NoError(t, err)
++		require.NoError(t, migration.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public").Error)
++		require.NoError(t, migration.Exec("ALTER EXTENSION \"uuid-ossp\" SET SCHEMA public").Error)
++		require.NoError(t, migration.Exec("CREATE FUNCTION uuid_generate_v4() RETURNS uuid LANGUAGE sql AS $$ SELECT public.uuid_generate_v4() $$").Error)
++	}
++	if !m.f.db.Migrator().HasColumn(&types.Message{}, "artifacts") {
++		require.NoError(t, migration.Exec("ALTER TABLE messages ADD COLUMN artifacts "+artifactType).Error)
++	}
++	for _, name := range names {
++		ddl, err := os.ReadFile("../../../migrations/" + directory + "/" + name)
++		require.NoError(t, err)
++		require.NoError(t, migration.Exec(string(ddl)).Error)
++	}
++	require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(m.f.db))
++	models := normalReferencesModelsForTest{final: final}
++	engine := &fakeRetrieveEngineService{engineType: types.PostgresRetrieverEngineType, support: []types.RetrieverType{types.VectorRetrieverType},
++		canned: []*types.IndexWithScore{{ChunkID: chunks[0].ID, KnowledgeID: k.ID, Score: 1}, {ChunkID: chunks[1].ID, KnowledgeID: k.ID, Score: .9}}}
++	if mode == "empty-fixed" || mode == "empty-fixed-refuse" {
++		engine.canned = nil
++	}
++	groups := NewGroupAccessService(repository.NewGroupAccessRepository(m.f.db))
++	publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(m.f.db), repository.NewDataSourceRepository(m.f.db))
++	m.f.s.publicationGuard = publication
++	kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(m.f.db), kgRepo: m.f.s.repo, chunkRepo: m.f.s.chunkRepo,
++		contentLeases: m.f.store.ContentLeaseStore(), ragChunkSnapshots: repository.NewRAGChunkSnapshotReader(m.f.db, m.f.store), ragChunkLineageGuard: m.f.guard,
++		modelService: models, retrieveEngine: parentChildRetrieveRegistry{engine: engine}, groupAccess: groups,
++		publicationGuard: publication}
++	cfg := &config.Config{Conversation: &config.ConversationConfig{MaxRounds: 3, FallbackStrategy: "fixed", FallbackResponse: "CURRENT FIXED SAFE FALLBACK", EmbeddingTopK: 2, RerankTopK: 2, EnableRewrite: false,
++		Summary: &config.SummaryConfig{Prompt: "Answer using the admitted current sources", ContextTemplate: "{{query}}\n{{contexts}}"}}}
++	tenantService := normalReferencesTenantForTest{db: m.f.db}
++	messages := &messageService{messageRepo: repository.NewMessageRepository(m.f.db), sessionRepo: repository.NewSessionRepository(m.f.db), sourceLineageGuard: m.f.guard, kbService: kbs, knowService: m.f.s, modelService: models}
++	ConfigureMessageMaterialProvenance(messages, m.f.store)
++	repository.ConfigureMessageOriginalBodyAvailability(m.f.store, repository.CheckOriginalBodyAvailableInTx)
++	manager := chatpipeline.NewEventManager()
++	chatpipeline.ConfigureSourceLineage(manager, m.f.guard)
++	chatpipeline.NewPluginLoadHistory(manager, messages, cfg)
++	chatpipeline.NewPluginMemoryRecall(manager, nil)
++	chatpipeline.NewPluginQueryUnderstand(manager, models, messages, nil, cfg)
++	chatpipeline.NewPluginSearchParallel(manager, kbs, m.f.s, m.f.s.chunkService, cfg, nil, tenantService, nil, nil, nil, nil, m.f.s.chunkRepo, m.f.s.repo)
++	chatpipeline.NewPluginRerank(manager, models)
++	chatpipeline.NewPluginMerge(manager, m.f.s.chunkRepo, m.f.s.chunkService)
++	chatpipeline.ConfigureRAGChunkMergeHydration(manager, kbs)
++	chatpipeline.NewPluginFilterTopK(manager)
++	into := chatpipeline.NewPluginIntoChatMessage(manager, messages, m.f.s)
++	manager.Register(normalReferencesCheckpointForTest{base: into, hook: func(ctx context.Context) {
++		switch mode {
++		case "source-before-refs":
++			m.personal.Store(false)
++		case "actor-before-refs":
++			require.NoError(t, m.f.db.Model(&types.User{}).Where("id=?", types.CallerFromContext(ctx).UserID).Update("is_active", false).Error)
++		case "lease-before-refs":
++			require.NoError(t, m.f.db.Exec("UPDATE nextcloud_content_leases SET expires_at_ms=1 WHERE kind='read' AND released_at_ms IS NULL").Error)
++		}
++	}})
++	chatpipeline.NewPluginChatCompletionStream(manager, models)
++	producerReturned := make(chan struct{})
++	completionReturned := make(chan struct{})
++	completionError := make(chan error, 1)
++	observedMessages := &normalReferencesObservedMessagesForTest{messageService: messages, returned: completionReturned, result: completionError}
++	sessions := &sessionService{cfg: cfg, sessionRepo: repository.NewSessionRepository(m.f.db), messageRepo: repository.NewMessageRepository(m.f.db), knowledgeBaseService: kbs,
++		knowledgeService: m.f.s, chunkService: m.f.s.chunkService, modelService: models, tenantService: tenantService, eventManager: manager, busyGate: NewSessionBusyGate(), groupAccess: groups}
++	ConfigureMessageSourceLineage(messages, sessions, &SessionForkService{}, manager, m.f.guard)
++	ctx := context.WithValue(m.f.ctx, types.UserIDContextKey, types.CallerFromContext(m.f.ctx).UserID)
++	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
++	t.Cleanup(cancel)
++	var tenant types.Tenant
++	require.NoError(t, m.f.db.Where("id=7").Take(&tenant).Error)
++	ctx = context.WithValue(ctx, types.TenantInfoContextKey, &tenant)
++	session := &types.Session{ID: "normal-references-session", TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++	require.NoError(t, m.f.db.Create(session).Error)
++	original, err := m.f.store.CaptureKnowledgeOutputInputs(ctx, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: k.ID})
++	require.NoError(t, err)
++	return &NormalReferencesHTTPFixtureForTest{DB: m.f.db, Store: m.f.store, Ctx: ctx, Session: session, Sessions: normalReferencesSessionForTest{SessionService: sessions, mode: mode, returned: producerReturned}, Messages: observedMessages, KBs: kbs, Models: models, Config: cfg, Lineage: original.Proof.SourceLineage, Revoke: func() { m.personal.Store(false) }, Cancel: cancel, ProducerReturned: producerReturned, CompletionReturned: completionReturned, CompletionError: completionError, CompletionErrors: observedMessages.completionErrors}
++}
++
++type normalReferencesTenantForTest struct {
++	interfaces.TenantService
++	db *gorm.DB
++}
++
++func (s normalReferencesTenantForTest) GetTenantByID(ctx context.Context, id uint64) (*types.Tenant, error) {
++	var tenant types.Tenant
++	err := s.db.WithContext(ctx).Where("id=?", id).Take(&tenant).Error
++	return &tenant, err
++}
++
++// The checkpoint delegates to the actual prompt producer before changing current
++// authority. It does not construct an event or replace any source proof.
++type normalReferencesCheckpointForTest struct {
++	base *chatpipeline.PluginIntoChatMessage
++	hook func(context.Context)
++}
++
++func (p normalReferencesCheckpointForTest) ActivationEvents() []types.EventType {
++	return []types.EventType{types.INTO_CHAT_MESSAGE}
++}
++func (p normalReferencesCheckpointForTest) OnEvent(ctx context.Context, kind types.EventType, cm *types.ChatManage, next func() *chatpipeline.PluginError) *chatpipeline.PluginError {
++	return p.base.OnEvent(ctx, kind, cm, func() *chatpipeline.PluginError { p.hook(ctx); return next() })
++}
++
++type normalReferencesSessionForTest struct {
++	interfaces.SessionService
++	mode     string
++	returned chan struct{}
++}
++
++func (s normalReferencesSessionForTest) KnowledgeQA(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
++	defer close(s.returned) // The actual production service returned; no fabricated stream result.
++	if s.mode == "unknown-prefix" {
++		// Explicit unproven prior-output negative. The real producer must never
++		// clear the strict consumer's unknown prefix when its own proof arrives.
++		_ = bus.Emit(ctx, event.Event{Type: event.EventAgentToolCall, SessionID: req.Session.ID, Data: event.AgentToolCallData{ToolCallID: "unproven-old-prefix", ToolName: "unproven-old-prefix"}})
++	}
++	if s.mode == "references-refuse" || s.mode == "thinking-refuse" {
++		kind := event.EventAgentReferences
++		if s.mode == "empty-fixed-refuse" {
++			kind = event.EventAgentFinalAnswer
++		}
++		if s.mode == "thinking-refuse" {
++			kind = event.EventAgentThought
++		}
++		bus.On(kind, func(context.Context, event.Event) error { return errors.New("controlled actual subscriber refusal") })
++	}
++	return s.SessionService.KnowledgeQA(ctx, req, bus)
++}
++
++// Embed the real concrete message service so all original-material capabilities
++// remain visible to the production handler. Only observe an actual completed
++// UpdateMessage return; do not create a receipt, origin, or completion proof.
++type normalReferencesObservedMessagesForTest struct {
++	*messageService
++	returned chan struct{}
++	result   chan error
++	once     sync.Once
++	mu       sync.Mutex
++	errors   []error
++}
++
++func (s *normalReferencesObservedMessagesForTest) UpdateMessage(ctx context.Context, message *types.Message) error {
++	err := s.messageService.UpdateMessage(ctx, message)
++	if message.Role == "assistant" && message.IsCompleted {
++		s.mu.Lock()
++		s.errors = append(s.errors, err)
++		s.mu.Unlock()
++		s.once.Do(func() { s.result <- err; close(s.returned) })
++	}
++	return err
++}
++
++func (s *normalReferencesObservedMessagesForTest) completionErrors() []error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return append([]error(nil), s.errors...)
++}
 diff --git a/internal/application/service/original_body_retention_test.go b/internal/application/service/original_body_retention_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..060494224a059855346239f197699e33e01e2014
@@ -121767,7 +123007,7 @@ index fab799e6159efc38883a9bde3b320123c36c2a9c..ac0980e9528fe25188d55fb95cac15a2
  
  func TestForkUsesProvidedTitle(t *testing.T) {
 diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
-index 068265c42b84594161d9dccf4b85695bf92c5745..c7257cf6841852819fd71b65c38ecfefe9b88cfc 100644
+index 068265c42b84594161d9dccf4b85695bf92c5745..141a2b5e944ffd98feecf6f8120cec7ac072aa04 100644
 --- a/internal/application/service/session_knowledge_qa.go
 +++ b/internal/application/service/session_knowledge_qa.go
 @@ -7,6 +7,7 @@ import (
@@ -121836,15 +123076,28 @@ index 068265c42b84594161d9dccf4b85695bf92c5745..c7257cf6841852819fd71b65c38ecfef
 +	markMessageMaterialReady(ctx)
  	err = s.KnowledgeQAByEvent(ctx, chatManage, pipeline)
 +	if err == nil {
-+		handoff = true
++		handoff = chatManage.SourceStreamResult != nil
 +	}
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, map[string]interface{}{
  			"session_id": req.Session.ID,
-@@ -768,6 +811,13 @@ func intersectStrings(left []string, right []string) []string {
+@@ -767,7 +810,25 @@ func intersectStrings(left []string, right []string) []string {
+ // KnowledgeQAByEvent processes knowledge QA through a series of events in the pipeline
  func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  	chatManage *types.ChatManage, eventList []types.EventType,
- ) error {
+-) error {
++) (resultErr error) {
++	defer func() {
++		if resultErr != nil && chatManage.SourceStreamResult != nil {
++			if chatManage.SourceStreamCancel != nil {
++				chatManage.SourceStreamCancel()
++			}
++			// A started producer must exit before the caller releases the last
++			// original owner on any later pipeline/refusal/cancellation path.
++			<-chatManage.SourceStreamResult
++		}
++	}()
++
 +	if types.RAGSourceLineageFromContext(ctx) == nil {
 +		var err error
 +		ctx, err = s.eventManager.BeginSourceLineage(ctx, chatManage, access.LineageReadScope{Targets: chatManage.SearchTargets})
@@ -121855,7 +123108,7 @@ index 068265c42b84594161d9dccf4b85695bf92c5745..c7257cf6841852819fd71b65c38ecfef
  	logger.Info(ctx, "Start processing knowledge base question answering through events")
  	logger.Infof(ctx, "Knowledge base question answering parameters, session ID: %s, query: %s",
  		chatManage.SessionID, chatManage.Query)
-@@ -785,6 +835,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -785,6 +846,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  	var understandProgress *chatpipeline.StageProgress
  	var understandStart time.Time
  	for _, eventType := range eventList {
@@ -121865,14 +123118,33 @@ index 068265c42b84594161d9dccf4b85695bf92c5745..c7257cf6841852819fd71b65c38ecfef
  		if err := s.revalidateSearchTargets(ctx, chatManage.SearchTargets); err != nil {
  			return err
  		}
-@@ -825,9 +878,19 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -815,21 +879,41 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+ 		if eventType == types.QUERY_UNDERSTAND && chatpipeline.ShouldEmitQueryUnderstandProgress(chatManage) {
+ 			understandStart = stageStart
+ 			understandProgress = chatpipeline.BeginQueryUnderstandProgress(stageCtx, chatManage)
++			if err := understandProgress.Err(); err != nil {
++				return err
++			}
+ 		}
+ 		if chatpipeline.IsConsolidatedRetrievalStage(eventType, chatManage) && retrievalProgress == nil {
+ 			retrievalStart = stageStart
+ 			retrievalProgress = chatpipeline.BeginRetrievalProgress(stageCtx, chatManage)
++			if err := retrievalProgress.Err(); err != nil {
++				return err
++			}
+ 		}
+ 		// Emit references before answer streaming so the SSE client receives
+ 		// them while the connection is still open. Previously references were
  		// emitted after the pipeline returned — by then the `complete` event had
  		// already closed the stream, so the frontend only saw citations on refresh.
  		if eventType == types.CHAT_COMPLETION_STREAM {
+-			emitKnowledgeReferencesEvent(ctx, chatManage)
 +			if err := chatpipeline.AccountResults(ctx, chatManage.MergeResult); err != nil {
 +				return err
 +			}
- 			emitKnowledgeReferencesEvent(ctx, chatManage)
++			if err := emitKnowledgeReferencesEvent(ctx, chatManage); err != nil {
++				return err
++			}
  		}
  		err := s.eventManager.Trigger(stageCtx, eventType, chatManage)
 +		if err == nil || err == chatpipeline.ErrSearchNothing {
@@ -121883,19 +123155,79 @@ index 068265c42b84594161d9dccf4b85695bf92c5745..c7257cf6841852819fd71b65c38ecfef
 +			}
 +		}
  		if understandProgress != nil && eventType == types.QUERY_UNDERSTAND {
- 			chatpipeline.EndQueryUnderstandProgress(stageCtx, chatManage, understandProgress, understandStart, err)
+-			chatpipeline.EndQueryUnderstandProgress(stageCtx, chatManage, understandProgress, understandStart, err)
++			if emitErr := chatpipeline.EndQueryUnderstandProgress(stageCtx, chatManage, understandProgress, understandStart, err); emitErr != nil {
++				return emitErr
++			}
  			understandProgress = nil
-@@ -880,6 +943,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+ 		}
+ 		// Close the consolidated retrieval progress window as soon as retrieval
+@@ -840,7 +924,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+ 		// tool_call pending — so the frontend keeps spinning on "正在检索知识库"
+ 		// forever even though the fallback answer has already streamed.
+ 		if retrievalProgress != nil && chatpipeline.ShouldCloseRetrievalProgress(eventType, lastRetrievalStage, err) {
+-			chatpipeline.EndRetrievalProgress(stageCtx, chatManage, retrievalProgress, retrievalStart, err)
++			if emitErr := chatpipeline.EndRetrievalProgress(stageCtx, chatManage, retrievalProgress, retrievalStart, err); emitErr != nil {
++				return emitErr
++			}
+ 			retrievalProgress = nil
+ 		}
+ 		stageDuration := time.Since(stageStart)
+@@ -879,7 +965,12 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+ 				"reason":      "search_nothing",
  				"strategy":    string(chatManage.FallbackStrategy),
  			})
- 			s.handleFallbackResponse(ctx, chatManage)
+-			s.handleFallbackResponse(ctx, chatManage)
++			if err := s.handleFallbackResponse(ctx, chatManage); err != nil {
++				return err
++			}
 +			if turn := types.RAGSourceLineageFromContext(ctx); turn != nil {
 +				return turn.Check(ctx)
 +			}
  			return nil
  		}
  
-@@ -1039,6 +1105,11 @@ func (s *sessionService) handleFixedFallback(ctx context.Context, chatManage *ty
+@@ -899,6 +990,14 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+ 		})
+ 	}
+ 
++	if chatManage.SourceStreamResult != nil {
++		select {
++		case streamErr := <-chatManage.SourceStreamResult:
++			return streamErr
++		case <-ctx.Done():
++			return ctx.Err()
++		}
++	}
+ 	common.PipelineInfo(ctx, "Pipeline", "all_stages_complete", map[string]interface{}{
+ 		"session_id":        chatManage.SessionID,
+ 		"total_stages":      len(eventList),
+@@ -1022,23 +1121,32 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
+ }
+ 
+ // handleFallbackResponse handles fallback response based on strategy
+-func (s *sessionService) handleFallbackResponse(ctx context.Context, chatManage *types.ChatManage) {
++func (s *sessionService) handleFallbackResponse(ctx context.Context, chatManage *types.ChatManage) error {
+ 	if chatManage.FallbackStrategy == types.FallbackStrategyModel {
+ 		s.handleModelFallback(ctx, chatManage)
++		if turn := types.RAGSourceLineageFromContext(ctx); turn != nil {
++			return turn.Check(ctx)
++		}
++		return nil
+ 	} else {
+-		s.handleFixedFallback(ctx, chatManage)
++		return s.handleFixedFallback(ctx, chatManage)
+ 	}
+ }
+ 
+ // handleFixedFallback handles fixed fallback response
+-func (s *sessionService) handleFixedFallback(ctx context.Context, chatManage *types.ChatManage) {
++func (s *sessionService) handleFixedFallback(ctx context.Context, chatManage *types.ChatManage) error {
+ 	fallbackContent := chatManage.FallbackResponse
+ 	chatManage.ChatResponse = &types.ChatResponse{Content: fallbackContent}
+-	s.emitFallbackAnswer(ctx, chatManage, fallbackContent)
++	return s.emitFallbackAnswer(ctx, chatManage, fallbackContent)
+ }
  
  // handleModelFallback handles model-based fallback response using streaming
  func (s *sessionService) handleModelFallback(ctx context.Context, chatManage *types.ChatManage) {
@@ -121907,7 +123239,7 @@ index 068265c42b84594161d9dccf4b85695bf92c5745..c7257cf6841852819fd71b65c38ecfef
  	// Check if FallbackPrompt is available
  	if chatManage.FallbackPrompt == "" {
  		logger.Warnf(ctx, "Fallback strategy is 'model' but FallbackPrompt is empty, falling back to fixed response")
-@@ -1202,6 +1273,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
+@@ -1202,6 +1310,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
  		if total >= maxDocuments {
  			break
  		}
@@ -121919,16 +123251,63 @@ index 068265c42b84594161d9dccf4b85695bf92c5745..c7257cf6841852819fd71b65c38ecfef
  		knowledges, err := s.knowledgeService.ListKnowledgeByKnowledgeBaseID(ctx, kbID)
  		if err != nil {
  			logger.Warnf(ctx, "buildKBDocumentListing: failed to list knowledge for KB %s: %v", kbID, err)
-@@ -1323,6 +1399,9 @@ func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatMan
+@@ -1304,12 +1417,12 @@ func (s *sessionService) consumeFallbackStream(
+ // remain available even when inline citations in the model answer are disabled.
+ // Must run before CHAT_COMPLETION_STREAM so the event arrives while the
+ // connection is still open (complete closes the stream).
+-func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatManage) {
++func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatManage) error {
+ 	if chatManage == nil || chatManage.EventBus == nil || len(chatManage.MergeResult) == 0 {
+-		return
++		return nil
+ 	}
+ 	logger.Infof(ctx, "Emitting references event with %d results (pre-answer)", len(chatManage.MergeResult))
+-	if err := chatManage.EventBus.Emit(ctx, types.Event{
++	if err := chatpipeline.EmitSourceLineageEvent(ctx, chatManage.EventBus, types.Event{
+ 		ID:        generateEventID("references"),
+ 		Type:      types.EventType(event.EventAgentReferences),
+ 		SessionID: chatManage.SessionID,
+@@ -1318,20 +1431,25 @@ func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatMan
+ 		},
+ 	}); err != nil {
+ 		logger.Errorf(ctx, "Failed to emit references event: %v", err)
++		return err
+ 	}
++	return nil
+ }
  
  // emitFallbackAnswer emits fallback answer event
- func (s *sessionService) emitFallbackAnswer(ctx context.Context, chatManage *types.ChatManage, content string) {
+-func (s *sessionService) emitFallbackAnswer(ctx context.Context, chatManage *types.ChatManage, content string) {
++func (s *sessionService) emitFallbackAnswer(ctx context.Context, chatManage *types.ChatManage, content string) error {
 +	if err := chatpipeline.CheckSourceLineageInputs(ctx, chatManage); err != nil {
-+		return
++		return err
 +	}
  	if chatManage.EventBus == nil {
- 		return
+-		return
++		return nil
  	}
+ 	if !chatManage.CitationsEnabled() {
+ 		content = modelcontext.NewRegistry(false).DecodeOutputText(content)
+ 	}
+ 
+ 	fallbackID := generateEventID("fallback")
+-	if err := chatManage.EventBus.Emit(ctx, types.Event{
++	if err := chatpipeline.EmitSourceLineageEvent(ctx, chatManage.EventBus, types.Event{
+ 		ID:        fallbackID,
+ 		Type:      types.EventType(event.EventAgentFinalAnswer),
+ 		SessionID: chatManage.SessionID,
+@@ -1342,9 +1460,11 @@ func (s *sessionService) emitFallbackAnswer(ctx context.Context, chatManage *typ
+ 		},
+ 	}); err != nil {
+ 		logger.Errorf(ctx, "Failed to emit fallback answer event: %v", err)
++		return err
+ 	} else {
+ 		logger.Infof(ctx, "Fallback answer event emitted successfully")
+ 	}
++	return nil
+ }
+ 
+ // resolveWebSearchProviderID returns the web search provider ID to use for a pipeline request.
 diff --git a/internal/application/service/session_rewind.go b/internal/application/service/session_rewind.go
 index a9994d316a1f9370b0763f7fb7b4033b7e2a5b04..d1474a3bea43e552753acc6ce9189c6342ec2538 100644
 --- a/internal/application/service/session_rewind.go
@@ -157139,6 +158518,21 @@ index b208f5a3bc9a25b2210ac21c16eb4823cbd69fcb..79a23e66e572227bc13931c315870b09
  	// ReasoningContent 是支持思考链的模型（DeepSeek thinking、小米 MiMo、vLLM reasoning 等）
  	// 在本轮输出的推理内容。需要在后续多轮请求中原样回传给那些严格校验的供应商。
  	ReasoningContent string `json:"reasoning_content,omitempty"`
+diff --git a/internal/types/chat_manage.go b/internal/types/chat_manage.go
+index 68075be66a15628843e4fc0e620831ac3d76a2a4..3cbddf04097ec1795cbdc805e16b2119f23c0849 100644
+--- a/internal/types/chat_manage.go
++++ b/internal/types/chat_manage.go
+@@ -144,6 +144,10 @@ type PipelineContext struct {
+ 	EventBus      EventBusInterface `json:"-"`
+ 	MessageID     string            `json:"-"`
+ 	UserMessageID string            `json:"-"`
++	// SourceStreamResult reports the owned ordinary producer's terminal result.
++	// It is runtime-only and never part of saved/client material.
++	SourceStreamResult <-chan error `json:"-"`
++	SourceStreamCancel func()       `json:"-"`
+ }
+ 
+ // ChatManage represents the full configuration, state and runtime context
 diff --git a/internal/types/chunk_output_input.go b/internal/types/chunk_output_input.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..842d14544a7f3ed4c86017fffa57ce14ff799ec8

@@ -4,10 +4,10 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
-The manifest's current candidates are C6 `f766a373` and RAG `595f241f`.
+The manifest's current candidates are C6 `aac58fa7` and RAG `1ab47546`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
 frozen evidence for current implementation facts; the table below is historical.
-The subsequent normal AnyDoc app/UI build completed and its immutable IDs and
+The preceding normal AnyDoc app/UI build for RAG `595f241f` completed; its immutable IDs and
 source labels were verified. A new owned nested-LDAP environment passed startup,
 signed ingestion and the permission matrix, but its first actual QA failed:
 the references producer emitted no checked source lineage, so the strict stream
@@ -38,9 +38,12 @@ including HTTP-caller disconnect, provider-error/EOF and real schema-probe
 cancellation regressions, passed 77 focused nodes per profile with no failures
 or test skips. The original caller-disconnect test sends normal model Done
 after HTTP cancellation; it does not establish producer-context cancellation.
-Its completed-state assertion must also move after the real producer terminal.
-A separate actual StopSession test and these stronger assertions are being
-prepared without changing the frozen production behavior. The inline-body checker now
+That early completed-state assertion is now replaced by actual service-return,
+HTTP-handler-return and detached stop-watcher-exit observations. The strengthened
+real StopSession test verifies provider cancellation, every completed write
+being refused by the original-material boundary, released leases and final
+completed/manifest counts. It also verifies legitimate background completion
+after HTTP disconnect. The inline-body checker now
 checks all heads once per row and rechecks the original head set, journal pin
 and cancellation at the return boundary, including a real canceled schema
 probe without changing actual absent-schema compatibility. Its 22 row-boundary
@@ -50,9 +53,11 @@ source and passed on the correction in both databases. A matched 20-node
 parent-copy run fell from 27.71 to 22.90 seconds for SQLite and 57.13 to 43.03
 seconds for PostgreSQL; this single comparison is not P5 acceptance.
 Root independently verified the [raw-log records](evidence/ordinary-qa-body-combined-boundaries-20261010.json).
-These prepared sources are not yet the manifest candidates: the complete 20-minute
-selection, full compile and fresh normal application
-QA/restore still need actual acceptance. CI now explicitly selects ordinary QA
+The corrected sources are now the manifest candidates. The complete selection
+and compile records remain labelled with their tested production commits
+`48ce1d3c`/`0388c309`; the final candidate trees add only three test files,
+whose full ordinary QA target passed 38 nodes per profile. Fresh normal
+application QA/restore still needs actual acceptance. CI now explicitly selects ordinary QA
 and requires all twelve new test parents without changing its timeout.
 
 The first final RAG full selection ended within its original 20-minute budget
@@ -81,8 +86,13 @@ failures: its older fixture lacked the real completion-manifest migration,
 and its one-second model-start check preceded actual start. These are
 preparation failures, not a business red or accepted cancellation test. The
 fixture is being upgraded through the real forward migrations while preserving
-the eight-second HTTP bound. Actual producer cancellation is still pending;
-this does not promote the manifest or accept normal images/application/restore.
+the eight-second HTTP bound. The final strengthened tests subsequently passed on RAG `1ab47546` and C6
+`aac58fa7`: 38 ordinary QA/boundary nodes per profile with no failures or skips.
+The [real StopSession record](evidence/ordinary-QA-real-stop-chain-20261010.json)
+keeps the original full-suite identities separate and proves that production
+bytes did not change in the test supplement. Both patches reproduce and reverse
+their exact baseline trees. These sources are promoted as development candidates;
+normal images/application/restore and P5 remain unaccepted.
 
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
 their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the
