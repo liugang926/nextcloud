@@ -54,6 +54,22 @@ def immutable_pending_restored(checkpoint,restored,snapshot):
     C['pending_quiescence'](snapshot)
 
 
+def keep_exact_closed_receipt(path,receipt):
+    """Reuse exact private bytes only after the caller repeats every live gate."""
+    require(path.name=='closed-pending-gate.json','pending_closed_receipt_path_invalid')
+    plain(path.parent,True)
+    expected=json.dumps(receipt,sort_keys=True,indent=2).encode()+b'\n'
+    try:
+        write_json(path,receipt)
+        reused=False
+    except FileExistsError:
+        reused=True
+    # Read with private path/inode/nlink/mode/race guards. Existing receipts
+    # are never rewritten, normalized or deleted, including on disagreement.
+    require(N['private_control_bytes'](path)==expected,'pending_closed_receipt_changed')
+    return reused
+
+
 class PendingRestore(N['Restore']):
     def __init__(self,scratch,manifest,profile,evidence,variant):
         super().__init__(scratch,manifest,profile,evidence)
@@ -293,7 +309,7 @@ class PendingRestore(N['Restore']):
             '--name',self.project+'-nextcloud-99','--user','www-data','--entrypoint','php','nextcloud','-r',code,name)
         self.owned();physical=json.loads(N['command'](command,timeout=120));self.owned()
         require(physical=={'fault_file_absent':True},'pending_full_restore_physical_file_fault_survived')
-        write_json(self.evidence/'closed-pending-gate.json',{'candidate':self.provenance,
+        keep_exact_closed_receipt(self.evidence/'closed-pending-gate.json',{'candidate':self.provenance,
             'checkpoint_sha256':sha(self.evidence/'checkpoint.json'),'original':original,'accepted':False})
 
     def reopen(self):

@@ -90,6 +90,13 @@ Source, actor and model rejection each require an independent original checkpoin
 records 89 independently rerun pure tests with zero skips. No broker fault,
 full application restore or startup execution has yet been accepted.
 
+The pending driver's separate `closed` phase can now precede `reopen` without
+rewriting its evidence file. Each call repeats all current gates; an existing
+receipt must match the freshly computed canonical bytes and pass private-file
+checks. [File and flow regressions](evidence/pending-auto-closed-receipt-preparation-20261009.json)
+passed 97 tests with zero skips, including changed current state and tampered
+receipts which must refuse startup. These remain preparation checks.
+
 The remaining V1 work includes the full normal QA/source-revocation loop;
 clean and stale-publication recovery plus real pending-Auto fault recovery;
 Steer and other exposed consumer original-material/lifetime coverage; old

@@ -4,11 +4,13 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import runpy
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import uuid
 
 HERE = Path(__file__).resolve().parent
@@ -199,6 +201,153 @@ class PendingAutoContractTest(unittest.TestCase):
         with self.assertRaises(RuntimeError): C['startup_result'](row, original, status, after, True)
         row['tag_ids'] = [uid(7)]
         with self.assertRaises(RuntimeError): C['startup_result'](row, original, status, status, True)
+
+
+class ClosedReceiptReuseTest(unittest.TestCase):
+    def receipt(self):
+        return {'candidate':{'profile':'rag','app':{'image_id':'sha256:'+'a'*64}},
+                'checkpoint_sha256':'b'*64,'original':C['pending_receipt'](sample(),uid(7)),'accepted':False}
+
+    def test_private_receipt_is_created_once_then_reused_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root).resolve()/'closed-pending-gate.json';value=self.receipt()
+            self.assertFalse(P['keep_exact_closed_receipt'](path,value))
+            before=path.read_bytes();stat=path.stat()
+            self.assertTrue(P['keep_exact_closed_receipt'](path,copy.deepcopy(value)))
+            self.assertEqual(path.read_bytes(),before)
+            self.assertEqual((path.stat().st_ino,path.stat().st_mtime_ns),(stat.st_ino,stat.st_mtime_ns))
+
+    def test_changed_candidate_checkpoint_original_heads_and_extra_fields_are_refused(self):
+        for change in ('candidate','checkpoint','original','source','head','generation','accepted','extra'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as root:
+                path=Path(root).resolve()/'closed-pending-gate.json';value=self.receipt()
+                P['keep_exact_closed_receipt'](path,value);before=path.read_bytes();inode=path.stat().st_ino
+                changed=copy.deepcopy(value)
+                if change=='candidate':changed['candidate']['app']['image_id']='sha256:'+'c'*64
+                elif change=='checkpoint':changed['checkpoint_sha256']='d'*64
+                elif change=='original':changed['original']['payload_sha256']='e'*64
+                elif change=='source':changed['original']['knowledge_id']=uid(90)
+                elif change=='head':changed['original']['manifests'][0]['head']['body_id']=uid(91)
+                elif change=='generation':changed['original']['build_generation']+=1
+                elif change=='accepted':changed['accepted']=True
+                else:changed['forged_bypass']=True
+                with self.assertRaisesRegex(RuntimeError,'pending_closed_receipt_changed'):
+                    P['keep_exact_closed_receipt'](path,changed)
+                self.assertEqual(path.read_bytes(),before);self.assertEqual(path.stat().st_ino,inode)
+
+    def test_semantically_equal_tampered_bytes_and_duplicate_json_keys_are_refused(self):
+        for change in ('whitespace','duplicate-key'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as root:
+                path=Path(root).resolve()/'closed-pending-gate.json';value=self.receipt()
+                P['keep_exact_closed_receipt'](path,value)
+                raw=json.dumps(value).encode() if change=='whitespace' else path.read_bytes().replace(b'{',b'{"accepted": false,',1)
+                path.write_bytes(raw);inode=path.stat().st_ino
+                with self.assertRaisesRegex(RuntimeError,'pending_closed_receipt_changed'):
+                    P['keep_exact_closed_receipt'](path,value)
+                self.assertEqual(path.read_bytes(),raw);self.assertEqual(path.stat().st_ino,inode)
+
+    def test_symlink_hardlink_and_unsafe_mode_are_not_adopted(self):
+        for change in ('symlink','broken-symlink','hardlink','mode'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as root:
+                directory=Path(root).resolve();path=directory/'closed-pending-gate.json';value=self.receipt()
+                P['keep_exact_closed_receipt'](path,value)
+                before=path.read_bytes()
+                if change in ('symlink','broken-symlink'):
+                    moved=directory/'other-receipt';path.rename(moved)
+                    path.symlink_to(moved if change=='symlink' else directory/'missing')
+                elif change=='hardlink':os.link(path,directory/'other-receipt')
+                else:path.chmod(0o644)
+                with self.assertRaises(RuntimeError):P['keep_exact_closed_receipt'](path,value)
+                if change!='broken-symlink':self.assertEqual(path.read_bytes(),before)
+                if change in ('symlink','broken-symlink'):self.assertTrue(path.is_symlink())
+
+    def closed_flow(self,directory):
+        # These are method ports recording which live boundaries the driver
+        # invokes. They attest ordering only; no SQL/CLI/runtime is simulated
+        # into an acceptance receipt or claim.
+        probe=object.__new__(P['PendingRestore']);probe.evidence=directory;probe.provenance={'profile':'rag','app':{'image_id':'sha256:'+'a'*64}}
+        probe.directory=directory;probe.project='nc-synldap-a1b2c3d4';probe.state={'project':probe.project}
+        probe.calls=[];probe.failed_gate=None
+        row=sample();original=C['pending_receipt'](row,uid(7))
+        inventory=directory/'original-inventory.json';P['write_json'](inventory,{'scope':'original-private-test-metadata'})
+        checkpoint={'identity':{'scope':'same-original'},'pending_auto':{'receipt':original},
+            'external_recovery_anchor':{'instance_id':uid(20),'stream_id':uid(21),'record_sha256':'c'*64,
+                'sequence':1,'database_chain_sha256':'d'*64},'original_inventory':{'path':str(inventory)}}
+        P['write_json'](directory/'checkpoint.json',checkpoint)
+        restored={'checkpoint_sha256':P['sha'](directory/'checkpoint.json'),'actual_dual_full_pg_restore':True,
+            'original_pending_intent_restored':True,'actual_nc_configuration_restored':True,
+            'configuration_controls':{'actual_checkpoint_controls_restored':True,'fault_absent_after_restore':True},
+            'current_body_or_independent_publication_anchors_restored':False,
+            'actual_original_data_volumes_restored':sorted(P['N']['DATA_VOLUMES'])}
+        P['write_json'](directory/'actual-data-restore.json',restored)
+        P['write_json'](directory/'actual-fault.json',{'fault_file_id':77,'fault_file_name':'pending-full-restore-fault-test.txt'})
+        def gate(name):
+            probe.calls.append(name)
+            if probe.failed_gate==name:raise RuntimeError('method_gate_refused_'+name)
+        probe.pending_checkpoint=lambda:checkpoint
+        probe.actors=lambda:['wk-app','nextcloud']
+        probe.stopped=lambda service:gate('stopped_'+service)
+        probe.no_external_workers=lambda:gate('workers')
+        probe.restored_configuration=lambda *args:gate('configuration')
+        probe.packaged_tools=lambda:gate('tools')
+        probe.body_cli=lambda mode:gate('body_'+mode)
+        probe.identity=lambda:(gate('identity') or checkpoint['identity'])
+        probe.target_snapshot=lambda knowledge:(gate('original_snapshot') or copy.deepcopy(row))
+        probe.publication_cli=lambda *args:(gate('source_inventory') or json.loads(inventory.read_text()))
+        probe.sql=lambda *args,**kwargs:(gate('filecache') or 0)
+        probe.owned=lambda:gate('owned_resource')
+        fake=dict(P['N']);fake['pinned_publication']=lambda *args:gate('publication_current')
+        fake['command']=lambda *args,**kwargs:(gate('physical_file') or b'{"fault_file_absent": true}')
+        return probe,fake
+
+    def test_every_closed_call_rechecks_all_boundaries_and_keeps_exact_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory=Path(root).resolve();probe,fake=self.closed_flow(directory)
+            with mock.patch.dict(P['PendingRestore'].closed.__globals__,{'N':fake}):
+                probe.closed();path=directory/'closed-pending-gate.json';before=path.read_bytes();inode=path.stat().st_ino
+                first=list(probe.calls);probe.calls=[];probe.closed()
+            self.assertEqual(probe.calls,first)
+            for gate in ('configuration','body_reconcile','body_verify','identity','publication_current',
+                         'original_snapshot','source_inventory','filecache','physical_file','owned_resource'):
+                self.assertIn(gate,first)
+            self.assertEqual(path.read_bytes(),before);self.assertEqual(path.stat().st_ino,inode)
+
+    def test_reopen_repeats_closed_gates_before_first_start_without_rewriting_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory=Path(root).resolve();probe,fake=self.closed_flow(directory)
+            probe.compose=mock.Mock(side_effect=RuntimeError('method_reached_reopen_start_boundary'))
+            with mock.patch.dict(P['PendingRestore'].closed.__globals__,{'N':fake}):
+                probe.closed();path=directory/'closed-pending-gate.json';before=path.read_bytes();inode=path.stat().st_ino
+                first=list(probe.calls);probe.calls=[]
+                with self.assertRaisesRegex(RuntimeError,'method_reached_reopen_start_boundary'):probe.reopen()
+            self.assertEqual(probe.calls,first)
+            probe.compose.assert_called_once_with('start','nextcloud','mock-embedding','docreader')
+            self.assertEqual(path.read_bytes(),before);self.assertEqual(path.stat().st_ino,inode)
+
+    def test_existing_receipt_never_bypasses_a_changed_live_gate_on_reopen(self):
+        for failed in ('configuration','body_verify','publication_current','source_inventory','filecache','physical_file','owned_resource'):
+            with self.subTest(failed=failed),tempfile.TemporaryDirectory() as root:
+                directory=Path(root).resolve();probe,fake=self.closed_flow(directory)
+                probe.compose=mock.Mock(side_effect=AssertionError('must_not_open_after_failed_current_gate'))
+                with mock.patch.dict(P['PendingRestore'].closed.__globals__,{'N':fake}):
+                    probe.closed();path=directory/'closed-pending-gate.json';before=path.read_bytes();inode=path.stat().st_ino
+                    probe.failed_gate=failed;probe.calls=[]
+                    with self.assertRaisesRegex(RuntimeError,'method_gate_refused_'+failed):probe.reopen()
+                probe.compose.assert_not_called();self.assertIn(failed,probe.calls)
+                self.assertEqual(path.read_bytes(),before);self.assertEqual(path.stat().st_ino,inode)
+
+    def test_reopen_rechecks_all_gates_but_preserves_and_refuses_tampered_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory=Path(root).resolve();probe,fake=self.closed_flow(directory)
+            probe.compose=mock.Mock(side_effect=AssertionError('must_not_open_after_changed_receipt'))
+            with mock.patch.dict(P['PendingRestore'].closed.__globals__,{'N':fake}):
+                probe.closed();path=directory/'closed-pending-gate.json';first=list(probe.calls)
+                value=json.loads(path.read_text());value['accepted']=True
+                changed=json.dumps(value,sort_keys=True,indent=2).encode()+b'\n';path.write_bytes(changed)
+                inode=path.stat().st_ino;probe.calls=[]
+                with self.assertRaisesRegex(RuntimeError,'pending_closed_receipt_changed'):probe.reopen()
+            self.assertEqual(probe.calls,first);probe.compose.assert_not_called()
+            self.assertEqual(path.read_bytes(),changed);self.assertEqual(path.stat().st_ino,inode)
 
 
 class PostprocessControlTest(unittest.TestCase):
