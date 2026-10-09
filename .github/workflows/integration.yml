@@ -46,6 +46,7 @@ jobs:
           python3 scripts/ops/test-pilot-original-volume.py
           python3 scripts/test-rotate-lan-ip.py
           python3 scripts/ops/test_candidate_image_provenance.py
+          python3 scripts/ops/test-verify-go-test-evidence.py
           python3 scripts/ops/test_shared_cold_checkpoint.py
           python3 scripts/ops/test_publication_recovery_journal.py
           python3 scripts/ops/test_shared_cold_restore_plan.py
@@ -226,12 +227,23 @@ jobs:
           export WEKNORA_ORIGINAL_BODY_TEST_CLI=/tmp/original-body-retention
           go test -json -tags sqlite_fts5 -p 1 ./internal/config ./internal/application/readlease ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
             -run 'MessageRewindMaterial|OriginalRewind|RAGPhysicalActual|NextcloudKBRead|NextcloudKnowledgeLeaseScope|NativeLive|MessageNativeLive|OriginalBody|PostgresOriginalBody|KnowledgeAutoCompletion|PostgresKnowledgeAutoCompletion|AgentHistoryActual|AgentHistoryPostgresActual|CommittedHistoryParentRequest|MessageGeneratedField|MessageFork|MessageActual|NativeSavedReplay|MessageMaterialLiveHTTP|ChunkOutputHTTP|KnowledgeMachine|PostgresKnowledgeMachine|DataSourceName|MessageMaterial|KnowledgeHistory|NextcloudGCManualActual|NextcloudGCAdminStatus|NextcloudGCActualAdminHTTPPreview|NextcloudGCAdminPagination|^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 -timeout 20m > candidate-tests.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-tests.jsonl \
+            --require-test TestMessageMaterialActualHTTPProducerReadSingleConnection \
+            --require-test TestMessageMaterialActualControlledSavedHTTPAndCurrentSourceRevoke \
+            --require-test TestAgentHistoryPostgresActualModelCheckpointAndParentRevokeSingleConnection \
+            --require-test TestKnowledgeAutoCompletionActualRedisSQLite \
+            --require-test TestPostgresKnowledgeAutoCompletionActualRedis \
+            --require-test TestRAGPhysicalActualShortSummarySQLite \
+            --require-test TestPostgresRAGPhysicalActualShortSummary
           go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-compile.jsonl --compile-only
       - name: Verify failed QA streams terminate without retained source text
         working-directory: candidate
         run: |
           go test -json -p 1 ./internal/handler/session \
             -run 'NativeLive|LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError' -count=1 > candidate-qa-terminal.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-qa-terminal.jsonl \
+            --require-test TestLiveSSEProducerErrorWithRefusedOriginalMaterialHolder
       - name: Verify actual SQLite FTS5 and PostgreSQL derived collection
         working-directory: candidate
         env:
@@ -240,6 +252,7 @@ jobs:
         run: |
           go test -json -tags sqlite_fts5 -p 1 ./internal/application/service ./internal/application/service/file ./internal/application/repository/retriever/sqlite \
             -run 'NextcloudLocalDerived|PostgresNextcloudLocalDerived|LocalGC|LocalPath|RetrieveReturns|VectorRetrieveFiltersBeforeTopK' -count=1 > candidate-local-derived.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-local-derived.jsonl
       - name: Verify actual native halfvec collection
         working-directory: candidate
         env:
@@ -248,6 +261,8 @@ jobs:
         run: |
           go test -json -p 1 ./internal/application/service \
             -run '^TestPostgresNextcloudLocalDerivedActualPipeline$' -count=1 > candidate-native-derived.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-native-derived.jsonl \
+            --require-test TestPostgresNextcloudLocalDerivedActualPipeline
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

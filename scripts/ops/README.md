@@ -462,6 +462,19 @@ See the [browser drill](../../docs/synthetic-ldap-compose.md#files-browser-hando
 for the command and observed result. The normal fixture flow does not require
 Playwright or a WeKnora UI image.
 
+## Candidate Go test evidence
+
+Candidate CI checks its `go test -json` logs with
+`verify-go-test-evidence.py`. Selected tests must actually run, finish, and
+pass; a skipped database test, an empty selector, or a truncated log fails
+the check. `--require-test TestName` also requires that exact test to pass,
+so changing a selector cannot silently remove an acceptance regression.
+Package-level `skip` for a package without test files is reported separately
+from skipped tests. The full compile gate uses `--compile-only` and must
+contain no executed tests. This verifies the recorded component checks;
+normal application, restore, performance, and enterprise acceptance still
+require their own actual evidence.
+
 ## Owned fixture resource evidence
 
 Use the read-only resource watcher during a new synthetic LDAP application
