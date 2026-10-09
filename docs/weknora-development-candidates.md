@@ -252,3 +252,24 @@ attached grouping tag had no display origin. That concrete failure is retained;
 the new150 grouping receipt must pass a fresh full application probe. All core
 probe resources were removed. New machine candidate image build is underway.
 No shared service switched and no full V1 completion is claimed.
+
+
+## Normal machine candidate application probe
+
+The normal AnyDoc app/UI build of source8d35d848 completed and its immutable
+images matched the frozen source/tree/patch and distinct app/UI role labels.
+A new owned Nextcloud/WeKnora/nested-LDAP stack performed actual registration,
+model/KB configuration, source pairing and signed sync:2 chunks and2 embeddings.
+The nested permission matrix passed: the authorized employee had DAV/source/
+knowledge/search access, while the other department was denied. This repairs
+the older core candidate's concrete grouping-tag403 without weakening guards.
+
+Actual first personal RAG QA remains failed. The current request's newly created
+assistant placeholder was included in completed-history material capture,
+causing KnowledgeQA refusal; the SSE reader later timed out. There were2
+messages/receipts but no completed assistant. The independent consumer module
+is adding original completion/excluded-request controls before body reads and
+holding them through model/output. It must pass a new first-QA positive plus
+selection/source/actor negatives. This application probe is not full V1
+acceptance. [Actual image/runtime boundary](evidence/normal-machine-candidate-app-20261009.json)
+records IDs and the failed QA metadata, without credentials or body text.
