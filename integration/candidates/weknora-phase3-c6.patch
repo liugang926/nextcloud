@@ -91884,13 +91884,14 @@ index 025e6c69292811dcda942c8fa75f9b3e032a37cc..8d0197d7df31dfff3d39d35bf834a336
  	}
 diff --git a/internal/application/service/chat_pipeline/merge_rag_hydration.go b/internal/application/service/chat_pipeline/merge_rag_hydration.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..cdadf743531d9a69cd070bb1a0e8f49691bc5111
+index 0000000000000000000000000000000000000000..93768469b8a454b471fd225811df83cf0fdb885b
 --- /dev/null
 +++ b/internal/application/service/chat_pipeline/merge_rag_hydration.go
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,170 @@
 +package chatpipeline
 +
 +import (
++	"bytes"
 +	"context"
 +	"github.com/Tencent/WeKnora/internal/searchutil"
 +	"github.com/Tencent/WeKnora/internal/types"
@@ -91949,7 +91950,25 @@ index 0000000000000000000000000000000000000000..cdadf743531d9a69cd070bb1a0e8f496
 +
 +func (p *PluginMerge) resolveCapturedParents(ctx context.Context, results []*types.SearchResult) []*types.SearchResult {
 +	for _, result := range results {
-+		if result == nil || result.ParentChunkID == "" {
++		if result == nil {
++			continue
++		}
++		if result.ChunkType == types.ChunkTypeSummary {
++			// A generated summary's parent records its original text input; it
++			// is not a parent_text expansion request. Revalidate the captured
++			// summary itself under its existing proof and source lease, without
++			// borrowing parent text or certifying a changed cached body/relation.
++			rows := p.hydrateMergeInput(ctx, result, []string{result.ID})
++			if len(rows) != 1 || rows[0].ChunkType != types.ChunkTypeSummary ||
++				rows[0].Content != result.Content || rows[0].ParentChunkID != result.ParentChunkID ||
++				rows[0].ContentRevision != result.ContentRevision || rows[0].ChunkIndex != result.ChunkIndex ||
++				rows[0].StartAt != result.StartAt || rows[0].EndAt != result.EndAt ||
++				rows[0].ImageInfo != result.ImageInfo || !bytes.Equal(rows[0].Metadata, result.ChunkMetadata) || result.ContentRewritten {
++				unknownMergeInput(ctx, result)
++			}
++			continue
++		}
++		if result.ParentChunkID == "" {
 +			continue
 +		}
 +		// The narrow text closure does not borrow OCR/caption/image children
@@ -104399,10 +104418,10 @@ index 0000000000000000000000000000000000000000..0295b83e645d9282327c3bd39f915131
 +}
 diff --git a/internal/application/service/knowledge_machine_pipeline_test.go b/internal/application/service/knowledge_machine_pipeline_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..9989bc4fda9bdb4f33e1c961bc051818b9ac057b
+index 0000000000000000000000000000000000000000..b717e85f73153bb9b8b8a93a84d8eebb5df0fc13
 --- /dev/null
 +++ b/internal/application/service/knowledge_machine_pipeline_test.go
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,656 @@
 +package service
 +
 +import (
@@ -104483,6 +104502,10 @@ index 0000000000000000000000000000000000000000..9989bc4fda9bdb4f33e1c961bc051818
 +}
 +
 +func newMachinePipelineFixture(t *testing.T, pg bool) *machinePipelineFixture {
++	return newMachinePipelineFixtureWithDocument(t, pg, strings.Repeat("Actual original document about its topic, with enough text for chunking and retrieval. ", 4))
++}
++
++func newMachinePipelineFixtureWithDocument(t *testing.T, pg bool, artifact string) *machinePipelineFixture {
 +	t.Helper()
 +	f := newEnrichmentTestFixture(t, pg)
 +	// Remove setup-only ordinary data. Every tested NC knowledge below is
@@ -104553,7 +104576,6 @@ index 0000000000000000000000000000000000000000..9989bc4fda9bdb4f33e1c961bc051818
 +	unavailableAfterCompletion := &atomic.Bool{}
 +	failureProbe := &atomic.Int64{}
 +	completedProbes := &atomic.Int64{}
-+	artifact := strings.Repeat("Actual original document about its topic, with enough text for chunking and retrieval. ", 4)
 +	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		require.Equal(t, "Bearer isolated-machine", r.Header.Get("Authorization"))
 +		require.NotEmpty(t, r.Header.Get("X-WeKnora-Signature"))
@@ -116040,6 +116062,140 @@ index 0000000000000000000000000000000000000000..ae18495e8f66f6dd5b8014707fd333ad
 +			require.Error(t, check())
 +		})
 +	}
++}
+diff --git a/internal/application/service/rag_short_summary_actual_test.go b/internal/application/service/rag_short_summary_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c185f523a3a82e0b27953989478ef8aa4e1338b
+--- /dev/null
++++ b/internal/application/service/rag_short_summary_actual_test.go
+@@ -0,0 +1,128 @@
++package service
++
++import (
++	"context"
++	"testing"
++	"unicode/utf8"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// This selects both real text and the real generated Summary, including the
++// producer's text-parent association. A short text also forces Merge through
++// its actual base/neighbor snapshot path instead of silently skipping it.
++func runRAGPhysicalActualShortSummary(t *testing.T, pg bool) {
++	for _, mode := range []string{"short-summary", "text-neighbors", "source-revoked", "missing-summary-proof", "changed-stored-parent", "forged-parent-selector", "changed-cached-summary", "unsupported-image-parent"} {
++		t.Run(mode, func(t *testing.T) {
++			body := "Current employee policy: read the approved record, then ask before changing another department's access."
++			if mode == "text-neighbors" {
++				body = "First policy paragraph: current authorization is required.\n\nSecond policy paragraph: keep the original record intact.\n\nThird policy paragraph: ask the owner before changing access.\n\nFourth policy paragraph: source withdrawal ends reading rights."
++			}
++			m := newMachinePipelineFixtureWithDocument(t, pg, body)
++			if mode == "text-neighbors" {
++				var kb types.KnowledgeBase
++				require.NoError(t, m.f.db.Where("id='kb'").Take(&kb).Error)
++				kb.ChunkingConfig.ChunkSize, kb.ChunkingConfig.ChunkOverlap = 64, 0
++				require.NoError(t, m.f.store.UpdateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(m.f.ctx), &kb))
++			}
++			k := m.ingest(t)
++			for i := 0; i < len(m.f.queue.tasks); i++ {
++				require.NoError(t, m.run(t, m.f.queue.tasks[i]))
++			}
++			var text []*types.Chunk
++			var summary types.Chunk
++			require.NoError(t, m.f.db.Where("knowledge_id=? AND chunk_type=?", k.ID, types.ChunkTypeText).Order("chunk_index").Find(&text).Error)
++			require.NotEmpty(t, text)
++			require.NoError(t, m.f.db.Where("knowledge_id=? AND chunk_type=?", k.ID, types.ChunkTypeSummary).Take(&summary).Error)
++			require.Equal(t, text[0].ID, summary.ParentChunkID, "actual generated summary associates with its original source text")
++			require.Less(t, utf8.RuneCountInString(text[0].Content), 350)
++			if mode == "text-neighbors" {
++				require.Greater(t, len(text), 1)
++				require.NotEmpty(t, text[0].NextChunkID)
++			}
++			engine := &fakeRetrieveEngineService{engineType: types.PostgresRetrieverEngineType, support: []types.RetrieverType{types.VectorRetrieverType},
++				canned: []*types.IndexWithScore{{ChunkID: text[0].ID, KnowledgeID: k.ID, Score: 1}, {ChunkID: summary.ID, KnowledgeID: k.ID, Score: .9}}}
++			svc := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(m.f.db), kgRepo: m.f.s.repo, chunkRepo: m.f.s.chunkRepo,
++				contentLeases: m.f.store.ContentLeaseStore(), ragChunkSnapshots: repository.NewRAGChunkSnapshotReader(m.f.db, m.f.store), ragChunkLineageGuard: m.f.guard,
++				modelService: m.f.s.modelService, retrieveEngine: parentChildRetrieveRegistry{engine: engine},
++				publicationGuard: access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(m.f.db), repository.NewDataSourceRepository(m.f.db))}
++			var tenant types.Tenant
++			require.NoError(t, m.f.db.Where("id=7").Take(&tenant).Error)
++			ctx := context.WithValue(m.f.ctx, types.TenantInfoContextKey, &tenant)
++			ctx, attach, checkpoint, releaseHTTP := BeginMessageMaterialHTTPBoundary(ctx)
++			defer releaseHTTP()
++			ctx, releaseModel, external := retainMessageMaterialProducer(ctx)
++			require.True(t, external)
++			defer releaseModel()
++			markMessageMaterialReady(ctx)
++			manager := chatpipeline.NewEventManager()
++			chatpipeline.ConfigureSourceLineage(manager, m.f.guard)
++			chatpipeline.NewPluginMerge(manager, m.f.s.chunkRepo, m.f.s.chunkService)
++			chatpipeline.ConfigureRAGChunkMergeHydration(manager, svc)
++			cm := &types.ChatManage{}
++			cm.TenantID = 7
++			cm.SearchTargets = []*types.SearchTarget{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: "kb"}}
++			ctx, err := manager.BeginSourceLineage(ctx, cm, access.LineageReadScope{Targets: cm.SearchTargets})
++			require.NoError(t, err)
++			rows, err := svc.HybridSearch(ctx, "kb", types.SearchParams{QueryText: "current employee policy", QueryEmbedding: []float32{.5}, MatchCount: 2, SkipContextEnrichment: true})
++			require.NoError(t, err)
++			require.Len(t, rows, 2, "both actual short text and its generated summary were retrieved")
++			var summaryResult *types.SearchResult
++			for _, row := range rows {
++				require.NoError(t, row.SourceLineage.RequireComplete())
++				if row.ID == summary.ID {
++					summaryResult = row
++				}
++			}
++			require.NotNil(t, summaryResult)
++			switch mode {
++			case "source-revoked":
++				m.personal.Store(false)
++			case "missing-summary-proof":
++				summaryResult.SourceLineage = types.UnknownSourceLineage()
++			case "changed-stored-parent":
++				require.NoError(t, m.f.db.Model(&types.Chunk{}).Where("id=?", summary.ID).Update("parent_chunk_id", "unrelated-parent").Error)
++			case "forged-parent-selector":
++				summaryResult.ParentChunkID = "unrelated-parent"
++			case "changed-cached-summary":
++				summaryResult.Content = "unadmitted replacement summary"
++			case "unsupported-image-parent":
++				summaryResult.ChunkType = types.ChunkTypeImageOCR
++			}
++			cm.SearchResult = rows
++			require.Nil(t, manager.Trigger(ctx, types.CHUNK_MERGE, cm))
++			err = chatpipeline.CheckSourceLineageInputs(ctx, cm)
++			if mode != "short-summary" && mode != "text-neighbors" {
++				require.Error(t, err, "no changed body/relation or missing authorization may reach the next model stage")
++				return
++			}
++			require.NoError(t, err, "a production-generated summary's source association is not an unsupported image parent")
++			require.Len(t, cm.MergeResult, 2)
++			for _, row := range cm.MergeResult {
++				require.NoError(t, row.SourceLineage.RequireComplete())
++				if row.ID == summary.ID {
++					require.Equal(t, summary.Content, row.Content, "summary revalidation never appends its source parent body")
++				}
++				if mode == "text-neighbors" && row.ID == text[0].ID {
++					require.Contains(t, row.SubChunkID, text[0].NextChunkID, "actual neighbor was captured under the held source scope")
++				}
++			}
++			require.NoError(t, checkpoint())
++			releaseModel()
++			require.NoError(t, CheckMessageMaterialOutputBoundary(attach(ctx)))
++			m.personal.Store(false)
++			require.Error(t, types.RAGSourceLineageFromContext(ctx).Check(ctx))
++		})
++	}
++}
++
++func TestRAGPhysicalActualShortSummarySQLite(t *testing.T) {
++	runRAGPhysicalActualShortSummary(t, false)
++}
++func TestPostgresRAGPhysicalActualShortSummary(t *testing.T) {
++	runRAGPhysicalActualShortSummary(t, true)
 +}
 diff --git a/internal/application/service/rag_source_lineage_entry_test.go b/internal/application/service/rag_source_lineage_entry_test.go
 new file mode 100644

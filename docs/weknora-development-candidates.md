@@ -424,3 +424,27 @@ after marker verification while keeping their volumes, original files,
 anchors and private evidence. Shared services were preserved. A separate
 four-GiB trial with `GOMEMLIMIT=3GiB` is prepared, with serial build/test/start
 ordering; it has not measured or accepted any P95 target.
+
+## Proven summaries in ordinary RAG Merge
+
+The fresh `eb7d5756` application passed the permission matrix and no longer
+returned the early material-initialization 503. Its first QA closed HTTP 200
+after Search/Merge but produced no answer. Read-only production-row evidence
+showed a 102-byte text chunk and a 28-byte generated summary, both enabled and
+indexed, with the summary pointing to the text chunk. The narrow parent
+expansion treated every non-text parent relationship as unsupported and made
+the source prefix unknown before the final model stage.
+
+Candidates `6ccecc02` / `cec0e03b` verify the summary itself against its original
+capture, including body, type, parent, revision, position, image and metadata.
+They retain the summary and original proof without adding parent body text.
+Unknown proof, cached-body changes, forged parent relations, source retirement
+and unsupported image parents remain rejected. The actual signed short-file
+producer and SQL retrieval/merge path failed its two positive scenarios before
+the fix; after it, 42 RAG cases and 18 new C6 cases passed on PostgreSQL and
+SQLite, with zero failures or skips and exact owned resource cleanup.
+
+The [summary repair record](evidence/summary-parent-merge-20261009.json) separates
+these component results from the still-required normal-image QA/history and
+restore acceptance. Steer154/SQLite73 is being combined and tested separately;
+its prepared code is not yet part of these manifest candidates.

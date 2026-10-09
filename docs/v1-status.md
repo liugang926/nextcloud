@@ -4,15 +4,18 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-09
 
-The manifest's current candidates are C6 `35968820` and RAG `eb7d5756`.
+The manifest's current candidates are C6 `6ccecc02` and RAG `cec0e03b`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
 frozen evidence for current implementation facts; the table below is historical.
-Normal AnyDoc images have been built and their exact source labels verified.
-A fresh nested-LDAP application passed startup, signed ingestion and the
+Normal AnyDoc images for the preceding `eb7d5756` source have been built and
+their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the
 permission matrix. The early HTTP material-initialization 503 is fixed, but
-first QA still fails after Merge: a legitimate generated summary's parent
-relationship is rejected as an unsupported input. Full QA/history/replay,
-clean application restore and measured P5 acceptance therefore remain open.
+first QA failed after Merge: a legitimate generated summary's parent
+relationship was rejected as an unsupported input. The new candidates preserve
+the summary's original proof and verify its own captured body and relationship;
+actual PostgreSQL/SQLite regressions passed 42 RAG and 18 new C6 cases.
+The latest source still needs a new normal image and full QA/history/replay,
+clean application restore and measured P5 acceptance.
 
 The remaining V1 work includes the full normal QA/source-revocation loop;
 clean and stale-publication recovery plus real pending-Auto fault recovery;
