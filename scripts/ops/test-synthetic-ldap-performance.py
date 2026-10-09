@@ -88,6 +88,25 @@ class PerformanceMethodTest(unittest.TestCase):
             self.assertEqual(json.loads(probe.sample_path.read_text()),sample)
             self.assertEqual(probe.records,[sample])
 
+    def test_sender_marker_covers_sleep_and_is_removed_only_after_join(self):
+        sender_type=P['Sender'];globals_=sender_type.start.__globals__
+        with tempfile.TemporaryDirectory() as directory:
+            probe=mock.Mock(directory=Path(directory).resolve(),state={'owner_token':'a'*32})
+            probe.assert_owned=mock.Mock()
+            thread=mock.Mock();thread.is_alive.return_value=False
+            fake_threading=mock.Mock(Thread=mock.Mock(return_value=thread),Event=mock.Mock())
+            with mock.patch.dict(globals_,{'threading':fake_threading}):
+                sender=sender_type(probe);sender.start()
+                marker=probe.directory/'active-probe-workers.json'
+                self.assertTrue(marker.exists());self.assertEqual(marker.stat().st_mode&0o777,0o600)
+                self.assertEqual(json.loads(marker.read_text())['kind'],'synthetic-p5-event-sender')
+                # It is present even when no Docker CLI happens to be running.
+                thread.is_alive.return_value=True
+                with self.assertRaisesRegex(RuntimeError,'sender_stop_timeout'):sender.stop()
+                self.assertTrue(marker.exists())
+                thread.is_alive.return_value=False;sender.stop()
+                self.assertFalse(marker.exists())
+
 
 if __name__=="__main__":
     unittest.main()

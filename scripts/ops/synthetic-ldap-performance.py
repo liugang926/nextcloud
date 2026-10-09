@@ -116,9 +116,20 @@ class Sender:
         self.thread = None
         self.passes = []
         self.failed = False
+        self.worker_marker = None
 
     def start(self):
         require(self.thread is None, "sender_already_started")
+        self.probe.assert_owned()
+        marker = self.probe.directory / "active-probe-workers.json"
+        marker_payload = {"kind": "synthetic-p5-event-sender", "pid": os.getpid(),
+                          "worker_nonce": uuid.uuid4().hex,
+                          "owner_sha256": hashlib.sha256(self.probe.state["owner_token"].encode()).hexdigest()}
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as output:
+            output.write(json.dumps(marker_payload, sort_keys=True) + "\n")
+            output.flush(); os.fsync(output.fileno())
+        self.worker_marker = marker_payload
         self.stop_event.clear()
         self.failed = False
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -150,6 +161,15 @@ class Sender:
             self.thread.join(timeout=110)
             require(not self.thread.is_alive(), "sender_stop_timeout")
             self.thread = None
+        if self.worker_marker is not None:
+            self.probe.assert_owned()
+            marker = self.probe.directory / "active-probe-workers.json"
+            info = marker.lstat()
+            require(not marker.is_symlink() and info.st_uid == os.getuid() and
+                    info.st_nlink == 1 and info.st_mode & 0o777 == 0o600 and
+                    json.loads(marker.read_text()) == self.worker_marker, "sender_worker_marker_changed")
+            marker.unlink()
+            self.worker_marker = None
 
 
 class Probe:
