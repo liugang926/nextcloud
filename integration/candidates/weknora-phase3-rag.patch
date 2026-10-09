@@ -44880,10 +44880,10 @@ index 0000000000000000000000000000000000000000..5bcc09bfd7f4161f48c8df27879914c8
 +}
 diff --git a/internal/application/readlease/nextcloud_content_read.go b/internal/application/readlease/nextcloud_content_read.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..b41acd75c2a6bf71ee0a246f813aca1f1cddd7b8
+index 0000000000000000000000000000000000000000..3b4c03baacdea31b63172dd2dc8027bd562f6257
 --- /dev/null
 +++ b/internal/application/readlease/nextcloud_content_read.go
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,348 @@
 +package readlease
 +
 +import (
@@ -44997,6 +44997,26 @@ index 0000000000000000000000000000000000000000..b41acd75c2a6bf71ee0a246f813aca1f
 +		return nil
 +	}
 +	return context.WithValue(g.ctx, nextcloudReadGuardContextKey{}, g)
++}
++
++// ContextFor attaches this fence to the current consumer's values. A reused
++// turn guard may predate its lineage accumulator, actor or search selectors;
++// returning its creation context would discard those later authority inputs.
++// Both the current caller and the original fence can cancel this read.
++func (g *NextcloudReadGuard) ContextFor(values context.Context) context.Context {
++	if g == nil {
++		return values
++	}
++	var ctx context.Context
++	var cancel context.CancelFunc
++	if deadline, ok := g.ctx.Deadline(); ok {
++		ctx, cancel = context.WithDeadline(values, deadline)
++	} else {
++		ctx, cancel = context.WithCancel(values)
++	}
++	stop := context.AfterFunc(g.ctx, cancel)
++	context.AfterFunc(ctx, func() { stop() })
++	return context.WithValue(ctx, nextcloudReadGuardContextKey{}, g)
 +}
 +
 +// ParentContext preserves the request's authority and cancellation while a
@@ -45214,10 +45234,10 @@ index 0000000000000000000000000000000000000000..b41acd75c2a6bf71ee0a246f813aca1f
 +}
 diff --git a/internal/application/readlease/nextcloud_content_read_test.go b/internal/application/readlease/nextcloud_content_read_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3793cb1d847861a81a293f7cd88e4cae91ccf62d
+index 0000000000000000000000000000000000000000..20c3fedea31899359076e8862eb72e6dee1c13fc
 --- /dev/null
 +++ b/internal/application/readlease/nextcloud_content_read_test.go
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,214 @@
 +package readlease
 +
 +import (
@@ -45378,6 +45398,59 @@ index 0000000000000000000000000000000000000000..3793cb1d847861a81a293f7cd88e4cae
 +	require.False(t, marked)
 +	require.Error(t, (*NextcloudReadGuard)(nil).PinKnowledge(k))
 +	require.NoError(t, (*NextcloudReadGuard)(nil).PinKnowledge(ordinary))
++}
++
++func TestNextcloudKBReadContextForKeepsCurrentAuthorityAndCancellation(t *testing.T) {
++	for _, mode := range []string{"current-values", "caller-cancel", "lease-retired", "earlier-fence-deadline"} {
++		t.Run(mode, func(t *testing.T) {
++			store, _ := nextcloudReadTestStore(t)
++			base := context.Background()
++			if mode == "earlier-fence-deadline" {
++				var cancel context.CancelFunc
++				base, cancel = context.WithTimeout(base, time.Minute)
++				defer cancel()
++			}
++			guard, err := BeginNextcloudKBRead(base, store, []NextcloudKBReadScope{{TenantID: 7, KBID: "kb-1"}})
++			require.NoError(t, err)
++			defer guard.Close()
++			knowledge := nextcloudReadTestKnowledge(t)
++			require.NoError(t, guard.PinKnowledge(knowledge))
++			type currentSelectionKey struct{}
++			turn := types.NewRAGSourceLineage(func(context.Context, *types.SourceLineage) error { return nil })
++			current := types.WithRAGSourceLineage(context.WithValue(context.Background(), currentSelectionKey{}, "later selector"), turn)
++			current = types.WithCaller(current, types.Caller{TenantID: 7, UserID: "current-user"})
++			current, cancel := context.WithCancel(current)
++			defer cancel()
++			attached := guard.ContextFor(current)
++			require.Same(t, guard, NextcloudReadGuardFromContext(attached))
++			require.Same(t, turn, types.RAGSourceLineageFromContext(attached))
++			require.Equal(t, "later selector", attached.Value(currentSelectionKey{}))
++			require.Equal(t, "current-user", types.CallerFromContext(attached).UserID)
++			switch mode {
++			case "caller-cancel":
++				cancel()
++				require.ErrorIs(t, attached.Err(), context.Canceled)
++				require.NoError(t, guard.Verify(), "a cancelled query does not cancel another consumer's turn fence")
++			case "lease-retired":
++				scope, _, err := NextcloudKnowledgeLeaseScope(knowledge)
++				require.NoError(t, err)
++				require.NoError(t, store.RetireKnowledge(base, scope))
++				require.Error(t, guard.Verify())
++				select {
++				case <-attached.Done():
++				case <-time.After(time.Second):
++					t.Fatal("retired fence did not cancel the current consumer")
++				}
++			case "earlier-fence-deadline":
++				deadline, ok := attached.Deadline()
++				require.True(t, ok)
++				original, _ := base.Deadline()
++				require.False(t, deadline.After(original))
++			default:
++				require.NoError(t, guard.Verify())
++			}
++		})
++	}
 +}
 diff --git a/internal/application/repository/chunk.go b/internal/application/repository/chunk.go
 index 943bcb069604db16a2cc849807fceac7448fccc0..cf0051af7703d61b8df64419014cdd2d909d601e 100644
@@ -51906,10 +51979,10 @@ index 0000000000000000000000000000000000000000..334064e47bbcd0fef1d579b7d07ef645
 +}
 diff --git a/internal/application/repository/knowledge_display_input.go b/internal/application/repository/knowledge_display_input.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d7c91e0be1bf9789fedb7cd2ca4110db778b748
+index 0000000000000000000000000000000000000000..3cba8a89a03ece4ef737029e62623cae015b7d79
 --- /dev/null
 +++ b/internal/application/repository/knowledge_display_input.go
-@@ -0,0 +1,499 @@
+@@ -0,0 +1,502 @@
 +package repository
 +
 +import (
@@ -52065,7 +52138,10 @@ index 0000000000000000000000000000000000000000..3d7c91e0be1bf9789fedb7cd2ca4110d
 +			cache.versions[knowledgeDisplayCacheID(v.Kind, v.RowID)] = v.Revision
 +		}
 +		var origins []knowledgeDisplayInputOrigin
-+		if err := tx.Table("knowledge_display_input_origins o").Select("o.*").Joins("JOIN knowledge_display_versions v ON v.kind=o.kind AND v.row_id=o.row_id AND v.revision=o.revision").Where("o.row_id IN ?", ids[first:end]).Scan(&origins).Error; err != nil {
++		// Original inputs are body-vault references after migration 152. Keep
++		// the model schema and Query callbacks through this aliased batch read
++		// so the original-body resolver authenticates and hydrates each input.
++		if err := tx.Model(&knowledgeDisplayInputOrigin{}).Table("knowledge_display_input_origins o").Select("o.*").Joins("JOIN knowledge_display_versions v ON v.kind=o.kind AND v.row_id=o.row_id AND v.revision=o.revision").Where("o.row_id IN ?", ids[first:end]).Find(&origins).Error; err != nil {
 +			return nil, err
 +		}
 +		for _, o := range origins {
@@ -52794,6 +52870,139 @@ index 0000000000000000000000000000000000000000..c04d34596b1d3932be35795a6c3e355e
 +	require.True(t, fired)
 +	require.Equal(t, tag.Name, manifest.Tags[0].Name, "RR keeps the actual candidate body, membership version and original field receipt in one snapshot")
 +	require.Error(t, store.RecheckKnowledgeAutoTagInputs(ctx, manifest), "the next model/writer checkpoint rejects the committed candidate mutation")
++}
+diff --git a/internal/application/repository/knowledge_display_original_body_test.go b/internal/application/repository/knowledge_display_original_body_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..386b61aa0862b7f5480987a8eca84bd0734a18ed
+--- /dev/null
++++ b/internal/application/repository/knowledge_display_original_body_test.go
+@@ -0,0 +1,127 @@
++package repository
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func initializeDisplayOriginalBody(t *testing.T, db *gorm.DB, pg bool) {
++	t.Helper()
++	path := "../../../migrations/sqlite/000071_original_body_retention.up.sql"
++	if pg {
++		path = "../../../migrations/versioned/000152_original_body_retention.up.sql"
++	}
++	script, err := os.ReadFile(path)
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(string(script)).Error)
++	require.NoError(t, InstallOriginalBodyRetentionTriggers(db))
++	require.NoError(t, InstallOriginalBodyRetentionCallbacks(db))
++	directory := t.TempDir()
++	require.NoError(t, os.Chmod(directory, 0700))
++	key := filepath.Join(directory, "key")
++	require.NoError(t, os.WriteFile(key, []byte(strings.Repeat("owned-display-key-", 3)), 0600))
++	t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY", directory)
++	t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_KEY", key)
++	t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_PIN", filepath.Join(directory, "pin"))
++	require.NoError(t, NewOriginalBodyRetentionStore(db).InitializeJournal())
++}
++
++func runKnowledgeDisplayOriginalBody(t *testing.T, pg bool) {
++	t.Run("actual_alias_cache_and_original_revision", func(t *testing.T) {
++		store, db, ctx, tags, knowledge, k := displayTestFixture(t, pg)
++		initializeDisplayOriginalBody(t, db, pg)
++		tag := displayTag(t, tags, ctx, "body-display-tag")
++		require.NoError(t, knowledge.SetKnowledgeTags(WithIndependentKnowledgeTagAssignmentInput(ctx, map[string][]string{k.ID: {tag.ID}}), k.ID, []string{tag.ID}))
++		var kb types.KnowledgeBase
++		require.NoError(t, db.Where("id='kb'").Take(&kb).Error)
++		kb.Name = "actual body-backed KB name"
++		require.NoError(t, store.UpdateKnowledgeBaseWithInput(WithIndependentKnowledgeBaseNameInput(WithIndependentKnowledgeInput(ctx), kb.ID, kb.Name), &kb))
++
++		// Raw SQL deliberately bypasses body hydration to prove the real
++		// producers stored references, rather than unchanged inline fixtures.
++		var raw []string
++		require.NoError(t, db.Raw("SELECT actual_input FROM knowledge_display_input_origins WHERE row_id=? OR (row_id=? AND kind='relations')", tag.ID, k.ID).Scan(&raw).Error)
++		require.Len(t, raw, 4)
++		for _, value := range raw {
++			_, reference := bodyReference(value)
++			require.True(t, reference)
++		}
++		cached, err := cacheKnowledgeDisplayInputs(db, []string{tag.ID, k.ID, kb.ID})
++		require.NoError(t, err)
++		cache := cached.Statement.Context.Value(knowledgeDisplayCacheKey{}).(*knowledgeDisplayCache)
++		for _, kind := range []string{"tag-name", "tag-color", "tag-sort_order", "relations", "kb-name"} {
++			id := tag.ID
++			if kind == "relations" {
++				id = k.ID
++			} else if kind == "kb-name" {
++				id = kb.ID
++			}
++			origin, present := cache.origins[knowledgeDisplayCacheID(kind, id)]
++			require.True(t, present)
++			_, reference := bodyReference(origin.ActualInput)
++			require.False(t, reference, "aliased Query callback must resolve each actual original input")
++		}
++		original, err := store.CaptureKnowledgeOutputInputs(ctx, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: k.ID})
++		require.NoError(t, err)
++		proofs := []*types.KnowledgeBuildInputProof{original.Proof}
++		selections := []types.KnowledgeOutputDisplaySelection{{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: k.ID, Tags: true, KnowledgeBaseName: true}}
++		snapshot, err := store.CaptureKnowledgeOutputAuxiliary(ctx, proofs, selections)
++		require.NoError(t, err)
++		require.Equal(t, tag.Name, snapshot.Auxiliary.Tags[k.ID][0].Name)
++		require.Equal(t, kb.Name, snapshot.Auxiliary.KnowledgeBaseNames[kb.ID])
++		require.NoError(t, store.RecheckKnowledgeOutputAuxiliary(ctx, snapshot))
++
++		// A genuine authorized producer writes a new original revision. No
++		// test edits a vault payload or invents an original receipt.
++		name := "new authorized original tag name"
++		tag.Name = name
++		require.NoError(t, tags.Update(WithIndependentKnowledgeTagUpdateInput(ctx, tag.ID, &name, nil, nil), tag))
++		require.Error(t, store.RecheckKnowledgeOutputAuxiliary(ctx, snapshot))
++		current, err := store.CaptureKnowledgeOutputAuxiliary(ctx, proofs, selections)
++		require.NoError(t, err)
++		require.Equal(t, name, current.Auxiliary.Tags[k.ID][0].Name)
++	})
++
++	t.Run("derived_source_retirement", func(t *testing.T) {
++		store, db, ctx, tags, knowledge, k := displayTestFixture(t, pg)
++		initializeDisplayOriginalBody(t, db, pg)
++		sourceID := "candidate"
++		if pg {
++			sourceID = "doc-a"
++		}
++		_, source, err := knowledge.(*knowledgeRepository).ResolveNextcloudSourceLineage(ctx, 7, "kb", sourceID)
++		require.NoError(t, err)
++		lineage, err := types.NewCompleteSourceLineage(source)
++		require.NoError(t, err)
++		derived, err := WithDerivedKnowledgeInput(ctx, lineage)
++		require.NoError(t, err)
++		input := &types.Knowledge{ID: "body-display-derived", TenantID: 7, KnowledgeBaseID: "kb", Type: types.KnowledgeTypeManual, Channel: "web", CustomMetadata: types.JSON(`{}`), ParseStatus: types.ParseStatusCompleted, EnableStatus: "enabled"}
++		proof, err := store.CreateKnowledgeWithInput(derived, input, "actual source-derived display input")
++		require.NoError(t, err)
++		producer, err := WithDerivedKnowledgeDisplayInput(ctx, proof)
++		require.NoError(t, err)
++		tag := &types.KnowledgeTag{ID: "body-derived-tag", TenantID: 7, KnowledgeBaseID: "kb", Name: "actual source-derived tag", Color: "blue", SortOrder: 2}
++		require.NoError(t, tags.Create(producer, tag))
++		require.NoError(t, knowledge.SetKnowledgeTags(WithIndependentKnowledgeTagAssignmentInput(ctx, map[string][]string{k.ID: {tag.ID}}), k.ID, []string{tag.ID}))
++		_, err = captureDisplayTest(t, db, k)
++		require.NoError(t, err)
++		require.NoError(t, NewNextcloudContentLeaseStore(db).RetireKnowledge(context.Background(), NextcloudContentScope{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: source.KnowledgeID, DataSourceID: source.DataSourceID, ExternalID: source.ExternalID}))
++		_, err = captureDisplayTest(t, db, k)
++		require.Error(t, err, "hydrating a vault input must preserve current source denial")
++	})
++}
++
++func TestKnowledgeDisplayOriginalBodySQLite(t *testing.T) {
++	runKnowledgeDisplayOriginalBody(t, false)
++}
++
++func TestPostgresKnowledgeDisplayOriginalBody(t *testing.T) {
++	runKnowledgeDisplayOriginalBody(t, true)
 +}
 diff --git a/internal/application/repository/knowledge_enrichment_input.go b/internal/application/repository/knowledge_enrichment_input.go
 new file mode 100644
@@ -108430,7 +108639,7 @@ index 4ac525b1f2460b738c2d40c96f4688a3df28c1e8..fa9b6a2a2d40ef61e4f6e59a917e1c55
  		out := parseDocumentSummaryOutput("```json\n" +
 diff --git a/internal/application/service/knowledgebase_rag_hydration.go b/internal/application/service/knowledgebase_rag_hydration.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..643ada0d7e6bcc4b0c042430a54347633d90e308
+index 0000000000000000000000000000000000000000..d2109ab23b8d6fd7b0274054240b97c17789ab91
 --- /dev/null
 +++ b/internal/application/service/knowledgebase_rag_hydration.go
 @@ -0,0 +1,254 @@
@@ -108505,8 +108714,8 @@ index 0000000000000000000000000000000000000000..643ada0d7e6bcc4b0c042430a5434763
 +		if !held {
 +			defer guard.Close()
 +		}
-+		ctx = guard.Context()
 +	}
++	ctx = guard.ContextFor(ctx)
 +	if err := guard.PinKnowledge(knowledge); err != nil {
 +		return nil, err
 +	}
@@ -108781,7 +108990,7 @@ index 0000000000000000000000000000000000000000..25bfdb5b1b27b4e0a5de929a47c04093
 +	}
 +}
 diff --git a/internal/application/service/knowledgebase_search.go b/internal/application/service/knowledgebase_search.go
-index 5970777fd8bafee079417462a65edb4b6cebcccb..f5a583e67c5b98cbf738ef965c13d318eaf21646 100644
+index 5970777fd8bafee079417462a65edb4b6cebcccb..db60496ae140f56dae63a9d656c26e9313c40f92 100644
 --- a/internal/application/service/knowledgebase_search.go
 +++ b/internal/application/service/knowledgebase_search.go
 @@ -3,7 +3,9 @@ package service
@@ -108804,7 +109013,7 @@ index 5970777fd8bafee079417462a65edb4b6cebcccb..f5a583e67c5b98cbf738ef965c13d318
  
  	// Explicit embedding-model consistency check. Multi-KB searches that
  	// span different embedding spaces would otherwise silently produce
-@@ -179,6 +184,43 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
+@@ -179,6 +184,45 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
  		return nil, err
  	}
  
@@ -108841,14 +109050,16 @@ index 5970777fd8bafee079417462a65edb4b6cebcccb..f5a583e67c5b98cbf738ef965c13d318
 +			if !held {
 +				defer guard.Close()
 +			}
-+			ctx = guard.Context()
 +		}
++	}
++	if guard != nil {
++		ctx = guard.ContextFor(ctx)
 +	}
 +
  	// Resolve the primary KB — embedding model + FAQ type come from this
  	// one. Miss → 404 (no kbs[0] fallback; a silent pivot to an arbitrary
  	// KB would hide caller bugs and reveal foreign KB metadata).
-@@ -297,7 +339,49 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
+@@ -297,7 +341,49 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
  		deduplicatedChunks = deduplicatedChunks[:params.MatchCount]
  	}
  
@@ -116133,6 +116344,134 @@ index 0000000000000000000000000000000000000000..f2f64befee9fb44f5a2b84828d5f84d2
 +	require.Nil(t, got.ContextCheckpoint)
 +	require.NotEmpty(t, row.Images, "read sanitization mutated stored input")
 +}
+diff --git a/internal/application/service/rag_turn_reuse_actual_test.go b/internal/application/service/rag_turn_reuse_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..69383c05003a7ba0665e6c8856e162b0e194eb8d
+--- /dev/null
++++ b/internal/application/service/rag_turn_reuse_actual_test.go
+@@ -0,0 +1,122 @@
++package service
++
++import (
++	"context"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/readlease"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// The input is produced by actual signed ProcessSync, file/catalog admission,
++// parsing, Summary/Auto publication and the installed original-body journal.
++// Only the vector backend is controlled: it returns actual persisted chunk IDs,
++// whose text/provenance is captured by the real SQL snapshot reader.
++func runRAGPhysicalActualReusedTurn(t *testing.T, pg bool) {
++	for _, mode := range []string{"search-and-merge", "source-revoked", "missing-proof", "caller-cancelled"} {
++		t.Run(mode, func(t *testing.T) {
++			m := newMachinePipelineFixture(t, pg)
++			k := m.ingest(t)
++			for i := 0; i < len(m.f.queue.tasks); i++ {
++				require.NoError(t, m.run(t, m.f.queue.tasks[i]))
++			}
++			var chunks []*types.Chunk
++			require.NoError(t, m.f.db.Where("knowledge_id=? AND chunk_type=?", k.ID, types.ChunkTypeText).Find(&chunks).Error)
++			require.NotEmpty(t, chunks)
++			engine := &fakeRetrieveEngineService{engineType: types.PostgresRetrieverEngineType, support: []types.RetrieverType{types.VectorRetrieverType},
++				canned: []*types.IndexWithScore{{ChunkID: chunks[0].ID, KnowledgeID: k.ID, Score: 1, Content: "untrusted index text"}}}
++			svc := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(m.f.db), kgRepo: m.f.s.repo, chunkRepo: m.f.s.chunkRepo,
++				contentLeases: m.f.store.ContentLeaseStore(), ragChunkSnapshots: repository.NewRAGChunkSnapshotReader(m.f.db, m.f.store), ragChunkLineageGuard: m.f.guard,
++				modelService: m.f.s.modelService, retrieveEngine: parentChildRetrieveRegistry{engine: engine},
++				publicationGuard: access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(m.f.db), repository.NewDataSourceRepository(m.f.db))}
++			var tenant types.Tenant
++			require.NoError(t, m.f.db.Where("id=7").Take(&tenant).Error)
++			ctx := context.WithValue(m.f.ctx, types.TenantInfoContextKey, &tenant)
++			ctx, attach, checkpoint, releaseHTTP := BeginMessageMaterialHTTPBoundary(ctx)
++			defer releaseHTTP()
++			ctx, releaseModel, external := retainMessageMaterialProducer(ctx)
++			require.True(t, external)
++			defer releaseModel()
++			markMessageMaterialReady(ctx)
++			manager := chatpipeline.NewEventManager()
++			chatpipeline.ConfigureSourceLineage(manager, m.f.guard)
++			chatpipeline.NewPluginMerge(manager, m.f.s.chunkRepo, m.f.s.chunkService)
++			chatpipeline.ConfigureRAGChunkMergeHydration(manager, svc)
++			chatpipeline.NewPluginFilterTopK(manager)
++			cm := &types.ChatManage{}
++			cm.TenantID, cm.RerankTopK = 7, 1
++			cm.SearchTargets = []*types.SearchTarget{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: "kb"}}
++			params := types.SearchParams{QueryText: "actual original topic", QueryEmbedding: []float32{0.5}, MatchCount: 1}
++			// The holder may acquire its fence before the QA entry adds its
++			// lineage accumulator. Reuse must preserve that later accumulator.
++			warm, err := svc.HybridSearch(ctx, "kb", params)
++			require.NoError(t, err)
++			require.Len(t, warm, 1)
++			ctx, err = manager.BeginSourceLineage(ctx, cm, access.LineageReadScope{Targets: cm.SearchTargets})
++			require.NoError(t, err)
++			turn := types.RAGSourceLineageFromContext(ctx)
++			first, err := svc.HybridSearch(ctx, "kb", params)
++			require.NoError(t, err)
++			require.Len(t, first, 1)
++			require.Equal(t, chunks[0].Content, first[0].Content)
++			accounted, err := turn.CheckedSnapshot(ctx)
++			require.NoError(t, err)
++			require.Len(t, accounted.Sources, 1, "the late accumulator must include the actual source dependency")
++			owned, ok := ragTurnPhysicalReadGuard(ctx, []readlease.NextcloudKBReadScope{{TenantID: 7, KBID: "kb"}})
++			require.True(t, ok)
++			require.NotNil(t, owned)
++			// Reuse the same turn fence from a current caller context, rather than
++			// the older context stored when the guard was created.
++			ctx = context.WithValue(ctx, ragReuseCurrentSelectorKey{}, "current selection")
++			if mode == "caller-cancelled" {
++				var cancel context.CancelFunc
++				ctx, cancel = context.WithCancel(ctx)
++				cancel()
++			} else if mode == "source-revoked" {
++				m.personal.Store(false)
++			} else if mode == "missing-proof" {
++				first[0].SourceLineage = types.UnknownSourceLineage()
++			}
++			if mode != "search-and-merge" {
++				rows, err := svc.HydrateRAGChunkAugmentations(ctx, first[0], []string{chunks[0].ID})
++				require.Error(t, err)
++				require.Nil(t, rows)
++				return
++			}
++			second, err := svc.HybridSearch(ctx, "kb", params)
++			require.NoError(t, err, "a same-turn query expansion must attach its owned physical fence")
++			require.Len(t, second, 1)
++			require.Same(t, turn, types.RAGSourceLineageFromContext(ctx))
++			for i := 0; i < 2; i++ {
++				rows, err := svc.HydrateRAGChunkAugmentations(ctx, second[0], []string{chunks[0].ID})
++				require.NoError(t, err, "repeated parent/neighbor capture keeps the existing turn fence")
++				require.Len(t, rows, 1)
++				require.Equal(t, chunks[0].Content, rows[0].Chunk.Content)
++			}
++			cm.SearchResult = second
++			require.Nil(t, manager.Trigger(ctx, types.CHUNK_MERGE, cm))
++			require.NoError(t, chatpipeline.CheckSourceLineageInputs(ctx, cm))
++			require.Nil(t, manager.Trigger(ctx, types.FILTER_TOP_K, cm))
++			require.Len(t, cm.MergeResult, 1)
++			require.NoError(t, cm.MergeResult[0].SourceLineage.RequireComplete())
++			require.NoError(t, checkpoint())
++			releaseModel()
++			require.NoError(t, CheckMessageMaterialOutputBoundary(attach(ctx)))
++			m.personal.Store(false)
++			require.Error(t, turn.Check(ctx), "an open read lease cannot prolong source access")
++			releaseHTTP()
++			var active int64
++			require.NoError(t, m.f.db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&active).Error)
++			require.Zero(t, active)
++		})
++	}
++}
++
++type ragReuseCurrentSelectorKey struct{}
++
++func TestRAGPhysicalActualReusedTurnSQLite(t *testing.T)   { runRAGPhysicalActualReusedTurn(t, false) }
++func TestPostgresRAGPhysicalActualReusedTurn(t *testing.T) { runRAGPhysicalActualReusedTurn(t, true) }
 diff --git a/internal/application/service/resource.go b/internal/application/service/resource.go
 index b376fa91d10c0ee9570e2f8bde8622bbcd4063f5..95052a3da118d88871ab39bf9e804bf4583658c7 100644
 --- a/internal/application/service/resource.go
@@ -140973,7 +141312,7 @@ index 0000000000000000000000000000000000000000..69209282bd70f21755a039567b911ae9
 +	require.Equal(t, "{}", string(aborted.NewConfig))
 +}
 diff --git a/internal/handler/session/agent_stream_handler.go b/internal/handler/session/agent_stream_handler.go
-index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25eff7aa7d3c 100644
+index 8968a0d179aa0026b6221570b768a9aefecbb042..6526d4b2fad8b40b8c988e9dc161d494f3d416ec 100644
 --- a/internal/handler/session/agent_stream_handler.go
 +++ b/internal/handler/session/agent_stream_handler.go
 @@ -10,6 +10,7 @@ import (
@@ -140992,7 +141331,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	completionEvent    *interfaces.StreamEvent // Published only after the final message is persisted.
  
  	eventBus *event.EventBus
-@@ -138,23 +140,54 @@ func NewAgentStreamHandler(
+@@ -138,23 +140,57 @@ func NewAgentStreamHandler(
  // No SessionID filtering needed since we have a dedicated EventBus per request
  func (h *AgentStreamHandler) Subscribe() {
  	// Subscribe to all agent streaming events on the dedicated EventBus
@@ -141006,13 +141345,6 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
 -	h.eventBus.On(event.EventUserMessageInjected, h.handleUserMessageInjected)
 -	h.eventBus.On(event.EventAgentFinalAnswer, h.handleFinalAnswer)
 -	h.eventBus.On(event.EventAgentReflection, h.handleReflection)
--	h.eventBus.On(event.EventError, h.handleError)
--	h.eventBus.On(event.EventSessionTitle, h.handleSessionTitle)
--	h.eventBus.On(event.EventAgentComplete, h.handleComplete)
--	h.eventBus.On(event.EventToolApprovalRequired, h.handleToolApprovalRequired)
--	h.eventBus.On(event.EventToolApprovalResolved, h.handleToolApprovalResolved)
--	h.eventBus.On(event.EventMCPOAuthRequired, h.handleMCPOAuthRequired)
--	h.eventBus.On(event.EventMCPOAuthResolved, h.handleMCPOAuthResolved)
 +	h.subscribeWithLineage(event.EventAgentThought, h.handleThought)
 +	h.subscribeWithLineage(event.EventAgentToolCall, h.handleToolCall)
 +	h.subscribeWithLineage(event.EventAgentToolResult, h.handleToolResult)
@@ -141023,7 +141355,16 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
 +	h.subscribeWithLineage(event.EventUserMessageInjected, h.handleUserMessageInjected)
 +	h.subscribeWithLineage(event.EventAgentFinalAnswer, h.handleFinalAnswer)
 +	h.subscribeWithLineage(event.EventAgentReflection, h.handleReflection)
-+	h.subscribeWithLineage(event.EventError, h.handleError)
++	// Failure carries no admitted generated body. Its handler replaces all
++	// diagnostics with a fixed code-origin terminal before transport storage;
++	// a missing/poisoned source prefix must not suppress that close signal.
+ 	h.eventBus.On(event.EventError, h.handleError)
+-	h.eventBus.On(event.EventSessionTitle, h.handleSessionTitle)
+-	h.eventBus.On(event.EventAgentComplete, h.handleComplete)
+-	h.eventBus.On(event.EventToolApprovalRequired, h.handleToolApprovalRequired)
+-	h.eventBus.On(event.EventToolApprovalResolved, h.handleToolApprovalResolved)
+-	h.eventBus.On(event.EventMCPOAuthRequired, h.handleMCPOAuthRequired)
+-	h.eventBus.On(event.EventMCPOAuthResolved, h.handleMCPOAuthResolved)
 +	h.subscribeWithLineage(event.EventSessionTitle, h.handleSessionTitle)
 +	h.subscribeWithLineage(event.EventAgentComplete, h.handleComplete)
 +	h.subscribeWithLineage(event.EventToolApprovalRequired, h.handleToolApprovalRequired)
@@ -141064,7 +141405,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  }
  
  // handleThought handles agent thought events
-@@ -192,14 +225,16 @@ func (h *AgentStreamHandler) handleThought(ctx context.Context, evt event.Event)
+@@ -192,14 +228,16 @@ func (h *AgentStreamHandler) handleThought(ctx context.Context, evt event.Event)
  
  	// Append this chunk to stream (no accumulation - frontend will accumulate)
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141087,7 +141428,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}
  
  	return nil
-@@ -241,12 +276,13 @@ func (h *AgentStreamHandler) handleToolCall(ctx context.Context, evt event.Event
+@@ -241,12 +279,13 @@ func (h *AgentStreamHandler) handleToolCall(ctx context.Context, evt event.Event
  
  	// Append event to stream
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141107,7 +141448,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append tool call event to stream failed", "error", err)
  	}
-@@ -304,12 +340,13 @@ func (h *AgentStreamHandler) handleToolResult(ctx context.Context, evt event.Eve
+@@ -304,12 +343,13 @@ func (h *AgentStreamHandler) handleToolResult(ctx context.Context, evt event.Eve
  
  	// Append event to stream
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141127,7 +141468,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append tool result event to stream failed", "error", err)
  	}
-@@ -338,12 +375,13 @@ func (h *AgentStreamHandler) handleToolApprovalRequired(ctx context.Context, evt
+@@ -338,12 +378,13 @@ func (h *AgentStreamHandler) handleToolApprovalRequired(ctx context.Context, evt
  	meta := toolApprovalDataToMap(data)
  	meta["pending_id"] = data.PendingID
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141147,7 +141488,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append tool approval required event failed", "error", err)
  	}
-@@ -359,12 +397,13 @@ func (h *AgentStreamHandler) handleToolApprovalResolved(ctx context.Context, evt
+@@ -359,12 +400,13 @@ func (h *AgentStreamHandler) handleToolApprovalResolved(ctx context.Context, evt
  	meta := toolApprovalDataToMap(data)
  	meta["pending_id"] = data.PendingID
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141167,7 +141508,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append tool approval resolved event failed", "error", err)
  	}
-@@ -381,12 +420,13 @@ func (h *AgentStreamHandler) handleMCPOAuthRequired(ctx context.Context, evt eve
+@@ -381,12 +423,13 @@ func (h *AgentStreamHandler) handleMCPOAuthRequired(ctx context.Context, evt eve
  	meta := toolApprovalDataToMap(data)
  	meta["pending_id"] = data.PendingID
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141187,7 +141528,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append mcp oauth required event failed", "error", err)
  	}
-@@ -402,12 +442,13 @@ func (h *AgentStreamHandler) handleMCPOAuthResolved(ctx context.Context, evt eve
+@@ -402,12 +445,13 @@ func (h *AgentStreamHandler) handleMCPOAuthResolved(ctx context.Context, evt eve
  	meta := toolApprovalDataToMap(data)
  	meta["pending_id"] = data.PendingID
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141207,7 +141548,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append mcp oauth resolved event failed", "error", err)
  	}
-@@ -445,11 +486,12 @@ func (h *AgentStreamHandler) handleReferences(ctx context.Context, evt event.Eve
+@@ -445,11 +489,12 @@ func (h *AgentStreamHandler) handleReferences(ctx context.Context, evt event.Eve
  
  	// Append references event to stream
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141225,7 +141566,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  		Data: map[string]interface{}{
  			"references": types.References(h.knowledgeRefs),
  		},
-@@ -478,11 +520,12 @@ func (h *AgentStreamHandler) handleMemoryRecalled(ctx context.Context, evt event
+@@ -478,11 +523,12 @@ func (h *AgentStreamHandler) handleMemoryRecalled(ctx context.Context, evt event
  	h.mu.Unlock()
  
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141243,7 +141584,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append memory recalled event to stream failed", "error", err)
  	}
-@@ -494,17 +537,18 @@ func (h *AgentStreamHandler) handleMemoryRecalled(ctx context.Context, evt event
+@@ -494,17 +540,18 @@ func (h *AgentStreamHandler) handleMemoryRecalled(ctx context.Context, evt event
  // The summary itself is carried so the user can expand it and see exactly what
  // the agent kept, which is the only way to tell an agent that forgot something
  // from an agent that never had it.
@@ -141267,7 +141608,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  		Data: map[string]interface{}{
  			"reason":          data.Reason,
  			"round":           data.Round,
-@@ -547,6 +591,15 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
+@@ -547,6 +594,15 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
  			h.requestID, h.sessionID, ttfb.Milliseconds())
  	}
  
@@ -141283,7 +141624,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	// Accumulate final answer locally for assistant message (database). Track
  	// per event ID so a later supersede can subtract this segment's content.
  	if data.Content != "" {
-@@ -592,14 +645,16 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
+@@ -592,14 +648,16 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
  
  	// Append this chunk to stream (frontend will accumulate by event ID)
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141306,7 +141647,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}
  
  	return nil
-@@ -614,11 +669,12 @@ func (h *AgentStreamHandler) handleReflection(ctx context.Context, evt event.Eve
+@@ -614,11 +672,12 @@ func (h *AgentStreamHandler) handleReflection(ctx context.Context, evt event.Eve
  
  	// Append this chunk to stream (frontend will accumulate by event ID)
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141324,27 +141665,42 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append reflection event to stream failed", "error", err)
  	}
-@@ -641,12 +697,13 @@ func (h *AgentStreamHandler) handleError(ctx context.Context, evt event.Event) e
+@@ -628,25 +687,24 @@ func (h *AgentStreamHandler) handleReflection(ctx context.Context, evt event.Eve
  
- 	// Append error event to stream
+ // handleError handles error events
+ func (h *AgentStreamHandler) handleError(ctx context.Context, evt event.Event) error {
+-	data, ok := evt.Data.(event.ErrorData)
++	_, ok := evt.Data.(event.ErrorData)
+ 	if !ok {
+ 		return nil
+ 	}
+-
+-	// Build error metadata
+-	metadata := map[string]interface{}{
+-		"stage": data.Stage,
+-		"error": data.Error,
++	if evt.SessionID != "" && evt.SessionID != h.sessionID || evt.RequestID != "" && evt.RequestID != h.requestID {
++		return access.ErrNextcloudPublicationDenied
+ 	}
+ 
+-	// Append error event to stream
++	// Provider errors and stage metadata can contain source text or secrets.
++	// This code-origin control neither authenticates the failed assistant nor
++	// certifies a source lineage, and is bound to this handler's exact run.
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
 -		ID:        evt.ID,
--		Type:      types.ResponseTypeError,
++		ID:        h.requestID,
+ 		Type:      types.ResponseTypeError,
 -		Content:   data.Error,
--		Done:      true,
--		Timestamp: time.Now(),
++		Content:   "Generation could not complete; please retry after checking access",
+ 		Done:      true,
+ 		Timestamp: time.Now(),
 -		Data:      metadata,
-+		SourceLineage: eventSourceLineage(ctx, evt),
-+		ID:            evt.ID,
-+		Type:          types.ResponseTypeError,
-+		Content:       data.Error,
-+		Done:          true,
-+		Timestamp:     time.Now(),
-+		Data:          metadata,
++		Data:      map[string]interface{}{"error_code": "generation_failed"},
  	}); err != nil {
  		logger.GetLogger(h.ctx).Error("Append error event to stream failed", "error", err)
  	}
-@@ -666,11 +723,12 @@ func (h *AgentStreamHandler) handleSessionTitle(ctx context.Context, evt event.E
+@@ -666,11 +724,12 @@ func (h *AgentStreamHandler) handleSessionTitle(ctx context.Context, evt event.E
  
  	// Append title event to stream
  	if err := h.streamManager.AppendEvent(bgCtx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141362,7 +141718,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  		Data: map[string]interface{}{
  			"session_id": data.SessionID,
  			"title":      data.Title,
-@@ -686,17 +744,18 @@ func (h *AgentStreamHandler) handleSessionTitle(ctx context.Context, evt event.E
+@@ -686,17 +745,18 @@ func (h *AgentStreamHandler) handleSessionTitle(ctx context.Context, evt event.E
  // user-visible stream so the frontend can flip its optimistic "queued"
  // bubble into a normal message of the running turn. The event carries the
  // steer ID the client generated queue time, so correlation is exact.
@@ -141386,7 +141742,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  		Data: map[string]interface{}{
  			"steer_id":        data.SteerID,
  			"message_id":      data.MessageID,
-@@ -719,6 +778,15 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
+@@ -719,6 +779,15 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
  	h.mu.Lock()
  	defer h.mu.Unlock()
  
@@ -141402,7 +141758,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	// Update assistant message with final data
  	if data.MessageID == h.assistantMessageID {
  		// h.assistantMessage.Content = data.FinalAnswer
-@@ -850,11 +918,12 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
+@@ -850,11 +919,12 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
  		)
  		fallbackID := fmt.Sprintf("answer-fallback-%d", time.Now().UnixMilli())
  		if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141420,7 +141776,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  			Data: map[string]interface{}{
  				"event_id":    fallbackID,
  				"is_fallback": true,
-@@ -863,11 +932,12 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
+@@ -863,11 +933,12 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
  			logger.GetLogger(h.ctx).Errorf("Append fallback answer event failed: %v", err)
  		}
  		if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141438,7 +141794,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  			Data: map[string]interface{}{
  				"event_id":    fallbackID,
  				"is_fallback": true,
-@@ -901,13 +971,14 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
+@@ -901,13 +972,14 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
  		completeData["usage"] = turnUsage
  	}
  	h.completionEvent = &interfaces.StreamEvent{
@@ -141460,7 +141816,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	}
  
  	return nil
-@@ -922,6 +993,7 @@ func (h *AgentStreamHandler) publishCompletion(ctx context.Context) error {
+@@ -922,6 +994,7 @@ func (h *AgentStreamHandler) publishCompletion(ctx context.Context) error {
  	if h.completionEvent == nil {
  		return nil
  	}
@@ -141468,7 +141824,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  	if err := h.streamManager.AppendEvent(ctx, h.sessionID, h.assistantMessageID, *h.completionEvent); err != nil {
  		return err
  	}
-@@ -937,9 +1009,10 @@ func (h *AgentStreamHandler) emitArtifactsPending(count int) {
+@@ -937,9 +1010,10 @@ func (h *AgentStreamHandler) emitArtifactsPending(count int) {
  		return
  	}
  	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -141482,7 +141838,7 @@ index 8968a0d179aa0026b6221570b768a9aefecbb042..758f2d0f5d4ea472190fa46eca4e25ef
  		Data: map[string]interface{}{
  			"count": count,
  		},
-@@ -975,16 +1048,26 @@ func publicArtifactViews(list types.MessageArtifacts) []map[string]interface{} {
+@@ -975,16 +1049,26 @@ func publicArtifactViews(list types.MessageArtifacts) []map[string]interface{} {
  
  // handleCommandOutput forwards UI-only progress without adding partial output
  // to the model conversation or completing the tool call.
@@ -143874,6 +144230,149 @@ index 0000000000000000000000000000000000000000..eedf180483aa00ff16e8f0e5928cd58c
 +		})
 +	}
 +}
+diff --git a/internal/handler/session/qa_terminal_material_holder_test.go b/internal/handler/session/qa_terminal_material_holder_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a37119a8366aec6a7dd3169c2349ddb3b193f2b3
+--- /dev/null
++++ b/internal/handler/session/qa_terminal_material_holder_test.go
+@@ -0,0 +1,137 @@
++package session
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	applicationservice "github.com/Tencent/WeKnora/internal/application/service"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/storageurl"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++type terminalMaterialStream struct {
++	interfaces.StreamManager
++	mu     sync.Mutex
++	events []interfaces.StreamEvent
++	scopes [][2]string
++}
++
++func (s *terminalMaterialStream) AppendEvent(_ context.Context, session, message string, frame interfaces.StreamEvent) error {
++	// Use the transport's JSON shape, retaining no caller-owned event maps.
++	raw, err := json.Marshal(frame)
++	if err != nil {
++		return err
++	}
++	var copy interfaces.StreamEvent
++	if err := json.Unmarshal(raw, &copy); err != nil {
++		return err
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.events = append(s.events, copy)
++	s.scopes = append(s.scopes, [2]string{session, message})
++	return nil
++}
++
++func (s *terminalMaterialStream) GetEvents(_ context.Context, _, _ string, offset int) ([]interfaces.StreamEvent, int, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return append([]interfaces.StreamEvent(nil), s.events[offset:]...), len(s.events), nil
++}
++
++func TestAgentStreamHandlerInternalErrorRejectsForeignRunScope(t *testing.T) {
++	streams := &terminalMaterialStream{}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "assistant", SessionID: "session", RequestID: "request", Role: "assistant"}
++	producer := NewAgentStreamHandler(context.Background(), "session", "assistant", "request", 7, time.Now(), message, streams, bus, nil, nil, nil)
++	producer.Subscribe()
++	for _, control := range [][2]string{{"foreign-session", "request"}, {"session", "foreign-request"}} {
++		require.ErrorIs(t, bus.Emit(context.Background(), event.Event{Type: event.EventError, SessionID: control[0], RequestID: control[1], Data: event.ErrorData{Error: "foreign private error"}}), access.ErrNextcloudPublicationDenied)
++	}
++	require.Empty(t, streams.events)
++	require.False(t, message.IsCompleted)
++}
++
++func TestLiveSSEProducerErrorWithRefusedOriginalMaterialHolder(t *testing.T) {
++	for _, condition := range []string{"missing_original", "unknown_prefix", "source_revoked"} {
++		t.Run(condition, func(t *testing.T) {
++			gin.SetMode(gin.TestMode)
++			streams := &terminalMaterialStream{}
++			message := &types.Message{ID: "assistant", SessionID: "session", RequestID: "request", Role: "assistant"}
++			service := &liveHistoryMessageService{}
++			if condition == "source_revoked" {
++				service.denyAt = 1
++			}
++			h := &Handler{messageService: service, streamManager: streams}
++			producerResult := make(chan error, 1)
++			r := gin.New()
++			r.GET("/stream", func(c *gin.Context) {
++				// This is the actual original-material owner used by executeQA,
++				// not a check stub. It has no admitted originals and is not Ready.
++				ctx, attach, check, close := applicationservice.BeginMessageMaterialHTTPBoundary(c.Request.Context())
++				defer close()
++				require.ErrorIs(t, check(), access.ErrNextcloudPublicationUnavailable)
++				ctx = attach(ctx)
++				c.Writer = &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: check}
++				bus := event.NewEventBus()
++				producer := NewAgentStreamHandler(ctx, "session", "assistant", "request", 7, time.Now(), message, streams, bus, nil, nil, nil)
++				producer.Subscribe()
++				if condition == "unknown_prefix" {
++					require.ErrorIs(t, bus.Emit(ctx, event.Event{Type: event.EventAgentThought, SourceLineage: types.UnknownSourceLineage(), Data: event.AgentThoughtData{Content: "private refused body"}}), access.ErrNextcloudPublicationDenied)
++				}
++				if condition == "source_revoked" {
++					require.ErrorIs(t, service.CheckLiveMessagePublication(ctx, message), access.ErrNextcloudPublicationDenied)
++				}
++				// executeQA emits this event after the service fails, without a
++				// generated-body receipt; do not fake assistant completion to close.
++				producerResult <- bus.Emit(ctx, event.Event{ID: "private diagnostic event ID", Type: event.EventError, SessionID: "session", RequestID: "request", Data: event.ErrorData{Error: "private diagnostic token=SECRET", Stage: "private source stage"}})
++				setSSEHeaders(c)
++				rewriter := storageurl.NewStreamRewriter(storageurl.NewRequestRewriter(ctx, storageurl.ModePublic, nil, nil))
++				rewriter.Push(ctx, "held", "private held source ![", false, nil)
++				h.handleAgentEventsForSSE(ctx, c, "session", "assistant", "request", bus, true, rewriter, message)
++			})
++			server := httptest.NewServer(r)
++			defer server.Close()
++			client := &http.Client{Timeout: 2 * time.Second}
++			started := time.Now()
++			response, err := client.Get(server.URL + "/stream")
++			require.NoError(t, err, "original refusal must close via a static terminal, not client timeout")
++			defer response.Body.Close()
++			raw, err := io.ReadAll(response.Body)
++			require.NoError(t, err)
++			require.Less(t, time.Since(started), time.Second)
++			require.NoError(t, <-producerResult)
++			require.Contains(t, string(raw), `"response_type":"error"`)
++			require.Contains(t, string(raw), `"done":true`)
++			require.Contains(t, string(raw), `"error_code":"generation_failed"`)
++			require.NotContains(t, string(raw), `"response_type":"complete"`)
++			for _, forbidden := range []string{"SECRET", "private diagnostic", "private source stage", "private refused body", "private held source"} {
++				require.NotContains(t, string(raw), forbidden)
++			}
++			require.False(t, message.IsCompleted)
++			require.Empty(t, message.Content)
++			require.Error(t, message.SourceLineage.RequireComplete(), "static control must not mint an assistant body origin")
++			streams.mu.Lock()
++			defer streams.mu.Unlock()
++			require.Len(t, streams.events, 1)
++			require.Equal(t, [][2]string{{"session", "assistant"}}, streams.scopes)
++			require.Equal(t, "request", streams.events[0].ID)
++			stored, err := json.Marshal(streams.events[0])
++			require.NoError(t, err)
++			require.NotContains(t, string(stored), "SECRET")
++			require.NotContains(t, string(stored), "private")
++			require.Error(t, streams.events[0].SourceLineage.RequireComplete(), "the code-origin terminal is not source-body authority")
++		})
++	}
++}
 diff --git a/internal/handler/session/rag_source_lineage_stream_test.go b/internal/handler/session/rag_source_lineage_stream_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..163e4574cb9ae32415e641082ddb482a1bd1b6f3
@@ -144105,7 +144604,7 @@ index 19a36ad806a87312b914df7bfd9a631b67a00d9e..ac73c9c7cc641f393fc890757c6fc01c
  		return "", err
  	}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..d7990214653f93940342f9e499aad9450521336c 100644
+index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59965dcffe 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -7,6 +7,7 @@ import (
@@ -144386,10 +144885,19 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..d7990214653f93940342f9e499aad945
  
  	for {
  		select {
-@@ -362,11 +547,25 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -362,11 +547,34 @@ func (h *Handler) handleAgentEventsForSSE(
  				log.Warnf("Failed to get events from stream: %v", err)
  				continue
  			}
++			// An error closes through a fixed code-origin recipe only. Discard
++			// the entire pending batch and holdback tail before any source or
++			// original-material check; refusal cannot suppress this static close.
++			for _, evt := range events {
++				if evt.Type == types.ResponseTypeError && evt.Done {
++					emitSafeTerminalGenerationError(c, requestID)
++					return
++				}
++			}
 +			events, err = protectLiveStreamBatch(ctx, h.messageService, liveMessage, events)
 +			if err != nil {
 +				stopLiveStreamForPublication(ctx, c, eventBus, sessionID, assistantMessageID, requestID, err)
@@ -144413,21 +144921,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..d7990214653f93940342f9e499aad945
  				// Check for stop event
  				if evt.Type == types.ResponseType(event.EventStop) {
  					log.Infof("Detected stop event, triggering stop via EventBus for session=%s", sessionID)
-@@ -401,6 +600,13 @@ func (h *Handler) handleAgentEventsForSSE(
- 					return
- 				}
- 
-+				// Producer failure is terminal. Do not wait for a success marker,
-+				// a title, or flush source-derived holdback text on this path.
-+				if evt.Type == types.ResponseTypeError && evt.Done {
-+					emitSafeTerminalGenerationError(c, requestID)
-+					return
-+				}
-+
- 				// Check for completion event
- 				if evt.Type == "complete" {
- 					streamCompleted = true
-@@ -420,7 +626,14 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -420,7 +628,14 @@ func (h *Handler) handleAgentEventsForSSE(
  					return
  				}
  
@@ -144442,7 +144936,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..d7990214653f93940342f9e499aad945
  			}
  
  			// Update offset
-@@ -449,7 +662,17 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -449,7 +664,17 @@ func (h *Handler) handleAgentEventsForSSE(
  								break titleWaitLoop
  							}
  							if len(events) > 0 {
@@ -144461,7 +144955,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..d7990214653f93940342f9e499aad945
  									emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
  									// If we got the title, we can exit
  									if evt.Type == types.ResponseTypeSessionTitle {
-@@ -473,3 +696,313 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -473,3 +698,313 @@ func (h *Handler) handleAgentEventsForSSE(
  		}
  	}
  }

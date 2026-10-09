@@ -368,3 +368,29 @@ parent-reference rows. Nine method checks passed on both macOS and Linux;
 the new count case executes the actual predicate with direct/message, expired,
 released and foreign-tenant rows. This remains method validation, not a P95
 measurement.
+
+## Normal application read and QA repairs
+
+Candidates `426c1ad4` / `155f0732` combine the display vault fix, reused RAG
+turn-fence context binding, and safe terminal-error delivery. `ContextFor`
+keeps the current caller's authority, selection and lineage accumulator while
+honoring both caller and fence cancellation. Actual PostgreSQL/SQLite tests
+cover a fence created before the lineage accumulator, repeated search and
+augmentation, and denial after source retirement, missing proof or cancellation.
+Terminal controls carry a fixed message and error code bound to the current
+request/session; provider diagnostics and source body tails are discarded.
+
+Final read-only combination checks passed 21 C6 terminal cases and 42 RAG
+cases (6 display, 5 context, 21 terminal and 10 actual turn cases), with no
+failures or skips. An initial concurrent build/test compiler OOM executed no
+tests; its log remains retained. The serial actual-turn retry with
+`GOMEMLIMIT=2GiB` passed, and exact owned test resources were removed. Existing
+tool-result fixtures with no producer lineage still fail identically before
+and after this change; their nil-lineage rejection was preserved.
+
+The normal AnyDoc app/UI `155f0732` build completed and its immutable image
+IDs and role/base/commit/tree/patch labels match the manifest. The complete
+patches apply and reverse exactly on both profiles. The [repair evidence](evidence/normal-candidate-read-qa-fixes-20261009.json)
+records measured component gates separately from pending full HTTP, clean
+restore and P5 acceptance. Fresh isolated application and performance fixtures
+are being prepared; the shared runtime remains unchanged.
