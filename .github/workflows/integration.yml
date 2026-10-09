@@ -158,6 +158,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30
+      redis:
+        image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
       pgvector:
         image: paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2
         env:
@@ -203,20 +212,23 @@ jobs:
           WEKNORA_SOURCE_HEALTH_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_sourcehealth sslmode=disable
           WEKNORA_PAIRING_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_pairing sslmode=disable
           WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_auto sslmode=disable
+          WEKNORA_AUTO_COMPLETION_TEST_REDIS_ADDR: 127.0.0.1:6379
           WEKNORA_FAQ_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_faq sslmode=disable
           WEKNORA_CAPACITY_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_capacity sslmode=disable
           WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_gc sslmode=disable
         run: |
           go build -buildvcs=false -p 1 -o /tmp/capacity-reconcile ./cmd/capacity-reconcile
           export WEKNORA_CAPACITY_RECONCILE_CLI=/tmp/capacity-reconcile
-          go test -json -tags sqlite_fts5 -p 1 ./internal/config ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
-            -run 'KnowledgeMachine|PostgresKnowledgeMachine|DataSourceName|MessageMaterial|KnowledgeHistory|NextcloudGCManualActual|NextcloudGCAdminStatus|NextcloudGCActualAdminHTTPPreview|NextcloudGCAdminPagination|^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
+          go build -buildvcs=false -p 1 -o /tmp/original-body-retention ./cmd/original-body-retention
+          export WEKNORA_ORIGINAL_BODY_TEST_CLI=/tmp/original-body-retention
+          go test -json -tags sqlite_fts5 -p 1 ./internal/config ./internal/application/readlease ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
+            -run 'MessageRewindMaterial|OriginalRewind|RAGPhysicalActual|NextcloudKBRead|NextcloudKnowledgeLeaseScope|NativeLive|MessageNativeLive|OriginalBody|PostgresOriginalBody|KnowledgeAutoCompletion|PostgresKnowledgeAutoCompletion|AgentHistoryActual|AgentHistoryPostgresActual|CommittedHistoryParentRequest|MessageGeneratedField|MessageFork|MessageActual|NativeSavedReplay|MessageMaterialLiveHTTP|ChunkOutputHTTP|KnowledgeMachine|PostgresKnowledgeMachine|DataSourceName|MessageMaterial|KnowledgeHistory|NextcloudGCManualActual|NextcloudGCAdminStatus|NextcloudGCActualAdminHTTPPreview|NextcloudGCAdminPagination|^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 -timeout 20m > candidate-tests.jsonl
           go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
       - name: Verify failed QA streams terminate without retained source text
         working-directory: candidate
         run: |
           go test -json -p 1 ./internal/handler/session \
-            -run 'LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError' -count=1 > candidate-qa-terminal.jsonl
+            -run 'NativeLive|LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError' -count=1 > candidate-qa-terminal.jsonl
       - name: Verify actual SQLite FTS5 and PostgreSQL derived collection
         working-directory: candidate
         env:

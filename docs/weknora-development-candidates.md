@@ -296,3 +296,30 @@ the actual frontend app-project typecheck/build passed. The artifact hashes
 and package results are retained in the evidence JSON. This source precedes
 the independently developed body152, durable Auto153 and history consumer
 changes, which still require combined application verification.
+
+## Body, durable completion and original live consumers
+
+The new full candidates include body152/SQLite71 and Auto153/SQLite72, the
+original-history live HTTP holder, native same-instance running replay,
+original Rewind cuts and physical RAG retrieval guards. Normal images now
+package original-body-retention, publication-recovery and capacity-reconcile
+from the same source. Their final Docker build is pending.
+
+The readonly dual-profile combination passed551 tests/subtests per profile,
+zero failures/skips, across eight packages with real PostgreSQL/SQLite/Redis
+and both maintenance CLIs. Exact owned resources were removed. That measured
+source precedes the final scope-completeness marker correction; its separate
+six-case dual-SQL gate and four CLI forward/restore cases passed. Final full CI
+and normal app startup/QA/reconnect/restore/P5 metrics remain required.
+
+The previous combination failed485pass/11fail per profile. Old chunk HTTP
+fixtures omitted actual actor/group/input authority; their corrected seven
+cases passed. The old body GC fixture lacked private build context and
+Auto153 controls. Failed logs remain in the evidence. Raw diagnostic bytes
+are preserved with binary Git attributes; source whitespace checks stay on.
+
+New generated parent records omit duplicate Messages bodies. Known old
+generated/fork parent-copy leaves remain inventoried and retained when
+original copy/lifecycle proof is insufficient; they are not reported as
+physically cleared. That cleanup protocol, Steer154/73, remaining consumer
+lifetimes, full application acceptance and performance are active work.
