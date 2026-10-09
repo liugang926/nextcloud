@@ -1148,6 +1148,32 @@ index 0000000000000000000000000000000000000000..579802e53fe1a4ad617c3bd4c34b246b
 +receipts, perform authoritative directory/ACL and physical/index inventory
 +reconciliation, and gate ingress reopening. This module does not declare that
 +larger acceptance completed.
+diff --git a/docs/evidence/qa-terminal-error-20261009.json b/docs/evidence/qa-terminal-error-20261009.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b9307fafb0760f3b3301871dafe9c5499ce20cf
+--- /dev/null
++++ b/docs/evidence/qa-terminal-error-20261009.json
+@@ -0,0 +1,20 @@
++{
++  "source_parent": "e0b33efe6eb89321060f3e1a401afc1499117b4b",
++  "actual_http_error_close": true,
++  "safe_error_payload": true,
++  "held_body_not_flushed_on_error": true,
++  "title_wait_skipped_on_error": true,
++  "last_verified_counts": {
++    "pass": 11,
++    "fail": 0,
++    "skip": 0
++  },
++  "log_sha256": "a41b4b74a52ef3bac3b14d396c0d914e0261d4ae5a398c7d361e03efc6a9d07b",
++  "previous_failed_logs": {
++    ".qa-terminal-root-20261009.jsonl": "fe43496a7ad292a2573b703ca9d0f8fa84c338aa990d7dde5a72dbde6c62fe04",
++    ".qa-terminal-r2-root-20261009.jsonl": "452eb75a8485612fe483b711efa8d1d3f245416896a76ef3029c0ad87edc315e"
++  },
++  "fixture_correction": "old staged authorized frames had no complete original lineage; added explicit code-origin complete frames so actual publication verifier still denies the third chunk",
++  "shared_runtime_changed": false,
++  "full_session_suite_run": false
++}
 diff --git a/docs/evidence/wiki-source-policy-20261009.json b/docs/evidence/wiki-source-policy-20261009.json
 new file mode 100644
 index 0000000000000000000000000000000000000000..4ee8fe9e0f17397ba2ce821e59214127e29f52a3
@@ -7597,6 +7623,19 @@ index 0000000000000000000000000000000000000000..685d01335f12729e59fd57b939138d6f
 +an isolated module contract, not acceptance of a complete deployed shared-stack
 +recovery. The combined recovery entry point must require both receipts and its
 +remaining authoritative checks before reopening ingress.
+diff --git a/docs/nextcloud-qa-terminal-error.md b/docs/nextcloud-qa-terminal-error.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae0184fda56ee26f46c3f3c70c5cb600908ccddc
+--- /dev/null
++++ b/docs/nextcloud-qa-terminal-error.md
+@@ -0,0 +1,7 @@
++# Failed generation SSE completion
++
++The actual pull-based SSE loop waited only for response_type=complete. A KnowledgeQA failure produced an error with done=true, so a first-request refusal could leave the HTTP reader waiting until socket timeout. The send loop now returns immediately on a terminal error, skips title waiting, and emits a static error without flushing retained source text or passing the backend's raw error payload. Continue polling follows the same terminal rule. Current source authorization checks remain before emission; revocation still emits its safe source-access terminal error.
++
++The QA service-error event now contains a static diagnostic and generation_failed code. This change does not mark the assistant successfully completed, certify its retained body, or repair the separate completed-history selection problem.
++
++Actual httptest.Server/HTTP-client tests prove the connection closes before one second, sends done=true/error, emits no success complete, and exposes neither backend sentinel text nor an intentionally held source tail. Revoked source, authorized/refused producer, old agent error type and poll-failure retained-tail gates passed11 tests/subtests with0fail/skip. The first compile failure and an old source-less staged-frame fixture failure remain recorded; the corrected frame fixture reaches the intended current-publication path. Full actual first-QA/history/model lifecycle verification remains required.
 diff --git a/docs/nextcloud-source-pairing.md b/docs/nextcloud-source-pairing.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..6984a00b0da09d31a2113547ac06cff4a7a044ff
@@ -104947,7 +104986,7 @@ index 0000000000000000000000000000000000000000..d830c456b198b2dd4e140e23be7b91f0
 +	require.NotContains(t, w.Body.String(), "unattributed source text")
 +}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 544e45aa6be46abd2ef69c3935035e13041c01ce..9d9c32e52b694b8443bc741b871f211b78803f19 100644
+index 544e45aa6be46abd2ef69c3935035e13041c01ce..d24deaf8956df4ff994bae899a640526da62309d 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
 @@ -508,6 +508,15 @@ func buildMessageExecutionContext(
@@ -105046,7 +105085,17 @@ index 544e45aa6be46abd2ef69c3935035e13041c01ce..9d9c32e52b694b8443bc741b871f211b
  	asyncDone := make(chan struct{})
  	go func() {
  		defer close(asyncDone)
-@@ -1485,8 +1531,17 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
+@@ -1469,7 +1515,8 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
+ 					Type:      event.EventError,
+ 					SessionID: sessionID,
+ 					Data: event.ErrorData{
+-						Error:     serviceErr.Error(),
++						Error:     "Generation could not complete; please retry after checking access",
++						ErrorCode: "generation_failed",
+ 						Stage:     stageName,
+ 						SessionID: sessionID,
+ 					},
+@@ -1485,8 +1532,17 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
  
  	// Handle SSE events (blocking)
  	shouldWaitForTitle := generateTitle && reqCtx.session.Title == ""
@@ -105066,7 +105115,7 @@ index 544e45aa6be46abd2ef69c3935035e13041c01ce..9d9c32e52b694b8443bc741b871f211b
  }
  
  // runVLMAnalysisIfNeeded runs VLM image analysis within the async goroutine,
-@@ -1929,11 +1984,11 @@ func (h *Handler) completeAssistantMessage(
+@@ -1929,11 +1985,11 @@ func (h *Handler) completeAssistantMessage(
  	// Asynchronously index the Q&A pair into the chat history knowledge base for vector search.
  	// Use WithoutCancel so the goroutine survives after the HTTP request context is done.
  	bgCtx := context.WithoutCancel(ctx)
@@ -105080,7 +105129,7 @@ index 544e45aa6be46abd2ef69c3935035e13041c01ce..9d9c32e52b694b8443bc741b871f211b
  		go func() {
  			if _, err := h.suggestionService.EnsureFollowUps(
  				bgCtx, assistantMessage.SessionID, assistantMessage.ID, false,
-@@ -1942,7 +1997,7 @@ func (h *Handler) completeAssistantMessage(
+@@ -1942,7 +1998,7 @@ func (h *Handler) completeAssistantMessage(
  			}
  		}()
  	}
@@ -105089,6 +105138,71 @@ index 544e45aa6be46abd2ef69c3935035e13041c01ce..9d9c32e52b694b8443bc741b871f211b
  		go h.recordTurnMemory(bgCtx, assistantMessage, userQuery, userMessageID)
  	}
  	return nil
+diff --git a/internal/handler/session/qa_terminal_error_test.go b/internal/handler/session/qa_terminal_error_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..eedf180483aa00ff16e8f0e5928cd58cbea9239e
+--- /dev/null
++++ b/internal/handler/session/qa_terminal_error_test.go
+@@ -0,0 +1,59 @@
++package session
++
++import (
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/storageurl"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLiveSSEProducerErrorClosesWithoutSuccessOrHeldSourceTail(t *testing.T) {
++	for _, revoke := range []bool{false, true} {
++		t.Run(map[bool]string{false: "producer_refusal", true: "source_revoked"}[revoke], func(t *testing.T) {
++			gin.SetMode(gin.TestMode)
++			service := &liveHistoryMessageService{}
++			if revoke {
++				service.denyAt = 1
++			}
++			lineage, err := types.NewCompleteSourceLineage()
++			require.NoError(t, err)
++			streams := &stagedLiveStream{events: []interfaces.StreamEvent{{SourceLineage: lineage, ID: "producer-error", Type: types.ResponseTypeError, Content: "private response body token=SECRET", Done: true, Data: map[string]interface{}{"error": "private response body"}}}}
++			h := &Handler{messageService: service, streamManager: streams}
++			r := gin.New()
++			r.GET("/stream", func(c *gin.Context) {
++				ctx := c.Request.Context()
++				rewriter := storageurl.NewStreamRewriter(storageurl.NewRequestRewriter(ctx, storageurl.ModePublic, nil, nil))
++				rewriter.Push(ctx, "answer:held", "private held source ![", false, nil)
++				h.handleAgentEventsForSSE(ctx, c, "session", "assistant", "request", event.NewEventBus(), true, rewriter, &types.Message{Role: "assistant", RequestID: "request"})
++			})
++			server := httptest.NewServer(r)
++			defer server.Close()
++			client := &http.Client{Timeout: 2 * time.Second}
++			started := time.Now()
++			response, err := client.Get(server.URL + "/stream")
++			require.NoError(t, err)
++			defer response.Body.Close()
++			body, err := io.ReadAll(response.Body)
++			require.NoError(t, err, "real HTTP body must end, not wait for client timeout")
++			require.Less(t, time.Since(started), time.Second)
++			text := string(body)
++			require.Contains(t, text, `"done":true`)
++			require.Contains(t, text, `"response_type":"error"`)
++			require.NotContains(t, text, "SECRET")
++			require.NotContains(t, text, "private response body")
++			require.NotContains(t, text, "private held source")
++			require.NotContains(t, text, `"response_type":"complete"`)
++			if !revoke {
++				require.Contains(t, text, "generation_failed")
++			}
++		})
++	}
++}
 diff --git a/internal/handler/session/rag_source_lineage_stream_test.go b/internal/handler/session/rag_source_lineage_stream_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..163e4574cb9ae32415e641082ddb482a1bd1b6f3
@@ -105293,7 +105407,7 @@ index 19a36ad806a87312b914df7bfd9a631b67a00d9e..ac73c9c7cc641f393fc890757c6fc01c
  		return "", err
  	}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c6424ec5aa77 100644
+index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..8c9d65a95640b66a84776ada1d56bb654c93cf5c 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -7,6 +7,7 @@ import (
@@ -105355,7 +105469,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
  		emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter)
  	}
  
-@@ -176,13 +202,36 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -176,13 +202,41 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  			newEvents, newOffset, err := h.streamManager.GetEvents(ctx, sessionID, messageID, currentOffset)
  			if err != nil {
  				logger.Errorf(ctx, "Failed to get new events: %v", err)
@@ -105390,10 +105504,15 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
 +						return
 +					}
 +				}
++				if evt.Type == types.ResponseTypeError && evt.Done {
++					emitSafeTerminalGenerationError(c, message.RequestID)
++					return
++				}
++
  				// Check for completion event
  				if evt.Type == "complete" {
  					streamCompletedNow = true
-@@ -204,6 +253,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -204,6 +258,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	}
  }
  
@@ -105504,7 +105623,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
  // StopSession godoc
  // @Summary      停止生成
  // @Description  停止当前正在进行的生成任务
-@@ -249,7 +402,7 @@ func (h *Handler) StopSession(c *gin.Context) {
+@@ -249,7 +407,7 @@ func (h *Handler) StopSession(c *gin.Context) {
  	tenantIDUint := tenantID.(uint64)
  
  	// Verify message ownership and status
@@ -105513,7 +105632,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, map[string]interface{}{
  			"session_id": sessionID,
-@@ -335,6 +488,7 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -335,6 +493,7 @@ func (h *Handler) handleAgentEventsForSSE(
  	eventBus *event.EventBus,
  	waitForTitle bool,
  	resourceRewriter *storageurl.StreamRewriter,
@@ -105521,7 +105640,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
  ) {
  	ticker := time.NewTicker(100 * time.Millisecond)
  	defer ticker.Stop()
-@@ -343,6 +497,10 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -343,6 +502,10 @@ func (h *Handler) handleAgentEventsForSSE(
  	log := logger.GetLogger(ctx)
  
  	log.Infof("Starting pull-based SSE streaming for session=%s, message=%s", sessionID, assistantMessageID)
@@ -105532,7 +105651,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
  
  	for {
  		select {
-@@ -362,11 +520,25 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -362,11 +525,25 @@ func (h *Handler) handleAgentEventsForSSE(
  				log.Warnf("Failed to get events from stream: %v", err)
  				continue
  			}
@@ -105559,7 +105678,21 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
  				// Check for stop event
  				if evt.Type == types.ResponseType(event.EventStop) {
  					log.Infof("Detected stop event, triggering stop via EventBus for session=%s", sessionID)
-@@ -449,7 +621,17 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -401,6 +578,13 @@ func (h *Handler) handleAgentEventsForSSE(
+ 					return
+ 				}
+ 
++				// Producer failure is terminal. Do not wait for a success marker,
++				// a title, or flush source-derived holdback text on this path.
++				if evt.Type == types.ResponseTypeError && evt.Done {
++					emitSafeTerminalGenerationError(c, requestID)
++					return
++				}
++
+ 				// Check for completion event
+ 				if evt.Type == "complete" {
+ 					streamCompleted = true
+@@ -449,7 +633,17 @@ func (h *Handler) handleAgentEventsForSSE(
  								break titleWaitLoop
  							}
  							if len(events) > 0 {
@@ -105578,7 +105711,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
  									emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
  									// If we got the title, we can exit
  									if evt.Type == types.ResponseTypeSessionTitle {
-@@ -473,3 +655,296 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -473,3 +667,305 @@ func (h *Handler) handleAgentEventsForSSE(
  		}
  	}
  }
@@ -105875,6 +106008,15 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..cc380127e98d79fe25e63a5d68f0c642
 +	})
 +	c.Writer.Flush()
 +}
++
++func emitSafeTerminalGenerationError(c *gin.Context, requestID string) {
++	c.SSEvent("message", &types.StreamResponse{
++		ID: requestID, ResponseType: types.ResponseTypeError,
++		Content: "Generation could not complete; please retry after checking access", Done: true,
++		Data: map[string]interface{}{"error_code": "generation_failed"},
++	})
++	c.Writer.Flush()
++}
 diff --git a/internal/handler/session/stream_nextcloud_history_test.go b/internal/handler/session/stream_nextcloud_history_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..f5753a3f60153380fe3d67f641f54e7888c389a3
@@ -105954,10 +106096,10 @@ index 0000000000000000000000000000000000000000..f5753a3f60153380fe3d67f641f54e78
 +}
 diff --git a/internal/handler/session/stream_nextcloud_live_test.go b/internal/handler/session/stream_nextcloud_live_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a97c59b944f0323909764ec99da90955262674b
+index 0000000000000000000000000000000000000000..1661a6d2548b551178fdcb150bde2638146c8ff6
 --- /dev/null
 +++ b/internal/handler/session/stream_nextcloud_live_test.go
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,310 @@
 +package session
 +
 +import (
@@ -106016,12 +106158,16 @@ index 0000000000000000000000000000000000000000..1a97c59b944f0323909764ec99da9095
 +func TestLiveSSEStopsBeforeRevokedNextChunk(t *testing.T) {
 +	gin.SetMode(gin.TestMode)
 +	svc := &liveHistoryMessageService{denyAt: 3}
++	lineage, err := types.NewCompleteSourceLineage()
++	if err != nil {
++		t.Fatal(err)
++	}
 +	h := &Handler{messageService: svc, streamManager: &stagedLiveStream{events: []interfaces.StreamEvent{
-+		{ID: "refs", Type: types.ResponseTypeReferences, Data: map[string]interface{}{"references": types.References{{
++		{SourceLineage: lineage, ID: "refs", Type: types.ResponseTypeReferences, Data: map[string]interface{}{"references": types.References{{
 +			KnowledgeID: "nextcloud-document", KnowledgeChannel: types.ConnectorTypeNextcloud,
 +		}}}},
-+		{ID: "answer", Type: types.ResponseTypeAnswer, Content: "authorized first chunk"},
-+		{ID: "answer", Type: types.ResponseTypeAnswer, Content: "revoked secret second chunk"},
++		{SourceLineage: lineage, ID: "answer", Type: types.ResponseTypeAnswer, Content: "authorized first chunk"},
++		{SourceLineage: lineage, ID: "answer", Type: types.ResponseTypeAnswer, Content: "revoked secret second chunk"},
 +	}}}
 +	bus := event.NewEventBus()
 +	stops := 0

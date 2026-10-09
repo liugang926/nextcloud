@@ -273,3 +273,19 @@ holding them through model/output. It must pass a new first-QA positive plus
 selection/source/actor negatives. This application probe is not full V1
 acceptance. [Actual image/runtime boundary](evidence/normal-machine-candidate-app-20261009.json)
 records IDs and the failed QA metadata, without credentials or body text.
+
+
+## Failed QA stream termination
+
+[Terminal error fix](nextcloud-qa-terminal-error.md) repairs the real application's
+error-with-done stream waiting for a successful complete marker. Live/Continue
+loops now stop on terminal error with a static message; they skip title waiting
+and do not flush source-derived holdback or raw backend diagnostics. Actual
+HTTP closure, source revoke and prior poll/error regressions passed11 cases,
+zero failures/skips. Complete first-QA/history selection remains a separate
+in-progress gate.
+
+Submission53df55f passed all12 push/PR jobs. Retained per-profile logs contain
+726 producer cases,35 local-derived and11 native halfvec cases with0fail/skip,
+complete Go compile and actual frontend app-project typecheck/build. The new
+SSE delta6a3df67e/1bc5cfd0 is separately measured and needs fresh full CI.
