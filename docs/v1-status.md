@@ -34,9 +34,13 @@ and fixed fallback, propagates asynchronous publication errors, and waits for
 the owned producer before releasing its last material holder. Successful Done
 ends the producer even when the provider keeps its channel open. Actual
 PostgreSQL/SQLite boundary tests passed 28 nodes. The final combined sources,
-including parent cancellation, provider-error/EOF and real schema-probe
+including HTTP-caller disconnect, provider-error/EOF and real schema-probe
 cancellation regressions, passed 77 focused nodes per profile with no failures
-or test skips. The inline-body checker now
+or test skips. The original caller-disconnect test sends normal model Done
+after HTTP cancellation; it does not establish producer-context cancellation.
+Its completed-state assertion must also move after the real producer terminal.
+A separate actual StopSession test and these stronger assertions are being
+prepared without changing the frozen production behavior. The inline-body checker now
 checks all heads once per row and rechecks the original head set, journal pin
 and cancellation at the return boundary, including a real canceled schema
 probe without changing actual absent-schema compatibility. Its 22 row-boundary
@@ -61,6 +65,16 @@ including the exact owner, image, memory limit and cgroup OOM event. This run is
 not accepted. A fresh owned disk-backed PGDATA fixture will rerun the complete
 selection with the same memory/CPU budgets, timeout and required tests; the
 failed logs, diagnostics and binaries remain preserved.
+
+The fresh disk-backed RAG full selection subsequently passed all 1163 test
+nodes with zero failures or skipped tests, including all 38 mandatory parents.
+The same frozen `48ce1d3c` source also passed 59 session-terminal nodes and 35
+local-derived nodes, plus compilation of 155 packages (115 test packages and
+40 packages with no tests). Root independently verified raw hashes, actual
+required terminals, unchanged before/after source identity and removed owned
+Go containers in the [disk-gate record](evidence/ordinary-qa-full-disk-gates-20261010.json).
+C6 full gates and the actual producer-cancellation regression are still pending;
+this does not promote the manifest or accept normal images/application/restore.
 
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
 their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the
