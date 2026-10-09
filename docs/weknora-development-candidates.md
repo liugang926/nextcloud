@@ -5,6 +5,11 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
+The current development candidates are RAG `1bbd0cc8` and C6 `b43afa53`.
+Their exact two-profile source gates and owned cleanup passed; new normal
+images, application QA/replay/full restore, pending Auto restore and P5 remain
+pending. See the [final source-gate record](evidence/ordinary-qa-idle-material-final-gates-20261010.json).
+
 | Profile | Upstream baseline | Candidate patch |
 | --- | --- | --- |
 | c6 | `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4` | `integration/candidates/weknora-phase3-c6.patch` |
@@ -57,7 +62,7 @@ passes `git diff --check`.
 
 ## Ordinary QA and body validation update — 2026-10-10
 
-Current candidates are RAG `1ab47546` and C6 `aac58fa7`. Ordinary progress,
+The preceding candidates were RAG `1ab47546` and C6 `aac58fa7`. Ordinary progress,
 references and fixed fallback publish checked source lineage and propagate
 consumer refusal. The stream producer reports its actual terminal, cancels and
 joins on failure, releases its original material holder, and ends on successful
@@ -574,3 +579,54 @@ Four required tests were absent or unfinished, and later skipped compile/UI
 steps are not acceptance. [Actual failure evidence](evidence/normal-application-ci-failure-20261010.json)
 retains the raw hashes and limits. Corrective work preserves all input/source
 checks, unknown-prefix refusal, assertions and original deadlines.
+
+
+## 2026-10-10 final ordinary idle and cancellation gate review
+
+The current development sources are RAG `1bbd0cc8` and C6 `b43afa53`,
+superseding the preceding manifest's `1ab47546`/`aac58fa7` after exact two-profile
+source gates and owned cleanup. This adopts the development candidate pair only.
+Each source has the same four-file, 23,629-byte delta. Both complete candidate
+patches apply to their own fixed upstream baseline and reverse to that exact
+tree. Default build, shared runtime and broad ingress/physical-GC acceptance
+flags remain false. CI's existing ordinary-QA selector already covers the
+four new Idle/LateIdle parents; the prepared require list grows from 38 to 42.
+
+On the exact final RAG tree, ordinary HTTP passed 50 nodes / 10 parents and
+session termination passed 59 nodes. The full selection passed 1177 nodes,
+including all 42 mandatory parents, in 1020.933 seconds within the unchanged
+20-minute limit. Full compilation covered 155 packages: 115 test packages and
+40 no-test packages; it executed no runtime tests. Root verified original
+hashes and terminals. On the exact final C6 tree, ordinary HTTP also passed 50
+nodes / 10 parents and session termination passed 59 nodes. The source-bound
+body-retention and capacity CLI builds passed; their bytes, SHA, mode 0700 and
+single link were verified. C6's full selection also passed all 1177 nodes and
+42 mandatory parents in 1007.649 seconds, within the same original limit. Its
+11 passed packages and one no-test package are separate from the zero test
+skips. C6 full compilation passed 155 packages in 249.866 seconds, with 115 test
+packages, 40 no-test metadata records and zero runtime tests. Exact owner
+cleanup removed all task resources and released the heavy window. Private
+originals, logs and failed results remain preserved; shared and previously
+failed application owners were untouched.
+
+The matched empty-poll measurement verifies eight actual held bodies and
+80 old versus eight corrected successful renewals. The source-revocation
+cases terminate the actual model in both databases. The independently retained
+`d3147927` late-refusal baseline closed HTTP but left the provider and pins alive;
+the final correction cancels the existing request owner and verifies service
+return, released pins and no completed assistant or manifest after actual
+actor deactivation or body-lease expiry. The older `3f327fc3` 44/59 component
+results and superseded preparation failures keep their original identities.
+A late journal-failure regression was not executed and is not claimed.
+
+The two `9df5dfc` CI runs tested the old manifest sources. Their four candidate
+jobs failed actual ordinary HTTP's original eight-second termination bound;
+three service packages later hit cumulative 20 minutes, while PR RAG returned
+failed without a panic. The other eight jobs passed. These failures are retained
+separately from the new RAG gates and prove no new observer Python or image-pull
+terminal failure. The [final-gate review record](evidence/ordinary-qa-idle-material-final-gates-20261010.json)
+pins the exact final source, patch, result, original-log and cleanup hashes.
+The earlier serial summary retains its precleanup scope. New normal images,
+two real application QAs, running replay,
+matched full database/files/config restore, pending Auto restore and P5 remain
+required. This source-gate review does not complete V1.

@@ -4,35 +4,54 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
-Independent idle-stream candidates now have actual causal regressions:
-matched empty polls renew eight held bodies 80 times on the old source and
-eight times on the correction. Both databases also stop the real model after
-idle source revocation. A later original-material refusal regression found
-that HTTP closure did not cancel the provider or release its pins after actor
-deactivation or body-lease expiry. The correction passed all six corresponding
-nodes with actual cancellation, service return, released pins and zero completed
-rows/manifests. The [progress record](evidence/ordinary-qa-idle-cancel-progress-20261010.json)
-keeps the earlier 44 ordinary/59 terminal tests tied to their original source;
-the final sources still need their own full two-profile gates, normal images
-and application/restore acceptance. The current manifest is unchanged.
+The current development candidates are RAG `1bbd0cc8` and C6 `b43afa53`. Root verified the final RAG source's 50 ordinary-HTTP nodes across
+10 parents, 59 session-terminal nodes and all 1177 selected nodes, including
+all 42 mandatory parents. The full selection finished in 1020.933 seconds
+within its original 20-minute package limit, with no failures or test skips.
+Full compilation covered 155 packages: 115 with tests and 40 without, and
+executed zero runtime tests. On its exact final source, C6 also passed 50
+ordinary-HTTP nodes / 10 parents and 59 session-terminal nodes, and its two
+source-bound CLI builds passed with verified bytes, mode and single link.
+C6's full selection also passed all 1177 nodes and 42 mandatory parents in
+1007.649 seconds, with zero failures or test skips. Its package metadata has
+11 passed packages and one without tests; that no-test package is not a skipped
+test. C6 full compilation also passed for 155 packages: 115 test packages and
+40 no-test metadata records, with zero runtime tests. Final exact owner cleanup
+removed the test containers, network and disk volume and released the heavy
+window while preserving private logs, source and shared caches. These results
+permit adopting the exact pair as development candidates. New normal images,
+application QA/running replay/full restore, pending Auto restore and P5 remain
+pending; this does not complete V1.
 
-Integration head `06811da` has actual terminal failures in both push and PR CI.
-The C6 candidate failed its default PostgreSQL ordinary-QA HTTP read at the
-unchanged 8-second deadline; the producer completed afterward. The service
-package later exhausted its cumulative 20-minute budget while different cases
-had run only 4–5 seconds, which does not establish a deadlock. Image pulls for
-PHP checks and several container initialization jobs hit Docker Hub's
-unauthenticated pull limit.
-The two direct-upgrade jobs stopped before their business assertions; their
-exact registry/startup cause was not retained. The
-[current CI failure record](evidence/ci-06811da-failures-20261010.json) preserves
-original artifact hashes and distinguishes these failures. Required deadlines
-and restore assertions remain unchanged; this CI is not acceptance.
+The empty-stream correction reduced successful renewals of eight held bodies
+from 80 to eight in the matched poll window. Actual source revocation stops
+the model in both databases. Separate late actor-deactivation and body-lease
+expiry regressions verified actual provider cancellation, service return,
+released pins and zero completed rows/manifests. Earlier failed preparation
+and causal baselines retain their own source identities; the earlier 44/59
+component gates on `3f327fc3` are not attributed to the final source. The
+[final-gate record](evidence/ordinary-qa-idle-material-final-gates-20261010.json)
+records the completed two-profile source gates and cleanup while keeping new
+images, normal QA/running replay/full restore, pending Auto restore and P5 pending.
 
-The manifest's current candidates are C6 `aac58fa7` and RAG `1ab47546`.
+Integration head `9df5dfc` tested the preceding `1ab47546`/`aac58fa7` candidates.
+Both push and PR CI failed their candidate producer jobs at actual ordinary
+HTTP's unchanged eight-second termination assertion. Eight other jobs passed.
+Three service packages later exhausted their cumulative 20-minute limit while
+running different boundary cases; PR RAG ended failed without a timeout panic.
+These runs did not test the new final idle sources and establish no observer
+Python or Docker-pull terminal failure. Their original ZIP/log hashes and
+exact failure nodes remain in the final-gate record. Earlier `06811da` CI
+failures, including independently proved image-pull quota and direct-upgrade
+startup failures with missing diagnostics, remain in their separate
+[historical CI record](evidence/ci-06811da-failures-20261010.json). Neither CI
+record is application acceptance; no deadline or safety assertion was relaxed.
+
+The preceding manifest candidates were C6 `aac58fa7` and RAG `1ab47546`;
+the current manifest pins C6 `b43afa53` and RAG `1bbd0cc8`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
 frozen evidence for current implementation facts; the table below is historical.
-The ordinary AnyDoc app/UI images for RAG `1ab47546` subsequently built from
+The preceding ordinary AnyDoc app/UI images for RAG `1ab47546` built from
 the frozen integration runner `06811da` in 324.927 seconds. Their distinct
 immutable image IDs and all five source/role labels match the private frozen
 manifest. The first attempt stopped before Docker build because the host had

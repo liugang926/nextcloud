@@ -115687,10 +115687,10 @@ index 0000000000000000000000000000000000000000..f034203b67edd30ac98fe867f9e91d0c
 +}
 diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd3c36e434c6dfeb438771ed218b859dd7a17032
+index 0000000000000000000000000000000000000000..8f493fb38ba8977ac9e401b744179da8de7bbc09
 --- /dev/null
 +++ b/internal/application/service/message_material_output.go
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,574 @@
 +package service
 +
 +import (
@@ -115831,6 +115831,62 @@ index 0000000000000000000000000000000000000000..cd3c36e434c6dfeb438771ed218b859d
 +		}
 +		slot.mu.Unlock()
 +	}
++}
++
++// MessageMaterialIdleRecheckEligible changes only an empty HTTP poll cadence.
++// It is never authorization to publish bytes: every nonempty batch and writer
++// still executes CheckMessageMaterialOutputBoundary and its current checks.
++func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
++	if ctx == nil || ctx.Err() != nil {
++		return false
++	}
++	if turn := types.RAGSourceLineageFromContext(ctx); turn != nil && turn.Snapshot().RequireComplete() != nil {
++		return false
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok {
++		return false
++	}
++	slot.mu.Lock()
++	defer slot.mu.Unlock()
++	if !slot.Ready || slot.Closed || slot.Failed != nil || len(slot.Guards) == 0 {
++		return false
++	}
++	for _, guard := range slot.Guards {
++		if guard == nil {
++			return false
++		}
++		guard.mu.Lock()
++		known := guard.ctx != nil && guard.ctx.Err() == nil && guard.plan != nil && guard.plan.SourceLineage.RequireComplete() == nil
++		if known && guard.snapshot != nil {
++			for _, proof := range guard.snapshot.Proofs {
++				if proof == nil || proof.SourceLineage.RequireComplete() != nil {
++					known = false
++					break
++				}
++			}
++			for _, message := range guard.snapshot.Messages {
++				if message == nil || message.SourceLineage.RequireComplete() != nil {
++					known = false
++					break
++				}
++			}
++		} else {
++			known = false
++		}
++		guard.mu.Unlock()
++		if !known {
++			return false
++		}
++	}
++	for _, output := range slot.Outputs {
++		for _, message := range output {
++			if message == nil || message.SourceLineage.RequireComplete() != nil {
++				return false
++			}
++		}
++	}
++	return true
 +}
 +
 +func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
@@ -119831,10 +119887,10 @@ index 0000000000000000000000000000000000000000..088d064b72b42688bb30681a53a13bdc
 +}
 diff --git a/internal/application/service/normal_references_http_actual_test.go b/internal/application/service/normal_references_http_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403bd658968
+index 0000000000000000000000000000000000000000..c0dd000d9910f19aed78e057e6e1fe01798cbaa0
 --- /dev/null
 +++ b/internal/application/service/normal_references_http_actual_test.go
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,485 @@
 +package service_test
 +
 +import (
@@ -119859,19 +119915,26 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +	"github.com/Tencent/WeKnora/internal/types/interfaces"
 +	"github.com/alicebob/miniredis/v2"
 +	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
 +	"github.com/stretchr/testify/require"
 +)
 +
 +type normalReferencesActualBaseChat interface{ chat.Chat }
 +type normalReferencesActualModel struct {
 +	normalReferencesActualBaseChat
-+	t          *testing.T
-+	f          *service.NormalReferencesHTTPFixtureForTest
-+	calls      atomic.Int64
-+	inputFound atomic.Bool
-+	stopped    atomic.Bool
-+	mode       string
-+	started    chan struct{}
++	t                     *testing.T
++	f                     *service.NormalReferencesHTTPFixtureForTest
++	calls                 atomic.Int64
++	inputFound            atomic.Bool
++	stopped               atomic.Bool
++	mode                  string
++	started               chan struct{}
++	emptyPolls            *atomic.Int64
++	consecutiveEmptyPolls *atomic.Int64
++	idleMeasured          atomic.Bool
++	idleRenewals          atomic.Int64
++	idleHeldBodies        atomic.Int64
++	lateIdleFaultApplied  atomic.Bool
 +}
 +
 +func (m *normalReferencesActualModel) GetModelID() string   { return "normal-reference-model" }
@@ -119907,6 +119970,101 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +		m.f.Cancel()
 +	}
 +	out := make(chan types.StreamResponse, 2)
++	if m.mode == "late-idle-actor" || m.mode == "late-idle-body-lease" {
++		// Only test cleanup can abandon this transport. Neither a timer nor
++		// the fault manufactures EOF/Done or cancels the production context.
++		abandoned := make(chan struct{})
++		m.t.Cleanup(func() { close(abandoned) })
++		go func() {
++			defer close(out)
++			ticker := time.NewTicker(10 * time.Millisecond)
++			defer ticker.Stop()
++			for m.consecutiveEmptyPolls.Load() < 10 {
++				select {
++				case <-ctx.Done():
++					m.stopped.Store(true)
++					return
++				case <-abandoned:
++					return
++				case <-ticker.C:
++				}
++			}
++			var err error
++			if m.mode == "late-idle-actor" {
++				err = m.f.DB.Model(&types.User{}).Where("id=?", m.f.Session.UserID).Update("is_active", false).Error
++			} else {
++				err = m.f.DB.Exec("UPDATE original_body_leases SET expires_at_ms=1 WHERE kind='read' AND released_at_ms IS NULL").Error
++			}
++			if err != nil {
++				m.t.Errorf("actual late idle mutation failed: %v", err)
++				return
++			}
++			m.lateIdleFaultApplied.Store(true)
++			select {
++			case <-ctx.Done():
++				m.stopped.Store(true)
++			case <-abandoned:
++			}
++		}()
++		return out, nil
++	}
++	if m.mode == "idle-current" || m.mode == "idle-source-revoke" {
++		var heldBodies int64
++		require.NoError(m.t, m.f.DB.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&heldBodies).Error)
++		require.Positive(m.t, heldBodies)
++		entryRenewals := m.f.BodyLeaseRenewals()
++		require.Positive(m.t, entryRenewals, "the actual GORM observer captured successful physical body SQL renewals before idle sampling")
++		m.idleHeldBodies.Store(heldBodies)
++		go func() {
++			deadline := time.NewTimer(3 * time.Second)
++			defer deadline.Stop()
++			ticker := time.NewTicker(10 * time.Millisecond)
++			defer ticker.Stop()
++			// First let actual queued references/progress finish. Every real
++			// nonempty batch resets this observation; no write check is removed.
++			for m.consecutiveEmptyPolls.Load() < 3 {
++				select {
++				case <-ctx.Done():
++					m.stopped.Store(true)
++					close(out)
++					return
++				case <-deadline.C:
++					close(out)
++					return
++				case <-ticker.C:
++				}
++			}
++			beforeRenewals, beforeEmpty := m.f.BodyLeaseRenewals(), m.emptyPolls.Load()
++			for m.emptyPolls.Load()-beforeEmpty < 10 {
++				select {
++				case <-ctx.Done():
++					m.stopped.Store(true)
++					close(out)
++					return
++				case <-deadline.C:
++					close(out)
++					return
++				case <-ticker.C:
++				}
++			}
++			// Actual Redis empty reads and actual SQL lease renewals, with the
++			// production pipeline/holder still active. No synthetic emitter.
++			renewals := m.f.BodyLeaseRenewals() - beforeRenewals
++			m.idleRenewals.Store(renewals)
++			m.idleMeasured.Store(true)
++			if m.mode == "idle-source-revoke" {
++				m.f.Revoke()
++				<-ctx.Done()
++				m.stopped.Store(true)
++				close(out)
++				return
++			}
++			out <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "CURRENT ADMITTED NORMAL ANSWER", Done: true}
++			close(out)
++		}()
++		return out, nil
++	}
++
 +	if m.mode == "model-error" {
 +		out <- types.StreamResponse{ResponseType: types.ResponseTypeError, Content: "untrusted controlled provider diagnostic"}
 +		close(out)
@@ -119938,6 +120096,7 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +	if len(modes) > 0 {
 +		mode = modes[0]
 +	}
++	lateIdle := mode == "late-idle-actor" || mode == "late-idle-body-lease"
 +	model := &normalReferencesActualModel{t: t, mode: mode, started: make(chan struct{})}
 +	f := service.NewNormalReferencesHTTPFixtureForTest(t, pg, model, mode)
 +	model.f = f
@@ -119946,6 +120105,8 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +	require.NoError(t, err)
 +	t.Cleanup(func() { _ = redis.Close() })
 +	observedStream := &normalReferencesObservedStreamForTest{RedisStreamManager: redis, watcher: make(chan context.Context, 1)}
++	model.emptyPolls = &observedStream.emptyPolls
++	model.consecutiveEmptyPolls = &observedStream.consecutiveEmptyPolls
 +	var sender interfaces.StreamManager = observedStream
 +	if mode == "empty-fixed-refuse" {
 +		sender = normalReferencesRefusingSink{StreamManager: observedStream}
@@ -120003,7 +120164,11 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +		select {
 +		case <-f.ProducerReturned:
 +		case <-time.After(3 * time.Second):
-+			t.Fatal("the actual production KnowledgeQA did not return before final database assertions")
++			if lateIdle {
++				assert.Fail(t, "the actual production KnowledgeQA did not return before final database assertions")
++			} else {
++				t.Fatal("the actual production KnowledgeQA did not return before final database assertions")
++			}
 +		}
 +		if mode == "producer-stop" {
 +			select {
@@ -120034,22 +120199,37 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +				t.Fatal("the actual StopSession completion call did not return")
 +			}
 +		}
-+		require.Eventually(t, func() bool {
++		leasesReleased := func() bool {
 +			var source, body int64
 +			return f.DB.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&source).Error == nil && f.DB.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&body).Error == nil && source == 0 && body == 0
-+		}, 3*time.Second, 10*time.Millisecond, "actual terminal releases producer/reader pins before fixture cleanup")
++		}
++		if lateIdle {
++			assert.Eventually(t, leasesReleased, 3*time.Second, 10*time.Millisecond, "actual terminal releases producer/reader pins before fixture cleanup")
++		} else {
++			require.Eventually(t, leasesReleased, 3*time.Second, 10*time.Millisecond, "actual terminal releases producer/reader pins before fixture cleanup")
++		}
++		if mode == "idle-current" || mode == "idle-source-revoke" {
++			t.Logf("actual idle metadata: measured=%t empty_http_polls=%d held_body_leases=%d successful_sql_renewals=%d", model.idleMeasured.Load(), observedStream.emptyPolls.Load(), model.idleHeldBodies.Load(), model.idleRenewals.Load())
++			require.True(t, model.idleMeasured.Load(), "ten real empty HTTP Redis polls were observed, not fabricated callback counts")
++			require.LessOrEqual(t, model.idleRenewals.Load(), 6*model.idleHeldBodies.Load(), "real empty native polls must not perform one full SQL body renewal per100ms tick")
++		}
 +		var completed, manifests int64
 +		require.NoError(t, f.DB.Model(&types.Message{}).Where("session_id=? AND role='assistant' AND is_completed=true", f.Session.ID).Count(&completed).Error)
 +		require.NoError(t, f.DB.Table("message_completion_input_manifests c").Joins("JOIN message_material_receipts r ON r.admission_id=c.assistant_admission_id").Joins("JOIN messages m ON m.id=r.message_id").Where("m.session_id=? AND m.role='assistant'", f.Session.ID).Count(&manifests).Error)
-+		if mode == "current" || mode == "done-open" || mode == "empty-fixed" || mode == "caller-disconnect" {
++		if mode == "current" || mode == "done-open" || mode == "empty-fixed" || mode == "caller-disconnect" || mode == "idle-current" {
 +			require.EqualValues(t, 1, completed, "actual permitted background production completed before the final oracle")
 +			require.EqualValues(t, 1, manifests, "the current completion receipt has its original immutable input manifest")
 +		} else {
-+			require.Zero(t, completed, "a refused or truly stopped producer never fabricates a completed assistant after it returns")
-+			require.Zero(t, manifests, "a refused or truly stopped producer has no current completion manifest")
++			if lateIdle {
++				assert.Zero(t, completed, "a refused producer never fabricates a completed assistant")
++				assert.Zero(t, manifests, "a refused producer has no current completion manifest")
++			} else {
++				require.Zero(t, completed, "a refused or truly stopped producer never fabricates a completed assistant after it returns")
++				require.Zero(t, manifests, "a refused or truly stopped producer has no current completion manifest")
++			}
 +		}
 +	}()
-+	if mode != "current" && mode != "done-open" && mode != "empty-fixed" && mode != "caller-disconnect" {
++	if mode != "current" && mode != "done-open" && mode != "empty-fixed" && mode != "caller-disconnect" && mode != "idle-current" {
 +		if mode != "producer-stop" {
 +			require.Contains(t, content, "\"response_type\":\"error\"")
 +		}
@@ -120057,12 +120237,19 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +		require.NotContains(t, content, "untrusted controlled provider diagnostic")
 +		require.NotContains(t, content, "\"response_type\":\"complete\"")
 +		wantCalls := int64(0)
-+		if mode == "source-after-start" || mode == "source-after-start-open" || mode == "lease-after-start" || mode == "thinking-refuse" || mode == "caller-disconnect" || mode == "model-error" || mode == "eof-no-done" || mode == "producer-stop" {
++		if mode == "source-after-start" || mode == "source-after-start-open" || mode == "lease-after-start" || mode == "thinking-refuse" || mode == "caller-disconnect" || mode == "model-error" || mode == "eof-no-done" || mode == "producer-stop" || mode == "idle-source-revoke" || mode == "late-idle-actor" || mode == "late-idle-body-lease" {
 +			wantCalls = 1
 +		}
 +		require.Equal(t, wantCalls, model.calls.Load(), "no later model starts after the actual producer boundary fails")
-+		if mode == "source-after-start-open" || mode == "producer-stop" {
-+			require.Eventually(t, func() bool { return model.stopped.Load() }, time.Second, time.Millisecond, "the started original provider actually receives cancellation and stops")
++		if mode == "late-idle-actor" || mode == "late-idle-body-lease" {
++			require.True(t, model.lateIdleFaultApplied.Load(), "the actual DB mutation happened after ten consecutive real empty reads")
++		}
++		if mode == "source-after-start-open" || mode == "producer-stop" || mode == "idle-source-revoke" || mode == "late-idle-actor" || mode == "late-idle-body-lease" {
++			if lateIdle {
++				assert.Eventually(t, func() bool { return model.stopped.Load() }, time.Second, time.Millisecond, "the started original provider actually receives cancellation and stops")
++			} else {
++				require.Eventually(t, func() bool { return model.stopped.Load() }, time.Second, time.Millisecond, "the started original provider actually receives cancellation and stops")
++			}
 +		}
 +		return
 +	}
@@ -120142,29 +120329,68 @@ index 0000000000000000000000000000000000000000..c51ea826aa473a4a3d189f2c9e3cb403
 +// watcher defer only after its synchronous stop callback returns.
 +type normalReferencesObservedStreamForTest struct {
 +	*stream.RedisStreamManager
-+	watcher chan context.Context
-+	once    sync.Once
++	watcher               chan context.Context
++	once                  sync.Once
++	emptyPolls            atomic.Int64
++	consecutiveEmptyPolls atomic.Int64
 +}
 +
 +func (s *normalReferencesObservedStreamForTest) GetEvents(ctx context.Context, session, message string, offset int) ([]interfaces.StreamEvent, int, error) {
 +	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > time.Hour {
 +		s.once.Do(func() { s.watcher <- ctx })
 +	}
-+	return s.RedisStreamManager.GetEvents(ctx, session, message, offset)
++	events, next, err := s.RedisStreamManager.GetEvents(ctx, session, message, offset)
++	// The ordinary SSE context is logger.CloneContext of the request: it
++	// has no deadline. The real stop watcher owns a two-hour deadline.
++	deadline, hasDeadline := ctx.Deadline()
++	if (!hasDeadline || time.Until(deadline) < time.Minute) && err == nil {
++		if len(events) == 0 {
++			s.emptyPolls.Add(1)
++			s.consecutiveEmptyPolls.Add(1)
++		} else {
++			s.consecutiveEmptyPolls.Store(0)
++		}
++	}
++	return events, next, err
++}
++
++func TestNormalReferencesActualHTTPIdleMaterialSQLite(t *testing.T) {
++	for _, mode := range []string{"idle-current", "idle-source-revoke"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, false, mode) })
++	}
++}
++func TestPostgresNormalReferencesActualHTTPIdleMaterial(t *testing.T) {
++	for _, mode := range []string{"idle-current", "idle-source-revoke"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, true, mode) })
++	}
++}
++
++func TestNormalReferencesActualHTTPLateIdleMaterialSQLite(t *testing.T) {
++	for _, mode := range []string{"late-idle-actor", "late-idle-body-lease"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, false, mode) })
++	}
++}
++
++func TestPostgresNormalReferencesActualHTTPLateIdleMaterial(t *testing.T) {
++	for _, mode := range []string{"late-idle-actor", "late-idle-body-lease"} {
++		t.Run(mode, func(t *testing.T) { runNormalReferencesActualHTTP(t, true, mode) })
++	}
 +}
 diff --git a/internal/application/service/normal_references_http_fixture_test.go b/internal/application/service/normal_references_http_fixture_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..28d0cfa176bab916a75f43e875607974f6dc6db8
+index 0000000000000000000000000000000000000000..176813bfee4a9e7dac876dd630306b7538446400
 --- /dev/null
 +++ b/internal/application/service/normal_references_http_fixture_test.go
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,251 @@
 +package service
 +
 +import (
 +	"context"
 +	"errors"
 +	"os"
++	"strings"
 +	"sync"
++	"sync/atomic"
 +	"testing"
 +	"time"
 +
@@ -120201,6 +120427,7 @@ index 0000000000000000000000000000000000000000..28d0cfa176bab916a75f43e875607974
 +	CompletionReturned <-chan struct{}
 +	CompletionError    <-chan error
 +	CompletionErrors   func() []error
++	BodyLeaseRenewals  func() int64
 +}
 +
 +type normalReferencesModelsForTest struct {
@@ -120300,6 +120527,13 @@ index 0000000000000000000000000000000000000000..28d0cfa176bab916a75f43e875607974
 +		}
 +	}})
 +	chatpipeline.NewPluginChatCompletionStream(manager, models)
++	var bodyLeaseRenewals atomic.Int64
++	require.NoError(t, m.f.db.Callback().Update().After("gorm:update").Register("actual-idle-body-lease-renewals", func(tx *gorm.DB) {
++		if tx.Statement.Table == "original_body_leases" && tx.Error == nil && tx.RowsAffected > 0 && strings.Contains(tx.Statement.SQL.String(), "expires_at_ms") {
++			bodyLeaseRenewals.Add(1)
++		}
++	}))
++	t.Cleanup(func() { m.f.db.Callback().Update().Remove("actual-idle-body-lease-renewals") })
 +	producerReturned := make(chan struct{})
 +	completionReturned := make(chan struct{})
 +	completionError := make(chan error, 1)
@@ -120317,7 +120551,7 @@ index 0000000000000000000000000000000000000000..28d0cfa176bab916a75f43e875607974
 +	require.NoError(t, m.f.db.Create(session).Error)
 +	original, err := m.f.store.CaptureKnowledgeOutputInputs(ctx, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: k.ID})
 +	require.NoError(t, err)
-+	return &NormalReferencesHTTPFixtureForTest{DB: m.f.db, Store: m.f.store, Ctx: ctx, Session: session, Sessions: normalReferencesSessionForTest{SessionService: sessions, mode: mode, returned: producerReturned}, Messages: observedMessages, KBs: kbs, Models: models, Config: cfg, Lineage: original.Proof.SourceLineage, Revoke: func() { m.personal.Store(false) }, Cancel: cancel, ProducerReturned: producerReturned, CompletionReturned: completionReturned, CompletionError: completionError, CompletionErrors: observedMessages.completionErrors}
++	return &NormalReferencesHTTPFixtureForTest{DB: m.f.db, Store: m.f.store, Ctx: ctx, Session: session, Sessions: normalReferencesSessionForTest{SessionService: sessions, mode: mode, returned: producerReturned}, Messages: observedMessages, KBs: kbs, Models: models, Config: cfg, Lineage: original.Proof.SourceLineage, Revoke: func() { m.personal.Store(false) }, Cancel: cancel, ProducerReturned: producerReturned, CompletionReturned: completionReturned, CompletionError: completionError, CompletionErrors: observedMessages.completionErrors, BodyLeaseRenewals: bodyLeaseRenewals.Load}
 +}
 +
 +type normalReferencesTenantForTest struct {
@@ -152246,7 +152480,7 @@ index 0000000000000000000000000000000000000000..e50cc008ecc609f6f1a36abdf2125209
 +	return &follow, true, true
 +}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb34da2c47b 100644
+index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd29109fd1 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -7,6 +7,8 @@ import (
@@ -152258,7 +152492,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  	"github.com/Tencent/WeKnora/internal/errors"
  	"github.com/Tencent/WeKnora/internal/event"
  	"github.com/Tencent/WeKnora/internal/logger"
-@@ -18,6 +20,15 @@ import (
+@@ -18,6 +20,18 @@ import (
  	"gorm.io/gorm"
  )
  
@@ -152267,14 +152501,17 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
 +	RawControl             bool
 +	MaterialCheck          func() error
 +	InitializationDeadline time.Time
++	LastIdleMaterialCheck  time.Time
++	IdleMaterialReady      bool
 +}
 +
 +const liveMaterialInitializationTimeout = 10 * time.Second
++const liveIdleMaterialRecheckInterval = time.Second
 +
  // ContinueStream godoc
  // @Summary      继续流式响应
  // @Description  继续获取正在进行的流式响应
-@@ -76,9 +87,26 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -76,9 +90,26 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  		return
  	}
  
@@ -152302,7 +152539,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  		if stderrors.Is(err, errors.ErrSessionNotFound) {
  			// PR #1309 plumbed user-scope into messageService.GetMessage's
  			// session existence check; non-owner / wrong-user lookups now
-@@ -112,6 +140,16 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -112,6 +143,16 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  		return
  	}
  
@@ -152319,7 +152556,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  	// Get initial events from stream (offset 0)
  	events, currentOffset, err := h.streamManager.GetEvents(ctx, sessionID, messageID, 0)
  	if err != nil {
-@@ -128,6 +166,18 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -128,6 +169,18 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  		})
  		return
  	}
@@ -152338,7 +152575,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  
  	logger.Infof(
  		ctx, "Preparing to replay %d events and continue streaming, session ID: %s, message ID: %s",
-@@ -149,7 +199,12 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -149,7 +202,12 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	// Replay existing events, a segment's worth of chunks per frame
  	replay := coalesceReplayEvents(events)
  	logger.Debugf(ctx, "Replaying %d existing events as %d frames", len(events), len(replay))
@@ -152352,7 +152589,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  		emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter)
  	}
  
-@@ -176,13 +231,41 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -176,13 +234,41 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  			newEvents, newOffset, err := h.streamManager.GetEvents(ctx, sessionID, messageID, currentOffset)
  			if err != nil {
  				logger.Errorf(ctx, "Failed to get new events: %v", err)
@@ -152395,7 +152632,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  				// Check for completion event
  				if evt.Type == "complete" {
  					streamCompletedNow = true
-@@ -204,6 +287,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -204,6 +290,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	}
  }
  
@@ -152506,7 +152743,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  // StopSession godoc
  // @Summary      停止生成
  // @Description  停止当前正在进行的生成任务
-@@ -249,7 +436,7 @@ func (h *Handler) StopSession(c *gin.Context) {
+@@ -249,7 +439,7 @@ func (h *Handler) StopSession(c *gin.Context) {
  	tenantIDUint := tenantID.(uint64)
  
  	// Verify message ownership and status
@@ -152515,7 +152752,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, map[string]interface{}{
  			"session_id": sessionID,
-@@ -335,6 +522,7 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -335,6 +525,7 @@ func (h *Handler) handleAgentEventsForSSE(
  	eventBus *event.EventBus,
  	waitForTitle bool,
  	resourceRewriter *storageurl.StreamRewriter,
@@ -152523,7 +152760,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  ) {
  	ticker := time.NewTicker(100 * time.Millisecond)
  	defer ticker.Stop()
-@@ -343,6 +531,10 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -343,6 +534,10 @@ func (h *Handler) handleAgentEventsForSSE(
  	log := logger.GetLogger(ctx)
  
  	log.Infof("Starting pull-based SSE streaming for session=%s, message=%s", sessionID, assistantMessageID)
@@ -152534,7 +152771,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  
  	for {
  		select {
-@@ -362,11 +554,52 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -362,11 +557,72 @@ func (h *Handler) handleAgentEventsForSSE(
  				log.Warnf("Failed to get events from stream: %v", err)
  				continue
  			}
@@ -152548,7 +152785,15 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
 +				}
 +			}
 +			if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok && phase.MaterialCheck != nil {
++				// No buffered/public-resource tail and no queued event may use
++				// the bounded idle cadence. It cannot authorize a future write.
++				idle := len(events) == 0 && !phase.RawControl && (resourceRewriter == nil || !resourceRewriter.Enabled())
++				eligible := idle && phase.IdleMaterialReady && applicationservice.MessageMaterialIdleRecheckEligible(ctx)
++				if eligible && time.Since(phase.LastIdleMaterialCheck) < liveIdleMaterialRecheckInterval {
++					continue
++				}
 +				if err := phase.MaterialCheck(); err != nil {
++					phase.IdleMaterialReady = false
 +					if stderrors.Is(err, applicationservice.ErrMessageMaterialHTTPInitializing) {
 +						if phase.InitializationDeadline.IsZero() {
 +							phase.InitializationDeadline = time.Now().Add(liveMaterialInitializationTimeout)
@@ -152561,9 +152806,21 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
 +					}
 +					// Actual refusal, failed setup or bounded initialization expiry
 +					// closes without granting a placeholder any completed proof.
-+					emitSafeTerminalGenerationError(c, requestID)
++					stopLiveStreamForOriginalMaterial(ctx, c, eventBus, sessionID, assistantMessageID, requestID)
 +					return
 +				}
++				// Empty physical renewal alone does not recheck the current
++				// actor grant for sources already admitted by prior frames.
++				// Use only that original complete union, never infer a source
++				// from citations or clear an unknown prefix during idle.
++				if idle && liveMessage != nil && liveMessage.SourceLineage.RequireComplete() == nil {
++					if err := checkLiveStreamPublication(ctx, h.messageService, liveMessage, nil); err != nil {
++						stopLiveStreamForPublication(ctx, c, eventBus, sessionID, assistantMessageID, requestID, err)
++						return
++					}
++				}
++				phase.IdleMaterialReady = true
++				phase.LastIdleMaterialCheck = time.Now()
 +			}
 +			events, err = protectLiveStreamBatch(ctx, h.messageService, liveMessage, events)
 +			if err != nil {
@@ -152588,7 +152845,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  				// Check for stop event
  				if evt.Type == types.ResponseType(event.EventStop) {
  					log.Infof("Detected stop event, triggering stop via EventBus for session=%s", sessionID)
-@@ -420,7 +653,14 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -420,7 +676,14 @@ func (h *Handler) handleAgentEventsForSSE(
  					return
  				}
  
@@ -152603,7 +152860,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  			}
  
  			// Update offset
-@@ -449,7 +689,17 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -449,7 +712,17 @@ func (h *Handler) handleAgentEventsForSSE(
  								break titleWaitLoop
  							}
  							if len(events) > 0 {
@@ -152622,7 +152879,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
  									emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
  									// If we got the title, we can exit
  									if evt.Type == types.ResponseTypeSessionTitle {
-@@ -473,3 +723,313 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -473,3 +746,330 @@ func (h *Handler) handleAgentEventsForSSE(
  		}
  	}
  }
@@ -152914,6 +153171,23 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb3
 +	// Do not flush the resource URL holdback buffer: its tail may itself be
 +	// source-derived text from just before the publication was withdrawn.
 +	emitStaticTerminalStreamError(c, requestID, "Current source access changed; generation stopped", "source_access_changed")
++}
++
++// Original-material refusal closes the original owner before cancellation.
++// Stop is an exact control event, never authorization for a completed body.
++// The existing KnowledgeQA cancellation path joins its actual child stream.
++func stopLiveStreamForOriginalMaterial(
++	ctx context.Context, c *gin.Context, bus *event.EventBus,
++	sessionID, messageID, requestID string,
++) {
++	applicationservice.RefuseMessageMaterialOutputBoundary(ctx)
++	if bus != nil {
++		_ = bus.Emit(ctx, event.Event{
++			Type: event.EventStop, SessionID: sessionID,
++			Data: event.StopData{SessionID: sessionID, MessageID: messageID, Reason: "original_material_unavailable"},
++		})
++	}
++	emitSafeTerminalGenerationError(c, requestID)
 +}
 +
 +func emitSafeTerminalGenerationError(c *gin.Context, requestID string) {
