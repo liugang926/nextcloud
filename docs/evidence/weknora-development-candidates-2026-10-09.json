@@ -1071,5 +1071,37 @@
     "needs_db_upgrade": false,
     "candidate_not_deployed": true
   },
-  "latest_source_verification_boundary": "41 cases/profile and C6 native probe used4254/f79 before metadata owner delta; owner delta passed6 focused SQLite cases; latest full CI pending"
+  "latest_source_verification_boundary": "41 cases/profile and C6 native probe used4254/f79 before metadata owner delta; owner delta passed6 focused SQLite cases; latest full CI pending",
+  "ci_8521d6a_c6_failure": {
+    "run": 37867906012,
+    "job": 113618966626,
+    "artifact": 11589427290,
+    "counts": {
+      "pass": 553,
+      "fail": 13,
+      "skip": 0
+    },
+    "failed_test_nodes": [
+      "TestNextcloudLocalDerivedActualSQLitePipeline/normal",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/reader",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/builder",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/late-writer",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/foreign-parent",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/receipt-crash",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/restored-current",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/sqlite-ftserror",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/physical-original",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/unwitnessed-row",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/restored-after-collection",
+      "TestNextcloudLocalDerivedActualSQLitePipeline/orphan-native",
+      "TestNextcloudLocalDerivedActualSQLitePipeline"
+    ],
+    "log_sha256": "9e532ee93800cf1c505ddc705c2cfab178a71f2228d48911abf57dc56a8a151a",
+    "observed_errors": [
+      "no such module fts5",
+      "no such table lite_embeddings_fts for intentional DROP case"
+    ],
+    "cause": "broad candidate regex SQLite also selected native local-derived fixture before its separate tagged gate; first gate omitted sqlite_fts5",
+    "fix": "build tagged candidate producer test binary; ordinary complete Go compile remains untagged"
+  }
 }

@@ -141,3 +141,9 @@ GC list preview/manual collection UI and complete derived/bucket capacity
 accounting also remain open. Production-directory acceptance, full application recovery, and the
 PRD performance targets remain outstanding. This is a reproducible development
 submission, not a V1 release acceptance.
+
+The8521d6a C6 PR candidate first gate failed13 native SQLite test/subtest
+nodes because its broad `SQLite` selector reached the new FTS fixture without
+the required tag. The raw log/artifact is retained. Candidate producer tests
+now use `sqlite_fts5`; default complete source compilation remains untagged.
+The isolated native41-case root gate was already tagged and passed.
