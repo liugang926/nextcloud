@@ -46,7 +46,8 @@ immutable image IDs. The browser fixture verifies those same IDs before
 startup and its owner verifies that the tags still point to the captured IDs.
 For a frozen older build use `--candidate-manifest=/absolute/snapshot.json`
 on both commands. Label verification alone does not establish runtime success;
-no current candidate image build or application acceptance is claimed here.
+the current normal build and its failed application trial are recorded in the
+latest evidence below; label verification does not establish application acceptance.
 The manifest also records the exact resulting Git tree. The captured patches
 passed fresh Git-index application and reverse application, reproducing both
 the candidate and baseline trees exactly. Reverse application warns about three
@@ -522,3 +523,31 @@ runtime and broad physical-GC/ingress acceptance flags remain unchanged.
 The [exposed-consumer source follow-up](exposed-consumer-follow-up-20261009.md)
 records separate memory, skill transcript and non-Web principal work without
 claiming runtime exploit evidence or narrowing V1.
+
+
+## 2026-10-10 normal application and broad CI failure
+
+RAG `595f241f`'s normal AnyDoc app and UI were built successfully from a separate
+frozen runner checkout; source labels, manifest hash and distinct immutable
+image IDs match. The fresh owned application passed startup, signed ingestion
+and its permission matrix. The first real QA then failed before any two-round
+baseline or restoration: the ordinary references producer emitted no checked
+source lineage. The strict subscriber refused the event and retained an unknown
+prefix. No field was recaptured to manufacture successful history. All owned
+services were stopped; data volumes, original controls and CURRENT anchors remain.
+
+The pre-start observer failed during the owned resource inventory, before it
+captured either regular target. Its exact failed Docker command was not recorded.
+A disappearing startup one-off is a hypothesis to test, not established cause;
+47 pre-start samples with no RSS cannot support application memory acceptance.
+
+Both `63e03f2` full CI runs also failed. The PostgreSQL ParentCopy test began near
+the service package's 20-minute limit: RAG at 1152.087 s and C6 at 1128.223 s. Earlier
+children passed, including C6 missing-source-coverage, so the available stack
+and timing do not prove a child deadlock. A retained-source Agent HTTP sender
+also failed to finish in its original wait. Actual title true/default/false
+checks passed; no title startup was observed in that failed scenario.
+Four required tests were absent or unfinished, and later skipped compile/UI
+steps are not acceptance. [Actual failure evidence](evidence/normal-application-ci-failure-20261010.json)
+retains the raw hashes and limits. Corrective work preserves all input/source
+checks, unknown-prefix refusal, assertions and original deadlines.

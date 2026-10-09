@@ -7,6 +7,20 @@ This repository implements a local development slice of the [PRD](development-pl
 The manifest's current candidates are C6 `f766a373` and RAG `595f241f`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
 frozen evidence for current implementation facts; the table below is historical.
+The subsequent normal AnyDoc app/UI build completed and its immutable IDs and
+source labels were verified. A new owned nested-LDAP environment passed startup,
+signed ingestion and the permission matrix, but its first actual QA failed:
+the references producer emitted no checked source lineage, so the strict stream
+consumer refused it and retained an unknown prefix. No two-round baseline or
+restore acceptance was created. All owned services were stopped with volumes,
+controls, originals and CURRENT anchors preserved. The observer also failed
+during the startup resource inventory; its exact Docker failure is not yet proved.
+The `63e03f2` full push/PR CI failed despite successful isolated checks: the
+service package exhausted its cumulative 20-minute budget, while a retained-source
+HTTP sender did not finish in time. Title-control regressions passed. These
+[actual failure records](evidence/normal-application-ci-failure-20261010.json)
+remain unaccepted and are being corrected without removing required tests.
+
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
 their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the
 permission matrix. The early HTTP material-initialization 503 is fixed, but
@@ -14,8 +28,9 @@ first QA failed after Merge: a legitimate generated summary's parent
 relationship was rejected as an unsupported input. The new candidates preserve
 the summary's original proof and verify its own captured body and relationship;
 actual PostgreSQL/SQLite regressions passed 42 RAG and 18 new C6 cases.
-The latest source still needs a new normal image and full QA/history/replay,
-clean application restore and measured P5 acceptance.
+The latest normal image's broader QA failure is recorded above. Its corrective
+source still needs normal application QA/history/replay, clean restore and
+measured P5 acceptance.
 
 Steer's original-material integration is now included, with PostgreSQL154 and
 SQLite73 forward migrations. The actual HTTP input keeps its immutable author
@@ -47,7 +62,8 @@ sender timeout without extending its deadline. The combined sources are now
 included in this manifest. Each profile passed 414 distinct test nodes / 165
 top-level tests, zero failures or test skips, and compilation of 155 packages.
 Root independently verified the [raw-log evidence](evidence/parent-copy-title-original-material-20261009.json)
-and resource cleanup. New normal images and application acceptance remain pending.
+and resource cleanup. The subsequent normal images are verified, but application
+acceptance failed as recorded above.
 The historical local withdrawal inventory still needs immutable backend plans
 and writer artifacts observed after current rows disappear; its prepared
 forward migration remains untested and incomplete.
