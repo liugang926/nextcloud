@@ -142,7 +142,7 @@ jobs:
 
   weknora-development-candidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:
@@ -236,6 +236,9 @@ jobs:
             --require-test TestPostgresKnowledgeAutoCompletionActualRedis \
             --require-test TestRAGPhysicalActualShortSummarySQLite \
             --require-test TestPostgresRAGPhysicalActualShortSummary
+      - name: Verify full candidate compile
+        working-directory: candidate
+        run: |
           go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-compile.jsonl --compile-only
       - name: Verify failed QA streams terminate without retained source text
