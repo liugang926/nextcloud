@@ -288,4 +288,11 @@ in-progress gate.
 Submission53df55f passed all12 push/PR jobs. Retained per-profile logs contain
 726 producer cases,35 local-derived and11 native halfvec cases with0fail/skip,
 complete Go compile and actual frontend app-project typecheck/build. The new
-SSE delta6a3df67e/1bc5cfd0 is separately measured and needs fresh full CI.
+SSE delta6a3df67e/1bc5cfd0 subsequently passed all12 push/PR jobs in
+submissione01b417. Downloaded artifacts from PR run37879686759 contain, per
+profile,726 producer cases,11 QA terminal cases,35 local-derived cases and11
+native halfvec cases, all with0 failures/skips. Complete Go compilation and
+the actual frontend app-project typecheck/build passed. The artifact hashes
+and package results are retained in the evidence JSON. This source precedes
+the independently developed body152, durable Auto153 and history consumer
+changes, which still require combined application verification.
