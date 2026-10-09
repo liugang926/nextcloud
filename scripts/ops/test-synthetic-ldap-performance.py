@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Offline method checks only; these tests never produce measured P5 claims."""
+import json
+from pathlib import Path
+import runpy
+import tempfile
+import unittest
+from unittest import mock
+import uuid
+
+P = runpy.run_path(str(Path(__file__).with_name("synthetic-ldap-performance.py")))
+
+
+class PerformanceMethodTest(unittest.TestCase):
+    def test_nearest_rank_and_small_sample_rejection(self):
+        self.assertEqual(P["quantile"](list(range(1,101))),95)
+        with self.assertRaises(RuntimeError):
+            P["summary"]([{"elapsed_ms":1}]*99)
+        for value in [-1, float("nan"), float("inf")]:
+            with self.assertRaises(RuntimeError):
+                P["quantile"]([value])
+
+    def test_abba_counts_are_exact_and_not_repeated_samples(self):
+        for size in (100,101,123,1000):
+            plan=P["abba_plan"](size)
+            self.assertEqual(sum(n for mode,n in plan if mode=="on"),size)
+            self.assertEqual(sum(n for mode,n in plan if mode=="off"),size)
+            self.assertTrue(all(0<n<=25 for _,n in plan))
+        self.assertEqual([x[0] for x in P["abba_plan"](100)],
+                         ["on","off","off","on","on","off","off","on"])
+        for size in (99,1001):
+            with self.assertRaises(RuntimeError):
+                P["abba_plan"](size)
+
+    def test_owned_runtime_requires_the_fixed_binding_and_scope(self):
+        runtime={name:str(uuid.uuid4()) for name in
+                 ("source_id","knowledge_base_id","operation_id","model_id","chat_model_id")}
+        runtime.update(binding_id="synthetic-published",tenant_id=7,file_id=17)
+        fixture={"synthetic_fixture":True,"binding_id":"synthetic-published"}
+        P["validate_runtime"](runtime,fixture)
+        for field,value in [("binding_id","pilot-load-old"),("tenant_id",True),("file_id",0)]:
+            changed=dict(runtime);changed[field]=value
+            with self.assertRaises(RuntimeError):
+                P["validate_runtime"](changed,fixture)
+
+    def test_off_requires_idle_then_stops_builders_before_disabling(self):
+        probe=object.__new__(P["Probe"])
+        calls=[]
+        probe.wait_idle=lambda:calls.append("idle")
+        probe.sender=mock.Mock(stop=lambda:calls.append("sender-stop"))
+        probe.compose_action=lambda action:calls.append("app-"+action)
+        probe.assert_owned=lambda:calls.append("owned")
+        probe.state={}
+        probe.restore_required=False
+        with mock.patch.dict(P["Probe"].off.__globals__["e2e"],
+                             {"occ":lambda *args:calls.append("disable")}) as _:
+            probe.off()
+        self.assertEqual(calls,["idle","sender-stop","idle","app-stop","owned","disable"])
+        self.assertTrue(probe.restore_required)
+
+    def test_observer_reports_request_time_instead_of_false_half_second_bound(self):
+        report=P["polling_report"]([
+            {"request_start_ms":0,"request_end_ms":700,"previous_request_start_ms":None},
+            {"request_start_ms":1200,"request_end_ms":1900,"previous_request_start_ms":0}])
+        self.assertEqual(report["configured_sleep_ms"],500)
+        self.assertEqual(report["max_actual_observation_interval_ms"],1900)
+
+    def test_idle_requires_unsent_source_outbox_to_drain(self):
+        row={key:0 for key in ("running","processing","staged","content_leases","body_leases","auto_pending")}
+        row.update(received=7,applied=7)
+        cloud={"outbox_id":8,"sender_received":7,"sender_status":"active"}
+        self.assertFalse(P["idle_ready"](row,cloud))
+        row.update(received=8,applied=8);cloud["sender_received"]=8
+        self.assertTrue(P["idle_ready"](row,cloud))
+        for key in ("running","processing","staged","content_leases","body_leases","auto_pending"):
+            changed=dict(row);changed[key]=1
+            self.assertFalse(P["idle_ready"](changed,cloud))
+        bad=dict(cloud);bad["sender_received"]=True
+        self.assertFalse(P["idle_ready"](row,bad))
+
+    def test_raw_sample_is_written_as_it_is_observed(self):
+        probe=object.__new__(P["Probe"])
+        probe.records=[]
+        with tempfile.TemporaryDirectory() as directory:
+            probe.sample_path=Path(directory)/"samples.jsonl"
+            sample={"sample":0,"put_http_status":201,"elapsed_ms":3.2}
+            probe.record(sample)
+            self.assertEqual(json.loads(probe.sample_path.read_text()),sample)
+            self.assertEqual(probe.records,[sample])
+
+
+if __name__=="__main__":
+    unittest.main()
