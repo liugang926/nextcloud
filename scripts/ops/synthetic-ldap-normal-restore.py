@@ -41,6 +41,9 @@ DATA_VOLUMES=frozenset(('nc-html','wk-data','nc-redis-data','docreader-tmp'))
 CONTROL_FILES=('state.json','compose.yaml','passwords.json','runtime.json','fixture.json')
 HASH=re.compile(r'[0-9a-f]{64}\Z')
 
+def control_files_for_state(state):
+    return CONTROL_FILES+(('mock_embedding.py',) if state.get('mock_model_code_sha256') else ())
+
 def require(value,code):
     if not value:raise RuntimeError(code)
 
@@ -151,7 +154,8 @@ class Restore:
     def __init__(self,scratch,manifest,profile,evidence):
         self.directory,self.state=owner['owned_state'](scratch)
         plain(self.directory,True)
-        for name in CONTROL_FILES:plain(self.directory/name)
+        self.control_files=control_files_for_state(self.state)
+        for name in self.control_files:plain(self.directory/name)
         self.owned()
         require(self.state.get('body_journal_initialized') is True,'body_journal_not_bootstrapped')
         self.runtime=json.loads(plain(self.directory/'runtime.json').read_text())
@@ -516,7 +520,7 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         # during storage archives; body volumes stay present and unmodified.
         self.compose('stop','nc-db','wk-db','nc-redis','wk-redis')
         for role in sorted(DATA_VOLUMES):files[role+'.tar']=self.archive(role,self.evidence/(role+'.tar'))
-        for name in CONTROL_FILES:
+        for name in self.control_files:
             destination=self.evidence/('control-'+name)
             legacy['copy_private'](self.directory/name,destination)
             files[destination.name]={'sha256':sha(destination),'bytes':destination.stat().st_size}

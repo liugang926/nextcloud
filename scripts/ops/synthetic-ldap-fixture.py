@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -434,7 +435,9 @@ def assert_owned_resources(directory, state, *, require_empty=False):
             raise RuntimeError("network does not belong to this synthetic fixture")
 
 
-def prepare(image, mode, ui_image=None, *, body_journal=False):
+def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay_max_seconds=0):
+    if type(chat_stream_delay_max_seconds) is not int or not 0 <= chat_stream_delay_max_seconds <= 20:
+        raise RuntimeError("invalid owned chat stream delay maximum")
     inspected = subprocess.run(["docker", "image", "inspect", image, "--format", "{{.Id}}"],
                                check=True, text=True, capture_output=True)
     image_id = inspected.stdout.strip()
@@ -484,16 +487,29 @@ def prepare(image, mode, ui_image=None, *, body_journal=False):
         generate_certs(directory)
         config = compose_data(directory, project, ports, passwords, image,
                               ui_image, owner_token=owner_token, body_journal=body_journal)
+        # A fresh fixture keeps the exact model implementation through later
+        # repository updates. Existing owners and their stored hashes are not
+        # adopted or rewritten by this preparation path.
+        mock_code = directory.resolve() / "mock_embedding.py"
+        mock_bytes = (ROOT / "integration/mock_embedding.py").read_bytes()
+        write_private(mock_code, mock_bytes.decode("utf-8"))
+        config["services"]["mock-embedding"]["volumes"] = [f"{mock_code}:/srv/mock_embedding.py:ro"]
+        if chat_stream_delay_max_seconds:
+            config["services"]["mock-embedding"]["environment"] = {
+                "MOCK_CHAT_STREAM_DELAY_MAX_SECONDS": str(chat_stream_delay_max_seconds)}
         state = {"marker": MARKER, "project": project, "mode": mode,
                  "scratch_dir": str(directory.resolve()), "owner_token": owner_token,
                  "compose_fingerprint": compose_fingerprint(config),
                  "source_commit": subprocess.check_output(
                      ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip(),
                  "weknora_image": image, "weknora_image_id": image_id,
+                 "mock_model_code_sha256": hashlib.sha256(mock_bytes).hexdigest(),
                  "ports": ports, "guids": guids,
                  "directory_id": "synthetic-ad"}
         if body_journal:
             state["body_journal"] = True
+        if chat_stream_delay_max_seconds:
+            state["mock_chat_stream_delay_max_seconds"] = chat_stream_delay_max_seconds
         if ui_image:
             state.update({"weknora_ui_image": ui_image,
                           "weknora_ui_image_id": ui_image_id})
@@ -548,6 +564,23 @@ def assert_state_matches_compose(state, config):
             not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)):
         raise RuntimeError("synthetic WeKnora backend image state is invalid")
     services = config["services"]
+    mock_hash = state.get("mock_model_code_sha256")
+    if mock_hash is not None:
+        if not isinstance(mock_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", mock_hash):
+            raise RuntimeError("invalid frozen fixture model hash")
+        mock_code = Path(state["scratch_dir"]) / "mock_embedding.py"
+        details = mock_code.lstat()
+        if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1 or
+                details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o600 or
+                mock_code.resolve() != mock_code or hashlib.sha256(mock_code.read_bytes()).hexdigest() != mock_hash or
+                services["mock-embedding"].get("volumes") != [f"{mock_code}:/srv/mock_embedding.py:ro"]):
+            raise RuntimeError("frozen fixture model source changed")
+    delay = state.get("mock_chat_stream_delay_max_seconds", 0)
+    if type(delay) is not int or not 0 <= delay <= 20:
+        raise RuntimeError("invalid owned chat stream delay maximum")
+    expected_mock_env = {"MOCK_CHAT_STREAM_DELAY_MAX_SECONDS": str(delay)} if delay else None
+    if services["mock-embedding"].get("environment") != expected_mock_env:
+        raise RuntimeError("owned chat stream delay differs from its frozen state")
     if state.get("body_journal") not in (None, True):
         raise RuntimeError("invalid body journal fixture mode")
     body_mounts = ["wk-body-journal:/var/lib/weknora-body-ledger",
@@ -751,12 +784,15 @@ def main():
                         help="optional locally built UI image for browser acceptance")
     create.add_argument("--body-journal", action="store_true", help="initialize candidate152 external anchor before app startup")
     create.add_argument("--mode", choices=("direct", "primary", "nested"), required=True)
+    create.add_argument("--chat-stream-delay-max-seconds", type=int, default=0,
+                        help="fresh fixture only: opt in to loopback-only bounded real model stream scheduling (0-20)")
     for name in ("up", "status", "destroy"):
         command = commands.add_parser(name)
         command.add_argument("--scratch", required=True, type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.weknora_image, args.mode, args.weknora_ui_image, body_journal=args.body_journal)
+        prepare(args.weknora_image, args.mode, args.weknora_ui_image, body_journal=args.body_journal,
+                chat_stream_delay_max_seconds=args.chat_stream_delay_max_seconds)
         return
     directory, state = owned_state(args.scratch)
     if args.action == "up":

@@ -429,3 +429,32 @@ without a recursive stop write; the next ordinary source read can persist the
 stop. A database or outbox failure may also prevent the audit or hint while
 the current read remains denied. Real AD and production Team Folder acceptance
 remain open.
+
+## Prepared running replay acceptance, 2026-10-09
+
+`synthetic-ldap-running-replay-acceptance.py` is prepared for a fresh owned
+fixture using exact, verified normal candidate app/UI images. Its actual
+application run is still pending. Prepare with
+`--chat-stream-delay-max-seconds 20` and `--body-journal`, then complete the
+usual startup, bootstrap, signed ingestion and permission matrix first.
+Preparation freezes a private model script, its SHA-256 and its read-only
+mount. Existing owners keep their captured controls and cannot be adopted into
+this opt-in run. The default cap is zero, including performance fixtures.
+
+After those real prerequisites pass, run:
+
+```sh
+python3 scripts/ops/synthetic-ldap-running-replay-acceptance.py \
+  --scratch "$OWNED_SCRATCH" --output "$PRIVATE_EVIDENCE" --delay-seconds 20
+```
+
+The first QA completes normally. The second actual model response flushes an
+answer prefix before waiting; native replay must return that same prefix and
+the original citations while the actual assistant remains unfinished. The
+model call sequence must stay unchanged during replay. Releasing the real
+model allows the two actual answers, saved history and completed replay to be
+compared by producer IDs and material hashes. An unjoined reader or an
+unremoved worker marker prevents a successful receipt. Source-only midstream
+revocation and full application restoration still require separate actual
+evidence. The [preparation record](evidence/running-replay-preparation-20261009.json)
+contains harness checks only.

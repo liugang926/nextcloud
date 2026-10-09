@@ -40,6 +40,17 @@ and an actual two-round baseline. The
 passed, while running replay and the next full application trial remain
 unaccepted.
 
+A fresh-fixture running replay driver is now prepared. It delays one actual
+model HTTP response for at most 20 seconds, reads the same answer prefix and
+citations concurrently through native replay, and checks the real unfinished
+assistant before allowing completion. Its model code and opt-in configuration
+are frozen with the fixture; the default delay is zero. Preparation regressions
+are [recorded here](evidence/running-replay-preparation-20261009.json);
+the actual running replay, midstream source revocation and full restore remain
+unaccepted. Candidate CI's complete compile and frontend checks now have a
+55-minute outer budget after an observed 35-minute timeout interrupted the C6
+frontend step; the selected Go test timeout and assertions are unchanged.
+
 The remaining V1 work includes the full normal QA/source-revocation loop;
 clean and stale-publication recovery plus real pending-Auto fault recovery;
 Steer and other exposed consumer original-material/lifetime coverage; old
