@@ -30,6 +30,7 @@ SERVICES = frozenset(("openldap", "cert-init", "nc-db", "nc-redis", "nextcloud",
                       "wk-db", "wk-redis", "docreader", "mock-embedding", "wk-app"))
 VOLUMES = frozenset(("ldap-certs", "ldap-fixture", "nc-postgres", "nc-redis-data",
                      "nc-html", "wk-postgres", "wk-data", "docreader-tmp"))
+BODY_VOLUMES = frozenset(("wk-body-journal", "wk-body-key", "wk-body-pin"))
 SHORT_PRIMARY_ENV = {"DOCREADER_PDF_FORCE_SCANNED": "1"}
 LDAP_IMAGE = ("bitnamilegacy/openldap:2.6.10-debian-12-r4@"
               "sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93")
@@ -183,7 +184,7 @@ def generate_certs(directory):
     (certs / "ca.crt").chmod(0o644)
 
 
-def compose_data(directory, project, ports, passwords, image, ui_image=None, *, owner_token):
+def compose_data(directory, project, ports, passwords, image, ui_image=None, *, owner_token, body_journal=False):
     certs, schema, ldifs = directory / "certs", directory / "schema", directory / "ldif"
     base_env = {"POSTGRES_DB": "nextcloud", "POSTGRES_USER": "nextcloud",
                 "POSTGRES_PASSWORD": passwords["nc_db"]}
@@ -310,6 +311,19 @@ def compose_data(directory, project, ports, passwords, image, ui_image=None, *, 
         },
         "volumes": {name: {} for name in VOLUMES},
     }
+    if body_journal:
+        app = result["services"]["wk-app"]
+        app["environment"].update({
+            "WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY": "/var/lib/weknora-body-ledger",
+            "WEKNORA_ORIGINAL_BODY_JOURNAL_KEY": "/var/lib/weknora-body-key/hmac.key",
+            "WEKNORA_ORIGINAL_BODY_JOURNAL_PIN": "/var/lib/weknora-body-pin/pin.json",
+        })
+        app["volumes"].extend([
+            "wk-body-journal:/var/lib/weknora-body-ledger",
+            "wk-body-key:/var/lib/weknora-body-key",
+            "wk-body-pin:/var/lib/weknora-body-pin",
+        ])
+        result["volumes"].update({name: {} for name in BODY_VOLUMES})
     for service in result["services"].values():
         service["labels"] = {OWNER_LABEL: owner_token}
     for volume in result["volumes"].values():
@@ -375,7 +389,7 @@ def assert_owned_resources(directory, state, *, require_empty=False):
     """Fail closed before Compose can modify a project or remove its volumes."""
     project, token = state["project"], state["owner_token"]
     services = SERVICES | ({"wk-ui"} if state.get("weknora_ui_image") else set())
-    expected_volumes = {project + "_" + name for name in VOLUMES}
+    expected_volumes = {project + "_" + name for name in VOLUMES | (BODY_VOLUMES if state.get("body_journal") else set())}
     expected_network = project + "_default"
     resources = project_resources(project)
     prefixes = {"container": project + "-", "volume": project + "_",
@@ -420,7 +434,7 @@ def assert_owned_resources(directory, state, *, require_empty=False):
             raise RuntimeError("network does not belong to this synthetic fixture")
 
 
-def prepare(image, mode, ui_image=None):
+def prepare(image, mode, ui_image=None, *, body_journal=False):
     inspected = subprocess.run(["docker", "image", "inspect", image, "--format", "{{.Id}}"],
                                check=True, text=True, capture_output=True)
     image_id = inspected.stdout.strip()
@@ -469,7 +483,7 @@ def prepare(image, mode, ui_image=None):
                       make_ldif(mode, passwords, guids, domain_parts))
         generate_certs(directory)
         config = compose_data(directory, project, ports, passwords, image,
-                              ui_image, owner_token=owner_token)
+                              ui_image, owner_token=owner_token, body_journal=body_journal)
         state = {"marker": MARKER, "project": project, "mode": mode,
                  "scratch_dir": str(directory.resolve()), "owner_token": owner_token,
                  "compose_fingerprint": compose_fingerprint(config),
@@ -478,6 +492,8 @@ def prepare(image, mode, ui_image=None):
                  "weknora_image": image, "weknora_image_id": image_id,
                  "ports": ports, "guids": guids,
                  "directory_id": "synthetic-ad"}
+        if body_journal:
+            state["body_journal"] = True
         if ui_image:
             state.update({"weknora_ui_image": ui_image,
                           "weknora_ui_image_id": ui_image_id})
@@ -506,7 +522,7 @@ def owned_state(directory):
     if (config.get("name") != state["project"] or
             set(config.get("services", {})) !=
             SERVICES | ({"wk-ui"} if state.get("weknora_ui_image") else set()) or
-            set(config.get("volumes", {})) != VOLUMES or
+            set(config.get("volumes", {})) != VOLUMES | (BODY_VOLUMES if state.get("body_journal") else set()) or
             compose_fingerprint(config) != state["compose_fingerprint"]):
         raise RuntimeError("synthetic LDAP Compose configuration changed")
     assert_state_matches_compose(state, config)
@@ -532,6 +548,23 @@ def assert_state_matches_compose(state, config):
             not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)):
         raise RuntimeError("synthetic WeKnora backend image state is invalid")
     services = config["services"]
+    if state.get("body_journal") not in (None, True):
+        raise RuntimeError("invalid body journal fixture mode")
+    body_mounts = ["wk-body-journal:/var/lib/weknora-body-ledger",
+                   "wk-body-key:/var/lib/weknora-body-key",
+                   "wk-body-pin:/var/lib/weknora-body-pin"]
+    body_env = {"WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY": "/var/lib/weknora-body-ledger",
+                "WEKNORA_ORIGINAL_BODY_JOURNAL_KEY": "/var/lib/weknora-body-key/hmac.key",
+                "WEKNORA_ORIGINAL_BODY_JOURNAL_PIN": "/var/lib/weknora-body-pin/pin.json"}
+    app = services["wk-app"]
+    actual_body_mounts = [m for m in app.get("volumes", []) if isinstance(m, str) and
+                          any(m.split(":", 2)[1:2] == [expected.split(":")[1]] for expected in body_mounts)]
+    if state.get("body_journal"):
+        if sorted(actual_body_mounts) != sorted(body_mounts) or any(m not in app.get("volumes", []) for m in body_mounts) or any(
+                app.get("environment", {}).get(k) != v for k, v in body_env.items()):
+            raise RuntimeError("body journal must use its exact independent owned mounts")
+    elif actual_body_mounts or any(k in app.get("environment", {}) for k in body_env):
+        raise RuntimeError("unexpected body journal configuration")
     expected = {
         "openldap": ("ldap", 1636),
         "nextcloud": ("nextcloud", 80),
@@ -667,6 +700,48 @@ def configure_primary_sid_match(state):
         raise RuntimeError("synthetic AD-compatible textual SID lookup failed closed")
 
 
+def initialize_body_journal(directory, state):
+    # Start only the DB before migration. No app/readers/builders run until init
+    # and verify complete with the same appuser UID as the normal entrypoint.
+    subprocess.run(compose_command(directory, state, "up", "-d", "--wait",
+                                   "--wait-timeout", "180", "wk-db"), check=True,
+                   capture_output=True, text=True)
+    script = """set -eu
+cd /app
+export WEKNORA_ORIGINAL_BODY_MAINTENANCE_DSN="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
+exec gosu appuser original-body-retention -driver postgres -mode "$1"
+"""
+    def maintenance(mode):
+        result = subprocess.run(compose_command(directory, state, "run", "--rm", "--no-deps",
+                                "--name", state["project"] + "-wk-app-99", "--entrypoint", "/bin/sh", "wk-app", "-c", script, "sh", mode),
+                                check=False, capture_output=True, text=True, timeout=240)
+        if result.returncode:
+            raise RuntimeError("owned body journal " + mode + " failed; preserve fixture for diagnosis")
+    if state.get("body_journal_initialized"):
+        maintenance("verify")
+        return
+    maintenance("migrate")
+    setup = """set -eu
+for path in /var/lib/weknora-body-ledger /var/lib/weknora-body-key /var/lib/weknora-body-pin; do
+  test -d "$path" && test ! -L "$path"
+  test -z "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)"
+  chown appuser:appuser "$path"
+  chmod 0700 "$path"
+done
+gosu appuser sh -c 'umask 077; head -c 48 /dev/urandom > /var/lib/weknora-body-key/hmac.key'
+"""
+    result = subprocess.run(compose_command(directory, state, "run", "--rm", "--no-deps",
+                            "--name", state["project"] + "-wk-app-99", "--entrypoint", "/bin/sh", "wk-app", "-c", setup),
+                            check=False, capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("body journal provisioning refused; existing anchors are not replaced")
+    maintenance("init")
+    maintenance("verify")
+    assert_owned_resources(directory, state)
+    state["body_journal_initialized"] = True
+    write_private(directory / "state.json", json.dumps(state, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
@@ -674,13 +749,14 @@ def main():
     create.add_argument("--weknora-image", required=True)
     create.add_argument("--weknora-ui-image",
                         help="optional locally built UI image for browser acceptance")
+    create.add_argument("--body-journal", action="store_true", help="initialize candidate152 external anchor before app startup")
     create.add_argument("--mode", choices=("direct", "primary", "nested"), required=True)
     for name in ("up", "status", "destroy"):
         command = commands.add_parser(name)
         command.add_argument("--scratch", required=True, type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.weknora_image, args.mode, args.weknora_ui_image)
+        prepare(args.weknora_image, args.mode, args.weknora_ui_image, body_journal=args.body_journal)
         return
     directory, state = owned_state(args.scratch)
     if args.action == "up":
@@ -696,6 +772,8 @@ def main():
                  "--format", "{{.Id}}"], check=True, text=True, capture_output=True)
             if ui_inspected.stdout.strip() != state["weknora_ui_image_id"]:
                 raise RuntimeError("WeKnora UI image tag changed since fixture preparation")
+        if state.get("body_journal"):
+            initialize_body_journal(directory, state)
         subprocess.run(compose_command(directory, state, "up", "-d", "--wait",
                                        "--wait-timeout", "600"), check=True)
         assert_owned_resources(directory, state)

@@ -61,6 +61,8 @@ def main():
                         help="absolute path to an installed Playwright Node module")
     parser.add_argument("--browser-executable",
                         help="optional isolated Chromium headless executable")
+    parser.add_argument('--body-journal', action='store_true',
+                        help='provision candidate152 external anchor before full app startup')
     parser.add_argument('--candidate-profile', choices=('c6', 'rag'),
                         help='require exact candidate app/UI source labels before the owned fixture')
     parser.add_argument('--candidate-manifest',
@@ -84,10 +86,13 @@ def main():
     primary_error = None
     result = None
     try:
-        prepared = run([sys.executable, str(FIXTURE), "prepare",
-                        "--weknora-image", args.weknora_image,
-                        "--weknora-ui-image", args.weknora_ui_image,
-                        "--mode", "direct"], "prepare isolated fixture", 60)
+        prepare_command = [sys.executable, str(FIXTURE), "prepare",
+                           "--weknora-image", args.weknora_image,
+                           "--weknora-ui-image", args.weknora_ui_image,
+                           "--mode", "direct"]
+        if args.body_journal:
+            prepare_command.append('--body-journal')
+        prepared = run(prepare_command, "prepare isolated fixture", 60)
         state = json.loads(prepared)
         scratch = Path(state["scratch"])
         project = state["project"]

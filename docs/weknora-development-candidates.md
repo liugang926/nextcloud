@@ -206,3 +206,14 @@ all owned DSNs. Its actual combined message/FAQ/collection/local-index/admin
 GC gate passed285 cases per profile with no failures or skips; both integrated
 source trees stayed clean and exact owned resources were removed.152 is an availability
 hook only until the body vault/journal module is integrated and verified.
+
+
+For a candidate that includes152/71, pass `--body-journal` to the owned browser
+fixture. The owner starts only its fresh database, invokes the packaged actual
+migration CLI, provisions three independent nonce-owned volumes at0700 plus a
+0600 random key under the runtime appuser, then runs init/verify before starting
+readers/builders. Repeated up verifies the existing anchor; it never replaces it.
+The three mounts cannot be repointed to the DB/data volume or shadowed. Offline
+state/topology tests cover these exact bindings; full application execution is
+pending the frozen body module and normal candidate image. This mode is for
+fresh fixtures, while restore uses retained anchors plus reconcile/verify.
