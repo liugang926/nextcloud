@@ -1653,3 +1653,21 @@ the observed timing, not yet an isolated reproduction of that exact CI failure.
 The new matrix adds actual PG/SQLite capacity intents and owner CLI checks.
 Actual objectGC fencing, full parent/read coverage and complete backend capacity
 remain pending; the shared app is the fixed0.4.37 runtime snapshot.
+
+## 2026-10-09 template, FAQ all-parent and actual object-GC combination
+
+Both separately pinned candidates passed529 test/subtest cases, zero failures
+and zero skips, plus complete Go compilation in owned PG/SQLite fixtures. The
+code includes actual-admin/code/derived KB template writers and guarded reads,
+original FAQ progress/results, metadata-only all-parent read plans, transaction-
+bound single-connection authority checks, and actual RunDue local-object content
+fences/provider ACK. The [candidate evidence](evidence/weknora-development-candidates-2026-10-09.json)
+retains the original smaller-PG failure and duplicate fixture DDL failures, and
+the final successful combination. All owned resources were removed; caches kept.
+
+The ordinary build script still selects the default adaptation; the explicit
+`WEKNORA_RAG_CANDIDATE=1` path verifies the candidate manifest/tree and builds
+separate app/UI image tags without starting services. Candidate deployment and
+full normal machine-ingestion acceptance remain pending. No production coverage
+marker or global recovery ingress is enabled. Local derived/vector inventory,
+remaining readers/history and the PRD performance requirements are still open.

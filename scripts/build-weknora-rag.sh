@@ -8,9 +8,40 @@ patch_file="$project_dir/integration/weknora-rag-b6ea8b56.patch"
 base_commit="b6ea8b560b886cef77fb32fb2e092123cdce4ed3"
 expected_patch_sha="8bbffc98f1fbdc03f08be0e7f6d959da61536b17b1b75b8b3a4258b914e612ae"
 
+# Explicit candidate builds use the separately verified manifest and a distinct
+# default image tag. They never replace the default source patch selection.
+candidate_mode="${WEKNORA_RAG_CANDIDATE:-0}"
+if [[ "$candidate_mode" != 0 && "$candidate_mode" != 1 ]]; then
+  echo 'WEKNORA_RAG_CANDIDATE must be 0 or 1.' >&2
+  exit 1
+fi
+default_tag_suffix=nextcloud-rag
+if [[ "$candidate_mode" == 1 ]]; then
+  candidate_fields="$(python3 - "$project_dir" "$base_commit" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+project = Path(sys.argv[1])
+entry = json.loads((project / 'integration/candidates/manifest.json').read_text())['profiles']['rag']
+if entry['base'] != sys.argv[2] or not re.fullmatch(r'[a-f0-9]{64}', entry['patch_sha256']):
+    raise SystemExit('Candidate baseline or SHA is invalid')
+path = project / entry['path']
+if path.resolve().parent != (project / 'integration/candidates').resolve():
+    raise SystemExit('Candidate patch must be inside integration/candidates')
+print(path)
+print(entry['patch_sha256'])
+PY
+)"
+  patch_file="${candidate_fields%%$'\n'*}"
+  expected_patch_sha="${candidate_fields#*$'\n'}"
+  default_tag_suffix=nextcloud-rag-candidate
+fi
+
 # An alternate suffix lets an operator verify a candidate without replacing
 # the image tags used by the shared local WeKnora stack.
-tag_suffix="${WEKNORA_RAG_TAG_SUFFIX:-nextcloud-rag}"
+tag_suffix="${WEKNORA_RAG_TAG_SUFFIX:-$default_tag_suffix}"
 if [[ ! "$tag_suffix" =~ ^[a-z0-9][a-z0-9_.-]*$ || ${#tag_suffix} -gt 128 ]]; then
   echo "Invalid WEKNORA_RAG_TAG_SUFFIX: use 1-128 lowercase tag characters" >&2
   exit 1
@@ -71,6 +102,10 @@ patch_sha="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv
 if [[ "$patch_sha" != "$expected_patch_sha" ]]; then
   echo "WeKnora RAG patch SHA-256 mismatch: expected $expected_patch_sha, got $patch_sha" >&2
   exit 1
+fi
+if [[ "$candidate_mode" == 1 ]]; then
+  python3 "$project_dir/scripts/ops/verify-weknora-candidate.py" \
+    --profile=rag --source-repo="$source_dir"
 fi
 
 build_dir="$(mktemp -d "$workspace_dir/.weknora-rag-build.XXXXXXXX")"

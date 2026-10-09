@@ -180,7 +180,7 @@ jobs:
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
         run: |
-          for kind in lease migration sourcehealth pairing auto faq capacity; do
+          for kind in lease migration sourcehealth pairing auto faq capacity gc; do
             docker exec "$PG_CONTAINER" createdb -U postgres "candidate_$kind"
           done
       - name: Test candidate producers and recovery contracts
@@ -193,11 +193,12 @@ jobs:
           WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_auto sslmode=disable
           WEKNORA_FAQ_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_faq sslmode=disable
           WEKNORA_CAPACITY_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_capacity sslmode=disable
+          WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_gc sslmode=disable
         run: |
           go build -buildvcs=false -p 1 -o /tmp/capacity-reconcile ./cmd/capacity-reconcile
           export WEKNORA_CAPACITY_RECONCILE_CLI=/tmp/capacity-reconcile
-          go test -json -p 1 ./internal/config ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/handler ./internal/container ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
-            -run 'CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
+          go test -json -p 1 ./internal/config ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
+            -run 'KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
           go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
       - uses: actions/setup-node@v4
         with:
