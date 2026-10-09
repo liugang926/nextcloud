@@ -38,6 +38,7 @@ jobs:
           python3 scripts/ops/test-synthetic-ldap-fixture-state.py
           python3 scripts/ops/test-synthetic-ldap-resource-profile.py
           python3 scripts/ops/test-synthetic-ldap-normal-restore.py
+          python3 scripts/ops/test-synthetic-ldap-pending-auto-restore.py
           python3 scripts/ops/test-synthetic-ldap-history-acceptance.py
           python3 scripts/ops/test-synthetic-ldap-running-replay.py
           python3 scripts/ops/test-synthetic-ldap-performance.py
@@ -226,10 +227,10 @@ jobs:
         run: |
           go build -buildvcs=false -p 1 -o /tmp/capacity-reconcile ./cmd/capacity-reconcile
           export WEKNORA_CAPACITY_RECONCILE_CLI=/tmp/capacity-reconcile
-          go build -buildvcs=false -p 1 -o /tmp/original-body-retention ./cmd/original-body-retention
+          go build -tags sqlite_fts5 -buildvcs=false -p 1 -o /tmp/original-body-retention ./cmd/original-body-retention
           export WEKNORA_ORIGINAL_BODY_TEST_CLI=/tmp/original-body-retention
           go test -json -tags sqlite_fts5 -p 1 ./internal/config ./internal/application/readlease ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/agent ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
-            -run 'SteerMaterial|SteerOriginalMaterialActualHTTP|AgentSteerOriginal|AgentSteerUnknown|PostgresSteerOriginalUpgradeFrom153|MessageRewindMaterial|OriginalRewind|RAGPhysicalActual|NextcloudKBRead|NextcloudKnowledgeLeaseScope|NativeLive|MessageNativeLive|OriginalBody|PostgresOriginalBody|KnowledgeAutoCompletion|PostgresKnowledgeAutoCompletion|AgentHistoryActual|AgentHistoryPostgresActual|CommittedHistoryParentRequest|MessageGeneratedField|MessageFork|MessageActual|NativeSavedReplay|MessageMaterialLiveHTTP|ChunkOutputHTTP|KnowledgeMachine|PostgresKnowledgeMachine|DataSourceName|MessageMaterial|KnowledgeHistory|NextcloudGCManualActual|NextcloudGCAdminStatus|NextcloudGCActualAdminHTTPPreview|NextcloudGCAdminPagination|^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 -timeout 20m > candidate-tests.jsonl
+            -run 'SteerMaterial|SteerOriginalMaterialActualHTTP|AgentSteerOriginal|AgentSteerUnknown|PostgresSteerOriginalUpgradeFrom153|MessageRewindMaterial|OriginalRewind|RAGPhysicalActual|NextcloudKBRead|NextcloudKnowledgeLeaseScope|NativeLive|MessageNativeLive|OriginalBody|PostgresOriginalBody|ParentBodyCopy|ParentCopy|KnowledgeAutoCompletion|PostgresKnowledgeAutoCompletion|AgentHistoryActual|AgentHistoryPostgresActual|CommittedHistoryParentRequest|MessageGeneratedField|MessageFork|MessageActual|NativeSavedReplay|MessageMaterialLiveHTTP|ChunkOutputHTTP|KnowledgeMachine|PostgresKnowledgeMachine|DataSourceName|MessageMaterial|KnowledgeHistory|NextcloudGCManualActual|NextcloudGCAdminStatus|NextcloudGCActualAdminHTTPPreview|NextcloudGCAdminPagination|^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 -timeout 20m > candidate-tests.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-tests.jsonl \
             --require-test TestMessageMaterialActualHTTPProducerReadSingleConnection \
             --require-test TestMessageMaterialActualControlledSavedHTTPAndCurrentSourceRevoke \
@@ -243,7 +244,20 @@ jobs:
             --require-test TestSteerMaterialLegacyMessageRequestJSONAndDigestStayExact \
             --require-test TestSteerMaterialActualFollowUpKeepsOriginalAndBindsExactNewInitial \
             --require-test TestPostgresSteerOriginalUpgradeFrom153PreservesUnknownHistory \
-            --require-test TestAgentSteerUnknownSinkCannotCertifyCachedBodyOrEnterModel
+            --require-test TestAgentSteerUnknownSinkCannotCertifyCachedBodyOrEnterModel \
+            --require-test TestSteerOriginalMaterialActualHTTPAgentHonorsDisableTitle \
+            --require-test TestParentBodyCopyActual793SQLite \
+            --require-test TestPostgresParentBodyCopyActual793 \
+            --require-test TestParentBodyCopyUnknownProofSQLite \
+            --require-test TestPostgresParentBodyCopyUnknownProof \
+            --require-test TestParentBodyCopyUnknownOriginalScopeSQLite \
+            --require-test TestPostgresParentBodyCopyUnknownOriginalScope \
+            --require-test TestParentBodyCopyMultipleLiveHostsSQLite \
+            --require-test TestPostgresParentBodyCopyMultipleLiveHosts \
+            --require-test TestParentCopyActualGeneratedDependencySQLite \
+            --require-test TestPostgresParentCopyActualGeneratedDependency \
+            --require-test TestMessageMaterialOwnGrowthActualSQLite \
+            --require-test TestPostgresMessageMaterialOwnGrowthActual
       - name: Verify full candidate compile
         working-directory: candidate
         run: |

@@ -4,7 +4,7 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-09
 
-The manifest's current candidates are C6 `afdfd48d` and RAG `f9a75a0e`.
+The manifest's current candidates are C6 `f766a373` and RAG `595f241f`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
 frozen evidence for current implementation facts; the table below is historical.
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
@@ -37,13 +37,20 @@ profile, with zero failed or skipped selected tests and full compile for
 tests were confirmed present in the [CI evidence](evidence/steer-candidate-ci-20261009.json).
 These checks do not accept the upcoming normal application or full restore.
 
-Old parent-body copies still need the original dependencies of later generated
-fields included in their retention scope before cleanup can be accepted. That
-source preparation has been combined with the final Steer source in an isolated
-worktree and is undergoing actual PostgreSQL/SQLite and CLI validation. It is
-not included in this manifest. The historical local withdrawal inventory also
-needs immutable backend plans and writer artifacts observed after current rows
-disappear; its prepared forward migration remains untested and incomplete.
+Known old parent-body copies now include the immutable original dependencies of
+later generated fields in their retention scope. Cleanup requires closed hosts,
+retired source fences and the exact complete closure; unknown copies remain
+retained. Own generated-field growth acquires and retains its additional KB and
+source leases and rechecks withdrawal, epoch and cancellation before installing
+new material. Agent QA also honors `disable_title`, fixing the observed CI
+sender timeout without extending its deadline. The combined sources are now
+included in this manifest. Each profile passed 414 distinct test nodes / 165
+top-level tests, zero failures or test skips, and compilation of 155 packages.
+Root independently verified the [raw-log evidence](evidence/parent-copy-title-original-material-20261009.json)
+and resource cleanup. New normal images and application acceptance remain pending.
+The historical local withdrawal inventory still needs immutable backend plans
+and writer artifacts observed after current rows disappear; its prepared
+forward migration remains untested and incomplete.
 
 Candidate CI now checks that selected tests actually executed and completed,
 including required HTTP, PostgreSQL, Redis and summary regressions. The

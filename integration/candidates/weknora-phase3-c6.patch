@@ -34132,6 +34132,31 @@ index 0000000000000000000000000000000000000000..e6ba98706c72370b2ad339aa287d72d0
 +90-day retention policy, recovery-copy policy, or physical cleanup. Both down
 +migrations intentionally fail closed; automatic rollback would destroy the
 +only retained local history.
+diff --git a/docs/parent-body-copy-cleanup-design.md b/docs/parent-body-copy-cleanup-design.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..17cb645ee12ed3fcfb8b2297e02b3e1bde0d0abb
+--- /dev/null
++++ b/docs/parent-body-copy-cleanup-design.md
+@@ -0,0 +1,19 @@
++# Immutable parent Messages copy cleanup preparation
++
++This exclusive preparation combines the original nine-file WIP from base `36cf96c44e5ce207c2e489fdc8773faf79f20374` onto frozen Steer `fb433a322e9440e91c36a66078dfe9e6c80864b6`. It is not the final Steer combination and has not run the new heavy SQL gates. The original WIP and its process are untouched.
++
++The copy slot is exactly `parent_materials.*.Messages`, for arrays and single snapshots. Removal preserves every non-Messages JSON value. A complete inventory marker requires the immutable material admission, generation, original owner/session, revisions, consumed execution controls and copied byte digest. Inventory never authenticates a historic selector by resolving its current KB or current message bytes.
++
++Frozen 7930 actually stored `json.Marshal(boundary.Parents)`. Both `MessageMaterialProof.SourceLineage` and `MessageGeneratedFieldProof.SourceLineage` were serialized. The `Message` itself omitted its hidden lineage, execution, agent tenant, rendered content and checkpoint. Hidden lineage/execution/agent tenant are recovered only from the exact immutable material fact; unavailable nonempty hidden rendered/checkpoint bytes remain retained. The actual user proof merged its raw lineage with consumed generated-field lineage. Validation follows each immutable generated admission's ID, generation, field revision and body digest, then traverses its original ParentMaterials. A later generated field cannot become a no-parent authored field: only original initial user images/attachments with the original generation actor and empty lineage have that form.
++
++Every captured source must match its unique immutable Nextcloud knowledge-input admission by original tenant/KB/document, build generation and complete source tuple/ETag. Those original admission IDs are persisted in existing immutable body parent refs, so CURRENT journal ScopeSHA fixes the captured source versions as well as deduplicated original KB scopes. Present scope rows must exactly match the recomputed union. A present incomplete/corrupt marker is not repaired by appending scopes during a fresh scan. Missing original sources, raw selector resolutions or immutable dependency associations remain unaccounted.
++
++Purge requires all recorded incoming heads to close, not merely the absence of a current field receipt. An actual message/session deletion supplies the one-hour host deadline. Each original source requires durable tombstone/withdrawal/supersession and an exact retired/deleted content fence whose datasource/external ID match and whose epoch exceeds the captured epoch. Source lease coverage must be explicitly established and active original read/build leases must be absent. Actual body-ID read leases independently protect the copy. A current or ambiguous host/source stays retained; unknown or corrupt copies are never re-signed from current permissions or equal bytes.
++
++The existing purge transaction holds the journal head, original scope locks, coverage rows and exact source fences, then locks the target payload and confirms its leases before advancing pending state and fsyncing CURRENT. Existing exact copy-ID reads/writes take the same payload lock and reject retired state or external journal decisions; generated writers also retain their source leases. Cross-host arbitrary sharing of these inline slots is not exposed by the existing vault-only ShareOriginalBodyField API. Multiple independent physical copies retain distinct body IDs and closure checks. Additional race and incoming-host regression remains pending before acceptance.
++
++Traversal fails closed at depth 32, 4096 proof visits/scopes, the existing 1024-source lineage limit, 8 MiB per original JSON snapshot and 32 MiB total parsed metadata. Generated admission IDs and scopes are deduplicated; cyclic generated parents remain retained.
++
++Prepared actual SQL cases include raw user no-KB -> genuine signed source ingest and source-derived answer -> actual generated image -> old serializer copy, with exact source and copy-ID leases, durable source/host closure and byte-only leaf removal. Negative preparations cover active source, missing operational coverage, present missing/corrupt scope marker, changed generated SourceLineage/ParentMaterials, wrong generation/admission, original unresolvable pre152 scope and unaccounted copied bytes. Operational coverage declarations in these isolated tests are explicit fixture contracts after the real fixture workers drain, not production coverage evidence or material seals. The DB-clock one-hour simulation and SQL restore checks are protocol tests, not normal application restore evidence.
++
++Earlier original-WIP evidence was 70 pass / 2 fail / 6 skip. Two failed blanket purge-count assertions treated a known closed orphan as unsupported; the six skips lacked PostgreSQL DSN or the real compiled CLI. Those results do not validate this preparation. Its new tests and final Steer integration remain pending. No frozen fork writer that actually persisted Messages has been found; an unprovable old fork copy remains retained, and full V1 cleanup/reconciliation is not claimed.
 diff --git a/docs/rag-chunk-snapshot-capture.md b/docs/rag-chunk-snapshot-capture.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..eda41b35dc8cbb4f34dac7deb65841eb4bc713f4
@@ -59100,7 +59125,7 @@ index 0000000000000000000000000000000000000000..cdefe5fa699951c8b2dcfffa30dc7a68
 +}
 diff --git a/internal/application/repository/message_material_read.go b/internal/application/repository/message_material_read.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..e759ec4c8117b2eac73ce13d6452972a4c4ab05a
+index 0000000000000000000000000000000000000000..88fab5b6caf35c649d2c63254121fda417b99c00
 --- /dev/null
 +++ b/internal/application/repository/message_material_read.go
 @@ -0,0 +1,870 @@
@@ -59344,7 +59369,7 @@ index 0000000000000000000000000000000000000000..e759ec4c8117b2eac73ce13d6452972a
 +		}
 +		var fieldParents []struct{ ParentMaterials, SourceLineage string }
 +		if tx.Migrator().HasTable("message_generated_field_admissions") {
-+			if err := tx.Table("message_generated_field_admissions a").Select("a.parent_materials,a.source_lineage").Joins("JOIN message_generated_field_receipts r ON r.admission_id=a.id AND r.message_id=a.message_id AND r.field=a.field").Where("a.message_id=?", id.ID).Scan(&fieldParents).Error; err != nil {
++			if err := tx.Table("message_generated_field_admissions a").Select(parentCopyMetadataSelect(tx, "a.parent_materials", true)+" AS parent_materials,a.source_lineage").Joins("JOIN message_generated_field_receipts r ON r.admission_id=a.id AND r.message_id=a.message_id AND r.field=a.field").Where("a.message_id=?", id.ID).Scan(&fieldParents).Error; err != nil {
 +				return nil, err
 +			}
 +		}
@@ -59393,7 +59418,7 @@ index 0000000000000000000000000000000000000000..e759ec4c8117b2eac73ce13d6452972a
 +		}
 +		if tx.Migrator().HasTable("message_fork_parent_origins") {
 +			var fork messageForkParentOrigin
-+			err := tx.Where("generation_id=?", fact.GenerationID).Take(&fork).Error
++			err := tx.Select("generation_id,"+parentCopyMetadataSelect(tx, "parent_materials", false)+" AS parent_materials").Where("generation_id=?", fact.GenerationID).Take(&fork).Error
 +			if err != nil && err != gorm.ErrRecordNotFound {
 +				return nil, err
 +			}
@@ -81795,10 +81820,10 @@ index 0000000000000000000000000000000000000000..e0c81acb2853ad9d4e6b96e1092a5416
 +}
 diff --git a/internal/application/repository/original_body_fields.go b/internal/application/repository/original_body_fields.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..32850743e86329541b49af81387313738c6db3a3
+index 0000000000000000000000000000000000000000..acc45496cdfd8f4a7d46bc697e320918e0488f3e
 --- /dev/null
 +++ b/internal/application/repository/original_body_fields.go
-@@ -0,0 +1,788 @@
+@@ -0,0 +1,802 @@
 +package repository
 +
 +import (
@@ -81835,8 +81860,8 @@ index 0000000000000000000000000000000000000000..32850743e86329541b49af8138731373
 +	// Old generated/fork parent snapshots can contain a second Messages copy.
 +	// Inventory recognizes only that leaf, preserving proof metadata. With no
 +	// durable copy/closure receipt these copies remain explicit blockers.
-+	{"message_generated_field_admissions", "id", "unsupported", []string{"parent_materials.*.Messages"}},
-+	{"message_fork_parent_origins", "generation_id", "unsupported", []string{"parent_materials.*.Messages"}},
++	{"message_generated_field_admissions", "id", "inline", []string{"parent_materials.*.Messages"}},
++	{"message_fork_parent_origins", "generation_id", "inline", []string{"parent_materials.*.Messages"}},
 +	// Current entity columns keep their SQL search/storage representation. Their
 +	// exact mirror receipts permit clearing only after actual lifecycle closure.
 +	{"knowledge_processing_spans", "id", "inline", []string{"input", "output", "error_message", "error_detail"}},
@@ -81889,6 +81914,9 @@ index 0000000000000000000000000000000000000000..32850743e86329541b49af8138731373
 +	return result, nil
 +}
 +func bodyNestedReplace(raw, field, old, replacement string) (string, error) {
++	if field == parentCopyBodyField {
++		return parentCopyReplace(raw, old, replacement)
++	}
 +	parts := strings.Split(field, ".")
 +	var object map[string]any
 +	if e := json.Unmarshal([]byte(raw), &object); e != nil {
@@ -82042,6 +82070,12 @@ index 0000000000000000000000000000000000000000..32850743e86329541b49af8138731373
 +			return e
 +		}
 +		if old.BodySHA256 == sha {
++			if parentCopyTable(d.Table) {
++				if e := s.recordParentCopyScopes(tx, old.ID, d, key, scope); e != nil {
++					return e
++				}
++				return bodyInternal(tx).Model(&old).Where("state='live'").Update("storage_kind", "inline").Error
++			}
 +			return nil
 +		}
 +		// A genuine producer change retires the prior representation. Cached
@@ -82071,6 +82105,11 @@ index 0000000000000000000000000000000000000000..32850743e86329541b49af8138731373
 +		}
 +	} else if e != nil {
 +		return e
++	}
++	if parentCopyTable(d.Table) {
++		if e := s.recordParentCopyScopes(tx, body.ID, d, key, scope); e != nil {
++			return e
++		}
 +	}
 +	if e := s.recordMessageLeaseScopes(tx, body.ID, d, key, raw, scope); e != nil {
 +		return e
@@ -82945,10 +82984,10 @@ index 0000000000000000000000000000000000000000..15fe97f6146f19c1c7f87c81e76c935b
 +}
 diff --git a/internal/application/repository/original_body_message_scopes.go b/internal/application/repository/original_body_message_scopes.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..20c81b1e148c6fecd8b9055508f196979bc2f45f
+index 0000000000000000000000000000000000000000..f700167c6f50b6d86326e9a2f6a5c2e27cc48f7a
 --- /dev/null
 +++ b/internal/application/repository/original_body_message_scopes.go
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,386 @@
 +package repository
 +
 +import (
@@ -83228,6 +83267,14 @@ index 0000000000000000000000000000000000000000..20c81b1e148c6fecd8b9055508f19697
 +				if e := bodyInternal(tx).Where("(source_table='messages' AND row_key=?) OR (source_table='message_generation_origins' AND row_key=?)", control.ID, control.GenerationID).Find(&heads).Error; e != nil {
 +					return e
 +				}
++				var copies []originalBodyFieldHead
++				query := bodyInternal(tx).Table("original_body_field_heads h").Select("h.*").Where("(h.source_table='message_fork_parent_origins' AND h.row_key=?) OR (h.source_table='message_generated_field_admissions' AND h.row_key IN (SELECT a.id FROM message_generated_field_admissions a JOIN message_generated_field_receipts r ON r.admission_id=a.id AND r.message_id=a.message_id AND r.field=a.field WHERE a.message_id=?))", control.GenerationID, control.ID)
++				if tx.Migrator().HasTable("message_generated_field_admissions") && tx.Migrator().HasTable("message_fork_parent_origins") {
++					if e := query.Find(&copies).Error; e != nil {
++						return e
++					}
++					heads = append(heads, copies...)
++				}
 +				for _, head := range heads {
 +					if seen[head.BodyID] {
 +						continue
@@ -83326,6 +83373,651 @@ index 0000000000000000000000000000000000000000..20c81b1e148c6fecd8b9055508f19697
 +		}
 +	}
 +	return false
++}
+diff --git a/internal/application/repository/original_body_parent_copies.go b/internal/application/repository/original_body_parent_copies.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..032a16bf9ba5c58e0c19d05db1e34b0c250bdbe9
+--- /dev/null
++++ b/internal/application/repository/original_body_parent_copies.go
+@@ -0,0 +1,639 @@
++package repository
++
++import (
++	"encoding/json"
++	"errors"
++	"strings"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++const parentCopyBodyField = "parent_materials.*.Messages"
++
++func parentCopyTable(table string) bool {
++	return table == "message_generated_field_admissions" || table == "message_fork_parent_origins"
++}
++func parentCopySnapshots(raw string) ([]*types.MessageMaterialSnapshot, error) {
++	var out []*types.MessageMaterialSnapshot
++	if strings.HasPrefix(strings.TrimSpace(raw), "{") {
++		var one types.MessageMaterialSnapshot
++		if e := json.Unmarshal([]byte(raw), &one); e != nil {
++			return nil, e
++		}
++		out = append(out, &one)
++	} else if e := json.Unmarshal([]byte(raw), &out); e != nil {
++		return nil, e
++	}
++	return out, nil
++}
++
++// Parent-copy evidence comes only from immutable original admissions and the
++// bytes actually stored in the copy. Current message/KB pointers are never an
++// inventory authority. Metadata-only generated parents carry the original
++// proof identities; their generated dependencies are traversed separately.
++type parentCopyEvidence struct {
++	tx          *gorm.DB
++	scopes      []originalBodyLeaseScope
++	scopeKeys   map[originalBodyLeaseScope]bool
++	sources     map[types.SourceIdentity]knowledgeInputAdmission
++	visiting    map[string]bool
++	done        map[string]bool
++	count       int
++	parsedBytes int
++}
++
++func (v *parentCopyEvidence) addScope(scope originalBodyLeaseScope) error {
++	scope.BodyID = ""
++	if !v.scopeKeys[scope] {
++		if len(v.scopeKeys) >= 4096 {
++			return ErrOriginalBodyRetained
++		}
++		v.scopeKeys[scope] = true
++		v.scopes = append(v.scopes, scope)
++	}
++	return nil
++}
++
++func (v *parentCopyEvidence) snapshots(raw string) ([]*types.MessageMaterialSnapshot, error) {
++	v.parsedBytes += len(raw)
++	if len(raw) > 8<<20 || v.parsedBytes > 32<<20 {
++		return nil, ErrOriginalBodyRetained
++	}
++	return parentCopySnapshots(raw)
++}
++
++func (v *parentCopyEvidence) addLineage(lineage *types.SourceLineage) error {
++	if lineage.RequireComplete() != nil {
++		return ErrOriginalBodyRetained
++	}
++	for _, source := range lineage.Sources {
++		if _, found := v.sources[source]; !found {
++			var original knowledgeInputAdmission
++			var candidates []knowledgeInputAdmission
++			if v.tx.Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND build_generation=? AND origin_kind='nextcloud'", source.TenantID, source.KnowledgeBaseID, source.KnowledgeID, source.Revision).Limit(2).Find(&candidates).Error != nil || len(candidates) != 1 {
++				return ErrOriginalBodyRetained
++			}
++			original = candidates[0]
++			var captured types.SourceLineage
++			if json.Unmarshal([]byte(original.SourceLineage), &captured) != nil || captured.RequireComplete() != nil {
++				return ErrOriginalBodyRetained
++			}
++			matched := false
++			for _, dependency := range captured.Sources {
++				if dependency == source {
++					matched = true
++				}
++				declared := false
++				for _, current := range lineage.Sources {
++					if current == dependency {
++						declared = true
++					}
++				}
++				if !declared {
++					return ErrOriginalBodyRetained
++				}
++			}
++			if !matched {
++				return ErrOriginalBodyRetained
++			}
++			v.sources[source] = original
++		}
++		if err := v.addScope(originalBodyLeaseScope{TenantID: source.TenantID, KnowledgeBaseID: source.KnowledgeBaseID}); err != nil {
++			return err
++		}
++		if len(v.sources) > types.SourceLineageMaxSources {
++			return ErrOriginalBodyRetained
++		}
++	}
++	return nil
++}
++
++func (v *parentCopyEvidence) proof(snapshot *types.MessageMaterialSnapshot, proof *types.MessageMaterialProof, message *types.Message, depth int) error {
++	v.count++
++	if depth > 32 || v.count > 4096 || proof == nil || proof.AdmissionID == "" || proof.GenerationID == "" {
++		return ErrOriginalBodyRetained
++	}
++	var fact messageMaterialAdmission
++	if v.tx.Where("id=?", proof.AdmissionID).Take(&fact).Error != nil {
++		return ErrOriginalBodyRetained
++	}
++	var origin messageGenerationOrigin
++	if v.tx.Select(messageGenerationMetadataFields).Where("id=?", proof.GenerationID).Take(&origin).Error != nil {
++		return ErrOriginalBodyRetained
++	}
++	if fact.GenerationID != origin.ID || fact.MessageID != proof.MessageID || fact.SessionID != snapshot.Request.SessionID || proof.SessionID != fact.SessionID || fact.TenantID != snapshot.Request.TenantID || proof.TenantID != fact.TenantID || fact.OwnerID != snapshot.SessionOwnerID || fact.OwnerRevision != snapshot.SessionOwnerRevision || proof.OwnerID != fact.OwnerID || proof.OwnerRevision != fact.OwnerRevision || fact.Revision != proof.Revision || fact.BodyDigest != proof.BodyDigest || origin.MessageID != fact.MessageID || origin.TenantID != fact.TenantID || origin.SessionID != fact.SessionID || origin.OwnerID != fact.OwnerID || origin.OwnerRevision != fact.OwnerRevision {
++		return ErrOriginalBodyRetained
++	}
++	var lineage types.SourceLineage
++	var execution types.MessageExecutionContext
++	if json.Unmarshal([]byte(fact.SourceLineage), &lineage) != nil || lineage.RequireComplete() != nil || json.Unmarshal([]byte(fact.ExecutionContext), &execution) != nil || !faqInputEqual(execution, proof.Execution) || fact.AgentID != proof.AgentID || fact.AgentTenantID != proof.AgentTenantID {
++		return ErrOriginalBodyRetained
++	}
++	if message != nil {
++		if message.ID != fact.MessageID || message.SessionID != fact.SessionID || origin.Role != message.Role || origin.RequestID != message.RequestID {
++			return ErrOriginalBodyRetained
++		}
++		restored := *message
++		restored.SourceLineage, restored.ExecutionContext, restored.AgentTenantID = &lineage, execution, fact.AgentTenantID
++		digest, err := messageMaterialDigest(&restored)
++		if err != nil || digest != fact.BodyDigest {
++			return ErrOriginalBodyRetained
++		}
++	}
++	if err := v.addLineage(&lineage); err != nil {
++		return err
++	}
++	var originalScopes []originalBodyLeaseScope
++	if err := v.tx.Table("original_body_lease_scopes s").Select("s.*").Joins("JOIN original_body_field_heads h ON h.body_id=s.body_id").Where("h.source_table='message_generation_origins' AND h.row_key=?", origin.ID).Find(&originalScopes).Error; err != nil {
++		return err
++	}
++	if bodyLeaseScopesComplete(originalScopes, fact.TenantID) {
++		for _, scope := range originalScopes {
++			if err := v.addScope(scope); err != nil {
++				return err
++			}
++		}
++	} else {
++		// A source identity itself fixes the original tenant/KB/document tuple.
++		// An ordinary old execution selector with no such immutable resolution
++		// remains unknown, even if its current KB pointer happens to be readable.
++		kbIDs := append(append([]string{}, execution.KnowledgeBaseIDs...), execution.AgentKnowledgeBaseIDs...)
++		for _, tag := range execution.TagScopes {
++			kbIDs = append(kbIDs, tag.KnowledgeBaseID)
++		}
++		for _, kb := range kbIDs {
++			found := false
++			for _, source := range lineage.Sources {
++				if source.KnowledgeBaseID == kb {
++					found = true
++				}
++			}
++			if !found {
++				return ErrOriginalBodyRetained
++			}
++		}
++		for _, id := range execution.KnowledgeIDs {
++			found := false
++			for _, source := range lineage.Sources {
++				if source.KnowledgeID == id {
++					found = true
++				}
++			}
++			if !found {
++				return ErrOriginalBodyRetained
++			}
++		}
++	}
++	proofLineages := []*types.SourceLineage{&lineage}
++	covered := map[string]bool{}
++	for _, field := range proof.GeneratedFields {
++		if field == nil || covered[field.Field] {
++			return ErrOriginalBodyRetained
++		}
++		if err := v.generated(snapshot, &fact, field, message, depth+1); err != nil {
++			return err
++		}
++		covered[field.Field] = true
++		proofLineages = append(proofLineages, field.SourceLineage)
++	}
++	expectedLineage, err := types.UnionSourceLineage(proofLineages...)
++	if err != nil || !faqInputEqual(expectedLineage, proof.SourceLineage) {
++		return ErrOriginalBodyRetained
++	}
++	if message != nil && message.Role == "user" && (len(message.Images) > 0 && !covered["images"] || len(message.Attachments) > 0 && !covered["attachments"] || message.RenderedContent != "" && !covered["rendered_content"] || message.ContextCheckpoint != nil && !covered["context_checkpoint"] || len(message.AgentSteps) > 0 || len(message.KnowledgeReferences) > 0 || len(message.UsedMemories) > 0) {
++		return ErrOriginalBodyRetained
++	}
++	return nil
++}
++
++func (v *parentCopyEvidence) generated(snapshot *types.MessageMaterialSnapshot, fact *messageMaterialAdmission, proof *types.MessageGeneratedFieldProof, message *types.Message, depth int) error {
++	if depth > 32 || proof.AdmissionID == "" || v.visiting[proof.AdmissionID] {
++		return ErrOriginalBodyRetained
++	}
++	var admission messageGeneratedFieldAdmission
++	if v.tx.Where("id=?", proof.AdmissionID).Take(&admission).Error != nil {
++		return ErrOriginalBodyRetained
++	}
++	if admission.MessageID != fact.MessageID || admission.GenerationID != fact.GenerationID || admission.SessionID != fact.SessionID || admission.TenantID != fact.TenantID || admission.Field != proof.Field || admission.FieldRevision != proof.Revision || admission.BodyDigest != proof.BodyDigest {
++		return ErrOriginalBodyRetained
++	}
++	var lineage types.SourceLineage
++	if json.Unmarshal([]byte(admission.SourceLineage), &lineage) != nil || lineage.RequireComplete() != nil || !faqInputEqual(&lineage, proof.SourceLineage) {
++		return ErrOriginalBodyRetained
++	}
++	if message != nil {
++		var value any
++		switch proof.Field {
++		case "images":
++			value = message.Images
++		case "attachments":
++			value = message.Attachments
++		case "rendered_content":
++			value = message.RenderedContent
++		case "context_checkpoint":
++			value = message.ContextCheckpoint
++		default:
++			return ErrOriginalBodyRetained
++		}
++		digest, err := KnowledgeInputDigest(value)
++		if err != nil {
++			return ErrOriginalBodyRetained
++		}
++		if digest != admission.BodyDigest {
++			// The real old Message serializer used omitempty for these arrays.
++			// A missing JSON leaf can represent its original typed empty slice.
++			// Try only that empty shape against the immutable original digest;
++			// omitted nonempty fields still fail, and no original seal changes.
++			if proof.Field == "images" && len(message.Images) == 0 {
++				digest, err = KnowledgeInputDigest(types.MessageImages{})
++			}
++			if proof.Field == "attachments" && len(message.Attachments) == 0 {
++				digest, err = KnowledgeInputDigest(types.MessageAttachments{})
++			}
++			if err != nil || digest != admission.BodyDigest {
++				return ErrOriginalBodyRetained
++			}
++		}
++	}
++	if err := v.addLineage(&lineage); err != nil {
++		return err
++	}
++	if v.done[admission.ID] {
++		return nil
++	}
++	v.visiting[admission.ID] = true
++	defer delete(v.visiting, admission.ID)
++	parents, err := v.snapshots(admission.ParentMaterials)
++	if err != nil {
++		return ErrOriginalBodyRetained
++	}
++	var previous messageMaterialAdmission
++	if v.tx.Where("id=?", admission.PreviousAdmissionID).Take(&previous).Error != nil || previous.GenerationID != admission.GenerationID || previous.MessageID != admission.MessageID || previous.SessionID != admission.SessionID || previous.TenantID != admission.TenantID || previous.Revision != admission.PreviousRevision || admission.PreviousMembership == 0 || admission.ResultRevision < admission.PreviousRevision {
++		return ErrOriginalBodyRetained
++	}
++	if len(parents) == 0 {
++		// Only actual authored initial images/attachments legitimately have no
++		// consumed parents. Their actor is the original generation actor, not a
++		// later generated callback's actor. Removing a later callback's parents
++		// must never turn a derived field into an original empty-scope field.
++		var original messageGenerationOrigin
++		if v.tx.Select(messageGenerationMetadataFields).Where("id=?", admission.GenerationID).Take(&original).Error != nil || original.Role != "user" || admission.Field != "images" && admission.Field != "attachments" || admission.Actor != original.Actor || len(lineage.Sources) != 0 || admission.ResultRevision != previous.Revision {
++			return ErrOriginalBodyRetained
++		}
++	}
++	for _, parent := range parents {
++		if err := v.snapshot(parent, false, depth+1); err != nil {
++			return err
++		}
++		for _, original := range parent.Proofs {
++			if original.MessageID == admission.MessageID && (original.AdmissionID != admission.PreviousAdmissionID || original.Revision != admission.PreviousRevision || parent.MembershipRevision != admission.PreviousMembership) {
++				return ErrOriginalBodyRetained
++			}
++			// Every parent source must have been accounted by this immutable
++			// generated admission, never introduced by a current lookup.
++			dependencies := []*types.SourceLineage{original.SourceLineage}
++			for _, field := range original.GeneratedFields {
++				if field == nil {
++					return ErrOriginalBodyRetained
++				}
++				dependencies = append(dependencies, field.SourceLineage)
++			}
++			for _, dependency := range dependencies {
++				if dependency.RequireComplete() != nil {
++					return ErrOriginalBodyRetained
++				}
++				for _, source := range dependency.Sources {
++					found := false
++					for _, declared := range lineage.Sources {
++						if declared == source {
++							found = true
++						}
++					}
++					if !found {
++						return ErrOriginalBodyRetained
++					}
++				}
++			}
++		}
++	}
++	v.done[admission.ID] = true
++	return nil
++}
++
++func (v *parentCopyEvidence) snapshot(snapshot *types.MessageMaterialSnapshot, requireBodies bool, depth int) error {
++	if depth > 32 || snapshot == nil || snapshot.Request.TenantID == 0 || snapshot.Request.SessionID == "" || snapshot.SessionOwnerID == "" || snapshot.SessionOwnerRevision == 0 || snapshot.MembershipRevision == 0 || snapshot.MetadataDigest == "" {
++		return ErrOriginalBodyRetained
++	}
++	byID := map[string]*types.Message{}
++	for _, message := range snapshot.Messages {
++		if message == nil || byID[message.ID] != nil {
++			return ErrOriginalBodyRetained
++		}
++		byID[message.ID] = message
++	}
++	if (requireBodies || len(byID) > 0) && len(byID) != len(snapshot.Proofs) {
++		return ErrOriginalBodyRetained
++	}
++	seen := map[string]bool{}
++	for _, proof := range snapshot.Proofs {
++		if proof == nil || seen[proof.MessageID] {
++			return ErrOriginalBodyRetained
++		}
++		seen[proof.MessageID] = true
++		if (requireBodies || len(byID) > 0) && byID[proof.MessageID] == nil {
++			return ErrOriginalBodyRetained
++		}
++		if err := v.proof(snapshot, proof, byID[proof.MessageID], depth+1); err != nil {
++			return err
++		}
++	}
++	if !snapshot.Request.AllSession {
++		if len(snapshot.Request.MessageIDs) != len(seen) {
++			return ErrOriginalBodyRetained
++		}
++		for _, id := range snapshot.Request.MessageIDs {
++			if !seen[id] {
++				return ErrOriginalBodyRetained
++			}
++		}
++	}
++	return nil
++}
++
++func validateParentCopyEvidence(tx *gorm.DB, d originalBodyFieldDescriptor, key string, scope originalBodyScope) (*parentCopyEvidence, error) {
++	row, err := bodySourceRow(tx, d, key)
++	if err != nil {
++		return nil, err
++	}
++	raw := bodyText(row["parent_materials"])
++	if len(raw) > 8<<20 {
++		return nil, ErrOriginalBodyRetained
++	}
++	v := &parentCopyEvidence{tx: bodyInternal(tx), scopeKeys: map[originalBodyLeaseScope]bool{}, sources: map[types.SourceIdentity]knowledgeInputAdmission{}, visiting: map[string]bool{}, done: map[string]bool{}}
++	if err := v.addScope(originalBodyLeaseScope{TenantID: scope.Tenant}); err != nil {
++		return nil, err
++	}
++	snapshots, err := v.snapshots(raw)
++	if err != nil {
++		return nil, ErrOriginalBodyRetained
++	}
++	for _, snapshot := range snapshots {
++		if snapshot != nil && len(snapshot.Messages) == 0 {
++			continue
++		}
++		if err := v.snapshot(snapshot, true, 0); err != nil {
++			return nil, err
++		}
++	}
++	return v, nil
++}
++
++func parentCopyScopesMatch(bodyID string, actual, expected []originalBodyLeaseScope) bool {
++	if len(actual) != len(expected) {
++		return false
++	}
++	values := map[originalBodyLeaseScope]bool{}
++	for _, scope := range actual {
++		if scope.BodyID != bodyID {
++			return false
++		}
++		scope.BodyID = ""
++		values[scope] = true
++	}
++	for _, scope := range expected {
++		scope.BodyID = ""
++		if !values[scope] {
++			return false
++		}
++	}
++	return len(values) == len(expected)
++}
++
++func parentCopySourceRefsPresent(tx *gorm.DB, bodyID string, evidence *parentCopyEvidence) (bool, error) {
++	var refs []originalBodyParentRef
++	if err := bodyInternal(tx).Where("body_id=?", bodyID).Find(&refs).Error; err != nil {
++		return false, err
++	}
++	known := map[originalBodyParentRef]bool{}
++	for _, ref := range refs {
++		known[ref] = true
++	}
++	for _, original := range evidence.sources {
++		if !known[originalBodyParentRef{BodyID: bodyID, TenantID: original.TenantID, KnowledgeBaseID: original.KnowledgeBaseID, KnowledgeID: original.KnowledgeID, AdmissionID: original.AdmissionID}] {
++			return false, nil
++		}
++	}
++	return true, nil
++}
++
++func parentCopyScopeEvidence(tx *gorm.DB, head originalBodyFieldHead, stored []originalBodyLeaseScope) (*parentCopyEvidence, error) {
++	descriptor, ok := bodyDescriptor(head.SourceTable)
++	if !ok {
++		return nil, ErrOriginalBodyRetained
++	}
++	evidence, err := validateParentCopyEvidence(tx, descriptor, head.RowKey, originalBodyScope{Tenant: head.TenantID})
++	if err != nil {
++		return nil, err
++	}
++	if !parentCopyScopesMatch(head.BodyID, stored, evidence.scopes) {
++		return nil, ErrOriginalBodyRetained
++	}
++	return evidence, nil
++}
++
++func validateParentCopies(tx *gorm.DB, d originalBodyFieldDescriptor, key string, scope originalBodyScope) ([]originalBodyLeaseScope, error) {
++	v, err := validateParentCopyEvidence(tx, d, key, scope)
++	if err != nil {
++		return nil, err
++	}
++	return v.scopes, nil
++}
++func (s *OriginalBodyRetentionStore) recordParentCopyScopes(tx *gorm.DB, id string, d originalBodyFieldDescriptor, key string, scope originalBodyScope) error {
++	evidence, e := validateParentCopyEvidence(tx, d, key, scope)
++	if errors.Is(e, ErrOriginalBodyRetained) {
++		return nil
++	}
++	if e != nil {
++		return e
++	}
++	var existing []originalBodyLeaseScope
++	if e := bodyInternal(tx).Where("body_id=?", id).Find(&existing).Error; e != nil {
++		return e
++	}
++	if len(existing) > 0 {
++		// A present historical marker is an immutable assertion, not an empty
++		// slot for a later scan to fill. Mismatch stays unknown and is never
++		// upgraded by appending the missing scopes from fresh evidence.
++		if !parentCopyScopesMatch(id, existing, evidence.scopes) {
++			return nil
++		}
++		return nil
++	}
++	for _, original := range evidence.sources {
++		// The journal's immutable parent-ref digest now names the actual original
++		// knowledge admission/build generation, rather than just its current KB.
++		ref := originalBodyParentRef{BodyID: id, TenantID: original.TenantID, KnowledgeBaseID: original.KnowledgeBaseID, KnowledgeID: original.KnowledgeID, AdmissionID: original.AdmissionID}
++		if e := bodyInternal(tx).Clauses(clause.OnConflict{DoNothing: true}).Create(&ref).Error; e != nil {
++			return e
++		}
++	}
++	for i := range evidence.scopes {
++		evidence.scopes[i].BodyID = id
++	}
++	return bodyInternal(tx).Clauses(clause.OnConflict{DoNothing: true}).Create(&evidence.scopes).Error
++}
++func parentCopyReplace(raw, old, replacement string) (string, error) {
++	actual, e := legacyParentMessageBodies(raw)
++	if e != nil || actual != old {
++		return "", ErrOriginalBodyUnavailable
++	}
++	if replacement != "" {
++		return "", ErrOriginalBodyUnavailable
++	}
++	var nodes []map[string]json.RawMessage
++	object := strings.HasPrefix(strings.TrimSpace(raw), "{")
++	if object {
++		var one map[string]json.RawMessage
++		if e := json.Unmarshal([]byte(raw), &one); e != nil {
++			return "", e
++		}
++		nodes = append(nodes, one)
++	} else if e := json.Unmarshal([]byte(raw), &nodes); e != nil {
++		return "", e
++	}
++	for _, node := range nodes {
++		if _, exists := node["Messages"]; exists {
++			node["Messages"] = json.RawMessage("null")
++		}
++	}
++	var out []byte
++	if object {
++		out, e = json.Marshal(nodes[0])
++	} else {
++		out, e = json.Marshal(nodes)
++	}
++	return string(out), e
++}
++func parentCopyMetadataSelect(tx *gorm.DB, column string, array bool) string {
++	if array {
++		if tx.Dialector.Name() == "postgres" {
++			return "(SELECT COALESCE(jsonb_agg(v - 'Messages'),'[]'::jsonb)::text FROM jsonb_array_elements(CAST(" + column + " AS jsonb)) v)"
++		}
++		return "(SELECT COALESCE(json_group_array(json_remove(value,'$.Messages')),'[]') FROM json_each(" + column + "))"
++	}
++	if tx.Dialector.Name() == "postgres" {
++		return "(CAST(" + column + " AS jsonb)-'Messages')::text"
++	}
++	return "json_remove(" + column + ",'$.Messages')"
++}
++
++// Source closure is a durable local version/fence/withdrawal fact, never a
++// transient HTTP denial or a later readable KB pointer. Active/ambiguous
++// source generations keep old derived copies; exact original scope locks and
++// current read/build leases remain independently required by the purge gate.
++func parentCopySourceDeadline(tx *gorm.DB, source types.SourceIdentity) (int64, error) {
++	now, err := nextcloudLeaseNowMS(bodyInternal(tx))
++	if err != nil {
++		return 0, err
++	}
++	originalScope := NextcloudContentScope{TenantID: source.TenantID, KnowledgeBaseID: source.KnowledgeBaseID, KnowledgeID: source.KnowledgeID, DataSourceID: source.DataSourceID, ExternalID: source.ExternalID}
++	if nextcloudRequireContentLeaseCoverage(bodyInternal(tx), originalScope, now) != nil {
++		return 0, ErrOriginalBodyRetained
++	}
++	if err := nextcloudRequireNoActiveContentLeases(bodyInternal(tx), originalScope, now); err != nil {
++		return 0, ErrOriginalBodyRetained
++	}
++	var version nextcloudSourceVersion
++	if err := nextcloudVersionQuery(bodyInternal(tx).Clauses(clause.Locking{Strength: "UPDATE"}), source.TenantID, source.KnowledgeBaseID, source.DataSourceID, source.ExternalID).Take(&version).Error; err != nil {
++		return 0, ErrOriginalBodyRetained
++	}
++	withdrawn := false
++	if tx.Migrator().HasTable(&NextcloudIndexedWithdrawal{}) {
++		var count int64
++		if err := bodyInternal(tx).Model(&NextcloudIndexedWithdrawal{}).Where("tenant_id=? AND knowledge_base_id=? AND datasource_id=? AND state=?", source.TenantID, source.KnowledgeBaseID, source.DataSourceID, "withdrawn_inventory_incomplete").Count(&count).Error; err != nil {
++			return 0, err
++		}
++		withdrawn = count > 0
++	}
++	if !withdrawn && version.State != "tombstone" && version.CandidateKnowledgeID == source.KnowledgeID {
++		return 0, ErrOriginalBodyRetained
++	}
++	if !withdrawn && version.State != "tombstone" {
++		var current types.DataSource
++		if bodyInternal(tx).Where("id=? AND tenant_id=? AND knowledge_base_id=?", source.DataSourceID, source.TenantID, source.KnowledgeBaseID).Take(&current).Error != nil || current.Status != types.DataSourceStatusActive {
++			return 0, ErrOriginalBodyRetained
++		}
++	}
++	var fence nextcloudContentFence
++	if err := bodyInternal(tx).Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=?", source.TenantID, source.KnowledgeBaseID, source.KnowledgeID).Take(&fence).Error; err != nil {
++		return 0, ErrOriginalBodyRetained
++	}
++	if (fence.State != "retired" && fence.State != "deleted") || fence.RetiredAtMS == nil || fence.DataSourceID != source.DataSourceID || fence.ExternalID != source.ExternalID || fence.Epoch <= int64(source.Revision) {
++		return 0, ErrOriginalBodyRetained
++	}
++	deadline := *fence.RetiredAtMS
++	if !withdrawn && version.State != "tombstone" {
++		deadline += 3600000
++	}
++	return deadline, nil
++}
++
++func (s *OriginalBodyRetentionStore) parentCopyCurrent(tx *gorm.DB, head originalBodyFieldHead, row map[string]any, now int64) (bool, int64, error) {
++	// Every recorded body head is checked by bodyEligibility. A missing
++	// current receipt alone never closes a historical consumer or shared owner.
++	var scopes []originalBodyLeaseScope
++	if e := bodyInternal(tx).Where("body_id=?", head.BodyID).Find(&scopes).Error; e != nil {
++		return true, 0, e
++	}
++	if !bodyLeaseScopesComplete(scopes, head.TenantID) {
++		return true, 0, ErrOriginalBodyRetained
++	}
++	evidence, err := parentCopyScopeEvidence(tx, head, scopes)
++	if err != nil {
++		return true, 0, err
++	}
++	dependencyDeadline := int64(0)
++	for source := range evidence.sources {
++		deadline, err := parentCopySourceDeadline(tx, source)
++		if err != nil {
++			return true, 0, err
++		}
++		if deadline > dependencyDeadline {
++			dependencyDeadline = deadline
++		}
++	}
++	messageID := bodyText(row["message_id"])
++	if head.SourceTable == "message_fork_parent_origins" {
++		var origin messageGenerationOrigin
++		if e := bodyInternal(tx).Select(messageGenerationMetadataFields).Where("id=?", head.RowKey).Take(&origin).Error; e != nil {
++			return true, 0, e
++		}
++		messageID = origin.MessageID
++	}
++	var message struct {
++		ID, SessionID string
++		DeletedAt     gorm.DeletedAt
++	}
++	e := bodyInternal(tx).Unscoped().Table("messages").Select("id,session_id,deleted_at").Where("id=?", messageID).Take(&message).Error
++	if e != nil {
++		return true, 0, ErrOriginalBodyRetained
++	}
++	if message.DeletedAt.Valid {
++		return false, max(message.DeletedAt.Time.UnixMilli()+3600000, dependencyDeadline), nil
++	}
++	var session struct{ DeletedAt gorm.DeletedAt }
++	if e := bodyInternal(tx).Unscoped().Table("sessions").Select("deleted_at").Where("id=?", message.SessionID).Take(&session).Error; e != nil {
++		return true, 0, ErrOriginalBodyRetained
++	}
++	if session.DeletedAt.Valid {
++		return false, max(session.DeletedAt.Time.UnixMilli()+3600000, dependencyDeadline), nil
++	}
++	// A missing incoming current field receipt is not a durable termination
++	// receipt for every original consumer. Until its message/session actually
++	// closes, retain even an orphan/obsolete admission rather than assuming an
++	// old task or saved control can no longer consume or restore this body.
++
++	return true, 0, nil
 +}
 diff --git a/internal/application/repository/original_body_protocol_test.go b/internal/application/repository/original_body_protocol_test.go
 new file mode 100644
@@ -83907,10 +84599,10 @@ index 0000000000000000000000000000000000000000..0b66c6d74af215d1e76cfc897ee0fe57
 +func TestPostgresOriginalBodyCLIForwardScopes(t *testing.T) { bodyProtocolCLIForwardScopes(t, true) }
 diff --git a/internal/application/repository/original_body_purge.go b/internal/application/repository/original_body_purge.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..a12837050e02ca80b28c999ebe7ae0d1d21fdf91
+index 0000000000000000000000000000000000000000..63b8adc41c7c1ccac702539883169ab145dbf220
 --- /dev/null
 +++ b/internal/application/repository/original_body_purge.go
-@@ -0,0 +1,716 @@
+@@ -0,0 +1,721 @@
 +package repository
 +
 +import (
@@ -84128,6 +84820,8 @@ index 0000000000000000000000000000000000000000..a12837050e02ca80b28c999ebe7ae0d1
 +			return true, 0, nil
 +		}
 +		return false, -1, nil
++	case "message_generated_field_admissions", "message_fork_parent_origins":
++		return s.parentCopyCurrent(tx, head, row, now)
 +	case "messages", "message_generation_origins":
 +		messageID := head.RowKey
 +		if d.Table == "message_generation_origins" {
@@ -84273,7 +84967,7 @@ index 0000000000000000000000000000000000000000..a12837050e02ca80b28c999ebe7ae0d1
 +		}
 +	}
 +	for _, head := range heads {
-+		if head.SourceTable != "messages" && head.SourceTable != "message_generation_origins" {
++		if head.SourceTable != "messages" && head.SourceTable != "message_generation_origins" && !parentCopyTable(head.SourceTable) {
 +			continue
 +		}
 +		var resolved []originalBodyLeaseScope
@@ -84282,6 +84976,9 @@ index 0000000000000000000000000000000000000000..a12837050e02ca80b28c999ebe7ae0d1
 +		}
 +		if !bodyLeaseScopesComplete(resolved, head.TenantID) {
 +			return ErrOriginalBodyRetained
++		}
++		if parentCopyTable(head.SourceTable) {
++			if _, err := parentCopyScopeEvidence(tx, head, resolved); err != nil { return err }
 +		}
 +		for _, scopeRef := range resolved {
 +			if scopeRef.KnowledgeBaseID != "" {
@@ -85044,10 +85741,10 @@ index 0000000000000000000000000000000000000000..636c05d5d99f818dfa599e541d097b8e
 +func (originalBodyGCItem) TableName() string { return "original_body_gc_items" }
 diff --git a/internal/application/repository/original_body_rewrite.go b/internal/application/repository/original_body_rewrite.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..12e6845091be79f00498f5a2f880d9622a58d147
+index 0000000000000000000000000000000000000000..8caf1926710a261e8a7994eef2e477fabff8ac02
 --- /dev/null
 +++ b/internal/application/repository/original_body_rewrite.go
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,223 @@
 +package repository
 +
 +import (
@@ -85084,8 +85781,14 @@ index 0000000000000000000000000000000000000000..12e6845091be79f00498f5a2f880d962
 +			return e
 +		}
 +		if tx.Dialector.Name() == "postgres" {
-+			if e := internal.Raw("SELECT CAST(? AS jsonb)::text", updated).Scan(&updated).Error; e != nil {
++			jsonColumn, e := originalBodyColumnIsJSON(tx, d.Table, col)
++			if e != nil {
 +				return e
++			}
++			if jsonColumn {
++				if e := internal.Raw("SELECT CAST(? AS jsonb)::text", updated).Scan(&updated).Error; e != nil {
++					return e
++				}
 +			}
 +		}
 +		old, new, col = stored, updated, bodyFieldColumn(col)
@@ -113414,10 +114117,10 @@ index 0000000000000000000000000000000000000000..cca49eb8db72204b85abe2f4aeff7e2e
 +}
 diff --git a/internal/application/service/message_material_guard.go b/internal/application/service/message_material_guard.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..c01563330c1a4005e09fcbee3dcbf3823f55b840
+index 0000000000000000000000000000000000000000..dcab00508cd9aa413ac1ac9c62ca3d52210cda4d
 --- /dev/null
 +++ b/internal/application/service/message_material_guard.go
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,439 @@
 +package service
 +
 +import (
@@ -113611,6 +114314,142 @@ index 0000000000000000000000000000000000000000..c01563330c1a4005e09fcbee3dcbf382
 +	}
 +}
 +
++// prepareOwnPlanGrowthLocked runs only after the immutable own-write transfer
++// has passed. New scopes belong to this guard, not a borrowed sibling/slot
++// context. Preserve its original caller/cancel values and its previous leases.
++func (g *MessageMaterialGuard) checkOwnPlanGrowthAuthorization(ctx, marked context.Context, plan *types.MessageMaterialReadPlan, updated *types.MessageMaterialSnapshot) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if err := marked.Err(); err != nil {
++		return err
++	}
++	if g.verifier == nil || g.verifier.sourceLineageGuard == nil {
++		return access.ErrNextcloudPublicationUnavailable
++	}
++	targets := []*types.SearchTarget{}
++	for _, scope := range plan.Scopes {
++		targets = append(targets, &types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, TenantID: scope.TenantID, KnowledgeBaseID: scope.KBID})
++	}
++	if err := g.verifier.sourceLineageGuard.Check(marked, plan.SourceLineage, access.LineageReadScope{Targets: targets}); err != nil {
++		return err
++	}
++	if len(updated.Messages) > 0 {
++		if err := g.verifier.CheckMessagePublications(marked, updated.Messages); err != nil {
++			return err
++		}
++		if err := g.store.CheckKnowledgeHistoryOriginalSources(marked, updated.Messages); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func (g *MessageMaterialGuard) releaseAddedOwnBodyLeases(ids []string) {
++	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	for i := len(ids) - 1; i >= 0; i-- {
++		_ = g.store.ReleaseMessageBodyReadLease(cleanup, ids[i])
++	}
++}
++
++func (g *MessageMaterialGuard) prepareOwnPlanGrowthLocked(ctx context.Context, plan *types.MessageMaterialReadPlan, updated *types.MessageMaterialSnapshot) (context.Context, []repository.NextcloudContentLease, func(), error) {
++	added := []repository.NextcloudContentLease{}
++	rollback := func() {
++		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		for i := len(added) - 1; i >= 0; i-- {
++			_ = g.store.ContentLeaseStore().ReleaseLease(cleanup, added[i].ID)
++		}
++	}
++	fail := func(err error) (context.Context, []repository.NextcloudContentLease, func(), error) {
++		rollback()
++		return g.ctx, nil, func() {}, err
++	}
++	if err := ctx.Err(); err != nil {
++		return fail(err)
++	}
++	if err := g.ctx.Err(); err != nil {
++		return fail(err)
++	}
++	leases := append([]repository.NextcloudContentLease{}, g.leases...)
++	broad := map[types.KnowledgeSearchScope]repository.NextcloudContentLease{}
++	for _, lease := range leases {
++		if lease.Kind == repository.NextcloudContentReadLease && lease.KnowledgeID == "" {
++			broad[types.KnowledgeSearchScope{TenantID: lease.TenantID, KBID: lease.KnowledgeBaseID}] = lease
++		}
++	}
++	for _, scope := range plan.Scopes {
++		if _, exists := broad[scope]; exists {
++			continue
++		}
++		lease, err := g.store.ContentLeaseStore().AcquireKBRead(g.ctx, scope.TenantID, scope.KBID, uuid.NewString(), 2*time.Minute)
++		if err != nil {
++			return fail(err)
++		}
++		added = append(added, lease)
++		leases = append(leases, lease)
++		broad[scope] = lease
++	}
++	for _, source := range plan.SourceLineage.Sources {
++		found := false
++		originalScope := false
++		for _, captured := range g.plan.SourceLineage.Sources {
++			if captured == source {
++				originalScope = true
++			}
++		}
++		for _, lease := range leases {
++			// The lease struct does not expose datasource/external ID. Its
++			// original owning plan supplies that full immutable source tuple;
++			// SQL coverage then verifies the fence tuple and epoch again.
++			if originalScope && lease.Kind == repository.NextcloudContentReadLease && lease.TenantID == source.TenantID && lease.KnowledgeBaseID == source.KnowledgeBaseID && lease.KnowledgeID == source.KnowledgeID && uint64(lease.Epoch) == source.Revision {
++				found = true
++			}
++		}
++		if found {
++			continue
++		}
++		kb, exists := broad[types.KnowledgeSearchScope{TenantID: source.TenantID, KBID: source.KnowledgeBaseID}]
++		if !exists {
++			return fail(repository.ErrNextcloudContentGCUncovered)
++		}
++		lease, err := g.store.ContentLeaseStore().UpgradeKBRead(g.ctx, kb.ID, repository.NextcloudContentScope{TenantID: source.TenantID, KnowledgeBaseID: source.KnowledgeBaseID, KnowledgeID: source.KnowledgeID, DataSourceID: source.DataSourceID, ExternalID: source.ExternalID}, kb.OwnerID, 2*time.Minute)
++		if err != nil {
++			return fail(err)
++		}
++		added = append(added, lease)
++		leases = append(leases, lease)
++		if uint64(lease.Epoch) != source.Revision {
++			return fail(repository.ErrKnowledgeInputChanged)
++		}
++	}
++	marked := g.ctx
++	var err error
++	if len(leases) > 0 {
++		marked, err = repository.WithFAQReadLeaseCoverage(marked, leases)
++		if err != nil {
++			return fail(err)
++		}
++	}
++	marked, err = repository.WithMessageMaterialReadPlan(marked, plan)
++	if err != nil {
++		return fail(err)
++	}
++	if err := ctx.Err(); err != nil {
++		return fail(err)
++	}
++	if err := marked.Err(); err != nil {
++		return fail(err)
++	}
++	// Raw-user snapshots may omit unconsumed generated fields; still check
++	// the full original union, source and actor after physical acquisition.
++	if err := g.checkOwnPlanGrowthAuthorization(ctx, marked, plan, updated); err != nil {
++		return fail(err)
++	}
++	return marked, leases, rollback, nil
++}
++
 +func (g *MessageMaterialGuard) advanceOwnGeneratedField(ctx context.Context) error {
 +	g.mu.Lock()
 +	defer g.mu.Unlock()
@@ -113622,7 +114461,7 @@ index 0000000000000000000000000000000000000000..c01563330c1a4005e09fcbee3dcbf382
 +	if err != nil {
 +		return err
 +	}
-+	marked, err := repository.WithMessageMaterialReadPlan(g.ctx, plan)
++	marked, leases, rollback, err := g.prepareOwnPlanGrowthLocked(ctx, plan, updated)
 +	if err != nil {
 +		return err
 +	}
@@ -113630,8 +114469,17 @@ index 0000000000000000000000000000000000000000..c01563330c1a4005e09fcbee3dcbf382
 +	// earlier body leases until the same model/output guard finally closes.
 +	bodyLeases, err := g.store.AcquireMessageBodyReadLeases(marked, plan, uuid.NewString(), 2*time.Minute, g.bodyLeases)
 +	if err != nil {
++		rollback()
 +		return err
 +	}
++	// Cancellation/withdrawal can commit during body acquisition. Install no
++	// new snapshot and release only this transition's newly acquired pins.
++	if err := g.checkOwnPlanGrowthAuthorization(ctx, marked, plan, updated); err != nil {
++		g.releaseAddedOwnBodyLeases(bodyLeases)
++		rollback()
++		return err
++	}
++	g.leases = leases
 +	g.bodyLeases = append(g.bodyLeases, bodyLeases...)
 +	// New immutable own admission has already passed the exact transfer check.
 +	// Use only the new matching plan; old unrelated plans are not re-certified.
@@ -113681,14 +114529,23 @@ index 0000000000000000000000000000000000000000..c01563330c1a4005e09fcbee3dcbf382
 +	if err != nil {
 +		return err
 +	}
-+	marked, err := repository.WithMessageMaterialReadPlan(g.ctx, plan)
++	marked, leases, rollback, err := g.prepareOwnPlanGrowthLocked(ctx, plan, updated)
 +	if err != nil {
 +		return err
 +	}
 +	bodyLeases, err := g.store.AcquireMessageBodyReadLeases(marked, plan, uuid.NewString(), 2*time.Minute, g.bodyLeases)
 +	if err != nil {
++		rollback()
 +		return err
 +	}
++	// Cancellation/withdrawal can commit during body acquisition. Install no
++	// new snapshot and release only this transition's newly acquired pins.
++	if err := g.checkOwnPlanGrowthAuthorization(ctx, marked, plan, updated); err != nil {
++		g.releaseAddedOwnBodyLeases(bodyLeases)
++		rollback()
++		return err
++	}
++	g.leases = leases
 +	g.bodyLeases = append(g.bodyLeases, bodyLeases...)
 +	g.ctx = marked
 +	g.plan = plan
@@ -114682,6 +115539,237 @@ index 0000000000000000000000000000000000000000..cd3c36e434c6dfeb438771ed218b859d
 +	}
 +	return release
 +}
+diff --git a/internal/application/service/message_material_own_growth_actual_test.go b/internal/application/service/message_material_own_growth_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d655ead6641c2257bb25f2989c99217a4200ae89
+--- /dev/null
++++ b/internal/application/service/message_material_own_growth_actual_test.go
+@@ -0,0 +1,225 @@
++package service
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++	"os"
++	"reflect"
++	"strings"
++	"testing"
++)
++
++func runMessageMaterialOwnGrowthActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"no-kb", "cross-kb", "source-after-content", "actor-after-content", "caller-after-content", "guard-after-content", "epoch-after-content", "cancel-after-body", "raw-unconsumed"} {
++		t.Run(mode, func(t *testing.T) {
++			m := newMachinePipelineFixture(t, pg)
++			k := m.ingest(t)
++			for i := 0; i < len(m.f.queue.tasks); i++ {
++				require.NoError(t, m.run(t, m.f.queue.tasks[i]))
++			}
++			migration := m.f.db
++			directory := "sqlite"
++			names := []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql", "000070_message_original_materials.up.sql"}
++			artifactType := "TEXT"
++			if pg {
++				directory, artifactType = "versioned", "JSONB"
++				names = []string{"000103_message_artifacts_table.up.sql", "000107_message_artifacts_deleted_at.up.sql", "000151_message_original_materials.up.sql"}
++				pool, err := m.f.db.DB()
++				require.NoError(t, err)
++				migration, err = gorm.Open(postgres.New(postgres.Config{Conn: pool, PreferSimpleProtocol: true}), &gorm.Config{})
++				require.NoError(t, err)
++				require.NoError(t, migration.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public`).Error)
++				require.NoError(t, migration.Exec(`ALTER EXTENSION "uuid-ossp" SET SCHEMA public`).Error)
++				require.NoError(t, migration.Exec(`CREATE FUNCTION uuid_generate_v4() RETURNS uuid LANGUAGE sql AS $$ SELECT public.uuid_generate_v4() $$`).Error)
++			}
++			if !m.f.db.Migrator().HasColumn(&types.Message{}, "artifacts") {
++				require.NoError(t, migration.Exec("ALTER TABLE messages ADD COLUMN artifacts "+artifactType).Error)
++			}
++			for _, name := range names {
++				ddl, err := os.ReadFile("../../../migrations/" + directory + "/" + name)
++				require.NoError(t, err)
++				require.NoError(t, migration.Exec(string(ddl)).Error)
++			}
++			require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(m.f.db))
++			messages := &messageService{messageRepo: repository.NewMessageRepository(m.f.db), sessionRepo: repository.NewSessionRepository(m.f.db), sourceLineageGuard: m.f.guard, kbService: m.f.s.kbService, knowService: m.f.s}
++			ConfigureMessageMaterialProvenance(messages, m.f.store)
++			repository.ConfigureMessageOriginalBodyAvailability(m.f.store, repository.CheckOriginalBodyAvailableInTx)
++			ctx := context.WithValue(m.f.ctx, types.UserIDContextKey, types.CallerFromContext(m.f.ctx).UserID)
++			session := &types.Session{ID: "actual-generated-parent-copy-session", TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++			require.NoError(t, m.f.db.Create(session).Error)
++			execution := types.MessageExecutionContext{}
++			if mode == "cross-kb" {
++				kb := &types.KnowledgeBase{ID: "ordinary-a", TenantID: 7, Name: "actual ordinary A", Type: types.KnowledgeBaseTypeDocument}
++				require.NoError(t, m.f.store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeBaseNameInput(repository.WithIndependentKnowledgeInput(ctx), "", kb.Name), kb))
++				execution.KnowledgeBaseIDs = []string{kb.ID}
++			}
++			user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "raw-no-kb", Role: "user", Content: "actual user raw input without a KB", IsCompleted: true, ExecutionContext: execution})
++			require.NoError(t, err)
++			_, err = messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "copy-host", Role: "user", Content: "actual host of legacy copied material", IsCompleted: true})
++			require.NoError(t, err)
++			parent, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "source-parent", Role: "assistant", ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}})
++			require.NoError(t, err)
++			actual, err := m.f.store.CaptureKnowledgeOutputInputs(ctx, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: k.ID})
++			require.NoError(t, err)
++			parent.Content, parent.IsCompleted, parent.SourceLineage = "actual source-derived answer", true, actual.Proof.SourceLineage
++			require.NoError(t, messages.UpdateMessage(ctx, parent))
++			scope := access.LineageReadScope{Targets: []*types.SearchTarget{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: "kb"}}}
++			writer := WithMessageMaterialOutputBoundary(ctx)
++			defer CloseMessageMaterialOutputBoundary(writer)
++			writer = types.WithRAGSourceLineage(writer, types.NewRAGSourceLineage(func(check context.Context, l *types.SourceLineage) error { return m.f.guard.Check(check, l, scope) }))
++			_, err = messages.GetMessage(writer, session.ID, parent.ID)
++			require.NoError(t, err)
++			_, err = messages.GetMessage(writer, session.ID, user.ID)
++			require.NoError(t, err)
++
++			slot := writer.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++			var userGuard *MessageMaterialGuard
++			for _, guard := range slot.Guards {
++				if guard.snapshot.Request.MessageIDs[0] == user.ID {
++					userGuard = guard
++				}
++			}
++			require.NotNil(t, userGuard)
++			oldProof := *userGuard.snapshot.Proofs[0]
++			oldCtx := userGuard.Context()
++			oldLeases := append([]repository.NextcloudContentLease{}, userGuard.leases...)
++			oldSnapshot := userGuard.snapshot
++			beforeIDs := []string{}
++			require.NoError(t, m.f.db.Table("nextcloud_content_leases").Where("released_at_ms IS NULL").Pluck("lease_id", &beforeIDs).Error)
++			requestCtx, cancelRequest := context.WithCancel(writer)
++			defer cancelRequest()
++			triggered := false
++			revoke := func(tx *gorm.DB) {
++				triggered = true
++				switch mode {
++				case "source-after-content":
++					m.allow.Store(false)
++				case "actor-after-content":
++					require.NoError(t, tx.Session(&gorm.Session{NewDB: true}).Model(&types.User{}).Where("id=?", types.CallerFromContext(ctx).UserID).Update("is_active", false).Error)
++				case "caller-after-content":
++					cancelRequest()
++				case "guard-after-content", "cancel-after-body":
++					userGuard.cancel()
++				case "epoch-after-content":
++					source := actual.Proof.SourceLineage.Sources[0]
++					// The successful raw INSERT callback still carries that INSERT's
++					// SQL and arguments. Keep its transaction, but begin an independent
++					// statement for the real fence transition.
++					cleanTx := tx.Session(&gorm.Session{NewDB: true, Initialized: true})
++					require.Same(t, tx.Statement.ConnPool, cleanTx.Statement.ConnPool)
++					require.NoError(t, m.f.store.ContentLeaseStore().RetireKnowledgeInTx(context.Background(), cleanTx, repository.NextcloudContentScope{TenantID: source.TenantID, KnowledgeBaseID: source.KnowledgeBaseID, KnowledgeID: source.KnowledgeID, DataSourceID: source.DataSourceID, ExternalID: source.ExternalID}))
++					var fence struct {
++						Epoch uint64
++						State string
++					}
++					require.NoError(t, tx.Session(&gorm.Session{NewDB: true, Initialized: true}).Table("nextcloud_content_fences").Select("epoch", "state").Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND datasource_id=? AND external_id=?", source.TenantID, source.KnowledgeBaseID, source.KnowledgeID, source.DataSourceID, source.ExternalID).Take(&fence).Error)
++					require.Equal(t, "retired", fence.State)
++					require.Equal(t, source.Revision+1, fence.Epoch, "real fence transition invalidates the captured source revision")
++				}
++			}
++			if mode == "cancel-after-body" {
++				require.NoError(t, m.f.db.Callback().Create().After("gorm:create").Register("actual-own-growth-late-refusal", func(tx *gorm.DB) {
++					if triggered || tx.Statement.Table != "original_body_leases" {
++						return
++					}
++					value := tx.Statement.ReflectValue
++					for value.Kind() == reflect.Ptr {
++						value = value.Elem()
++					}
++					if value.Kind() != reflect.Struct {
++						return
++					}
++					var count int64
++					require.NoError(t, tx.Session(&gorm.Session{NewDB: true}).Table("original_body_field_heads").Where("body_id=? AND source_table='messages' AND row_key=? AND column_name='images'", value.FieldByName("BodyID").String(), user.ID).Count(&count).Error)
++					if count > 0 {
++						revoke(tx)
++					}
++				}))
++			} else if mode != "no-kb" && mode != "cross-kb" && mode != "raw-unconsumed" {
++				// Content lease inserts use the actual native INSERT path rather
++				// than ORM Create. Observe successful Raw execution, not a mock.
++				require.NoError(t, m.f.db.Callback().Raw().After("gorm:raw").Register("actual-own-growth-late-refusal", func(tx *gorm.DB) {
++					if triggered || tx.Error != nil || !strings.Contains(tx.Statement.SQL.String(), "INSERT INTO nextcloud_content_leases") || len(tx.Statement.Vars) < 10 {
++						return
++					}
++					knowledge, ok := tx.Statement.Vars[3].(string)
++					if !ok || knowledge != k.ID {
++						return
++					}
++					kind, ok := tx.Statement.Vars[4].(string)
++					if !ok || kind != "read" {
++						return
++					}
++					revoke(tx)
++				}))
++			}
++
++			writeErr := messages.UpdateMessageImages(requestCtx, session.ID, user.ID, types.MessageImages{{URL: "https://fixture.invalid/growth-owned", Caption: "actual owned B image"}})
++			_ = m.f.db.Callback().Create().Remove("actual-own-growth-late-refusal")
++			_ = m.f.db.Callback().Raw().Remove("actual-own-growth-late-refusal")
++			positive := mode == "no-kb" || mode == "cross-kb" || mode == "raw-unconsumed"
++			if !positive {
++				require.True(t, triggered)
++				require.Error(t, writeErr)
++				require.Same(t, oldSnapshot, userGuard.snapshot, "failed transfer exposes no new snapshot")
++				require.Equal(t, oldLeases, userGuard.leases, "failed transfer leaves its prior owned leases intact")
++				var addedHeld int64
++				require.NoError(t, m.f.db.Table("nextcloud_content_leases").Where("lease_id NOT IN ? AND released_at_ms IS NULL", beforeIDs).Count(&addedHeld).Error)
++				require.Zero(t, addedHeld, "only newly added content pins are rolled back")
++			} else {
++				require.NoError(t, writeErr)
++				require.NoError(t, userGuard.Recheck())
++				require.NoError(t, oldCtx.Err(), "original guard cancellation relationship remains")
++				require.Equal(t, types.CallerFromContext(oldCtx), types.CallerFromContext(userGuard.Context()))
++				require.Empty(t, userGuard.snapshot.Messages[0].Images, "raw-only material remains unconsumed by this guard")
++				require.Equal(t, oldProof.BodyDigest, userGuard.snapshot.Proofs[0].BodyDigest)
++				require.Empty(t, userGuard.snapshot.Proofs[0].GeneratedFields, "physical hold does not recertify generated bytes as model input")
++				var broad, exact int
++				for _, lease := range userGuard.leases {
++					if lease.TenantID == 7 && lease.KnowledgeBaseID == "kb" {
++						if lease.KnowledgeID == "" {
++							broad++
++						}
++						if lease.KnowledgeID == k.ID {
++							exact++
++							require.Equal(t, actual.Proof.SourceLineage.Sources[0].Revision, uint64(lease.Epoch))
++						}
++					}
++				}
++				require.Equal(t, 1, broad)
++				require.Equal(t, 1, exact)
++				if mode == "cross-kb" {
++					var ordinary int
++					for _, lease := range userGuard.leases {
++						if lease.KnowledgeBaseID == "ordinary-a" && lease.KnowledgeID == "" {
++							ordinary++
++						}
++					}
++					require.Equal(t, 1, ordinary)
++				}
++				if mode == "raw-unconsumed" {
++					_, err = messages.GetMessage(writer, session.ID, user.ID)
++					require.NoError(t, err)
++					require.Empty(t, userGuard.snapshot.Messages[0].Images)
++				}
++			}
++			CloseMessageMaterialOutputBoundary(writer)
++			var liveContent, liveBodies int64
++			require.NoError(t, m.f.db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&liveContent).Error)
++			require.Zero(t, liveContent)
++			require.NoError(t, m.f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&liveBodies).Error)
++			require.Zero(t, liveBodies)
++		})
++	}
++}
++func TestMessageMaterialOwnGrowthActualSQLite(t *testing.T) {
++	runMessageMaterialOwnGrowthActual(t, false)
++}
++func TestPostgresMessageMaterialOwnGrowthActual(t *testing.T) {
++	runMessageMaterialOwnGrowthActual(t, true)
++}
 diff --git a/internal/application/service/message_material_replay.go b/internal/application/service/message_material_replay.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..0c0ae6f439854f42f807925df372bbc005572b51
@@ -114861,10 +115949,10 @@ index 0000000000000000000000000000000000000000..a467c96b333e3630db3ecd5b8d117e61
 +}
 diff --git a/internal/application/service/message_original_body_integration_test.go b/internal/application/service/message_original_body_integration_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..e38c8ef0fce2fdb3a0231141df1b4717debe1fe7
+index 0000000000000000000000000000000000000000..19198e4da76198a42c984a5619eb78563ffb1881
 --- /dev/null
 +++ b/internal/application/service/message_original_body_integration_test.go
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,454 @@
 +package service
 +
 +import (
@@ -114882,7 +115970,7 @@ index 0000000000000000000000000000000000000000..e38c8ef0fce2fdb3a0231141df1b4717
 +	"time"
 +)
 +
-+func messageBodyIntegrationFixture(t *testing.T, pg bool, before ...func(*gorm.DB, *repository.KnowledgeInputProvenanceStore, context.Context)) (*messageService, *knowledgeService, *repository.KnowledgeInputProvenanceStore, *gorm.DB, context.Context, *types.Session, *repository.OriginalBodyRetentionStore) {
++func messageBodyIntegrationFixture(t *testing.T, pg bool, before ...any) (*messageService, *knowledgeService, *repository.KnowledgeInputProvenanceStore, *gorm.DB, context.Context, *types.Session, *repository.OriginalBodyRetentionStore) {
 +	t.Helper()
 +	var messages *messageService
 +	var kg *knowledgeService
@@ -114920,7 +116008,14 @@ index 0000000000000000000000000000000000000000..e38c8ef0fce2fdb3a0231141df1b4717
 +		require.NoError(t, db.Create(session).Error)
 +	}
 +	if len(before) > 0 {
-+		before[0](db, store, ctx)
++		switch hook := before[0].(type) {
++		case func(*gorm.DB, *repository.KnowledgeInputProvenanceStore, context.Context):
++			hook(db, store, ctx)
++		case func(*messageService, *gorm.DB, *repository.KnowledgeInputProvenanceStore, context.Context, *types.Session):
++			hook(messages, db, store, ctx, session)
++		default:
++			t.Fatal("unsupported actual before-body fixture hook")
++		}
 +	}
 +	path := "../../../migrations/sqlite/000071_original_body_retention.up.sql"
 +	if pg {
@@ -115230,13 +116325,18 @@ index 0000000000000000000000000000000000000000..e38c8ef0fce2fdb3a0231141df1b4717
 +	var oldAdmission map[string]any
 +	require.NoError(t, db.Table("message_generated_field_admissions").Where("message_id=?", user.ID).Take(&oldAdmission).Error)
 +	slot := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
-+	legacyBytes, e := json.Marshal([]*types.MessageMaterialSnapshot{slot.Guards[0].snapshot})
++	legacyCopy := *slot.Guards[0].snapshot
++	legacyCopy.Messages = append([]*types.Message{}, legacyCopy.Messages...)
++	unadmitted := *legacyCopy.Messages[0]
++	unadmitted.Content = "unaccounted historical duplicate bytes"
++	legacyCopy.Messages[0] = &unadmitted
++	legacyBytes, e := json.Marshal([]*types.MessageMaterialSnapshot{&legacyCopy})
 +	require.NoError(t, e)
-+	oldAdmission["id"] = "known-legacy-parent-copy"
++	oldAdmission["id"] = "unknown-legacy-parent-copy"
 +	oldAdmission["parent_materials"] = string(legacyBytes)
 +	require.NoError(t, db.Table("message_generated_field_admissions").Create(&oldAdmission).Error)
 +	var legacyBodyID string
-+	require.NoError(t, db.Raw("SELECT body_id FROM original_body_field_heads WHERE source_table='message_generated_field_admissions' AND row_key='known-legacy-parent-copy'").Scan(&legacyBodyID).Error)
++	require.NoError(t, db.Raw("SELECT body_id FROM original_body_field_heads WHERE source_table='message_generated_field_admissions' AND row_key='unknown-legacy-parent-copy'").Scan(&legacyBodyID).Error)
 +	require.NotEmpty(t, legacyBodyID, "known old Messages copies enter conservative body inventory")
 +
 +	var scoped, leased int64
@@ -115261,9 +116361,9 @@ index 0000000000000000000000000000000000000000..e38c8ef0fce2fdb3a0231141df1b4717
 +	require.Zero(t, live, "closed generated body is not left unknown by a missing producer marker")
 +	var legacyState string
 +	require.NoError(t, db.Raw("SELECT state FROM original_body_payloads WHERE id=?", legacyBodyID).Scan(&legacyState).Error)
-+	require.Equal(t, "live", legacyState, "old parent copy lacks a supported immutable closure receipt and remains blocked")
-+	require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE id='known-legacy-parent-copy'").Scan(&parents).Error)
-+	require.Contains(t, parents, user.Content, "no current-body re-sign or unproved old-copy erase")
++	require.Equal(t, "live", legacyState, "unadmitted old copy bytes cannot acquire scope/closure proof from a current message")
++	require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE id='unknown-legacy-parent-copy'").Scan(&parents).Error)
++	require.Contains(t, parents, "unaccounted historical duplicate bytes", "no current-body re-sign or unproved old-copy erase")
 +
 +}
 +func TestMessageBodyActualGeneratedFieldSQLite(t *testing.T) {
@@ -118173,6 +119273,680 @@ index 0000000000000000000000000000000000000000..060494224a059855346239f197699e33
 +}
 +func TestPostgresOriginalBodyActualTagProducer(t *testing.T) {
 +	runOriginalBodyActualTagProducer(t, true)
++}
+diff --git a/internal/application/service/parent_body_copy_integration_test.go b/internal/application/service/parent_body_copy_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff25226b120fba9cef83145db9d9541baff1de20
+--- /dev/null
++++ b/internal/application/service/parent_body_copy_integration_test.go
+@@ -0,0 +1,365 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++)
++
++func runParentBodyCopyActual793(t *testing.T, pg bool) {
++	runParentBodyCopyCase(t, pg, "positive")
++}
++func runParentBodyCopyCase(t *testing.T, pg bool, mode string) {
++	var user *types.Message
++	var rawBefore string
++	messages, _, _, db, ctx, session, body := messageBodyIntegrationFixture(t, pg, func(messages *messageService, db *gorm.DB, store *repository.KnowledgeInputProvenanceStore, ctx context.Context, session *types.Session) {
++		var e error
++		input := &types.Message{SessionID: session.ID, RequestID: "actual-old-793-parent", Role: "user", Content: "real old parent body sentinel", IsCompleted: true}
++		if mode == "unknown-scope" {
++			input.ExecutionContext = types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}
++		}
++		user, e = messages.CreateMessage(ctx, input)
++		require.NoError(t, e)
++		writer := WithMessageMaterialOutputBoundary(ctx)
++		defer CloseMessageMaterialOutputBoundary(writer)
++		turn := types.NewRAGSourceLineage(func(checkCtx context.Context, lineage *types.SourceLineage) error {
++			if e := lineage.RequireComplete(); e != nil {
++				return e
++			}
++			return CheckMessageMaterialOutputBoundary(writer)
++		})
++		writer = types.WithRAGSourceLineage(writer, turn)
++		_, e = messages.GetMessage(writer, session.ID, user.ID)
++		require.NoError(t, e)
++		slot := writer.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++		bytes, e := json.Marshal([]*types.MessageMaterialSnapshot{slot.Guards[0].snapshot})
++		require.NoError(t, e)
++		// Restore the exact persistence expression in frozen 7930: marshal actual
++		// boundary.Parents, with all genuine actor/read/admission controls intact.
++		name := "actual-793-parent-serializer"
++		require.NoError(t, db.Callback().Create().Before("gorm:create").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Table != "message_generated_field_admissions" {
++				return
++			}
++			value := tx.Statement.ReflectValue
++			for value.Kind() == reflect.Ptr {
++				value = value.Elem()
++			}
++			field := value.FieldByName("ParentMaterials")
++			require.True(t, field.CanSet())
++			field.SetString(string(bytes))
++		}))
++		require.NoError(t, messages.UpdateMessageRenderedContent(writer, session.ID, user.ID, "actual admitted rendered output"))
++		require.NoError(t, db.Callback().Create().Remove(name))
++		require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE message_id=? AND field='rendered_content'", user.ID).Scan(&rawBefore).Error)
++		require.Contains(t, rawBefore, user.Content)
++
++	})
++	if mode == "unknown-scope" {
++		_, err := body.Inventory(ctx, 100)
++		require.NoError(t, err)
++		var scopes int64
++		require.NoError(t, db.Raw("SELECT count(*) FROM original_body_lease_scopes s JOIN original_body_field_heads h ON h.body_id=s.body_id JOIN message_generated_field_admissions a ON a.id=h.row_key WHERE h.source_table='message_generated_field_admissions' AND a.message_id=?", user.ID).Scan(&scopes).Error)
++		require.Zero(t, scopes, "an actual pre152 KB selector without immutable resolved scope cannot be backfilled from current KB metadata")
++		require.NoError(t, messages.DeleteMessage(ctx, session.ID, user.ID))
++		deleted := "datetime('now','-2 hours')"
++		if pg {
++			deleted = "CURRENT_TIMESTAMP-INTERVAL '2 hours'"
++		}
++		require.NoError(t, db.Exec("UPDATE messages SET deleted_at="+deleted+" WHERE id=?", user.ID).Error)
++		_, err = body.PurgeDue(context.Background(), 100)
++		require.NoError(t, err)
++		var retained string
++		require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE message_id=? AND field='rendered_content'", user.ID).Scan(&retained).Error)
++		require.Contains(t, retained, user.Content)
++		return
++	}
++	if mode == "unknown-proof" {
++		// A historical corrupted extra body is not covered by the admitted
++		// source digest. Maintenance seeding cannot make it an actual producer.
++		var admission map[string]any
++		require.NoError(t, db.Table("message_generated_field_admissions").Where("message_id=? AND field='rendered_content'", user.ID).Take(&admission).Error)
++		var snapshots []*types.MessageMaterialSnapshot
++		require.NoError(t, json.Unmarshal([]byte(rawBefore), &snapshots))
++		snapshots[0].Messages[0].Content = "unaccounted historical copied bytes"
++		altered, e := json.Marshal(snapshots)
++		require.NoError(t, e)
++		admission["id"] = "unknown-old-parent-copy"
++		admission["parent_materials"] = string(altered)
++		require.NoError(t, db.Table("message_generated_field_admissions").Create(&admission).Error)
++		require.NoError(t, messages.DeleteMessage(ctx, session.ID, user.ID))
++		deleted := "datetime('now','-2 hours')"
++		if pg {
++			deleted = "CURRENT_TIMESTAMP-INTERVAL '2 hours'"
++		}
++		require.NoError(t, db.Exec("UPDATE messages SET deleted_at="+deleted+" WHERE id=?", user.ID).Error)
++		_, e = body.Inventory(ctx, 100)
++		require.NoError(t, e)
++		_, e = body.PurgeDue(context.Background(), 100)
++		require.NoError(t, e)
++		var marker int64
++		require.NoError(t, db.Raw("SELECT count(*) FROM original_body_lease_scopes s JOIN original_body_field_heads h ON h.body_id=s.body_id WHERE h.source_table='message_generated_field_admissions' AND h.row_key='unknown-old-parent-copy' AND s.knowledge_base_id='' ").Scan(&marker).Error)
++		require.Zero(t, marker)
++		var remains string
++		require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE id='unknown-old-parent-copy'").Scan(&remains).Error)
++		require.Contains(t, remains, "unaccounted historical copied bytes")
++		return
++	}
++	// Real legacy rows are now present before migration 152 callbacks/inventory.
++	_, e := body.Inventory(ctx, 100)
++	require.NoError(t, e)
++	var bodyID string
++	require.NoError(t, db.Raw("SELECT h.body_id FROM original_body_field_heads h JOIN message_generated_field_admissions a ON a.id=h.row_key WHERE h.source_table='message_generated_field_admissions' AND a.message_id=? AND a.field='rendered_content'", user.ID).Scan(&bodyID).Error)
++	require.NotEmpty(t, bodyID)
++	var marker int64
++	require.NoError(t, db.Table("original_body_lease_scopes").Where("body_id=? AND tenant_id=7 AND knowledge_base_id=''", bodyID).Count(&marker).Error)
++	require.Equal(t, int64(1), marker, "immutable original no-KB controls account for the old copy without current-pointer backfill")
++	restore := parentCopyDatabaseSnapshot(t, db, pg)
++	n, e := body.PurgeDue(context.Background(), 100)
++	require.NoError(t, e)
++	require.Zero(t, n, "actual current host protects its old immutable parent copy")
++	guard, e := messages.beginMessageMaterialRead(ctx, types.MessageMaterialReadRequest{TenantID: 7, SessionID: session.ID, MessageIDs: []string{user.ID}})
++	require.NoError(t, e)
++	var held int64
++	require.NoError(t, db.Table("original_body_leases").Where("body_id=? AND released_at_ms IS NULL", bodyID).Count(&held).Error)
++	require.Positive(t, held, "actual original reader owns copied parent body lease")
++	require.NoError(t, messages.DeleteMessage(ctx, session.ID, user.ID))
++	deleted := "datetime('now','-2 hours')"
++	if pg {
++		deleted = "CURRENT_TIMESTAMP-INTERVAL '2 hours'"
++	}
++	require.NoError(t, db.Exec("UPDATE messages SET deleted_at="+deleted+" WHERE id=?", user.ID).Error)
++	n, e = body.PurgeDue(context.Background(), 100)
++	require.NoError(t, e)
++	require.Zero(t, n, "actual held reader prevents purge after real closure")
++	guard.Close()
++	n, e = body.PurgeDue(context.Background(), 100)
++	require.NoError(t, e)
++	require.Positive(t, n)
++	var cleared string
++	require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE message_id=? AND field='rendered_content'", user.ID).Scan(&cleared).Error)
++	require.NotContains(t, cleared, user.Content)
++	var a, b []map[string]json.RawMessage
++	require.NoError(t, json.Unmarshal([]byte(rawBefore), &a))
++	require.NoError(t, json.Unmarshal([]byte(cleared), &b))
++	for _, entry := range a {
++		delete(entry, "Messages")
++	}
++	for _, entry := range b {
++		delete(entry, "Messages")
++	}
++	require.Equal(t, a, b, "only exact Messages leaf is cleared; all immutable metadata/proofs survive")
++	restore()
++	// Restoring all DB rows leaves the independent current external decision.
++	body = repository.NewOriginalBodyRetentionStore(db)
++	require.Error(t, body.VerifyJournalReady())
++	_, e = body.ReconcileExternalPurge(context.Background())
++	require.Error(t, e, "restored current ownership must be closed again before replay")
++	// App reads remain fail-closed during restore reconciliation. The offline
++	// operator reestablishes the already observed deletion independently.
++	require.NoError(t, db.Exec("UPDATE messages SET deleted_at="+deleted+" WHERE id=?", user.ID).Error)
++	_, e = body.ReconcileExternalPurge(context.Background())
++	require.NoError(t, e)
++	require.NoError(t, body.VerifyJournalReady())
++	var rowID string
++	require.NoError(t, db.Raw("SELECT id FROM message_generated_field_admissions WHERE message_id=? AND field='rendered_content'", user.ID).Scan(&rowID).Error)
++
++	require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE id=?", rowID).Scan(&cleared).Error)
++	require.NotContains(t, cleared, user.Content)
++}
++func TestParentBodyCopyActual793SQLite(t *testing.T)   { runParentBodyCopyActual793(t, false) }
++func TestPostgresParentBodyCopyActual793(t *testing.T) { runParentBodyCopyActual793(t, true) }
++
++func parentCopyDatabaseSnapshot(t *testing.T, db *gorm.DB, pg bool) func() {
++	if pg {
++		var schema string
++		require.NoError(t, db.Raw("SELECT current_schema()").Scan(&schema).Error)
++		backup := "parent_snapshot_" + strings.ReplaceAll(uuid.NewString(), "-", "")
++		require.NoError(t, db.Exec("CREATE SCHEMA "+backup).Error)
++		t.Cleanup(func() { db.Exec("DROP SCHEMA " + backup + " CASCADE") })
++		var tables []string
++		require.NoError(t, db.Raw("SELECT table_name FROM information_schema.tables WHERE table_schema=? AND table_type='BASE TABLE' ORDER BY table_name", schema).Scan(&tables).Error)
++		for _, table := range tables {
++			require.NoError(t, db.Exec("CREATE TABLE "+backup+"."+table+" AS TABLE "+schema+"."+table).Error)
++		}
++		return func() {
++			qualified := []string{}
++			for _, table := range tables {
++				qualified = append(qualified, schema+"."+table)
++			}
++			require.NoError(t, db.Exec("TRUNCATE "+strings.Join(qualified, ",")+" CASCADE").Error)
++			require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
++				if e := tx.Exec("SET LOCAL session_replication_role=replica").Error; e != nil {
++					return e
++				}
++				for _, table := range tables {
++					if e := tx.Exec("INSERT INTO " + schema + "." + table + " SELECT * FROM " + backup + "." + table).Error; e != nil {
++						return e
++					}
++				}
++				return nil
++			}))
++		}
++	}
++	var files []struct {
++		Seq        int
++		Name, File string
++	}
++	require.NoError(t, db.Raw("PRAGMA database_list").Scan(&files).Error)
++	var file string
++	for _, f := range files {
++		if f.Name == "main" {
++			file = f.File
++		}
++	}
++	require.NotEmpty(t, file)
++	snapshot := filepath.Join(t.TempDir(), "complete-copy-snapshot.sqlite")
++	require.NoError(t, db.Exec("VACUUM INTO ?", snapshot).Error)
++	return func() {
++		sql, e := db.DB()
++		require.NoError(t, e)
++		require.NoError(t, sql.Close())
++		bytes, e := os.ReadFile(snapshot)
++		require.NoError(t, e)
++		require.NoError(t, os.WriteFile(file, bytes, 0600))
++		fresh, e := gorm.Open(sqlite.Open(file), &gorm.Config{})
++		require.NoError(t, e)
++		sql, e = fresh.DB()
++		require.NoError(t, e)
++		sql.SetMaxOpenConns(1)
++		t.Cleanup(func() { sql.Close() })
++		db.Config.ConnPool = fresh.Config.ConnPool
++		db.Statement.ConnPool = fresh.Statement.ConnPool
++	}
++}
++
++func TestParentBodyCopyUnknownProofSQLite(t *testing.T) {
++	runParentBodyCopyCase(t, false, "unknown-proof")
++}
++func TestPostgresParentBodyCopyUnknownProof(t *testing.T) {
++	runParentBodyCopyCase(t, true, "unknown-proof")
++}
++
++func TestParentBodyCopyUnknownOriginalScopeSQLite(t *testing.T) {
++	runParentBodyCopyCase(t, false, "unknown-scope")
++}
++func TestPostgresParentBodyCopyUnknownOriginalScope(t *testing.T) {
++	runParentBodyCopyCase(t, true, "unknown-scope")
++}
++
++// Current receipt disappearance is deliberately corrupted volatile bookkeeping,
++// not a lifetime close or a new producer proof. Both old copies below came from
++// the actual writer/old serializer; each original host must close independently.
++func runParentBodyCopyMultipleLiveHosts(t *testing.T, pg bool) {
++	var hosts []*types.Message
++	messages, _, _, db, ctx, session, body := messageBodyIntegrationFixture(t, pg, func(messages *messageService, db *gorm.DB, store *repository.KnowledgeInputProvenanceStore, ctx context.Context, session *types.Session) {
++		source, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-multi-copy-source", Role: "user", Content: "actual original shared parent input", IsCompleted: true})
++		require.NoError(t, err)
++		for _, request := range []string{"old-copy-host-one", "old-copy-host-two"} {
++			host, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: request, Role: "user", Content: request, IsCompleted: true})
++			require.NoError(t, err)
++			hosts = append(hosts, host)
++		}
++		for _, host := range hosts {
++			writer := WithMessageMaterialOutputBoundary(ctx)
++			defer CloseMessageMaterialOutputBoundary(writer)
++			writer = types.WithRAGSourceLineage(writer, types.NewRAGSourceLineage(func(check context.Context, lineage *types.SourceLineage) error {
++				if err := lineage.RequireComplete(); err != nil {
++					return err
++				}
++				return CheckMessageMaterialOutputBoundary(writer)
++			}))
++			_, err := messages.GetMessage(writer, session.ID, source.ID)
++			require.NoError(t, err)
++			_, err = messages.GetMessage(writer, session.ID, host.ID)
++			require.NoError(t, err)
++			parents, err := messageMaterialBoundarySnapshots(writer)
++			require.NoError(t, err)
++			oldBytes, err := json.Marshal(parents)
++			require.NoError(t, err)
++			require.NoError(t, db.Callback().Create().Before("gorm:create").Register("actual-multi-old-serializer", func(tx *gorm.DB) {
++				if tx.Statement.Table != "message_generated_field_admissions" {
++					return
++				}
++				value := tx.Statement.ReflectValue
++				for value.Kind() == reflect.Ptr {
++					value = value.Elem()
++				}
++				if value.FieldByName("MessageID").String() == host.ID && value.FieldByName("Field").String() == "rendered_content" {
++					value.FieldByName("ParentMaterials").SetString(string(oldBytes))
++				}
++			}))
++			require.NoError(t, messages.UpdateMessageRenderedContent(writer, session.ID, host.ID, "actual derived output for "+host.RequestID))
++			require.NoError(t, db.Callback().Create().Remove("actual-multi-old-serializer"))
++			CloseMessageMaterialOutputBoundary(writer)
++		}
++	})
++	_, err := body.Inventory(ctx, 100)
++	require.NoError(t, err)
++	ids := map[string]string{}
++	for _, host := range hosts {
++		var id string
++		require.NoError(t, db.Raw("SELECT h.body_id FROM original_body_field_heads h JOIN message_generated_field_admissions a ON a.id=h.row_key WHERE h.source_table='message_generated_field_admissions' AND a.message_id=? AND a.field='rendered_content'", host.ID).Scan(&id).Error)
++		require.NotEmpty(t, id)
++		ids[host.ID] = id
++		var complete int64
++		require.NoError(t, db.Table("original_body_lease_scopes").Where("body_id=? AND tenant_id=7 AND knowledge_base_id=''", id).Count(&complete).Error)
++		require.Equal(t, int64(1), complete)
++	}
++	require.NotEqual(t, ids[hosts[0].ID], ids[hosts[1].ID], "independent original admissions keep distinct physical copy identities")
++	// Do not alter any immutable original admission or body proof. Simulate
++	// loss of only the current incoming field-receipt bookkeeping for both hosts.
++	require.NoError(t, db.Exec("DELETE FROM message_generated_field_receipts WHERE message_id IN ? AND field='rendered_content'", []string{hosts[0].ID, hosts[1].ID}).Error)
++	assertState := func(host *types.Message, want string) {
++		var state string
++		require.NoError(t, db.Table("original_body_payloads").Select("state").Where("id=?", ids[host.ID]).Scan(&state).Error)
++		require.Equal(t, want, state)
++	}
++	_, err = body.PurgeDue(context.Background(), 100)
++	require.NoError(t, err)
++	for _, host := range hosts {
++		assertState(host, "live")
++	}
++	closeHost := func(host *types.Message) {
++		require.NoError(t, messages.DeleteMessage(ctx, session.ID, host.ID))
++		deleted := "datetime('now','-2 hours')"
++		if pg {
++			deleted = "CURRENT_TIMESTAMP-INTERVAL '2 hours'"
++		}
++		require.NoError(t, db.Exec("UPDATE messages SET deleted_at="+deleted+" WHERE id=?", host.ID).Error)
++	}
++	closeHost(hosts[0])
++	_, err = body.PurgeDue(context.Background(), 100)
++	require.NoError(t, err)
++	assertState(hosts[0], "purged")
++	assertState(hosts[1], "live")
++	_, err = messages.GetMessage(ctx, session.ID, hosts[0].ID)
++	require.Error(t, err, "closed consumer cannot restore the cleared copy")
++	closeHost(hosts[1])
++	_, err = body.PurgeDue(context.Background(), 100)
++	require.NoError(t, err)
++	assertState(hosts[1], "purged")
++	for _, host := range hosts {
++		var carrier string
++		require.NoError(t, db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE message_id=? AND field='rendered_content'", host.ID).Scan(&carrier).Error)
++		require.NotContains(t, carrier, "actual original shared parent input")
++		require.Contains(t, carrier, "MetadataDigest")
++	}
++}
++
++func TestParentBodyCopyMultipleLiveHostsSQLite(t *testing.T) {
++	runParentBodyCopyMultipleLiveHosts(t, false)
++}
++func TestPostgresParentBodyCopyMultipleLiveHosts(t *testing.T) {
++	runParentBodyCopyMultipleLiveHosts(t, true)
++}
+diff --git a/internal/application/service/parent_copy_generated_dependency_actual_test.go b/internal/application/service/parent_copy_generated_dependency_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4176d0dbecf96762531ed2c416249e01a49efda9
+--- /dev/null
++++ b/internal/application/service/parent_copy_generated_dependency_actual_test.go
+@@ -0,0 +1,297 @@
++package service
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"os"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++// Raw user input has no KB dependency. Its actual generated image field uses
++// a separately admitted source-backed answer. Only the old Messages serializer
++// is restored at the real generated-field Create boundary; receipts and parent
++// material are obtained from the actual producers/readers, never raw SQL seals.
++func runParentCopyActualGeneratedDependency(t *testing.T, pg bool) {
++	for _, mode := range []string{"known-source-closure", "source-still-active", "missing-source-coverage", "missing-existing-scope", "corrupt-existing-scope", "changed-generated-source", "changed-generated-parent", "wrong-generation", "wrong-admission"} {
++		t.Run(mode, func(t *testing.T) {
++			m := newMachinePipelineFixture(t, pg)
++			k := m.ingest(t)
++			for i := 0; i < len(m.f.queue.tasks); i++ {
++				require.NoError(t, m.run(t, m.f.queue.tasks[i]))
++			}
++			migration := m.f.db
++			directory := "sqlite"
++			names := []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql", "000070_message_original_materials.up.sql"}
++			artifactType := "TEXT"
++			if pg {
++				directory, artifactType = "versioned", "JSONB"
++				names = []string{"000103_message_artifacts_table.up.sql", "000107_message_artifacts_deleted_at.up.sql", "000151_message_original_materials.up.sql"}
++				pool, err := m.f.db.DB()
++				require.NoError(t, err)
++				migration, err = gorm.Open(postgres.New(postgres.Config{Conn: pool, PreferSimpleProtocol: true}), &gorm.Config{})
++				require.NoError(t, err)
++				require.NoError(t, migration.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public`).Error)
++				require.NoError(t, migration.Exec(`ALTER EXTENSION "uuid-ossp" SET SCHEMA public`).Error)
++				require.NoError(t, migration.Exec(`CREATE FUNCTION uuid_generate_v4() RETURNS uuid LANGUAGE sql AS $$ SELECT public.uuid_generate_v4() $$`).Error)
++			}
++			if !m.f.db.Migrator().HasColumn(&types.Message{}, "artifacts") {
++				require.NoError(t, migration.Exec("ALTER TABLE messages ADD COLUMN artifacts "+artifactType).Error)
++			}
++			for _, name := range names {
++				ddl, err := os.ReadFile("../../../migrations/" + directory + "/" + name)
++				require.NoError(t, err)
++				require.NoError(t, migration.Exec(string(ddl)).Error)
++			}
++			require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(m.f.db))
++			messages := &messageService{messageRepo: repository.NewMessageRepository(m.f.db), sessionRepo: repository.NewSessionRepository(m.f.db), sourceLineageGuard: m.f.guard, kbService: m.f.s.kbService, knowService: m.f.s}
++			ConfigureMessageMaterialProvenance(messages, m.f.store)
++			repository.ConfigureMessageOriginalBodyAvailability(m.f.store, repository.CheckOriginalBodyAvailableInTx)
++			ctx := context.WithValue(m.f.ctx, types.UserIDContextKey, types.CallerFromContext(m.f.ctx).UserID)
++			session := &types.Session{ID: "actual-generated-parent-copy-session", TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++			require.NoError(t, m.f.db.Create(session).Error)
++			user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "raw-no-kb", Role: "user", Content: "actual user raw input without a KB", IsCompleted: true})
++			require.NoError(t, err)
++			host, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "copy-host", Role: "user", Content: "actual host of legacy copied material", IsCompleted: true})
++			require.NoError(t, err)
++			parent, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "source-parent", Role: "assistant", ExecutionContext: types.MessageExecutionContext{KnowledgeBaseIDs: []string{"kb"}}})
++			require.NoError(t, err)
++			actual, err := m.f.store.CaptureKnowledgeOutputInputs(ctx, types.KnowledgeBuildInputCaptureRequest{TenantID: 7, KnowledgeBaseID: "kb", KnowledgeID: k.ID})
++			require.NoError(t, err)
++			parent.Content, parent.IsCompleted, parent.SourceLineage = "actual source-derived answer", true, actual.Proof.SourceLineage
++			require.NoError(t, messages.UpdateMessage(ctx, parent))
++			scope := access.LineageReadScope{Targets: []*types.SearchTarget{{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: "kb"}}}
++			writer := WithMessageMaterialOutputBoundary(ctx)
++			defer CloseMessageMaterialOutputBoundary(writer)
++			writer = types.WithRAGSourceLineage(writer, types.NewRAGSourceLineage(func(check context.Context, l *types.SourceLineage) error { return m.f.guard.Check(check, l, scope) }))
++			_, err = messages.GetMessage(writer, session.ID, parent.ID)
++			require.NoError(t, err)
++			_, err = messages.GetMessage(writer, session.ID, user.ID)
++			require.NoError(t, err)
++			require.NoError(t, messages.UpdateMessageImages(writer, session.ID, user.ID, types.MessageImages{{URL: "https://fixture.invalid/actual-derived-image", Caption: "actual derived image field"}}))
++			CloseMessageMaterialOutputBoundary(writer)
++			copyWriter := WithMessageMaterialOutputBoundary(context.WithValue(ctx, agentHistoryCurrentRequestKey{}, "different-current-request"))
++			defer CloseMessageMaterialOutputBoundary(copyWriter)
++			copyWriter = types.WithRAGSourceLineage(copyWriter, types.NewRAGSourceLineage(func(check context.Context, l *types.SourceLineage) error { return m.f.guard.Check(check, l, scope) }))
++			_, err = messages.GetMessage(copyWriter, session.ID, user.ID)
++			require.NoError(t, err)
++			parents, err := messageMaterialBoundarySnapshots(copyWriter)
++			require.NoError(t, err)
++			require.Len(t, parents, 1)
++			require.NotEmpty(t, parents[0].Proofs[0].GeneratedFields)
++			var imageProof *types.MessageGeneratedFieldProof
++			for _, field := range parents[0].Proofs[0].GeneratedFields {
++				if field.Field == "images" {
++					imageProof = field
++				}
++			}
++			require.NotNil(t, imageProof)
++			// A genuine raw no-KB input later consumes B through the actual image
++			// producer. The old serializer preserved both proof lineages.
++			require.Empty(t, user.ExecutionContext.KnowledgeBaseIDs)
++			require.Empty(t, user.SourceLineage.Sources)
++			require.Len(t, imageProof.SourceLineage.Sources, 1)
++			require.Len(t, parents[0].Proofs[0].SourceLineage.Sources, 1)
++			_, err = messages.GetMessage(copyWriter, session.ID, host.ID)
++			require.NoError(t, err)
++			originalParents, err := messageMaterialBoundarySnapshots(copyWriter)
++			require.NoError(t, err)
++			require.Len(t, originalParents, 2)
++			// Negative maintenance seeds represent deliberately corrupt historical
++			// associations. They are never an authenticated producer or a positive
++			// receipt; inventory must leave their copied body unaccounted.
++			if mode == "changed-generated-source" {
++				imageProof.SourceLineage, _ = types.NewCompleteSourceLineage()
++			}
++			if mode == "changed-generated-parent" {
++				var corrupted map[string]any
++				require.NoError(t, m.f.db.Table("message_generated_field_admissions").Where("id=?", imageProof.AdmissionID).Take(&corrupted).Error)
++				corrupted["id"] = "unknown-historical-generated-parent"
++				corrupted["parent_materials"] = `[]`
++				require.NoError(t, m.f.db.Table("message_generated_field_admissions").Create(&corrupted).Error)
++				imageProof.AdmissionID = corrupted["id"].(string)
++			}
++			if mode == "wrong-generation" {
++				parents[0].Proofs[0].GenerationID = "unknown-original-generation"
++			}
++			if mode == "wrong-admission" {
++				parents[0].Proofs[0].AdmissionID = "unknown-material-admission"
++			}
++			oldParents := append(parents, originalParents[1])
++			oldBytes, err := json.Marshal(oldParents)
++			require.NoError(t, err)
++			var carrierID string
++			if mode == "missing-existing-scope" || mode == "corrupt-existing-scope" {
++				require.NoError(t, m.f.db.Callback().Create().Before("gorm:create").Register("historical-copy-scope-corruption", func(tx *gorm.DB) {
++					if tx.Statement.Table != "original_body_lease_scopes" || carrierID == "" {
++						return
++					}
++					value := tx.Statement.ReflectValue
++					for value.Kind() == reflect.Ptr {
++						value = value.Elem()
++					}
++					if value.Kind() != reflect.Slice || value.Len() == 0 {
++						return
++					}
++					bodyID := value.Index(0).FieldByName("BodyID").String()
++					var domain string
++					require.NoError(t, tx.Session(&gorm.Session{NewDB: true}).Table("original_body_payloads").Select("origin_domain_sha256").Where("id=?", bodyID).Scan(&domain).Error)
++					identity := sha256.Sum256([]byte("7///message_generated_field_admissions/" + carrierID))
++					if domain != hex.EncodeToString(identity[:]) {
++						return
++					}
++					if mode == "corrupt-existing-scope" {
++						for i := 0; i < value.Len(); i++ {
++							if value.Index(i).FieldByName("KnowledgeBaseID").String() == "kb" {
++								value.Index(i).FieldByName("KnowledgeBaseID").SetString("unproven-original-kb")
++							}
++						}
++						return
++					}
++					filtered := reflect.MakeSlice(value.Type(), 0, value.Len())
++					for i := 0; i < value.Len(); i++ {
++						if value.Index(i).FieldByName("KnowledgeBaseID").String() != "kb" {
++							filtered = reflect.Append(filtered, value.Index(i))
++						}
++					}
++					value.Set(filtered)
++				}))
++			}
++			require.NoError(t, m.f.db.Callback().Create().Before("gorm:create").Register("old-parent-copy-serializer", func(tx *gorm.DB) {
++				if tx.Statement.Table != "message_generated_field_admissions" {
++					return
++				}
++				v := tx.Statement.ReflectValue
++				for v.Kind() == reflect.Ptr {
++					v = v.Elem()
++				}
++				if v.FieldByName("Field").String() == "rendered_content" {
++					carrierID = v.FieldByName("ID").String()
++					v.FieldByName("ParentMaterials").SetString(string(oldBytes))
++				}
++			}))
++			writeErr := messages.UpdateMessageRenderedContent(copyWriter, session.ID, host.ID, "actual new rendered result")
++			if mode == "wrong-generation" || mode == "wrong-admission" {
++				require.Error(t, writeErr, "the actual writer recheck must refuse an untrusted old parent association")
++			} else {
++				require.NoError(t, writeErr)
++			}
++			require.NoError(t, m.f.db.Callback().Create().Remove("old-parent-copy-serializer"))
++			if mode == "missing-existing-scope" || mode == "corrupt-existing-scope" {
++				require.NoError(t, m.f.db.Callback().Create().Remove("historical-copy-scope-corruption"))
++			}
++			var copyID string
++			require.NoError(t, m.f.db.Raw("SELECT h.body_id FROM original_body_field_heads h JOIN message_generated_field_admissions a ON a.id=h.row_key WHERE h.source_table='message_generated_field_admissions' AND a.message_id=? AND a.field='rendered_content'", host.ID).Scan(&copyID).Error)
++			require.NotEmpty(t, copyID)
++			var scopeCount int64
++			require.NoError(t, m.f.db.Table("original_body_lease_scopes").Where("body_id=? AND tenant_id=7 AND knowledge_base_id='kb'", copyID).Count(&scopeCount).Error)
++			if mode == "wrong-generation" || mode == "wrong-admission" || mode == "changed-generated-source" || mode == "changed-generated-parent" || mode == "missing-existing-scope" || mode == "corrupt-existing-scope" {
++				require.Zero(t, scopeCount)
++				_, err = repository.NewOriginalBodyRetentionStore(m.f.db).Inventory(ctx, 100)
++				require.NoError(t, err)
++				require.NoError(t, m.f.db.Table("original_body_lease_scopes").Where("body_id=? AND knowledge_base_id='kb'", copyID).Count(&scopeCount).Error)
++				require.Zero(t, scopeCount, "scan must not upgrade a present inconsistent historical marker")
++				CloseMessageMaterialOutputBoundary(copyWriter)
++				require.NoError(t, messages.DeleteMessage(ctx, session.ID, host.ID))
++				deleted := "datetime('now','-2 hours')"
++				if pg {
++					deleted = "CURRENT_TIMESTAMP-INTERVAL '2 hours'"
++				}
++				require.NoError(t, m.f.db.Exec("UPDATE messages SET deleted_at="+deleted+" WHERE id=?", host.ID).Error)
++				_, err = repository.NewOriginalBodyRetentionStore(m.f.db).PurgeDue(context.Background(), 100)
++				require.NoError(t, err)
++				var retained string
++				require.NoError(t, m.f.db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE message_id=? AND field='rendered_content'", host.ID).Scan(&retained).Error)
++				require.Contains(t, retained, "actual user raw input without a KB")
++				return
++			}
++			require.Positive(t, scopeCount, "generated KB/source dependency cannot disappear behind raw no-KB user input")
++			var sourceRef int64
++			require.NoError(t, m.f.db.Raw("SELECT count(*) FROM original_body_parent_refs p JOIN knowledge_input_admissions a ON a.admission_id=p.admission_id WHERE p.body_id=? AND a.knowledge_id=? AND a.build_generation=?", copyID, k.ID, actual.Proof.SourceLineage.Sources[0].Revision).Scan(&sourceRef).Error)
++			require.Equal(t, int64(1), sourceRef, "journal scope must name the original captured source admission/version")
++			guard, err := messages.beginMessageMaterialRead(ctx, types.MessageMaterialReadRequest{TenantID: 7, SessionID: session.ID, MessageIDs: []string{host.ID}})
++			require.NoError(t, err)
++			var held int64
++			require.NoError(t, m.f.db.Table("original_body_leases").Where("body_id=? AND released_at_ms IS NULL", copyID).Count(&held).Error)
++			require.Positive(t, held)
++			var exactHeld int64
++			require.NoError(t, m.f.db.Table("nextcloud_content_leases").Where("tenant_id=7 AND knowledge_base_id='kb' AND knowledge_id=? AND epoch=? AND kind='read' AND released_at_ms IS NULL", k.ID, actual.Proof.SourceLineage.Sources[0].Revision).Count(&exactHeld).Error)
++			require.Positive(t, exactHeld, "the real material guard also holds the exact originally captured source version")
++			require.NoError(t, messages.DeleteMessage(ctx, session.ID, host.ID))
++			deleted := "datetime('now','-2 hours')"
++			if pg {
++				deleted = "CURRENT_TIMESTAMP-INTERVAL '2 hours'"
++			}
++			require.NoError(t, m.f.db.Exec("UPDATE messages SET deleted_at="+deleted+" WHERE id=?", host.ID).Error)
++			bodyStore := repository.NewOriginalBodyRetentionStore(m.f.db)
++			_, err = bodyStore.PurgeDue(context.Background(), 100)
++			require.NoError(t, err)
++			assertCopyLive := func() {
++				var value string
++				require.NoError(t, m.f.db.Raw("SELECT state FROM original_body_payloads WHERE id=?", copyID).Scan(&value).Error)
++				require.Equal(t, "live", value)
++			}
++			assertCopyLive()
++			guard.Close()
++			CloseMessageMaterialOutputBoundary(copyWriter)
++			declareCoverage := func() {
++				// Explicit isolated test-contract rollout declaration, not a
++				// producer/material seal or production coverage evidence. All
++				// real fixture workers and material/source guards have drained.
++				clock := "CAST((julianday('now')-2440587.5)*86400000 AS BIGINT)"
++				if pg {
++					clock = "CAST(EXTRACT(EPOCH FROM clock_timestamp())*1000 AS BIGINT)"
++				}
++				require.NoError(t, m.f.db.Exec("INSERT INTO nextcloud_content_lease_coverage(tenant_id,knowledge_base_id,activated_at_ms,legacy_drained_at_ms,reader_revision,builder_revision) VALUES(7,'kb',"+clock+","+clock+",'actual-copy-pipeline-reader-contract','actual-copy-pipeline-builder-contract')").Error)
++			}
++			if mode != "missing-source-coverage" {
++				declareCoverage()
++			}
++			if mode == "source-still-active" {
++				_, err = bodyStore.PurgeDue(context.Background(), 100)
++				require.NoError(t, err)
++				assertCopyLive()
++				return
++			}
++			versions := m.f.s.repo.(interface {
++				TombstoneNextcloudVersion(context.Context, uint64, string, string, string) error
++			})
++			require.NoError(t, versions.TombstoneNextcloudVersion(ctx, 7, "kb", m.ds.ID, "nextcloud:instance:77"))
++			m.allow.Store(false)
++			_, err = messages.GetMessage(context.WithValue(ctx, agentHistoryCurrentRequestKey{}, "source-consuming-reader"), session.ID, user.ID)
++			require.Error(t, err, "original generated consumer must refuse retired source before copy purge")
++			_, err = messages.GetMessage(ctx, session.ID, host.ID)
++			require.Error(t, err, "closed host must not read or restore the copied field")
++
++			_, err = bodyStore.PurgeDue(context.Background(), 100)
++			require.NoError(t, err)
++			if mode == "missing-source-coverage" {
++				assertCopyLive()
++				return
++			}
++			var cleared string
++			require.NoError(t, m.f.db.Raw("SELECT parent_materials FROM message_generated_field_admissions WHERE message_id=? AND field='rendered_content'", host.ID).Scan(&cleared).Error)
++			require.NotContains(t, cleared, "actual user raw input without a KB")
++			require.NotContains(t, cleared, "actual-derived-image")
++			require.Contains(t, cleared, "MetadataDigest")
++			require.False(t, strings.Contains(cleared, `"Messages":[`))
++		})
++	}
++}
++
++func TestParentCopyActualGeneratedDependencySQLite(t *testing.T) {
++	runParentCopyActualGeneratedDependency(t, false)
++}
++func TestPostgresParentCopyActualGeneratedDependency(t *testing.T) {
++	runParentCopyActualGeneratedDependency(t, true)
 +}
 diff --git a/internal/application/service/rag_physical_lifetime_test.go b/internal/application/service/rag_physical_lifetime_test.go
 new file mode 100644
@@ -147555,7 +149329,7 @@ index 0000000000000000000000000000000000000000..d830c456b198b2dd4e140e23be7b91f0
 +	require.NotContains(t, w.Body.String(), "unattributed source text")
 +}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 544e45aa6be46abd2ef69c3935035e13041c01ce..bd69d5af6cf9a327ed7ab703604e357615226da0 100644
+index 544e45aa6be46abd2ef69c3935035e13041c01ce..0865fd80cfe03931134c433a655ca87fc07b6d9f 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
 @@ -16,6 +16,7 @@ import (
@@ -147687,6 +149461,15 @@ index 544e45aa6be46abd2ef69c3935035e13041c01ce..bd69d5af6cf9a327ed7ab703604e3576
  	})
  }
  
+@@ -1036,7 +1087,7 @@ func (h *Handler) AgentQA(c *gin.Context) {
+ 
+ 	// Route to appropriate handler based on agent mode
+ 	if agentModeEnabled {
+-		h.executeQA(reqCtx, qaModeAgent, true)
++		h.executeQA(reqCtx, qaModeAgent, !request.DisableTitle)
+ 	} else {
+ 		logger.Infof(reqCtx.ctx, "Agent mode disabled, delegating to normal mode for session: %s", reqCtx.sessionID)
+ 		h.executeQA(reqCtx, qaModeNormal, !request.DisableTitle)
 @@ -1207,6 +1258,15 @@ func (h *Handler) holdQATurn(ctx context.Context, reqCtx *qaRequestContext) (fun
  // It handles message creation, SSE setup, VLM analysis, service invocation, and error handling.
  func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle bool) {
@@ -150849,10 +152632,10 @@ index 0000000000000000000000000000000000000000..8fd5bcce4e59b5f4bf81613b48e6bf64
 +}
 diff --git a/internal/handler/steer_material_actual_http_fixture_test.go b/internal/handler/steer_material_actual_http_fixture_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..ba29ffd711e97f51021f5baf0e52f99ca143f5d1
+index 0000000000000000000000000000000000000000..d3f20653f8c25d32ac4a8ca81c69b63d62d02ccb
 --- /dev/null
 +++ b/internal/handler/steer_material_actual_http_fixture_test.go
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,431 @@
 +package handler
 +
 +import (
@@ -150986,6 +152769,7 @@ index 0000000000000000000000000000000000000000..ba29ffd711e97f51021f5baf0e52f99c
 +	inputs       [][]chat.Message
 +	followUp     bool
 +	claimFailure bool
++	titleCalls   atomic.Int64
 +}
 +
 +func (m *actualSteerHTTPModel) GetModelName() string { return "local-original-steer-agent" }
@@ -151060,6 +152844,22 @@ index 0000000000000000000000000000000000000000..ba29ffd711e97f51021f5baf0e52f99c
 +type actualSteerHTTPModels struct {
 +	actualHTTPTailModels
 +	steered *actualSteerHTTPModel
++}
++
++type actualSteerHTTPSessionPort interface {
++	interfaces.SessionService
++	RejectSendIfRewinding(context.Context, string) error
++	HoldSandboxTurn(context.Context, string, string) (func(), error)
++}
++
++type actualSteerHTTPObservedSessions struct {
++	actualSteerHTTPSessionPort
++	titleCalls *atomic.Int64
++}
++
++func (s *actualSteerHTTPObservedSessions) GenerateTitleAsync(ctx context.Context, session *types.Session, query, modelID string, bus *event.EventBus) {
++	s.titleCalls.Add(1)
++	s.actualSteerHTTPSessionPort.GenerateTitleAsync(ctx, session, query, modelID, bus)
 +}
 +
 +func (m actualSteerHTTPModels) GetChatModel(context.Context, string) (chat.Chat, error) {
@@ -151225,7 +153025,10 @@ index 0000000000000000000000000000000000000000..ba29ffd711e97f51021f5baf0e52f99c
 +	if model.claimFailure {
 +		transport = &actualSteerHTTPClaimFailureStream{StreamManager: redis}
 +	}
-+	h := sessionhandler.NewHandler(sessions, observed, nil, transport, cfg, f.kbs, customs, nil, nil, nil, nil, nil, nil, models, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, groups)
++	actualSessions, ok := sessions.(actualSteerHTTPSessionPort)
++	require.True(t, ok, "observe the real title producer without dropping the production turn/rewind guards")
++	observedSessions := &actualSteerHTTPObservedSessions{actualSteerHTTPSessionPort: actualSessions, titleCalls: &model.titleCalls}
++	h := sessionhandler.NewHandler(observedSessions, observed, nil, transport, cfg, f.kbs, customs, nil, nil, nil, nil, nil, nil, models, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, groups)
 +	return h, observed, redis, raw
 +}
 +
@@ -151266,10 +153069,10 @@ index 0000000000000000000000000000000000000000..ba29ffd711e97f51021f5baf0e52f99c
 +}
 diff --git a/internal/handler/steer_material_actual_http_test.go b/internal/handler/steer_material_actual_http_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..90b2390583fa25f699d87f2cfc8d1d35ac748c10
+index 0000000000000000000000000000000000000000..b2827021ce4a374d19a1f125450bae8d02211704
 --- /dev/null
 +++ b/internal/handler/steer_material_actual_http_test.go
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,492 @@
 +package handler
 +
 +import (
@@ -151294,6 +153097,64 @@ index 0000000000000000000000000000000000000000..90b2390583fa25f699d87f2cfc8d1d35
 +			name = "retained_current_source"
 +		}
 +		t.Run(name, func(t *testing.T) { runActualSteerHTTPAgent(t, controlled, "positive") })
++	}
++}
++
++func TestSteerOriginalMaterialActualHTTPAgentHonorsDisableTitle(t *testing.T) {
++	for _, mode := range []string{"disabled", "default", "explicit_false"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newActualSteerHTTPFixture(t, true)
++			model := &actualSteerHTTPModel{t: t, f: f, followUp: true, ready: make(chan struct{}), resume: make(chan struct{})}
++			t.Cleanup(model.release)
++			h, _, _, _ := newActualSteerHTTPHandler(t, f, model)
++			router := actualSteerHTTPRouter(f.ctx, h)
++			payload := map[string]interface{}{"query": "actual current user task", "agent_id": "actual-steer-agent", "agent_enabled": true, "summary_model_id": "actual-http-tail-model"}
++			if mode != "default" {
++				payload["disable_title"] = mode == "disabled"
++			}
++			raw, err := json.Marshal(payload)
++			require.NoError(t, err)
++			w := &actualSteerHTTPWriter{ResponseRecorder: httptest.NewRecorder(), t: t, f: f}
++			done := make(chan struct{})
++			go func() {
++				defer close(done)
++				request := httptest.NewRequest(http.MethodPost, "/agent-chat/"+f.parent.SessionID, strings.NewReader(string(raw)))
++				request.Header.Set("Content-Type", "application/json")
++				router.ServeHTTP(w, request)
++			}()
++			select {
++			case <-model.ready:
++			case <-done:
++				t.Fatal("actual AgentQA ended before its admitted local model")
++			case <-time.After(8 * time.Second):
++				t.Fatal("actual AgentQA did not reach its admitted local model")
++			}
++			wantTitles := int64(1)
++			if mode == "disabled" {
++				wantTitles = 0
++			}
++			require.Equal(t, wantTitles, model.titleCalls.Load(), "the actual public route controls the real title service")
++			model.release()
++			select {
++			case <-done:
++			case <-time.After(8 * time.Second):
++				t.Fatal("actual Agent producer or its final HTTP sender did not finish")
++			}
++			require.Equal(t, wantTitles, model.titleCalls.Load())
++			require.EqualValues(t, 1, model.calls.Load())
++			require.Equal(t, 1, w.completeWrites)
++			require.Positive(t, w.finalWrites)
++			require.Contains(t, w.Body.String(), actualSteerHTTPAnswer)
++			var final types.Message
++			require.NoError(t, f.db.Where("session_id=? AND role='assistant' AND request_id<>?", f.parent.SessionID, f.parent.RequestID).Take(&final).Error)
++			require.True(t, final.IsCompleted)
++			require.Equal(t, actualSteerHTTPAnswer, final.Content)
++			require.Equal(t, f.parent.SourceLineage, final.SourceLineage)
++			require.Eventually(t, func() bool {
++				var held int64
++				return f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&held).Error == nil && held == 0
++			}, 3*time.Second, 10*time.Millisecond, "actual finalization releases original material reads")
++		})
 +	}
 +}
 +
@@ -151476,6 +153337,7 @@ index 0000000000000000000000000000000000000000..90b2390583fa25f699d87f2cfc8d1d35
 +		t.Fatal("actual public AgentQA did not reach the paused local model")
 +	}
 +	var run types.Message
++	require.Zero(t, model.titleCalls.Load(), "disable_title must reach the actual Agent route and title producer")
 +	require.NoError(t, f.db.Where("session_id=? AND role='assistant' AND request_id<>?", f.parent.SessionID, f.parent.RequestID).Take(&run).Error)
 +	require.False(t, run.IsCompleted)
 +	mentions := types.MentionedItems{{ID: "human-literal-name", Type: "file", Name: "actual original typed mention", KBID: "kb", KBName: "actual original typed KB name"}}
@@ -151561,6 +153423,7 @@ index 0000000000000000000000000000000000000000..90b2390583fa25f699d87f2cfc8d1d35
 +		t.Fatal("actual Agent producer or its final HTTP sender did not finish")
 +	}
 +	require.EqualValues(t, 1, observed.consumes.Load(), "one actual round drain consumes one exact admitted original")
++	require.Zero(t, model.titleCalls.Load(), "no asynchronous title generation may outlive an opted-out request")
 +	require.NotContains(t, w.Body.String(), "FORGED REDIS")
 +	var users []types.Message
 +	require.NoError(t, f.db.Where("session_id=? AND request_id=? AND role='user'", f.parent.SessionID, run.RequestID).Order("created_at").Find(&users).Error)

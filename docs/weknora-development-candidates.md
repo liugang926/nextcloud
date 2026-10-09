@@ -484,3 +484,41 @@ The normal AnyDoc build and full application QA/running replay/restore remain
 pending. Parent body-copy closure and the local withdrawal inventory extension
 are separate prepared source work, not included here. Shared runtime, default
 build selection and broad physical-GC/ingress acceptance flags remain unchanged.
+
+
+## 2026-10-09 parent-copy closure and Agent title integration
+
+The current manifest freezes RAG `595f241f` and C6 `f766a373`. Known legacy
+parent-message copies derive their complete dependency closure from the
+immutable original admissions and generated-field receipts, including later
+cross-KB fields. Purge requires closed hosts, retired original sources, exact
+closure and no active pins. Unknown or corrupted copies remain retained; no
+current lookup recaptures them as known. Own generated growth keeps its old
+pins while acquiring new KB and exact-source leases, rechecks source/actor,
+epoch and cancellation after acquisition, and rolls back only the new pins
+on failure. Actual PostgreSQL/SQLite and the built retention CLI were used.
+
+Agent QA now honors `disable_title`. The observed CI failures were two real
+Agent sender timeouts caused by starting a title despite that flag. Actual
+true/default/explicit-false cases check the real delegated title call count,
+completion and lease cleanup; the eight-second assertion remains unchanged.
+
+Each frozen profile passed 425 executed nodes across the selected gates,
+including repeated interoperability nodes: 414 distinct nodes / 165 top-level
+tests, zero failures or test skips. Full compile completed for 155 packages
+(115 with test files, 40 without). Root independently rechecked every raw
+log hash, terminal, count and source tree. Temporary-index forward and reverse
+application reproduced the candidate and upstream trees exactly. Self-owned
+test resources were removed by exact ID and nonce; old failed fixtures,
+uncommitted work and shared caches were preserved.
+[The component evidence](evidence/parent-copy-title-original-material-20261009.json)
+records the boundaries. CI now requires the parent-copy/growth and title tests
+to execute rather than treating an empty selector as acceptance.
+
+Normal AnyDoc images, full application QA/running replay/restore and P5 remain
+pending. The PG155/SQLite74 local withdrawal extension is still prepared
+source only and is not in these patches. Default build selection, shared
+runtime and broad physical-GC/ingress acceptance flags remain unchanged.
+The [exposed-consumer source follow-up](exposed-consumer-follow-up-20261009.md)
+records separate memory, skill transcript and non-Web principal work without
+claiming runtime exploit evidence or narrowing V1.
