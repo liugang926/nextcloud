@@ -1688,3 +1688,18 @@ JSON body purge, external backend inventory, machine first-ingestion, complete
 saved-history readers, candidate app recovery and measured performance remain
 open. Global physical coverage remains closed. Shared Nextcloud stays on its
 separate0.4.37 source snapshot.
+
+
+## 2026-10-09 guarded admin cleanup candidate
+
+The selected-KB administrator panel now has expiry, bounded task paging,
+category/count preview, readable deferrals, retry and immediate guarded
+collection.32 actual PG/SQLite/operator/HTTP cases passed, including true local
+unlink and late admin revocation; coverage and retention remain enforced.
+Body purge and full external inventory remain incomplete. See [admin scope](
+nextcloud-gc-admin.md). Submission8426485 passed all12 jobs, including566/35/11
+producer/local-derived/native-vector cases per profile with no failures/skips.
+The previous frontend typecheck selected only the empty root configuration;
+new CI explicitly checks the app project, which passed in the new owned source.
+Full personal history/machine pipeline modules and candidate application
+build/restore/performance are still open; shared services remain pinned.

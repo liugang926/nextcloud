@@ -137,8 +137,7 @@ These candidates have not been deployed to the shared test stack. Full personal
 read/build lease coverage and physical derived GC inventory remain incomplete;
 the GC coverage gate remains closed. Saved-history original material and
 machine initial upload/auto-tag admission are still being completed.
-GC list preview/manual collection UI and complete derived/bucket capacity
-accounting also remain open. Production-directory acceptance, full application recovery, and the
+Complete derived/bucket capacity accounting remains open. Production-directory acceptance, full application recovery, and the
 PRD performance targets remain outstanding. This is a reproducible development
 submission, not a V1 release acceptance.
 
@@ -147,3 +146,23 @@ nodes because its broad `SQLite` selector reached the new FTS fixture without
 the required tag. The raw log/artifact is retained. Candidate producer tests
 now use `sqlite_fts5`; default complete source compilation remains untagged.
 The isolated native41-case root gate was already tagged and passed.
+
+
+## Administrative collection update
+
+[Administrator cleanup](nextcloud-gc-admin.md) adds scoped status/pagination,
+expiry, confirmed-versus-estimated bytes, category preview, retry and guarded
+immediate attempts. It reuses the existing exact source/reference/read/build
+checks without overriding retention or activating coverage. Current SQL web
+admin/policy is checked in each actual destructive transaction.32 cases passed
+on owned PG/SQLite, including real unlink, late account revocation and110-job
+paging; exact cleanup verified. The actual Vue app TypeScript project and Vite
+bundle passed;13 locale registry tests passed. Body purge and global/external
+coverage are still pending.
+
+Submission8426485 passed all12 push/PR jobs. Per profile, retained logs contain
+566 producer cases,35 actual local-derived cases,11 native halfvec cases, all
+with zero failures/skips, and complete Go compilation. Its old root-only
+`vue-tsc --noEmit` command did not select the app project. The new candidate CI
+uses `vue-tsc --noEmit -p tsconfig.app.json`; Vite builds were actual throughout.
+The current GC candidates149b2a9f/523a123b need a fresh full CI run.
