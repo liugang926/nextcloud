@@ -465,3 +465,21 @@ unremoved worker marker prevents a successful receipt. Source-only midstream
 revocation and full application restoration still require separate actual
 evidence. The [preparation record](evidence/running-replay-preparation-20261009.json)
 contains harness checks only.
+
+A separate fresh owner can exercise the prepared source-only midstream
+revocation mode by adding `--revoke-source-share-during-running`. It completes
+one actual QA, then connects both live generation and native replay to the
+same unfinished answer prefix. While the model is still paused, it removes
+only the owner's Nextcloud group share and requires a real signed source deny,
+unchanged LDAP/KB grants and continued owner-file access. After releasing the
+real model, both connections must terminate with the static source-access
+error and expose no further answer, citation or successful completion. The
+earlier completed answer and native replay must also be hidden.
+
+This mode records a separate source-revocation receipt and cannot supply a
+positive restore baseline. Its mode file prevents reusing an owner across
+positive and negative trials. It checks original completed-message records,
+the current journal's retained prefix, and actual lease/reader cleanup.
+[Preparation checks](evidence/midstream-source-revoke-preparation-20261009.json)
+have passed; full application execution and its source-revocation acceptance
+remain pending.

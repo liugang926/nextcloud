@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -133,6 +134,80 @@ class RunningReplayPreparationTest(unittest.TestCase):
         self.assertFalse(result['running_replay_accepted'])
         self.assertEqual(result['terminal'],1)
         self.assertEqual(result['safe_reason'],'actual_body_failure')
+
+    def test_source_denied_terminal_is_static_and_has_no_fake_completion(self):
+        request=str(uuid.uuid4());error={'id':request,'response_type':'error','done':True,
+            'content':R['SOURCE_DENIED_CONTENT'],'data':{'error_code':'source_access_changed'}}
+        result=R['require_post_revoke_source_denied']([error],request,'actual withheld tail','http://source/f/92')
+        self.assertEqual(result['error_code'],'source_access_changed')
+        for change in ({'done':False},{'content':'private backend diagnostic'},
+                       {'data':{'error_code':'generation_failed'}},{'id':str(uuid.uuid4())}):
+            with self.subTest(change=change),self.assertRaises(RuntimeError):
+                R['require_post_revoke_source_denied']([{**error,**change}],request,'actual withheld tail','http://source/f/92')
+        for leaked in ({'id':request,'response_type':'answer','content':'actual withheld tail'},
+                       {'id':request,'response_type':'references','data':{'references':[{'metadata':{'nextcloud_human_url':'http://source/f/92'}}]}},
+                       {'id':request,'response_type':'complete','done':True,'data':{'final_content':'actual withheld tail'}}):
+            with self.subTest(leaked=leaked),self.assertRaises(RuntimeError):
+                R['require_post_revoke_source_denied']([leaked,error],request,'actual withheld tail','http://source/f/92')
+
+    def test_pre_authorised_prefix_is_not_relabelled_as_post_revoke_body(self):
+        request=str(uuid.uuid4());prefix={'id':request,'response_type':'answer','content':'actual permitted prefix'}
+        terminal={'id':request,'response_type':'error','done':True,'content':R['SOURCE_DENIED_CONTENT'],
+                  'data':{'error_code':'source_access_changed'}}
+        observed=[prefix,terminal];offset=1
+        R['require_post_revoke_source_denied'](observed[offset:],request,'withheld tail','http://source/f/92')
+        with self.assertRaises(RuntimeError):
+            R['require_post_revoke_source_denied'](observed,request,'withheld tail','http://source/f/92')
+
+    def test_negative_acceptance_also_depends_on_actual_worker_cleanup(self):
+        result={'source_midstream_revocation_accepted':True,'running_replay_accepted':False,
+                'actual_running_window':{'observed':True}}
+        R['record_worker_cleanup'](result,[True,False],False)
+        self.assertFalse(result['source_midstream_revocation_accepted'])
+        self.assertFalse(result['running_replay_accepted'])
+        self.assertEqual(result['terminal'],1)
+        self.assertEqual(result['actual_running_window'],{'observed':True})
+
+    def test_current_journal_can_append_but_cannot_rollback_or_rewrite_prefix(self):
+        before={'journal_id':'actual-journal','sequence':1,'head_sha256':'head1',
+                'event_digests':['digest1'],'event_heads':['head1']}
+        after={'journal_id':'actual-journal','sequence':2,'head_sha256':'head2',
+               'event_digests':['digest1','digest2'],'event_heads':['head1','head2']}
+        self.assertEqual(R['append_only_journal'](before,after)['append_count'],1)
+        for changed in ({'journal_id':'replacement'}, {'sequence':0,'head_sha256':'','event_digests':[],'event_heads':[]},
+                        {'event_digests':['rewritten','digest2']},{'event_heads':['rewritten','head2']}):
+            with self.subTest(changed=changed),self.assertRaises(RuntimeError):
+                R['append_only_journal'](before,{**after,**changed})
+
+    def test_real_body_scope_schema_join_uses_body_id_and_counts_cross_tenant(self):
+        # This executes the actual predicate against the real scope shape:
+        # scopes have body_id/tenant_id/KB, and deliberately no lease_id.
+        db=sqlite3.connect(':memory:')
+        db.executescript('CREATE TABLE original_body_payloads(id TEXT,tenant_id INTEGER);'
+                         'CREATE TABLE original_body_leases(lease_id TEXT,body_id TEXT);'
+                         'CREATE TABLE original_body_lease_scopes(body_id TEXT,tenant_id INTEGER,knowledge_base_id TEXT);'
+                         'CREATE TABLE original_body_field_heads(body_id TEXT,tenant_id INTEGER);'
+                         'CREATE TABLE original_body_parent_refs(body_id TEXT,tenant_id INTEGER);'
+                         "INSERT INTO original_body_payloads VALUES('body',8);"
+                         "INSERT INTO original_body_leases VALUES('lease','body');"
+                         "INSERT INTO original_body_lease_scopes VALUES('body',7,'kb');")
+        query=('SELECT count(*) FROM original_body_leases l JOIN original_body_payloads p ON p.id=l.body_id WHERE '+
+               R['actual_body_lease_scope_predicate'](7))
+        self.assertEqual(db.execute(query).fetchone()[0],1)
+        db.execute('DELETE FROM original_body_lease_scopes')
+        self.assertEqual(db.execute(query).fetchone()[0],0)
+        db.execute("INSERT INTO original_body_field_heads VALUES('body',7)")
+        self.assertEqual(db.execute(query).fetchone()[0],1)
+        db.close()
+
+    def test_positive_and_source_revoke_trials_cannot_mix_one_owner(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            directory=Path(scratch).resolve();state={'project':'nc-synldap-abcdef12'}
+            R['bind_fresh_trial_mode'](directory,state,False)
+            before=(directory/'native-stream-trial-mode.json').read_bytes()
+            with self.assertRaises(FileExistsError):R['bind_fresh_trial_mode'](directory,state,True)
+            self.assertEqual((directory/'native-stream-trial-mode.json').read_bytes(),before)
+            self.assertEqual((directory/'native-stream-trial-mode.json').stat().st_mode&0o777,0o600)
 
     def frozen_fixture(self,directory,maximum):
         state,compose=F.sample(directory,ui=False)

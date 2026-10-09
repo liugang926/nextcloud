@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Real concurrent second QA/native replay in a fresh opted-in owned fixture.
+"""Real concurrent QA/native replay in one fresh opted-in owned fixture.
 
 Preparation alone proves nothing. The model scheduler delays an actual streamed
 response, while all messages, origins, leases, frames and terminals come from
-the normal application. This positive runner does not revoke the source share.
+the normal application. The optional source-only midstream revoke mode uses a
+separate fresh owner and never produces a positive two-round restore baseline.
 """
 import argparse
 import datetime as dt
@@ -29,6 +30,7 @@ HISTORY = runpy.run_path(str(HERE / 'synthetic-ldap-history-acceptance.py'))
 Q = HISTORY['probe']
 OWNER, E2E = Q['owner'], Q['e2e']
 FILES = runpy.run_path(str(HERE / 'synthetic-ldap-resource-watch.py'))
+SOURCE = runpy.run_path(str(HERE / 'isolated-dual-service-restore.py'))
 require = Q['require']
 
 
@@ -207,10 +209,177 @@ def record_worker_cleanup(result,joined,marker_removed):
     if not all(joined) or not marker_removed:
         # Preserve the actual window observations, but never publish acceptance
         # when a real reader is still active or cleanup ownership is uncertain.
-        result.update(running_replay_accepted=False,terminal=1,
+        result.update(running_replay_accepted=False,source_midstream_revocation_accepted=False,terminal=1,
                       cleanup_error_code='actual_running_workers_not_cleanly_joined')
-    elif result.get('running_replay_accepted'):
+    elif result.get('running_replay_accepted') or result.get('source_midstream_revocation_accepted'):
         result.setdefault('terminal',0)
+
+
+SOURCE_DENIED_CONTENT='Current source access changed; generation stopped'
+
+
+def require_post_revoke_source_denied(events,request,tail,human):
+    require(events and all(isinstance(event,dict) for event in events),'actual_post_revoke_frames_missing')
+    require(not any(event.get('response_type') in {'answer','references','complete','tool_call','tool_result','thinking','reflection'}
+                    for event in events),'actual_post_revoke_business_body_exposed')
+    require(not any(tail in json.dumps(event,ensure_ascii=False) or human in json.dumps(event,ensure_ascii=False)
+                    for event in events),'actual_post_revoke_tail_or_citation_exposed')
+    terminals=[event for event in events if event.get('response_type')=='error' and event.get('done') is True]
+    require(len(terminals)==1 and events[-1] is terminals[0] and terminals[0].get('id')==request and
+            terminals[0].get('content')==SOURCE_DENIED_CONTENT and
+            terminals[0].get('data')=={'error_code':'source_access_changed'},
+            'actual_post_revoke_terminal_is_not_static_SourceDenied')
+    return {'terminal_type':'error','done':True,'error_code':'source_access_changed',
+            'post_revoke_event_count':len(events),'post_revoke_frames_sha256':
+            hashlib.sha256(json.dumps(events,sort_keys=True).encode()).hexdigest()}
+
+
+def original_control_metadata(state,first_message,session):
+    first_message,session=(str(uuid.UUID(value)) for value in (first_message,session))
+    return E2E['sql_json'](state['project']+'-wk-db-1',
+        "SELECT jsonb_build_object('generation_origin_digest',"
+        f"(SELECT md5(COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]'::jsonb)::text) FROM message_generation_origins x WHERE session_id='{session}'),"
+        "'completed_original_receipt_digest',"
+        f"(SELECT md5(COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.message_id),'[]'::jsonb)::text) FROM message_material_receipts x WHERE message_id='{first_message}'),"
+        "'completed_original_admission_digest',"
+        f"(SELECT md5(COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]'::jsonb)::text) FROM message_material_admissions x JOIN message_material_receipts r ON r.admission_id=x.id WHERE r.message_id='{first_message}'),"
+        "'completed_original_body_heads_digest',"
+        f"(SELECT md5(COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.slot_id),'[]'::jsonb)::text) FROM original_body_field_heads x WHERE source_table='messages' AND row_key='{first_message}'))")
+
+
+def actual_journal_inventory(directory,state):
+    OWNER['assert_owned_resources'](directory,state)
+    app=OWNER['docker_inspect']('container',state['project']+'-wk-app-1')
+    require(app['Image']==state['weknora_image_id'] and app['State']['Running'],
+            'owned_journal_reader_app_identity')
+    # Metadata-only current ledger prefix inventory; key bytes are never read.
+    # HMAC/purge authority remains the packaged application's independent gate.
+    script='''import hashlib,json,pathlib,stat
+ledger=pathlib.Path('/var/lib/weknora-body-ledger/purge-ledger.json')
+pinpath=pathlib.Path('/var/lib/weknora-body-pin/pin.json')
+for path in (ledger,pinpath):
+ st=path.lstat()
+ assert stat.S_ISREG(st.st_mode) and st.st_nlink==1 and path.resolve()==path and stat.S_IMODE(st.st_mode)==0o600
+events=json.loads(ledger.read_bytes());pin=json.loads(pinpath.read_bytes())
+assert isinstance(events,list) and isinstance(pin,dict)
+print(json.dumps({'journal_id':pin['JournalID'],'sequence':pin['Sequence'],'head_sha256':pin['HeadSHA256'],
+'event_digests':[hashlib.sha256(json.dumps(e,sort_keys=True,separators=(',',':')).encode()).hexdigest() for e in events],
+'event_heads':[e['HeadSHA256'] for e in events]}))
+'''
+    result=subprocess.run(['docker','exec',app['Id'],'python3','-c',script],capture_output=True,timeout=10,check=False)
+    require(result.returncode==0,'actual_journal_prefix_inventory_failed')
+    value=json.loads(result.stdout)
+    db=E2E['sql_json'](state['project']+'-wk-db-1',
+        "SELECT jsonb_build_object('journal_id',journal_id,'sequence',sequence,'head_sha256',head_sha256) "
+        "FROM original_body_journal_heads WHERE id=1")
+    require(all(value.get(key)==db.get(key) for key in ('journal_id','sequence','head_sha256')),
+            'actual_current_journal_pin_database_disagree')
+    OWNER['assert_owned_resources'](directory,state)
+    return value
+
+
+def append_only_journal(before,after):
+    require(before.get('journal_id')==after.get('journal_id') and before.get('journal_id'),
+            'actual_current_journal_identity_changed')
+    for item in (before,after):
+        seq=item.get('sequence');digests=item.get('event_digests');heads=item.get('event_heads')
+        require(type(seq) is int and seq>=0 and isinstance(digests,list) and isinstance(heads,list) and
+                len(digests)==len(heads)==seq and item.get('head_sha256')==(heads[-1] if heads else ''),
+                'actual_current_journal_inventory_incomplete')
+    require(after['sequence']>=before['sequence'] and
+            after['event_digests'][:before['sequence']]==before['event_digests'] and
+            after['event_heads'][:before['sequence']]==before['event_heads'],
+            'actual_current_journal_rollback_or_prefix_rewrite')
+    return {'journal_id':after['journal_id'],'before_sequence':before['sequence'],'after_sequence':after['sequence'],
+            'original_prefix_retained':True,'append_count':after['sequence']-before['sequence'],
+            'metadata_inventory_only_hmac_authority_not_substituted':True}
+
+
+def require_old_history_hidden(base,session,token,first,human):
+    status,response=E2E['http_json'](base,'GET','/api/v1/messages/'+session+'/load?limit=20',token=token)
+    require(status in {200,403,404},'actual_revoked_history_http_unexpected')
+    raw=json.dumps(response,ensure_ascii=False)
+    require(Q['MARKER'] not in raw and human not in raw,'actual_revoked_original_history_exposed')
+    if status==200 and isinstance(response,dict) and isinstance(response.get('data'),list):
+        for row in response['data']:
+            if isinstance(row,dict) and row.get('id')==first['id']:
+                require(not row.get('content') and not row.get('knowledge_references'),
+                        'actual_revoked_original_history_body_or_references_not_redacted')
+    replay_status,body=HISTORY['replay'](base,session,first['id'],token)
+    require(replay_status in {200,403,404} and Q['MARKER'].encode() not in body and human.encode() not in body,
+            'actual_revoked_completed_native_replay_exposed')
+    if replay_status==200:
+        events=Q['parse_sse_events'](body)
+        require(not any(event.get('response_type') in {'answer','references','complete'} for event in events),
+                'actual_revoked_completed_replay_body_exposed')
+    return {'old_completed_history_http':status,'old_completed_replay_http':replay_status,
+            'old_completed_history_hidden':True,'old_completed_replay_hidden':True}
+
+
+def actual_body_lease_scope_predicate(tenant):
+    require(type(tenant) is int and tenant>0,'owned_tenant_invalid')
+    return (f"(p.tenant_id={tenant} OR EXISTS (SELECT 1 FROM original_body_lease_scopes s WHERE s.body_id=l.body_id AND s.tenant_id={tenant}) "
+            f"OR EXISTS (SELECT 1 FROM original_body_field_heads h WHERE h.body_id=l.body_id AND h.tenant_id={tenant}) "
+            f"OR EXISTS (SELECT 1 FROM original_body_parent_refs r WHERE r.body_id=l.body_id AND r.tenant_id={tenant}))")
+
+
+def zero_actual_leases(state,runtime,timeout=15):
+    tenant=runtime['tenant_id'];require(type(tenant) is int and tenant>0,'owned_tenant_invalid')
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        value=E2E['sql_json'](state['project']+'-wk-db-1',
+            "SELECT jsonb_build_object('content',(SELECT count(*) FROM nextcloud_content_leases "
+            f"WHERE tenant_id={tenant} AND released_at_ms IS NULL AND expires_at_ms>EXTRACT(EPOCH FROM clock_timestamp())*1000),"
+            "'body',(SELECT count(DISTINCT l.lease_id) FROM original_body_leases l JOIN original_body_payloads p ON p.id=l.body_id "
+            'WHERE '+actual_body_lease_scope_predicate(tenant)+' '
+            "AND l.released_at_ms IS NULL AND l.expires_at_ms>EXTRACT(EPOCH FROM clock_timestamp())*1000))")
+        if all(type(count) is int and count==0 for count in value.values()):return value
+        time.sleep(.1)
+    raise RuntimeError('actual_post_revoke_live_lease_zero_not_established')
+
+
+def revoke_actual_window(directory,state,runtime,passwords,base,nc_base,token,session,first,human,producer,native,
+                         body,operation,sequence):
+    unchanged_model_window(model_control(directory,state),operation,sequence)
+    before=SOURCE['source_decision'](nc_base,state,runtime)
+    require(before.get('allow') is True,'actual_source_was_not_authorized_before_revocation')
+    originals=original_control_metadata(state,first['id'],session)
+    journal_before=actual_journal_inventory(directory,state)
+    prefix=body['content'];answer=first['content']
+    require(answer.startswith(prefix) and len(prefix)<len(answer),'actual_model_prefix_has_no_retained_tail')
+    tail=answer[len(prefix):]
+    # Both readers have already consumed the sole first model delta. The real
+    # model remains paused, so there is no future tail to mislabel as an earlier
+    # authorised TCP buffer. The earlier prefix is retained only as a digest.
+    offsets=(len(producer.events),len(native.events))
+    require(not producer.closed.is_set() and not native.closed.is_set(),'actual_running_stream_closed_before_revoke')
+    Q['revoke_source_share'](nc_base,passwords,runtime['share_id'])
+    deadline=time.monotonic()+10
+    while time.monotonic()<deadline:
+        decision=SOURCE['source_decision'](nc_base,state,runtime)
+        if decision.get('allow') is False:break
+        time.sleep(.1)
+    else:raise RuntimeError('actual_signed_source_authority_deny_not_observed')
+    Q['source_context_unchanged'](state,nc_base,passwords,runtime)
+    # Do not extend the captured model window or claim a late source error was
+    # tested against a still-running producer if its bounded delay elapsed.
+    unchanged_model_window(model_control(directory,state),operation,sequence)
+    model_control(directory,state,{'action':'release','operation_id':operation})
+    events=(producer.finish(),native.finish())
+    denied=[require_post_revoke_source_denied(values[offset:],body['id'],tail,human)
+            for values,offset in zip(events,offsets)]
+    require(original_control_metadata(state,first['id'],session)==originals,
+            'actual_revocation_changed_original_generation_receipt_admission_or_body_heads')
+    journal_after=actual_journal_inventory(directory,state)
+    journal_growth=append_only_journal(journal_before,journal_after)
+    hidden=require_old_history_hidden(base,session,token,first,human)
+    return {'source_midstream_revocation_accepted':True,'running_replay_accepted':False,
+        'signed_source_authority_before_allow':True,'signed_source_authority_after_allow':False,
+        'identity_kb_group_and_owner_file_preserved':True,'authorised_prefix_sha256':hashlib.sha256(prefix.encode()).hexdigest(),
+        'producer_post_revoke':denied[0],'native_post_revoke':denied[1],
+        'original_control_before_and_after':originals,'current_journal_append_only':journal_growth,
+        'actual_post_revoke_live_leases':zero_actual_leases(state,runtime),
+        'actual_old_completed_material_hidden':hidden,'session_id':session}
 
 
 def running_frame_matches(first, second, request):
@@ -224,7 +393,13 @@ def running_frame_matches(first, second, request):
                 'running replay changed actual producer citations')
 
 
-def run(scratch, delay_seconds, output):
+def bind_fresh_trial_mode(directory,state,revoke_midstream):
+    return FILES['exclusive_json'](directory/'native-stream-trial-mode.json',
+        {'mode':'source-only-midstream-revoke' if revoke_midstream else 'positive-two-round-baseline',
+         'project':state['project'],'created_at_utc':dt.datetime.now(dt.timezone.utc).isoformat()})
+
+
+def run(scratch, delay_seconds, output, revoke_midstream=False):
     directory, state = OWNER['owned_state'](scratch)
     maximum = fresh_stream_configuration(directory, state)
     require(type(delay_seconds) is int and 0 < delay_seconds <= maximum, 'invalid_owned_running_delay')
@@ -242,6 +417,7 @@ def run(scratch, delay_seconds, output):
     token = Q['wait_ldap_login'](base, 'alice', passwords['alice'])
     human = Q['citation_url'](state['project'], runtime['knowledge_id'], runtime['file_id'], nc_base)
     require(not model_control(directory, state)['operation'], 'owned_model_schedule_not_idle')
+    bind_fresh_trial_mode(directory,state,revoke_midstream)
     operation = str(uuid.uuid4())
     marker = directory / 'active-probe-workers.json'
     marker_raw = FILES['exclusive_json'](marker, {'marker': 'actual_running_replay_workers_v1',
@@ -305,6 +481,10 @@ def run(scratch, delay_seconds, output):
             'actual_body_sha256': hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
             'actual_reference_sha256':Q['reference_metadata'](producer_refs,runtime['knowledge_id'],human)['references_sha256'],
             'before_native_model_schedule':before_schedule,'after_native_model_schedule':after_schedule}
+        if revoke_midstream:
+            result.update(revoke_actual_window(directory,state,runtime,passwords,base,nc_base,token,session,
+                                               first[0],human,producer,native,body,operation,sequence))
+            return result
         model_control(directory, state, {'action': 'release', 'operation_id': operation})
         producer_events, native_events = producer.finish(), native.finish()
         finished_schedule=model_control(directory,state)
@@ -358,9 +538,17 @@ if __name__ == '__main__':
     parser.add_argument('--scratch', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--delay-seconds', type=int, default=20)
+    parser.add_argument('--revoke-source-share-during-running',action='store_true',
+                        help='independent fresh negative owner; never produces a positive two-round restore baseline')
     args = parser.parse_args()
     try:
-        run(args.scratch, args.delay_seconds, args.output)
+        result=run(args.scratch,args.delay_seconds,args.output,args.revoke_source_share_during_running)
+        if args.revoke_source_share_during_running:
+            require(result['all_real_reader_threads_joined'] and result['own_worker_marker_removed'] and
+                    result['source_midstream_revocation_accepted'],'actual_negative_worker_cleanup_required')
+            FILES['exclusive_json'](args.output.resolve()/'actual-source-revocation.receipt.json',result)
+            print(json.dumps({'project':result['project'],'terminal':0,'evidence':str(args.output.resolve()),
+                              'source_midstream_revocation_accepted':True,'positive_restore_baseline':False}))
     except Exception as error:
         print('Owned actual running replay refused: ' + type(error).__name__, file=sys.stderr)
         raise SystemExit(1)
