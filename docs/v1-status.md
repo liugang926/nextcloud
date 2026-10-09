@@ -4,7 +4,7 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-09
 
-The manifest's current candidates are C6 `6ccecc02` and RAG `cec0e03b`.
+The manifest's current candidates are C6 `afdfd48d` and RAG `f9a75a0e`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
 frozen evidence for current implementation facts; the table below is historical.
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
@@ -17,14 +17,25 @@ actual PostgreSQL/SQLite regressions passed 42 RAG and 18 new C6 cases.
 The latest source still needs a new normal image and full QA/history/replay,
 clean application restore and measured P5 acceptance.
 
-Steer's original-material integration is being developed in isolated source
-worktrees and is not included in this manifest yet. Actual HTTP validation
-found an automatic follow-up attempt after material refusal and an unsupported
-cross-run `after` consumption path. The latter needs an immutable transition
-from the original input to the new assistant and user, with exact control,
-membership and initial-input checks. Old parent-body copies also need the
-original dependencies of later generated fields included in their retention
-scope before their cleanup can be accepted. These remain implementation work.
+Steer's original-material integration is now included, with PostgreSQL154 and
+SQLite73 forward migrations. The actual HTTP input keeps its immutable author
+and original run; consumption derives the next real user and completion inputs.
+Exact controls and owned membership transitions are checked across the handoff,
+and the successor waits for the preceding producer's real finalization.
+Refused inputs cannot trigger automatic follow-up, and failed claims preserve
+their evidence while denying consumption. Both frozen profiles passed 233
+test nodes / 107 top-level tests with zero failures or skipped tests, plus full
+compilation; [the recorded logs](evidence/steer-original-material-20261009.json)
+were independently rechecked. Old request JSON/digests and unknown legacy
+history remain unchanged. The new normal application run is still pending.
+
+Old parent-body copies still need the original dependencies of later generated
+fields included in their retention scope before cleanup can be accepted. That
+source preparation has been combined with the final Steer source in an isolated
+worktree and is undergoing actual PostgreSQL/SQLite and CLI validation. It is
+not included in this manifest. The historical local withdrawal inventory also
+needs immutable backend plans and writer artifacts observed after current rows
+disappear; its prepared forward migration remains untested and incomplete.
 
 Candidate CI now checks that selected tests actually executed and completed,
 including required HTTP, PostgreSQL, Redis and summary regressions. The

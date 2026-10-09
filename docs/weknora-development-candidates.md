@@ -446,5 +446,41 @@ SQLite, with zero failures or skips and exact owned resource cleanup.
 
 The [summary repair record](evidence/summary-parent-merge-20261009.json) separates
 these component results from the still-required normal-image QA/history and
-restore acceptance. Steer154/SQLite73 is being combined and tested separately;
-its prepared code is not yet part of these manifest candidates.
+restore acceptance. The later Steer integration below supersedes these source
+commits while retaining their summary fix.
+
+## Original Steer inputs and completed successor provenance
+
+The current manifest freezes C6 `afdfd48d` and RAG `f9a75a0e`, including
+PostgreSQL154/SQLite73. Authenticated enqueue stores the actual authored input;
+Redis holds transport mirrors. Promote/delete/consume name the exact immutable
+control head. An `after` input keeps its original author/run and derives the
+successor's real user admission through an immutable consumption transition.
+The old material owner admits only its exact assistant +1 and user +1 changes,
+retaining all preceding controls and original body proofs. The successor starts
+after actual preceding completion and binds its saved initial input.
+
+Actual debugging retained failures for automatic follow-up after refusal,
+an unsupported cross-run consume, mismatched metadata/body exclusion rules and
+an unfinished preceding turn invalidating history. The corrections preserve
+the original proof comparisons. Source/actor/control changes reject the next
+model or output; a failed live-run claim preserves the consumed input and
+negative control rather than deleting its evidence. Consumed controls must
+still equal the exact recorded result head. New empty exclusion lists are
+omitted from JSON, preserving existing request bytes and digests. Migration
+rollback refuses to erase the new proof tables; old unknown history is never
+backfilled into signed history.
+
+Each final profile passed 233 test nodes / 107 top-level tests: actual HTTP44,
+service interoperation54, full relevant session59, real PostgreSQL/SQLite/Redis
+Auto completion42, migrations16, Agent16 and request contracts2. Full compile
+completed for 155 packages, including 40 with no test files. All selected tests
+had zero failures or skips. Root rechecked every final raw-log SHA, test
+terminal/count and the required actual after positive. The full patches apply
+and reverse to the exact fixed baseline trees. [The component evidence](evidence/steer-original-material-20261009.json)
+records those boundaries and the preserved failures.
+
+The normal AnyDoc build and full application QA/running replay/restore remain
+pending. Parent body-copy closure and the local withdrawal inventory extension
+are separate prepared source work, not included here. Shared runtime, default
+build selection and broad physical-GC/ingress acceptance flags remain unchanged.
