@@ -16,6 +16,20 @@ P = runpy.run_path(str(Path(__file__).with_name("synthetic-ldap-resource-watch.p
 
 
 class ResourceWatchTests(unittest.TestCase):
+    def setUp(self):
+        # Method tests cannot contact the host's Docker daemon through new reads.
+        patch = mock.patch.dict(P['OWNER'], {'docker_names': mock.Mock(return_value=set())})
+        patch.start()
+        self.addCleanup(patch.stop)
+        real_run = subprocess.run
+        def forbid_host_docker(args, *positional, **kwargs):
+            if isinstance(args, (tuple, list)) and args and args[0] == 'docker':
+                raise AssertionError('offline observer tests must not contact host Docker')
+            return real_run(args, *positional, **kwargs)
+        patch = mock.patch.object(subprocess, 'run', side_effect=forbid_host_docker)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def transition_observer(self):
         observer = object.__new__(P["Observer"])
         observer.directory = Path('/private/tmp/fixture-method-only')
@@ -24,7 +38,12 @@ class ResourceWatchTests(unittest.TestCase):
         observer.identity = dict(observer.state)
         observer.ids = {}
         observer.image_ids = {"wk-app": observer.state['weknora_image_id'], "nextcloud": "sha256:" + "d" * 64}
+        for role in P['OWNER']['SERVICES']:
+            observer.image_ids.setdefault(role, 'sha256:' + 'e' * 64)
+        observer.config = {'services': {role: {'image': image, 'mem_limit': 16*1024**2,
+            'memswap_limit': 16*1024**2, 'cpus': 1.0} for role, image in observer.image_ids.items()}}
         observer.owner_disappearance_rescans = 0
+        observer.owner_snapshot_rescans = 0
         observer.last_docker_failure = None
         return observer
 
@@ -32,6 +51,185 @@ class ResourceWatchTests(unittest.TestCase):
         name = name or observer.state['project'] + '-wk-app-99'
         return subprocess.CalledProcessError(1, ['docker', 'container', 'inspect', name],
             stderr=stderr or 'Error response from daemon: No such container: ' + name + '\n')
+
+    def snapshot_resource(self, observer, kind, role):
+        project = observer.state['project']; own = P['OWNER']
+        name = project + ('-' + role + '-1' if kind == 'container' else '_' + role)
+        labels = {'com.docker.compose.project': project, own['OWNER_LABEL']: observer.state['owner_token']}
+        if kind == 'container':
+            labels['com.docker.compose.service'] = role
+            expected = observer.config['services'][role]
+            return name, {'Id': 'a'*64, 'Name': '/'+name, 'Image': observer.image_ids[role],
+                'Config': {'Labels': labels}, 'HostConfig': {'Memory': expected['mem_limit'],
+                    'MemorySwap': expected['memswap_limit'], 'NanoCpus': int(expected['cpus']*1_000_000_000)}}
+        labels['com.docker.compose.'+kind] = role
+        return name, {'Id': 'b'*64, 'Name': name, 'Labels': labels}
+
+    @contextlib.contextmanager
+    def real_prefix_flow(self, observer, kind, name, item, extra=None, inspect_error=None):
+        """Real strict helper sees a creation between its two fake Docker lists."""
+        own = P['OWNER']; strict = own['assert_owned_resources']; globals_ = strict.__globals__
+        inventory = {k: set() for k in ('container', 'volume', 'network')}
+        inventory[kind].add(name)
+        for k, values in (extra or {}).items(): inventory[k].update(values)
+        labelled_target_reads = 0
+        def names(k, project=None):
+            nonlocal labelled_target_reads
+            if k == kind and project is not None:
+                labelled_target_reads += 1
+                if labelled_target_reads == 1: return set()
+            return set(inventory[k])
+        def inspect(k, candidate):
+            if k == kind and candidate == name:
+                if inspect_error: raise inspect_error
+                return item
+            raise AssertionError('unexpected inspection; unknown names must be rejected before inspect')
+        wrapped = mock.Mock(wraps=strict)
+        with mock.patch.dict(globals_, {'docker_names': names, 'docker_inspect': inspect}), \
+                mock.patch.dict(own, {'owned_state': lambda path: (path, observer.state),
+                    'assert_owned_resources': wrapped, 'docker_names': names, 'docker_inspect': inspect}):
+            yield wrapped
+
+    def test_all_startup_container_roles_and_volume_network_creation_rescan(self):
+        cases = [('container', role) for role in sorted(P['OWNER']['SERVICES'] | {'wk-ui'})]
+        cases += [('volume', role) for role in sorted(P['OWNER']['VOLUMES'] | P['OWNER']['BODY_VOLUMES'])]
+        cases += [('network', 'default')]
+        for kind, role in cases:
+            observer = self.transition_observer(); observer.state.update(resource_profile='normal-trial',
+                body_journal=True, weknora_ui_image='fixture-ui', weknora_ui_image_id='sha256:'+'f'*64)
+            observer.image_ids['wk-ui'] = observer.state['weknora_ui_image_id']
+            observer.config['services']['wk-ui'] = {'image': 'fixture-ui', 'mem_limit': 16*1024**2,
+                'memswap_limit': 16*1024**2, 'cpus': 1.0}
+            observer.identity = dict(observer.state)
+            name, item = self.snapshot_resource(observer, kind, role)
+            with self.subTest(kind=kind, role=role), self.real_prefix_flow(observer, kind, name, item) as strict:
+                observer.verify(); self.assertEqual(strict.call_count, 2)
+            self.assertEqual(observer.owner_snapshot_rescans, 1)
+            self.assertEqual(observer.ids, {})
+            self.assertEqual(observer.last_owner_prefix_mismatch['kind'], kind)
+            self.assertEqual(observer.last_owner_prefix_mismatch['expected_resource_names'], [name])
+
+    def test_typed_mismatch_does_not_relax_or_retry_mutation_helper(self):
+        observer = self.transition_observer(); name, item = self.snapshot_resource(observer, 'container', 'nextcloud')
+        with self.real_prefix_flow(observer, 'container', name, item) as strict:
+            with self.assertRaises(P['OWNER']['PrefixResourceMismatch']) as caught:
+                strict(observer.directory, observer.state)
+            self.assertIsInstance(caught.exception, RuntimeError)
+            self.assertEqual(str(caught.exception), 'unlabeled resource occupies synthetic Compose project name')
+            self.assertEqual(caught.exception.kind, 'container')
+            self.assertEqual(caught.exception.names, (name,))
+            self.assertEqual(strict.call_count, 1)
+
+    def test_nonprimary_image_pin_is_read_from_frozen_reference_without_environment(self):
+        observer=self.transition_observer();name,item=self.snapshot_resource(observer,'container','wk-db')
+        pin=observer.image_ids.pop('wk-db');observer.command=mock.Mock(return_value=(pin+'\n').encode())
+        with self.real_prefix_flow(observer,'container',name,item):observer.verify()
+        observer.command.assert_called_once_with(['docker','image','inspect','--format','{{.Id}}',
+            observer.config['services']['wk-db']['image']])
+        self.assertEqual(observer.image_ids['wk-db'],pin)
+        self.assertEqual(observer.ids,{})
+
+    def test_real_prefix_existing_foreign_owner_image_budget_and_captured_id_refused(self):
+        for mode in ('nonce', 'project', 'service', 'name', 'image', 'memory', 'swap', 'cpu', 'captured'):
+            observer = self.transition_observer(); observer.state['resource_profile'] = 'normal-trial'
+            observer.identity = dict(observer.state)
+            name, item = self.snapshot_resource(observer, 'container', 'wk-db' if mode != 'captured' else 'wk-app')
+            if mode == 'nonce': item['Config']['Labels'][P['OWNER']['OWNER_LABEL']] = 'foreign'
+            elif mode == 'project': item['Config']['Labels']['com.docker.compose.project'] = 'foreign'
+            elif mode == 'service': item['Config']['Labels']['com.docker.compose.service'] = 'nextcloud'
+            elif mode == 'name': item['Name'] = '/foreign'
+            elif mode == 'image': item['Image'] = 'sha256:'+'f'*64
+            elif mode == 'memory': item['HostConfig']['Memory'] += 1
+            elif mode == 'swap': item['HostConfig']['MemorySwap'] += 1
+            elif mode == 'cpu': item['HostConfig']['NanoCpus'] += 1
+            elif mode == 'captured': observer.ids['wk-app'] = 'b'*64
+            with self.subTest(mode=mode), self.real_prefix_flow(observer, 'container', name, item) as strict:
+                with self.assertRaises(P['WatchError']): observer.verify()
+                self.assertEqual(strict.call_count, 1)
+            self.assertEqual(observer.owner_snapshot_rescans if hasattr(observer, 'owner_snapshot_rescans') else 0, 0)
+
+    def test_current_union_checks_foreign_volume_network_and_unexpected_scope(self):
+        for kind, role in [('volume','wk-data'), ('network','default')]:
+            for mode in ('nonce', 'project', 'scope', 'name'):
+                observer = self.transition_observer(); name, item = self.snapshot_resource(observer, kind, role)
+                if mode == 'nonce': item['Labels'][P['OWNER']['OWNER_LABEL']] = 'foreign'
+                elif mode == 'project': item['Labels']['com.docker.compose.project'] = 'foreign'
+                elif mode == 'scope': item['Labels']['com.docker.compose.'+kind] = 'foreign'
+                else: item['Name'] = 'foreign'
+                with self.subTest(kind=kind, mode=mode), self.real_prefix_flow(observer, kind, name, item) as strict:
+                    with self.assertRaises(P['WatchError']): observer.verify()
+                    self.assertEqual(strict.call_count, 1)
+        observer = self.transition_observer(); name, item = self.snapshot_resource(observer, 'container','wk-app')
+        with self.real_prefix_flow(observer, 'container', name, item,
+                extra={'volume': {observer.state['project']+'_unexpected-body-marker'}}) as strict:
+            with self.assertRaisesRegex(P['WatchError'], 'owner_prefix_unknown_resource'): observer.verify()
+            self.assertEqual(strict.call_count, 1)
+
+    def test_unknown_prefix_diagnostic_hashes_name_without_plaintext_or_retry(self):
+        observer = self.transition_observer(); name = observer.state['project']+'-untrusted-secret-marker-1'
+        own = P['OWNER']; failure = mock.Mock(side_effect=own['PrefixResourceMismatch']('container', {name}))
+        with mock.patch.dict(own, {'owned_state': lambda path: (path, observer.state), 'assert_owned_resources': failure}):
+            with self.assertRaisesRegex(P['WatchError'], 'owner_prefix_unknown_resource'): observer.verify()
+        self.assertEqual(failure.call_count, 1)
+        fact = observer.last_owner_prefix_mismatch
+        self.assertEqual(fact['unknown_resource_count'], 1)
+        self.assertEqual(fact['expected_resource_names'], [])
+        self.assertNotIn(name, json.dumps(fact))
+
+    def test_other_replicas_and_unapproved_oneoff_are_unknown_even_if_owned(self):
+        for suffix in ('-wk-app-2', '-wk-db-99'):
+            observer = self.transition_observer(); own = P['OWNER']; name = observer.state['project']+suffix
+            failure = mock.Mock(side_effect=own['PrefixResourceMismatch']('container',{name}))
+            with self.subTest(suffix=suffix), mock.patch.dict(own, {
+                    'owned_state':lambda path:(path,observer.state),'assert_owned_resources':failure}):
+                with self.assertRaisesRegex(P['WatchError'],'owner_prefix_unknown_resource'):observer.verify()
+                self.assertEqual(failure.call_count,1)
+            self.assertEqual(observer.owner_snapshot_rescans,0)
+
+    def test_all_kinds_exact_disappeared_candidates_allow_fresh_empty_snapshot(self):
+        for kind, role in [('container','wk-db'), ('volume','wk-data'), ('network','default')]:
+            observer = self.transition_observer(); name, _ = self.snapshot_resource(observer, kind, role)
+            own = P['OWNER']; mismatch = own['PrefixResourceMismatch'](kind, {name})
+            error = subprocess.CalledProcessError(1, ['docker',kind,'inspect',name],
+                stderr='Error: No such '+kind+': '+name+'\n')
+            strict = mock.Mock(side_effect=[mismatch, None])
+            with self.subTest(kind=kind), mock.patch.dict(own, {'owned_state': lambda path: (path, observer.state),
+                    'assert_owned_resources': strict, 'docker_inspect': mock.Mock(side_effect=error)}):
+                observer.verify(); self.assertEqual(strict.call_count, 2)
+            self.assertEqual(observer.owner_snapshot_rescans, 1)
+            self.assertEqual(observer.owner_disappearance_rescans, 1)
+
+    def test_prefix_daemon_or_wrong_notfound_never_rescans(self):
+        for mode in ('daemon', 'wrong-name', 'returncode'):
+            observer = self.transition_observer(); name, item = self.snapshot_resource(observer,'container','nextcloud')
+            error = self.missing_oneoff(observer, name)
+            if mode == 'daemon': error.stderr = 'Cannot connect to Docker daemon; secret-marker'
+            elif mode == 'wrong-name': error.stderr = 'Error: No such container: other'
+            else: error.returncode = 125
+            with self.subTest(mode=mode), self.real_prefix_flow(observer, 'container', name, item, inspect_error=error) as strict:
+                with self.assertRaisesRegex(P['WatchError'], 'owner_readonly_docker_command_failed'): observer.verify()
+                self.assertEqual(strict.call_count, 1)
+
+    def test_persistent_prefix_mismatch_is_bounded_and_no_id_is_adopted(self):
+        observer = self.transition_observer(); name, item = self.snapshot_resource(observer,'container','nextcloud')
+        own=P['OWNER']; failure=mock.Mock(side_effect=own['PrefixResourceMismatch']('container',{name}))
+        with mock.patch.dict(own, {'owned_state': lambda path:(path,observer.state),
+                'assert_owned_resources':failure,'docker_inspect':mock.Mock(return_value=item)}):
+            with self.assertRaisesRegex(P['WatchError'], 'owner_prefix_snapshot_rescan_exhausted'): observer.verify()
+        self.assertEqual(failure.call_count,3);self.assertEqual(observer.owner_snapshot_rescans,2)
+        self.assertEqual(observer.ids,{})
+
+    def test_fresh_listed_resource_disappearance_exhausts_without_accepting_snapshot(self):
+        observer=self.transition_observer();own=P['OWNER'];name,_=self.snapshot_resource(observer,'volume','wk-data')
+        error=subprocess.CalledProcessError(1,['docker','volume','inspect',name],
+            stderr='Error response from daemon: get '+name+': no such volume\n')
+        strict=mock.Mock(side_effect=[own['PrefixResourceMismatch']('volume',{name}),None,None])
+        names=lambda kind,project=None: {name} if kind=='volume' else set()
+        with mock.patch.dict(own, {'owned_state':lambda path:(path,observer.state),
+                'assert_owned_resources':strict,'docker_names':names,'docker_inspect':mock.Mock(side_effect=error)}):
+            with self.assertRaisesRegex(P['WatchError'],'owner_prefix_snapshot_rescan_exhausted'):observer.verify()
+        self.assertEqual(strict.call_count,3);self.assertEqual(observer.owner_snapshot_rescans,2)
+        self.assertEqual(observer.ids,{})
 
     def test_listed_ephemeral_disappearance_rescans_complete_strict_snapshot(self):
         observer = self.transition_observer()
@@ -68,14 +266,15 @@ class ResourceWatchTests(unittest.TestCase):
                     'docker_inspect': mock.Mock(return_value=item)}):
                 if mode == 'owned': observer.verify()
                 else:
-                    with self.assertRaisesRegex(P['WatchError'], 'ephemeral_container_(owner|image|budget)_changed'):
+                    with self.assertRaisesRegex(P['WatchError'], 'snapshot_container_(owner|image|budget)_changed'):
                         observer.verify()
             self.assertEqual(observer.ids, {})
 
     def test_continuing_ephemeral_disappearance_is_bounded_and_refused(self):
         observer = self.transition_observer(); own = P['OWNER']
         failure = mock.Mock(side_effect=lambda *_: (_ for _ in ()).throw(self.missing_oneoff(observer)))
-        with mock.patch.dict(own, {'owned_state': lambda path: (path, observer.state), 'assert_owned_resources': failure}):
+        with mock.patch.dict(own, {'owned_state': lambda path: (path, observer.state),
+                'assert_owned_resources': failure, 'docker_inspect': mock.Mock(side_effect=self.missing_oneoff(observer))}):
             with self.assertRaisesRegex(P['WatchError'], 'owner_ephemeral_disappearance_rescan_exhausted'):
                 observer.verify()
         self.assertEqual(failure.call_count, 3)
@@ -83,10 +282,12 @@ class ResourceWatchTests(unittest.TestCase):
         self.assertEqual(observer.ids, {})
 
     def test_primary_unsafe_or_daemon_failures_never_rescan(self):
-        for mode in ('primary', 'unsafe-name', 'daemon', 'wrong-missing-name', 'nonzero-other'):
+        for mode in ('captured-primary', 'unsafe-name', 'daemon', 'wrong-missing-name', 'nonzero-other'):
             observer = self.transition_observer(); own = P['OWNER']
             name = observer.state['project'] + '-wk-app-99'
-            if mode == 'primary': name = observer.state['project'] + '-wk-app-1'
+            if mode == 'captured-primary':
+                name = observer.state['project'] + '-wk-app-1'
+                observer.ids['wk-app'] = 'a' * 64
             elif mode == 'unsafe-name': name = observer.state['project'] + '-unknown-99'
             error = self.missing_oneoff(observer, name)
             if mode == 'daemon': error.stderr = 'Cannot connect to the Docker daemon: private-untrusted-text'
@@ -95,7 +296,7 @@ class ResourceWatchTests(unittest.TestCase):
             failure = mock.Mock(side_effect=error)
             with self.subTest(mode=mode), mock.patch.dict(own, {
                     'owned_state': lambda path: (path, observer.state), 'assert_owned_resources': failure}):
-                with self.assertRaisesRegex(P['WatchError'], 'owner_readonly_docker_command_failed'):
+                with self.assertRaisesRegex(P['WatchError'], 'owner_readonly_docker_command_failed|captured_container_missing'):
                     observer.verify()
             self.assertEqual(failure.call_count, 1)
             self.assertEqual(observer.owner_disappearance_rescans, 0)
@@ -106,7 +307,7 @@ class ResourceWatchTests(unittest.TestCase):
         globals_ = strict.__globals__
         name = observer.state['project'] + '-wk-app-99'
         for mode in ('nonce', 'image'):
-            item = {'Id': 'a'*64, 'Image': observer.state['weknora_image_id'], 'Config': {'Labels': {
+            item = {'Id': 'a'*64, 'Name': '/' + name, 'Image': observer.state['weknora_image_id'], 'Config': {'Labels': {
                 'com.docker.compose.project': observer.state['project'], own['OWNER_LABEL']: observer.state['owner_token'],
                 'com.docker.compose.service': 'wk-app'}}}
             if mode == 'nonce': item['Config']['Labels'][own['OWNER_LABEL']] = 'foreign'
@@ -114,8 +315,10 @@ class ResourceWatchTests(unittest.TestCase):
             inspect = mock.Mock(side_effect=[self.missing_oneoff(observer), item])
             def names(kind, project=None): return {name} if kind == 'container' else set()
             with self.subTest(mode=mode), mock.patch.dict(own, {'owned_state': lambda path: (path, observer.state)}), \
+                    mock.patch.dict(own, {'docker_names': names}), \
                     mock.patch.dict(globals_, {'docker_names': names, 'docker_inspect': inspect}):
-                with self.assertRaisesRegex(P['WatchError'], 'owner_container_(identity|image)_changed'):
+                with mock.patch.dict(own, {'docker_inspect': inspect}), \
+                        self.assertRaisesRegex(P['WatchError'], 'snapshot_container_(owner|image)_changed'):
                     observer.verify()
                 self.assertEqual(inspect.call_count, 2)
 

@@ -55,6 +55,26 @@ def missing_ephemeral_inspect(error, state):
     return args[3] if re.fullmatch(pattern, stderr.strip()) else None
 
 
+def exact_missing_inspect(error, kind, name):
+    """Recognize only the exact inspected resource's static Docker not-found error."""
+    if (not isinstance(error, subprocess.CalledProcessError) or error.returncode != 1 or
+            not isinstance(error.cmd, (tuple, list)) or
+            list(error.cmd) != ["docker", kind, "inspect", name]):
+        return False
+    stderr = error.stderr or ""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    prefix = r"(?:Error response from daemon: |Error: )"
+    escaped = re.escape(name)
+    patterns = [prefix + r"No such " + (r"(?:container|object)" if kind == "container" else kind) +
+                r": /?" + escaped]
+    if kind == "volume":
+        patterns.append(prefix + "get " + escaped + r": no such volume")
+    elif kind == "network":
+        patterns.append(prefix + "network " + escaped + r" not found")
+    return any(re.fullmatch(pattern, stderr.strip()) for pattern in patterns)
+
+
 def docker_failure_facts(args, returncode, stderr, state, operation):
     """Diagnostic metadata never contains inspect output, env or body text."""
     argv = list(args) if isinstance(args, (tuple, list)) else [str(args)]
@@ -255,7 +275,11 @@ class Observer:
         private(self.directory, True)
         self.identity = {k: self.state[k] for k in ("project", "owner_token", "compose_fingerprint",
                                                   "weknora_image", "weknora_image_id")}
+        self.identity.update({k: self.state.get(k) for k in
+                              ("resource_profile", "body_journal", "weknora_ui_image", "weknora_ui_image_id")})
         self.owner_disappearance_rescans = 0
+        self.owner_snapshot_rescans = 0
+        self.last_owner_prefix_mismatch = None
         self.last_docker_failure = None
         self.config = json.loads((self.directory / "compose.yaml").read_text())
         self.image_ids = {"wk-app": self.state["weknora_image_id"]}
@@ -296,36 +320,50 @@ class Observer:
         directory, state = OWNER["owned_state"](self.directory)
         require(directory == self.directory and all(state.get(k) == v for k, v in self.identity.items()),
                 "fixture_identity_changed")
-        disappeared = None
+        pending = None
         for attempt in range(OWNER_RESCAN_ATTEMPTS):
             try:
                 OWNER["assert_owned_resources"](directory, state)
-                if disappeared is not None:
-                    # If the same one-off name reappears, prove its ownership
-                    # and image/budget too. It is never adopted as a primary ID.
-                    try:
-                        value = OWNER["docker_inspect"]("container", disappeared)
-                    except subprocess.CalledProcessError as error:
-                        if missing_ephemeral_inspect(error, state) != disappeared:
-                            raise
-                    else:
-                        self.validate_reappeared_ephemeral(value, disappeared)
+                if pending is not None:
+                    # Recheck all current names, including a reappeared candidate.
+                    # A failed inventory is never used to produce a sample.
+                    _, lost_current = self.validate_current_owner_snapshot(state, *pending)
+                    if lost_current:
+                        if attempt + 1 == OWNER_RESCAN_ATTEMPTS:
+                            raise WatchError("owner_prefix_snapshot_rescan_exhausted")
+                        self.owner_disappearance_rescans = getattr(self, "owner_disappearance_rescans", 0) + 1
+                        self.owner_snapshot_rescans = getattr(self, "owner_snapshot_rescans", 0) + 1
+                        continue
                 return
             except subprocess.CalledProcessError as error:
                 self.last_docker_failure = docker_failure_facts(error.cmd, error.returncode, error.stderr,
                                                                state, "owner_resource_verification")
-                ephemeral = missing_ephemeral_inspect(error, state)
-                if ephemeral is None:
+                args = error.cmd
+                if (not isinstance(args, (list, tuple)) or len(args) != 4 or
+                        list(args[:1]) != ["docker"] or args[2] != "inspect" or
+                        not self.expected_resource_name(args[1], args[3]) or
+                        not exact_missing_inspect(error, args[1], args[3])):
                     raise WatchError("owner_readonly_docker_command_failed") from error
+                pending = (args[1], (args[3],))
+                captured = next((role for role in self.ids if args[3] == state["project"] + "-" + role + "-1"), None)
+                require(args[1] != "container" or captured is None, "captured_container_missing")
+                self.validate_current_owner_snapshot(state, *pending)
                 if attempt + 1 == OWNER_RESCAN_ATTEMPTS:
                     raise WatchError("owner_ephemeral_disappearance_rescan_exhausted") from error
-                # Re-run the complete strict owner/resource snapshot. No sample,
-                # RSS or authorization is produced from the failed snapshot.
                 self.owner_disappearance_rescans = getattr(self, "owner_disappearance_rescans", 0) + 1
-                disappeared = ephemeral
+                self.owner_snapshot_rescans = getattr(self, "owner_snapshot_rescans", 0) + 1
             except RuntimeError as error:
                 if isinstance(error, WatchError):
                     raise
+                if isinstance(error, OWNER["PrefixResourceMismatch"]):
+                    self.last_owner_prefix_mismatch = self.prefix_mismatch_facts(error.kind, error.names)
+                    pending = (error.kind, error.names)
+                    disappeared, _ = self.validate_current_owner_snapshot(state, *pending)
+                    if attempt + 1 == OWNER_RESCAN_ATTEMPTS:
+                        raise WatchError("owner_prefix_snapshot_rescan_exhausted") from error
+                    self.owner_disappearance_rescans = getattr(self, "owner_disappearance_rescans", 0) + int(disappeared)
+                    self.owner_snapshot_rescans = getattr(self, "owner_snapshot_rescans", 0) + 1
+                    continue
                 # Preserve strict owner/image rejection with a fixed diagnostic,
                 # rather than serializing arbitrary exception text.
                 codes = {
@@ -338,6 +376,93 @@ class Observer:
                     "unlabeled resource occupies synthetic Compose project name": "owner_unlabeled_prefix_resource",
                 }
                 raise WatchError(codes.get(str(error), "owner_resource_verification_failed")) from error
+
+    def prefix_mismatch_facts(self, kind, names):
+        safe = sorted(name for name in names if self.expected_resource_name(kind, name))
+        unknown = sorted(set(names) - set(safe))
+        return {"kind": kind if kind in ("container", "volume", "network") else "unknown",
+                "kind_sha256": hashlib.sha256(str(kind).encode()).hexdigest(),
+                "expected_resource_names": safe, "resource_count": len(names),
+                "unknown_resource_count": len(unknown),
+                "unknown_resource_names_sha256": hashlib.sha256(json.dumps(unknown, separators=(",", ":")).encode()).hexdigest(),
+                "raw_unknown_names_or_environment_recorded": False}
+
+    def expected_resource_name(self, kind, name):
+        project = self.state["project"]
+        if kind == "container":
+            services = OWNER["SERVICES"] | ({"wk-ui"} if self.state.get("weknora_ui_image") else set())
+            return (name in {project + "-" + role + "-1" for role in services} or
+                    name in {project + "-" + role + "-99" for role in ROLES})
+        if kind == "volume":
+            volumes = OWNER["VOLUMES"] | (OWNER["BODY_VOLUMES"] if self.state.get("body_journal") else set())
+            return name in {project + "_" + role for role in volumes}
+        return kind == "network" and name == project + "_default"
+
+    def snapshot_image_id(self, role):
+        if role not in self.image_ids:
+            if role == "wk-ui":
+                self.image_ids[role] = self.state["weknora_ui_image_id"]
+            else:
+                identity = self.command(["docker", "image", "inspect", "--format", "{{.Id}}",
+                                         self.config["services"][role]["image"]]).decode().strip()
+                require(re.fullmatch(r"sha256:[0-9a-f]{64}", identity), "snapshot_image_identity")
+                self.image_ids[role] = identity
+        return self.image_ids[role]
+
+    def validate_current_owner_snapshot(self, state, kind, names):
+        """Prove a raced inventory using reads; never relax the mutation guard."""
+        require(bool(names) and all(self.expected_resource_name(kind, name) for name in names),
+                "owner_prefix_unknown_resource")
+        project = state["project"]
+        prefixes = {"container": project + "-", "volume": project + "_", "network": project + "_"}
+        current = {k: OWNER["docker_names"](k, project) |
+                   {name for name in OWNER["docker_names"](k) if name.startswith(prefix)}
+                   for k, prefix in prefixes.items()}
+        listed = {k: set(values) for k, values in current.items()}
+        current[kind].update(names)
+        disappeared, lost_current = False, False
+        for resource_kind, resource_names in current.items():
+            for name in sorted(resource_names):
+                require(self.expected_resource_name(resource_kind, name), "owner_prefix_unknown_resource")
+                try:
+                    value = OWNER["docker_inspect"](resource_kind, name)
+                except subprocess.CalledProcessError as error:
+                    self.last_docker_failure = docker_failure_facts(error.cmd, error.returncode, error.stderr,
+                                                                   state, "owner_snapshot_inspection")
+                    if not exact_missing_inspect(error, resource_kind, name):
+                        raise WatchError("owner_readonly_docker_command_failed") from error
+                    role = next((r for r in self.ids if name == project + "-" + r + "-1"), None)
+                    require(resource_kind != "container" or role is None, "captured_container_missing")
+                    disappeared = True
+                    lost_current = lost_current or name in listed[resource_kind]
+                    continue
+                if resource_kind == "container":
+                    labels = value.get("Config", {}).get("Labels") or {}
+                    role = labels.get("com.docker.compose.service")
+                    require(role in self.config["services"] and HEX_ID.fullmatch(value.get("Id", "")) and
+                            value.get("Name") == "/" + name and
+                            name in {project + "-" + role + "-1", project + "-" + role + "-99"} and
+                            labels.get(OWNER["OWNER_LABEL"]) == state["owner_token"] and
+                            labels.get("com.docker.compose.project") == project,
+                            "snapshot_container_owner_changed")
+                    require(name.endswith("-99") or self.ids.get(role, value["Id"]) == value["Id"],
+                            "container_id_changed")
+                    require(value.get("Image") == self.snapshot_image_id(role), "snapshot_container_image_changed")
+                    if state.get("resource_profile") == "normal-trial":
+                        expected, host = self.config["services"][role], value.get("HostConfig") or {}
+                        require(host.get("Memory") == expected["mem_limit"] and
+                                host.get("MemorySwap") == expected["memswap_limit"] and
+                                host.get("NanoCpus") == int(float(expected["cpus"]) * 1_000_000_000),
+                                "snapshot_container_budget_changed")
+                else:
+                    labels = value.get("Labels") or {}
+                    label = "com.docker.compose." + ("volume" if resource_kind == "volume" else "network")
+                    require(value.get("Name") == name and labels.get(OWNER["OWNER_LABEL"]) == state["owner_token"] and
+                            labels.get("com.docker.compose.project") == project and
+                            labels.get(label) == name[len(project) + 1:], "snapshot_resource_owner_changed")
+                    if resource_kind == "network":
+                        require(HEX_ID.fullmatch(value.get("Id", "")) is not None, "snapshot_network_identity")
+        return disappeared, lost_current
 
     def validate_reappeared_ephemeral(self, value, name):
         role = next((role for role in ROLES if name == self.state["project"] + "-" + role + "-99"), None)
@@ -490,6 +615,8 @@ class Observer:
                             sample_count=count, sampled_max_weknora_rss_bytes=maximum_rss,
                             captured_container_ids=self.ids, received_signal=self.signal_number,
                             owner_disappearance_rescans=getattr(self, "owner_disappearance_rescans", 0),
+                            owner_snapshot_rescans=getattr(self, "owner_snapshot_rescans", 0),
+                            last_owner_prefix_mismatch=getattr(self, "last_owner_prefix_mismatch", None),
                             last_docker_command_failure=getattr(self, "last_docker_failure", None),
                             observed_application_state=self.previous_states.get("wk-app"),
                             own_marker_removed=remove_own_marker(self.marker, self.marker_raw, marker_identity))

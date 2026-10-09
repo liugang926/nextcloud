@@ -4,9 +4,38 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Integration head `06811da` has actual terminal failures in both push and PR CI.
+The C6 candidate failed its default PostgreSQL ordinary-QA HTTP read at the
+unchanged 8-second deadline; the producer completed afterward. The service
+package later exhausted its cumulative 20-minute budget while different cases
+had run only 4–5 seconds, which does not establish a deadlock. Image pulls for
+PHP checks and several container initialization jobs hit Docker Hub's
+unauthenticated pull limit.
+The two direct-upgrade jobs stopped before their business assertions; their
+exact registry/startup cause was not retained. The
+[current CI failure record](evidence/ci-06811da-failures-20261010.json) preserves
+original artifact hashes and distinguishes these failures. Required deadlines
+and restore assertions remain unchanged; this CI is not acceptance.
+
 The manifest's current candidates are C6 `aac58fa7` and RAG `1ab47546`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
 frozen evidence for current implementation facts; the table below is historical.
+The ordinary AnyDoc app/UI images for RAG `1ab47546` subsequently built from
+the frozen integration runner `06811da` in 324.927 seconds. Their distinct
+immutable image IDs and all five source/role labels match the private frozen
+manifest. The first attempt stopped before Docker build because the host had
+6.2 GiB free; exact retired private compile-cache cleanup restored 32.06 GiB
+while preserving source, failed logs and original results. The existing
+16 GiB build minimum was retained. The [actual image record](evidence/ordinary-qa-normal-anydoc-images-20261010.json)
+accepts only the build and image provenance; fresh normal QA, running replay,
+dual-database restore and P5 still require actual acceptance.
+The readonly observer now diagnoses the exact kind and names involved in
+disagreeing prefix inventories, verifies current resources and limits complete
+rescans to three. Mutation helpers still reject the same mismatch immediately.
+[Ninety-one offline preparation checks](evidence/resource-watch-prefix-snapshot-preparation-20261010.json)
+passed without skipped tests; a fresh actual startup must still verify this fix.
+The two [fresh startup failures](evidence/ordinary-qa-normal-startup-failures-20261010.json) remain unaccepted and ran no QA or restore.
+The first stopped before resources; the second observer recorded zero samples and removed its marker, and all owned services stopped with volumes/CURRENT preserved. Its exact unlabelled-prefix resource remains unrecorded.
 The preceding normal AnyDoc app/UI build for RAG `595f241f` completed; its immutable IDs and
 source labels were verified. A new owned nested-LDAP environment passed startup,
 signed ingestion and the permission matrix, but its first actual QA failed:
@@ -91,8 +120,9 @@ the eight-second HTTP bound. The final strengthened tests subsequently passed on
 The [real StopSession record](evidence/ordinary-QA-real-stop-chain-20261010.json)
 keeps the original full-suite identities separate and proves that production
 bytes did not change in the test supplement. Both patches reproduce and reverse
-their exact baseline trees. These sources are promoted as development candidates;
-normal images/application/restore and P5 remain unaccepted.
+their exact baseline trees. These sources are promoted as development candidates.
+The later ordinary image build is recorded above; application/restore and P5
+remain unaccepted.
 
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
 their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the

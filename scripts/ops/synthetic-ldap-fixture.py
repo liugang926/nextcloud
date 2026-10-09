@@ -389,6 +389,13 @@ def docker_inspect(kind, name):
     return items[0]
 
 
+class PrefixResourceMismatch(RuntimeError):
+    """Two resource inventories disagree; mutation callers still fail closed."""
+    def __init__(self, kind, names):
+        super().__init__("unlabeled resource occupies synthetic Compose project name")
+        self.kind, self.names = kind, tuple(sorted(names))
+
+
 def assert_owned_resources(directory, state, *, require_empty=False):
     """Fail closed before Compose can modify a project or remove its volumes."""
     project, token = state["project"], state["owner_token"]
@@ -401,7 +408,7 @@ def assert_owned_resources(directory, state, *, require_empty=False):
     for kind, prefix in prefixes.items():
         foreign = {name for name in docker_names(kind) if name.startswith(prefix)} - resources[kind]
         if foreign:
-            raise RuntimeError("unlabeled resource occupies synthetic Compose project name")
+            raise PrefixResourceMismatch(kind, foreign)
     if require_empty:
         if any(resources.values()):
             raise RuntimeError("synthetic Compose project still has resources")
