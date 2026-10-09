@@ -29,8 +29,9 @@ records baseline and patch SHA in image labels; deployment evidence must also
 record the actual image digests.
 The manifest also records the exact resulting Git tree. The captured patches
 passed fresh Git-index application and reverse application, reproducing both
-the candidate and baseline trees exactly. Reverse application warns about two
-pre-existing upstream Neo4j raw-string indentation lines; the generated source
+the candidate and baseline trees exactly. Reverse application warns about three
+pre-existing upstream lines (two Neo4j raw-string indents and a SQLite
+SQL-string trailing space); the generated source
 passes `git diff --check`.
 
 ## Included implementation
@@ -82,6 +83,18 @@ or skipped cases, including owned PostgreSQL and SQLite; the complete Go source
 compiled on both profiles. Separate capacity/recovery and tag/auto-span gates
 are recorded with their original measured commits.
 
+The newest source also requires a Wiki policy on every service entry. Missing
+policy denies before storage; ID reads resolve only KB ownership before body.
+Its SQLite policy/ordinary-reader tests passed 36 cases, and three original
+revision restore/churn/delete regressions passed. The subsequent persisted-ID
+metadata ownership repair passed six focused cases; the final sources require
+new full CI. See [Wiki policy](wiki-nextcloud-source-policy.md).
+
+[Local derived inventory](nextcloud-local-derived-gc.md) records the independently
+frozen real SQL/filesystem/native-vector probes. Audit metadata can remain
+90 days under PRD §7.4; body-bearing JSON is still pending the separate
+source-state-specific purge module and is not authorized by that deadline.
+
 The subsequently integrated FAQ/tag HTTP lease gate and existing knowledge
 collection gate passed 367 cases per profile, zero failures/skips, and full
 source compilation. They protect the selected KB through capture and output,
@@ -89,7 +102,8 @@ reject missing stores, and release on cancellation. Cross-KB original parent
 material and the actual `RunDue` object-delete adapter were completed by the
 following independently measured integrations; global coverage remains closed.
 
-The current combination passed 529 cases per profile, zero failures/skips, and
+The earlier all-parent/object-GC combination passed 529 cases per profile, zero
+failures/skips, and
 complete Go compilation on owned stock PostgreSQL and SQLite. FAQ metadata-only
 plans now locate every parent/source scope before body reads; actual broad and
 exact leases are validated in the capture transaction and held through HTTP
@@ -98,15 +112,21 @@ SQLite single-connection authority checks use transaction-bound repositories.
 Actual object `RunDue` checks coverage/read/build fences, blocks late reads,
 and holds the final source/resource transaction through provider unlink and ACK.
 Crashes, failed providers, lost tokens and restore competition have real SQL/
-filesystem probes. No production coverage row is inserted. Global derived
-inventory, other reader/writer families and safe shared-path replacement remain
-separate unfinished gates.
+filesystem probes. No production coverage row is inserted. The subsequently integrated
+local-derived module records actual backend selection
+before writes, exact chunk/index writer receipts, native SQLite FTS5/vec0 and PG
+row deletion receipts, and fenced filesystem pathname replacement. Root combined source probes passed 41 cases per profile with no failures or
+skips, including actual original input, SQLite FTS5/vec0, stock PostgreSQL
+index/GC and Wiki policy. A separate native halfvec probe passed on the exact
+C6 source, left it unchanged and removed all owned resources. These are
+controlled model/source fixtures, not full live application or global coverage. Full external inventory
+and reader/writer coverage remain unfinished; production coverage stays closed.
 
-Both CI runs of submission `324425d` passed all 12 jobs, including each
-candidate's 337 producer/recovery cases with zero failures/skips, 115 compiled
-test packages and frontend typecheck/build. Those logs are retained and pinned
-in the evidence; the newer read-lease candidate is verified separately above
-and will receive its own CI run.
+Both CI runs of submission `beb2646` passed all 12 jobs. Actual retained logs
+contain 547 producer/recovery test and subtest cases per profile, zero failures
+or skips, complete Go compilation and frontend typecheck/build. This CI used the
+manifest's `a9d31fb4` / `2f6f75fc` sources; subsequent local-derived changes need
+separate verification and submission. Earlier CI records remain in the evidence.
 
 The live joint recovery probe uses actual Nextcloud, nested synthetic LDAP,
 PostgreSQL dump/restore, signed HTTP endpoints and WeKnora maintenance CLI /
@@ -117,6 +137,7 @@ These candidates have not been deployed to the shared test stack. Full personal
 read/build lease coverage and physical derived GC inventory remain incomplete;
 the GC coverage gate remains closed. Saved-history original material and
 machine initial upload/auto-tag admission are still being completed.
-Production-directory acceptance, full application recovery, and the
+GC list preview/manual collection UI and complete derived/bucket capacity
+accounting also remain open. Production-directory acceptance, full application recovery, and the
 PRD performance targets remain outstanding. This is a reproducible development
 submission, not a V1 release acceptance.

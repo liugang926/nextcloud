@@ -157,6 +157,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30
+      pgvector:
+        image: paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2
+        env:
+          POSTGRES_PASSWORD: candidate-vector-test-only
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -198,8 +209,24 @@ jobs:
           go build -buildvcs=false -p 1 -o /tmp/capacity-reconcile ./cmd/capacity-reconcile
           export WEKNORA_CAPACITY_RECONCILE_CLI=/tmp/capacity-reconcile
           go test -json -p 1 ./internal/config ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
-            -run 'KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
+            -run '^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 > candidate-tests.jsonl
           go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
+      - name: Verify actual SQLite FTS5 and PostgreSQL derived collection
+        working-directory: candidate
+        env:
+          WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_auto sslmode=disable
+          WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_gc sslmode=disable
+        run: |
+          go test -json -tags sqlite_fts5 -p 1 ./internal/application/service ./internal/application/service/file ./internal/application/repository/retriever/sqlite \
+            -run 'NextcloudLocalDerived|PostgresNextcloudLocalDerived|LocalGC|LocalPath|RetrieveReturns|VectorRetrieveFiltersBeforeTopK' -count=1 > candidate-local-derived.jsonl
+      - name: Verify actual native halfvec collection
+        working-directory: candidate
+        env:
+          WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5433 user=postgres password=candidate-vector-test-only dbname=postgres sslmode=disable
+          WEKNORA_LOCAL_DERIVED_NATIVE_VECTOR: '1'
+        run: |
+          go test -json -p 1 ./internal/application/service \
+            -run '^TestPostgresNextcloudLocalDerivedActualPipeline$' -count=1 > candidate-native-derived.jsonl
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

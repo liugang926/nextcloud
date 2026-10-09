@@ -1671,3 +1671,20 @@ separate app/UI image tags without starting services. Candidate deployment and
 full normal machine-ingestion acceptance remain pending. No production coverage
 marker or global recovery ingress is enabled. Local derived/vector inventory,
 remaining readers/history and the PRD performance requirements are still open.
+
+
+## 2026-10-09 candidate CI and local derived follow-up
+
+Submission `beb2646` passed all 12 push/PR jobs. Retained artifacts contain547
+producer/recovery test and subtest cases per candidate with zero failures/skips,
+complete Go compile and frontend checks. Later candidate sources add exact local
+backend writer/retirement inventory, atomic native SQLite/PG row receipts, local
+path replacement/crash fences and mandatory Wiki source policy. Current
+verification results and original failed fixture runs are separately pinned in
+[candidate evidence](evidence/weknora-development-candidates-2026-10-09.json).
+
+PRD §7.4 allows90-day retention only for body-free metadata/audit. Original
+JSON body purge, external backend inventory, machine first-ingestion, complete
+saved-history readers, candidate app recovery and measured performance remain
+open. Global physical coverage remains closed. Shared Nextcloud stays on its
+separate0.4.37 source snapshot.
