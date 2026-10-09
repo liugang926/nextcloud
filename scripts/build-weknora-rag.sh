@@ -149,7 +149,7 @@ patch_label="io.github.liugang926.weknora.nextcloud-patch-sha256=$patch_sha"
 
 # The pinned source Dockerfile builds the Rust anydoc library and links the
 # Go backend with GO_BUILD_TAGS=anydoc when WITH_ANYDOC=1.
-build_args=(--build-arg WITH_ANYDOC=1)
+build_args=(--build-arg WITH_ANYDOC=1 --build-arg "GOSUMDB_ARG=${WEKNORA_RAG_GOSUMDB:-sum.golang.org}")
 source_labels=(--label "$source_label" --label "$patch_label")
 app_role_labels=()
 ui_role_labels=()

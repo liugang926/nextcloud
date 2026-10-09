@@ -22,6 +22,9 @@ WEKNORA_RAG_CANDIDATE=1 scripts/build-weknora-rag.sh
 ```
 
 This selects the candidate manifest and verifies both exact trees before build.
+The normal build explicitly enables the Go checksum database (`sum.golang.org`
+unless the operator supplies `WEKNORA_RAG_GOSUMDB`), because the upstream Docker
+ARG default is off. It retains the normal AnyDoc app and UI build paths.
 Its default output tags are `weknora-ldap-app:nextcloud-rag-candidate` and
 `weknora-ldap-ui:nextcloud-rag-candidate`. The build does not start or switch a
 running service. Use those images in a separately owned fixture. Build output
