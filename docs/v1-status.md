@@ -4,6 +4,18 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Independent idle-stream candidates now have actual causal regressions:
+matched empty polls renew eight held bodies 80 times on the old source and
+eight times on the correction. Both databases also stop the real model after
+idle source revocation. A later original-material refusal regression found
+that HTTP closure did not cancel the provider or release its pins after actor
+deactivation or body-lease expiry. The correction passed all six corresponding
+nodes with actual cancellation, service return, released pins and zero completed
+rows/manifests. The [progress record](evidence/ordinary-qa-idle-cancel-progress-20261010.json)
+keeps the earlier 44 ordinary/59 terminal tests tied to their original source;
+the final sources still need their own full two-profile gates, normal images
+and application/restore acceptance. The current manifest is unchanged.
+
 Integration head `06811da` has actual terminal failures in both push and PR CI.
 The C6 candidate failed its default PostgreSQL ordinary-QA HTTP read at the
 unchanged 8-second deadline; the producer completed afterward. The service
