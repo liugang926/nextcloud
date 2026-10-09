@@ -61,7 +61,21 @@ def main():
                         help="absolute path to an installed Playwright Node module")
     parser.add_argument("--browser-executable",
                         help="optional isolated Chromium headless executable")
+    parser.add_argument('--candidate-profile', choices=('c6', 'rag'),
+                        help='require exact candidate app/UI source labels before the owned fixture')
+    parser.add_argument('--candidate-manifest',
+                        help='optional frozen manifest snapshot for this exact candidate build')
     args = parser.parse_args()
+    provenance = None
+    if args.candidate_profile:
+        command = [sys.executable, str(HERE / 'inspect-weknora-candidate-images.py'),
+                   '--profile', args.candidate_profile, '--app-image', args.weknora_image,
+                   '--ui-image', args.weknora_ui_image]
+        if args.candidate_manifest:
+            command.extend(['--manifest', args.candidate_manifest])
+        provenance = json.loads(run(command, 'exact candidate image preflight', 35))
+    elif args.candidate_manifest:
+        raise ValueError('candidate manifest requires a candidate profile')
     preflight(args)
     evidence = Path(tempfile.mkdtemp(prefix="nc-browser-ask-evidence-"))
     evidence.chmod(0o700)
@@ -77,6 +91,9 @@ def main():
         state = json.loads(prepared)
         scratch = Path(state["scratch"])
         project = state["project"]
+        if provenance and (state['weknora_image_id'] != provenance['app']['image_id'] or
+                           state['weknora_ui_image_id'] != provenance['ui']['image_id']):
+            raise RuntimeError('candidate image changed between preflight and fixture preparation')
         if not re.fullmatch(r"nc-synldap-[0-9a-f]{8}", project):
             raise RuntimeError("prepared fixture returned an invalid project")
         run([sys.executable, str(FIXTURE), "up", "--scratch", str(scratch)],
@@ -105,7 +122,7 @@ def main():
         parts = [str(error) for error in (primary_error, cleanup_error) if error]
         raise RuntimeError("; ".join(parts) + f"; private evidence: {evidence}")
     print(json.dumps({**result, "fixture_cleaned": True,
-                      "evidence": str(evidence)}, separators=(",", ":")))
+                      "evidence": str(evidence), "candidate_image_provenance": provenance}, separators=(",", ":")))
 
 
 if __name__ == "__main__":

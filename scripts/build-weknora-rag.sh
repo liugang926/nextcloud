@@ -25,17 +25,24 @@ import sys
 
 project = Path(sys.argv[1])
 entry = json.loads((project / 'integration/candidates/manifest.json').read_text())['profiles']['rag']
-if entry['base'] != sys.argv[2] or not re.fullmatch(r'[a-f0-9]{64}', entry['patch_sha256']):
+if (entry['base'] != sys.argv[2] or not re.fullmatch(r'[a-f0-9]{64}', entry['patch_sha256'])
+        or any(not re.fullmatch(r'[a-f0-9]{40}', entry[field]) for field in ('candidate_tree', 'candidate_commit'))):
     raise SystemExit('Candidate baseline or SHA is invalid')
 path = project / entry['path']
 if path.resolve().parent != (project / 'integration/candidates').resolve():
     raise SystemExit('Candidate patch must be inside integration/candidates')
 print(path)
 print(entry['patch_sha256'])
+print(entry['candidate_tree'])
+print(entry['candidate_commit'])
 PY
 )"
   patch_file="${candidate_fields%%$'\n'*}"
-  expected_patch_sha="${candidate_fields#*$'\n'}"
+  candidate_remainder="${candidate_fields#*$'\n'}"
+  expected_patch_sha="${candidate_remainder%%$'\n'*}"
+  candidate_remainder="${candidate_remainder#*$'\n'}"
+  candidate_tree="${candidate_remainder%%$'\n'*}"
+  candidate_commit="${candidate_remainder#*$'\n'}"
   default_tag_suffix=nextcloud-rag-candidate
 fi
 
@@ -122,6 +129,11 @@ patch_label="io.github.liugang926.weknora.nextcloud-patch-sha256=$patch_sha"
 # The pinned source Dockerfile builds the Rust anydoc library and links the
 # Go backend with GO_BUILD_TAGS=anydoc when WITH_ANYDOC=1.
 build_args=(--build-arg WITH_ANYDOC=1)
+source_labels=(--label "$source_label" --label "$patch_label")
+if [[ "$candidate_mode" == 1 ]]; then
+  source_labels+=(--label "io.github.liugang926.weknora.candidate-tree=$candidate_tree"
+                  --label "io.github.liugang926.weknora.candidate-commit=$candidate_commit")
+fi
 if [[ -n "${WEKNORA_RAG_GOPROXY:-}" ]]; then
   build_args+=(--build-arg "GOPROXY_ARG=$WEKNORA_RAG_GOPROXY")
 fi
@@ -142,7 +154,7 @@ if [[ -n "${WEKNORA_RAG_RUSTUP_UPDATE_ROOT:-}" ]]; then
 fi
 docker build "${build_args[@]}" \
   --build-arg "VERSION_ARG=$version" --build-arg "COMMIT_ID_ARG=$revision" \
-  --label "$source_label" --label "$patch_label" \
+  "${source_labels[@]}" \
   -f "$build_dir/docker/Dockerfile.app" \
   -t "$app_image" "$build_dir"
 ui_build_args=(--build-arg "VITE_FRONTEND_COMMIT=$revision")
@@ -150,7 +162,7 @@ if [[ -n "${WEKNORA_RAG_NPM_REGISTRY:-}" ]]; then
   ui_build_args+=(--build-arg "NPM_REGISTRY=$WEKNORA_RAG_NPM_REGISTRY")
 fi
 docker build "${ui_build_args[@]}" \
-  --label "$source_label" --label "$patch_label" \
+  "${source_labels[@]}" \
   -f "$build_dir/frontend/Dockerfile" \
   -t "$ui_image" "$build_dir/frontend"
 

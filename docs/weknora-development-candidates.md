@@ -25,8 +25,25 @@ This selects the candidate manifest and verifies both exact trees before build.
 Its default output tags are `weknora-ldap-app:nextcloud-rag-candidate` and
 `weknora-ldap-ui:nextcloud-rag-candidate`. The build does not start or switch a
 running service. Use those images in a separately owned fixture. Build output
-records baseline and patch SHA in image labels; deployment evidence must also
-record the actual image digests.
+records baseline, patch SHA, exact candidate tree and source commit in image
+labels; deployment evidence must also record the actual image digests. Before
+starting the owned browser fixture, require the exact manifest's pair:
+
+```sh
+python3 scripts/ops/inspect-weknora-candidate-images.py --profile=rag \
+  --app-image=weknora-ldap-app:nextcloud-rag-candidate \
+  --ui-image=weknora-ldap-ui:nextcloud-rag-candidate
+python3 scripts/ops/isolated-browser-ask-smoke.py --candidate-profile=rag \
+  --weknora-image=weknora-ldap-app:nextcloud-rag-candidate \
+  --weknora-ui-image=weknora-ldap-ui:nextcloud-rag-candidate
+```
+
+The read-only image check rejects old/incomplete build labels and captures
+immutable image IDs. The browser fixture verifies those same IDs before
+startup and its owner verifies that the tags still point to the captured IDs.
+For a frozen older build use `--candidate-manifest=/absolute/snapshot.json`
+on both commands. Label verification alone does not establish runtime success;
+no current candidate image build or application acceptance is claimed here.
 The manifest also records the exact resulting Git tree. The captured patches
 passed fresh Git-index application and reverse application, reproducing both
 the candidate and baseline trees exactly. Reverse application warns about three
