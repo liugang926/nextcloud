@@ -17,6 +17,21 @@ actual PostgreSQL/SQLite regressions passed 42 RAG and 18 new C6 cases.
 The latest source still needs a new normal image and full QA/history/replay,
 clean application restore and measured P5 acceptance.
 
+Steer's original-material integration is being developed in isolated source
+worktrees and is not included in this manifest yet. Actual HTTP validation
+found an automatic follow-up attempt after material refusal and an unsupported
+cross-run `after` consumption path. The latter needs an immutable transition
+from the original input to the new assistant and user, with exact control,
+membership and initial-input checks. Old parent-body copies also need the
+original dependencies of later generated fields included in their retention
+scope before their cleanup can be accepted. These remain implementation work.
+
+Candidate CI now checks that selected tests actually executed and completed,
+including required HTTP, PostgreSQL, Redis and summary regressions. The
+[evidence check](evidence/candidate-test-evidence-gate-20261009.json) was
+verified against both preceding candidate CI artifacts and preserved real
+failure logs. This does not establish full application or V1 acceptance.
+
 The remaining V1 work includes the full normal QA/source-revocation loop;
 clean and stale-publication recovery plus real pending-Auto fault recovery;
 Steer and other exposed consumer original-material/lifetime coverage; old
