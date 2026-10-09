@@ -56,6 +56,29 @@ def replay(base, session_id, message_id, token):
     return status, content
 
 
+def rejected_generation(base, session_id, token, runtime):
+    payload = json.dumps({"query": "What is the synthetic approval code?",
+                          "knowledge_ids": [runtime["knowledge_id"]],
+                          "agent_enabled": False, "summary_model_id": runtime["chat_model_id"],
+                          "channel": "web", "disable_title": True}).encode()
+    request = urllib.request.Request(base + "/api/v1/knowledge-chat/" +
+                                     urllib.parse.quote(session_id), data=payload, method="POST",
+                                     headers={"Authorization": "Bearer " + token,
+                                              "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status, content = response.status, response.read(2 * 1024 * 1024 + 1)
+    except urllib.error.HTTPError as error:
+        status, content = error.code, error.read(2 * 1024 * 1024 + 1)
+    require(len(content) <= 2 * 1024 * 1024, "rejected QA exceeded probe bound")
+    events = []
+    if status == 200:
+        for line in content.decode("utf-8").splitlines():
+            if line.startswith("data:") and line[5:].strip() not in {"", "[DONE]"}:
+                events.append(json.loads(line[5:].strip()))
+    return status, content, events
+
+
 def run(scratch, revoke):
     directory, state = owner["owned_state"](scratch)
     require(state["mode"] in {"direct", "nested"}, "unsupported owned LDAP mode")
@@ -104,11 +127,22 @@ def run(scratch, revoke):
             require(replay_status in {200, 403, 404} and
                     MARKER.encode() not in content and human.encode() not in content,
                     "source revocation still exposed original replay")
+        # A new generation must also stop without using the old saved body.
+        started = time.monotonic()
+        denied_status, denied_content, denied_events = rejected_generation(base, session, token, runtime)
+        elapsed = time.monotonic() - started
+        require(MARKER.encode() not in denied_content and human.encode() not in denied_content and
+                (denied_status in {403, 404} or (denied_status == 200 and
+                 any(item.get("response_type") == "error" and
+                     item.get("done") is True for item in denied_events))),
+                "new revoked QA did not terminate with a safe error")
         # Confirm the identity and KB grant still exist, so the source denial
         # was exercised independently of account removal.
         probe["source_context_unchanged"](state, nc_base, passwords, runtime)
         result.update(source_revocation_checked=True, history_redacted=True,
-                      completed_replays_redacted=True)
+                      completed_replays_redacted=True, new_qa_denied=True,
+                      denied_qa_http_status=denied_status,
+                      denied_qa_terminal_seconds=round(elapsed, 3))
     print(json.dumps(result, separators=(",", ":")), flush=True)
 
 
