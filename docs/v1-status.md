@@ -2,6 +2,37 @@
 
 This repository implements a local development slice of the [PRD](development-plan.md), not a V1 enterprise release. The PRD describes requirements; the table records the historical implementation and tests through 2026-09-24, with a newer addendum below. Only synthetic local data has been used for cross-system testing.
 
+## Current checkpoint — 2026-10-09
+
+The manifest's current candidates are C6 `35968820` and RAG `eb7d5756`.
+Use the [latest candidate record](weknora-development-candidates.md) and its
+frozen evidence for current implementation facts; the table below is historical.
+Normal AnyDoc images have been built and their exact source labels verified.
+A fresh nested-LDAP application passed startup, signed ingestion and the
+permission matrix. The early HTTP material-initialization 503 is fixed, but
+first QA still fails after Merge: a legitimate generated summary's parent
+relationship is rejected as an unsupported input. Full QA/history/replay,
+clean application restore and measured P5 acceptance therefore remain open.
+
+The remaining V1 work includes the full normal QA/source-revocation loop;
+clean and stale-publication recovery plus real pending-Auto fault recovery;
+Steer and other exposed consumer original-material/lifetime coverage; old
+parent body-copy closure and purge; complete indexed-source withdrawal
+inventory, physical receipts and credential retirement; external derived GC
+and capacity coverage; 100 independent latency samples and upload comparisons,
+followed by the full AI workload pilot; fault/retry/rotation and operations UX;
+and enterprise AD, real-model, deployment and recovery acceptance. Existing
+failed-candidate retry and local selected-resource cleanup are implemented
+components and must not be mistaken for these broader acceptance results.
+
+Manual publication snapshots, explicit file replacement and delegated embedded
+Q&A/SSO are V1.1; unrestricted private/shared/file-ACL expansion is product V2.
+PRD §7.7's V2/V3 document revisions are V1 consistency requirements. Security
+of already exposed history, Agent, download and other consumer paths remains
+required in V1 regardless of later product phases.
+
+## Historical implementation table
+
 | PRD area | Implemented and checked locally | Remaining before V1 |
 | --- | --- | --- |
 | Docker and app | Nextcloud 34.0.4, PostgreSQL 16 and Redis 7 use separate volumes; the app installs and upgrades; Compose includes cron, separate five-second event sender and applied-status workers, and a mock embedding service. A deterministic app packaging script emits a runtime-only 0.4.24 archive and verifies its install layout. A disposable fresh Nextcloud stack installed the preceding 0.4.23 archive without a source bind mount, created the expected migration tables, and returned authenticated DAV 207. The local shared stack upgraded to 0.4.24; a fresh 0.4.24 install and direct 0.4.6-to-0.4.24 upgrade passed GitHub CI at `a134851`. The existing `weknora-ldap-local` app can use an image built from a fixed WeKnora commit plus this repository's patch. | Pin a production image and dependency matrix for both stacks; verify rollback and coordinated backup/restore. |

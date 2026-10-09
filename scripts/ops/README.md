@@ -462,6 +462,33 @@ See the [browser drill](../../docs/synthetic-ldap-compose.md#files-browser-hando
 for the command and observed result. The normal fixture flow does not require
 Playwright or a WeKnora UI image.
 
+## Owned fixture resource evidence
+
+Use the read-only resource watcher during a new synthetic LDAP application
+trial when memory or CPU evidence is needed:
+
+```sh
+python3 scripts/ops/synthetic-ldap-resource-watch.py \
+  --scratch OWNED_SCRATCH --output NEW_PRIVATE_DIRECTORY \
+  --interval 5 --duration 1800
+```
+
+It verifies the fixture marker, exact container IDs and images on every sample.
+The private JSONL records Docker working-set/CPU, actual `WeKnora` process
+VmRSS/HWM, cgroup memory events, VM capacity and container health/exit state.
+It can start before the app is created; after observing an ID it rejects a
+replacement. Stop its reported PID with SIGTERM and retain `metadata.json`
+with the actual terminal result and marker cleanup state. Its separate
+`resource-watch.json` marker is an observer marker, not a delivery worker or
+proof that the application is quiescent.
+
+Five-second samples can miss short peaks, and Docker CLI memory values are
+rounded. The tool reports unavailable RSS after exit rather than reconstructing
+history. It does not read credentials or document bodies, change budgets,
+restart containers, or establish business/performance acceptance. Run heavy
+compilation and application trials serially on a small Docker VM; report the
+actual workload, limits and observer interval alongside latency results.
+
 ## Isolated backup and restore drill
 
 Run `./scripts/ops/isolated-restore-drill.sh` from this repository to rehearse a **synthetic data-level** backup and restore. The script creates new, uniquely named Docker volumes and two PostgreSQL containers on Docker's `none` network. It never accepts a Compose project, existing volume name, database address, or production credentials. It verifies labels before removing only the volumes and containers it created. Backup files and comparison results remain in a new private temporary directory printed at the end. Pass a path that does not exist to choose the output directory.
