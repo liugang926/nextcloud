@@ -21,6 +21,14 @@ HTTP sender did not finish in time. Title-control regressions passed. These
 [actual failure records](evidence/normal-application-ci-failure-20261010.json)
 remain unaccepted and are being corrected without removing required tests.
 
+The resource observer now bounds complete readonly ownership rescans when an
+exact allowed one-off inspection reports that its container disappeared. All
+ordinary container, owner, image and budget mismatches still refuse, and the
+mutation helpers are unchanged. Safe command diagnostics avoid losing the
+next failure's cause. [Nineteen independent preparation checks](evidence/resource-watch-transition-preparation-20261010.json)
+passed; the earlier exact command and the suspected startup race remain
+unproved, and the next fresh startup must verify the observer in practice.
+
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
 their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the
 permission matrix. The early HTTP material-initialization 503 is fixed, but
