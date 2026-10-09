@@ -32,6 +32,9 @@ SERVICES = frozenset(("openldap", "cert-init", "nc-db", "nc-redis", "nextcloud",
 VOLUMES = frozenset(("ldap-certs", "ldap-fixture", "nc-postgres", "nc-redis-data",
                      "nc-html", "wk-postgres", "wk-data", "docreader-tmp"))
 BODY_VOLUMES = frozenset(("wk-body-journal", "wk-body-key", "wk-body-pin"))
+NORMAL_TRIAL_MEMORY_MIB = {"wk-app":4096,"nextcloud":768,"wk-db":512,"nc-db":256,
+                         "docreader":256,"openldap":128,"cert-init":64,"mock-embedding":128,
+                         "nc-redis":64,"wk-redis":64,"wk-ui":64}
 SHORT_PRIMARY_ENV = {"DOCREADER_PDF_FORCE_SCANNED": "1"}
 LDAP_IMAGE = ("bitnamilegacy/openldap:2.6.10-debian-12-r4@"
               "sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93")
@@ -435,9 +438,23 @@ def assert_owned_resources(directory, state, *, require_empty=False):
             raise RuntimeError("network does not belong to this synthetic fixture")
 
 
-def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay_max_seconds=0):
+def apply_resource_profile(config,profile):
+    if profile not in {'default','normal-trial'}:
+        raise RuntimeError('invalid fresh fixture resource profile')
+    if profile=='normal-trial':
+        for service,item in config['services'].items():
+            memory=NORMAL_TRIAL_MEMORY_MIB[service]*1024**2
+            item.update(mem_limit=memory,memswap_limit=memory,
+                        cpus=1.0 if service in {'wk-app','nextcloud','wk-db','nc-db','docreader'} else .5)
+        config['services']['wk-app'].setdefault('environment',{})['GOMEMLIMIT']='3GiB'
+
+
+def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay_max_seconds=0,
+            resource_profile='default'):
     if type(chat_stream_delay_max_seconds) is not int or not 0 <= chat_stream_delay_max_seconds <= 20:
         raise RuntimeError("invalid owned chat stream delay maximum")
+    if resource_profile not in {'default','normal-trial'}:
+        raise RuntimeError('invalid fresh fixture resource profile')
     inspected = subprocess.run(["docker", "image", "inspect", image, "--format", "{{.Id}}"],
                                check=True, text=True, capture_output=True)
     image_id = inspected.stdout.strip()
@@ -497,6 +514,7 @@ def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay
         if chat_stream_delay_max_seconds:
             config["services"]["mock-embedding"]["environment"] = {
                 "MOCK_CHAT_STREAM_DELAY_MAX_SECONDS": str(chat_stream_delay_max_seconds)}
+        apply_resource_profile(config,resource_profile)
         state = {"marker": MARKER, "project": project, "mode": mode,
                  "scratch_dir": str(directory.resolve()), "owner_token": owner_token,
                  "compose_fingerprint": compose_fingerprint(config),
@@ -510,6 +528,8 @@ def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay
             state["body_journal"] = True
         if chat_stream_delay_max_seconds:
             state["mock_chat_stream_delay_max_seconds"] = chat_stream_delay_max_seconds
+        if resource_profile!='default':
+            state['resource_profile']=resource_profile
         if ui_image:
             state.update({"weknora_ui_image": ui_image,
                           "weknora_ui_image_id": ui_image_id})
@@ -564,6 +584,18 @@ def assert_state_matches_compose(state, config):
             not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)):
         raise RuntimeError("synthetic WeKnora backend image state is invalid")
     services = config["services"]
+    profile=state.get('resource_profile','default')
+    if profile not in {'default','normal-trial'}:
+        raise RuntimeError('invalid fresh fixture resource profile')
+    if profile=='normal-trial':
+        expected=json.loads(json.dumps(config));apply_resource_profile(expected,profile)
+        for service,item in services.items():
+            if (type(item.get('mem_limit')) is not int or type(item.get('memswap_limit')) is not int or
+                    type(item.get('cpus')) not in (int,float) or
+                    any(item.get(key)!=expected['services'][service][key] for key in ('mem_limit','memswap_limit','cpus'))):
+                raise RuntimeError('owned resource budget differs from its frozen profile')
+        if services['wk-app'].get('environment',{}).get('GOMEMLIMIT')!='3GiB':
+            raise RuntimeError('owned Go memory budget differs from its frozen profile')
     mock_hash = state.get("mock_model_code_sha256")
     if mock_hash is not None:
         if not isinstance(mock_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", mock_hash):
@@ -786,13 +818,15 @@ def main():
     create.add_argument("--mode", choices=("direct", "primary", "nested"), required=True)
     create.add_argument("--chat-stream-delay-max-seconds", type=int, default=0,
                         help="fresh fixture only: opt in to loopback-only bounded real model stream scheduling (0-20)")
+    create.add_argument('--resource-profile',choices=('default','normal-trial'),default='default',
+                        help='fresh only: normal-trial pins app4GiB/noSwap/CPU1/Go3GiB and bounded companion services')
     for name in ("up", "status", "destroy"):
         command = commands.add_parser(name)
         command.add_argument("--scratch", required=True, type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
         prepare(args.weknora_image, args.mode, args.weknora_ui_image, body_journal=args.body_journal,
-                chat_stream_delay_max_seconds=args.chat_stream_delay_max_seconds)
+                chat_stream_delay_max_seconds=args.chat_stream_delay_max_seconds,resource_profile=args.resource_profile)
         return
     directory, state = owned_state(args.scratch)
     if args.action == "up":

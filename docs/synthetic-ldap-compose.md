@@ -435,11 +435,18 @@ remain open.
 `synthetic-ldap-running-replay-acceptance.py` is prepared for a fresh owned
 fixture using exact, verified normal candidate app/UI images. Its actual
 application run is still pending. Prepare with
-`--chat-stream-delay-max-seconds 20` and `--body-journal`, then complete the
+`--chat-stream-delay-max-seconds 20`, `--body-journal` and
+`--resource-profile normal-trial`, then complete the
 usual startup, bootstrap, signed ingestion and permission matrix first.
 Preparation freezes a private model script, its SHA-256 and its read-only
 mount. Existing owners keep their captured controls and cannot be adopted into
 this opt-in run. The default cap is zero, including performance fixtures.
+The normal-trial resource profile fixes app memory at 4 GiB with no swap,
+one CPU and a 3 GiB Go memory budget, and bounds every companion service.
+State, Compose and fingerprint checks reject drift from that profile.
+Start the resource watcher after preparation freezes the owned scratch and
+before `up`. Keep it running through bootstrap restarts and planned checkpoint
+stops; stop its own process and verify cleanup before final fixture cleanup.
 
 After those real prerequisites pass, run:
 
