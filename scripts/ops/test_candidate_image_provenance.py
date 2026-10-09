@@ -17,13 +17,18 @@ class CandidateImageProvenance(unittest.TestCase):
                       'candidate_tree': 'c' * 40, 'patch_sha256': 'd' * 64}
         self.image = {'Id': 'sha256:' + 'e' * 64, 'Config': {'Labels': {
             'org.opencontainers.image.revision': self.entry['base'],
+            'io.github.liugang926.weknora.candidate-role': 'app',
             'io.github.liugang926.weknora.nextcloud-patch-sha256': self.entry['patch_sha256'],
             'io.github.liugang926.weknora.candidate-tree': self.entry['candidate_tree'],
             'io.github.liugang926.weknora.candidate-commit': self.entry['candidate_commit'],
         }}}
 
     def test_pinned_pair_member_keeps_immutable_id(self):
-        self.assertEqual(module.check_image(self.image, self.entry)['image_id'], self.image['Id'])
+        self.assertEqual(module.check_image(self.image, self.entry, 'app')['image_id'], self.image['Id'])
+
+    def test_backend_image_cannot_be_used_as_ui(self):
+        with self.assertRaises(ValueError):
+            module.check_image(self.image, self.entry, 'ui')
 
     def test_an_old_default_build_cannot_pass_as_new_candidate(self):
         old = copy.deepcopy(self.image)
@@ -31,21 +36,21 @@ class CandidateImageProvenance(unittest.TestCase):
         del labels['io.github.liugang926.weknora.candidate-tree']
         del labels['io.github.liugang926.weknora.candidate-commit']
         with self.assertRaises(ValueError):
-            module.check_image(old, self.entry)
+            module.check_image(old, self.entry, 'app')
 
     def test_changed_manifest_rejects_the_existing_image(self):
         for field in ('base', 'candidate_commit', 'candidate_tree', 'patch_sha256'):
             with self.subTest(field=field):
                 changed = dict(self.entry, **{field: 'f' * len(self.entry[field])})
                 with self.assertRaises(ValueError):
-                    module.check_image(self.image, changed)
+                    module.check_image(self.image, changed, 'app')
 
     def test_absent_or_invalid_immutable_identity_is_refused(self):
         for identity in ('', 'latest', 'sha256:' + 'z' * 64):
             with self.subTest(identity=identity):
                 invalid = dict(self.image, Id=identity)
                 with self.assertRaises(ValueError):
-                    module.check_image(invalid, self.entry)
+                    module.check_image(invalid, self.entry, 'app')
 
 
 if __name__ == '__main__':

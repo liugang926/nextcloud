@@ -130,9 +130,13 @@ patch_label="io.github.liugang926.weknora.nextcloud-patch-sha256=$patch_sha"
 # Go backend with GO_BUILD_TAGS=anydoc when WITH_ANYDOC=1.
 build_args=(--build-arg WITH_ANYDOC=1)
 source_labels=(--label "$source_label" --label "$patch_label")
+app_role_labels=()
+ui_role_labels=()
 if [[ "$candidate_mode" == 1 ]]; then
   source_labels+=(--label "io.github.liugang926.weknora.candidate-tree=$candidate_tree"
                   --label "io.github.liugang926.weknora.candidate-commit=$candidate_commit")
+  app_role_labels+=(--label "io.github.liugang926.weknora.candidate-role=app")
+  ui_role_labels+=(--label "io.github.liugang926.weknora.candidate-role=ui")
 fi
 if [[ -n "${WEKNORA_RAG_GOPROXY:-}" ]]; then
   build_args+=(--build-arg "GOPROXY_ARG=$WEKNORA_RAG_GOPROXY")
@@ -154,7 +158,7 @@ if [[ -n "${WEKNORA_RAG_RUSTUP_UPDATE_ROOT:-}" ]]; then
 fi
 docker build "${build_args[@]}" \
   --build-arg "VERSION_ARG=$version" --build-arg "COMMIT_ID_ARG=$revision" \
-  "${source_labels[@]}" \
+  "${source_labels[@]}" "${app_role_labels[@]}" \
   -f "$build_dir/docker/Dockerfile.app" \
   -t "$app_image" "$build_dir"
 ui_build_args=(--build-arg "VITE_FRONTEND_COMMIT=$revision")
@@ -162,7 +166,7 @@ if [[ -n "${WEKNORA_RAG_NPM_REGISTRY:-}" ]]; then
   ui_build_args+=(--build-arg "NPM_REGISTRY=$WEKNORA_RAG_NPM_REGISTRY")
 fi
 docker build "${ui_build_args[@]}" \
-  "${source_labels[@]}" \
+  "${source_labels[@]}" "${ui_role_labels[@]}" \
   -f "$build_dir/frontend/Dockerfile" \
   -t "$ui_image" "$build_dir/frontend"
 

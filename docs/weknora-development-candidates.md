@@ -26,7 +26,7 @@ Its default output tags are `weknora-ldap-app:nextcloud-rag-candidate` and
 `weknora-ldap-ui:nextcloud-rag-candidate`. The build does not start or switch a
 running service. Use those images in a separately owned fixture. Build output
 records baseline, patch SHA, exact candidate tree and source commit in image
-labels; deployment evidence must also record the actual image digests. Before
+labels, plus a distinct app/UI role; deployment evidence must also record the actual image digests. Before
 starting the owned browser fixture, require the exact manifest's pair:
 
 ```sh

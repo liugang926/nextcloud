@@ -14,14 +14,17 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def check_image(image, entry):
+def check_image(image, entry, role):
     if not isinstance(image, dict):
         raise ValueError('invalid image inspection')
     identity = image.get('Id', '')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', identity):
         raise ValueError('image digest is unavailable')
     labels = (image.get('Config') or {}).get('Labels') or {}
+    if role not in ('app', 'ui'):
+        raise ValueError('unknown candidate image role')
     expected = {
+        'io.github.liugang926.weknora.candidate-role': role,
         'org.opencontainers.image.revision': entry['base'],
         'io.github.liugang926.weknora.nextcloud-patch-sha256': entry['patch_sha256'],
         'io.github.liugang926.weknora.candidate-tree': entry['candidate_tree'],
@@ -53,8 +56,8 @@ def main():
     args = parser.parse_args()
     raw = args.manifest.read_bytes()
     entry = json.loads(raw)['profiles'][args.profile]
-    app = check_image(inspect(args.app_image), entry)
-    ui = check_image(inspect(args.ui_image), entry)
+    app = check_image(inspect(args.app_image), entry, 'app')
+    ui = check_image(inspect(args.ui_image), entry, 'ui')
     if app['image_id'] == ui['image_id']:
         raise ValueError('backend and UI must be distinct images')
     print(json.dumps({'profile': args.profile,
