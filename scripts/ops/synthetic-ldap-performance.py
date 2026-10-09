@@ -260,8 +260,11 @@ class Probe:
             f"tenant_id={r['tenant_id']} AND knowledge_base_id='{r['knowledge_base_id']}' "
             "AND released_at_ms IS NULL AND expires_at_ms>EXTRACT(EPOCH FROM clock_timestamp())*1000),"
             "'body_leases',(SELECT count(DISTINCT l.lease_id) FROM original_body_leases l "
-            "JOIN original_body_parent_refs b ON b.body_id=l.body_id WHERE "
-            f"b.tenant_id={r['tenant_id']} AND b.knowledge_base_id='{r['knowledge_base_id']}' "
+            # This isolated fixture owns the whole tenant. Direct knowledge
+            # and message bodies can have no parent_refs; count every owned
+            # active body lease conservatively before admitting a sample.
+            "JOIN original_body_payloads b ON b.id=l.body_id WHERE "
+            f"b.tenant_id={r['tenant_id']} "
             "AND l.released_at_ms IS NULL AND l.expires_at_ms>EXTRACT(EPOCH FROM clock_timestamp())*1000),"
             "'auto_pending',(SELECT count(*) FROM task_pending_ops WHERE "
             f"tenant_id={r['tenant_id']} AND scope_id IN (SELECT id FROM knowledges WHERE "

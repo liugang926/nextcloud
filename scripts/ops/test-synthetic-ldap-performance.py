@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import runpy
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -77,6 +78,38 @@ class PerformanceMethodTest(unittest.TestCase):
             self.assertFalse(P["idle_ready"](changed,cloud))
         bad=dict(cloud);bad["sender_received"]=True
         self.assertFalse(P["idle_ready"](row,bad))
+
+    def test_idle_counts_direct_and_message_body_leases_without_parent_rows(self):
+        probe=object.__new__(P["Probe"])
+        probe.runtime={"tenant_id":7,"knowledge_base_id":str(uuid.uuid4()),"source_id":str(uuid.uuid4())}
+        probe.sql=mock.Mock(return_value={})
+        probe.state_snapshot()
+        query=probe.sql.call_args.args[0]
+        body_query=query.split("'body_leases',(",1)[1].split("),'auto_pending'",1)[0]
+        self.assertIn("JOIN original_body_payloads b ON b.id=l.body_id",body_query)
+        self.assertIn("b.tenant_id=7",body_query)
+        self.assertNotIn("original_body_parent_refs",body_query)
+        self.assertNotIn("knowledge_base_id",body_query)
+        clock="EXTRACT(EPOCH FROM clock_timestamp())*1000"
+        self.assertIn(clock,body_query)
+        # Execute the actual count predicate with only its PostgreSQL clock
+        # expression replaced by a bound test clock. No parent table exists.
+        with sqlite3.connect(":memory:") as database:
+            database.executescript("""
+                CREATE TABLE original_body_payloads(id TEXT PRIMARY KEY,tenant_id INTEGER);
+                CREATE TABLE original_body_leases(lease_id TEXT PRIMARY KEY,body_id TEXT,
+                    released_at_ms INTEGER,expires_at_ms INTEGER);
+                INSERT INTO original_body_payloads VALUES('direct-knowledge',7),('message-scope-only',7),('other-tenant',8);
+                INSERT INTO original_body_leases VALUES('direct','direct-knowledge',NULL,6000),
+                    ('message','message-scope-only',NULL,6000),('expired','direct-knowledge',NULL,2999),
+                    ('released','message-scope-only',1000,6000),('other','other-tenant',NULL,6000);
+            """)
+            count=database.execute(body_query.replace(clock,"?"),(3000,)).fetchone()[0]
+        self.assertEqual(count,2)
+        row={key:0 for key in ("running","processing","staged","content_leases","body_leases","auto_pending")}
+        row.update(received=8,applied=8,body_leases=count)
+        cloud={"outbox_id":8,"sender_received":8,"sender_status":"active"}
+        self.assertFalse(P["idle_ready"](row,cloud))
 
     def test_raw_sample_is_written_as_it_is_observed(self):
         probe=object.__new__(P["Probe"])

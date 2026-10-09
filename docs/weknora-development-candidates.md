@@ -350,3 +350,21 @@ still fail the check. Its authorized body upgrade uses the actual packaged
 `upgrade-scopes` mode. Seventeen restore guard cases and eight performance
 method cases passed, and both suites are included in CI. These offline checks
 do not constitute full application restore or measured performance acceptance.
+
+The fresh `400d4392` nested-LDAP/body-journal fixture actually started, paired
+and ingested two chunks and two embeddings. Alice's source authorization,
+chunks, preview and search passed, but detail reads returned 403 and first QA
+did not complete. The retained [normal application record](evidence/normal-candidate-resumed-app-20261009.json)
+separates these failures from successful setup. Display-origin cache queries
+used `Scan`, bypassing vault hydration; the `Model`/`Find` correction passed
+actual PostgreSQL and SQLite regressions on both profiles. First-QA turn-guard
+context reuse and static terminal-error delivery are being repaired separately.
+Full restore and performance measurements have not started on this failed
+application candidate.
+
+The P5 probe now counts all active body leases for its owned tenant through
+the payload catalog, including direct knowledge and message bodies without
+parent-reference rows. Nine method checks passed on both macOS and Linux;
+the new count case executes the actual predicate with direct/message, expired,
+released and foreign-tenant rows. This remains method validation, not a P95
+measurement.
