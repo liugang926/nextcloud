@@ -80,6 +80,16 @@ excludes CURRENT body/publication anchors. [Preparation checks](evidence/configu
 passed 70 tests, including actual temporary-file restoration; the complete
 application configuration fault and restore have not yet run.
 
+The separate pending-Auto restore driver is now source-prepared. It pauses a
+real final enrichment response, stops the owned broker, and requires an actual
+undelivered SQL intent with both immutable input manifests before checkpointing.
+It reuses the full database, files and configuration restore path, then checks
+one genuine startup execution and no additional execution after restart.
+Source, actor and model rejection each require an independent original checkpoint.
+[Preparation evidence](evidence/pending-auto-restore-preparation-20261009.json)
+records 89 independently rerun pure tests with zero skips. No broker fault,
+full application restore or startup execution has yet been accepted.
+
 The remaining V1 work includes the full normal QA/source-revocation loop;
 clean and stale-publication recovery plus real pending-Auto fault recovery;
 Steer and other exposed consumer original-material/lifetime coverage; old

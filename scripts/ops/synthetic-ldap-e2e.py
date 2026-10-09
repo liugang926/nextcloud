@@ -300,11 +300,27 @@ def weknora_setup(directory, state, passwords, nc_base, wk_base, runtime):
                        "api_key": "synthetic-only"}}, token)
     need(status, {201}, "register isolated mock chat model")
     chat_model_id = chat_model["data"]["id"]
-    status, kb = http_json(wk_base, "POST", "/api/v1/knowledge-bases", {
+    kb_request = {
         "name": "Synthetic LDAP ACL", "type": "document", "embedding_model_id": model_id,
-        "summary_model_id": chat_model_id}, token)
+        "summary_model_id": chat_model_id}
+    pending_auto = state.get('mock_postprocess_control_max_seconds', 0) > 0
+    if pending_auto:
+        kb_request.update(auto_tag_config={'enabled': True, 'model_id': chat_model_id, 'max_tags': 1},
+                          question_generation_config={'enabled': True, 'question_count': 1})
+    status, kb = http_json(wk_base, "POST", "/api/v1/knowledge-bases", kb_request, token)
     need(status, {201}, "create synthetic knowledge base")
     kb_id = kb["data"]["id"]
+    auto = {}
+    if pending_auto:
+        tag_name = 'Pending Auto ' + state['project']
+        status, tag = http_json(wk_base, 'POST', f'/api/v1/knowledge-bases/{kb_id}/tags', {'name': tag_name}, token)
+        need(status, {201}, 'create exact synthetic pending Auto candidate')
+        tag_id = tag['data']['id']
+        if str(uuid.UUID(tag_id)) != tag_id:
+            raise RuntimeError('pending Auto candidate identity missing')
+        contract = runpy.run_path(str(Path(__file__).with_name('synthetic-ldap-pending-auto-contract.py')))
+        contract['model_control'](owner, directory, state, {'action': 'configure', 'expected_tag_name': tag_name})
+        auto = {'pending_auto_tag_id': tag_id, 'pending_auto_tag_name': tag_name}
     status, _ = http_json(wk_base, "PUT", "/api/v1/group-access/knowledge_base/" + kb_id, {
         "mode": "restricted", "grants": [{"directory_id": state["directory_id"],
                                          "directory_group_id": groups["Engineering"],
@@ -359,7 +375,7 @@ def weknora_setup(directory, state, passwords, nc_base, wk_base, runtime):
              f"WHERE v.datasource_id='{source_id}' "
              f"AND v.external_id LIKE '%:{runtime['file_id']}' AND v.state='published'")
     knowledge_id = sql_json(database, query)
-    return {"tenant_id": tenant, "model_id": model_id, "chat_model_id": chat_model_id,
+    return {**auto, "tenant_id": tenant, "model_id": model_id, "chat_model_id": chat_model_id,
             "knowledge_base_id": kb_id,
             "knowledge_id": knowledge_id, "source_id": source_id,
             "operation_id": operation, "indexed_chunks": proof["chunks"],

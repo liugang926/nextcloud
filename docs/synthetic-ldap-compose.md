@@ -483,3 +483,47 @@ the current journal's retained prefix, and actual lease/reader cleanup.
 [Preparation checks](evidence/midstream-source-revoke-preparation-20261009.json)
 have passed; full application execution and its source-revocation acceptance
 remain pending.
+
+## Prepared pending-Auto full restore, 2026-10-09
+
+`synthetic-ldap-pending-auto-restore.py` is a separate opt-in application trial.
+Its [preparation evidence](evidence/pending-auto-restore-preparation-20261009.json)
+records pure tests; actual broker failure, full restore and startup remain
+unaccepted. Run only with the current verified normal candidate images in the
+assigned serial resource window.
+
+Each `positive`, `source`, `actor` or `model` variant needs its own fresh owner.
+Prepare with `--postprocess-control-max-seconds 60`, `--body-journal` and
+`--resource-profile normal-trial`. Bootstrap creates and records one real Auto
+tag through the API and enables one generated question. Complete the real
+two-round QA/history baseline before capture. The pending lane requires that
+exact single candidate; a permission-matrix run which creates another tag
+cannot be reused for it. Keep the resource watcher through planned stops.
+
+Run the phases in order: `capture`, `fault`, `restore-data`, `closed`, then
+`reopen`. Every invocation requires the same `--scratch`, `--candidate-manifest`,
+`--profile`, `--variant` and private `--evidence` directory; `capture` also
+requires `--baseline-history` containing the actual two-round receipt.
+Use the driver's `--help` for the complete argument syntax.
+
+Capture waits until the last real question request is paused before its response,
+stops the owned broker, then releases that response. It must observe the original
+completed knowledge,
+an unclaimed SQL Auto intent, both immutable input manifests and no Auto model
+call before closing readers and taking the full database/files/configuration
+checkpoint. It refuses a broker outage which prevents the genuine SQL seal.
+The fault phase removes that exact pending row and injects actual private
+configuration and unpublished-file faults. Full restore must return the same
+original intent, payload, manifests, IDs and configuration while retaining
+CURRENT body and publication anchors.
+
+Normal startup must consume the original intent once, create exactly the
+expected tag relation, and make no additional call after an actual restart.
+The source variant withdraws the original file through Nextcloud's API with
+WeKnora still closed. Actor and model variants mutate their original controls
+through the real WeKnora API after the original SQL intent seals during the
+broker outage, while the original app is still live. Each then captures its own
+pending checkpoint; a positive checkpoint cannot receive a pre-start control mutation.
+Their startup must reject the original intent with zero Auto model calls.
+Failure keeps the owned volumes, original evidence and anchors for inspection;
+there is no SQL seeding or input recapture fallback.

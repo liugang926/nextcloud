@@ -114,6 +114,7 @@ def control_identity(state):
         'app_image_id':state['weknora_image_id'],'ui_image_id':state.get('weknora_ui_image_id'),
         'mock_model_code_sha256':state.get('mock_model_code_sha256'),
         'mock_chat_stream_delay_max_seconds':state.get('mock_chat_stream_delay_max_seconds',0),
+        'mock_postprocess_control_max_seconds':state.get('mock_postprocess_control_max_seconds',0),
         'resource_profile':state.get('resource_profile','default')}
 
 def checked_checkpoint_controls(directory,evidence,state,checkpoint,provenance,control_fault=None):
@@ -740,6 +741,13 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         receipt=self.history_receipt(baseline=baseline)
         self.idle();identity=self.identity();source=self.source_scope();anchors=self.anchor_volume_facts()
         publication_current=self.publication_current()
+        self.capture_full_checkpoint(receipt,identity,source,anchors,publication_current)
+
+    def capture_full_checkpoint(self,receipt,identity,source,anchors,publication_current,pending_auto=None):
+        # Both clean and pending lanes use the same real dual SQL, files and
+        # configuration backup path. The pending caller must independently
+        # establish its exact immutable undelivered intent and quiescence.
+        require(not (self.evidence/'checkpoint.json').exists(),'checkpoint_exists')
         self.stop_actors();self.packaged_tools();self.body_cli('verify')
         nc_configuration=self.nc_configuration(offline=True)
         inventory=self.original_inventory(publication_current)
@@ -765,6 +773,8 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
             'weknora_recovery_inventory':inventory['binding'],'all_services_stopped_at_completion':True,
             'body_anchor_volumes_current':anchors,'publication_anchor_current':publication_current,
             'all_apps_readers_builders_stopped':True,'pending_auto_restore_accepted':False}
+        if pending_auto is not None:
+            manifest['pending_auto']=pending_auto
         checked_checkpoint_controls(self.directory,self.evidence,self.state,manifest,self.provenance)
         write_json(self.evidence/'checkpoint.json',manifest)
         write_json(Path(publication_current['directory'])/'checkpoint-pin.json',
@@ -843,8 +853,14 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
 
     def restore_data(self):
         checkpoint=self.load_checkpoint();fault=json.loads(plain(self.evidence/'actual-fault.json').read_text())
-        require(fault.get('mode') in ('clean','stale_publication') and fault['body_anchors_retained']==checkpoint['body_anchor_volumes_current'],
+        require(fault.get('mode') in ('clean','stale_publication','pending_auto') and fault['body_anchors_retained']==checkpoint['body_anchor_volumes_current'],
             'actual_fault_scope_or_current_anchor_changed')
+        pending_fault=fault.get('mode')=='pending_auto'
+        if pending_fault:
+            require(isinstance(checkpoint.get('pending_auto'),dict) and
+                fault.get('removed_pending_intent_id')==checkpoint['pending_auto']['receipt']['intent_id'] and
+                fault.get('original_payload_sha256')==checkpoint['pending_auto']['receipt']['payload_sha256'],
+                'pending_auto_fault_checkpoint_changed')
         for service in self.actors():self.stopped(service)
         require(nc_config_archive_sha256(self.evidence/'nc-html.tar')==checkpoint['nextcloud_configuration']['config_php_sha256'],
                 'checkpoint_nc_configuration_archive_changed')
@@ -887,9 +903,16 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
         # Queue restoration is deliberately empty: old Redis messages are not
         # original authority, and SQL153 intents survive the actual DB restore.
         command(['docker','exec',self.project+'-wk-redis-1','redis-cli','FLUSHALL'],timeout=30)
-        fault_session=str(uuid.UUID(fault['wk_session_id']))
-        require(self.sql(f"SELECT count(*) FROM sessions WHERE id='{fault_session}'")==0,
-                'post_checkpoint_personal_session_survived_actual_restore')
+        if pending_fault:
+            contract=runpy.run_path(str(HERE/'synthetic-ldap-pending-auto-contract.py'))
+            original=checkpoint['pending_auto']['receipt']
+            snapshot=self.sql(contract['pending_snapshot_query'](original['tenant_id'],original['knowledge_base_id'],original['knowledge_id']))
+            require(contract['pending_receipt'](snapshot,original['expected_tag_id'])==original,
+                'actual_full_restore_did_not_retain_original_pending_intent')
+        else:
+            fault_session=str(uuid.UUID(fault['wk_session_id']))
+            require(self.sql(f"SELECT count(*) FROM sessions WHERE id='{fault_session}'")==0,
+                    'post_checkpoint_personal_session_survived_actual_restore')
         require(self.anchor_volume_facts()==checkpoint['body_anchor_volumes_current'],'current_anchors_replaced')
         nc_configuration=self.nc_configuration(offline=True)
         require(nc_configuration==checkpoint['nextcloud_configuration'],'actual_nc_configuration_not_restored')
@@ -900,7 +923,8 @@ php custom_apps/integration_weknora/appinfo/recovery-console.php --plan="$d/plan
             'configuration_restore_inputs':{'nextcloud':'nc-html.tar','weknora_runtime':'wk.dump',
                 'private_controls':['control-'+name for name in self.control_files]},
             'current_body_or_independent_publication_anchors_restored':False,
-            'fault_session_absent':True,'body_anchor_volumes_current':self.anchor_volume_facts(),'all_actors_closed':True})
+            'fault_session_absent':not pending_fault,'original_pending_intent_restored':pending_fault,
+            'body_anchor_volumes_current':self.anchor_volume_facts(),'all_actors_closed':True})
         self.record('application_data_restored_apps_closed',redis_queue_policy='owned_empty_sql_authoritative')
 
     def actual_clean_gates(self,checkpoint,upgrade=False):

@@ -450,9 +450,11 @@ def apply_resource_profile(config,profile):
 
 
 def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay_max_seconds=0,
-            resource_profile='default'):
+            resource_profile='default', postprocess_control_max_seconds=0):
     if type(chat_stream_delay_max_seconds) is not int or not 0 <= chat_stream_delay_max_seconds <= 20:
         raise RuntimeError("invalid owned chat stream delay maximum")
+    if type(postprocess_control_max_seconds) is not int or not 0 <= postprocess_control_max_seconds <= 60:
+        raise RuntimeError("invalid owned postprocess delay maximum")
     if resource_profile not in {'default','normal-trial'}:
         raise RuntimeError('invalid fresh fixture resource profile')
     inspected = subprocess.run(["docker", "image", "inspect", image, "--format", "{{.Id}}"],
@@ -511,9 +513,13 @@ def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay
         mock_bytes = (ROOT / "integration/mock_embedding.py").read_bytes()
         write_private(mock_code, mock_bytes.decode("utf-8"))
         config["services"]["mock-embedding"]["volumes"] = [f"{mock_code}:/srv/mock_embedding.py:ro"]
+        mock_env = {}
         if chat_stream_delay_max_seconds:
-            config["services"]["mock-embedding"]["environment"] = {
-                "MOCK_CHAT_STREAM_DELAY_MAX_SECONDS": str(chat_stream_delay_max_seconds)}
+            mock_env["MOCK_CHAT_STREAM_DELAY_MAX_SECONDS"] = str(chat_stream_delay_max_seconds)
+        if postprocess_control_max_seconds:
+            mock_env["MOCK_POSTPROCESS_CONTROL_MAX_SECONDS"] = str(postprocess_control_max_seconds)
+        if mock_env:
+            config["services"]["mock-embedding"]["environment"] = mock_env
         apply_resource_profile(config,resource_profile)
         state = {"marker": MARKER, "project": project, "mode": mode,
                  "scratch_dir": str(directory.resolve()), "owner_token": owner_token,
@@ -528,6 +534,8 @@ def prepare(image, mode, ui_image=None, *, body_journal=False, chat_stream_delay
             state["body_journal"] = True
         if chat_stream_delay_max_seconds:
             state["mock_chat_stream_delay_max_seconds"] = chat_stream_delay_max_seconds
+        if postprocess_control_max_seconds:
+            state["mock_postprocess_control_max_seconds"] = postprocess_control_max_seconds
         if resource_profile!='default':
             state['resource_profile']=resource_profile
         if ui_image:
@@ -611,6 +619,11 @@ def assert_state_matches_compose(state, config):
     if type(delay) is not int or not 0 <= delay <= 20:
         raise RuntimeError("invalid owned chat stream delay maximum")
     expected_mock_env = {"MOCK_CHAT_STREAM_DELAY_MAX_SECONDS": str(delay)} if delay else None
+    postprocess = state.get("mock_postprocess_control_max_seconds", 0)
+    if type(postprocess) is not int or not 0 <= postprocess <= 60 or (postprocess and not mock_hash):
+        raise RuntimeError("invalid frozen owned postprocess control")
+    if postprocess:
+        expected_mock_env = {**(expected_mock_env or {}), "MOCK_POSTPROCESS_CONTROL_MAX_SECONDS": str(postprocess)}
     if services["mock-embedding"].get("environment") != expected_mock_env:
         raise RuntimeError("owned chat stream delay differs from its frozen state")
     if state.get("body_journal") not in (None, True):
@@ -818,6 +831,8 @@ def main():
     create.add_argument("--mode", choices=("direct", "primary", "nested"), required=True)
     create.add_argument("--chat-stream-delay-max-seconds", type=int, default=0,
                         help="fresh fixture only: opt in to loopback-only bounded real model stream scheduling (0-20)")
+    create.add_argument("--postprocess-control-max-seconds", type=int, default=0,
+                        help="fresh fixture only: bounded loopback non-stream Summary/Question control and Auto telemetry (0-60)")
     create.add_argument('--resource-profile',choices=('default','normal-trial'),default='default',
                         help='fresh only: normal-trial pins app4GiB/noSwap/CPU1/Go3GiB and bounded companion services')
     for name in ("up", "status", "destroy"):
@@ -826,7 +841,8 @@ def main():
     args = parser.parse_args()
     if args.action == "prepare":
         prepare(args.weknora_image, args.mode, args.weknora_ui_image, body_journal=args.body_journal,
-                chat_stream_delay_max_seconds=args.chat_stream_delay_max_seconds,resource_profile=args.resource_profile)
+                chat_stream_delay_max_seconds=args.chat_stream_delay_max_seconds,resource_profile=args.resource_profile,
+                postprocess_control_max_seconds=args.postprocess_control_max_seconds)
         return
     directory, state = owned_state(args.scratch)
     if args.action == "up":
