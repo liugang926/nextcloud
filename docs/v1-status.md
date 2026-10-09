@@ -2,7 +2,7 @@
 
 This repository implements a local development slice of the [PRD](development-plan.md), not a V1 enterprise release. The PRD describes requirements; the table records the historical implementation and tests through 2026-09-24, with a newer addendum below. Only synthetic local data has been used for cross-system testing.
 
-## Current checkpoint — 2026-10-09
+## Current checkpoint — 2026-10-10
 
 The manifest's current candidates are C6 `f766a373` and RAG `595f241f`.
 Use the [latest candidate record](weknora-development-candidates.md) and its
@@ -28,6 +28,39 @@ mutation helpers are unchanged. Safe command diagnostics avoid losing the
 next failure's cause. [Nineteen independent preparation checks](evidence/resource-watch-transition-preparation-20261010.json)
 passed; the earlier exact command and the suspected startup race remain
 unproved, and the next fresh startup must verify the observer in practice.
+
+The ordinary QA correction now carries checked lineage on progress, references
+and fixed fallback, propagates asynchronous publication errors, and waits for
+the owned producer before releasing its last material holder. Successful Done
+ends the producer even when the provider keeps its channel open. Actual
+PostgreSQL/SQLite boundary tests passed 28 nodes. The final combined sources,
+including parent cancellation, provider-error/EOF and real schema-probe
+cancellation regressions, passed 77 focused nodes per profile with no failures
+or test skips. The inline-body checker now
+checks all heads once per row and rechecks the original head set, journal pin
+and cancellation at the return boundary, including a real canceled schema
+probe without changing actual absent-schema compatibility. Its 22 row-boundary
+nodes passed, and
+actual cancellation during an actual journal-key file read failed on the old
+source and passed on the correction in both databases. A matched 20-node
+parent-copy run fell from 27.71 to 22.90 seconds for SQLite and 57.13 to 43.03
+seconds for PostgreSQL; this single comparison is not P5 acceptance.
+Root independently verified the [raw-log records](evidence/ordinary-qa-body-combined-boundaries-20261010.json).
+These prepared sources are not yet the manifest candidates: the complete 20-minute
+selection, full compile and fresh normal application
+QA/restore still need actual acceptance. CI now explicitly selects ordinary QA
+and requires all twelve new test parents without changing its timeout.
+
+The first final RAG full selection ended within its original 20-minute budget
+with 1155 passed nodes, 8 failed nodes and no skipped tests. The owned PostgreSQL
+cluster recorded OOM and a recovery window while its 512MiB PGDATA tmpfs was
+96% occupied. Seven actual cases failed before their business assertions with
+EOF or SQLSTATE 57P03; one additional node aggregates a child failure. Root
+independently verified the [failed full-gate record](evidence/ordinary-qa-full-gate-PG-OOM-20261010.json),
+including the exact owner, image, memory limit and cgroup OOM event. This run is
+not accepted. A fresh owned disk-backed PGDATA fixture will rerun the complete
+selection with the same memory/CPU budgets, timeout and required tests; the
+failed logs, diagnostics and binaries remain preserved.
 
 Normal AnyDoc images for the preceding `eb7d5756` source have been built and
 their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the
@@ -75,6 +108,12 @@ acceptance failed as recorded above.
 The historical local withdrawal inventory still needs immutable backend plans
 and writer artifacts observed after current rows disappear; its prepared
 forward migration remains untested and incomplete.
+Independent review found that its pinned SQLite rollback fixtures copied only
+UP files. A separate test-only preparation now also copies the original matching
+DOWN files for Steer73 and inventory74, keeping all downgrade assertions and
+production SQL unchanged. Its real upgrade/down execution, C6 mirror and the
+complete withdrawal/ACK/retirement chain remain pending in the
+[source-review record](evidence/remaining-consumer-inventory-source-review-20261010.json).
 
 Candidate CI now checks that selected tests actually executed and completed,
 including required HTTP, PostgreSQL, Redis and summary regressions. The

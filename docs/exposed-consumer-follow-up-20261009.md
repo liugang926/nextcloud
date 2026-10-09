@@ -21,6 +21,21 @@ changed for this audit.
    Normal RAG and Agent memory recall already reject unsupported original
    material; that functional denial is not evidence of successful disclosure.
 
+   A source-only actual-task fixture is now frozen at `27302181`: it uses
+   real message creation/completion, `ScheduleExtraction`, the SQL pending
+   queue and `Handle`, with model and enqueue transport spies. Its six cases
+   plus two parents cover PostgreSQL/SQLite legal input, changed current bytes
+   without a new admission, and inactive original actor. API signatures were
+   independently checked, but compilation and actual baseline/red execution
+   remain pending. This is not Redis broker or restore evidence.
+   The production correction must also cover prior context and relevant
+   existing memory entries in the prompt. Current prior-context failures are
+   swallowed, and derived memory rows have no original-material receipt.
+   Pending work can merge sessions, so a trigger message ID alone cannot prove
+   the exact admitted page, cursor, actor, model and configuration. Hold the
+   original inputs through generation and the item/cursor commit; unknown
+   historical entries cannot be newly signed to make them eligible.
+
 2. Skill installation still installs the old `installSteerSink` in
    `tenant_skill_install.go:1038`. The new Agent requires `OriginalSteerSink`,
    so this is a functional refusal before model consumption. The independent
