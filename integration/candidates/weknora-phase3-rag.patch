@@ -111962,15 +111962,16 @@ index 0000000000000000000000000000000000000000..f034203b67edd30ac98fe867f9e91d0c
 +}
 diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb45f03b9796badab69651480cba690f77d81c49
+index 0000000000000000000000000000000000000000..cef0598add795745ccac2e98d65e6e89ff6860ee
 --- /dev/null
 +++ b/internal/application/service/message_material_output.go
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,490 @@
 +package service
 +
 +import (
 +	"context"
 +	"encoding/json"
++	"fmt"
 +	"sync"
 +	"time"
 +
@@ -111979,6 +111980,10 @@ index 0000000000000000000000000000000000000000..fb45f03b9796badab69651480cba690f
 +	"github.com/Tencent/WeKnora/internal/application/repository"
 +	"github.com/Tencent/WeKnora/internal/types"
 +)
++
++// Initialization is not an authorization decision. HTTP may wait for this
++// state, but must still run the original/current checks once setup finishes.
++var ErrMessageMaterialHTTPInitializing = fmt.Errorf("%w: original message material initialization pending", access.ErrNextcloudPublicationUnavailable)
 +
 +type messageMaterialOutputKey struct{}
 +type messageMaterialExternalKey struct{}
@@ -112016,8 +112021,11 @@ index 0000000000000000000000000000000000000000..fb45f03b9796badab69651480cba690f
 +		if failed != nil {
 +			return failed
 +		}
-+		if !ready || closed {
++		if closed {
 +			return access.ErrNextcloudPublicationUnavailable
++		}
++		if !ready {
++			return ErrMessageMaterialHTTPInitializing
 +		}
 +		return CheckMessageMaterialOutputBoundary(marked)
 +	}
@@ -133710,6 +133718,133 @@ index 0000000000000000000000000000000000000000..83dd062a8e701e58436a7618cd12abea
 +	require.NoError(t, f.db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
 +	require.Zero(t, live)
 +}
+diff --git a/internal/handler/message_material_initialization_actual_http_test.go b/internal/handler/message_material_initialization_actual_http_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8360239ffd714bc8d42aa193b460cc701906bbce
+--- /dev/null
++++ b/internal/handler/message_material_initialization_actual_http_test.go
+@@ -0,0 +1,121 @@
++package handler
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/application/service"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/middleware"
++	"github.com/Tencent/WeKnora/internal/stream"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++type actualHTTPInitializationModels struct {
++	actualHTTPTailModels
++	once   sync.Once
++	before func()
++}
++
++func (m *actualHTTPInitializationModels) GetModelByID(ctx context.Context, id string) (*types.Model, error) {
++	m.once.Do(func() {
++		// Actual KnowledgeQA has already admitted the current user here,
++		// but has not marked the HTTP material holder Ready.
++		time.Sleep(350 * time.Millisecond)
++		if m.before != nil {
++			m.before()
++		}
++	})
++	return m.actualHTTPTailModels.GetModelByID(ctx, id)
++}
++
++func TestMessageMaterialActualHTTPInitializationWaitsForAdmission(t *testing.T) {
++	for _, mode := range []string{"ready", "current_user_aba", "actor_revoked", "source_revoked", "cancelled"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newActualHTTPTailFixture(t, mode == "source_revoked")
++			model := &actualHTTPTailModel{t: t, db: f.db, parent: f.parent}
++			ctx, cancel := context.WithCancel(f.ctx)
++			defer cancel()
++			models := &actualHTTPInitializationModels{actualHTTPTailModels: actualHTTPTailModels{model: model}}
++			models.before = func() {
++				if mode == "current_user_aba" {
++					require.NoError(t, f.db.Model(&types.Message{}).Where("role='user' AND request_id='actual-initialization-request'").Update("content", "unadmitted transient original").Error)
++					require.NoError(t, f.db.Model(&types.Message{}).Where("role='user' AND request_id='actual-initialization-request'").Update("content", "actual new delayed user question").Error)
++				} else if mode == "actor_revoked" {
++					require.NoError(t, f.db.Model(&types.User{}).Where("id='user'").Update("is_active", false).Error)
++				} else if mode == "source_revoked" {
++					f.revokeSource()
++				} else if mode == "cancelled" {
++					cancel()
++				}
++			}
++			cfg := &config.Config{Conversation: &config.ConversationConfig{MaxRounds: 3, Summary: &config.SummaryConfig{Prompt: "Actual operator configured plain chat prompt", ContextTemplate: "{{.Query}}"}}}
++			manager := chatpipeline.NewEventManager()
++			chatpipeline.ConfigureSourceLineage(manager, f.guard)
++			chatpipeline.NewPluginLoadHistory(manager, f.messages, cfg)
++			chatpipeline.NewPluginMemoryRecall(manager, nil)
++			chatpipeline.NewPluginChatCompletionStream(manager, models)
++			sessions := service.NewSessionService(cfg, repository.NewSessionRepository(f.db), repository.NewMessageRepository(f.db), nil, f.knowledge, nil, models, nil, manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, service.NewSessionBusyGate(), nil, nil)
++			service.ConfigureMessageSourceLineage(f.messages, sessions, &service.SessionForkService{}, manager, f.guard)
++			mini := miniredis.RunT(t)
++			redis, err := stream.NewRedisStreamManager(mini.Addr(), "", "", 0, "actual-initialization-http", time.Minute)
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = redis.Close() })
++			h := nativeRunningHandler(f, sessions, redis, cfg, models, nil)
++			gin.SetMode(gin.TestMode)
++			router := gin.New()
++			router.Use(middleware.ErrorHandler())
++			router.Use(func(c *gin.Context) {
++				c.Request = c.Request.WithContext(ctx)
++				c.Set(types.TenantIDContextKey.String(), uint64(7))
++				c.Set(types.RequestIDContextKey.String(), "actual-initialization-request")
++				c.Next()
++			})
++			router.POST("/knowledge-chat/:session_id", h.KnowledgeQA)
++			server := httptest.NewServer(router)
++			defer server.Close()
++			client := &http.Client{Timeout: 3 * time.Second}
++			started := time.Now()
++			response, err := client.Post(server.URL+"/knowledge-chat/"+f.parent.SessionID, "application/json", strings.NewReader(`{"query":"actual new delayed user question","summary_model_id":"actual-http-tail-model","disable_title":true}`))
++			require.NoError(t, err)
++			defer response.Body.Close()
++			body, err := io.ReadAll(response.Body)
++			require.NoError(t, err, "the actual HTTP receiver must terminate without client timeout")
++			if mode == "ready" {
++				require.Equal(t, http.StatusOK, response.StatusCode, string(body))
++				require.GreaterOrEqual(t, time.Since(started), 350*time.Millisecond)
++				require.Contains(t, string(body), `"response_type":"agent_query"`)
++				require.Contains(t, string(body), "LIVE HTTP SECRET")
++				require.Contains(t, string(body), `"response_type":"complete"`)
++				require.EqualValues(t, 1, model.calls.Load())
++			} else {
++				require.NotContains(t, string(body), "LIVE HTTP SECRET")
++				require.NotContains(t, string(body), f.parent.Content)
++				require.NotContains(t, string(body), `"response_type":"complete"`)
++				if mode != "cancelled" {
++					require.Contains(t, string(body), `"response_type":"error"`)
++					require.Contains(t, string(body), `"done":true`)
++				}
++				var completed, admissions int64
++				require.NoError(t, f.db.Table("messages").Where("request_id='actual-initialization-request' AND role='assistant' AND is_completed=true").Count(&completed).Error)
++				require.Zero(t, completed, "failed initialization cannot certify the placeholder")
++				// Creation legitimately seals the empty placeholder's original
++				// controls. Failure must not mint a second/completed admission.
++				require.NoError(t, f.db.Table("message_material_admissions a").Joins("JOIN messages m ON m.id=a.message_id").Where("m.request_id='actual-initialization-request' AND m.role='assistant'").Count(&admissions).Error)
++				require.EqualValues(t, 1, admissions)
++			}
++			assertActualHTTPTailLeases(t, f.db, false, "")
++		})
++	}
++}
 diff --git a/internal/handler/message_material_live_tail_actual_http_test.go b/internal/handler/message_material_live_tail_actual_http_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..f5c51e54d5ded95f94d8d5618677f369b52ed5cb
@@ -143937,7 +144072,7 @@ index 0000000000000000000000000000000000000000..d830c456b198b2dd4e140e23be7b91f0
 +	require.NotContains(t, w.Body.String(), "unattributed source text")
 +}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 544e45aa6be46abd2ef69c3935035e13041c01ce..297ae5cfc9e24dcf5e804de7ababd3916b2efaac 100644
+index 544e45aa6be46abd2ef69c3935035e13041c01ce..8a3256712f8ac5b8587568aa1f4344e04f613237 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
 @@ -16,6 +16,7 @@ import (
@@ -144114,7 +144249,7 @@ index 544e45aa6be46abd2ef69c3935035e13041c01ce..297ae5cfc9e24dcf5e804de7ababd391
 +		sseCtx = streamCtx.materialAttach(sseCtx)
 +	}
 +	if streamCtx.materialCheck != nil {
-+		phase := &liveMaterialWritePhase{}
++		phase := &liveMaterialWritePhase{MaterialCheck: streamCtx.materialCheck}
 +		sseCtx = context.WithValue(sseCtx, liveMaterialWritePhaseKey{}, phase)
 +		prior := reqCtx.c.Writer
 +		writer := &nativeSavedReplayWriter{ResponseWriter: prior, ctx: reqCtx.c.Request.Context(), check: func() error {
@@ -144165,6 +144300,60 @@ index 544e45aa6be46abd2ef69c3935035e13041c01ce..297ae5cfc9e24dcf5e804de7ababd391
  		go h.recordTurnMemory(bgCtx, assistantMessage, userQuery, userMessageID)
  	}
  	return nil
+diff --git a/internal/handler/session/qa_material_initialization_timeout_test.go b/internal/handler/session/qa_material_initialization_timeout_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..91496fe0587b572285fb857338ddfb26a0a9e888
+--- /dev/null
++++ b/internal/handler/session/qa_material_initialization_timeout_test.go
+@@ -0,0 +1,48 @@
++package session
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	applicationservice "github.com/Tencent/WeKnora/internal/application/service"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/storageurl"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLiveSSEProducerErrorInitializationTimeoutNeverWritesUnadmittedControl(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	h := &Handler{messageService: &liveHistoryMessageService{}, streamManager: &stagedLiveStream{events: []interfaces.StreamEvent{{Type: types.ResponseTypeAgentQuery, Content: "UNADMITTED QUERY SECRET"}}}}
++	message := &types.Message{Role: "assistant", RequestID: "request"}
++	router := gin.New()
++	router.GET("/stream", func(c *gin.Context) {
++		ctx, attach, check, close := applicationservice.BeginMessageMaterialHTTPBoundary(c.Request.Context())
++		defer close()
++		require.ErrorIs(t, check(), applicationservice.ErrMessageMaterialHTTPInitializing)
++		phase := &liveMaterialWritePhase{MaterialCheck: check, InitializationDeadline: time.Now().Add(150 * time.Millisecond)}
++		ctx = context.WithValue(attach(ctx), liveMaterialWritePhaseKey{}, phase)
++		c.Writer = &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: check}
++		rewriter := storageurl.NewStreamRewriter(storageurl.NewRequestRewriter(ctx, storageurl.ModeHandle, nil, nil))
++		h.handleAgentEventsForSSE(ctx, c, "session", "assistant", "request", event.NewEventBus(), false, rewriter, message)
++	})
++	server := httptest.NewServer(router)
++	defer server.Close()
++	client := &http.Client{Timeout: time.Second}
++	response, err := client.Get(server.URL + "/stream")
++	require.NoError(t, err)
++	defer response.Body.Close()
++	body, err := io.ReadAll(response.Body)
++	require.NoError(t, err)
++	require.Contains(t, string(body), `"response_type":"error"`)
++	require.Contains(t, string(body), `"done":true`)
++	require.NotContains(t, string(body), "UNADMITTED")
++	require.NotContains(t, string(body), `"response_type":"agent_query"`)
++	require.False(t, message.IsCompleted)
++}
 diff --git a/internal/handler/session/qa_terminal_error_test.go b/internal/handler/session/qa_terminal_error_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..eedf180483aa00ff16e8f0e5928cd58cbea9239e
@@ -144604,28 +144793,35 @@ index 19a36ad806a87312b914df7bfd9a631b67a00d9e..ac73c9c7cc641f393fc890757c6fc01c
  		return "", err
  	}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59965dcffe 100644
+index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..5fc96be197663ad6441bfe5349270eb34da2c47b 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
-@@ -7,6 +7,7 @@ import (
+@@ -7,6 +7,8 @@ import (
  	"net/http"
  	"time"
  
 +	"github.com/Tencent/WeKnora/internal/application/access"
++	applicationservice "github.com/Tencent/WeKnora/internal/application/service"
  	"github.com/Tencent/WeKnora/internal/errors"
  	"github.com/Tencent/WeKnora/internal/event"
  	"github.com/Tencent/WeKnora/internal/logger"
-@@ -18,6 +19,9 @@ import (
+@@ -18,6 +20,15 @@ import (
  	"gorm.io/gorm"
  )
  
 +type liveMaterialWritePhaseKey struct{}
-+type liveMaterialWritePhase struct{ RawControl bool }
++type liveMaterialWritePhase struct {
++	RawControl             bool
++	MaterialCheck          func() error
++	InitializationDeadline time.Time
++}
++
++const liveMaterialInitializationTimeout = 10 * time.Second
 +
  // ContinueStream godoc
  // @Summary      继续流式响应
  // @Description  继续获取正在进行的流式响应
-@@ -76,9 +80,26 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -76,9 +87,26 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  		return
  	}
  
@@ -144653,7 +144849,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  		if stderrors.Is(err, errors.ErrSessionNotFound) {
  			// PR #1309 plumbed user-scope into messageService.GetMessage's
  			// session existence check; non-owner / wrong-user lookups now
-@@ -112,6 +133,16 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -112,6 +140,16 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  		return
  	}
  
@@ -144670,7 +144866,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  	// Get initial events from stream (offset 0)
  	events, currentOffset, err := h.streamManager.GetEvents(ctx, sessionID, messageID, 0)
  	if err != nil {
-@@ -128,6 +159,18 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -128,6 +166,18 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  		})
  		return
  	}
@@ -144689,7 +144885,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  
  	logger.Infof(
  		ctx, "Preparing to replay %d events and continue streaming, session ID: %s, message ID: %s",
-@@ -149,7 +192,12 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -149,7 +199,12 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	// Replay existing events, a segment's worth of chunks per frame
  	replay := coalesceReplayEvents(events)
  	logger.Debugf(ctx, "Replaying %d existing events as %d frames", len(events), len(replay))
@@ -144703,7 +144899,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  		emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter)
  	}
  
-@@ -176,13 +224,41 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -176,13 +231,41 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  			newEvents, newOffset, err := h.streamManager.GetEvents(ctx, sessionID, messageID, currentOffset)
  			if err != nil {
  				logger.Errorf(ctx, "Failed to get new events: %v", err)
@@ -144746,7 +144942,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  				// Check for completion event
  				if evt.Type == "complete" {
  					streamCompletedNow = true
-@@ -204,6 +280,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -204,6 +287,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	}
  }
  
@@ -144857,7 +145053,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  // StopSession godoc
  // @Summary      停止生成
  // @Description  停止当前正在进行的生成任务
-@@ -249,7 +429,7 @@ func (h *Handler) StopSession(c *gin.Context) {
+@@ -249,7 +436,7 @@ func (h *Handler) StopSession(c *gin.Context) {
  	tenantIDUint := tenantID.(uint64)
  
  	// Verify message ownership and status
@@ -144866,7 +145062,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, map[string]interface{}{
  			"session_id": sessionID,
-@@ -335,6 +515,7 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -335,6 +522,7 @@ func (h *Handler) handleAgentEventsForSSE(
  	eventBus *event.EventBus,
  	waitForTitle bool,
  	resourceRewriter *storageurl.StreamRewriter,
@@ -144874,7 +145070,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  ) {
  	ticker := time.NewTicker(100 * time.Millisecond)
  	defer ticker.Stop()
-@@ -343,6 +524,10 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -343,6 +531,10 @@ func (h *Handler) handleAgentEventsForSSE(
  	log := logger.GetLogger(ctx)
  
  	log.Infof("Starting pull-based SSE streaming for session=%s, message=%s", sessionID, assistantMessageID)
@@ -144885,7 +145081,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  
  	for {
  		select {
-@@ -362,11 +547,34 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -362,11 +554,52 @@ func (h *Handler) handleAgentEventsForSSE(
  				log.Warnf("Failed to get events from stream: %v", err)
  				continue
  			}
@@ -144894,6 +145090,24 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
 +			// original-material check; refusal cannot suppress this static close.
 +			for _, evt := range events {
 +				if evt.Type == types.ResponseTypeError && evt.Done {
++					emitSafeTerminalGenerationError(c, requestID)
++					return
++				}
++			}
++			if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok && phase.MaterialCheck != nil {
++				if err := phase.MaterialCheck(); err != nil {
++					if stderrors.Is(err, applicationservice.ErrMessageMaterialHTTPInitializing) {
++						if phase.InitializationDeadline.IsZero() {
++							phase.InitializationDeadline = time.Now().Add(liveMaterialInitializationTimeout)
++						}
++						if time.Now().Before(phase.InitializationDeadline) {
++							// Keep the original offset and all bytes unconsumed. Even
++							// raw query controls wait for their actual user admission.
++							continue
++						}
++					}
++					// Actual refusal, failed setup or bounded initialization expiry
++					// closes without granting a placeholder any completed proof.
 +					emitSafeTerminalGenerationError(c, requestID)
 +					return
 +				}
@@ -144921,7 +145135,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  				// Check for stop event
  				if evt.Type == types.ResponseType(event.EventStop) {
  					log.Infof("Detected stop event, triggering stop via EventBus for session=%s", sessionID)
-@@ -420,7 +628,14 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -420,7 +653,14 @@ func (h *Handler) handleAgentEventsForSSE(
  					return
  				}
  
@@ -144936,7 +145150,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  			}
  
  			// Update offset
-@@ -449,7 +664,17 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -449,7 +689,17 @@ func (h *Handler) handleAgentEventsForSSE(
  								break titleWaitLoop
  							}
  							if len(events) > 0 {
@@ -144955,7 +145169,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..668f273b8689c9f733d194c13b3b0d59
  									emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
  									// If we got the title, we can exit
  									if evt.Type == types.ResponseTypeSessionTitle {
-@@ -473,3 +698,313 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -473,3 +723,313 @@ func (h *Handler) handleAgentEventsForSSE(
  		}
  	}
  }

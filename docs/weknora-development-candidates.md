@@ -394,3 +394,33 @@ patches apply and reverse exactly on both profiles. The [repair evidence](eviden
 records measured component gates separately from pending full HTTP, clean
 restore and P5 acceptance. Fresh isolated application and performance fixtures
 are being prepared; the shared runtime remains unchanged.
+
+## HTTP material initialization and resource limits
+
+Submission `a97ff93` passed all twelve push/PR jobs. Its fresh `155f0732`
+application passed the complete nested-LDAP permission matrix, fixing the
+earlier detail-read 403. First QA then exposed a real initialization race:
+the first HTTP write checked the material holder before the asynchronous
+pipeline had marked its actual original inputs ready. The response returned
+503 and closed that holder before later Search/Merge accounting.
+
+Candidates `35968820` / `eb7d5756` now distinguish pending initialization from
+an actual authority refusal. The live HTTP loop waits without serializing or
+advancing the original offset, rechecks the real holder after setup, and ends
+safely after cancellation, refusal, failure or a bounded ten-second wait.
+It does not mark a placeholder completed or fabricate a ready receipt.
+Thirty-seven actual initialization/terminal/tail cases passed; the original
+503 and corrected fixture-assertion failures remain retained. The full image
+build and fresh application acceptance follow this source check. The [initialization record](evidence/normal-candidate-material-initialization-20261009.json)
+retains the failed normal application result separately from these component
+checks.
+
+The isolated P5 trial passed its permission matrix but produced zero samples:
+its app was OOM-killed before the initial change hints could be delivered.
+The unlimited normal application was also OOM-killed during the same period;
+there is no historical RSS evidence establishing a leak or a particular
+container limit as the cause. All four owned failed fixtures were stopped
+after marker verification while keeping their volumes, original files,
+anchors and private evidence. Shared services were preserved. A separate
+four-GiB trial with `GOMEMLIMIT=3GiB` is prepared, with serial build/test/start
+ordering; it has not measured or accepted any P95 target.
