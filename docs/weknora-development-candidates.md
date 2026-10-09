@@ -344,7 +344,7 @@ source, tree and patch labels match the manifest. Shared services were not
 switched. Fresh nested-LDAP application and restore acceptance is in progress.
 
 The normal restore runner now compares role dumps while normalizing only a
-strictly matched PostgreSQL `\\restrict` / `\\unrestrict` token pair; raw SQL
+strictly matched PostgreSQL `\restrict` / `\unrestrict` token pair; raw SQL
 archives and their integrity hashes are retained. Role/password/grant changes
 still fail the check. Its authorized body upgrade uses the actual packaged
 `upgrade-scopes` mode. Seventeen restore guard cases and eight performance

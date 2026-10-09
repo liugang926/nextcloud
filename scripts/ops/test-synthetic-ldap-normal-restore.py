@@ -124,9 +124,9 @@ class RestoreGuardTest(unittest.TestCase):
         probe=object.__new__(P['Restore'])
         probe.load_checkpoint=lambda:{}
         with tempfile.TemporaryDirectory() as directory:
-            probe.evidence=Path(directory)
+            probe.evidence=Path(directory).resolve()
             probe.compose=mock.Mock()
-            with self.assertRaises(RuntimeError):probe.reopen_and_accept()
+            with self.assertRaises(FileNotFoundError):probe.reopen_and_accept()
             probe.compose.assert_not_called()
 
     def test_runtime_scope_rejects_unowned_binding(self):
