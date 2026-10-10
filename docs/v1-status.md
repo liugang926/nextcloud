@@ -155,7 +155,11 @@ SDK and transcript byte checks, seven exact resources absent. It also passes
 full migration38 (31protocoltables including durable facts), seven resources
 absent. See the [durable16](evidence/memory-durable-download16-GREEN-20261011.json)
 and [migration38](evidence/memory-full-migration38-durable-GREEN-20261011.json).
-Existing116 model/download/cleanup regressions are running. Newservice-instance
+Existing model/download100 passes on that durable source, but old cleanup10
+failed error-object identity. A narrow terminal aggregation repair now passes
+the byte-preserved cleanup10 plus initialization6 in76.901s, all eight resources
+absent; see the [error identity16 record](evidence/memory-terminal-errorABI16-GREEN-20261011.json).
+A single full116 window remains to be rerun after the repair. Newservice-instance
 recovery is explicitly separate from real OS-kill/11-minute-claim-expiry E2E;
 those cross-crash gates remain required. The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
