@@ -121,8 +121,12 @@ The genuine download is canceled/joined before dependent cleanup even after
 HTTP drain expires. Desktop-native shell/startup Fatal/crash replay/remote weight
 inventory remain pending. See the [download/host32 record](evidence/memory-local-download-host32-GREEN-20261011.json)
 and the exact [reviewable source proposal](../integration/proposals/weknora-original-local-download-20261011.json).
-Failed Close release retry/error propagation also remains an explicit lifecycle
-boundary. The shared model final-binding repair preserves its earlier test-only compile
+Failed Close release retry/error propagation now has a corrected source and
+16 actual SQL/HTTP nodes passing on789d6aa, including postcommit initialization
+refusal. It preserves both errors and nilread, reports outstanding failures,
+and retries only captured closed-owner releases. Eight resources are absent;
+see the [failure16 record](evidence/memory-download-release-failures16-GREEN-20261011.json).
+Shared model/download regressions and cross-crash cleanup recovery remain required. The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
