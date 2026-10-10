@@ -34,8 +34,13 @@ The next `1e70c75b` candidate combines query/vector/rank, ordinary Recall,
 Local/Ollama original embedding, complete155/74→156/75 migration and latejournal
 snapshot checks. All237 changed Go files parsed and11 selected packages compiled
 in129.439s with zero runtime tests. The50-node original/body/clock regression now
-passes in213.065s, zero failures/skips/OOM, with11 exact resources absent. New
-112-node SQL/HTTP consumer gates are running; full migration remains unaccepted.
+passes in213.065s, zero failures/skips/OOM, with11 exact resources absent. The first
+112-node consumer window stopped at a query expiry observer precondition after
+nine SQLite leaves passed; no consumer gate is accepted. The full migration
+window executed30 nodes (4PASS/26FAIL/0SKIP), exposing a removed fixture column
+and real duplicate trigger semantics at155/74. Both are under repair. See the
+[query failure](evidence/memory-query-observer-precondition-failure-20261011.json)
+and [actual migration failure](evidence/memory-full-migration30-failure-20261011.json).
 See the [latejournal50 record](evidence/memory-last-journal-50-GREEN-20261011.json). See the
 [compile record](evidence/memory-recall-local-integrated-compile-20261011.json).
 
