@@ -55,4 +55,4 @@
 
 本次只验证脚本语法和准备行为，没有运行 Docker build 或更改共享栈。`build-weknora-auto-space.sh --verify-only` 只调用临时Git index验证；正常构建显式启用 `auto_space`，默认镜像标签为 `nextcloud-auto-space-candidate`，不会自动选择或启动运行栈。普通RAG调用的默认profile仍为 `rag`，普通默认patch和 `nextcloud-rag` 标签不变。
 
-最终manifest已新增独立 `auto_space`，冻结WK提交 `b03ffaad1a44023096d32f82931924a5b3b9255f`。原 `c6`/`rag` 两项对象、patch字节和SHA完全不变。实际wrapper `--verify-only` exit0，临时index apply tree与冻结candidate tree相同，reverse恢复精确base tree；原patch少量whitespace警告不影响tree校验。[候选验证收据](evidence/auto-space-prd-20261010/candidate-verification.json) 与 [实现报告](auto-space-prd-implementation-20261010.md) 保存完整base/tree/hash/bytes。未执行Docker镜像构建或共享栈部署。
+最终manifest已新增独立 `auto_space`，冻结WK提交 `cf2a14b0272d6bfe1af0b9480e54df3923c3bff0`。原 `c6`/`rag` 两项对象、patch字节和SHA完全不变。实际wrapper `--verify-only` exit0，临时index apply tree与冻结candidate tree相同，reverse恢复精确base tree；原patch少量whitespace警告不影响tree校验。[候选验证收据](evidence/auto-space-prd-20261010/candidate-verification.json) 与 [实现报告](auto-space-prd-implementation-20261010.md) 保存完整base/tree/hash/bytes。未执行Docker镜像构建或共享栈部署。

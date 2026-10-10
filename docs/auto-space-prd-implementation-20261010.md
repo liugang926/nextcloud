@@ -66,6 +66,8 @@ worker 由安装的 web 用户运行并交给服务管理器管理。发现只�
 
 当前源内容同时关闭 LLM debug 正文文件和 Langfuse 正文遥测；chat、embedding、rerank、VLM、ASR 与 detached context 的九项父测试均通过真实文件/HTTP/log spy 验证。隐私限制也覆盖安装 RAG 账本上下文的普通 RAG/Agent 会话，其模型 generation 与用量遥测停写；无标记直接模型调用保留原追踪。构建隐私标记不赋予来源访问权。三处候选查询显式保留非空条件，命中现有 SQLite partial index；实际 Go SQLite 查询计划和图谱成功/撤回回归通过，无新增生产索引。
 
+SDK 与调用层的补充审查修复了包装器测试未覆盖的完整请求、raw dump、流内容预览、供应商错误及 RAG 公共日志路径。四 SDK 的真实 HTTP 流式/非流式矩阵、原生 Ollama 错误和实际 completion/SSE 消费测试均通过；保护上下文没有正文日志或 raw 目录，原请求、响应、错误及取消控制保持。两轮独立收据为 WeKnora `sdk-content-privacy-window-receipt.json`、`caller-content-privacy-window-receipt.json`，分别有三项和四项新父测试，最终 141 文件格式检查通过。原万文件图谱测试的 126 源文件字节未变，指标保留其原始冻结哈希；补充测试没有据此声称所有第三方 tracing 或生产模型已验收。
+
 恢复时独立的控制门禁同时关闭来源限定用户和普通 Owner 的内容、根元数据及读租约。只有与当前恢复计划、完整签名来源清单、新 KB 代次和未退休候选完全一致的维护构建，才能取得持久的专用构建许可；SQL 图谱实际写入也检查该许可。构建成功保持发布“待验证”，直到全部来源及当前控制库存核验后以 CAS 解除控制门禁。旧内容 fence 保持退休，凭据与托管授权仍需显式重新核验。
 
 历史基线本身存在 45 个失败父测试。本次引入的回归单独修复和验证，完整历史套件不能记为全绿；WeKnora 的 `docs/evidence/auto-space-prd-20261010/baseline-regression-audit.json` 保存精确基线、失败名称、日志哈希和 OOM 边界。
@@ -89,9 +91,9 @@ worker 由安装的 web 用户运行并交给服务管理器管理。发现只�
 
 ## 开发候选
 
-WeKnora 已冻结为提交 `b03ffaad1a44023096d32f82931924a5b3b9255f`，tree 为 `9f907c805688fa087b9cef420f2a114264f3d0da`。独立分支为 `codex/auto-space-prd-20261010`；Nextcloud 交付也在同名独立分支。`integration/candidates/manifest.json` 新增 `auto_space`，基线为精确 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4`。
+WeKnora 已冻结为提交 `cf2a14b0272d6bfe1af0b9480e54df3923c3bff0`，tree 为 `f988fd2f41ce277080be96ccfe20938ea14ace4a`。独立分支为 `codex/auto-space-prd-20261010`；Nextcloud 交付也在同名独立分支。`integration/candidates/manifest.json` 新增 `auto_space`，基线为精确 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4`。
 
-[完整补丁](../integration/candidates/weknora-auto-space.patch) 为 9,492,815 字节，SHA-256 为 `249d2568c7f886659032f6e147442435662578e97504825cb7ca990c5b7049a5`。实际 `--verify-only` 已通过：临时 index 应用后 tree 与冻结 tree 完全一致，反向应用恢复精确 base tree；传入 checkout 保持原状。[验证收据](evidence/auto-space-prd-20261010/candidate-verification.json) 保留结果。原 `c6`、`rag` 的 manifest 对象、补丁字节及哈希均保持不变。未运行新的 app/UI Docker build，未改变共享栈、全局入口或外部物理 GC coverage。
+[完整补丁](../integration/candidates/weknora-auto-space.patch) 为 9,563,801 字节，SHA-256 为 `862b8c333e863994279d5673b1b81767951533194663f6106b395832d7614765`。实际 `--verify-only` 已通过：临时 index 应用后 tree 与冻结 tree 完全一致，反向应用恢复精确 base tree；传入 checkout 保持原状。[验证收据](evidence/auto-space-prd-20261010/candidate-verification.json) 保留结果。原 `c6`、`rag` 的 manifest 对象、补丁字节及哈希均保持不变。未运行新的 app/UI Docker build，未改变共享栈、全局入口或外部物理 GC coverage。
 
 ```sh
 WEKNORA_RAG_SOURCE_DIR=/absolute/path/to/WeKnora \
