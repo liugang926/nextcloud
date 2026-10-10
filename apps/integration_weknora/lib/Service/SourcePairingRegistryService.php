@@ -7,6 +7,7 @@ namespace OCA\IntegrationWeknora\Service;
 use OCP\Files\Folder;
 use OCP\IConfig;
 use OCP\IDBConnection;
+use OCP\Security\ICrypto;
 
 /** Durable, binding-scoped intent for one dedicated WeKnora knowledge base. */
 final class SourcePairingRegistryService {
@@ -15,6 +16,7 @@ final class SourcePairingRegistryService {
         private IDBConnection $db,
         private IConfig $config,
         private BindingRegistryService $bindings,
+        private ?ICrypto $crypto = null,
     ) {
     }
 
@@ -102,6 +104,17 @@ final class SourcePairingRegistryService {
             ];
             if ($this->db->insertIgnoreConflict('weknora_src_pair', $row) !== 1) {
                 throw new \DomainException('Pairing operation has already been used');
+            }
+            // Automatic onboarding must recover the exact one-time token
+            // after response loss. The handoff shares the prepare transaction.
+            if ($this->crypto !== null) {
+                $ciphertext = $this->crypto->encrypt($token);
+                if ($ciphertext === '' || hash_equals($ciphertext, $token)) {
+                    throw new \UnexpectedValueException('Pairing credential encryption failed');
+                }
+                if ($this->db->insertIgnoreConflict('weknora_pair_handoff', [
+                    'operation_id' => $operationId, 'token_ciphertext' => $ciphertext, 'created_at' => $now,
+                ]) !== 1) { throw new \DomainException('Pairing handoff already exists'); }
             }
             $this->db->commit();
             return ['pairing' => $this->publicRow($row), 'token' => $token, 'created' => true];
@@ -283,6 +296,27 @@ final class SourcePairingRegistryService {
     public function status(string $bindingId): ?array {
         $row = $this->latestForBinding($bindingId);
         return $row === null ? null : $this->publicRow($row);
+    }
+
+    /** Server-only delivery; never exposed by session configuration endpoints. */
+    public function handoffToken(string $bindingId, string $operationId): string {
+        $pair = $this->byOperation($operationId);
+        if ($this->crypto === null || $pair === null || $pair['binding_id'] !== $bindingId ||
+            !in_array($pair['state'], ['pending', 'active'], true)) {
+            throw new \DomainException('Pairing handoff is unavailable');
+        }
+        $query = $this->db->getQueryBuilder();
+        $result = $query->select('token_ciphertext')->from('weknora_pair_handoff')
+            ->where($query->expr()->eq('operation_id', $query->createNamedParameter($operationId)))->executeQuery();
+        try { $ciphertext = $result->fetchOne(); } finally { $result->closeCursor(); }
+        if (!is_string($ciphertext) || $ciphertext === '') {
+            throw new \DomainException('Pairing handoff is unavailable');
+        }
+        $token = $this->crypto->decrypt($ciphertext);
+        if (!preg_match('/\A[A-Za-z0-9_-]{64}\z/D', $token)) {
+            throw new \UnexpectedValueException('Pairing handoff is invalid');
+        }
+        return $token;
     }
 
     /** Prepare an overlapping key. The token is returned only on first creation. */

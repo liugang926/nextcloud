@@ -26,6 +26,8 @@ foreach ([
     ['source_state' => 'withdrawn'],
     ['_binding_id' => 'another-binding'],
     ['source_etag' => 'new-etag'],
+    ['source_content_revision' => '1'], // An equal-ETag source write crossed the request.
+    ['source_content_revision' => null], // A live write fence blocks the remote observation.
 ] as $change) {
     if ($matches($before, array_replace($before, $change))) {
         throw new RuntimeException('Stale remote status accepted after a source change');

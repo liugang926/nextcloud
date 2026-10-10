@@ -2,6 +2,8 @@
 
 This repository contains an independent Nextcloud deployment, the `integration_weknora` app, and patches for two pinned WeKnora service baselines. It implements part of the [development plan](docs/development-plan.md) in a local development environment; it is not a V1 enterprise release. Nextcloud 34.0.4, PostgreSQL 16 and Redis 7 run with dedicated volumes. The Nextcloud stack starts on its own; the optional WeKnora override joins its app to this project's Docker network for integration tests.
 
+The auto-space development candidate adds directory onboarding in existing tenants, source-scoped user/group grants, document and graph status delivery, and coordinated recovery controls. See the [implementation and validation record](docs/auto-space-prd-implementation-20261010.md) for configuration, migrations, test boundaries, and the separately pinned `auto_space` WeKnora candidate.
+
 ## Start
 
 From this repository:

@@ -11,7 +11,7 @@ import tempfile
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', choices=('c6', 'rag'), required=True)
+    parser.add_argument('--profile', choices=('c6', 'rag', 'auto_space'), required=True)
     parser.add_argument('--source-repo', type=Path, required=True,
                         help='local Git repository containing the exact upstream baseline')
     args = parser.parse_args()
@@ -19,6 +19,8 @@ def main():
     manifest = json.loads((project / 'integration/candidates/manifest.json').read_text())
     entry = manifest['profiles'][args.profile]
     patch = project / entry['path']
+    if patch.stat().st_size != entry['patch_bytes']:
+        raise ValueError('candidate patch byte count mismatch')
     if hashlib.sha256(patch.read_bytes()).hexdigest() != entry['patch_sha256']:
         raise ValueError('candidate patch SHA-256 mismatch')
 

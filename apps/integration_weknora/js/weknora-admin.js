@@ -916,3 +916,55 @@
         init();
     }
 }());
+
+(function () {
+    'use strict';
+    function initDirectoryRules() {
+        const form = document.getElementById('weknora-directory-rule-form');
+        if (!form) return;
+        const message = document.getElementById('weknora-directory-rule-message');
+        const list = document.getElementById('weknora-directory-rules-list');
+        const url = window.OC.generateUrl('/apps/integration_weknora/api/v1/admin/directory-rules');
+        async function request(method, body) {
+            const response = await fetch(url, { method, credentials: 'same-origin', cache: 'no-store',
+                headers: { Accept: 'application/json', 'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest', requesttoken: window.OC.requestToken || '' },
+                body: body === undefined ? undefined : JSON.stringify(body) });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'rules_unavailable');
+            return data;
+        }
+        async function refresh() {
+            try { const data = await request('GET'); list.textContent = JSON.stringify(data.rules, null, 2); }
+            catch (_) { message.textContent = '规则读取暂不可用。'; }
+        }
+        form.addEventListener('submit', async function (event) {
+            event.preventDefault();
+            const fields = new FormData(form);
+            const rule = {};
+            for (const name of ['id', 'owner_uid', 'tenant_id', 'processing_template_id', 'weknora_origin', 'base_url', 'discovery', 'automation_uid']) {
+                rule[name] = String(fields.get(name) || '').trim();
+            }
+            rule.container_file_id = Number(fields.get('container_file_id'));
+            rule.delegates = String(fields.get('delegates')).split(',').map(uid => uid.trim()).filter(Boolean);
+            rule.auto_enabled = fields.get('auto_enabled') === 'on';
+            const targets = String(fields.get('targets') || '').trim();
+            if (targets) {
+                try { rule.targets = JSON.parse(targets); }
+                catch (_) { message.textContent = '工作空间 JSON 格式无效。'; return; }
+            }
+            const revision = Number(fields.get('expected_revision'));
+            const submit = form.querySelector('[type=submit]'); submit.disabled = true;
+            try {
+                const data = await request('POST', { rule, expected_revision: revision });
+                form.elements.expected_revision.value = data.rule.revision;
+                message.textContent = '规则已保存。'; await refresh();
+            } catch (_) { message.textContent = '规则未保存。请检查当前版本、目录范围、管理委派和允许的地址。'; }
+            finally { submit.disabled = false; }
+        });
+        document.getElementById('weknora-directory-rules-refresh').addEventListener('click', refresh);
+        refresh();
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initDirectoryRules, { once: true });
+    else initDirectoryRules();
+}());

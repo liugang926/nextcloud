@@ -36,6 +36,13 @@ class JournalTests(unittest.TestCase):
         self.assertFalse(plan['ingress_reopen_permitted']);self.assertTrue(plan['authoritative_reconciliation_required'])
         self.assertEqual([{'binding_id':'dept','file_id':'77','last_sequence':'4'}],plan['withdraw_files'])
         self.assertEqual('4',plan['close_bindings'][0]['last_sequence'])
+    def test_typed_content_facts_ignore_metadata_and_keep_incomplete_write(self):
+        first=j.append(self.log,self.key,self.page(kinds=()))
+        second=j.append(self.log,self.key,self.page(kinds=('content_write_begin','content_write_complete','metadata','content_write_begin')))
+        plan=j.replay_plan(self.log,self.key,first,second)
+        self.assertEqual([{'binding_id':'dept','file_id':'77','revision':'1','writing':True}],plan['latest_content_revisions'])
+        self.assertEqual([],plan['withdraw_files'])
+
     def test_exact_retry_does_not_duplicate(self):
         value=self.page();first=j.append(self.log,self.key,value);size=self.log.stat().st_size
         self.assertEqual(first,j.append(self.log,self.key,value));self.assertEqual(size,self.log.stat().st_size)

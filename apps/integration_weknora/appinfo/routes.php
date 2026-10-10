@@ -4,8 +4,23 @@ declare(strict_types=1);
 
 return [
     'routes' => [
+        ['name' => 'target_migration#status', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'GET'],
+        ['name' => 'target_migration#retry', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'POST'],
+        ['name' => 'target_migration#begin', 'url' => '/api/v1/folders/{folderId}/target-migration', 'verb' => 'POST'],
+        ['name' => 'root_migration#proof', 'url' => '/api/v1/bindings/{id}/root-migrations/{operationId}', 'verb' => 'GET'],
+        ['name' => 'root_migration#acknowledge', 'url' => '/api/v1/bindings/{id}/root-migrations/{operationId}/ack', 'verb' => 'POST'],
+        ['name' => 'directory_rule_admin#index', 'url' => '/api/v1/admin/directory-rules', 'verb' => 'GET'],
+        ['name' => 'directory_rule_admin#save', 'url' => '/api/v1/admin/directory-rules', 'verb' => 'POST'],
+        ['name' => 'directory#show', 'url' => '/api/v1/folders/{folderId}/status', 'verb' => 'GET', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'directory#candidates', 'url' => '/api/v1/folders/{folderId}/candidates', 'verb' => 'GET', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'directory#associate', 'url' => '/api/v1/folders/{folderId}/associate', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'directory#create', 'url' => '/api/v1/folders/{folderId}/create', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'directory#sync', 'url' => '/api/v1/folders/{folderId}/sync', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'directory#retry', 'url' => '/api/v1/directory-operations/{operationId}/retry', 'verb' => 'POST', 'requirements' => ['operationId' => '[A-Fa-f0-9-]+']],
+        ['name' => 'status_inbox#receive', 'url' => '/api/v1/status', 'verb' => 'POST'],
         ['name' => 'api#capabilities', 'url' => '/api/v1/capabilities', 'verb' => 'GET'],
         ['name' => 'api#bindings', 'url' => '/api/v1/bindings', 'verb' => 'GET'],
+        ['name' => 'api#recoveryState', 'url' => '/api/v1/bindings/{id}/recovery-state', 'verb' => 'GET'],
         [
             'name' => 'api#manifest',
             'url' => '/api/v1/bindings/{id}/manifest',
@@ -33,6 +48,12 @@ return [
         [
             'name' => 'authorization#authorize',
             'url' => '/api/v1/bindings/{id}/authorize',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
+        [
+            'name' => 'authorization#authorizeRoot',
+            'url' => '/api/v1/bindings/{id}/authorize-root',
             'verb' => 'POST',
             'requirements' => ['id' => '[A-Za-z0-9_-]+'],
         ],

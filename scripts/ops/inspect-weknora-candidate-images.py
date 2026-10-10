@@ -48,7 +48,7 @@ def inspect(reference):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', choices=('c6', 'rag'), default='rag')
+    parser.add_argument('--profile', choices=('c6', 'rag', 'auto_space'), default='rag')
     parser.add_argument('--manifest', type=Path,
                         default=ROOT / 'integration/candidates/manifest.json')
     parser.add_argument('--app-image', required=True)

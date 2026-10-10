@@ -13,7 +13,7 @@ final class PublicationRecoveryLedger {
     public const ZERO_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
     public const KINDS = ['upsert', 'metadata', 'delete', 'subtree_scan', 'subtree_moved',
         'subtree_deleted', 'reconcile', 'withdrawn', 'eligible', 'binding_stop',
-        'binding_resume', 'binding_retired', 'binding_created'];
+        'binding_resume', 'binding_retired', 'binding_created', 'content_write_begin', 'content_write_complete'];
 
     public function __construct(private IDBConnection $db, private IConfig $config) {
     }

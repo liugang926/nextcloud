@@ -3,9 +3,9 @@
       xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
     <id>integration_weknora</id>
     <name>WeKnora Integration</name>
-    <summary>WeKnora source API, publication controls, and file status.</summary>
-    <description>Exposes configured Nextcloud folders to a WeKnora connector, lets administrators manage publication exclusions, and shows source-side status in Files.</description>
-    <version>0.4.38</version>
+    <summary>WeKnora directory onboarding, source permissions, and processing status.</summary>
+    <description>Associates publication roots with dedicated knowledge bases in existing WeKnora spaces, verifies current source permissions, and shows document and graph processing status in Files.</description>
+    <version>0.6.0</version>
     <licence>Apache-2.0</licence>
     <author>WeKnora Integration</author>
     <namespace>IntegrationWeknora</namespace>
@@ -18,12 +18,17 @@
         <admin-section>OCA\IntegrationWeknora\Settings\AdminSection</admin-section>
     </settings>
     <background-jobs>
+        <job>OCA\IntegrationWeknora\BackgroundJob\DirectoryPublicationJob</job>
+        <job>OCA\IntegrationWeknora\BackgroundJob\DirectoryDiscoveryJob</job>
+        <job>OCA\IntegrationWeknora\BackgroundJob\StageStatusJob</job>
         <job>OCA\IntegrationWeknora\BackgroundJob\OutboxRetentionJob</job>
         <job>OCA\IntegrationWeknora\BackgroundJob\EventDeliveryJob</job>
         <job>OCA\IntegrationWeknora\BackgroundJob\EventAppliedStatusJob</job>
         <job>OCA\IntegrationWeknora\BackgroundJob\EventHealthJob</job>
     </background-jobs>
     <commands>
+        <command>OCA\IntegrationWeknora\Command\PollStageStatus</command>
+        <command>OCA\IntegrationWeknora\Command\DiscoverDirectories</command>
         <command>OCA\IntegrationWeknora\Command\DeliverEvents</command>
         <command>OCA\IntegrationWeknora\Command\PollEventStatus</command>
         <command>OCA\IntegrationWeknora\Command\ExportRecoveryLedger</command>

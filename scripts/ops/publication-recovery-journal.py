@@ -21,7 +21,7 @@ import time
 
 KINDS = {'upsert', 'metadata', 'delete', 'subtree_scan', 'subtree_moved',
          'subtree_deleted', 'reconcile', 'withdrawn', 'eligible', 'binding_stop',
-         'binding_resume', 'binding_retired', 'binding_created'}
+         'binding_resume', 'binding_retired', 'binding_created', 'content_write_begin', 'content_write_complete'}
 PAGE_KEYS = {'schema_version','instance_id','stream_id','after_sequence',
              'next_sequence','head_sequence','after_chain_sha256','next_chain_sha256','head_chain_sha256','items','has_more'}
 ITEM_KEYS = {'sequence','binding_id','file_id','kind','source_revision','created_at'}
@@ -215,12 +215,18 @@ def replay_plan(path,keyfile,anchor,through):
         value=signed['body']['page'];chain=value['after_chain_sha256']
         for event in value['items']:
             chain=event_hash(chain,event);prefix_hashes[event['sequence']]=chain
-    bindings={};files={}
+    bindings={};files={};content={}
     for item in records[start+1:end+1]:
         for event in item['body']['page']['items']:
             binding=event['binding_id'];bindings[binding]=event['sequence']
             if event['kind'] in {'withdrawn','delete'} and event['file_id'] is not None:
                 files[(binding,event['file_id'])]=event['sequence']
+            if event['kind'] in {'content_write_begin','content_write_complete'}:
+                require(event['file_id'] is not None,'content version event lacks file identity')
+                key=(binding,event['file_id']); revision=integer(event['source_revision'])
+                old=content.get(key)
+                require(old is None or revision>=integer(old['revision']),'content version journal regressed')
+                content[key]={'binding_id':binding,'file_id':event['file_id'],'revision':event['source_revision'],'writing':event['kind']=='content_write_begin'}
     return {'schema_version':1,'instance_id':last['instance_id'],'stream_id':last['stream_id'],
             'checkpoint_record_sha256':anchor,'recovery_record_sha256':through,
             'checkpoint_sequence':records[start]['body']['page']['next_sequence'],
@@ -228,7 +234,7 @@ def replay_plan(path,keyfile,anchor,through):
             'through_sequence':last['next_sequence'],'through_database_chain_sha256':last['next_chain_sha256'],
             'close_bindings':[{'binding_id':b,'last_sequence':seq} for b,seq in sorted(bindings.items())],
             'withdraw_files':[{'binding_id':b,'file_id':f,'last_sequence':seq} for (b,f),seq in sorted(files.items())],
-            'database_prefix_hashes':prefix_hashes,
+            'database_prefix_hashes':prefix_hashes,'latest_content_revisions':[content[k] for k in sorted(content)],
             'authoritative_reconciliation_required':True,'ingress_reopen_permitted':False}
 
 def collect(path,keyfile,container,project,max_pages=1000):

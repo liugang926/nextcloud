@@ -52,6 +52,24 @@ final class EventHealthEvaluator {
                 $alerts[] = ['binding_id' => $bindingId, 'code' => 'application_overdue'];
             }
         }
+        $processing = $snapshot['processing'] ?? null;
+        if (is_array($processing)) {
+            if (($processing['stale_status_count'] ?? 0) > 0) {
+                $alerts[] = ['binding_id' => '', 'code' => 'processing_status_stale'];
+            }
+            if (($processing['permission_unverified_count'] ?? 0) > 0) {
+                $alerts[] = ['binding_id' => '', 'code' => 'processing_permission_unverified'];
+            }
+            if (($processing['graph_failure_count'] ?? 0) > 0) {
+                $alerts[] = ['binding_id' => '', 'code' => 'graph_processing_failed'];
+            }
+            if (($processing['oldest_pending_directory_age_seconds'] ?? 0) >= 300) {
+                $alerts[] = ['binding_id' => '', 'code' => 'directory_onboarding_overdue'];
+            }
+            if (($processing['oldest_directory_discovery_age_seconds'] ?? 0) >= 10) {
+                $alerts[] = ['binding_id' => '', 'code' => 'directory_discovery_overdue'];
+            }
+        }
         return $alerts;
     }
 }

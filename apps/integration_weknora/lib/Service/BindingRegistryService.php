@@ -24,6 +24,7 @@ final class BindingRegistryService {
         private PublicationAclPolicyService $aclPolicy,
         private ChangeOutboxService $outbox,
         private LoggerInterface $logger,
+        private ControlRecoveryService $recovery,
     ) {
     }
 
@@ -58,7 +59,7 @@ final class BindingRegistryService {
             return [];
         }
         $query = $this->db->getQueryBuilder();
-        $query->select('binding_id', 'source_hash', 'publication_state', 'publication_epoch')
+        $query->select('binding_id', 'source_hash', 'publication_state', 'publication_epoch', 'sync_enabled', 'sync_revision')
             ->from('weknora_binding_id')
             ->where($query->expr()->eq('retired_at', $query->createNamedParameter(0)));
         $result = $query->executeQuery();
@@ -89,6 +90,8 @@ final class BindingRegistryService {
             }
             $binding['publication_state'] = $state;
             $binding['publication_epoch'] = $epoch;
+            $binding['sync_enabled'] = (int)$row['sync_enabled'] === 1;
+            $binding['sync_revision'] = (int)$row['sync_revision'];
         }
         unset($binding);
         return $bindings;
@@ -96,6 +99,9 @@ final class BindingRegistryService {
 
     /** A fresh gate check is required for every source read. */
     public function requirePublicationActive(string $bindingId): int {
+        if ($this->recovery->closed()) {
+            throw new BindingPublicationStoppedException('Recovery control gate is closed');
+        }
         foreach ($this->listBindings() as $binding) {
             if ($binding['id'] !== $bindingId) {
                 continue;
@@ -115,6 +121,9 @@ final class BindingRegistryService {
      * @return array{publication_state: string, publication_epoch: int, changed: bool}|null
      */
     public function setPublicationState(string $id, string $state, string $actorUid): ?array {
+        if ($state === 'active' && $this->recovery->closed()) {
+            throw new BindingPublicationStoppedException('Recovery control gate is closed');
+        }
         if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $id) ||
             !in_array($state, ['active', 'stopped'], true) ||
             $actorUid === '' || strlen($actorUid) > 64) {
@@ -248,6 +257,7 @@ final class BindingRegistryService {
         }
         if ($pairedRootHash !== false &&
             !hash_equals((string)$pairedRootHash, SourcePairingRegistryService::rootHash($selected))) {
+            $this->stopUnsafeBinding($bindingId);
             throw new \UnexpectedValueException('Paired binding root has moved');
         }
         try {
@@ -384,12 +394,11 @@ final class BindingRegistryService {
                     $found = true;
                     continue;
                 }
-                // In V1 we cannot establish reliable physical ancestry for
-                // shared mounts presented by two different user roots.
-                if ($binding['owner_uid'] !== $ownerUid) {
-                    throw new \DomainException('Cross-owner bindings require a verified mount model');
-                }
                 $otherRoot = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+                // Only the frozen local/Team Folder adapters may establish
+                // physical ancestry across owner views. Shared/external
+                // wrappers fail closed before comparison.
+                $this->aclPolicy->assertSupported($otherRoot);
                 if ($this->overlaps($root, $otherRoot)) {
                     throw new \DomainException('Binding roots overlap');
                 }
