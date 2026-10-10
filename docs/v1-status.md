@@ -314,7 +314,8 @@ tests pass8/8 in49.601s: installed empty module preserves a lawful path, missing
 from startup refuses, and the same running store refuses after actual DROP and
 catalogue readback. Exact joint83/164 DDL is used; no invented authorization or
 publication is supplied. All7 owned resources are independently absent. See the
-[path-module8 record](evidence/joint-root-path-module8-GREEN-20261011.json).
+[path-module8 record](evidence/joint-root-path-module8-GREEN-20261011.json) and
+[reviewable source patch](../integration/proposals/weknora-joint-root-path-module-20261011.json).
 This closes only the module metadata contract, not lineage or full app startup.
 
 ## Prior component checkpoints — 2026-10-10
