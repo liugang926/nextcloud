@@ -1,0 +1,1469 @@
+diff --git a/internal/application/repository/memory_embedding_input.go b/internal/application/repository/memory_embedding_input.go
+index b725f986..a90b97bb 100644
+--- a/internal/application/repository/memory_embedding_input.go
++++ b/internal/application/repository/memory_embedding_input.go
+@@ -14,25 +14,27 @@ import (
+ 	"time"
+ )
+ 
+-const memoryEmbeddingOriginalFields = "id,tenant_id,subject_id,item_id,model_id,recipe,item_publication_id,topic_publication_id,derived_inputs_json,derived_inputs_digest,actor_selector,policy_proof_json,model_proof_json,model_digest,space_digest,expected_dimensions,base_vector_revision,base_vector_present,input_sha256,digest,created_at"
++const memoryEmbeddingOriginalFields = "id,tenant_id,subject_id,item_id,model_id,recipe,item_publication_id,topic_publication_id,derived_inputs_json,derived_inputs_digest,actor_selector,policy_proof_json,model_proof_json,model_digest,space_digest,expected_dimensions,base_vector_revision,base_vector_present,parent_output_receipt_id,parent_output_receipt_digest,parent_rank_receipt_id,parent_rank_receipt_digest,input_sha256,digest,created_at"
+ 
+ type memoryEmbeddingReadKey struct{}
+ type memoryEmbeddingRead struct {
+-	repo        *memoryOriginalAdmissionRepository
+-	ctx         context.Context
+-	cancel      context.CancelFunc
+-	original    *types.MemoryEmbeddingOriginal
+-	head        originalBodyFieldHead
+-	clock       *memoryGeneratedHold
+-	derived     interfaces.MemoryDerivedRead
+-	policy      interfaces.MemoryPolicyOriginalRead
+-	model       interfaces.ModelOriginalRead
+-	modelProof  types.ModelOriginalProof
+-	mu          sync.Mutex
+-	checks      sync.WaitGroup
+-	closed      bool
+-	failed      error
+-	closeJoined chan struct{}
++	repo           *memoryOriginalAdmissionRepository
++	ctx            context.Context
++	cancel         context.CancelFunc
++	original       *types.MemoryEmbeddingOriginal
++	head           originalBodyFieldHead
++	clock          *memoryGeneratedHold
++	derived        interfaces.MemoryDerivedRead
++	policy         interfaces.MemoryPolicyOriginalRead
++	model          interfaces.ModelOriginalRead
++	modelProof     types.ModelOriginalProof
++	parentBindings map[string]originalBodyLease
++	parentHeads    map[string]originalBodyFieldHead
++	mu             sync.Mutex
++	checks         sync.WaitGroup
++	closed         bool
++	failed         error
++	closeJoined    chan struct{}
+ }
+ 
+ func memoryEmbeddingControlInTx(tx *gorm.DB, scope interfaces.MemoryScope, item string, lock string) (*types.MemoryEmbeddingVectorControl, error) {
+@@ -71,7 +73,7 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryEmbedding(ctx context.Con
+ 	if !scope.Valid() || capture.ItemID == "" || capture.ModelID == "" || r.authorityFactory == nil {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
+-	read := &memoryEmbeddingRead{repo: r, clock: &memoryGeneratedHold{}, closeJoined: make(chan struct{})}
++	read := &memoryEmbeddingRead{repo: r, clock: &memoryGeneratedHold{}, parentBindings: map[string]originalBodyLease{}, parentHeads: map[string]originalBodyFieldHead{}, closeJoined: make(chan struct{})}
+ 	read.ctx, read.cancel = context.WithCancel(ctx)
+ 	var err error
+ 	read.derived, err = r.BeginMemoryDerivedRead(read.ctx, scope)
+@@ -245,6 +247,10 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryEmbedding(ctx context.Con
+ 		if err != nil {
+ 			return err
+ 		}
++		parent, parentRank, err := captureMemoryEmbeddingParentInTx(tx, scope, item.ID, control)
++		if err != nil {
++			return err
++		}
+ 		manifest, err := json.Marshal(hold.Manifest)
+ 		if err != nil {
+ 			return err
+@@ -270,6 +276,15 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryEmbedding(ctx context.Con
+ 			return err
+ 		}
+ 		fact := &types.MemoryEmbeddingOriginal{ID: uuid.NewString(), TenantID: scope.TenantID, SubjectID: scope.SubjectID, ItemID: item.ID, ModelID: model.ID, Recipe: types.MemoryEmbeddingDocumentRecipe, ItemPublicationID: itemPublication, TopicPublicationID: topicPublication, DerivedInputsJSON: string(manifest), DerivedInputsDigest: hold.Manifest.Digest, ActorSelector: string(actorJSON), PolicyProofJSON: string(policyJSON), ModelProofJSON: string(modelJSON), ModelDigest: proof.Digest, SpaceDigest: space, ExpectedDimensions: recipe.ExpectedDimensions, BaseVectorRevision: control.Revision, BaseVectorPresent: control.Present, InputJSON: string(input), InputSHA256: bodySHA(input), CreatedAt: memoryFactTime()}
++		if parent != nil {
++			fact.ParentReceiptID, fact.ParentReceiptDigest = parent.ID, parent.Digest
++		}
++		if parentRank != nil {
++			fact.ParentRankID, fact.ParentRankDigest = parentRank.ID, parentRank.Digest
++		}
++		if err = read.acquireMemoryEmbeddingParentHoldsInTx(tx, fact); err != nil {
++			return err
++		}
+ 		fact.Digest, err = memoryEmbeddingOriginalDigest(fact)
+ 		if err != nil {
+ 			return err
+diff --git a/internal/application/repository/memory_embedding_read.go b/internal/application/repository/memory_embedding_read.go
+index 97f330d5..572c44cc 100644
+--- a/internal/application/repository/memory_embedding_read.go
++++ b/internal/application/repository/memory_embedding_read.go
+@@ -125,11 +125,14 @@ func (read *memoryEmbeddingRead) checkInTx(tx *gorm.DB, afterVectorWrite bool) e
+ 			return types.ErrMemoryOriginalUnavailable
+ 		}
+ 	}
++	if err = checkMemoryEmbeddingParentInTx(tx, fact, !afterVectorWrite); err != nil {
++		return err
++	}
+ 	head, err := checkMemoryEmbeddingBodyReceiptInTx(tx, "memory_embedding_originals", fact.ID, fact.TenantID, fact.InputSHA256, fact.Digest)
+ 	if err != nil || head != read.head {
+ 		return ErrOriginalBodyUnavailable
+ 	}
+-	return read.repo.checkMemoryGeneratedFinalClockInTx(tx, read.clock, hold)
++	return read.checkMemoryEmbeddingFinalClockInTx(tx, hold)
+ }
+ 
+ func (read *memoryEmbeddingRead) Snapshot() (*types.MemoryEmbeddingInputSnapshot, error) {
+@@ -155,7 +158,7 @@ func (read *memoryEmbeddingRead) Snapshot() (*types.MemoryEmbeddingInputSnapshot
+ 		}
+ 		snapshot = &types.MemoryEmbeddingInputSnapshot{OriginalID: read.original.ID, OriginalDigest: read.original.Digest, ItemID: read.original.ItemID, ModelID: read.original.ModelID, Text: input.Text, SpaceDigest: read.original.SpaceDigest, ExpectedDimensions: read.original.ExpectedDimensions}
+ 		hold, _ := tx.Statement.Context.Value(memoryDerivedHoldKey{}).(*memoryDerivedHold)
+-		return read.repo.checkMemoryGeneratedFinalClockInTx(tx, read.clock, hold)
++		return read.checkMemoryEmbeddingFinalClockInTx(tx, hold)
+ 	}, memoryWriteOptions(read.repo.db))
+ 	if err = read.finishCheck(err); err != nil {
+ 		return nil, err
+@@ -190,6 +193,11 @@ func (read *memoryEmbeddingRead) Close() error {
+ 	if read.clock.Lease.LeaseID != "" {
+ 		first = NewOriginalBodyRetentionStore(read.repo.db).ReleaseLease(cleanup, read.clock.Lease.LeaseID)
+ 	}
++	for id := range read.parentBindings {
++		if err := NewOriginalBodyRetentionStore(read.repo.db).ReleaseLease(cleanup, id); err != nil && first == nil {
++			first = err
++		}
++	}
+ 	for _, close := range []func() error{func() error {
+ 		if read.model != nil {
+ 			return read.model.Close()
+diff --git a/internal/application/repository/memory_embedding_result.go b/internal/application/repository/memory_embedding_result.go
+index 5a5c09d5..19a28538 100644
+--- a/internal/application/repository/memory_embedding_result.go
++++ b/internal/application/repository/memory_embedding_result.go
+@@ -101,6 +101,8 @@ func (r *memoryOriginalAdmissionRepository) CommitMemoryEmbedding(ctx context.Co
+ 			return err
+ 		}
+ 		receipt = &types.MemoryEmbeddingReceipt{ID: uuid.NewString(), OriginalID: read.original.ID, OriginalDigest: read.original.Digest, TenantID: scope.TenantID, SubjectID: scope.SubjectID, ItemID: row.ItemID, ModelID: row.ModelID, SpaceDigest: read.original.SpaceDigest, Dimensions: row.Dims, VectorRevision: actualControl.Revision, VectorDigest: bodySHA(vector), RankVectorPresent: rankPresent, RankVectorDigest: rankDigest, VectorJSON: string(body), VectorJSONSHA256: bodySHA(body), CreatedAt: at}
++		receipt.ParentReceiptID, receipt.ParentReceiptDigest = read.original.ParentReceiptID, read.original.ParentReceiptDigest
++		receipt.ParentRankID, receipt.ParentRankDigest = read.original.ParentRankID, read.original.ParentRankDigest
+ 		receipt.Digest, err = memoryEmbeddingReceiptDigest(receipt)
+ 		if err != nil {
+ 			return err
+diff --git a/internal/application/repository/memory_embedding_successor.go b/internal/application/repository/memory_embedding_successor.go
+new file mode 100644
+index 00000000..58b4de98
+--- /dev/null
++++ b/internal/application/repository/memory_embedding_successor.go
+@@ -0,0 +1,344 @@
++package repository
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"time"
++)
++
++func (read *memoryEmbeddingRead) acquireMemoryEmbeddingParentHoldsInTx(tx *gorm.DB, fact *types.MemoryEmbeddingOriginal) error {
++	if !fact.BaseVectorPresent {
++		return nil
++	}
++	parent, err := loadMemoryEmbeddingReceipt(tx, fact.ParentReceiptID)
++	if err != nil {
++		return err
++	}
++	original, err := memoryEmbeddingReceiptOriginInTx(tx, memoryScope(fact.TenantID, fact.SubjectID), fact.ItemID, parent)
++	if err != nil {
++		return err
++	}
++	entries := []struct{ table, id, sha, digest string }{{original.TableName(), original.ID, original.InputSHA256, original.Digest}, {parent.TableName(), parent.ID, parent.VectorJSONSHA256, parent.Digest}}
++	if fact.ParentRankID != "" {
++		rank, err := loadMemoryEmbeddingRankReceipt(tx, fact.ParentRankID)
++		if err != nil {
++			return err
++		}
++		entries = append(entries, struct{ table, id, sha, digest string }{rank.TableName(), rank.ID, rank.RankVectorDigest, rank.Digest})
++	}
++	owner := "memory-embedding-parent/" + uuid.NewString()
++	for _, entry := range entries {
++		head, err := checkMemoryEmbeddingBodyReceiptInTx(tx, entry.table, entry.id, fact.TenantID, entry.sha, entry.digest)
++		if err != nil {
++			return err
++		}
++		id, err := NewOriginalBodyRetentionStore(tx).acquireLeaseInTx(tx, head.BodyID, "read", owner, 15*time.Minute)
++		if err != nil {
++			return err
++		}
++		var lease originalBodyLease
++		if err = bodyInternal(tx).Where("lease_id=?", id).Take(&lease).Error; err != nil {
++			return err
++		}
++		read.parentBindings[id] = lease
++		read.parentHeads[head.SlotID] = head
++	}
++	return nil
++}
++
++func (read *memoryEmbeddingRead) checkMemoryEmbeddingFinalClockInTx(tx *gorm.DB, derived *memoryDerivedHold) (resultErr error) {
++	vector, _ := tx.Statement.Context.Value(memoryEmbeddingVectorReadKey{}).(*memoryEmbeddingVectorRead)
++	if vector != nil {
++		if !sameMemoryEmbeddingPool(vector.repo.db, tx) || !sameOriginalModelCallerInRepository(tx.Statement.Context, vector.ctx) {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		if err := vector.start(); err != nil {
++			return err
++		}
++		// A brief state lock establishes Add before Close may Wait. No state
++		// mutex is held while the caller-owned SQL transaction waits or queries.
++		defer func() { resultErr = vector.finish(resultErr) }()
++	}
++	if err := read.repo.checkMemoryGeneratedFinalClockInTx(tx, read.clock, derived); err != nil {
++		return err
++	}
++	if derived == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	all := map[string]originalBodyLease{read.clock.Lease.LeaseID: read.clock.Lease}
++	for _, bindings := range []map[string]originalBodyLease{derived.Leases, read.clock.Policy.Leases, read.clock.ModelBindings, read.parentBindings} {
++		if err := mergeMemoryFinalLeaseBindings(all, bindings); err != nil {
++			return err
++		}
++	}
++	for _, policy := range derived.Policies {
++		if err := mergeMemoryFinalLeaseBindings(all, policy.Leases); err != nil {
++			return err
++		}
++	}
++	coverage, _ := tx.Statement.Context.Value(faqReadLeaseCoverageKey{}).(faqReadLeaseCoverage)
++	content := append([]NextcloudContentLease(nil), coverage.Leases...)
++	contexts := []context.Context{tx.Statement.Context, read.ctx}
++	if vector != nil {
++		bindings, err := MemoryEmbeddingVectorLeaseBindings(tx.Statement.Context)
++		if err != nil {
++			return err
++		}
++		captured := map[string]originalBodyLease{}
++		for _, binding := range bindings {
++			captured[binding.LeaseID] = originalBodyLease{LeaseID: binding.LeaseID, BodyID: binding.BodyID, OwnerID: binding.OwnerID, Kind: binding.Kind, Epoch: binding.Epoch}
++		}
++		if err = mergeMemoryFinalLeaseBindings(all, captured); err != nil {
++			return err
++		}
++		contexts = append(contexts, vector.ctx)
++	}
++	// The result capability is inherited by a rank/vector consumer. Copy only
++	// its actual private tuples, never hydrate current rows to manufacture them.
++	if query, _ := tx.Statement.Context.Value(memoryQueryEmbeddingResultKey{}).(*memoryQueryEmbeddingRead); query != nil {
++		pool, err := tx.DB()
++		if err != nil {
++			return err
++		}
++		own, err := query.repo.db.DB()
++		if err != nil {
++			return err
++		}
++		if pool != own || !sameOriginalModelCallerInRepository(tx.Statement.Context, query.ctx) {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		if err = query.startCheck(); err != nil {
++			return err
++		}
++		defer func() { resultErr = query.finishCheck(resultErr) }()
++		view := query.stateView()
++		if view.result == nil || view.model == nil || view.policy == nil {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		if err = mergeMemoryFinalLeaseBindings(all, view.bodyBindings); err != nil {
++			return err
++		}
++		if err = mergeMemoryFinalLeaseBindings(all, view.policyHold.Leases); err != nil {
++			return err
++		}
++		models, err := memoryModelFinalLeaseBindings(view.model.Context())
++		if err != nil {
++			return err
++		}
++		if err = mergeMemoryFinalLeaseBindings(all, models); err != nil {
++			return err
++		}
++		content = append(content, view.content...)
++		contexts = append(contexts, view.ctx, view.model.Context(), view.policy.Context())
++	}
++	clock := &memoryQueryEmbeddingRead{ctx: read.ctx, bodyBindings: all, content: content}
++	if err := clock.finalStateClock(tx.Session(&gorm.Session{NewDB: true}), nil); err != nil {
++		return err
++	}
++	for _, ctx := range contexts {
++		if ctx == nil {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// These edges are written only by the genuine document producer on its own
++// checked transaction. A mutable vector/control observation is not an edge.
++func memoryEmbeddingReceiptOriginInTx(tx *gorm.DB, scope interfaces.MemoryScope, item string, receipt *types.MemoryEmbeddingReceipt) (*types.MemoryEmbeddingOriginal, error) {
++	if receipt == nil || receipt.TenantID != scope.TenantID || receipt.SubjectID != scope.SubjectID || receipt.ItemID != item {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	original, err := loadMemoryEmbeddingOriginal(tx, receipt.OriginalID)
++	if err != nil {
++		return nil, err
++	}
++	if original.Digest != receipt.OriginalDigest || original.TenantID != scope.TenantID || original.SubjectID != scope.SubjectID || original.ItemID != item || original.ModelID != receipt.ModelID || original.SpaceDigest != receipt.SpaceDigest || original.ExpectedDimensions != receipt.Dimensions || receipt.VectorRevision <= original.BaseVectorRevision || original.ParentReceiptID != receipt.ParentReceiptID || original.ParentReceiptDigest != receipt.ParentReceiptDigest || original.ParentRankID != receipt.ParentRankID || original.ParentRankDigest != receipt.ParentRankDigest {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	for _, entry := range []struct{ table, id, sha, digest string }{{original.TableName(), original.ID, original.InputSHA256, original.Digest}, {receipt.TableName(), receipt.ID, receipt.VectorJSONSHA256, receipt.Digest}} {
++		if _, err = checkMemoryEmbeddingBodyReceiptInTx(tx, entry.table, entry.id, scope.TenantID, entry.sha, entry.digest); err != nil {
++			return nil, err
++		}
++	}
++	return original, nil
++}
++
++func checkMemoryEmbeddingRankParentInTx(tx *gorm.DB, scope interfaces.MemoryScope, item string, rank *types.MemoryEmbeddingRankReceipt, receipt *types.MemoryEmbeddingReceipt) error {
++	if rank == nil || receipt == nil || rank.TenantID != scope.TenantID || rank.SubjectID != scope.SubjectID || rank.ItemID != item || rank.ModelID != receipt.ModelID || rank.ReceiptID != receipt.ID || rank.ReceiptDigest != receipt.Digest || rank.VectorDigest != receipt.VectorDigest || rank.SourceVectorRevision != receipt.VectorRevision {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	_, err := checkMemoryEmbeddingBodyReceiptInTx(tx, rank.TableName(), rank.ID, scope.TenantID, rank.RankVectorDigest, rank.Digest)
++	return err
++}
++
++// Validate the current blob against its true receipt without using it as the
++// historical ranking input. This reads no old credential or provider.
++func checkMemoryEmbeddingCurrentBlobInTx(tx *gorm.DB, scope interfaces.MemoryScope, item string, receipt *types.MemoryEmbeddingReceipt, rank *types.MemoryEmbeddingRankReceipt) error {
++	var row types.MemoryItemEmbedding
++	if err := tx.Session(&gorm.Session{NewDB: true}).Clauses(clause.Locking{Strength: "SHARE"}).Where("item_id=? AND tenant_id=? AND subject_id=?", item, scope.TenantID, scope.SubjectID).Take(&row).Error; err != nil {
++		return err
++	}
++	if row.ModelID != receipt.ModelID || row.Dims != receipt.Dimensions || bodySHA(row.Vector) != receipt.VectorDigest {
++		return ErrOriginalBodyUnavailable
++	}
++	present, digest := receipt.RankVectorPresent, receipt.RankVectorDigest
++	if rank != nil {
++		present, digest = true, rank.RankVectorDigest
++	}
++	if tx.Dialector.Name() == "postgres" && tx.Migrator().HasColumn(&types.MemoryItemEmbedding{}, "embedding") {
++		var actual struct{ Value *string }
++		if err := tx.Session(&gorm.Session{NewDB: true}).Raw("SELECT CAST(embedding AS TEXT) AS value FROM memory_item_embeddings WHERE item_id=?", item).Scan(&actual).Error; err != nil {
++			return err
++		}
++		if (actual.Value != nil) != present || actual.Value != nil && bodySHA([]byte(*actual.Value)) != digest {
++			return ErrOriginalBodyUnavailable
++		}
++	} else if present {
++		return ErrOriginalBodyUnavailable
++	}
++	return tx.Statement.Context.Err()
++}
++
++func captureMemoryEmbeddingParentInTx(tx *gorm.DB, scope interfaces.MemoryScope, item string, control *types.MemoryEmbeddingVectorControl) (*types.MemoryEmbeddingReceipt, *types.MemoryEmbeddingRankReceipt, error) {
++	if control == nil || control.TenantID != scope.TenantID || control.SubjectID != scope.SubjectID || control.ItemID != item {
++		return nil, nil, types.ErrMemoryOriginalUnavailable
++	}
++	if !control.Present {
++		var count int64
++		if err := tx.Session(&gorm.Session{NewDB: true}).Model(&types.MemoryItemEmbedding{}).Where("item_id=?", item).Count(&count).Error; err != nil {
++			return nil, nil, err
++		}
++		if count != 0 {
++			return nil, nil, types.ErrMemoryOriginalUnavailable
++		}
++		return nil, nil, nil
++	}
++	receipt, rank, err := loadCurrentMemoryEmbeddingReceipt(tx, scope, item, control.Revision)
++	if err != nil {
++		return nil, nil, err
++	} // UNKNOWN/raw gaps never become parents.
++	if _, err = memoryEmbeddingReceiptOriginInTx(tx, scope, item, receipt); err != nil {
++		return nil, nil, err
++	}
++	if rank != nil {
++		if err = checkMemoryEmbeddingRankParentInTx(tx, scope, item, rank, receipt); err != nil {
++			return nil, nil, err
++		}
++	}
++	if err = checkMemoryEmbeddingCurrentBlobInTx(tx, scope, item, receipt, rank); err != nil {
++		return nil, nil, err
++	}
++	return receipt, rank, nil
++}
++
++func checkMemoryEmbeddingParentInTx(tx *gorm.DB, fact *types.MemoryEmbeddingOriginal, requireCurrent bool) error {
++	if fact == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if (fact.ParentReceiptID == "") != (fact.ParentReceiptDigest == "") || (fact.ParentRankID == "") != (fact.ParentRankDigest == "") {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if !fact.BaseVectorPresent {
++		if fact.ParentReceiptID != "" || fact.ParentRankID != "" {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		return tx.Statement.Context.Err()
++	}
++	if fact.ParentReceiptID == "" || len(fact.ParentReceiptDigest) != 64 || fact.ParentRankID != "" && len(fact.ParentRankDigest) != 64 {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	scope := memoryScope(fact.TenantID, fact.SubjectID)
++	parent, err := loadMemoryEmbeddingReceipt(tx, fact.ParentReceiptID)
++	if err != nil {
++		return err
++	}
++	if parent.Digest != fact.ParentReceiptDigest {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if _, err = memoryEmbeddingReceiptOriginInTx(tx, scope, fact.ItemID, parent); err != nil {
++		return err
++	}
++	expectedRevision := parent.VectorRevision
++	var rank *types.MemoryEmbeddingRankReceipt
++	if fact.ParentRankID != "" {
++		rank, err = loadMemoryEmbeddingRankReceipt(tx, fact.ParentRankID)
++		if err != nil {
++			return err
++		}
++		if rank.Digest != fact.ParentRankDigest {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		if err = checkMemoryEmbeddingRankParentInTx(tx, scope, fact.ItemID, rank, parent); err != nil {
++			return err
++		}
++		expectedRevision = rank.VectorRevision
++	}
++	if expectedRevision != fact.BaseVectorRevision {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if requireCurrent {
++		control, err := memoryEmbeddingControlInTx(tx, scope, fact.ItemID, "SHARE")
++		if err != nil {
++			return err
++		}
++		if control.Revision != fact.BaseVectorRevision || !control.Present {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		current, currentRank, err := captureMemoryEmbeddingParentInTx(tx, scope, fact.ItemID, control)
++		if err != nil {
++			return err
++		}
++		if current.ID != parent.ID || current.Digest != parent.Digest || (currentRank == nil) != (rank == nil) || currentRank != nil && (currentRank.ID != rank.ID || currentRank.Digest != rank.Digest) {
++			return types.ErrMemoryOriginalUnavailable
++		}
++	}
++	return tx.Statement.Context.Err()
++}
++
++// A later genuine output is a current-control descendant, never replacement
++// material for the saved selection. Every hop names its actual prior receipt,
++// optionally through a genuine rank representation, and retains live bodies.
++func checkMemoryEmbeddingOutputAncestryInTx(tx *gorm.DB, scope interfaces.MemoryScope, item string, current, saved *types.MemoryEmbeddingReceipt, minimumRevision uint64) error {
++	if current == nil || saved == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	seen := map[string]bool{}
++	for steps := 0; ; steps++ {
++		if steps >= 256 || seen[current.ID] {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		seen[current.ID] = true
++		original, err := memoryEmbeddingReceiptOriginInTx(tx, scope, item, current)
++		if err != nil {
++			return err
++		}
++		if current.ID == saved.ID {
++			if !faqInputEqual(current, saved) {
++				return types.ErrMemoryOriginalUnavailable
++			}
++			return tx.Statement.Context.Err()
++		}
++		if err = checkMemoryEmbeddingParentInTx(tx, original, false); err != nil {
++			return err
++		}
++		if original.ParentReceiptID == "" || original.BaseVectorRevision < minimumRevision {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		parent, err := loadMemoryEmbeddingReceipt(tx, original.ParentReceiptID)
++		if err != nil {
++			return err
++		}
++		if parent.Digest != original.ParentReceiptDigest || parent.VectorRevision >= current.VectorRevision {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		current = parent
++	}
++}
+diff --git a/internal/application/repository/memory_embedding_vector_check.go b/internal/application/repository/memory_embedding_vector_check.go
+index a5a6246c..27cbddb7 100644
+--- a/internal/application/repository/memory_embedding_vector_check.go
++++ b/internal/application/repository/memory_embedding_vector_check.go
+@@ -303,7 +303,18 @@ func (read *memoryEmbeddingVectorRead) checkForCommitInTx(tx *gorm.DB, selfCommi
+ 			if err = tx.Session(&gorm.Session{NewDB: true}).Clauses(clause.Locking{Strength: "SHARE"}).Where("item_id=? AND tenant_id=? AND subject_id=?", id, read.scope.TenantID, read.scope.SubjectID).Take(&row).Error; err != nil {
+ 				return err
+ 			}
+-			if row.ModelID != receipt.ModelID || row.Dims != receipt.Dimensions || bodySHA(row.Vector) != receipt.VectorDigest {
++			expectedReceipt := receipt
++			if read.historical != nil {
++				dep, ok := read.historicalVectorDependency(id)
++				if !ok {
++					return ErrOriginalBodyUnavailable
++				}
++				expectedReceipt, _, err = semanticVectorCurrentInTx(tx, read.scope, dep)
++				if err != nil {
++					return err
++				}
++			}
++			if row.ModelID != expectedReceipt.ModelID || row.Dims != expectedReceipt.Dimensions || bodySHA(row.Vector) != expectedReceipt.VectorDigest {
+ 				return ErrOriginalBodyUnavailable
+ 			}
+ 			expectedRankPresent, expectedRankDigest := read.rankPresent(id), read.rankDigest(id)
+diff --git a/internal/application/repository/memory_embedding_vectors.go b/internal/application/repository/memory_embedding_vectors.go
+index 9d7262d6..05001e27 100644
+--- a/internal/application/repository/memory_embedding_vectors.go
++++ b/internal/application/repository/memory_embedding_vectors.go
+@@ -42,7 +42,7 @@ type memoryEmbeddingVectorRead struct {
+ 
+ func loadMemoryEmbeddingReceipt(tx *gorm.DB, id string) (*types.MemoryEmbeddingReceipt, error) {
+ 	var fact types.MemoryEmbeddingReceipt
+-	if err := tx.Session(&gorm.Session{NewDB: true}).Select("id,original_id,original_digest,tenant_id,subject_id,item_id,model_id,space_digest,dimensions,vector_revision,vector_digest,rank_vector_digest,rank_vector_present,vector_json_sha256,digest,created_at").Where("id=?", id).Take(&fact).Error; err != nil {
++	if err := tx.Session(&gorm.Session{NewDB: true}).Select("id,original_id,original_digest,tenant_id,subject_id,item_id,model_id,space_digest,dimensions,vector_revision,parent_output_receipt_id,parent_output_receipt_digest,parent_rank_receipt_id,parent_rank_receipt_digest,vector_digest,rank_vector_digest,rank_vector_present,vector_json_sha256,digest,created_at").Where("id=?", id).Take(&fact).Error; err != nil {
+ 		return nil, err
+ 	}
+ 	digest, err := memoryEmbeddingReceiptDigest(&fact)
+diff --git a/internal/application/repository/memory_semantic_history_vectors.go b/internal/application/repository/memory_semantic_history_vectors.go
+index 267b4072..826dad19 100644
+--- a/internal/application/repository/memory_semantic_history_vectors.go
++++ b/internal/application/repository/memory_semantic_history_vectors.go
+@@ -222,8 +222,8 @@ func (r *memoryOriginalAdmissionRepository) beginMemorySemanticHistoricalVectors
+ }
+ 
+ // A genuine rank representation successor may coexist with the old consumed
+-// vector. It must still name the SAME original output receipt/blob; unknown
+-// raw revisions and a new unrelated output are never adopted as that input.
++// vector. A different genuine output must descend through producer-pinned
++// receipt edges; no current output is adopted as the old ranking input.
+ func semanticVectorCurrentInTx(tx *gorm.DB, scope interfaces.MemoryScope, dep types.MemorySemanticVectorDependency) (*types.MemoryEmbeddingReceipt, *types.MemoryEmbeddingRankReceipt, error) {
+ 	if dep.Original == nil || dep.Receipt == nil || !dep.ControlKnown || !dep.Control.Present {
+ 		return nil, nil, types.ErrMemoryOriginalUnavailable
+@@ -239,20 +239,20 @@ func semanticVectorCurrentInTx(tx *gorm.DB, scope interfaces.MemoryScope, dep ty
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+-	if !faqInputEqual(receipt, dep.Receipt) {
+-		return nil, nil, types.ErrMemoryOriginalUnavailable
++	if err = checkMemoryEmbeddingOutputAncestryInTx(tx, scope, dep.ItemID, receipt, dep.Receipt, dep.Control.Revision); err != nil {
++		return nil, nil, err
+ 	}
+-	if control.Revision != dep.Control.Revision && rank == nil {
++	if control.Revision != receipt.VectorRevision && rank == nil {
+ 		return nil, nil, types.ErrMemoryOriginalUnavailable
+ 	}
+ 	if rank != nil {
+-		if rank.ReceiptID != dep.Receipt.ID || rank.ReceiptDigest != dep.Receipt.Digest || rank.VectorDigest != dep.Receipt.VectorDigest || rank.SourceVectorRevision != dep.Receipt.VectorRevision {
+-			return nil, nil, types.ErrMemoryOriginalUnavailable
+-		}
+-		if _, err = checkMemoryEmbeddingBodyReceiptInTx(tx, rank.TableName(), rank.ID, scope.TenantID, rank.RankVectorDigest, rank.Digest); err != nil {
++		if err = checkMemoryEmbeddingRankParentInTx(tx, scope, dep.ItemID, rank, receipt); err != nil {
+ 			return nil, nil, err
+ 		}
+ 	}
++	if err = checkMemoryEmbeddingCurrentBlobInTx(tx, scope, dep.ItemID, receipt, rank); err != nil {
++		return nil, nil, err
++	}
+ 	return receipt, rank, nil
+ }
+ 
+diff --git a/internal/application/service/memory_embedding_successor_final_clock_sql_actual_test.go b/internal/application/service/memory_embedding_successor_final_clock_sql_actual_test.go
+new file mode 100644
+index 00000000..e62bafec
+--- /dev/null
++++ b/internal/application/service/memory_embedding_successor_final_clock_sql_actual_test.go
+@@ -0,0 +1,301 @@
++package service
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"runtime"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	memoryservice "github.com/Tencent/WeKnora/internal/application/service/memory"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++func typesBodySHAForFinalClockTest(raw []byte) string {
++	digest := sha256.Sum256(raw)
++	return hex.EncodeToString(digest[:])
++}
++
++func embeddingSuccessorLastClockFrames() bool {
++	pcs := make([]uintptr, 96)
++	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
++	outer, last, first := false, false, false
++	for {
++		frame, more := frames.Next()
++		outer = outer || strings.Contains(frame.Function, "repository.(*memoryEmbeddingRead).checkMemoryEmbeddingFinalClockInTx")
++		last = last || strings.Contains(frame.Function, "repository.(*memoryQueryEmbeddingRead).finalStateClock")
++		first = first || strings.Contains(frame.Function, "repository.(*memoryOriginalAdmissionRepository).checkMemoryGeneratedFinalClockInTx")
++		if !more {
++			break
++		}
++	}
++	return outer && last && !first
++}
++
++func embeddingSuccessorRequestedIDs(tx *gorm.DB) map[string]bool {
++	ids := map[string]bool{}
++	where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
++	if !ok {
++		return ids
++	}
++	for _, part := range where.Exprs {
++		if e, ok := part.(clause.Expr); ok && e.SQL == "lease_id IN ?" && len(e.Vars) == 1 {
++			if values, ok := e.Vars[0].([]string); ok {
++				for _, id := range values {
++					ids[id] = true
++				}
++			}
++		}
++	}
++	return ids
++}
++
++func runEmbeddingSuccessorFinalClockActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"current", "late_inherited_vector", "late_inherited_query_result"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			installMemoryQueryActualDDL(t, f, pg)
++			_, models, _, _ := actualOriginalModelServices(t, f)
++			var calls atomic.Int64
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, err := io.ReadAll(r.Body)
++				if err != nil {
++					t.Error("genuine final-clock SDK body unavailable")
++					return
++				}
++				sequence := calls.Add(1)
++				expected := "GENUINE FINAL CLOCK DOCUMENT"
++				if sequence == 2 {
++					expected = f.user.Content
++				}
++				if sequence > 3 || !bytes.Contains(body, []byte(expected)) || r.Header.Get("Authorization") != "Bearer synthetic-final-clock-key" {
++					t.Error("genuine final-clock SDK input/credential mismatch")
++					w.WriteHeader(400)
++					return
++				}
++				vector := []float32{1, 0}
++				if sequence == 3 {
++					vector = []float32{0, 1}
++				}
++				w.Header().Set("Content-Type", "application/json")
++				_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{map[string]interface{}{"index": 0, "embedding": vector}}})
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			model := &types.Model{ID: "genuine-final-clock-embedding", TenantID: 7, Name: "genuine final clock embedding", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "synthetic-final-clock-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++			require.NoError(t, models.CreateModel(f.ctx, model))
++			tenants := repository.NewTenantRepository(f.db)
++			ConfigureTenantMemoryPolicyAuthority(tenants, f.machine.f.store, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil)
++			_, _, err := tenants.(interfaces.MemoryPolicyOriginalWriter).ReplaceMemoryPolicyOriginal(f.ctx, 7, types.MemoryConfig{Enabled: true, WriteMode: types.MemoryWriteAuto, ExtractModelID: f.model.GetModelID(), EmbeddingModelID: model.ID})
++			require.NoError(t, err)
++			f.service = memoryservice.NewOriginalBoundMemoryService(f.repo, tenants, repository.NewMessageRepository(f.db), models, f.queue, nil, f.reader, f.admissions)
++			item, err := f.service.Remember(f.ctx, types.MemoryItem{Origin: types.MemoryOriginManual, Kind: types.MemoryKindFact, Content: "GENUINE FINAL CLOCK DOCUMENT", Importance: 4})
++			require.NoError(t, err)
++			require.EqualValues(t, 1, calls.Load())
++			var saved types.MemoryEmbeddingReceipt
++			require.NoError(t, f.db.Select("id,original_id,digest,vector_digest,vector_revision").Where("item_id=?", item.ID).Take(&saved).Error)
++			writer := WithMessageMaterialOutputBoundary(f.ctx)
++			t.Cleanup(func() { CloseMessageMaterialOutputBoundary(writer) })
++			_, err = f.messages.GetMessage(writer, f.session.ID, f.user.ID)
++			require.NoError(t, err)
++			call, err := bindMemoryQueryMessageOriginal(writer, f.session.ID, f.user.ID)
++			require.NoError(t, err)
++			queryRepo := f.admissions.(interfaces.MemoryQueryEmbeddingOriginalRepository)
++			query, err := memoryservice.EmbedOriginalMemoryQuery(call, queryRepo, models, f.scope, model.ID)
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = query.Close() })
++			vectorRepo := f.admissions.(interfaces.MemoryEmbeddingVectorRepository)
++			vector, err := vectorRepo.BeginMemoryEmbeddingVectors(query.Context(), f.scope, model.ID, []string{item.ID})
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = vector.Close() })
++			originals := f.admissions.(interfaces.MemoryEmbeddingOriginalRepository)
++			read, err := originals.BeginMemoryEmbedding(vector.Context(), f.scope, types.MemoryEmbeddingCapture{ItemID: item.ID, ModelID: model.ID})
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = read.Close() })
++			input, err := read.Snapshot()
++			require.NoError(t, err)
++			client, err := models.GetEmbeddingModel(read.Context(), model.ID)
++			require.NoError(t, err)
++			lifetime, ok := client.(interfaces.ModelOriginalClientLifetime)
++			require.True(t, ok)
++			t.Cleanup(func() { _ = lifetime.CloseOriginal() })
++			callCtx, cancel := context.WithTimeout(read.Context(), 10*time.Second)
++			newVector, err := client.Embed(callCtx, input.Text)
++			cancel()
++			require.NoError(t, err)
++			require.NoError(t, read.Recheck())
++			require.EqualValues(t, 3, calls.Load())
++			var chosen types.MemoryBodyLeaseBinding
++			if mode != "late_inherited_query_result" {
++				var body struct{ BodyID string }
++				require.NoError(t, f.db.Table("original_body_field_heads").Select("body_id").Where("source_table='memory_embedding_receipts' AND row_key=?", saved.ID).Take(&body).Error)
++				bindings, err := repository.MemoryEmbeddingVectorLeaseBindings(vector.Context())
++				require.NoError(t, err)
++				for _, binding := range bindings {
++					if binding.BodyID == body.BodyID {
++						chosen = binding
++						break
++					}
++				}
++			} else {
++				snapshot, err := query.Snapshot()
++				require.NoError(t, err)
++				var result types.MemoryQueryEmbeddingReceipt
++				require.NoError(t, f.db.Select("id").Where("original_id=?", snapshot.OriginalID).Take(&result).Error)
++				var body struct{ BodyID string }
++				require.NoError(t, f.db.Table("original_body_field_heads").Select("body_id").Where("source_table='memory_query_embedding_receipts' AND row_key=?", result.ID).Take(&body).Error)
++				ids, err := repository.MemoryQueryEmbeddingLeaseIDs(query.Context())
++				require.NoError(t, err)
++				var lease struct {
++					LeaseID, BodyID, OwnerID, Kind string
++					Epoch                          int64
++				}
++				require.NoError(t, f.db.Table("original_body_leases").Select("lease_id,body_id,owner_id,kind,epoch").Where("lease_id IN ? AND body_id=?", ids, body.BodyID).Take(&lease).Error)
++				chosen = types.MemoryBodyLeaseBinding{LeaseID: lease.LeaseID, BodyID: lease.BodyID, OwnerID: lease.OwnerID, Kind: lease.Kind, Epoch: lease.Epoch}
++			}
++			require.NotEmpty(t, chosen.LeaseID)
++			require.Equal(t, "read", chosen.Kind)
++			type ownedFinalClockKey struct{}
++			token := new(int)
++			ctx := context.WithValue(read.Context(), ownedFinalClockKey{}, token)
++			crossed, covered, verified := false, false, false
++			var observerErr error
++			const callback = "test:genuine_successor_final_union"
++			require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
++				if tx.Statement.Context.Value(ownedFinalClockKey{}) != token || tx.Statement.Table != "original_body_leases" || !embeddingSuccessorLastClockFrames() {
++					return
++				}
++				ids := embeddingSuccessorRequestedIDs(tx)
++				if len(ids) == 0 {
++					return
++				}
++				fresh := func() *gorm.DB { return tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}) }
++				// Require the true new output receipt to exist in this transaction.
++				// The earlier pre-write current checks are not the late-IO window.
++				var outputs int64
++				if err := fresh().Model(&types.MemoryEmbeddingReceipt{}).Where("original_id=? AND original_digest=? AND tenant_id=? AND subject_id=? AND item_id=?", input.OriginalID, input.OriginalDigest, f.scope.TenantID, f.scope.SubjectID, item.ID).Count(&outputs).Error; err != nil {
++					observerErr = err
++					return
++				}
++				if outputs == 0 {
++					return
++				}
++				if outputs != 1 {
++					observerErr = fmt.Errorf("actual final operation has %d output receipts", outputs)
++					return
++				}
++				if !ids[chosen.LeaseID] {
++					observerErr = fmt.Errorf("last union omitted genuine inherited lease")
++					return
++				}
++				covered = true
++				if mode == "current" || crossed {
++					return
++				}
++				crossed = true
++				now := func() (int64, error) {
++					var ms int64
++					statement := "SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)"
++					if pg {
++						statement = "SELECT CAST(EXTRACT(EPOCH FROM clock_timestamp())*1000 AS BIGINT)"
++					}
++					err := fresh().Raw(statement).Scan(&ms).Error
++					return ms, err
++				}
++				at, err := now()
++				if err != nil {
++					observerErr = err
++					return
++				}
++				expiry := at + 60
++				update := fresh().Table("original_body_leases").Where("lease_id=? AND body_id=? AND owner_id=? AND kind=? AND epoch=? AND released_at_ms IS NULL", chosen.LeaseID, chosen.BodyID, chosen.OwnerID, chosen.Kind, chosen.Epoch).Update("expires_at_ms", expiry)
++				observerErr = update.Error
++				if observerErr != nil {
++					return
++				}
++				if update.RowsAffected != 1 {
++					observerErr = fmt.Errorf("owned expiry CAS affected %d rows", update.RowsAffected)
++					return
++				}
++				var actual struct {
++					LeaseID, BodyID, OwnerID, Kind string
++					Epoch, ExpiresAtMS             int64
++					ReleasedAtMS                   *int64
++				}
++				observerErr = fresh().Table("original_body_leases").Select("lease_id,body_id,owner_id,kind,epoch,expires_at_ms,released_at_ms").Where("lease_id=?", chosen.LeaseID).Take(&actual).Error
++				if observerErr != nil {
++					return
++				}
++				if actual.BodyID != chosen.BodyID || actual.OwnerID != chosen.OwnerID || actual.Kind != chosen.Kind || actual.Epoch != chosen.Epoch || actual.ExpiresAtMS != expiry || actual.ReleasedAtMS != nil {
++					observerErr = fmt.Errorf("owned expiry readback mismatch")
++					return
++				}
++				deadline := time.Now().Add(120 * time.Millisecond)
++				for {
++					observed, err := now()
++					if err != nil {
++						observerErr = err
++						return
++					}
++					if observed >= expiry {
++						verified = true
++						return
++					}
++					if time.Now().After(deadline) {
++						observerErr = fmt.Errorf("SQL clock did not cross actual expiry within bound")
++						return
++					}
++					time.Sleep(2 * time.Millisecond)
++				}
++			}))
++			t.Cleanup(func() { _ = f.db.Callback().Query().Remove(callback) })
++			receipt, err := originals.CommitMemoryEmbedding(ctx, types.MemoryEmbeddingResult{OriginalID: input.OriginalID, OriginalDigest: input.OriginalDigest, Vector: newVector})
++			require.NoError(t, observerErr)
++			require.True(t, covered, "the last real union must include the actual inherited capability")
++			if mode == "current" {
++				require.NoError(t, err)
++				require.NotNil(t, receipt)
++			} else {
++				require.True(t, crossed)
++				require.True(t, verified)
++				require.Error(t, err)
++				require.Nil(t, receipt)
++				var count int64
++				require.NoError(t, f.db.Model(&types.MemoryEmbeddingReceipt{}).Where("original_id=?", input.OriginalID).Count(&count).Error)
++				require.Zero(t, count)
++				var row types.MemoryItemEmbedding
++				require.NoError(t, f.db.Where("item_id=?", item.ID).Take(&row).Error)
++				require.Equal(t, saved.VectorDigest, typesBodySHAForFinalClockTest(row.Vector))
++			}
++			require.NoError(t, lifetime.CloseOriginal())
++			_ = read.Close()
++			_ = vector.Close()
++			_ = query.Close()
++			CloseMessageMaterialOutputBoundary(writer)
++			assertMemAtomicSQLLeasesClosed(t, f)
++		})
++	}
++}
++
++func TestEmbeddingSuccessorFinalUnionActualSQLite(t *testing.T) {
++	runEmbeddingSuccessorFinalClockActual(t, false)
++}
++func TestPostgresEmbeddingSuccessorFinalUnionActual(t *testing.T) {
++	runEmbeddingSuccessorFinalClockActual(t, true)
++}
+diff --git a/internal/application/service/memory_embedding_successor_saved_history_http_actual_test.go b/internal/application/service/memory_embedding_successor_saved_history_http_actual_test.go
+new file mode 100644
+index 00000000..f1efd29b
+--- /dev/null
++++ b/internal/application/service/memory_embedding_successor_saved_history_http_actual_test.go
+@@ -0,0 +1,246 @@
++package service_test
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/service"
++	memoryservice "github.com/Tencent/WeKnora/internal/application/service/memory"
++	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
++	"github.com/Tencent/WeKnora/internal/middleware"
++	"github.com/Tencent/WeKnora/internal/stream"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func runEmbeddingSuccessorSavedHistoryHTTP(t *testing.T, pg bool) {
++	for _, mode := range []string{"replacement", "two_replacements", "unknown_parent_before_model", "raw_ABA_after_replacement", "old_body_after_replacement"} {
++		t.Run(mode, func(t *testing.T) {
++			var modelCalls, embeddingCalls atomic.Int64
++			joined := make(chan struct{}, 1)
++			chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				defer func() { joined <- struct{}{} }()
++				body, err := io.ReadAll(r.Body)
++				if err != nil || !bytes.Contains(body, []byte("GENUINE SEMANTIC RESONANCE FACT")) {
++					t.Error("real model lost the original semantic selection")
++					w.WriteHeader(400)
++					return
++				}
++				modelCalls.Add(1)
++				w.Header().Set("Content-Type", "text/event-stream")
++				_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"GENUINE SAVED VECTOR SELECTION\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
++				w.(http.Flusher).Flush()
++			}))
++			t.Cleanup(chat.Close)
++			embed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, err := io.ReadAll(r.Body)
++				if err != nil {
++					t.Error("real successor embedding input unavailable")
++					return
++				}
++				n := embeddingCalls.Add(1)
++				expected := "GENUINE SEMANTIC RESONANCE FACT"
++				if n == 1 {
++					expected = "GENUINE ORDINARY RECALL PROFILE"
++				}
++				if n == 3 {
++					expected = "current employee policy"
++				}
++				if n > 5 || r.Header.Get("Authorization") != "Bearer synthetic-semantic-history-key" || !bytes.Contains(body, []byte(expected)) {
++					t.Error("successor SDK input or credential did not come from genuine originals")
++					w.WriteHeader(400)
++					return
++				}
++				vector := []float32{1, 0}
++				if n == 4 {
++					vector = []float32{0, 1}
++				}
++				if n == 5 {
++					vector = []float32{-1, 0}
++				}
++				w.Header().Set("Content-Type", "application/json")
++				_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{map[string]interface{}{"index": 0, "embedding": vector}}})
++			}))
++			t.Cleanup(embed.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			f := service.NewNormalSemanticOriginalHTTPFixtureForTest(t, pg, chat.URL, embed.URL)
++			require.EqualValues(t, 2, embeddingCalls.Load())
++			var saved types.MemoryEmbeddingReceipt
++			require.NoError(t, f.DB.Select("id,original_id,original_digest,tenant_id,subject_id,item_id,model_id,space_digest,dimensions,vector_revision,vector_digest,rank_vector_present,rank_vector_digest,vector_json_sha256,digest,created_at").Where("item_id=?", f.Item.ID).Take(&saved).Error)
++			mini := miniredis.RunT(t)
++			redis, err := stream.NewRedisStreamManager(mini.Addr(), "", "", 0, "genuine-successor-history", time.Minute)
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = redis.Close() })
++			h := sessionhandler.NewHandler(f.Sessions, f.Messages, nil, redis, f.Config, f.KBs, nil, nil, nil, nil, nil, nil, nil, f.Models, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
++			gin.SetMode(gin.TestMode)
++			router := gin.New()
++			router.Use(middleware.ErrorHandler())
++			router.Use(func(c *gin.Context) {
++				c.Request = c.Request.WithContext(f.Ctx)
++				c.Set(types.TenantIDContextKey.String(), uint64(7))
++				c.Set(types.RequestIDContextKey.String(), "genuine-successor-before-write")
++				c.Next()
++			})
++			router.POST("/knowledge-chat/:session_id", func(c *gin.Context) { h.KnowledgeQA(c) })
++			server := httptest.NewServer(router)
++			t.Cleanup(server.Close)
++			client := &http.Client{Timeout: 8 * time.Second}
++			response, err := client.Post(server.URL+"/knowledge-chat/"+f.Session.ID, "application/json", strings.NewReader(`{"query":"current employee policy","knowledge_base_ids":["kb"],"summary_model_id":"normal-reference-model","disable_title":true}`))
++			require.NoError(t, err)
++			raw, err := io.ReadAll(response.Body)
++			require.NoError(t, response.Body.Close())
++			require.NoError(t, err)
++			require.Equal(t, http.StatusOK, response.StatusCode)
++			require.Contains(t, string(raw), "GENUINE SAVED VECTOR SELECTION")
++			require.Contains(t, string(raw), `"response_type":"complete"`)
++			require.NotContains(t, string(raw), `"response_type":"error"`)
++			select {
++			case <-f.ProducerReturned:
++			case <-time.After(3 * time.Second):
++				t.Fatal("actual producer did not join")
++			}
++			select {
++			case <-joined:
++			case <-time.After(3 * time.Second):
++				t.Fatal("actual model did not join")
++			}
++			require.EqualValues(t, 1, modelCalls.Load())
++			require.EqualValues(t, 3, embeddingCalls.Load())
++			var assistant struct{ ID string }
++			require.NoError(t, f.DB.Model(&types.Message{}).Select("id").Where("session_id=? AND role='assistant' AND is_completed=true", f.Session.ID).Take(&assistant).Error)
++			var completion struct{ ParentManifest string }
++			require.NoError(t, f.DB.Table("message_completion_input_manifests c").Select("c.parent_manifest").Joins("JOIN message_material_receipts r ON r.admission_id=c.assistant_admission_id").Where("r.message_id=?", assistant.ID).Take(&completion).Error)
++			var manifest types.MessageCompletionInputManifest
++			require.NoError(t, json.Unmarshal([]byte(completion.ParentManifest), &manifest))
++			var captured *types.MemorySemanticConsumption
++			for _, entry := range manifest.SemanticConsumptions {
++				if entry.Recipe == "ordinary-semantic-selection-originals-v1" {
++					require.Nil(t, captured)
++					captured = entry
++				}
++			}
++			require.NotNil(t, captured)
++			var originalScore float64
++			var hit bool
++			for _, entry := range captured.Hits {
++				if entry.ItemID == f.Item.ID {
++					hit = true
++					originalScore = entry.Score
++				}
++			}
++			require.True(t, hit)
++			require.Greater(t, originalScore, .99)
++			originals, ok := f.Admissions.(interfaces.MemoryEmbeddingOriginalRepository)
++			require.True(t, ok)
++			if mode == "unknown_parent_before_model" {
++				var factsBefore int64
++				require.NoError(t, f.DB.Model(&types.MemoryEmbeddingOriginal{}).Count(&factsBefore).Error)
++				fault := f.DB.Model(&types.MemoryItemEmbedding{}).Where("item_id=?", f.Item.ID).Update("vector", types.EncodeEmbedding([]float32{0, 1}))
++				require.NoError(t, fault.Error)
++				require.EqualValues(t, 1, fault.RowsAffected)
++				receipt, err := memoryservice.EmbedOriginalMemoryItem(context.WithoutCancel(f.Ctx), originals, f.Models, f.Scope, types.MemoryEmbeddingCapture{ItemID: f.Item.ID, ModelID: f.EmbeddingModelID})
++				require.Error(t, err)
++				require.Nil(t, receipt)
++				require.EqualValues(t, 3, embeddingCalls.Load(), "UNKNOWN current control cannot be signed into a queued parent or call a model")
++				var factsAfter int64
++				require.NoError(t, f.DB.Model(&types.MemoryEmbeddingOriginal{}).Count(&factsAfter).Error)
++				require.Equal(t, factsBefore, factsAfter)
++			} else {
++				parent := saved
++				writes := 1
++				if mode == "two_replacements" {
++					writes = 2
++				}
++				for index := 0; index < writes; index++ {
++					receipt, err := memoryservice.EmbedOriginalMemoryItem(context.WithoutCancel(f.Ctx), originals, f.Models, f.Scope, types.MemoryEmbeddingCapture{ItemID: f.Item.ID, ModelID: f.EmbeddingModelID})
++					require.NoError(t, err)
++					require.NotNil(t, receipt)
++					require.NotEqual(t, parent.VectorDigest, receipt.VectorDigest)
++					require.Equal(t, parent.ID, receipt.ParentReceiptID)
++					require.Equal(t, parent.Digest, receipt.ParentReceiptDigest)
++					var input types.MemoryEmbeddingOriginal
++					require.NoError(t, f.DB.Select("id,parent_output_receipt_id,parent_output_receipt_digest,base_vector_revision,base_vector_present").Where("id=?", receipt.OriginalID).Take(&input).Error)
++					require.Equal(t, parent.ID, input.ParentReceiptID)
++					require.Equal(t, parent.Digest, input.ParentReceiptDigest)
++					require.Equal(t, parent.VectorRevision, input.BaseVectorRevision)
++					require.True(t, input.BaseVectorPresent)
++					parent = *receipt
++				}
++				if mode == "raw_ABA_after_replacement" {
++					var current types.MemoryItemEmbedding
++					require.NoError(t, f.DB.Where("item_id=?", f.Item.ID).Take(&current).Error)
++					before := append([]byte(nil), current.Vector...)
++					for _, body := range [][]byte{types.EncodeEmbedding([]float32{.5, .5}), before} {
++						fault := f.DB.Model(&types.MemoryItemEmbedding{}).Where("item_id=?", f.Item.ID).Update("vector", body)
++						require.NoError(t, fault.Error)
++						require.EqualValues(t, 1, fault.RowsAffected)
++					}
++				}
++				if mode == "old_body_after_replacement" {
++					var body struct{ BodyID string }
++					require.NoError(t, f.DB.Table("original_body_field_heads").Select("body_id").Where("source_table='memory_embedding_receipts' AND row_key=?", saved.ID).Take(&body).Error)
++					fault := f.DB.Table("original_body_payloads").Where("id=? AND state='live'", body.BodyID).Update("state", "purged")
++					require.NoError(t, fault.Error)
++					require.EqualValues(t, 1, fault.RowsAffected)
++				}
++			}
++			callsBefore := embeddingCalls.Load()
++			fresh, cancel := context.WithTimeout(context.WithoutCancel(f.Ctx), 3*time.Second)
++			defer cancel()
++			writer := service.WithMessageMaterialOutputBoundary(fresh)
++			defer service.CloseMessageMaterialOutputBoundary(writer)
++			history, err := f.Messages.GetMessagesBySession(writer, f.Session.ID, 1, 20)
++			if mode == "replacement" || mode == "two_replacements" {
++				require.NoError(t, err)
++				var found bool
++				for _, m := range history {
++					if m.ID == assistant.ID {
++						found = true
++						require.Contains(t, m.Content, "GENUINE SAVED VECTOR SELECTION")
++						var used bool
++						for _, memory := range m.UsedMemories {
++							if memory.ID == f.Item.ID {
++								used = true
++							}
++						}
++						require.True(t, used)
++					}
++				}
++				require.True(t, found)
++			} else {
++				require.Error(t, err)
++				require.Empty(t, history)
++			}
++			require.Equal(t, callsBefore, embeddingCalls.Load(), "old history must never re-embed/rerank through a new SDK result")
++			require.EqualValues(t, 1, modelCalls.Load())
++			var unchanged struct{ ParentManifest string }
++			require.NoError(t, f.DB.Table("message_completion_input_manifests c").Select("c.parent_manifest").Joins("JOIN message_material_receipts r ON r.admission_id=c.assistant_admission_id").Where("r.message_id=?", assistant.ID).Take(&unchanged).Error)
++			require.Equal(t, completion.ParentManifest, unchanged.ParentManifest)
++			service.CloseMessageMaterialOutputBoundary(writer)
++			require.Eventually(t, func() bool {
++				var n int64
++				return f.DB.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&n).Error == nil && n == 0
++			}, 3*time.Second, 10*time.Millisecond)
++		})
++	}
++}
++
++func TestMemoryEmbeddingOutputSuccessorActualSQLiteHTTP(t *testing.T) {
++	runEmbeddingSuccessorSavedHistoryHTTP(t, false)
++}
++func TestPostgresMemoryEmbeddingOutputSuccessorActualHTTP(t *testing.T) {
++	runEmbeddingSuccessorSavedHistoryHTTP(t, true)
++}
+diff --git a/internal/application/service/memory_embedding_successor_vector_lifecycle_sql_actual_test.go b/internal/application/service/memory_embedding_successor_vector_lifecycle_sql_actual_test.go
+new file mode 100644
+index 00000000..de0989f8
+--- /dev/null
++++ b/internal/application/service/memory_embedding_successor_vector_lifecycle_sql_actual_test.go
+@@ -0,0 +1,220 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"runtime"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	memoryservice "github.com/Tencent/WeKnora/internal/application/service/memory"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func actualVectorCloseWaitsForChecks() bool {
++	buffer := make([]byte, 1<<20)
++	count := runtime.Stack(buffer, true)
++	// Classify only program functions. Never log stack arguments, SQL or body.
++	for _, stack := range strings.Split(string(buffer[:count]), "\n\n") {
++		if strings.Contains(stack, "repository.(*memoryEmbeddingVectorRead).Close") && strings.Contains(stack, "sync.(*WaitGroup).Wait") {
++			return true
++		}
++	}
++	return false
++}
++
++func runEmbeddingSuccessorVectorLifecycleActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"foreign_pool_without_query", "close_during_final_union"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			_, models, _, _ := actualOriginalModelServices(t, f)
++			var calls atomic.Int64
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, err := io.ReadAll(r.Body)
++				if err != nil {
++					t.Error("real vector lifecycle SDK request unavailable")
++					return
++				}
++				sequence := calls.Add(1)
++				if sequence > 2 || !strings.Contains(string(body), "GENUINE VECTOR LIFECYCLE DOCUMENT") || r.Header.Get("Authorization") != "Bearer synthetic-vector-lifecycle-key" {
++					t.Error("real SDK changed original document/credential")
++					w.WriteHeader(400)
++					return
++				}
++				vector := []float32{1, 0}
++				if sequence == 2 {
++					vector = []float32{0, 1}
++				}
++				w.Header().Set("Content-Type", "application/json")
++				_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{map[string]interface{}{"index": 0, "embedding": vector}}})
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			model := &types.Model{ID: "actual-vector-lifecycle-model", TenantID: 7, Name: "actual vector lifecycle model", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "synthetic-vector-lifecycle-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++			require.NoError(t, models.CreateModel(f.ctx, model))
++			tenants := repository.NewTenantRepository(f.db)
++			ConfigureTenantMemoryPolicyAuthority(tenants, f.machine.f.store, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil)
++			_, _, err := tenants.(interfaces.MemoryPolicyOriginalWriter).ReplaceMemoryPolicyOriginal(f.ctx, 7, types.MemoryConfig{Enabled: true, WriteMode: types.MemoryWriteAuto, ExtractModelID: f.model.GetModelID(), EmbeddingModelID: model.ID})
++			require.NoError(t, err)
++			f.service = memoryservice.NewOriginalBoundMemoryService(f.repo, tenants, repository.NewMessageRepository(f.db), models, f.queue, nil, f.reader, f.admissions)
++			item, err := f.service.Remember(f.ctx, types.MemoryItem{Origin: types.MemoryOriginManual, Kind: types.MemoryKindFact, Content: "GENUINE VECTOR LIFECYCLE DOCUMENT", Importance: 4})
++			require.NoError(t, err)
++			require.EqualValues(t, 1, calls.Load())
++			originals := f.admissions.(interfaces.MemoryEmbeddingOriginalRepository)
++			if mode == "foreign_pool_without_query" {
++				// This is a real EMPTY vector capability from another private SQL pool.
++				// It has no query carrier and no foreign body IDs to accidentally fail
++				// a later SQL lookup. Only exact pool ownership can authorize joining it.
++				foreign := newMemAtomicSQLFixture(t, pg)
++				_, foreignModels, _, _ := actualOriginalModelServices(t, foreign)
++				utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++				foreignModel := *model
++				foreignModel.OriginalProof = nil
++				require.NoError(t, foreignModels.CreateModel(foreign.ctx, &foreignModel))
++				foreignTenants := repository.NewTenantRepository(foreign.db)
++				ConfigureTenantMemoryPolicyAuthority(foreignTenants, foreign.machine.f.store, NewGroupAccessService(repository.NewGroupAccessRepository(foreign.db)), nil)
++				_, _, err = foreignTenants.(interfaces.MemoryPolicyOriginalWriter).ReplaceMemoryPolicyOriginal(foreign.ctx, 7, types.MemoryConfig{Enabled: true, WriteMode: types.MemoryWriteAuto, ExtractModelID: foreign.model.GetModelID(), EmbeddingModelID: model.ID})
++				require.NoError(t, err)
++				_, err = foreign.repo.EnsureSubject(foreign.ctx, foreign.scope)
++				require.NoError(t, err)
++				foreignVector, err := foreign.admissions.(interfaces.MemoryEmbeddingVectorRepository).BeginMemoryEmbeddingVectors(foreign.ctx, foreign.scope, model.ID, nil)
++				require.NoError(t, err)
++				t.Cleanup(func() { _ = foreignVector.Close() })
++				snapshot, err := foreignVector.Snapshot()
++				require.NoError(t, err)
++				require.Empty(t, snapshot.Materials)
++				pool, err := f.db.DB()
++				require.NoError(t, err)
++				other, err := foreign.db.DB()
++				require.NoError(t, err)
++				require.NotSame(t, pool, other)
++				a, b := types.CallerFromContext(f.ctx), types.CallerFromContext(foreignVector.Context())
++				require.Equal(t, a.TenantID, b.TenantID)
++				require.Equal(t, a.UserID, b.UserID)
++				require.Equal(t, a.Role, b.Role)
++				p, pok := types.PrincipalFromContext(f.ctx)
++				q, qok := types.PrincipalFromContext(foreignVector.Context())
++				require.True(t, pok && qok)
++				require.Equal(t, p, q)
++				var before, after int64
++				require.NoError(t, f.db.Model(&types.MemoryEmbeddingOriginal{}).Count(&before).Error)
++				read, err := originals.BeginMemoryEmbedding(foreignVector.Context(), f.scope, types.MemoryEmbeddingCapture{ItemID: item.ID, ModelID: model.ID})
++				require.Error(t, err)
++				require.Nil(t, read)
++				require.NoError(t, f.db.Model(&types.MemoryEmbeddingOriginal{}).Count(&after).Error)
++				require.Equal(t, before, after)
++				require.EqualValues(t, 1, calls.Load(), "foreign vector pool without query must refuse before SDK")
++				require.NoError(t, foreignVector.Close())
++				assertMemAtomicSQLLeasesClosed(t, foreign)
++				assertMemAtomicSQLLeasesClosed(t, f)
++				return
++			}
++			vector, err := f.admissions.(interfaces.MemoryEmbeddingVectorRepository).BeginMemoryEmbeddingVectors(f.ctx, f.scope, model.ID, []string{item.ID})
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = vector.Close() })
++			read, err := originals.BeginMemoryEmbedding(vector.Context(), f.scope, types.MemoryEmbeddingCapture{ItemID: item.ID, ModelID: model.ID})
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = read.Close() })
++			input, err := read.Snapshot()
++			require.NoError(t, err)
++			client, err := models.GetEmbeddingModel(read.Context(), model.ID)
++			require.NoError(t, err)
++			lifetime, ok := client.(interfaces.ModelOriginalClientLifetime)
++			require.True(t, ok)
++			t.Cleanup(func() { _ = lifetime.CloseOriginal() })
++			call, cancelCall := context.WithTimeout(read.Context(), 10*time.Second)
++			result, err := client.Embed(call, input.Text)
++			cancelCall()
++			require.NoError(t, err)
++			require.NoError(t, read.Recheck())
++			require.EqualValues(t, 2, calls.Load())
++			pool, err := f.db.DB()
++			require.NoError(t, err)
++			pool.SetMaxOpenConns(1)
++			pool.SetMaxIdleConns(1)
++			type operationKey struct{}
++			token := new(int)
++			ctx, cancel := context.WithTimeout(context.WithValue(read.Context(), operationKey{}, token), 8*time.Second)
++			defer cancel()
++			observe, cancelObserve := context.WithTimeout(context.Background(), 8*time.Second)
++			defer cancelObserve() // observation only, never authority/SQL context
++			closeDone := make(chan error, 1)
++			var crossed, waitObserved atomic.Bool
++			var observerErr error
++			const callback = "test:genuine_vector_close_final_union"
++			require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
++				if tx.Statement.Context.Value(operationKey{}) != token || tx.Statement.Table != "original_body_leases" || !embeddingSuccessorLastClockFrames() || len(embeddingSuccessorRequestedIDs(tx)) == 0 {
++					return
++				}
++				var outputs int64
++				if err := tx.Session(&gorm.Session{NewDB: true}).Model(&types.MemoryEmbeddingReceipt{}).Where("original_id=? AND original_digest=?", input.OriginalID, input.OriginalDigest).Count(&outputs).Error; err != nil {
++					observerErr = err
++					return
++				}
++				if outputs != 1 {
++					return
++				}
++				if !crossed.CompareAndSwap(false, true) {
++					return
++				}
++				go func() { closeDone <- vector.Close() }()
++				select {
++				case <-vector.Context().Done():
++				case <-observe.Done():
++					observerErr = observe.Err()
++					return
++				}
++				// This observes the REAL Close blocked on its actual check WG, not a
++				// sleep guess or a SQL-pool wait that would mask the missing join.
++				ticker := time.NewTicker(time.Millisecond)
++				defer ticker.Stop()
++				for !actualVectorCloseWaitsForChecks() {
++					select {
++					case <-ticker.C:
++					case <-observe.Done():
++						observerErr = observe.Err()
++						return
++					}
++				}
++				waitObserved.Store(true)
++			}))
++			t.Cleanup(func() { _ = f.db.Callback().Query().Remove(callback) })
++			receipt, err := originals.CommitMemoryEmbedding(ctx, types.MemoryEmbeddingResult{OriginalID: input.OriginalID, OriginalDigest: input.OriginalDigest, Vector: result})
++			require.NoError(t, observerErr)
++			require.True(t, crossed.Load())
++			require.True(t, waitObserved.Load())
++			require.Error(t, err)
++			require.Nil(t, receipt)
++			select {
++			case <-closeDone:
++			case <-observe.Done():
++				t.Fatal("actual vector Close failed to join after final operation returned")
++			}
++			var committed int64
++			require.NoError(t, f.db.Model(&types.MemoryEmbeddingReceipt{}).Where("original_id=?", input.OriginalID).Count(&committed).Error)
++			require.Zero(t, committed)
++			require.NoError(t, lifetime.CloseOriginal())
++			_ = read.Close()
++			_ = vector.Close()
++			assertMemAtomicSQLLeasesClosed(t, f)
++		})
++	}
++}
++
++func TestEmbeddingSuccessorVectorLifecycleActualSQLite(t *testing.T) {
++	runEmbeddingSuccessorVectorLifecycleActual(t, false)
++}
++func TestPostgresEmbeddingSuccessorVectorLifecycleActual(t *testing.T) {
++	runEmbeddingSuccessorVectorLifecycleActual(t, true)
++}
+diff --git a/internal/types/memory_embedding_original.go b/internal/types/memory_embedding_original.go
+index 82a0ddfd..c738890a 100644
+--- a/internal/types/memory_embedding_original.go
++++ b/internal/types/memory_embedding_original.go
+@@ -30,6 +30,10 @@ type MemoryEmbeddingOriginal struct {
+ 	ExpectedDimensions                             int
+ 	BaseVectorRevision                             uint64
+ 	BaseVectorPresent                              bool
++	ParentReceiptID                                string `json:",omitempty" gorm:"column:parent_output_receipt_id"`
++	ParentReceiptDigest                            string `json:",omitempty" gorm:"column:parent_output_receipt_digest"`
++	ParentRankID                                   string `json:",omitempty" gorm:"column:parent_rank_receipt_id"`
++	ParentRankDigest                               string `json:",omitempty" gorm:"column:parent_rank_receipt_digest"`
+ 	InputJSON                                      string `json:"-"`
+ 	InputSHA256, Digest                            string
+ 	CreatedAt                                      time.Time
+@@ -44,6 +48,10 @@ type MemoryEmbeddingReceipt struct {
+ 	SubjectID, ItemID, ModelID, SpaceDigest string
+ 	Dimensions                              int
+ 	VectorRevision                          uint64
++	ParentReceiptID                         string `json:",omitempty" gorm:"column:parent_output_receipt_id"`
++	ParentReceiptDigest                     string `json:",omitempty" gorm:"column:parent_output_receipt_digest"`
++	ParentRankID                            string `json:",omitempty" gorm:"column:parent_rank_receipt_id"`
++	ParentRankDigest                        string `json:",omitempty" gorm:"column:parent_rank_receipt_digest"`
+ 	VectorDigest                            string
+ 	RankVectorDigest                        string
+ 	RankVectorPresent                       bool
+diff --git a/migrations/pending/memory_embedding_originals/sqlite/000075_memory_embedding_originals.up.fragment.sql b/migrations/pending/memory_embedding_originals/sqlite/000075_memory_embedding_originals.up.fragment.sql
+index 70ee9ec2..64a57e7a 100644
+--- a/migrations/pending/memory_embedding_originals/sqlite/000075_memory_embedding_originals.up.fragment.sql
++++ b/migrations/pending/memory_embedding_originals/sqlite/000075_memory_embedding_originals.up.fragment.sql
+@@ -1,8 +1,8 @@
+ -- Reserved 000075 forward fragment. Existing rows are UNKNOWN: controls only, no receipts.
+ CREATE TABLE memory_embedding_vector_controls(item_id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,revision INTEGER NOT NULL,present INTEGER NOT NULL);
+ INSERT INTO memory_embedding_vector_controls SELECT item_id,tenant_id,subject_id,0,1 FROM memory_item_embeddings;
+-CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision INTEGER NOT NULL,base_vector_present INTEGER NOT NULL,input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL);
+-CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision INTEGER NOT NULL,vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,UNIQUE(item_id,vector_revision));
++CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision INTEGER NOT NULL,base_vector_present INTEGER NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL);
++CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision INTEGER NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,UNIQUE(item_id,vector_revision));
+ CREATE TABLE memory_embedding_body_receipts(origin_kind TEXT NOT NULL,origin_id TEXT NOT NULL,origin_digest TEXT NOT NULL,body_sha256 TEXT NOT NULL,slot_id TEXT NOT NULL,body_id TEXT NOT NULL,head_revision INTEGER NOT NULL,source_identity_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,PRIMARY KEY(origin_kind,origin_id));
+ CREATE TRIGGER memory_embedding_vector_insert AFTER INSERT ON memory_item_embeddings BEGIN
+ UPDATE memory_embedding_vector_controls SET revision=revision+1,present=(tenant_id=NEW.tenant_id AND subject_id=NEW.subject_id) WHERE item_id=NEW.item_id;
+diff --git a/migrations/pending/memory_embedding_originals/versioned/000156_memory_embedding_originals.up.fragment.sql b/migrations/pending/memory_embedding_originals/versioned/000156_memory_embedding_originals.up.fragment.sql
+index 606c47d1..c1f8c4b6 100644
+--- a/migrations/pending/memory_embedding_originals/versioned/000156_memory_embedding_originals.up.fragment.sql
++++ b/migrations/pending/memory_embedding_originals/versioned/000156_memory_embedding_originals.up.fragment.sql
+@@ -1,8 +1,8 @@
+ -- Reserved 000156 forward fragment. Existing rows are UNKNOWN: controls only, no receipts.
+ CREATE TABLE memory_embedding_vector_controls(item_id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,revision BIGINT NOT NULL,present BOOLEAN NOT NULL);
+ INSERT INTO memory_embedding_vector_controls SELECT item_id,tenant_id,subject_id,0,TRUE FROM memory_item_embeddings;
+-CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision BIGINT NOT NULL,base_vector_present BOOLEAN NOT NULL,input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
+-CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision BIGINT NOT NULL,vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present BOOLEAN NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,UNIQUE(item_id,vector_revision));
++CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision BIGINT NOT NULL,base_vector_present BOOLEAN NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
++CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision BIGINT NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present BOOLEAN NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,UNIQUE(item_id,vector_revision));
+ CREATE TABLE memory_embedding_body_receipts(origin_kind TEXT NOT NULL,origin_id TEXT NOT NULL,origin_digest TEXT NOT NULL,body_sha256 TEXT NOT NULL,slot_id TEXT NOT NULL,body_id TEXT NOT NULL,head_revision BIGINT NOT NULL,source_identity_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,PRIMARY KEY(origin_kind,origin_id));
+ CREATE FUNCTION memory_embedding_vector_bump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR TG_OP='UPDATE' THEN
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+index e7f0973d..c932264c 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+@@ -295,8 +295,8 @@ CREATE TRIGGER memory_generated_body_receipts_no_replace BEFORE INSERT ON memory
+ -- Reserved 000075 forward fragment. Existing rows are UNKNOWN: controls only, no receipts.
+ CREATE TABLE memory_embedding_vector_controls(item_id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,revision INTEGER NOT NULL,present INTEGER NOT NULL);
+ INSERT INTO memory_embedding_vector_controls SELECT item_id,tenant_id,subject_id,0,1 FROM memory_item_embeddings;
+-CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision INTEGER NOT NULL,base_vector_present INTEGER NOT NULL,input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL);
+-CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision INTEGER NOT NULL,vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,UNIQUE(item_id,vector_revision));
++CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision INTEGER NOT NULL,base_vector_present INTEGER NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL);
++CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision INTEGER NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,UNIQUE(item_id,vector_revision));
+ CREATE TABLE memory_embedding_body_receipts(origin_kind TEXT NOT NULL,origin_id TEXT NOT NULL,origin_digest TEXT NOT NULL,body_sha256 TEXT NOT NULL,slot_id TEXT NOT NULL,body_id TEXT NOT NULL,head_revision INTEGER NOT NULL,source_identity_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,PRIMARY KEY(origin_kind,origin_id));
+ CREATE TRIGGER memory_embedding_vector_insert AFTER INSERT ON memory_item_embeddings BEGIN
+ UPDATE memory_embedding_vector_controls SET revision=revision+1,present=(tenant_id=NEW.tenant_id AND subject_id=NEW.subject_id) WHERE item_id=NEW.item_id;
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+index 8c03ef55..e0884c80 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+@@ -268,8 +268,8 @@ CREATE TRIGGER memory_generated_body_receipts_immutable BEFORE UPDATE OR DELETE
+ -- Reserved 000156 forward fragment. Existing rows are UNKNOWN: controls only, no receipts.
+ CREATE TABLE memory_embedding_vector_controls(item_id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,revision BIGINT NOT NULL,present BOOLEAN NOT NULL);
+ INSERT INTO memory_embedding_vector_controls SELECT item_id,tenant_id,subject_id,0,TRUE FROM memory_item_embeddings;
+-CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision BIGINT NOT NULL,base_vector_present BOOLEAN NOT NULL,input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
+-CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision BIGINT NOT NULL,vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present BOOLEAN NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,UNIQUE(item_id,vector_revision));
++CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision BIGINT NOT NULL,base_vector_present BOOLEAN NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
++CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision BIGINT NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present BOOLEAN NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,UNIQUE(item_id,vector_revision));
+ CREATE TABLE memory_embedding_body_receipts(origin_kind TEXT NOT NULL,origin_id TEXT NOT NULL,origin_digest TEXT NOT NULL,body_sha256 TEXT NOT NULL,slot_id TEXT NOT NULL,body_id TEXT NOT NULL,head_revision BIGINT NOT NULL,source_identity_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,PRIMARY KEY(origin_kind,origin_id));
+ CREATE FUNCTION memory_embedding_vector_bump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR TG_OP='UPDATE' THEN
+diff --git a/migrations/sqlite/000075_memory_original_protocols.up.sql b/migrations/sqlite/000075_memory_original_protocols.up.sql
+index e7f0973d..c932264c 100644
+--- a/migrations/sqlite/000075_memory_original_protocols.up.sql
++++ b/migrations/sqlite/000075_memory_original_protocols.up.sql
+@@ -295,8 +295,8 @@ CREATE TRIGGER memory_generated_body_receipts_no_replace BEFORE INSERT ON memory
+ -- Reserved 000075 forward fragment. Existing rows are UNKNOWN: controls only, no receipts.
+ CREATE TABLE memory_embedding_vector_controls(item_id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,revision INTEGER NOT NULL,present INTEGER NOT NULL);
+ INSERT INTO memory_embedding_vector_controls SELECT item_id,tenant_id,subject_id,0,1 FROM memory_item_embeddings;
+-CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision INTEGER NOT NULL,base_vector_present INTEGER NOT NULL,input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL);
+-CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision INTEGER NOT NULL,vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,UNIQUE(item_id,vector_revision));
++CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision INTEGER NOT NULL,base_vector_present INTEGER NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL);
++CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id INTEGER NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision INTEGER NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,UNIQUE(item_id,vector_revision));
+ CREATE TABLE memory_embedding_body_receipts(origin_kind TEXT NOT NULL,origin_id TEXT NOT NULL,origin_digest TEXT NOT NULL,body_sha256 TEXT NOT NULL,slot_id TEXT NOT NULL,body_id TEXT NOT NULL,head_revision INTEGER NOT NULL,source_identity_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at DATETIME NOT NULL,PRIMARY KEY(origin_kind,origin_id));
+ CREATE TRIGGER memory_embedding_vector_insert AFTER INSERT ON memory_item_embeddings BEGIN
+ UPDATE memory_embedding_vector_controls SET revision=revision+1,present=(tenant_id=NEW.tenant_id AND subject_id=NEW.subject_id) WHERE item_id=NEW.item_id;
+diff --git a/migrations/versioned/000156_memory_original_protocols.up.sql b/migrations/versioned/000156_memory_original_protocols.up.sql
+index 8c03ef55..e0884c80 100644
+--- a/migrations/versioned/000156_memory_original_protocols.up.sql
++++ b/migrations/versioned/000156_memory_original_protocols.up.sql
+@@ -268,8 +268,8 @@ CREATE TRIGGER memory_generated_body_receipts_immutable BEFORE UPDATE OR DELETE
+ -- Reserved 000156 forward fragment. Existing rows are UNKNOWN: controls only, no receipts.
+ CREATE TABLE memory_embedding_vector_controls(item_id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,revision BIGINT NOT NULL,present BOOLEAN NOT NULL);
+ INSERT INTO memory_embedding_vector_controls SELECT item_id,tenant_id,subject_id,0,TRUE FROM memory_item_embeddings;
+-CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision BIGINT NOT NULL,base_vector_present BOOLEAN NOT NULL,input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
+-CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision BIGINT NOT NULL,vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present BOOLEAN NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,UNIQUE(item_id,vector_revision));
++CREATE TABLE memory_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,recipe TEXT NOT NULL,item_publication_id TEXT NOT NULL,topic_publication_id TEXT NOT NULL,derived_inputs_json TEXT NOT NULL,derived_inputs_digest TEXT NOT NULL,actor_selector TEXT NOT NULL,policy_proof_json TEXT NOT NULL,model_proof_json TEXT NOT NULL,model_digest TEXT NOT NULL,space_digest TEXT NOT NULL,expected_dimensions INTEGER NOT NULL,base_vector_revision BIGINT NOT NULL,base_vector_present BOOLEAN NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',input_json TEXT NOT NULL,input_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
++CREATE TABLE memory_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,item_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_revision BIGINT NOT NULL,parent_output_receipt_id TEXT NOT NULL DEFAULT '',parent_output_receipt_digest TEXT NOT NULL DEFAULT '',parent_rank_receipt_id TEXT NOT NULL DEFAULT '',parent_rank_receipt_digest TEXT NOT NULL DEFAULT '',vector_digest TEXT NOT NULL,rank_vector_digest TEXT NOT NULL,rank_vector_present BOOLEAN NOT NULL,vector_json TEXT NOT NULL,vector_json_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,UNIQUE(item_id,vector_revision));
+ CREATE TABLE memory_embedding_body_receipts(origin_kind TEXT NOT NULL,origin_id TEXT NOT NULL,origin_digest TEXT NOT NULL,body_sha256 TEXT NOT NULL,slot_id TEXT NOT NULL,body_id TEXT NOT NULL,head_revision BIGINT NOT NULL,source_identity_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,PRIMARY KEY(origin_kind,origin_id));
+ CREATE FUNCTION memory_embedding_vector_bump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR TG_OP='UPDATE' THEN

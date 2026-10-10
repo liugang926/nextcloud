@@ -1,0 +1,693 @@
+diff --git a/internal/application/repository/memory_policy_body.go b/internal/application/repository/memory_policy_body.go
+index 7c354cea..9040e6ac 100644
+--- a/internal/application/repository/memory_policy_body.go
++++ b/internal/application/repository/memory_policy_body.go
+@@ -3,6 +3,8 @@ package repository
+ import (
+ 	"context"
+ 	"encoding/json"
++	"reflect"
++	"sort"
+ 	"sync"
+ 	"time"
+ 
+@@ -32,12 +34,17 @@ func memoryPolicyCapturedBodyHeadInTx(tx *gorm.DB, origin *types.MemoryPolicyOri
+ 	if err := tx.Statement.Context.Err(); err != nil {
+ 		return originalBodyFieldHead{}, err
+ 	}
+-	if origin == nil || !originalBodySchemaPresent(tx) {
++	if origin == nil {
+ 		return originalBodyFieldHead{}, ErrOriginalBodyUnavailable
+ 	}
+-	var heads []originalBodyFieldHead
+-	if err := bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("source_table='memory_policy_originals' AND row_key=?", origin.ID).Find(&heads).Error; err != nil {
+-		return originalBodyFieldHead{}, err
++	heads, captured := memoryPolicyScopedHeads(tx, origin.ID)
++	if !captured {
++		if !originalBodySchemaPresent(tx) {
++			return originalBodyFieldHead{}, ErrOriginalBodyUnavailable
++		}
++		if err := bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("source_table='memory_policy_originals' AND row_key=?", origin.ID).Find(&heads).Error; err != nil {
++			return originalBodyFieldHead{}, err
++		}
+ 	}
+ 	if len(heads) != 1 {
+ 		return originalBodyFieldHead{}, ErrOriginalBodyUnavailable
+@@ -68,14 +75,24 @@ func memoryPolicyBodyReceiptDigest(receipt *types.MemoryPolicyBodyReceipt) (stri
+ 	copy.Digest = ""
+ 	return KnowledgeInputDigest(copy)
+ }
+-func memoryPolicyProofInTx(tx *gorm.DB, origin *types.MemoryPolicyOriginal) (types.MemoryPolicyProof, error) {
+-	var receipt types.MemoryPolicyBodyReceipt
+-	if err := tx.Where("origin_id=?", origin.ID).Take(&receipt).Error; err != nil {
+-		return types.MemoryPolicyProof{}, err
++func memoryPolicyReceiptInTx(tx *gorm.DB, origin *types.MemoryPolicyOriginal) (types.MemoryPolicyBodyReceipt, error) {
++	receipt, cached := memoryPolicyScopedReceipt(tx, origin.ID)
++	if !cached {
++		if err := tx.Session(&gorm.Session{NewDB: true}).Where("origin_id=?", origin.ID).Take(&receipt).Error; err != nil {
++			return receipt, err
++		}
+ 	}
+ 	digest, err := memoryPolicyBodyReceiptDigest(&receipt)
+-	if err != nil || digest != receipt.Digest || receipt.TenantID != origin.TenantID || receipt.OriginDigest != origin.Digest || receipt.PolicyDigest != origin.PolicyDigest {
+-		return types.MemoryPolicyProof{}, ErrOriginalBodyUnavailable
++	if err != nil || digest != receipt.Digest || receipt.OriginID != origin.ID || receipt.TenantID != origin.TenantID || receipt.OriginDigest != origin.Digest || receipt.PolicyDigest != origin.PolicyDigest {
++		return receipt, ErrOriginalBodyUnavailable
++	}
++	rememberMemoryPolicyScopedReceipt(tx, receipt)
++	return receipt, tx.Statement.Context.Err()
++}
++func memoryPolicyProofInTx(tx *gorm.DB, origin *types.MemoryPolicyOriginal) (types.MemoryPolicyProof, error) {
++	receipt, err := memoryPolicyReceiptInTx(tx, origin)
++	if err != nil {
++		return types.MemoryPolicyProof{}, err
+ 	}
+ 	origin.BodyReceiptDigest = receipt.Digest
+ 	return origin.Proof(), nil
+@@ -85,14 +102,11 @@ func memoryPolicyBodyHeadInTx(tx *gorm.DB, origin *types.MemoryPolicyOriginal) (
+ 	if err != nil {
+ 		return head, err
+ 	}
+-	proof, err := memoryPolicyProofInTx(tx, origin)
++	receipt, err := memoryPolicyReceiptInTx(tx, origin)
+ 	if err != nil {
+ 		return head, err
+ 	}
+-	var receipt types.MemoryPolicyBodyReceipt
+-	if err = tx.Where("origin_id=? AND digest=?", origin.ID, proof.BodyReceiptDigest).Take(&receipt).Error; err != nil {
+-		return head, err
+-	}
++	origin.BodyReceiptDigest = receipt.Digest
+ 	if receipt.SlotID != head.SlotID || receipt.BodyID != head.BodyID || receipt.HeadRevision != head.Revision || receipt.SourceIdentitySHA256 != head.SourceIdentitySHA256 {
+ 		return head, ErrOriginalBodyUnavailable
+ 	}
+@@ -100,34 +114,66 @@ func memoryPolicyBodyHeadInTx(tx *gorm.DB, origin *types.MemoryPolicyOriginal) (
+ }
+ 
+ func memoryPolicyChainInTx(tx *gorm.DB, tenant uint64, current *types.MemoryPolicyOriginal, queued types.MemoryPolicyProof) ([]*types.MemoryPolicyOriginal, error) {
+-	if err := memoryPolicyDescendsFrom(tx, tenant, current, queued); err != nil {
++	if current == nil {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	checked, err := loadMemoryPolicyOriginal(tx, tenant, current.Proof())
++	if err != nil {
+ 		return nil, err
+ 	}
+-	chain := []*types.MemoryPolicyOriginal{current}
+-	for current.Proof() != queued {
++	if !faqInputEqual(checked, current) {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	chain := []*types.MemoryPolicyOriginal{}
++	seen := map[string]bool{}
++	for i := 0; i < 256; i++ {
++		if seen[checked.ID] {
++			return nil, types.ErrMemoryOriginalUnavailable
++		}
++		seen[checked.ID] = true
++		chain = append(chain, checked)
++		if checked.Proof() == queued {
++			return chain, tx.Statement.Context.Err()
++		}
++		if !queued.Valid() || checked.Revision <= queued.Revision || checked.PreviousOriginID == "" {
++			return nil, types.ErrMemoryOriginalUnavailable
++		}
+ 		var parent types.MemoryPolicyOriginal
+-		if err := tx.Where("id=? AND tenant_id=?", current.PreviousOriginID, tenant).Take(&parent).Error; err != nil {
++		if err := tx.Session(&gorm.Session{NewDB: true}).Where("id=? AND tenant_id=?", checked.PreviousOriginID, tenant).Take(&parent).Error; err != nil {
+ 			return nil, err
+ 		}
++		if parent.Digest != checked.PreviousOriginDigest || parent.Revision >= checked.Revision {
++			return nil, types.ErrMemoryOriginalUnavailable
++		}
+ 		proof, err := memoryPolicyProofInTx(tx, &parent)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		checked, err := loadMemoryPolicyOriginal(tx, tenant, proof)
++		checked, err = loadMemoryPolicyOriginal(tx, tenant, proof)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		chain = append(chain, checked)
+-		current = checked
+ 	}
+-	return chain, nil
++	return nil, types.ErrMemoryOriginalUnavailable
+ }
+ 
+-func checkMemoryPolicyHoldsInTx(tx *gorm.DB, tenant uint64, current, queued types.MemoryPolicyProof) error {
++func checkMemoryPolicyHoldsInTx(tx *gorm.DB, tenant uint64, current, queued types.MemoryPolicyProof) (resultErr error) {
+ 	hold, ok := tx.Statement.Context.Value(memoryPolicyHoldKey{}).(memoryPolicyHold)
+ 	if !ok || hold.Tenant != tenant || hold.Current != current || hold.Queued != queued || len(hold.Heads) == 0 || len(hold.Leases) != len(hold.Heads) {
+ 		return ErrOriginalBodyUnavailable
+ 	}
++	scoped, finishAvailability, scopeErr := beginMemoryPolicyAvailabilityRead(tx)
++	if scopeErr != nil {
++		return scopeErr
++	}
++	tx = scoped
++	if finishAvailability != nil {
++		defer func() {
++			if resultErr != nil {
++				abortOriginalBodyAvailabilityScope(tx, resultErr)
++			}
++		}()
++	}
+ 	origin, err := loadMemoryPolicyOriginal(tx, tenant, current)
+ 	if err != nil {
+ 		return err
+@@ -148,6 +194,8 @@ func checkMemoryPolicyHoldsInTx(tx *gorm.DB, tenant uint64, current, queued type
+ 		return err
+ 	}
+ 	lockedLeases := []originalBodyLease{}
++	verifiedPayloads := map[string]originalBodyPayload{}
++	verifiedPolicyBodies := map[string]*types.MemoryPolicyOriginal{}
+ 	for _, fact := range chain {
+ 		head, err := memoryPolicyBodyHeadInTx(tx, fact)
+ 		if err != nil {
+@@ -172,20 +220,102 @@ func checkMemoryPolicyHoldsInTx(tx *gorm.DB, tenant uint64, current, queued type
+ 		if err = bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("id=?", head.BodyID).Take(&body).Error; err != nil {
+ 			return err
+ 		}
+-		if body.State != "live" || body.PurgeEpoch != lease.Epoch || body.BodySHA256 != fact.PolicyDigest {
++		if body.State != "live" || body.TenantID != fact.TenantID || body.PurgeEpoch != lease.Epoch || body.BodySHA256 != fact.PolicyDigest {
+ 			return ErrOriginalBodyUnavailable
+ 		}
++		if _, duplicate := verifiedPayloads[body.ID]; duplicate {
++			return ErrOriginalBodyUnavailable
++		}
++		verifiedPayloads[body.ID] = body
++		verifiedPolicyBodies[body.ID] = fact
+ 	}
+ 	if err = store.checkJournalInTx(tx); err != nil {
+ 		return err
+ 	}
++	if finishAvailability != nil {
++		if err = finishAvailability(); err != nil {
++			return err
++		}
++	}
++	// Re-read every real lease after the final availability/journal IO. A
++	// same-TX callback can alter a locked row and wall time can cross expiry.
++	ids := []string{}
++	expected := map[string]originalBodyLease{}
++	for _, lease := range lockedLeases {
++		if _, duplicate := expected[lease.LeaseID]; duplicate {
++			return ErrOriginalBodyUnavailable
++		}
++		expected[lease.LeaseID] = lease
++		ids = append(ids, lease.LeaseID)
++	}
++	var finalLeases []originalBodyLease
++	if err = bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("lease_id IN ?", ids).Order("lease_id").Find(&finalLeases).Error; err != nil {
++		return err
++	}
++	if len(finalLeases) != len(ids) {
++		return ErrOriginalBodyUnavailable
++	}
++	for _, lease := range finalLeases {
++		before, found := expected[lease.LeaseID]
++		if !found || lease.BodyID != before.BodyID || lease.OwnerID != before.OwnerID || lease.Kind != before.Kind || lease.Epoch != before.Epoch || lease.ReleasedAtMS != nil {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	// Inline policy bodies live in their immutable source row; their payload
++	// mirror is normally NULL. Verify fresh bytes/length against the captured
++	// original, rather than treating a SHA column or NULL mirror as content.
++	originIDs := []string{}
++	byOrigin := map[string]string{}
++	for bodyID, fact := range verifiedPolicyBodies {
++		originIDs = append(originIDs, fact.ID)
++		byOrigin[fact.ID] = bodyID
++	}
++	sort.Strings(originIDs)
++	var inline []struct{ ID, PolicyJSON string }
++	if err = bodyInternal(tx).Table("memory_policy_originals").Select("id,policy_json").Where("id IN ?", originIDs).Order("id").Find(&inline).Error; err != nil {
++		return err
++	}
++	if len(inline) != len(verifiedPolicyBodies) {
++		return ErrOriginalBodyUnavailable
++	}
++	for _, row := range inline {
++		bodyID, found := byOrigin[row.ID]
++		fact := verifiedPolicyBodies[bodyID]
++		body := verifiedPayloads[bodyID]
++		if !found || fact == nil || row.PolicyJSON != fact.PolicyJSON || bodySHA([]byte(row.PolicyJSON)) != fact.PolicyDigest || int64(len([]byte(row.PolicyJSON))) != body.BodyBytes {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	// The final lease query can itself run a same-TX callback. Reload all
++	// verified physical payloads after it, before the sole wall clock.
++	bodyIDs := []string{}
++	for id := range verifiedPayloads {
++		bodyIDs = append(bodyIDs, id)
++	}
++	sort.Strings(bodyIDs)
++	var finalPayloads []originalBodyPayload
++	if err = bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("id IN ?", bodyIDs).Order("id").Find(&finalPayloads).Error; err != nil {
++		return err
++	}
++	if len(finalPayloads) != len(verifiedPayloads) {
++		return ErrOriginalBodyUnavailable
++	}
++	for _, body := range finalPayloads {
++		before, found := verifiedPayloads[body.ID]
++		if !found || body.State != "live" || !reflect.DeepEqual(before, body) {
++			return ErrOriginalBodyUnavailable
++		}
++		if body.Payload != nil && (bodySHA([]byte(*body.Payload)) != body.BodySHA256 || int64(len([]byte(*body.Payload))) != body.BodyBytes) {
++			return ErrOriginalBodyUnavailable
++		}
++	}
+ 	// The final journal/physical reads may take time. SQL-held rows still need
+ 	// a live lease at the final boundary, not merely at the earlier clock read.
+ 	finalNow, err := nextcloudLeaseNowMS(bodyInternal(tx))
+ 	if err != nil {
+ 		return err
+ 	}
+-	for _, lease := range lockedLeases {
++	for _, lease := range finalLeases {
+ 		if lease.ExpiresAtMS <= finalNow {
+ 			return ErrOriginalBodyUnavailable
+ 		}
+diff --git a/internal/application/repository/memory_policy_original.go b/internal/application/repository/memory_policy_original.go
+index 415e011c..41fe7153 100644
+--- a/internal/application/repository/memory_policy_original.go
++++ b/internal/application/repository/memory_policy_original.go
+@@ -47,6 +47,14 @@ func loadMemoryPolicyOriginal(tx *gorm.DB, tenant uint64, proof types.MemoryPoli
+ 	if !proof.Valid() {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
++	if original, ok := memoryPolicyScopedOrigin(tx, tenant, proof); ok {
++		// The fact/author bytes are immutable; every use still validates the
++		// physical head (or its active owner's final ALL-head batch).
++		if _, err := memoryPolicyBodyHeadInTx(tx, original); err != nil {
++			return nil, err
++		}
++		return original, tx.Statement.Context.Err()
++	}
+ 	var origin types.MemoryPolicyOriginal
+ 	if err := tx.Where("id=? AND tenant_id=? AND revision=?", proof.OriginID, tenant, proof.Revision).Take(&origin).Error; err != nil {
+ 		return nil, err
+@@ -77,6 +85,7 @@ func loadMemoryPolicyOriginal(tx *gorm.DB, tenant uint64, proof types.MemoryPoli
+ 	if _, err := memoryPolicyBodyHeadInTx(tx, &origin); err != nil {
+ 		return nil, err
+ 	}
++	rememberMemoryPolicyScopedOrigin(tx, &origin)
+ 	return &origin, tx.Statement.Context.Err()
+ }
+ 
+diff --git a/internal/application/repository/memory_policy_read_scope.go b/internal/application/repository/memory_policy_read_scope.go
+new file mode 100644
+index 00000000..08f09dd8
+--- /dev/null
++++ b/internal/application/repository/memory_policy_read_scope.go
+@@ -0,0 +1,123 @@
++package repository
++
++import (
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++type memoryPolicyScopedProof struct {
++	Tenant uint64
++	Proof  types.MemoryPolicyProof
++}
++
++// This reuses only immutable facts inside the actual availability owner's
++// active SQL transaction. Controls, actors, scopes, leases and clocks never
++// enter these maps. The owner still flushes fresh ALL-head/payload/journal IO.
++func memoryPolicyAvailabilityScope(tx *gorm.DB) *originalBodyAvailabilityScope {
++	if tx == nil || tx.Statement == nil || tx.Statement.Context == nil {
++		return nil
++	}
++	scope, _ := tx.Statement.Context.Value(originalBodyAvailabilityScopeKey{}).(*originalBodyAvailabilityScope)
++	if scope == nil || scope.pool != tx.Statement.ConnPool {
++		return nil
++	}
++	return scope
++}
++
++func beginMemoryPolicyAvailabilityRead(tx *gorm.DB) (*gorm.DB, func() error, error) {
++	if scope := memoryPolicyAvailabilityScope(tx); scope != nil {
++		scope.mu.Lock()
++		closed, failed := scope.closed, scope.failed
++		scope.mu.Unlock()
++		if failed != nil {
++			return tx, nil, failed
++		}
++		if !closed {
++			if err := scope.ctx.Err(); err != nil {
++				return tx, nil, err
++			}
++			return tx, nil, tx.Statement.Context.Err()
++		}
++	}
++	return beginOriginalBodyAvailabilityScope(tx)
++}
++
++func memoryPolicyScopedOrigin(tx *gorm.DB, tenant uint64, proof types.MemoryPolicyProof) (*types.MemoryPolicyOriginal, bool) {
++	scope := memoryPolicyAvailabilityScope(tx)
++	if scope == nil {
++		return nil, false
++	}
++	scope.mu.Lock()
++	defer scope.mu.Unlock()
++	if scope.closed || scope.failed != nil || scope.ctx.Err() != nil || tx.Statement.Context.Err() != nil {
++		return nil, false
++	}
++	origin, ok := scope.policyOrigins[memoryPolicyScopedProof{tenant, proof}]
++	if !ok {
++		return nil, false
++	}
++	return &origin, true
++}
++
++func rememberMemoryPolicyScopedOrigin(tx *gorm.DB, origin *types.MemoryPolicyOriginal) {
++	scope := memoryPolicyAvailabilityScope(tx)
++	if scope == nil {
++		return
++	}
++	scope.mu.Lock()
++	defer scope.mu.Unlock()
++	if scope.closed || scope.failed != nil || scope.ctx.Err() != nil || tx.Statement.Context.Err() != nil {
++		return
++	}
++	if scope.policyOrigins == nil {
++		scope.policyOrigins = map[memoryPolicyScopedProof]types.MemoryPolicyOriginal{}
++	}
++	scope.policyOrigins[memoryPolicyScopedProof{origin.TenantID, origin.Proof()}] = *origin
++}
++
++func memoryPolicyScopedReceipt(tx *gorm.DB, originID string) (types.MemoryPolicyBodyReceipt, bool) {
++	scope := memoryPolicyAvailabilityScope(tx)
++	if scope == nil {
++		return types.MemoryPolicyBodyReceipt{}, false
++	}
++	scope.mu.Lock()
++	defer scope.mu.Unlock()
++	if scope.closed || scope.failed != nil || scope.ctx.Err() != nil || tx.Statement.Context.Err() != nil {
++		return types.MemoryPolicyBodyReceipt{}, false
++	}
++	receipt, ok := scope.policyReceipts[originID]
++	return receipt, ok
++}
++
++func rememberMemoryPolicyScopedReceipt(tx *gorm.DB, receipt types.MemoryPolicyBodyReceipt) {
++	scope := memoryPolicyAvailabilityScope(tx)
++	if scope == nil {
++		return
++	}
++	scope.mu.Lock()
++	defer scope.mu.Unlock()
++	if scope.closed || scope.failed != nil || scope.ctx.Err() != nil || tx.Statement.Context.Err() != nil {
++		return
++	}
++	if scope.policyReceipts == nil {
++		scope.policyReceipts = map[string]types.MemoryPolicyBodyReceipt{}
++	}
++	scope.policyReceipts[receipt.OriginID] = receipt
++}
++
++func memoryPolicyScopedHeads(tx *gorm.DB, originID string) ([]originalBodyFieldHead, bool) {
++	scope := memoryPolicyAvailabilityScope(tx)
++	if scope == nil {
++		return nil, false
++	}
++	scope.mu.Lock()
++	defer scope.mu.Unlock()
++	if scope.closed || scope.failed != nil || scope.ctx.Err() != nil || tx.Statement.Context.Err() != nil {
++		return nil, false
++	}
++	heads, ok := scope.rows[originalBodyAvailabilityRow{"memory_policy_originals", originID}]
++	if !ok {
++		return nil, false
++	}
++	return append([]originalBodyFieldHead(nil), heads...), true
++}
+diff --git a/internal/application/repository/original_body_availability_scope.go b/internal/application/repository/original_body_availability_scope.go
+index 63718e02..8f8c4ed7 100644
+--- a/internal/application/repository/original_body_availability_scope.go
++++ b/internal/application/repository/original_body_availability_scope.go
+@@ -6,6 +6,7 @@ import (
+ 	"sync"
+ 	"sync/atomic"
+ 
++	"github.com/Tencent/WeKnora/internal/types"
+ 	"gorm.io/gorm"
+ )
+ 
+@@ -35,13 +36,15 @@ func beginOwnedMessageCaptureOpening(group *messageRecallHistoryRead, admissionI
+ // Every first row still passes the complete checker; all remembered ALL-head
+ // identities are re-read in one fresh final journal/head/payload batch.
+ type originalBodyAvailabilityScope struct {
+-	pool    gorm.ConnPool
+-	ctx     context.Context
+-	mu      sync.Mutex
+-	pending sync.WaitGroup
+-	rows    map[originalBodyAvailabilityRow][]originalBodyFieldHead
+-	closed  bool
+-	failed  error
++	pool           gorm.ConnPool
++	ctx            context.Context
++	mu             sync.Mutex
++	pending        sync.WaitGroup
++	rows           map[originalBodyAvailabilityRow][]originalBodyFieldHead
++	policyOrigins  map[memoryPolicyScopedProof]types.MemoryPolicyOriginal
++	policyReceipts map[string]types.MemoryPolicyBodyReceipt
++	closed         bool
++	failed         error
+ }
+ 
+ // Recursive captures borrow the current operation's memo only while that
+@@ -127,6 +130,8 @@ func beginOriginalBodyAvailabilityScope(tx *gorm.DB) (*gorm.DB, func() error, er
+ 			return ErrOriginalBodyUnavailable
+ 		}
+ 		scope.closed = true
++		scope.policyOrigins = nil
++		scope.policyReceipts = nil
+ 		scope.mu.Unlock()
+ 		scope.pending.Wait()
+ 		scope.mu.Lock()
+@@ -174,6 +179,8 @@ func abortOriginalBodyAvailabilityScope(tx *gorm.DB, err error) {
+ 	scope.mu.Lock()
+ 	defer scope.mu.Unlock()
+ 	scope.closed = true
++	scope.policyOrigins = nil
++	scope.policyReceipts = nil
+ 	if err != nil && scope.failed == nil {
+ 		scope.failed = err
+ 	}
+diff --git a/internal/application/service/memory_policy_same_tx_read_sql_actual_test.go b/internal/application/service/memory_policy_same_tx_read_sql_actual_test.go
+new file mode 100644
+index 00000000..7d7fbef1
+--- /dev/null
++++ b/internal/application/service/memory_policy_same_tx_read_sql_actual_test.go
+@@ -0,0 +1,205 @@
++package service
++
++import (
++	"context"
++	"sync/atomic"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++// These use the genuine configured policy producer and held reader. The
++// observer records counts/context identities only; it never signs a fact,
++// changes a result/error or supplies a permission to the checker.
++func runMemoryPolicySameTXReadSQL(t *testing.T, pg bool) {
++	for _, mode := range []string{"same_tx_current", "foreign_transaction", "last_head_mutation", "last_payload_mutation", "last_payload_bytes_mutation"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			repo, _, reader := actualPolicyRepository(t, f)
++			_, proof, err := reader.ReadMemoryPolicyOriginal(f.ctx, 7)
++			require.NoError(t, err)
++			require.NotNil(t, proof)
++			require.True(t, proof.Valid())
++			var origins int64
++			require.NoError(t, f.db.Model(&types.MemoryPolicyOriginal{}).Where("tenant_id=7").Count(&origins).Error)
++			require.EqualValues(t, 1, origins, "one real original, not synthetic chain fixtures")
++			lifetime, ok := repo.(interfaces.MemoryPolicyOriginalLifetimeReader)
++			require.True(t, ok)
++			read, err := lifetime.BeginMemoryPolicyOriginalRead(f.ctx, 7, *proof)
++			require.NoError(t, err)
++			closed := false
++			t.Cleanup(func() {
++				if !closed {
++					require.NoError(t, read.Close())
++				}
++			})
++			var head struct {
++				SlotID, BodyID string
++				Revision       int64
++			}
++			require.NoError(t, f.db.Table("original_body_field_heads").Select("slot_id,body_id,revision").Where("source_table='memory_policy_originals' AND row_key=?", proof.OriginID).Take(&head).Error)
++			require.NotEmpty(t, head.SlotID)
++			require.NotEmpty(t, head.BodyID)
++			var ownedLease struct {
++				LeaseID, BodyID, OwnerID, Kind string
++				Epoch                          int64
++			}
++			require.NoError(t, f.db.Table("original_body_leases").Select("lease_id,body_id,owner_id,kind,epoch").Where("body_id=? AND kind='read' AND released_at_ms IS NULL", head.BodyID).Take(&ownedLease).Error)
++			require.NotEmpty(t, ownedLease.LeaseID)
++			require.Equal(t, head.BodyID, ownedLease.BodyID)
++			require.NotEmpty(t, ownedLease.OwnerID)
++			var receipts, terminalBatches atomic.Int64
++			var triggered atomic.Bool
++			var actualContext context.Context
++			var actualPool gorm.ConnPool
++			const callback = "test:actual_policy_same_tx_read"
++			require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
++				if tx.Statement.Table == "memory_policy_body_receipts" {
++					receipts.Add(1)
++				}
++				if (mode == "last_payload_mutation" || mode == "last_payload_bytes_mutation") && tx.Statement.Table == "original_body_leases" && !triggered.Load() {
++					where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
++					if !ok {
++						return
++					}
++					selected := false
++					for _, part := range where.Exprs {
++						expression, ok := part.(clause.Expr)
++						if !ok || expression.SQL != "lease_id IN ?" || len(expression.Vars) != 1 {
++							continue
++						}
++						ids, ok := expression.Vars[0].([]string)
++						if !ok {
++							continue
++						}
++						for _, id := range ids {
++							selected = selected || id == ownedLease.LeaseID
++						}
++					}
++					if !selected || !triggered.CompareAndSwap(false, true) {
++						return
++					}
++					fresh := func() *gorm.DB { return tx.Session(&gorm.Session{NewDB: true}) }
++					update := map[string]interface{}{"state": "purged"}
++					if mode == "last_payload_bytes_mutation" {
++						update = map[string]interface{}{"payload": "CONTROLLED INLINE PAYLOAD CORRUPTION"}
++					}
++					changed := fresh().Table("original_body_payloads").Where("id=? AND tenant_id=7 AND state='live' AND purge_epoch=? AND body_sha256=?", ownedLease.BodyID, ownedLease.Epoch, proof.PolicyDigest).Updates(update)
++					require.NoError(t, changed.Error)
++					require.EqualValues(t, 1, changed.RowsAffected)
++					var after struct {
++						ID, State, BodySHA256 string
++						TenantID              uint64
++						PurgeEpoch            int64
++						Payload               *string
++					}
++					require.NoError(t, fresh().Table("original_body_payloads").Select("id,tenant_id,state,purge_epoch,body_sha256,payload").Where("id=?", ownedLease.BodyID).Take(&after).Error)
++					require.Equal(t, ownedLease.BodyID, after.ID)
++					require.EqualValues(t, 7, after.TenantID)
++					if mode == "last_payload_bytes_mutation" {
++						require.Equal(t, "live", after.State)
++						require.NotNil(t, after.Payload)
++						require.Equal(t, "CONTROLLED INLINE PAYLOAD CORRUPTION", *after.Payload)
++					} else {
++						require.Equal(t, "purged", after.State)
++					}
++					require.Equal(t, ownedLease.Epoch, after.PurgeEpoch)
++					require.Equal(t, proof.PolicyDigest, after.BodySHA256)
++					return
++				}
++				if tx.Statement.Table != "original_body_field_heads" || triggered.Load() {
++					return
++				}
++				where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
++				if !ok {
++					return
++				}
++				matched := false
++				for _, part := range where.Exprs {
++					expression, ok := part.(clause.Expr)
++					if !ok || expression.SQL != "source_table=? AND row_key IN ?" || len(expression.Vars) != 2 || expression.Vars[0] != "memory_policy_originals" {
++						continue
++					}
++					ids, ok := expression.Vars[1].([]string)
++					if !ok {
++						continue
++					}
++					for _, id := range ids {
++						matched = matched || id == proof.OriginID
++					}
++				}
++				if !matched {
++					return
++				}
++				terminalBatches.Add(1)
++				actualContext, actualPool = tx.Statement.Context, tx.Statement.ConnPool
++				if mode != "last_head_mutation" || !triggered.CompareAndSwap(false, true) {
++					return
++				}
++				fresh := func() *gorm.DB { return tx.Session(&gorm.Session{NewDB: true}) }
++				changed := fresh().Table("original_body_field_heads").Where("slot_id=? AND body_id=? AND revision=?", head.SlotID, head.BodyID, head.Revision).Update("revision", head.Revision+1)
++				require.NoError(t, changed.Error)
++				require.EqualValues(t, 1, changed.RowsAffected)
++				var after struct {
++					SlotID, BodyID string
++					Revision       int64
++				}
++				require.NoError(t, fresh().Table("original_body_field_heads").Select("slot_id,body_id,revision").Where("slot_id=?", head.SlotID).Take(&after).Error)
++				require.Equal(t, head.SlotID, after.SlotID)
++				require.Equal(t, head.BodyID, after.BodyID)
++				require.Equal(t, head.Revision+1, after.Revision)
++			}))
++			t.Cleanup(func() { _ = f.db.Callback().Query().Remove(callback) })
++			err = read.Recheck()
++			require.Positive(t, terminalBatches.Load(), "the actual fresh final ALL-head batch must execute")
++			require.Positive(t, receipts.Load(), "the checker really read immutable SQL receipts")
++			if mode == "last_head_mutation" || mode == "last_payload_mutation" || mode == "last_payload_bytes_mutation" {
++				require.True(t, triggered.Load())
++				require.ErrorIs(t, err, repository.ErrOriginalBodyUnavailable)
++				if mode == "last_payload_mutation" || mode == "last_payload_bytes_mutation" {
++					var rolledBack struct {
++						State, BodySHA256 string
++						PurgeEpoch        int64
++						Payload           *string
++					}
++					require.NoError(t, f.db.Table("original_body_payloads").Select("state,purge_epoch,body_sha256,payload").Where("id=?", ownedLease.BodyID).Take(&rolledBack).Error)
++					require.Equal(t, "live", rolledBack.State, "the genuine read transaction refused and rolled back its controlled fault")
++					require.Equal(t, ownedLease.Epoch, rolledBack.PurgeEpoch)
++					require.Equal(t, proof.PolicyDigest, rolledBack.BodySHA256)
++					require.Nil(t, rolledBack.Payload, "genuine inline original source survives without a fabricated payload mirror")
++				}
++			} else {
++				require.NoError(t, err)
++				// One unscoped current read remains complete; the held check owns
++				// one fresh scope. Its repeated proof/head uses do not requery
++				// the same immutable receipt. This limit concerns one origin only.
++				require.LessOrEqual(t, receipts.Load(), int64(4))
++				if mode == "foreign_transaction" {
++					require.NotNil(t, actualContext)
++					_ = f.db.Callback().Query().Remove(callback)
++					changed := f.db.Table("original_body_payloads").Where("id=? AND state='live'", head.BodyID).Update("state", "purged")
++					require.NoError(t, changed.Error)
++					require.EqualValues(t, 1, changed.RowsAffected)
++					err = f.db.WithContext(actualContext).Transaction(func(tx *gorm.DB) error {
++						require.True(t, actualPool != tx.Statement.ConnPool, "the old memo belongs to a different actual transaction")
++						return repository.CheckOriginalBodyAvailableInTx(actualContext, tx, "memory_policy_originals", proof.OriginID)
++					})
++					require.ErrorIs(t, err, repository.ErrOriginalBodyUnavailable, "an old context never makes purged bodies available in another transaction")
++				}
++			}
++			require.NoError(t, read.Close())
++			closed = true
++			var active int64
++			require.NoError(t, f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&active).Error)
++			require.Zero(t, active)
++		})
++	}
++}
++
++func TestMemoryPolicySameTXReadActualSQLite(t *testing.T)   { runMemoryPolicySameTXReadSQL(t, false) }
++func TestPostgresMemoryPolicySameTXReadActual(t *testing.T) { runMemoryPolicySameTXReadSQL(t, true) }

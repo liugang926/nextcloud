@@ -184,7 +184,10 @@ vector final-union/lifecycle14 in one selected30 window. Its four original
 semantic-current nodes still fail HTTP8s before saved-history assertions. The
 final inline-byte/state and actual pool/Close checks are accepted only within
 those26 correctness nodes; the performance gate remains unaccepted. See the
-[26-pass/4-failure record](evidence/memory-policy12-vector14-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
+[26-pass/4-failure record](evidence/memory-policy12-vector14-GREEN-semanticcurrent4-failure-20261011.json). Exact review proposals are available for [policy sameTX reads](../integration/proposals/weknora-policy-same-TX-read-20261011.json)
+and [embedding output succession](../integration/proposals/weknora-embedding-output-succession-20261011.json).
+Both reproduce the selected source files from the tested fusion and have exact
+forward/reverse tree proofs; separate proposal heads are not runtime-run or adopted. The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
