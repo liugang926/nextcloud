@@ -182,7 +182,10 @@ actual SDK requests produce one result, replay adds no third request, original
 fact/body fingerprints stay unchanged, and four exact leases are released. The
 681.499s window includes runtime resource preparation and finishes under1200s;
 three owned resources are independently absent. The [reviewable crash helper and owned drivers](../integration/proposals/weknora-original-download-real-crash-helper-20261011.json)
-reproduce the executed helper/runner bytes and keep separate proposal heads. See the [actual OS-crash record](evidence/memory-original-download-OS-SIGKILL-SQLite-GREEN-20261011.json).
+reproduce the executed helper/runner bytes and keep separate proposal heads. Before execution, copy the published inner runner byte-for-byte into a new
+private0700 directory, chmod the copy0600, and verify its manifest SHA256 before
+passing it as `--runner`. Git publishes the source as0644; the private-input guard
+correctly refuses that mode before creating any resources. See the [actual OS-crash record](evidence/memory-original-download-OS-SIGKILL-SQLite-GREEN-20261011.json).
 PG crash, durable broker/ACK, application recovery and physical weight inventory
 remain required. A combined policy/vector/crash-helper source now parses302 Go files and
 compiles12 test packages plus cmd/server, with zero business RUN. Independent
