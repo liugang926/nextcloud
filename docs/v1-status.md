@@ -30,14 +30,21 @@ Actual mutation and expiry-readback prerequisites were strengthened before
 acceptance; earlier failures remain preserved. This is not a single46-node run
 or full PRD performance acceptance. See the [partial and clock record](evidence/memory-original-partial-and-clock-GREEN-20261011.json).
 
-Query originals, vector receipt/rank/sync and complete155/74→156/75 migration
-source are privately combined. After one output-owner ABI argument repair,
-222 Go files parsed and all11 selected packages compiled in71.103s, with zero
-runtime tests in that compile. Ordinary Recall, Local/Ollama and extra final
-journal-window sources await integration and actual gates. No query/vector/full
-migration business pass is claimed. Tenant-cloud credentials, complete history,
-application/broker/recovery and PRD performance remain open. The full V1 goal
-remains active; deployment and coverage flags remain disabled.
+The next `1e70c75b` candidate combines query/vector/rank, ordinary Recall,
+Local/Ollama original embedding, complete155/74→156/75 migration and latejournal
+snapshot checks. All237 changed Go files parsed and11 selected packages compiled
+in129.439s with zero runtime tests. New50-node original/body/clock regression is
+running; new SQL/HTTP/full migration consumer gates remain unaccepted. See the
+[compile record](evidence/memory-recall-local-integrated-compile-20261011.json).
+
+Source inspection found that actual Recall dependency binding is not stored in
+the completed assistant input manifest. Its historical reader therefore lacks
+an exact memory publication/body/policy/model graph; this is a confirmed source
+gap, awaiting matched realhistory evidence and a durable bridge. Explicit local
+model download also still needs its original endpoint/lifetime. Tenant-cloud
+credentials, complete history, application/broker/recovery and PRD performance
+remain required. The full V1 goal remains active; deployment and coverage flags
+remain disabled.
 
 ## Prior component checkpoints — 2026-10-10
 
