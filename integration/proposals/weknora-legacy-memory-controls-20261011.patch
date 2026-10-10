@@ -1,0 +1,237 @@
+diff --git a/internal/database/migration_memory_original_full_chain_test.go b/internal/database/migration_memory_original_full_chain_test.go
+index c8989c8b..281d680d 100644
+--- a/internal/database/migration_memory_original_full_chain_test.go
++++ b/internal/database/migration_memory_original_full_chain_test.go
+@@ -125,8 +125,12 @@ func seedMemoryFullMigrationLegacy(t *testing.T, db *sql.DB, dialect, mode strin
+ 	require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO models(id,tenant_id,name,type,source,parameters,status) VALUES('full-schema-model',7,'unproven legacy model','KnowledgeQA','remote','{}','active')"))
+ 	seedPreSteerUnknownHistory(t, db)
+ 	if mode == "legacy-unknown-up" {
+-		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_subjects(id,tenant_id,subject_id) VALUES('full-schema-subject',7,'unproven-schema-subject')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_subjects(id,tenant_id,subject_id,block_text,item_count) VALUES('full-schema-subject',7,'unproven-schema-subject','unproven legacy resident block',1)"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_subjects(id,tenant_id,subject_id) VALUES('full-schema-empty-subject',7,'unproven-empty-subject')"))
+ 		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_items(id,tenant_id,subject_id,kind,content) VALUES('full-schema-item',7,'unproven-schema-subject','fact','unproven legacy memory')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_items(id,tenant_id,subject_id,kind,content,status) VALUES('full-schema-archived-item',7,'unproven-schema-subject','fact','unproven archived memory','archived')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_topic_stats(id,tenant_id,subject_id,normalized_key,topic) VALUES('full-schema-topic',7,'unproven-topic-subject','legacy-topic','unproven legacy topic')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_tombstones(id,tenant_id,subject_id,topic,fingerprint) VALUES('full-schema-tombstone',7,'unproven-tombstone-subject','unproven forgotten topic','unproven legacy fingerprint')"))
+ 	}
+ }
+ 
+@@ -166,7 +170,7 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&count))
+ 	}
+-	for _, table := range []string{"memory_original_admissions", "memory_policy_originals", "model_definition_originals", "memory_derived_publications", "memory_generated_originals", "memory_embedding_originals", "memory_query_embedding_originals"} {
++	for _, table := range []string{"memory_original_admissions", "memory_policy_originals", "model_definition_originals", "memory_derived_publications", "memory_derived_body_receipts", "memory_generated_originals", "memory_embedding_originals", "memory_query_embedding_originals"} {
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&count))
+ 		require.Zero(t, count, "complete migrations never authenticate a legacy original")
+@@ -186,7 +190,40 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM memory_derived_controls WHERE object_id='full-schema-item'").Scan(&count))
+ 		require.Equal(t, 1, count, "retained UNKNOWN controls are not body publications")
+-		return
++		for _, object := range []struct{ kind, id, subject string }{
++			{"memory_item", "full-schema-item", "unproven-schema-subject"},
++			{"memory_item", "full-schema-archived-item", "unproven-schema-subject"},
++			{"memory_topic", "full-schema-topic", "unproven-topic-subject"},
++			{"memory_tombstone", "full-schema-tombstone", "unproven-tombstone-subject"},
++			{"memory_block", "full-schema-subject", "unproven-schema-subject"},
++		} {
++			var revision uint64
++			var present bool
++			require.NoError(t, db.QueryRow(lineageMigrationQuery(dialect, "SELECT revision,present FROM memory_derived_controls WHERE tenant_id=7 AND subject_id=? AND object_kind=? AND object_id=?"), object.subject, object.kind, object.id).Scan(&revision, &present))
++			require.Equal(t, uint64(1), revision, "legacy inventory has not observed an authored successor")
++			require.True(t, present, "control presence tracks a physical row, including archived items")
++		}
++		for _, subject := range []string{"unproven-schema-subject", "unproven-topic-subject", "unproven-tombstone-subject", "unproven-empty-subject"} {
++			var revision uint64
++			require.NoError(t, db.QueryRow(lineageMigrationQuery(dialect, "SELECT revision FROM memory_derived_collections WHERE tenant_id=7 AND subject_id=?"), subject).Scan(&revision))
++			require.Equal(t, uint64(1), revision)
++		}
++		require.NoError(t, db.QueryRow("SELECT count(*) FROM memory_derived_controls WHERE object_id='full-schema-empty-subject'").Scan(&count))
++		require.Zero(t, count, "an empty subject has no resident material to authenticate")
++		for _, material := range []struct{ query, value string }{
++			{"SELECT content FROM memory_items WHERE id='full-schema-archived-item'", "unproven archived memory"},
++			{"SELECT topic FROM memory_topic_stats WHERE id='full-schema-topic'", "unproven legacy topic"},
++			{"SELECT fingerprint FROM memory_tombstones WHERE id='full-schema-tombstone'", "unproven legacy fingerprint"},
++			{"SELECT block_text FROM memory_subjects WHERE id='full-schema-subject'", "unproven legacy resident block"},
++		} {
++			var value string
++			require.NoError(t, db.QueryRow(material.query).Scan(&value))
++			require.Equal(t, material.value, value, "initialization does not rewrite legacy material")
++		}
++		require.NoError(t, db.QueryRow("SELECT count(*) FROM original_body_field_heads WHERE source_table IN ('memory_items','memory_topic_stats','memory_tombstones','memory_subjects') AND row_key IN ('full-schema-item','full-schema-archived-item','full-schema-topic','full-schema-tombstone','full-schema-subject')").Scan(&count))
++		require.Zero(t, count, "migration does not turn current bytes into original bodies")
++		// Continue into the same actual refused-DOWN oracle as retained facts:
++		// initialized legacy controls must survive before ANY drop or ALTER.
+ 	}
+ 	err = nil
+ 	switch mode {
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
+index 7560cb3c..049b42a4 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
+@@ -1,6 +1,23 @@
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), present INTEGER NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+index f37ac2a3..c8fe3e70 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+@@ -148,6 +148,23 @@ CREATE TRIGGER model_original_body_receipts_no_replace BEFORE INSERT ON model_or
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), present INTEGER NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
+index 796a5b07..fbad6ad1 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
+@@ -1,6 +1,23 @@
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), present BOOLEAN NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision BIGINT NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+index 09ef7ad2..f08e8e2e 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+@@ -160,6 +160,23 @@ CREATE TRIGGER model_original_body_receipts_immutable BEFORE UPDATE OR DELETE ON
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), present BOOLEAN NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision BIGINT NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+diff --git a/migrations/sqlite/000075_memory_original_protocols.up.sql b/migrations/sqlite/000075_memory_original_protocols.up.sql
+index f37ac2a3..c8fe3e70 100644
+--- a/migrations/sqlite/000075_memory_original_protocols.up.sql
++++ b/migrations/sqlite/000075_memory_original_protocols.up.sql
+@@ -148,6 +148,23 @@ CREATE TRIGGER model_original_body_receipts_no_replace BEFORE INSERT ON model_or
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), present INTEGER NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+diff --git a/migrations/versioned/000156_memory_original_protocols.up.sql b/migrations/versioned/000156_memory_original_protocols.up.sql
+index 09ef7ad2..f08e8e2e 100644
+--- a/migrations/versioned/000156_memory_original_protocols.up.sql
++++ b/migrations/versioned/000156_memory_original_protocols.up.sql
+@@ -160,6 +160,23 @@ CREATE TRIGGER model_original_body_receipts_immutable BEFORE UPDATE OR DELETE ON
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), present BOOLEAN NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision BIGINT NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',

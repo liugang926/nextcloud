@@ -44,13 +44,13 @@ cancellation closes the still-owned HTTP user-message guard before its current
 check. Vector, Recall and Local stages were not dispatched after that failure.
 See the [query22 and concurrency8 record](evidence/memory-query22-GREEN-concurrency8-failure-20261011.json).
 
-The real ParadeDB17/SQLite full migration rerun improves to30PASS/4FAIL across
-34 nodes. Its remaining failure is missing UNKNOWN controls for old native
-memory inventory; the removed fixture column, PG125 cross-schema trigger leak
-and SQLite74 nested transaction failures are closed within this rerun's scope.
-A four-kind UNKNOWN-only initialization repair is frozen and independently
-reviewed, awaiting the same actual gate. See the [migration34 record](evidence/memory-full-migration34-failure-20261011.json).
-Earlier failed attempts remain in their evidence files.
+The real ParadeDB17/SQLite full migration now passes all34 nodes on `b6b15c59`,
+zero failures/skips/OOM, with all seven exact owned resources independently
+absent. The four native kinds initialize UNKNOWN controls without publishing
+originals or re-signing old text; empty blocks do not acquire false controls.
+The original ANY-DROP downgrade protection remains unchanged. This is SQL
+migration/schema/FK/control acceptance only. See the [migration34 record](evidence/memory-full-migration34-GREEN-20261011.json).
+Earlier30-node and34-node failed attempts remain preserved.
 
 Exact saved-history Recall reopening is now a separate source candidate and
 needs matched actual tests. Semantic query/vector completion dependencies and
