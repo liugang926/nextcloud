@@ -55,8 +55,11 @@ passes16/16 nodes on production-identical `930df22a`, including genuine late
 lease expiry and readback in both databases. Recall HTTP runs14 nodes with
 5PASS/9FAIL: SQLite cancellation stops only the HTTP sender while the intentional
 background owner completes; the negative is being wired to real authenticated
-StopSession while preserving zero-completion assertions. Existing legal
-disconnect/continued-generation acceptance remains required. Meanwhile,
+StopSession while preserving zero-completion assertions. The corrected SQLite
+HTTP7 gate now passes on production-identical `a14481d0`, with actual Redis stop,
+provider cancel/join, zero completion/manifests and all seven resources absent.
+See the [SQLite HTTP7 record](evidence/memory-SQLite-RecallHTTP7-GREEN-20261011.json).
+Existing legal disconnect/continued-generation tests remain unchanged. Meanwhile,
 all PostgreSQL completion preludes exceed the original8s bound. Local/Ollama was not dispatched in that failed window. Its independent unchanged-
 source `930df22a` gate now passes32/32 nodes in47.571s, zero failures/skips/OOM,
 with seven exact resources independently absent. See the [Local32 record](evidence/memory-Local-Ollama32-GREEN-20261011.json). See the [Recall16 and HTTP14 record](evidence/memory-RecallSQL16-GREEN-RecallHTTP14-failure-20261011.json).
