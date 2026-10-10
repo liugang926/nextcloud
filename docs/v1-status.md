@@ -282,7 +282,14 @@ duplicate privacy import. A narrow source child removes it without altering
 suppression. Independent source review also finds that directory login snapshot
 had regressed to two reads; the previously gated atomic method must be restored.
 No joint app, shared database upgrade, deployment or adoption has run. See the
-[preserved compiler failure](evidence/joint-auto-space-first-full-compile-failure-20261011.json).
+[preserved compiler failure](evidence/joint-auto-space-first-full-compile-failure-20261011.json). The next3e9 source restores the atomic directory method and fixes duplicate
+import. Full compile parses417 Go files and compiles116 test packages plus40
+no-test packages, but service tests fail because the restored periodic-directory
+tests require a missing real SourceAuthorizeCalls transport counter. Assertions
+are kept and the fixture ABI is being restored; see the [full compile ABI
+record](evidence/joint-atomic-full-compile-fixture-ABI-failure-20261011.json).
+A separate one-line child also wires a sameTX onboarding path resolver into
+the final original-input transaction; late signed-path behavior remains pending.
 
 ## Prior component checkpoints — 2026-10-10
 
