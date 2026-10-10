@@ -21,6 +21,25 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+Integrated original-policy source `862fd486` now compiled all five selected
+packages successfully in 115.442 seconds, with no OOM or compiler errors.
+This `-run ^$` check executed no business tests. Its owned actor and temporary
+volume are confirmed absent; raw output and source remain retained. Genuine
+policy authoring/successor/body lease tests and model/derived integration are
+next. See the [policy compilation record](evidence/memory-policy-compilation-20261010.json).
+
+Private source `a8c2a303` now passed the complete 19-parent native SQLite/
+PostgreSQL component selection: all 55 nodes, no failures, skips or OOM, in
+285.993 seconds. A separate focused run also passed both shared-Agent cases,
+including actual source9 permission withdrawal and PostgreSQL epoch blocking.
+The repair configures the same transaction-bound shared-resource readers as
+production. All eight exact owned runtime identities are now absent; earlier
+failed volumes and raw evidence remain retained. The 16-parent/22-node unit
+result stays attributed to `a35ab0c3`; its production/unit bytes are unchanged.
+This accepts the native component slice only. Complete custom policy/model,
+existing-memory workflows, full migrations, real broker and restore remain
+pending. See the [native component pass](evidence/memory-native-component-pass-20261010.json).
+
 Repaired private source `a35ab0c3` passed all 16 selected unit/lifecycle parents
 and 22 test nodes across three packages, without failures or skips. Its SQLite/
 PostgreSQL component run passed 53 of 55 nodes; the PostgreSQL cross-input
