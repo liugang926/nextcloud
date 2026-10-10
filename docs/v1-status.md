@@ -93,7 +93,8 @@ initial current-Recall body scope. See the [multihistory prelude record](evidenc
 The current-Recall sameTX body scope now passes12 real SQLite/PG correctness
 nodes: genuine positive, native final head/body mutation and cancel refusal,
 and different-transaction cache refusal. It compiles271 Go files/12 test packages
-plus cmd/server; runtime8s performance gates remain pending. See the
+plus cmd/server. The original uninstrumented PG/current2 gate still fails8s
+after the scope change; see the [actual performance failure](evidence/memory-PG-current-scope8s-failure-20261011.json). See the
 [scope12 record](evidence/memory-Recall-body-scope12-GREEN-20261011.json).
 Actual multi-read late-clock and PostgreSQL history still need matched gates.
 Focused PG/current
