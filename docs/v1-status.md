@@ -21,6 +21,23 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+Private repaired source `ef58c603` now passed the matched repeated-subject
+diagnostic on both SQLite and PostgreSQL: all ten nodes, no failures/skips.
+The exact same tests failed before the sole EnsureSubject DAO change. The
+original worker final-clock selection also passed all six nodes: model1 legal
+commit and late actual current-model lease expiry rollback on both databases.
+Its effect/checkpoint/cursor and actual final SQL hook assertions passed under
+unchanged bounds. Total preparation, both stages and cleanup took 94.420 seconds.
+All eight exact owned identities are absent; previous failed SQL owners/volumes
+and the compile failure actor/temp are retained.
+
+This accepts repeated-subject idempotence and current-model final-TTL component
+behavior. First-create concurrency, all ancestor TTL variants, full model/
+ordinary HTTP/derived/consolidation/privacy, migrations, durable broker, normal
+application and restore remain pending. New extra DAO tests are source drafts
+and do not expand this passing scope. See the
+[matched GREEN and worker TTL record](evidence/memory-subject-idempotence-GREEN-20261010.json).
+
 A test-only diagnostic on `fe26fa24` now confirms a repeated-subject
 initialization defect on both SQLite and PostgreSQL: four model-service/
 admissions lifetime leaves passed Begin/Snapshot/Recheck/Close; four scheduling
