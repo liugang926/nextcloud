@@ -89,7 +89,8 @@ call. Seven exact resources are absent; see the [SQLite history6 record](evidenc
 The first multi-read SQLite3 run fails its real HTTP8s prelude before the final
 union fault is reached. It does not establish a final-clock failure; both leaves complete first request A within8s, but second request B reaches
 retrieval only around7.46s and times out. Historical reentry is outside the
-initial current-Recall body scope. See the [multihistory prelude record](evidence/memory-SQLite-multihistory3-prelude-failure-20261011.json).
+initial current-Recall body scope. A dedicated post-scope SQLite3 rerun also
+fails that unchanged8s prelude; see the [scope performance record](evidence/memory-SQLite-multihistory-scope8s-failure-20261011.json). See the [multihistory prelude record](evidence/memory-SQLite-multihistory3-prelude-failure-20261011.json).
 The current-Recall sameTX body scope now passes12 real SQLite/PG correctness
 nodes: genuine positive, native final head/body mutation and cancel refusal,
 and different-transaction cache refusal. It compiles271 Go files/12 test packages
