@@ -149,7 +149,15 @@ see the [failure16 record](evidence/memory-download-release-failures16-GREEN-202
 The same corrected source now passes all100 shared model/download regressions
 in262.830s, with10 exact resources absent. See the [existing100 record](evidence/memory-release-retry-existing100-GREEN-20261011.json)
 and [reviewable cleanup proposal](../integration/proposals/weknora-original-download-cleanup-retry-20261011.json).
-Cross-crash cleanup recovery remains required. The shared model final-binding repair preserves its earlier test-only compile
+Durable originaldownload dispatch/attempt/exact-owner source now passes16 actual
+startup/replay/revocation/receipt/owner-recovery nodes on59692b75, with pinned
+SDK and transcript byte checks, seven exact resources absent. It also passes
+full migration38 (31protocoltables including durable facts), seven resources
+absent. See the [durable16](evidence/memory-durable-download16-GREEN-20261011.json)
+and [migration38](evidence/memory-full-migration38-durable-GREEN-20261011.json).
+Existing116 model/download/cleanup regressions are running. Newservice-instance
+recovery is explicitly separate from real OS-kill/11-minute-claim-expiry E2E;
+those cross-crash gates remain required. The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
