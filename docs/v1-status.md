@@ -260,6 +260,30 @@ credentials, complete history, application/broker/recovery and PRD performance
 remain required. The full V1 goal remains active; deployment and coverage flags
 remain disabled.
 
+## Joint V1 source integration — 2026-10-11
+
+A full PRD audit identifies the unbuilt joint candidate as a main delivery gap.
+The adopted C6/RAG manifest still points to the existing snapshots/plugin0.4.38;
+peer auto-space source/plugin0.6.0 has separate component evidence. Neither set
+of tests alone proves the nonempty normal application flow. See the [full PRD
+remaining audit](evidence/full-PRD-unified-candidate-gap-audit-20261011.json).
+
+The private0aab source merges cd937 originals/lifecycle with cf2 automatic-space
+features, resolves DI/router/auth/API privacy conflicts, and preserves Root's
+schema-qualified125 guard. Root155/156 and SQLite74/75 collide with peer's
+onboarding/processing migrations. Unique fresh-root tails162–168/81–87 remove
+duplicate versions, preserve peer UP bytes and refuse all tail DOWN operations.
+This does not rewrite applied peer history or support its upgrade branch; exact
+lineage preflight and a separate forward bridge remain required. See the [joint
+assembly record](evidence/joint-auto-space-source-assembly-20261011.json).
+
+The first full `./...` zero-business compile parses412 Go files but fails on a
+duplicate privacy import. A narrow source child removes it without altering
+suppression. Independent source review also finds that directory login snapshot
+had regressed to two reads; the previously gated atomic method must be restored.
+No joint app, shared database upgrade, deployment or adoption has run. See the
+[preserved compiler failure](evidence/joint-auto-space-first-full-compile-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
