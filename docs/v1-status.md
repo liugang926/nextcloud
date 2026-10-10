@@ -69,7 +69,12 @@ completion preludes exceed the original HTTP8s bound. Failed owners/raw/data
 are retained, and the later vector/Recall/Local stages did not run. See the
 [history12 record](evidence/memory-saved-Recall-history12-failure-20261011.json).
 The historical reader and multi-dependency final-clock union remain under repair. Semantic query/vector completion dependencies and
-explicit local model download shutdown also remain underway. Tenant-cloud
+explicit local model download shutdown also remain underway. The download/host
+combination parses265 Go files and compiles12 test-bearing packages plus the
+cmd/server package-only terminal; an old parser misclassified that terminal
+and retained its stopped owner. See the [compile parser record](evidence/memory-download-host-compile-parser-failure-20261011.json).
+Runtime download shutdown, same-TX final lease reread and desktop-native acceptance
+remain pending. Tenant-cloud
 credentials, complete history, application/broker/recovery and PRD performance
 remain required. The full V1 goal remains active; deployment and coverage flags
 remain disabled.
