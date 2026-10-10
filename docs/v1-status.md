@@ -43,9 +43,17 @@ fix also passes all8 single-pool/Close concurrency nodes on `545eebcb`: producer
 cancellation leaves the real consumed message guard alive until final HTTP
 release. See the [query30 record](evidence/memory-query-owner30-GREEN-20261011.json)
 and [reviewable owner proposal](../integration/proposals/weknora-message-HTTP-owner-20261011.json).
-The copied ordinary-model stage plan omitted its expected-node parser key;
-its raw tests passed but that gate is awaiting a fresh corrected-plan rerun.
+A fresh corrected-plan ordinary-model HTTP gate now passes10/10 on unchanged
+`545eebcb`, with all seven owned resources independently absent and the original
+8s limits preserved. It is separate from the query30 window; see the
+[ordinary HTTP10 record](evidence/memory-message-owner-ordinaryHTTP10-GREEN-20261011.json).
 Prior query22/concurrency8 failures remain preserved.
+
+The vector reader/ranking/receipt component now passes20/20 nodes on `545eebcb`.
+Recall SQL runs16 nodes (12PASS/4FAIL); the two late-expiry observers did not
+reach their actual crossing after the Render completion boundary changed.
+Recall HTTP and Local/Ollama were not dispatched afterward. See the
+[vector20 and RecallSQL record](evidence/memory-vector20-GREEN-RecallSQL16-failure-20261011.json).
 
 The real ParadeDB17/SQLite full migration now passes all34 nodes on `b6b15c59`,
 zero failures/skips/OOM, with all seven exact owned resources independently
