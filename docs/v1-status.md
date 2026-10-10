@@ -298,6 +298,25 @@ history before Up or Force, but supports only fresh/common absence so far.
 Installed Root catalogue positives and peerApplied forward bridge remain
 required; this incremental gate is not normal joint app acceptance.
 
+The next `0ff63d22` joint source includes the full directory fixture and runtime
+missing-root-path guard. All423 changed Go files parse and all157 packages
+compile (117 test-bearing and40 no-test packages) in216.646s, with zero business
+RUN and independently absent compiler/temp resources. See the [first-guards
+compile record](evidence/joint-first-guards-full-compile-GREEN-20261011.json).
+Independent review finds that the first lineage preflight executes after driver
+initialization can create a migration ledger. Early readonly refusal, complete
+source-set validation and legitimate installed Root catalogue positives are
+being implemented before bootstrap acceptance. PeerApplied forward migration
+and full normal-app behavior remain required.
+
+On the same `0ff63d22` joint source, actual SQLite/PostgreSQL root-path module
+tests pass8/8 in49.601s: installed empty module preserves a lawful path, missing
+from startup refuses, and the same running store refuses after actual DROP and
+catalogue readback. Exact joint83/164 DDL is used; no invented authorization or
+publication is supplied. All7 owned resources are independently absent. See the
+[path-module8 record](evidence/joint-root-path-module8-GREEN-20261011.json).
+This closes only the module metadata contract, not lineage or full app startup.
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
