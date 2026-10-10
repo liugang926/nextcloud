@@ -33,8 +33,10 @@ or full PRD performance acceptance. See the [partial and clock record](evidence/
 The next `1e70c75b` candidate combines query/vector/rank, ordinary Recall,
 Local/Ollama original embedding, complete155/74→156/75 migration and latejournal
 snapshot checks. All237 changed Go files parsed and11 selected packages compiled
-in129.439s with zero runtime tests. New50-node original/body/clock regression is
-running; new SQL/HTTP/full migration consumer gates remain unaccepted. See the
+in129.439s with zero runtime tests. The50-node original/body/clock regression now
+passes in213.065s, zero failures/skips/OOM, with11 exact resources absent. New
+112-node SQL/HTTP consumer gates are running; full migration remains unaccepted.
+See the [latejournal50 record](evidence/memory-last-journal-50-GREEN-20261011.json). See the
 [compile record](evidence/memory-recall-local-integrated-compile-20261011.json).
 
 Source inspection found that actual Recall dependency binding is not stored in
