@@ -4,6 +4,20 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Generated consolidation now passed all 16 selected nodes on `7aff9c5f`,
+zero failures/skips, in 133.810 seconds including preparation and cleanup.
+Its retained `a01f9c40` baseline failed at fixture admission, repaired only
+by retaining the genuine model lifetime reader. Legal original-bound merge
+and post-model source/body/actor/input/model/invalid-result refusals passed.
+Multi-cluster atomicity and final ancestor clock boundaries remain separate.
+
+Stale-task maintenance on the same source passed 20 of 26 nodes, with six
+failures including both parents and no skips/OOM. Both policy-change leaves
+unexpectedly returned nil; both purged-body leaves failed at the final retained
+fact read. Their exact production/fixture cause is under review. This gate is
+unaccepted; its SQL owner, volumes and raw logs are stopped and retained.
+See the [generated/stale record](evidence/memory-generated-stale-components-20261010.json).
+
 Private integrated source `7aff9c5f` now passed all 82 selected component
 nodes, zero failures/skips, in 200.643 seconds including preparation and cleanup.
 This adds actual two-call first-create concurrency, repeated-subject/error/cancel
@@ -19,7 +33,7 @@ The generated consolidation baseline on `a01f9c40` failed all 16 nodes before
 the first model call: its model fixture omitted the genuine lifetime reader,
 so Schedule returned before a pending row existed. This is a retained setup
 failure, not a consolidation business RED. The isolated fixture repair supplies
-the actual configured service capability. Its business rerun is underway.
+the actual configured service capability. Its selected business rerun passed as recorded above.
 Worker/topic-log and enabled telemetry privacy follow-ons, full consolidation,
 stale maintenance, final ancestor TTL, full original workflows/migrations,
 durable broker, normal application/restore and V1 acceptance remain pending.
