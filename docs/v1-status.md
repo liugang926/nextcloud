@@ -4,6 +4,17 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+A stricter test-only stale diagnostic on `e27ef96b` confirms an actual
+generated-policy commit defect on both databases: real current policy proof
+changed from revision2 to3 during model1; the old call still published one
+derived record and one receipt and demoted importance5 to1 with nil error.
+Those genuine before/after proof and fault/model assertions executed before
+the unchanged expected rejection. The selection passed22 nodes and failed4
+(two policy leaves and parents), zero skips/OOM. The metadata-only old-fact
+oracle now lets both purged-body rollback cases pass. A same-transaction
+current-policy comparison is being repaired; the gate remains unaccepted.
+See the [policy successor RED](evidence/memory-generated-policy-successor-RED-20261010.json).
+
 Generated consolidation now passed all 16 selected nodes on `7aff9c5f`,
 zero failures/skips, in 133.810 seconds including preparation and cleanup.
 Its retained `a01f9c40` baseline failed at fixture admission, repaired only
