@@ -57,9 +57,9 @@ lease expiry and readback in both databases. Recall HTTP runs14 nodes with
 background owner completes; the negative is being wired to real authenticated
 StopSession while preserving zero-completion assertions. Existing legal
 disconnect/continued-generation acceptance remains required. Meanwhile,
-all PostgreSQL completion preludes exceed the original8s bound. Local/Ollama
-was not dispatched afterward and is scheduled as an independent unchanged-source
-gate. See the [Recall16 and HTTP14 record](evidence/memory-RecallSQL16-GREEN-RecallHTTP14-failure-20261011.json).
+all PostgreSQL completion preludes exceed the original8s bound. Local/Ollama was not dispatched in that failed window. Its independent unchanged-
+source `930df22a` gate now passes32/32 nodes in47.571s, zero failures/skips/OOM,
+with seven exact resources independently absent. See the [Local32 record](evidence/memory-Local-Ollama32-GREEN-20261011.json). See the [Recall16 and HTTP14 record](evidence/memory-RecallSQL16-GREEN-RecallHTTP14-failure-20261011.json).
 The earlier observer failure remains in its evidence record.
 
 The real ParadeDB17/SQLite full migration now passes all34 nodes on `b6b15c59`,
