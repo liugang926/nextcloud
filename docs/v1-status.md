@@ -82,11 +82,12 @@ legal completion succeeds but fresh history refuses before negatives; PostgreSQL
 completion preludes exceed the original HTTP8s bound. Failed owners/raw/data
 are retained, and the later vector/Recall/Local stages did not run. See the
 [history12 record](evidence/memory-saved-Recall-history12-failure-20261011.json).
-The fields-scope/multi-dependency union repair now passes the four original
-SQLite current/subject-disabled/body-unavailable nodes on `42ae5379`. The new
-model-successor fixture fails at UpdateModelOriginal before creating its successor
-or testing the historical read; this is a setup refusal. Actual multi-read late
-clock and PostgreSQL history still need matched gates. Focused PG/current
+The repaired exact saved-history path now passes all6 SQLite nodes on4b53:
+current reading, subject-disabled/body-unavailable refusal, and a genuinely
+written model successor while old history stays readable with no second SDK
+call. Seven exact resources are absent; see the [SQLite history6 record](evidence/memory-SQLite-savedhistory6-GREEN-20261011.json).
+Actual multi-read late-clock and PostgreSQL history still need matched gates.
+Focused PG/current
 profiling retains the original8s failure and records64,207 Recall-boundary and
 34,937 message-guard-boundary SQL callbacks; observer stack scanning adds CPU
 cost, so this is diagnostic evidence rather than an uninstrumented benchmark.
@@ -104,7 +105,10 @@ Creation download30 and real HTTP-expired-drain shutdown2 now pass on `4b53d5cc`
 in one58.106s window, zero failures/skips/OOM, with eight exact resources absent.
 The genuine download is canceled/joined before dependent cleanup even after
 HTTP drain expires. Desktop-native shell/startup Fatal/crash replay/remote weight
-inventory remain pending. See the [download/host32 record](evidence/memory-local-download-host32-GREEN-20261011.json). A
+inventory remain pending. See the [download/host32 record](evidence/memory-local-download-host32-GREEN-20261011.json)
+and the exact [reviewable source proposal](../integration/proposals/weknora-original-local-download-20261011.json).
+Failed Close release retry/error propagation also remains an explicit lifecycle
+boundary. A
 shared model final-binding repair is frozen; its first compile fails only on an
 unused new test variable, with production repository compiled. The test-only
 correction now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
