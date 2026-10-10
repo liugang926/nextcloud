@@ -4,6 +4,19 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+The proposed directory-publication correction reads the unique user binding,
+current directory, identity and groups in one consistent transaction. Its
+matched SQLite/PostgreSQL regressions passed 16 nodes, the existing access
+selection passed 42, and the real open-provider HTTP selection passed 10 with
+actual cancellation and released leases on revocation. Seven PostgreSQL
+transaction-overlap nodes also passed. The C6 mirror passed 62 component nodes;
+both final source trees compiled 155 packages with zero runtime tests.
+The exact test owner, network and both disk volumes were removed while sources,
+raw logs and shared caches remained. These are component results on proposed
+RAG `853c19cc` / C6 `7e1d5ce4`; the current manifest still pins `1bbd0cc8` /
+`b43afa53`. The new full 47-parent selection, normal images, application replay
+and restore remain pending. See the [atomic directory component record](evidence/directory-atomic-components-20261010.json).
+
 The current development candidates are RAG `1bbd0cc8` and C6 `b43afa53`. Root verified the final RAG source's 50 ordinary-HTTP nodes across
 10 parents, 59 session-terminal nodes and all 1177 selected nodes, including
 all 42 mandatory parents. The full selection finished in 1020.933 seconds

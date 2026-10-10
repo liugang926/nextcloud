@@ -67,6 +67,12 @@ passes `git diff --check`.
 
 ## Ordinary QA and body validation update — 2026-10-10
 
+Proposed atomic directory sources RAG `853c19cc` / C6 `7e1d5ce4` have passed
+matched, real HTTP, PostgreSQL concurrency and final compilation component
+checks. They have not replaced this manifest pair: the full 47-parent selection
+and fresh normal image/application/replay/restore gates remain pending. See the
+[component evidence](evidence/directory-atomic-components-20261010.json).
+
 The preceding candidates were RAG `1ab47546` and C6 `aac58fa7`. Ordinary progress,
 references and fixed fallback publish checked source lineage and propagate
 consumer refusal. The stream producer reports its actual terminal, cancels and
