@@ -352,6 +352,17 @@ independently absent, owned PG/Redis stopped, and failed logs/network/three
 volumes retained. No subsequent nonempty/HTTP/directory business stages run.
 See the [preserved actual66 failure](evidence/joint-lineage66-complete-restart-catalogue-failure-20261011.json).
 
+A production-identical test-only child then runs two fixed-object diagnostics.
+Both retain the real restart failure: SQLite mismatches only the temporary
+`nextcloud_gc_items_processing_v2` table name after the real migration renames
+it; PostgreSQL mismatches `memory_subjects_derived_block` WHEN plus the
+`memory_original_dispatch_due` and `nextcloud_root_migration_live` partial
+index predicates. Fixed object names/codes/booleans are logged without rows,
+body/credential values or DDL text. A one-table-name SQLite witness correction
+is frozen; PostgreSQL trigger-context and predicate normalization fixes are
+being implemented with changed-condition negatives. See the [actual diagnostic
+record](evidence/joint-complete-restart-object-diagnostic2-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
