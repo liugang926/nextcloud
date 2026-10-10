@@ -232,7 +232,12 @@ nodes and later stages do not run. The repaired50-node plan uses a fresh owner;
 see the [preserved plan mismatch](evidence/memory-rank-retirement-boundary-plan-mismatch-20261011.json). The corrected plan now passes all50 exact nodes on unchangedcd9375 in
 151.875s: originalpartial2/inline22/fullbatch18/actualderivedexpiry2/workerclock6.
 Eleven exact owned resources are independently absent; see the [boundary50
-record](evidence/memory-rank-retirement-boundary50-GREEN-20261011.json).
+record](evidence/memory-rank-retirement-boundary50-GREEN-20261011.json). A same-observer cd9375 pipeline diagnostic still fails originalHTTP8s in
+both databases. SQLite completes162 checks versus163 before, with nested
+output-check total12.48s versus16.00s and fewer head/journal reads. PostgreSQL
+completes111 versus90 checks but still fails; those progress differences and
+overlapping durations prohibit a paired uninstrumented walltime acceptance.
+See the [rank-scope diagnostic](evidence/memory-rank-scope-pipeline4-diagnostic-failure-20261011.json).
 A test-only candidate compiles309 files, but inherited-rank callbacks contain a
 known FailNow/WG failure-path issue that is being repaired before execution; see
 the [compile-only record](evidence/memory-rank-retirement-extra-test-compile-20261011.json). See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
