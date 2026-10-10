@@ -210,7 +210,13 @@ overlap, so this is observed duplicate-read reduction rather than an exact
 per-operation or uninstrumented walltime result. Source review identifies
 separate query/rank/vector Recheck transactions and repeated checks inside one
 rank operation; the next change must retain all current authority/final clocks.
-See the [current paired diagnostic](evidence/memory-f5d-semantic-pipeline4-paired-diagnostic-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
+See the [current paired diagnostic](evidence/memory-f5d-semantic-pipeline4-paired-diagnostic-failure-20261011.json). The next cd9375 source parses306 Go files and compiles12 test-bearing
+packages plus cmd/server. Actual rank sameTXscope10 and immutable native
+publication-retirement10 pass in one24-node window; all four original semantic
+current nodes still exceed HTTP8s line149. Retirements record actual producer
+supersession, preserve active ancestor bodies and do not enable physical GC.
+Existing worker/generated/UNKNOWN and full migration coverage remain required.
+See the [20-pass/4-failure record](evidence/memory-rank10-retirement10-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
