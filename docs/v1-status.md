@@ -96,8 +96,11 @@ The next `42ae5379` source includes the saved-history fields-scope and complete
 multi-read final union repair. It parses265 Go files and compiles12 test-bearing
 packages plus cmd/server with a corrected parser and zero business RUN/SKIP;
 compile actor/temp are independently absent. See the [compile record](evidence/memory-download-history-fixed-compile-20261011.json).
-Runtime download shutdown, same-TX final lease reread and desktop-native acceptance
-remain pending. Tenant-cloud
+Runtime download shutdown and desktop-native acceptance remain pending. A
+shared model final-binding repair is frozen; its first compile fails only on an
+unused new test variable, with production repository compiled. The test-only
+correction is now under a38-node current/download late-IO gate. See the
+[compile failure](evidence/memory-model-finalbinding-compile-failure-20261011.json). Tenant-cloud
 credentials, complete history, application/broker/recovery and PRD performance
 remain required. The full V1 goal remains active; deployment and coverage flags
 remain disabled.
