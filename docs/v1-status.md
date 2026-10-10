@@ -229,7 +229,10 @@ tree proofs; proposal heads remain separately unrun and unadopted. A copied boun
 test file contains18, including four final-journal fault cases. Raw partial2,
 inline22 and batch18 all pass, but the strict plan correctly rejects the extra
 nodes and later stages do not run. The repaired50-node plan uses a fresh owner;
-see the [preserved plan mismatch](evidence/memory-rank-retirement-boundary-plan-mismatch-20261011.json).
+see the [preserved plan mismatch](evidence/memory-rank-retirement-boundary-plan-mismatch-20261011.json). The corrected plan now passes all50 exact nodes on unchangedcd9375 in
+151.875s: originalpartial2/inline22/fullbatch18/actualderivedexpiry2/workerclock6.
+Eleven exact owned resources are independently absent; see the [boundary50
+record](evidence/memory-rank-retirement-boundary50-GREEN-20261011.json).
 A test-only candidate compiles309 files, but inherited-rank callbacks contain a
 known FailNow/WG failure-path issue that is being repaired before execution; see
 the [compile-only record](evidence/memory-rank-retirement-extra-test-compile-20261011.json). See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
