@@ -338,6 +338,20 @@ periodic nodes. Nonempty upgrade6, source-path HTTP6 and directory33 are source
 drafts pending compilation and actual gates; controlled directory model
 transports are a component limit, not real provider/whole-app acceptance.
 
+The repaired `535253e4` joint source parses439 changed Go files and compiles
+all157 packages (117 test-bearing/40 no-test) in81.281s with zero business RUN
+and independently absent compiler/temp resources. See the [full compile
+record](evidence/joint-catalogue-nonempty-directory-full-compile-GREEN-20261011.json).
+Its strict66-node actual migration window then runs all66 exactly once:
+38PASS/28FAIL/0SKIP/OOM in42.632s. Observed Root74/155 prefix preflight and
+Up to87/168 succeed, but complete restart rejects the legitimate catalogue;
+all installed-prefix restart cases remain failed. Unknown/source refusal
+positives do not offset that failure, and targeted constraint-negative passes
+cannot establish integrity while their current baseline is refused. Go is
+independently absent, owned PG/Redis stopped, and failed logs/network/three
+volumes retained. No subsequent nonempty/HTTP/directory business stages run.
+See the [preserved actual66 failure](evidence/joint-lineage66-complete-restart-catalogue-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
