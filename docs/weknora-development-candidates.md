@@ -6,9 +6,14 @@ do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
 The current development candidates are RAG `1bbd0cc8` and C6 `b43afa53`.
-Their exact two-profile source gates and owned cleanup passed; new normal
-images, application QA/replay/full restore, pending Auto restore and P5 remain
-pending. See the [final source-gate record](evidence/ordinary-qa-idle-material-final-gates-20261010.json).
+Their exact two-profile source gates and owned cleanup passed. The final RAG
+ordinary AnyDoc app/UI images subsequently built with verified source labels;
+this record includes no C6 normal-image build. The subsequent fresh running
+gate failed after successful startup and permission matrix; QA2/replay are
+unaccepted and full restore did not execute. Pending Auto restore and P5 remain
+pending. See the
+[final source-gate record](evidence/ordinary-qa-idle-material-final-gates-20261010.json)
+and [normal-image/controller record](evidence/ordinary-qa-final-normal-images-controller-20261010.json).
 
 | Profile | Upstream baseline | Candidate patch |
 | --- | --- | --- |
@@ -51,8 +56,8 @@ immutable image IDs. The browser fixture verifies those same IDs before
 startup and its owner verifies that the tags still point to the captured IDs.
 For a frozen older build use `--candidate-manifest=/absolute/snapshot.json`
 on both commands. Label verification alone does not establish runtime success;
-the current normal build and its failed application trial are recorded in the
-latest evidence below; label verification does not establish application acceptance.
+the current RAG normal build and preceding failed application trials are
+recorded separately below; label verification does not establish application acceptance.
 The manifest also records the exact resulting Git tree. The captured patches
 passed fresh Git-index application and reverse application, reproducing both
 the candidate and baseline trees exactly. Reverse application warns about three
@@ -626,7 +631,50 @@ failed without a panic. The other eight jobs passed. These failures are retained
 separately from the new RAG gates and prove no new observer Python or image-pull
 terminal failure. The [final-gate review record](evidence/ordinary-qa-idle-material-final-gates-20261010.json)
 pins the exact final source, patch, result, original-log and cleanup hashes.
-The earlier serial summary retains its precleanup scope. New normal images,
-two real application QAs, running replay,
+The earlier serial summary retains its precleanup scope. Final RAG normal
+images subsequently built as recorded below. Two real application QAs, running replay,
 matched full database/files/config restore, pending Auto restore and P5 remain
 required. This source-gate review does not complete V1.
+
+
+## 2026-10-10 final RAG normal images and controller preparation
+
+The fresh R2 ordinary AnyDoc app/UI build for RAG `1bbd0cc8` completed with
+actual exit zero in 155.666 seconds from frozen runner `a38e152`. Its immutable
+backend/UI image IDs are distinct; role, upstream revision, patch SHA, exact
+tree and candidate commit match the frozen manifest. The original 16 GiB disk
+minimum was retained. This proves only the RAG build and provenance. C6's
+source gates passed, but no C6 normal-image build is claimed here.
+
+The preceding first build was interrupted: its exact BuildKit receipt records
+`canceled` and `context canceled`. Driver/build clients and requested image
+references were absent at the diagnostic snapshot, and no completed driver
+result was fabricated. Old logs and controls remain preserved; the fresh R2
+uses distinct tags and actual build/provenance receipts.
+
+The new private normal plan freezes all fifteen script hashes and retains
+app memory 4 GiB, Go 3 GiB, CPU one, both 20-second controls, the owned observer
+before startup and the running driver as the sole producer of baseline QA2.
+Actual `--help` checks ran for all fifteen scripts and four subcommands without
+Docker or Go calls. The controller's minimal fast-child correction was verified
+using eight pure simulated old/new cases: a child that actually ends may race
+a start query, while a still-live unknown PID/start remains refused and blocks
+fixture mutation. Actual exit seven remains failure. Signals still require the
+exact PID/start/group, and failure handling preserves old failed owners and
+CURRENT anchors. These preparation cases do not establish normal runtime or
+restore success.
+
+The [new image/controller evidence](evidence/ordinary-qa-final-normal-images-controller-20261010.json)
+pins the old cancellation, new build, exact images and sealed controller.
+Root launched fresh owner `009f57f3`. Up, bootstrap and permission matrix
+returned 0. The running-window gate then returned 1 after 48.038 seconds because
+it did not observe the required active window. Its one actual HTTP reader
+returned 200, two events, EOF and 820 bytes, with no history receipt or answer/
+citation acceptance. All real reader threads joined and its own marker was
+removed. QA2 and replay remain unaccepted; restore and source denial did not
+execute. Failure handling stopped all 11 owned services and retained controls,
+volumes and CURRENT according to its receipt; the independent preservation audit
+remains separate. The observer ended 1 with 14 samples and its marker removed;
+its exact cause is being audited without assigning it as the business failure's
+cause. Pending Auto restore and P5 are separate unfinished requirements.
+No resource or business phase was started by this documentation preparation.

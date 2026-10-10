@@ -19,9 +19,21 @@ test. C6 full compilation also passed for 155 packages: 115 test packages and
 40 no-test metadata records, with zero runtime tests. Final exact owner cleanup
 removed the test containers, network and disk volume and released the heavy
 window while preserving private logs, source and shared caches. These results
-permit adopting the exact pair as development candidates. New normal images,
-application QA/running replay/full restore, pending Auto restore and P5 remain
-pending; this does not complete V1.
+permit adopting the exact pair as development candidates. The final RAG
+ordinary AnyDoc app/UI build subsequently completed in 155.666 seconds from
+the frozen `a38e152` runner; distinct immutable images and all five source/role
+labels match the exact `1bbd0cc8` manifest. This records RAG image provenance,
+not a C6 normal-image build. The fresh final-RAG owner passed up, bootstrap and
+its permission matrix, then the actual running-window gate failed after 48.038
+seconds. It produced no history receipt: QA2 and replay are unaccepted, and
+restore did not execute. Pending Auto restore and P5 still need actual
+acceptance; V1 remains incomplete.
+All eleven owned containers subsequently stopped with their volumes and network
+retained; the watcher exited with terminal 1 after the stop sequence interrupted
+a Docker CLI query. Its fourteen samples and removed marker are preserved,
+without accepting that observer exit as success. The application recorded a
+directory snapshot denial during stream publication; its exact rejecting
+predicate and the separate snapshot-read race still need causal verification.
 
 The empty-stream correction reduced successful renewals of eight held bodies
 from 80 to eight in the matched poll window. Actual source revocation stops
@@ -31,8 +43,11 @@ released pins and zero completed rows/manifests. Earlier failed preparation
 and causal baselines retain their own source identities; the earlier 44/59
 component gates on `3f327fc3` are not attributed to the final source. The
 [final-gate record](evidence/ordinary-qa-idle-material-final-gates-20261010.json)
-records the completed two-profile source gates and cleanup while keeping new
-images, normal QA/running replay/full restore, pending Auto restore and P5 pending.
+records the completed two-profile source gates and cleanup. The new
+[normal-image/controller record](evidence/ordinary-qa-final-normal-images-controller-20261010.json)
+accepts the final RAG image build and records the subsequent normal-running
+failure separately. QA2/replay remain unaccepted; full restore, pending Auto
+restore and P5 are pending.
 
 Integration head `9df5dfc` tested the preceding `1ab47546`/`aac58fa7` candidates.
 Both push and PR CI failed their candidate producer jobs at actual ordinary
@@ -46,6 +61,22 @@ failures, including independently proved image-pull quota and direct-upgrade
 startup failures with missing diagnostics, remain in their separate
 [historical CI record](evidence/ci-06811da-failures-20261010.json). Neither CI
 record is application acceptance; no deadline or safety assertion was relaxed.
+
+The first final-source build was interrupted with actual BuildKit `canceled` /
+`context canceled`; no successful driver result or images were inferred. Its
+original logs and cancellation receipt remain separate from the fresh R2 build.
+The private controller also retained a pure fake-child regression: an actual
+fast terminal could race its PID/start lookup before phase recording. The
+minimal correction records the real exit, refuses still-live unknown identity
+and retains all PID/start/group fences. Eight simulated old/new cases passed;
+these are not normal application tests. The subsequent normal lane ended with
+actual failure: its single HTTP reader returned 200, two events and EOF, while
+the required running window was not observed before the deadline. Those
+transport facts do not certify an answer or completed QA2. Reader threads joined
+and the running marker was removed. Guarded stop returned 0 and recorded all 11
+owned services stopped; volumes/CURRENT preservation has a separate independent
+audit. The observer ended 1 with 14 samples and its marker removed; its exact
+cause is under review and is not asserted as the running-window failure's cause.
 
 The preceding manifest candidates were C6 `aac58fa7` and RAG `1ab47546`;
 the current manifest pins C6 `b43afa53` and RAG `1bbd0cc8`.
