@@ -175,7 +175,11 @@ old116, and durable startup/replay16. Every selected RUN/PASS pair is exact once
 14 owned resources are independently absent. See the [138-node record](evidence/memory-download-claim-cleanup-existing138-GREEN-20261011.json)
 and [reviewable claim cleanup proposal](../integration/proposals/weknora-original-download-claim-cleanup-20261011.json). Newservice-instance
 recovery is explicitly separate from real OS-kill/11-minute-claim-expiry E2E;
-those cross-crash gates remain required. The shared model final-binding repair preserves its earlier test-only compile
+those cross-crash gates remain required. A combined policy/vector/crash-helper source now parses302 Go files and
+compiles12 test packages plus cmd/server, with zero business RUN. Independent
+review found a policy final-payload ordering gap and a crash-fixture expiry
+boundary race; both are being repaired before runtime acceptance. See the
+[compile-only record](evidence/memory-policy-vector-crash-helper-compile-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
