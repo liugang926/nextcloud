@@ -54,7 +54,7 @@ After binding the observer to the actual terminal consumption clock, Recall SQL
 passes16/16 nodes on production-identical `930df22a`, including genuine late
 lease expiry and readback in both databases. Recall HTTP runs14 nodes with
 5PASS/9FAIL: SQLite cancellation stops only the HTTP sender while the intentional
-background owner completes; the negative is being wired to real authenticated
+background owner completes; the negative now uses real authenticated
 StopSession while preserving zero-completion assertions. The corrected SQLite
 HTTP7 gate now passes on production-identical `a14481d0`, with actual Redis stop,
 provider cancel/join, zero completion/manifests and all seven resources absent.
@@ -92,8 +92,7 @@ profiling retains the original8s failure and records64,207 Recall-boundary and
 34,937 message-guard-boundary SQL callbacks; observer stack scanning adds CPU
 cost, so this is diagnostic evidence rather than an uninstrumented benchmark.
 See the [PG profile](evidence/memory-PG-Recall-current-profile-failure-20261011.json). See the [SQLite history
-record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion dependencies and
-explicit local model download shutdown also remain underway. The download/host
+record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion dependencies remain underway. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
 cmd/server package-only terminal; an old parser misclassified that terminal
 and retained its stopped owner. See the [compile parser record](evidence/memory-download-host-compile-parser-failure-20261011.json).
@@ -108,10 +107,8 @@ HTTP drain expires. Desktop-native shell/startup Fatal/crash replay/remote weigh
 inventory remain pending. See the [download/host32 record](evidence/memory-local-download-host32-GREEN-20261011.json)
 and the exact [reviewable source proposal](../integration/proposals/weknora-original-local-download-20261011.json).
 Failed Close release retry/error propagation also remains an explicit lifecycle
-boundary. A
-shared model final-binding repair is frozen; its first compile fails only on an
-unused new test variable, with production repository compiled. The test-only
-correction now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
+boundary. The shared model final-binding repair preserves its earlier test-only compile
+failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
 pass68/68 together on the same4b53 source in208.040s, with eight exact resources
