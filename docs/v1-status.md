@@ -53,7 +53,10 @@ The vector reader/ranking/receipt component passes20/20 nodes on `545eebcb`.
 After binding the observer to the actual terminal consumption clock, Recall SQL
 passes16/16 nodes on production-identical `930df22a`, including genuine late
 lease expiry and readback in both databases. Recall HTTP runs14 nodes with
-5PASS/9FAIL: SQLite caller cancellation observes one completed output, while
+5PASS/9FAIL: SQLite cancellation stops only the HTTP sender while the intentional
+background owner completes; the negative is being wired to real authenticated
+StopSession while preserving zero-completion assertions. Existing legal
+disconnect/continued-generation acceptance remains required. Meanwhile,
 all PostgreSQL completion preludes exceed the original8s bound. Local/Ollama
 was not dispatched afterward and is scheduled as an independent unchanged-source
 gate. See the [Recall16 and HTTP14 record](evidence/memory-RecallSQL16-GREEN-RecallHTTP14-failure-20261011.json).
@@ -77,6 +80,10 @@ explicit local model download shutdown also remain underway. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
 cmd/server package-only terminal; an old parser misclassified that terminal
 and retained its stopped owner. See the [compile parser record](evidence/memory-download-host-compile-parser-failure-20261011.json).
+The next `42ae5379` source includes the saved-history fields-scope and complete
+multi-read final union repair. It parses265 Go files and compiles12 test-bearing
+packages plus cmd/server with a corrected parser and zero business RUN/SKIP;
+compile actor/temp are independently absent. See the [compile record](evidence/memory-download-history-fixed-compile-20261011.json).
 Runtime download shutdown, same-TX final lease reread and desktop-native acceptance
 remain pending. Tenant-cloud
 credentials, complete history, application/broker/recovery and PRD performance
