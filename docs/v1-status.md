@@ -4,6 +4,17 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Memory task source preparation now persists an original-bound dispatch intent
+with the admission and pending revision in one transaction. Its recovery relay
+retains that exact intent after broker or post-commit failures, while completion
+still requires an immutable successful receipt. A separate Lite executor change
+cancels and joins its workers and refuses new tasks after shutdown. Fixed-image
+source parsing/formatting passed; 14 test declarations have not run, and no
+compilation, SQL, broker or restore acceptance is claimed. These changes are
+frozen on private source `ca5f9233`, awaiting the atomic-output/completion reader,
+full legal memory workflows and actual gates. They are not in the current
+candidate manifest. See the [memory source preparation record](evidence/memory-original-source-preparation-20261010.json).
+
 The complete original service selection is prepared with 178 planned parents,
 including 28 of the original 42 mandatory parents across 12 packages. Its
 driver preserves source `1bbd0cc8`, count one, the cumulative 20-minute service
