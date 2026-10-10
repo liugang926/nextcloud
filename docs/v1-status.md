@@ -4,6 +4,14 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+A fresh source-exact PostgreSQL ordinary-QA profiling run on `1bbd0cc8`
+passed its single required parent under the original eight-second HTTP and
+20-minute package limits. The original binary, CPU/block/mutex profiles and
+raw output are source-bound and independently hashed. This isolated run did
+not reproduce the four a38 Linux-CI body deadlines; it does not accept the
+full test selection. The next diagnostic retains all selected service cases
+and their cumulative package budget. See the [focused profiling record](evidence/ordinary-qa-fresh-focused-profiling-20261010.json).
+
 The proposed directory-publication correction reads the unique user binding,
 current directory, identity and groups in one consistent transaction. Its
 matched SQLite/PostgreSQL regressions passed 16 nodes, the existing access
