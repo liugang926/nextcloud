@@ -4,6 +4,18 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+The matched ordinary original-model HTTP selection now passes all10 nodes
+on private source `e8b2dd63`, zero failures/skips/OOM. Real old-source observer
+confirmed constructor cancellation closed the model read while HTTP still
+owned one reference. The fix preserves cancellation throughout acquisition
+and transfers the proved read to the live message owner; provider calls keep
+their original cancellation. All four legal current/Done-open cases publish
+answer/references/complete and one assistant/original input manifest, while
+actor/model revocations still cancel/join and create no completion. Original
+HTTP8s/package20m remain; the window took86.350 seconds. Paired tests/diagnostic
+are byte-identical, and all seven successful resource identities are independently
+absent. See the [owner-lifetime GREEN](evidence/ordinary-model-owner-lifetime-GREEN-20261010.json).
+
 Final-source policy58 and unit/lifecycle22 nodes now also pass, zero failures/
 skips/OOM. Their independent two-stage window took182.309 seconds, with all
 eight exact resources confirmed absent and original package20m retained. This
@@ -19,7 +31,7 @@ a cancellation-preserving owner-lifetime repair and exact diagnostic
 are prepared but unexecuted. Derived passes0/26: productive B cases stop at
 the real five-minute subject cadence instead of the fixture7s relay bound;
 partial Handle has an independent record-not-found failure. Native passes34/55
-and is unaccepted; topic effects, policy-origin setup and proof hash oracles
+and is unaccepted; resident-block effects, policy-origin setup and proof hash oracles
 need source-backed repairs. Failed owners are stopped and their raw/volumes/
 networks retained. See the [remaining regression evidence](evidence/memory-final-remaining-regressions-20261010.json).
 
