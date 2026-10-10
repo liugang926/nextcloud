@@ -96,7 +96,11 @@ The next `42ae5379` source includes the saved-history fields-scope and complete
 multi-read final union repair. It parses265 Go files and compiles12 test-bearing
 packages plus cmd/server with a corrected parser and zero business RUN/SKIP;
 compile actor/temp are independently absent. See the [compile record](evidence/memory-download-history-fixed-compile-20261011.json).
-Runtime download shutdown and desktop-native acceptance remain pending. A
+Creation download30 and real HTTP-expired-drain shutdown2 now pass on `4b53d5cc`
+in one58.106s window, zero failures/skips/OOM, with eight exact resources absent.
+The genuine download is canceled/joined before dependent cleanup even after
+HTTP drain expires. Desktop-native shell/startup Fatal/crash replay/remote weight
+inventory remain pending. See the [download/host32 record](evidence/memory-local-download-host32-GREEN-20261011.json). A
 shared model final-binding repair is frozen; its first compile fails only on an
 unused new test variable, with production repository compiled. The test-only
 correction now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
