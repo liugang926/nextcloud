@@ -99,7 +99,10 @@ compile actor/temp are independently absent. See the [compile record](evidence/m
 Runtime download shutdown and desktop-native acceptance remain pending. A
 shared model final-binding repair is frozen; its first compile fails only on an
 unused new test variable, with production repository compiled. The test-only
-correction is now under a38-node current/download late-IO gate. See the
+correction now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
+failures/skips/OOM; all seven exact owned resources are independently absent.
+Existing broad model/clock regressions and matched old-source RED remain pending.
+See the [final-binding38 record](evidence/memory-model-finalbinding38-GREEN-20261011.json). See the
 [compile failure](evidence/memory-model-finalbinding-compile-failure-20261011.json). Tenant-cloud
 credentials, complete history, application/broker/recovery and PRD performance
 remain required. The full V1 goal remains active; deployment and coverage flags
