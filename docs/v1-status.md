@@ -21,6 +21,18 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+A test-only diagnostic on `fe26fa24` now confirms a repeated-subject
+initialization defect on both SQLite and PostgreSQL: four model-service/
+admissions lifetime leaves passed Begin/Snapshot/Recheck/Close; four scheduling
+leaves passed existing-subject/enabled/config/actor checks, then repeated
+EnsureSubject returned record-not-found. The resulting ten-node selection
+passed four and failed six (including both parents), with zero skips/OOM.
+The DAO's no-op upsert supplies a new UUID to a body-capture callback, which
+looks for that uninserted row. This is a genuine subject-idempotence RED, not
+a worker TTL RED. A guarded idempotence/concurrency repair is under development.
+The failed owner is stopped with its three volumes/network/raw preserved.
+See the [subject failure record](evidence/memory-subject-idempotence-RED-20261010.json).
+
 Private memory source `856ea3b1` now compiles the final worker lease union and
 original-bound consolidation across all six selected packages, with zero
 runtime tests. All 121 changed Go files parsed/formatted successfully. The first

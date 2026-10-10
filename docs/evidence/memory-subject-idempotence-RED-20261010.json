@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "classification": "actual_two_database_repeated_subject_RED_with_model_read_positive_controls",
+  "source": {
+    "head": "fe26fa24e89a7e73342de77767af340032b7bbe4",
+    "tree": "f3d8987944c5f04cff5790d1a58067667afbdc8a",
+    "production_byte_identical_to": "856ea3b1679b47afe9ced338d065cc7793f13a1a",
+    "test_only": true,
+    "candidate_manifest_changed": false
+  },
+  "actual": {
+    "terminal": 1,
+    "nodes_RUN": 10,
+    "PASS": 4,
+    "FAIL": 6,
+    "SKIP": 0,
+    "OOMKilled": false,
+    "duration_seconds": 41.178,
+    "raw_SHA256": "5f4c2b1afe6b0b5c4403e7b8c26e96d23d163681df8f2bd533c3d4964f9a79c9",
+    "raw_bytes": 92809,
+    "positive_controls": "SQLite and PostgreSQL model service and admissions lifetime reads each completed actual Begin/Snapshot/Recheck/Close; all four leaves passed.",
+    "failure_boundary": "Both database native/special schedule leaves passed MemoryAllowed, existing nonnil enabled subject and config/actor/model checks, then repeated EnsureSubject returned gorm record_not_found. They stop before Schedule/model/TTL. Two parents aggregate failure.",
+    "business_RED_scope": "Repeated EnsureSubject idempotence only; no whole worker TTL/model output/broker acceptance."
+  },
+  "source_cause": {
+    "actual_existing_subject_read_passed": true,
+    "DAO": "EnsureSubject creates a new UUID on each call and uses OnConflictDoNothing",
+    "callback": "AfterCreate captures registered memory_subjects.block_text regardless of no-op row count; it queries the not-inserted new UUID and returns record_not_found",
+    "repair_in_progress": "Return the genuine existing scoped subject, preserving read guards and a safe first-create race path. No fabricated pending or originals and no permission fallback."
+  },
+  "retention": {
+    "Go_exact_absent": true,
+    "PG_Redis_exact_stopped_no_OOM": true,
+    "three_volumes_and_network_retained": true,
+    "source_and_raw_retained": true,
+    "independent_audit_SHA256": "16ced29476b64fe27cd1bf2b55c736811bf4aedaaf181dbf504821309fbe1c62"
+  },
+  "unexecuted_followup_source": {
+    "latest_fusion_head": "35c8084723c2fff59fb80a4882f38bff4bb6cf54",
+    "full_patch_bytes": 1095695,
+    "full_patch_SHA256": "07bf36d55c5b28d09112d10dec269afb3a1b63ade0211bbfd01342fbe3193ed3",
+    "exact_forward_reverse_roundtrip": true,
+    "old515_business_function_byte_exact": true,
+    "stale_and_SDK_privacy_business_accepted": false
+  },
+  "acceptance": {
+    "repeated_subject_failure_root_cause_confirmed": true,
+    "repair_GREEN": false,
+    "full_V1": false
+  },
+  "privacy": {
+    "credentials_raw_bodies_and_private_paths_omitted": true
+  }
+}
