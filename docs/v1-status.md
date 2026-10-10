@@ -21,6 +21,19 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+Model provider lifetime repairs are now integrated privately at `dd7f6e24`.
+The source captures complete remote protocol/URL/query/header/auth/settings
+recipes, reauthorizes the current actor in the same SQL transaction, retains
+original model bodies through ordinary message completion, and cancels and
+joins the actual provider stream. It fixes unconsumed-stream Close and the
+single-connection SQL pool lock ordering; 29 new cases in eight parent tests
+are source drafts only. The full core patch round-trips exactly, and the old
+515 business test function is byte-identical. Formatting, compilation and
+all new business execution are pending. Whole-result invalid decision handling
+is also under repair; builtin/YAML/Ollama/embedding and full existing-memory
+workflows remain required. See the
+[model provider lifetime source record](evidence/model-provider-lifetime-source-20261010.json).
+
 Model/policy/derived-memory source is now fused privately, with the latest
 test-adapter integration at `b1c24809`. Both sets of original body publications,
 execution proof fields and pending schema modules are preserved. A complete
