@@ -11,11 +11,14 @@ input/result and public-entry nodes in a separate window. Those component
 results do not accept the full embedding feature. The reviewable source remains
 separate from the adopted candidate manifest.
 
-The latest completed native historical fixture run passes50/55 nodes, zero
-skips/OOM. Four failures come from a remaining item-only derivation count and
-its parents; the fifth public-writer fixture lacks real authority on its new
-independent database handle. The repaired full-effect/real-DI/owned-lock source
-is being tested against227 required nodes; it is not yet accepted.
+The latest complete native run passes54/55 nodes, zero skips/OOM. Its remaining
+public-writer case proved real commit blocking, then encountered PostgreSQL
+40001 under the original repeatable-read snapshot. A bounded fresh initial graph
+read fixes that case on a byte-identical test, which now passes under unchanged
+10s/5s limits. All seven successful resources are independently absent. The
+54-node baseline and one-node repaired run are separate; the broader integrated
+gate remains pending. See the [matched public-writer GREEN](evidence/memory-native-public-serialization-GREEN-20261011.json)
+and [reviewable native follow-up](../integration/proposals/weknora-native-memory-followup-20261011.json).
 
 Real paired query counters show that same-TX reuse reduced PostgreSQL's first
 Handle from152,977 callbacks/15.128s to132,871/12.989s. Its second Handle still
@@ -23,9 +26,12 @@ fails the unchanged20s bound. CPU/allocation profiles identify repeated
 physical-head/journal SQL and file checks as major costs; profiles are diagnostic
 and do not constitute a performance pass. See the [actual paired diagnostics](evidence/memory-derived-performance-diagnostics-20261011.json).
 
-Query-message original receipts and vector receipt/rank/sync source are being
-integrated; complete migration155/74→156/75, ordinary Recall, local/cloud model
-variants, full application/broker/recovery and PRD performance remain open.
+Query-message original receipts, vector receipt/rank/sync and complete migration
+155/74→156/75 source are integrated privately. Its first217-file parse passed;
+compilation exposed one output-owner ABI argument omission, now repaired in a
+new child undergoing compilation. No query/vector/full-migration business pass
+is claimed. Ordinary Recall, local/cloud model variants, full application/broker/
+recovery and PRD performance remain open.
 The full V1 goal remains active. No deployment or coverage flag is enabled.
 
 ## Prior component checkpoints — 2026-10-10
