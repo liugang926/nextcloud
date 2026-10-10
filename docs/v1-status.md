@@ -159,6 +159,15 @@ Existing model/download100 passes on that durable source, but old cleanup10
 failed error-object identity. A narrow terminal aggregation repair now passes
 the byte-preserved cleanup10 plus initialization6 in76.901s, all eight resources
 absent; see the [error identity16 record](evidence/memory-terminal-errorABI16-GREEN-20261011.json).
+The private construction-time history opening repair now passes SQLite capture5:
+genuine fresh history, final-head mutation/cancel refusal, and copied-context
+different-transaction body refusal. PG capture5 still fails its original HTTP8s
+prelude before those assertions. See the [capture10 record](evidence/memory-owned-opening-capture5-GREEN-PG5-failure-20261011.json).
+The same 5ca source compiles294 Go files and12 test-bearing packages plus
+cmd/server. Its actual semantic pipeline diagnostic4 still fails HTTP8s in both
+databases; HTTP material-output checks dominate measured nested duration,
+with large repeated SQL counts. Nested timings overlap and do not establish
+paired performance acceptance. See the [pipeline diagnostic](evidence/memory-semantic-pipeline4-operation-profile-failure-20261011.json).
 A single full116 window remains to be rerun after the repair. Newservice-instance
 recovery is explicitly separate from real OS-kill/11-minute-claim-expiry E2E;
 those cross-crash gates remain required. The shared model final-binding repair preserves its earlier test-only compile
