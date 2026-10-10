@@ -318,6 +318,14 @@ publication is supplied. All7 owned resources are independently absent. See the
 [reviewable source patch](../integration/proposals/weknora-joint-root-path-module-20261011.json).
 This closes only the module metadata contract, not lineage or full app startup.
 
+The `e39ed067` joint child adds early readonly preflight, installed Root
+catalogue checks, explicit old prefix fixtures and a genuine full-schema HTTP
+business test. It parses432 Go files;116 test-bearing plus40 no-test packages
+compile, but the service test package has an actual handler/service import cycle.
+No business tests run. The package boundary is being repaired, and independent
+review also requires an exact PostgreSQL withdrawal kind CHECK witness before
+bootstrap acceptance. See the [preserved compile failure](evidence/joint-readonly-business-full-compile-import-cycle-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
