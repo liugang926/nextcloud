@@ -240,7 +240,13 @@ overlapping durations prohibit a paired uninstrumented walltime acceptance.
 See the [rank-scope diagnostic](evidence/memory-rank-scope-pipeline4-diagnostic-failure-20261011.json).
 A test-only candidate compiles309 files, but inherited-rank callbacks contain a
 known FailNow/WG failure-path issue that is being repaired before execution; see
-the [compile-only record](evidence/memory-rank-retirement-extra-test-compile-20261011.json). See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
+the [compile-only record](evidence/memory-rank-retirement-extra-test-compile-20261011.json). The repaired production-identical35496c test child compiles309 files and
+passes all four genuine UNKNOWN/tailDOWN nodes plus five SQLite inherited
+Recall/nestedpolicy/current/Close nodes. All five PG nodes still fail original
+HTTP8s line139 before their target assertions. The callback Fatal/WG path is
+closed in source and did not hang this actual run; expiry uses natural120ms
+wall wait plus actual SQL clock/readback, not a claimed120ms SQL IO. See the
+[actual9-pass/5-failure record](evidence/memory-retirement4-inherited-SQLite5-GREEN-PG5-failure-20261011.json). See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
 See the [20-pass/4-failure record](evidence/memory-rank10-retirement10-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
