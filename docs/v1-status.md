@@ -97,6 +97,10 @@ and different-transaction cache refusal. It compiles271 Go files/12 test package
 plus cmd/server. The original uninstrumented PG/current2 gate still fails8s
 after the scope change; see the [actual performance failure](evidence/memory-PG-current-scope8s-failure-20261011.json). See the
 [scope12 record](evidence/memory-Recall-body-scope12-GREEN-20261011.json).
+The outer-history-group sameTXscope compiles and preserves SQLite history6,
+but its multi3 still exceeds second-request8s before the final union fault.
+Remaining initialization/direct message-capture paths need targeted counts;
+see the [group-scope actual record](evidence/memory-history-group-scope6-GREEN-multi3-failure-20261011.json).
 Actual multi-read late-clock and PostgreSQL history still need matched gates.
 Focused PG/current
 profiling retains the original8s failure and records64,207 Recall-boundary and
