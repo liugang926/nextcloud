@@ -20,19 +20,24 @@ read fixes that case on a byte-identical test, which now passes under unchanged
 gate remains pending. See the [matched public-writer GREEN](evidence/memory-native-public-serialization-GREEN-20261011.json)
 and [reviewable native follow-up](../integration/proposals/weknora-native-memory-followup-20261011.json).
 
-Real paired query counters show that same-TX reuse reduced PostgreSQL's first
-Handle from152,977 callbacks/15.128s to132,871/12.989s. Its second Handle still
-fails the unchanged20s bound. CPU/allocation profiles identify repeated
-physical-head/journal SQL and file checks as major costs; profiles are diagnostic
-and do not constitute a performance pass. See the [actual paired diagnostics](evidence/memory-derived-performance-diagnostics-20261011.json).
+The original partial processing test now passes SQLite and PostgreSQL under
+the unchanged20s deadline on `ce006db6`, with its full test file byte-identical
+to the failed71d source. Same-TX physical availability batching addresses the
+repeated head/journal/file IO identified in the [paired diagnostics](evidence/memory-derived-performance-diagnostics-20261011.json).
+Old inline22, new batch14, new actual lease-expiry2 and old worker final-clock6
+nodes pass on production-identical test-only children in separate windows.
+Actual mutation and expiry-readback prerequisites were strengthened before
+acceptance; earlier failures remain preserved. This is not a single46-node run
+or full PRD performance acceptance. See the [partial and clock record](evidence/memory-original-partial-and-clock-GREEN-20261011.json).
 
-Query-message original receipts, vector receipt/rank/sync and complete migration
-155/74→156/75 source are integrated privately. Its first217-file parse passed;
-compilation exposed one output-owner ABI argument omission, now repaired in a
-new child undergoing compilation. No query/vector/full-migration business pass
-is claimed. Ordinary Recall, local/cloud model variants, full application/broker/
-recovery and PRD performance remain open.
-The full V1 goal remains active. No deployment or coverage flag is enabled.
+Query originals, vector receipt/rank/sync and complete155/74→156/75 migration
+source are privately combined. After one output-owner ABI argument repair,
+222 Go files parsed and all11 selected packages compiled in71.103s, with zero
+runtime tests in that compile. Ordinary Recall, Local/Ollama and extra final
+journal-window sources await integration and actual gates. No query/vector/full
+migration business pass is claimed. Tenant-cloud credentials, complete history,
+application/broker/recovery and PRD performance remain open. The full V1 goal
+remains active; deployment and coverage flags remain disabled.
 
 ## Prior component checkpoints — 2026-10-10
 
