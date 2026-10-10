@@ -1,0 +1,898 @@
+diff --git a/internal/application/repository/model_original_body.go b/internal/application/repository/model_original_body.go
+index 8e450580..27c2d855 100644
+--- a/internal/application/repository/model_original_body.go
++++ b/internal/application/repository/model_original_body.go
+@@ -3,6 +3,7 @@ package repository
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	"github.com/google/uuid"
+@@ -223,19 +224,21 @@ func checkModelOriginalHoldsInTx(tx *gorm.DB, proof types.ModelOriginalProof) er
+ }
+ 
+ type modelOriginalRead struct {
+-	download    bool
+-	db          *gorm.DB
+-	ctx         context.Context
+-	cancel      context.CancelFunc
+-	model       *types.Model
+-	hold        modelOriginalHold
+-	authorize   ModelOriginalHistoricalAuthorizer
+-	mu          sync.Mutex
+-	failed      error
+-	closed      bool
+-	checks      sync.WaitGroup
+-	closeJoined chan struct{}
+-	closeErr    error
++	download        bool
++	db              *gorm.DB
++	ctx             context.Context
++	cancel          context.CancelFunc
++	model           *types.Model
++	hold            modelOriginalHold
++	authorize       ModelOriginalHistoricalAuthorizer
++	mu              sync.Mutex
++	failed          error
++	closed          bool
++	checks          sync.WaitGroup
++	closeJoined     chan struct{}
++	closeErr        error
++	releaseMu       sync.Mutex
++	pendingReleases map[string]originalBodyLease
+ }
+ 
+ func cloneOriginalModel(model *types.Model) (*types.Model, error) {
+@@ -319,8 +322,7 @@ func beginModelOriginalReadMode(ctx context.Context, db *gorm.DB, id string, exp
+ 	read.ctx = context.WithValue(read.ctx, modelOriginalHoldKey{}, read.hold)
+ 	read.ctx = context.WithValue(read.ctx, modelOriginalSnapshotKey{}, read)
+ 	if err = read.Recheck(); err != nil {
+-		read.Close()
+-		return nil, err
++		return nil, closeFailedModelOriginalInitialization(read, err)
+ 	}
+ 	return read, nil
+ }
+@@ -434,17 +436,21 @@ func (r *modelOriginalRead) Close() error {
+ 	r.checks.Wait()
+ 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 5*time.Second)
+ 	defer cancel()
+-	store := NewOriginalBodyRetentionStore(r.db)
+-	var first error
++	pending := map[string]originalBodyLease{}
++	var releaseErrors []error
+ 	for _, lease := range r.hold.Leases {
+-		if err := store.ReleaseLease(ctx, lease.LeaseID); err != nil && first == nil {
+-			first = err
++		if err := releaseCapturedModelLease(ctx, r.db, lease); err != nil {
++			pending[lease.LeaseID] = lease
++			releaseErrors = append(releaseErrors, err)
+ 		}
+ 	}
++	first := errors.Join(releaseErrors...)
++
+ 	r.mu.Lock()
+ 	if first != nil && r.failed == nil {
+ 		r.failed = first
+ 	}
++	r.pendingReleases = pending
+ 	r.closeErr = first
+ 	close(r.closeJoined)
+ 	r.mu.Unlock()
+diff --git a/internal/application/repository/model_original_download.go b/internal/application/repository/model_original_download.go
+index 670438b6..0f18b276 100644
+--- a/internal/application/repository/model_original_download.go
++++ b/internal/application/repository/model_original_download.go
+@@ -37,8 +37,7 @@ func (r *modelRepository) BeginModelOriginalDownload(ctx context.Context, id str
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
+ 	if err = embedding.ValidateOriginalDownloadDefinition(actual.model.Parameters.OriginalDownload); err != nil {
+-		_ = raw.Close()
+-		return nil, err
++		return nil, closeFailedModelOriginalInitialization(actual, err)
+ 	}
+ 	return &modelOriginalDownloadRead{actual}, nil
+ }
+@@ -137,3 +136,9 @@ func (r *modelRepository) CommitModelOriginalDownload(read interfaces.ModelOrigi
+ }
+ 
+ var _ interfaces.ModelOriginalDownloader = (*modelRepository)(nil)
++
++func (r *modelOriginalDownloadRead) RetryOriginalRelease(ctx context.Context) error {
++	return r.read.retryClosedOriginalReleases(ctx)
++}
++
++var _ interfaces.ModelOriginalReleaseRetry = (*modelOriginalDownloadRead)(nil)
+diff --git a/internal/application/repository/model_original_initialization_failure.go b/internal/application/repository/model_original_initialization_failure.go
+new file mode 100644
+index 00000000..152698c3
+--- /dev/null
++++ b/internal/application/repository/model_original_initialization_failure.go
+@@ -0,0 +1,37 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++type modelOriginalClosedReleaseOwner struct{ read *modelOriginalRead }
++
++func (owner *modelOriginalClosedReleaseOwner) RetryOriginalRelease(ctx context.Context) error {
++	return owner.read.retryClosedOriginalReleases(ctx)
++}
++
++type modelOriginalInitializationFailure struct {
++	operationErr, cleanupErr error
++	owner                    *modelOriginalClosedReleaseOwner
++}
++
++func (f *modelOriginalInitializationFailure) Error() string {
++	return errors.Join(f.operationErr, f.cleanupErr).Error()
++}
++func (f *modelOriginalInitializationFailure) Unwrap() []error {
++	return []error{f.operationErr, f.cleanupErr}
++}
++func (f *modelOriginalInitializationFailure) OriginalInitializationCleanup() (error, error, interfaces.ModelOriginalReleaseRetry) {
++	return f.operationErr, f.cleanupErr, f.owner
++}
++func closeFailedModelOriginalInitialization(read *modelOriginalRead, operationErr error) error {
++	cleanupErr := read.Close()
++	if cleanupErr == nil {
++		return operationErr
++	}
++	return &modelOriginalInitializationFailure{operationErr: operationErr, cleanupErr: cleanupErr, owner: &modelOriginalClosedReleaseOwner{read: read}}
++}
++
++var _ interfaces.ModelOriginalInitializationFailure = (*modelOriginalInitializationFailure)(nil)
+diff --git a/internal/application/repository/model_original_release.go b/internal/application/repository/model_original_release.go
+new file mode 100644
+index 00000000..c8af3642
+--- /dev/null
++++ b/internal/application/repository/model_original_release.go
+@@ -0,0 +1,88 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"sort"
++	"time"
++)
++
++// Release exactly a captured ownership tuple. No body read, current catalog
++// lookup, permission grant, lease creation or renewal occurs in this operation.
++func releaseCapturedModelLease(ctx context.Context, db *gorm.DB, bound originalBodyLease) error {
++	if bound.LeaseID == "" || bound.BodyID == "" || bound.OwnerID == "" || bound.Kind != "read" {
++		return ErrOriginalBodyUnavailable
++	}
++	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		var actual originalBodyLease
++		if err := bodyInternal(tx).Clauses(clause.Locking{Strength: "UPDATE"}).Where("lease_id=?", bound.LeaseID).Take(&actual).Error; err != nil {
++			return err
++		}
++		if actual.BodyID != bound.BodyID || actual.OwnerID != bound.OwnerID || actual.Kind != bound.Kind || actual.Epoch != bound.Epoch {
++			return ErrOriginalBodyUnavailable
++		}
++		if actual.ReleasedAtMS != nil {
++			return ctx.Err()
++		}
++		now, err := nextcloudLeaseNowMS(bodyInternal(tx))
++		if err != nil {
++			return err
++		}
++		write := bodyInternal(tx).Model(&originalBodyLease{}).Where("lease_id=? AND body_id=? AND owner_id=? AND kind=? AND epoch=? AND released_at_ms IS NULL", bound.LeaseID, bound.BodyID, bound.OwnerID, bound.Kind, bound.Epoch).Update("released_at_ms", now)
++		if write.Error != nil {
++			return write.Error
++		}
++		if write.RowsAffected != 1 {
++			return ErrOriginalBodyUnavailable
++		}
++		return ctx.Err()
++	}, memoryWriteOptions(db))
++}
++func (r *modelOriginalRead) retryClosedOriginalReleases(ctx context.Context) error {
++	r.mu.Lock()
++	if !r.closed {
++		r.mu.Unlock()
++		return ErrOriginalBodyUnavailable
++	}
++	joined := r.closeJoined
++	r.mu.Unlock()
++	select {
++	case <-ctx.Done():
++		return ctx.Err()
++	case <-joined:
++	}
++	// This release-only mutex serializes explicit retries. It is not held by
++	// Snapshot/Recheck, and the model remains canceled/closed for its entire life.
++	r.releaseMu.Lock()
++	defer r.releaseMu.Unlock()
++	r.mu.Lock()
++	pending := map[string]originalBodyLease{}
++	for id, bound := range r.pendingReleases {
++		pending[id] = bound
++	}
++	r.mu.Unlock()
++	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
++	defer cancel()
++	keys := []string{}
++	for id := range pending {
++		keys = append(keys, id)
++	}
++	sort.Strings(keys)
++	remaining := map[string]originalBodyLease{}
++	var releaseErrors []error
++	for _, id := range keys {
++		bound := pending[id]
++		if err := releaseCapturedModelLease(bounded, r.db, bound); err != nil {
++			remaining[id] = bound
++			releaseErrors = append(releaseErrors, err)
++		}
++	}
++	err := errors.Join(releaseErrors...)
++	r.mu.Lock()
++	r.pendingReleases = remaining
++	r.closeErr = err
++	r.mu.Unlock()
++	return err
++}
+diff --git a/internal/application/service/model_original_download.go b/internal/application/service/model_original_download.go
+index 8e219c92..4387737f 100644
+--- a/internal/application/service/model_original_download.go
++++ b/internal/application/service/model_original_download.go
+@@ -19,11 +19,16 @@ import (
+ )
+ 
+ type originalModelDownloadJob struct {
+-	cancel context.CancelFunc
+-	done   chan struct{}
+-	err    error
++	cancel                   context.CancelFunc
++	done                     chan struct{}
++	mu                       sync.Mutex
++	err                      error
++	operationErr, cleanupErr error
++	releaseOwner             interfaces.ModelOriginalReleaseRetry
++	recorded                 bool
+ }
+ type originalModelDownloads struct {
++	releaseMu        sync.Mutex
+ 	mu               sync.Mutex
+ 	enabled, stopped bool
+ 	jobs             map[string]*originalModelDownloadJob
+@@ -37,7 +42,8 @@ func (s *modelService) StartOriginalDownloads() {
+ 		s.downloads.enabled = true
+ 	}
+ }
+-func (s *modelService) StopOriginalDownloads() {
++func (s *modelService) StopOriginalDownloads() { _ = s.StopOriginalDownloadsWithErrors() }
++func (s *modelService) StopOriginalDownloadsWithErrors() error {
+ 	s.downloads.mu.Lock()
+ 	s.downloads.stopped = true
+ 	for _, j := range s.downloads.jobs {
+@@ -45,6 +51,23 @@ func (s *modelService) StopOriginalDownloads() {
+ 	}
+ 	s.downloads.mu.Unlock()
+ 	s.downloads.active.Wait()
++	// Accepted explicit owner retries are serialized here and cannot outlive
++	// Stop. New retries check the stopped gate while holding releaseMu.
++	s.downloads.releaseMu.Lock()
++	defer s.downloads.releaseMu.Unlock()
++	s.downloads.mu.Lock()
++	jobs := []*originalModelDownloadJob{}
++	for _, job := range s.downloads.jobs {
++		jobs = append(jobs, job)
++	}
++	s.downloads.mu.Unlock()
++	var failures []error
++	for _, job := range jobs {
++		job.mu.Lock()
++		failures = append(failures, job.cleanupErr)
++		job.mu.Unlock()
++	}
++	return errors.Join(failures...)
+ }
+ func (s *modelService) WaitOriginalDownload(ctx context.Context, id string) error {
+ 	s.downloads.mu.Lock()
+@@ -57,7 +80,10 @@ func (s *modelService) WaitOriginalDownload(ctx context.Context, id string) erro
+ 	case <-ctx.Done():
+ 		return ctx.Err()
+ 	case <-j.done:
+-		return j.err
++		j.mu.Lock()
++		err := j.err
++		j.mu.Unlock()
++		return err
+ 	}
+ }
+ func (s *modelService) checkOriginalDownloadsAccepting() error {
+@@ -101,23 +127,50 @@ func (s *modelService) queueOriginalModelDownload(ctx context.Context, model *ty
+ 		defer s.downloads.active.Done()
+ 		defer close(job.done)
+ 		defer cancel()
+-		job.err = s.runOriginalModelDownload(intentCtx, proof)
++		err := s.runOriginalModelDownload(intentCtx, proof, job)
++		job.mu.Lock()
++		if !job.recorded {
++			job.operationErr = err
++			job.err = err
++			job.recorded = true
++		}
++		job.mu.Unlock()
+ 	}()
+ 	return nil
+ }
+-func (s *modelService) runOriginalModelDownload(ctx context.Context, proof types.ModelOriginalProof) (resultErr error) {
++func (s *modelService) runOriginalModelDownload(ctx context.Context, proof types.ModelOriginalProof, job *originalModelDownloadJob) (resultErr error) {
+ 	repo, ok := s.repo.(interfaces.ModelOriginalDownloader)
+ 	if !ok {
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
+ 	read, err := repo.BeginModelOriginalDownload(ctx, proof.ModelID, proof)
+ 	if err != nil {
++		var failed interfaces.ModelOriginalInitializationFailure
++		if errors.As(err, &failed) {
++			operationErr, cleanupErr, owner := failed.OriginalInitializationCleanup()
++			job.mu.Lock()
++			job.operationErr = operationErr
++			job.cleanupErr = cleanupErr
++			job.releaseOwner = owner
++			job.err = errors.Join(operationErr, cleanupErr)
++			job.recorded = true
++			job.mu.Unlock()
++		}
+ 		return err
+ 	}
+ 	defer func() {
+-		if e := read.Close(); e != nil && resultErr == nil {
+-			resultErr = e
++		operationErr := resultErr
++		cleanupErr := read.Close()
++		job.mu.Lock()
++		job.operationErr = operationErr
++		job.cleanupErr = cleanupErr
++		job.err = errors.Join(operationErr, cleanupErr)
++		job.recorded = true
++		if cleanupErr != nil {
++			job.releaseOwner, _ = read.(interfaces.ModelOriginalReleaseRetry)
+ 		}
++		resultErr = job.err
++		job.mu.Unlock()
+ 	}()
+ 	model, actual, err := read.Snapshot()
+ 	if err != nil {
+@@ -257,3 +310,41 @@ func (s *modelService) runOriginalModelDownload(ctx context.Context, proof types
+ }
+ 
+ var _ interfaces.ModelOriginalDownloadLifecycle = (*modelService)(nil)
++
++func (s *modelService) RetryOriginalDownloadRelease(ctx context.Context, id string) error {
++	s.downloads.releaseMu.Lock()
++	defer s.downloads.releaseMu.Unlock()
++	s.downloads.mu.Lock()
++	stopped := s.downloads.stopped
++	job := s.downloads.jobs[id]
++	s.downloads.mu.Unlock()
++	if stopped || job == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	select {
++	case <-ctx.Done():
++		return ctx.Err()
++	case <-job.done:
++	}
++	job.mu.Lock()
++	owner, cleanupErr := job.releaseOwner, job.cleanupErr
++	job.mu.Unlock()
++	if cleanupErr == nil {
++		return nil
++	}
++	if owner == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	err := owner.RetryOriginalRelease(ctx)
++	job.mu.Lock()
++	job.cleanupErr = err
++	if err == nil {
++		job.releaseOwner = nil
++	}
++	job.mu.Unlock()
++	// The immutable terminal error keeps both original causes for diagnosis;
++	// only current outstanding cleanup changes after a real successful release.
++	return err
++}
++
++var _ interfaces.ModelOriginalDownloadCleanupLifecycle = (*modelService)(nil)
+diff --git a/internal/application/service/model_original_download_release_retry_actual_test.go b/internal/application/service/model_original_download_release_retry_actual_test.go
+new file mode 100644
+index 00000000..37bcd38b
+--- /dev/null
++++ b/internal/application/service/model_original_download_release_retry_actual_test.go
+@@ -0,0 +1,203 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/shutdown"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func runOriginalDownloadReleaseRetryActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"normal_close", "close_failure", "operation_and_close_failure", "cleaner_reports_failure"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			_, models, _, _ := actualOriginalModelServices(t, f)
++			life, ok := models.(interfaces.ModelOriginalDownloadLifecycle)
++			require.True(t, ok)
++			cleanup, ok := models.(interfaces.ModelOriginalDownloadCleanupLifecycle)
++			require.True(t, ok)
++			actual, ok := models.(*modelService)
++			require.True(t, ok)
++			ctx, cancel := context.WithTimeout(f.ctx, 8*time.Second)
++			defer cancel()
++			started, released := make(chan struct{}), make(chan struct{})
++			var startOnce, releaseOnce sync.Once
++			var calls atomic.Int64
++			id := "actual-owned-release-retry"
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.URL.Path != "/api/pull" {
++					w.WriteHeader(400)
++					return
++				}
++				calls.Add(1)
++				_, _ = io.Copy(io.Discard, r.Body)
++				startOnce.Do(func() { close(started) })
++				select {
++				case <-released:
++				case <-r.Context().Done():
++					return
++				}
++				w.Header().Set("Content-Type", "application/x-ndjson")
++				if mode == "operation_and_close_failure" {
++					_, _ = io.WriteString(w, "{\"error\":\"owned operation refusal\"}\n")
++				} else {
++					_, _ = io.WriteString(w, "{\"status\":\"success\"}\n")
++				}
++			}))
++			triggerInstalled := false
++			var cleanupOwner interfaces.ModelOriginalReleaseRetry
++			dropFault := func() error {
++				if !triggerInstalled {
++					return nil
++				}
++				var err error
++				if pg {
++					err = f.db.Exec("DROP TRIGGER actual_owned_release_failure ON original_body_leases").Error
++					if err == nil {
++						err = f.db.Exec("DROP FUNCTION actual_owned_release_failure()").Error
++					}
++				} else {
++					err = f.db.Exec("DROP TRIGGER actual_owned_release_failure").Error
++				}
++				if err == nil {
++					triggerInstalled = false
++				}
++				return err
++			}
++			t.Cleanup(func() {
++				_ = dropFault()
++				releaseOnce.Do(func() { close(released) })
++				cancel()
++				life.StopOriginalDownloads()
++				if cleanupOwner != nil {
++					_ = cleanupOwner.RetryOriginalRelease(context.WithoutCancel(f.ctx))
++				}
++				server.Close()
++			})
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			life.StartOriginalDownloads()
++			model := &types.Model{ID: id, TenantID: 7, Name: "nomic-embed-text:actual-owned-release", Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{BaseURL: server.URL, EmbeddingParameters: types.EmbeddingParameters{Dimension: 2}}}
++			require.NoError(t, models.CreateModel(ctx, model))
++			require.NotNil(t, model.OriginalProof)
++			select {
++			case <-started:
++			case <-ctx.Done():
++				t.Fatal("actual owned download did not reach HTTP")
++			}
++			clean := func() *gorm.DB { return f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}) }
++			var receipt types.ModelOriginalBodyReceipt
++			require.NoError(t, clean().Where("origin_id=?", model.OriginalProof.DefinitionID).Take(&receipt).Error)
++			var leases []struct {
++				LeaseID, BodyID, OwnerID, Kind string
++				Epoch, ExpiresAtMS             int64
++				ReleasedAtMS                   *int64
++			}
++			require.NoError(t, clean().Table("original_body_leases").Where("body_id=? AND owner_id LIKE ? AND kind=? AND released_at_ms IS NULL", receipt.BodyID, "model-original-read/%", "read").Find(&leases).Error)
++			require.Len(t, leases, 1)
++			bound := leases[0]
++			if mode != "normal_close" {
++				literal := "'" + strings.ReplaceAll(bound.LeaseID, "'", "''") + "'"
++				if pg {
++					require.NoError(t, f.db.Exec("CREATE FUNCTION actual_owned_release_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.lease_id="+literal+" AND NEW.released_at_ms IS NOT NULL THEN RAISE EXCEPTION 'actual owned original lease release refused'; END IF; RETURN NEW; END $$").Error)
++					require.NoError(t, f.db.Exec("CREATE TRIGGER actual_owned_release_failure BEFORE UPDATE OF released_at_ms ON original_body_leases FOR EACH ROW EXECUTE FUNCTION actual_owned_release_failure()").Error)
++				} else {
++					require.NoError(t, f.db.Exec("CREATE TRIGGER actual_owned_release_failure BEFORE UPDATE OF released_at_ms ON original_body_leases WHEN OLD.lease_id="+literal+" AND NEW.released_at_ms IS NOT NULL BEGIN SELECT RAISE(ABORT,'actual owned original lease release refused'); END").Error)
++				}
++				triggerInstalled = true
++			}
++			releaseOnce.Do(func() { close(released) })
++			err := life.WaitOriginalDownload(ctx, id)
++			require.Equal(t, int64(1), calls.Load())
++			actual.downloads.mu.Lock()
++			job := actual.downloads.jobs[id]
++			actual.downloads.mu.Unlock()
++			require.NotNil(t, job)
++			job.mu.Lock()
++			operationErr, cleanupErr, terminalErr, owner := job.operationErr, job.cleanupErr, job.err, job.releaseOwner
++			job.mu.Unlock()
++			cleanupOwner = owner
++			if mode == "normal_close" {
++				require.NoError(t, err)
++				require.NoError(t, cleanupErr)
++				require.Nil(t, owner)
++				require.NoError(t, cleanup.StopOriginalDownloadsWithErrors())
++				assertMemAtomicSQLLeasesClosed(t, f)
++				return
++			}
++			require.Error(t, cleanupErr)
++			require.Contains(t, cleanupErr.Error(), "actual owned original lease release refused")
++			require.NotNil(t, owner)
++			require.True(t, errors.Is(err, cleanupErr))
++			require.True(t, errors.Is(terminalErr, cleanupErr))
++			if mode == "operation_and_close_failure" {
++				require.ErrorIs(t, operationErr, types.ErrMemoryOriginalUnavailable)
++				require.True(t, errors.Is(err, operationErr))
++			} else {
++				require.NoError(t, operationErr)
++			}
++			var held struct {
++				LeaseID, BodyID, OwnerID, Kind string
++				Epoch, ExpiresAtMS             int64
++				ReleasedAtMS                   *int64
++			}
++			require.NoError(t, clean().Table("original_body_leases").Where("lease_id=?", bound.LeaseID).Take(&held).Error)
++			require.Nil(t, held.ReleasedAtMS)
++			require.Equal(t, bound.OwnerID, held.OwnerID)
++			require.Equal(t, bound.Epoch, held.Epoch)
++			require.Equal(t, bound.ExpiresAtMS, held.ExpiresAtMS)
++			if mode == "cleaner_reports_failure" {
++				cleaner := shutdown.NewResourceCleaner()
++				cleaner.RegisterWithName("OriginalModelDownloads", func() error { return cleanup.StopOriginalDownloadsWithErrors() })
++				errs := shutdown.CleanupAfterHTTPDrain(context.Background(), time.Second, models, cleaner)
++				require.NotEmpty(t, errs)
++				for _, actualErr := range errs {
++					require.True(t, errors.Is(actualErr, cleanupErr))
++				}
++				require.ErrorIs(t, cleanup.RetryOriginalDownloadRelease(ctx, id), types.ErrMemoryOriginalUnavailable, "the stopped manager must not accept a new release operation")
++				require.NoError(t, dropFault())
++				require.NoError(t, owner.RetryOriginalRelease(ctx))
++				require.Equal(t, int64(1), calls.Load())
++				assertMemAtomicSQLLeasesClosed(t, f)
++				return
++			}
++			// The owner retry is release-only. A native SQL refusal retains the same
++			// actual lease and cannot prolong it or mint a fresh original/model call.
++			require.ErrorContains(t, cleanup.RetryOriginalDownloadRelease(ctx, id), "actual owned original lease release refused")
++			require.Equal(t, int64(1), calls.Load())
++			require.NoError(t, dropFault())
++			require.NoError(t, cleanup.RetryOriginalDownloadRelease(ctx, id))
++			require.Equal(t, int64(1), calls.Load())
++			require.NoError(t, clean().Table("original_body_leases").Where("lease_id=?", bound.LeaseID).Take(&held).Error)
++			require.NotNil(t, held.ReleasedAtMS)
++			require.Equal(t, bound.ExpiresAtMS, held.ExpiresAtMS)
++			// Terminal diagnostics retain BOTH original errors even after an actual
++			// cleanup retry succeeds. Current outstanding cleanup becomes empty.
++			historical := life.WaitOriginalDownload(ctx, id)
++			require.True(t, errors.Is(historical, cleanupErr))
++			if operationErr != nil {
++				require.True(t, errors.Is(historical, operationErr))
++			}
++			require.NoError(t, cleanup.StopOriginalDownloadsWithErrors())
++			assertMemAtomicSQLLeasesClosed(t, f)
++		})
++	}
++}
++func TestSQLiteOriginalDownloadReleaseRetryActual(t *testing.T) {
++	runOriginalDownloadReleaseRetryActual(t, false)
++}
++func TestPostgresOriginalDownloadReleaseRetryActual(t *testing.T) {
++	runOriginalDownloadReleaseRetryActual(t, true)
++}
+diff --git a/internal/application/service/model_original_initial_release_failure_actual_test.go b/internal/application/service/model_original_initial_release_failure_actual_test.go
+new file mode 100644
+index 00000000..e954b5d4
+--- /dev/null
++++ b/internal/application/service/model_original_initial_release_failure_actual_test.go
+@@ -0,0 +1,210 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"net/http"
++	"net/http/httptest"
++	"runtime"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type actualModelInitialRefusalKey struct{}
++
++func runModelOriginalInitialReleaseFailureActual(t *testing.T, pg bool) {
++	for _, lane := range []string{"generic_current", "queued_download"} {
++		t.Run(lane, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			_, models, _, reader := actualOriginalModelServices(t, f)
++			ctx, cancel := context.WithTimeout(f.ctx, 8*time.Second)
++			defer cancel()
++			token := new(int)
++			marked := context.WithValue(ctx, actualModelInitialRefusalKey{}, token)
++			var calls atomic.Int64
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(500) }))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			id := f.model.GetModelID()
++			var model *types.Model
++			var life interfaces.ModelOriginalDownloadLifecycle
++			var cleanup interfaces.ModelOriginalDownloadCleanupLifecycle
++			if lane == "queued_download" {
++				id = "actual-initial-recheck-failed-download"
++				var ok bool
++				life, ok = models.(interfaces.ModelOriginalDownloadLifecycle)
++				require.True(t, ok)
++				cleanup, ok = models.(interfaces.ModelOriginalDownloadCleanupLifecycle)
++				require.True(t, ok)
++				model = &types.Model{ID: id, TenantID: 7, Name: "nomic-embed-text:actual-initial-refusal", Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{BaseURL: server.URL, EmbeddingParameters: types.EmbeddingParameters{Dimension: 2}}}
++			}
++			quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
++			triggerInstalled := false
++			dropFault := func() error {
++				if !triggerInstalled {
++					return nil
++				}
++				var err error
++				if pg {
++					err = f.db.Exec("DROP TRIGGER actual_initial_release_failure ON original_body_leases").Error
++					if err == nil {
++						err = f.db.Exec("DROP FUNCTION actual_initial_release_failure()").Error
++					}
++				} else {
++					err = f.db.Exec("DROP TRIGGER actual_initial_release_failure").Error
++				}
++				if err == nil {
++					triggerInstalled = false
++				}
++				return err
++			}
++			target := "EXISTS(SELECT 1 FROM model_original_body_receipts b JOIN model_definition_originals d ON d.id=b.origin_id WHERE b.body_id=OLD.body_id AND d.model_id=" + quote(id) + ")"
++			if pg {
++				require.NoError(t, f.db.Exec("CREATE FUNCTION actual_initial_release_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.released_at_ms IS NOT NULL AND "+target+" THEN RAISE EXCEPTION 'actual initial original release refused'; END IF; RETURN NEW; END $$").Error)
++				require.NoError(t, f.db.Exec("CREATE TRIGGER actual_initial_release_failure BEFORE UPDATE OF released_at_ms ON original_body_leases FOR EACH ROW EXECUTE FUNCTION actual_initial_release_failure()").Error)
++			} else {
++				require.NoError(t, f.db.Exec("CREATE TRIGGER actual_initial_release_failure BEFORE UPDATE OF released_at_ms ON original_body_leases WHEN NEW.released_at_ms IS NOT NULL AND "+target+" BEGIN SELECT RAISE(ABORT,'actual initial original release refused'); END").Error)
++			}
++			triggerInstalled = true
++			var owner interfaces.ModelOriginalReleaseRetry
++			name := "actual-post-commit-initial-model-refusal"
++			var applied atomic.Bool
++			var faultErr error
++			var acquired int64
++			require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
++				if tx.Statement.Table != "users" || tx.Statement.Context.Value(actualModelInitialRefusalKey{}) != token || applied.Load() {
++					return
++				}
++				pcs := make([]uintptr, 64)
++				frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
++				initial, recheck := false, false
++				for {
++					frame, more := frames.Next()
++					initial = initial || strings.HasSuffix(frame.Function, ".beginModelOriginalReadMode")
++					recheck = recheck || strings.HasSuffix(frame.Function, ".(*modelOriginalRead).Recheck")
++					if !more {
++						break
++					}
++				}
++				if !initial || !recheck {
++					return
++				}
++				// This first Recheck runs after the real acquisition transaction committed.
++				// Within this new transaction, actual current-user read observes a native
++				// refusal; its rollback cannot remove the already-committed two leases.
++				clean := func() *gorm.DB {
++					return tx.Session(&gorm.Session{NewDB: true, Context: context.WithValue(tx.Statement.Context, actualModelInitialRefusalKey{}, nil)})
++				}
++				faultErr = clean().Table("original_body_leases").Where("owner_id LIKE ? AND body_id IN (SELECT body_id FROM model_original_body_receipts WHERE origin_id IN (SELECT id FROM model_definition_originals WHERE model_id=? UNION SELECT id FROM model_credential_originals WHERE model_id=?)) AND kind=? AND released_at_ms IS NULL", "model-original-read/%", id, id, "read").Count(&acquired).Error
++				if faultErr == nil && acquired != 2 {
++					faultErr = fmt.Errorf("initial Recheck saw %d actual committed leases, expected2", acquired)
++					return
++				}
++				if faultErr == nil {
++					write := clean().Model(&types.User{}).Where("id=?", types.CallerFromContext(f.ctx).UserID).Update("is_active", false)
++					faultErr = write.Error
++					if faultErr == nil && write.RowsAffected != 1 {
++						faultErr = fmt.Errorf("real initial-user refusal changed %d rows", write.RowsAffected)
++						return
++					}
++					if faultErr == nil {
++						var user types.User
++						faultErr = clean().Where("id=?", types.CallerFromContext(f.ctx).UserID).Take(&user).Error
++						if faultErr == nil && user.IsActive {
++							faultErr = fmt.Errorf("actual initial-user readback remained active")
++							return
++						}
++					}
++				}
++				applied.Store(faultErr == nil)
++				// No AddError/fake authorizer is used. The pending real users query and
++				// actual RefreshCurrentReadActor must reject its now-inactive SQL row.
++			}))
++			t.Cleanup(func() {
++				_ = f.db.Callback().Query().Remove(name)
++				_ = dropFault()
++				cancel()
++				if life != nil {
++					life.StopOriginalDownloads()
++				}
++				if owner != nil {
++					_ = owner.RetryOriginalRelease(context.WithoutCancel(f.ctx))
++				}
++			})
++			var err error
++			var operationErr, cleanupErr error
++			if lane == "generic_current" {
++				read, beginErr := reader.BeginModelOriginalRead(marked, id, nil)
++				if read != nil {
++					t.Cleanup(func() { _ = dropFault(); _ = read.Close() })
++				}
++				err = beginErr
++				require.Nil(t, read, "initial failure exposes no usable model/read/grant")
++				require.True(t, applied.Load())
++				require.NoError(t, faultErr)
++				var failure interfaces.ModelOriginalInitializationFailure
++				require.ErrorAs(t, err, &failure)
++				operationErr, cleanupErr, owner = failure.OriginalInitializationCleanup()
++			} else {
++				life.StartOriginalDownloads()
++				require.NoError(t, models.CreateModel(marked, model))
++				require.NotNil(t, model.OriginalProof)
++				err = life.WaitOriginalDownload(ctx, id)
++				actual := models.(*modelService)
++				actual.downloads.mu.Lock()
++				job := actual.downloads.jobs[id]
++				actual.downloads.mu.Unlock()
++				require.NotNil(t, job)
++				job.mu.Lock()
++				operationErr, cleanupErr, owner = job.operationErr, job.cleanupErr, job.releaseOwner
++				job.mu.Unlock()
++			}
++			require.True(t, applied.Load())
++			require.NoError(t, faultErr)
++			require.Equal(t, int64(2), acquired)
++			require.Error(t, operationErr)
++			require.ErrorContains(t, cleanupErr, "actual initial original release refused")
++			require.NotNil(t, owner)
++			require.True(t, errors.Is(err, operationErr))
++			require.True(t, errors.Is(err, cleanupErr))
++			require.Zero(t, calls.Load())
++			_, usable := owner.(interfaces.ModelOriginalRead)
++			require.False(t, usable, "failed owner must have release-only methods")
++			var active int64
++			require.NoError(t, f.db.Table("original_body_leases").Where("owner_id LIKE ? AND released_at_ms IS NULL AND body_id IN(SELECT body_id FROM model_original_body_receipts WHERE origin_id IN(SELECT id FROM model_definition_originals WHERE model_id=? UNION SELECT id FROM model_credential_originals WHERE model_id=?))", "model-original-read/%", id, id).Count(&active).Error)
++			require.Equal(t, int64(1), active)
++			require.NoError(t, dropFault())
++			if lane == "queued_download" {
++				require.NoError(t, cleanup.RetryOriginalDownloadRelease(ctx, id))
++				require.NoError(t, cleanup.StopOriginalDownloadsWithErrors())
++			} else {
++				require.NoError(t, owner.RetryOriginalRelease(ctx))
++			}
++			require.Zero(t, calls.Load())
++			assertMemAtomicSQLLeasesClosed(t, f)
++			if lane == "queued_download" {
++				var count int64
++				require.NoError(t, f.db.Model(&types.ModelDownloadOriginal{}).Where("model_id=?", id).Count(&count).Error)
++				require.Zero(t, count)
++				var stored types.Model
++				require.NoError(t, f.db.Where("id=?", id).Take(&stored).Error)
++				require.Equal(t, types.ModelStatusDownloading, stored.Status)
++			}
++		})
++	}
++}
++func TestSQLiteModelOriginalInitialReleaseFailureActual(t *testing.T) {
++	runModelOriginalInitialReleaseFailureActual(t, false)
++}
++func TestPostgresModelOriginalInitialReleaseFailureActual(t *testing.T) {
++	runModelOriginalInitialReleaseFailureActual(t, true)
++}
+diff --git a/internal/container/cleanup_original_model_downloads.go b/internal/container/cleanup_original_model_downloads.go
+index 8a96f25e..448fc45a 100644
+--- a/internal/container/cleanup_original_model_downloads.go
++++ b/internal/container/cleanup_original_model_downloads.go
+@@ -10,6 +10,12 @@ import (
+ func registerOriginalModelDownloads(models interfaces.ModelService, cleaner interfaces.ResourceCleaner) {
+ 	if life, ok := models.(interfaces.ModelOriginalDownloadLifecycle); ok {
+ 		life.StartOriginalDownloads()
+-		cleaner.RegisterWithName("OriginalModelDownloads", func() error { life.StopOriginalDownloads(); return nil })
++		cleaner.RegisterWithName("OriginalModelDownloads", func() error {
++			if cleanup, ok := models.(interfaces.ModelOriginalDownloadCleanupLifecycle); ok {
++				return cleanup.StopOriginalDownloadsWithErrors()
++			}
++			life.StopOriginalDownloads()
++			return nil
++		})
+ 	}
+ }
+diff --git a/internal/shutdown/http_resources.go b/internal/shutdown/http_resources.go
+index 84539924..1a37d3b5 100644
+--- a/internal/shutdown/http_resources.go
++++ b/internal/shutdown/http_resources.go
+@@ -14,8 +14,14 @@ import (
+ func CleanupAfterHTTPDrain(drain context.Context, timeout time.Duration, models interfaces.ModelService, cleaner interfaces.ResourceCleaner) []error {
+ 	ctx, cancel := context.WithTimeout(context.WithoutCancel(drain), timeout)
+ 	defer cancel()
+-	if life, ok := models.(interfaces.ModelOriginalDownloadLifecycle); ok {
++	var errs []error
++	if cleanup, ok := models.(interfaces.ModelOriginalDownloadCleanupLifecycle); ok {
++		if err := cleanup.StopOriginalDownloadsWithErrors(); err != nil {
++			errs = append(errs, err)
++		}
++	} else if life, ok := models.(interfaces.ModelOriginalDownloadLifecycle); ok {
+ 		life.StopOriginalDownloads()
+ 	}
+-	return cleaner.Cleanup(ctx)
++	return append(errs, cleaner.Cleanup(ctx)...)
++
+ }
+diff --git a/internal/types/interfaces/model_original_download.go b/internal/types/interfaces/model_original_download.go
+index c79104dc..2f96c7e4 100644
+--- a/internal/types/interfaces/model_original_download.go
++++ b/internal/types/interfaces/model_original_download.go
+@@ -20,3 +20,18 @@ type ModelOriginalDownloadLifecycle interface {
+ 	StopOriginalDownloads()
+ 	WaitOriginalDownload(context.Context, string) error
+ }
++
++// Cleanup-only capability: never reopens a read, renews a lease or authorizes
++// model execution. The concrete owner retains the failed captured tuples.
++type ModelOriginalReleaseRetry interface{ RetryOriginalRelease(context.Context) error }
++type ModelOriginalDownloadCleanupLifecycle interface {
++	StopOriginalDownloadsWithErrors() error
++	RetryOriginalDownloadRelease(context.Context, string) error
++}
++
++// A failed initialization exposes errors and its CLOSED release-only owner.
++// It carries no serializable origin, Snapshot, Context or execution capability.
++type ModelOriginalInitializationFailure interface {
++	error
++	OriginalInitializationCleanup() (operationErr, cleanupErr error, owner ModelOriginalReleaseRetry)
++}

@@ -126,7 +126,10 @@ Failed Close release retry/error propagation now has a corrected source and
 refusal. It preserves both errors and nilread, reports outstanding failures,
 and retries only captured closed-owner releases. Eight resources are absent;
 see the [failure16 record](evidence/memory-download-release-failures16-GREEN-20261011.json).
-Shared model/download regressions and cross-crash cleanup recovery remain required. The shared model final-binding repair preserves its earlier test-only compile
+The same corrected source now passes all100 shared model/download regressions
+in262.830s, with10 exact resources absent. See the [existing100 record](evidence/memory-release-retry-existing100-GREEN-20261011.json)
+and [reviewable cleanup proposal](../integration/proposals/weknora-original-download-cleanup-retry-20261011.json).
+Cross-crash cleanup recovery remains required. The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
