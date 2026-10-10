@@ -52,8 +52,12 @@ The original ANY-DROP downgrade protection remains unchanged. This is SQL
 migration/schema/FK/control acceptance only. See the [migration34 record](evidence/memory-full-migration34-GREEN-20261011.json).
 Earlier30-node and34-node failed attempts remain preserved.
 
-Exact saved-history Recall reopening is now a separate source candidate and
-needs matched actual tests. Semantic query/vector completion dependencies and
+Exact saved-history Recall reopening now has an actual12-node failure: SQLite
+legal completion succeeds but fresh history refuses before negatives; PostgreSQL
+completion preludes exceed the original HTTP8s bound. Failed owners/raw/data
+are retained, and the later vector/Recall/Local stages did not run. See the
+[history12 record](evidence/memory-saved-Recall-history12-failure-20261011.json).
+The historical reader and multi-dependency final-clock union remain under repair. Semantic query/vector completion dependencies and
 explicit local model download shutdown also remain underway. Tenant-cloud
 credentials, complete history, application/broker/recovery and PRD performance
 remain required. The full V1 goal remains active; deployment and coverage flags
