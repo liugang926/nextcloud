@@ -11,14 +11,14 @@ input/result and public-entry nodes in a separate window. Those component
 results do not accept the full embedding feature. The reviewable source remains
 separate from the adopted candidate manifest.
 
-The latest complete native run passes54/55 nodes, zero skips/OOM. Its remaining
-public-writer case proved real commit blocking, then encountered PostgreSQL
-40001 under the original repeatable-read snapshot. A bounded fresh initial graph
-read fixes that case on a byte-identical test, which now passes under unchanged
-10s/5s limits. All seven successful resources are independently absent. The
-54-node baseline and one-node repaired run are separate; the broader integrated
-gate remains pending. See the [matched public-writer GREEN](evidence/memory-native-public-serialization-GREEN-20261011.json)
-and [reviewable native follow-up](../integration/proposals/weknora-native-memory-followup-20261011.json).
+Current source `7c9b30e2` now passes all227 mandatory nodes in one serial
+window: native55, productive derived24, ordinary model HTTP10, model authoring/
+memory/body58, policy58 and queue/lifecycle22. Zero failures/skips/OOM; the
+window took995.190s under the unchanged20-minute bound. All12 exact owned
+resources are independently absent. This closes those complete selected gates,
+including the formerly failing PG public-writer operation; it does not recover
+the unchanged unbound515 test or accept new consumers/full V1. See the [227-node
+record](evidence/memory-current-native-model-policy-227-GREEN-20261011.json).
 
 The original partial processing test now passes SQLite and PostgreSQL under
 the unchanged20s deadline on `ce006db6`, with its full test file byte-identical
