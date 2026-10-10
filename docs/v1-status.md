@@ -21,6 +21,29 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+Model/policy/derived-memory source is now fused privately, with the latest
+test-adapter integration at `b1c24809`. Both sets of original body publications,
+execution proof fields and pending schema modules are preserved. A complete
+core patch round-trips to its exact base tree. Six host SQLite schema checks
+passed: empty DOWN succeeds; four representative invalid schema facts refuse
+before any DROP/ALTER, with all other modules retained. All 14 fact tables are
+listed in the upfront guard, not claimed as 14 individually executed cases.
+These sources have no formatting, compilation or business acceptance. Model
+catalog/default fallback and current actor/provider lifetime defects remain
+under repair; legitimate ordinary/builtin/embedding and complete old-memory
+flows remain required. See the [integrated source record](evidence/memory-model-derived-integration-source-20261010.json).
+
+Original-policy source `862fd486` now passed actual SQLite/PostgreSQL authoring:
+two parents and 20 nodes, no failures or skips. Its six-parent component run
+passed 48 of 58 nodes. Eight legal queue leaves completed Handle, one model
+call, item/checkpoint commit and policy-proof checks before their test-created
+ACK payload omitted the original language field; both queue parents failed.
+The repair consumes the actual emitted task payload and strengthens rollback
+cancellation assertions without changing production checks or expectations.
+It awaits a fresh rerun. Body lease/availability groups passed; failed runtime
+volumes and raw evidence are retained. See the
+[policy SQL partial record](evidence/memory-policy-SQL-partial-20261010.json).
+
 Integrated original-policy source `862fd486` now compiled all five selected
 packages successfully in 115.442 seconds, with no OOM or compiler errors.
 This `-run ^$` check executed no business tests. Its owned actor and temporary
