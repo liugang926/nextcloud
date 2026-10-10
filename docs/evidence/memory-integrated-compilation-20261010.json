@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "classification": "memory_integrated_compilation_only",
+  "record_date": "2026-10-10",
+  "scope": "Compilation of five selected packages and their test sources using -run ^$; no business tests or model execution.",
+  "initial_attempt": {
+    "source_head": "652df78f1957d6796c83cb78ead8589433c91ee6",
+    "source_tree": "4e523143f4b8f5d7a88ae3943775ada0688c3a9e",
+    "actual_terminal": 1,
+    "attach_terminal": 1,
+    "duration_seconds": 146.761,
+    "compiler_error_count": 2,
+    "compiler_errors": [
+      "internal/application/service/memory_original_transaction.go:41:50: cannot use knowledge (variable of interface type interfaces.KnowledgeRepository) as access.NextcloudLineageSnapshotLookup value in argument to access.NewNextcloudSourceLineageGuard: interfaces.KnowledgeRepository does not implement access.NextcloudLineageSnapshotLookup (missing method RecheckNextcloudSourceLineage)",
+      "internal/application/service/memory_original_transaction.go:41:61: cannot use kbs (variable of interface type interfaces.KnowledgeBaseRepository) as access.LineageKnowledgeBaseLookup value in argument to access.NewNextcloudSourceLineageGuard: interfaces.KnowledgeBaseRepository does not implement access.LineageKnowledgeBaseLookup (missing method GetKnowledgeBaseByIDOnly)"
+    ],
+    "business_tests": 0,
+    "metadata_sha256": "03f90cd7621ed7b722eba3a159363330ac6e3c1dda3a4468cf0a953326ae72c0",
+    "private_raw_sha256": "9e7e0e26d112f2c67f61c24acfbb6f42c775ed8672abccbf32f42d82ed705144",
+    "private_raw_bytes": 4519,
+    "terminal_cleanup_complete_reported_by_root": true
+  },
+  "corrected_source": {
+    "head": "5e071eef1121c515fb1797b198dbdfef3a392b5f",
+    "tree": "a2ceaa09c8550404e19587b0f4024f3da5d48c59",
+    "fix_reported_by_root": "Narrow lineage interface assertion and transaction-bound KnowledgeBase service wiring.",
+    "candidate_manifest_changed": false
+  },
+  "second_attempt": {
+    "command": [
+      "go",
+      "test",
+      "-buildvcs=false",
+      "-tags",
+      "sqlite_fts5",
+      "-p",
+      "1",
+      "-json",
+      "-run",
+      "^$",
+      "./internal/application/repository",
+      "./internal/application/service",
+      "./internal/application/service/memory",
+      "./internal/router",
+      "./internal/container"
+    ],
+    "actual_terminal": 0,
+    "attach_terminal": 0,
+    "duration_seconds": 212.012,
+    "OOM_observed": false,
+    "compiler_errors": [],
+    "passed_package_count": 5,
+    "passed_packages": [
+      "github.com/Tencent/WeKnora/internal/application/repository",
+      "github.com/Tencent/WeKnora/internal/application/service",
+      "github.com/Tencent/WeKnora/internal/application/service/memory",
+      "github.com/Tencent/WeKnora/internal/router",
+      "github.com/Tencent/WeKnora/internal/container"
+    ],
+    "independently_parsed_package_actions": {
+      "start": 5,
+      "output": 15,
+      "pass": 5
+    },
+    "independently_parsed_test_actions": {},
+    "invalid_JSON_lines": 0,
+    "test_skip_count": 0,
+    "business_tests": 0,
+    "metadata_sha256": "d3c2c8be5e51d724f6fca81c407725aca7a0e37a811ad0d6fbcc1d0fb6ff9a11",
+    "private_raw_sha256": "8d0ff29b368009c86d0f8ec0b88a54d32d9e4bb0482552d9c6a11f7d0328e851",
+    "private_raw_bytes": 4014,
+    "raw_disk_hash_independently_verified": true
+  },
+  "cleanup": {
+    "metadata_sha256": "b6d2932c67c991f532b2c5a23aaa00b234213b8f177238567878baf3d49e6e31",
+    "owned_compile_actor_and_temp_volume_reported_removed": true,
+    "shared_caches_untouched": true,
+    "runtime_mutations_by_document_editor": false
+  },
+  "historical_runtime_overlap": {
+    "classification": "observed_external_pressure_overlap",
+    "metadata_sha256": "db19b8fba4a87fa52548648b0e69981f63e17c9048150238c1a5230ba20dc4a5",
+    "strict_serial_window_confirmed": false,
+    "impact_on_latency_not_attributed": true,
+    "foreign_mutated": false,
+    "limits": "Historical external pressure observation only; no isolated performance claim or latency attribution."
+  },
+  "acceptance": {
+    "selected_five_package_compilation": true,
+    "business_tests": false,
+    "SQL_and_broker_business_gates": false,
+    "normal_application": false,
+    "restore": false,
+    "V1": false
+  },
+  "privacy": {
+    "raw_output_retained_privately": true,
+    "private_workspace_paths_fixture_credentials_DSNs_and_environment_omitted": true
+  },
+  "document_update_actions": {
+    "Go_or_Docker_executed": false,
+    "commit_or_push_performed": false,
+    "candidate_manifest_or_source_patches_modified": false
+  }
+}

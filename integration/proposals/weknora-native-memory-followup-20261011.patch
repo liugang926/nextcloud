@@ -1,0 +1,1023 @@
+diff --git a/internal/application/repository/memory_derived_native.go b/internal/application/repository/memory_derived_native.go
+index 41eaa2f8..04fc3087 100644
+--- a/internal/application/repository/memory_derived_native.go
++++ b/internal/application/repository/memory_derived_native.go
+@@ -3,6 +3,7 @@ package repository
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
+ 
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+@@ -55,7 +56,26 @@ func (r *memoryRepository) prepareMemoryNativeWrite(ctx context.Context, scope i
+ 	if r.derived == nil {
+ 		return ctx, nil, types.ErrMemoryOriginalUnavailable
+ 	}
+-	read, err := r.derived.BeginMemoryDerivedRead(ctx, scope)
++	var read interfaces.MemoryDerivedRead
++	var err error
++	// A repeatable-read snapshot can predate a concurrent original commit
++	// whose collection lock we waited for. PostgreSQL then aborts this read
++	// with 40001. Begin rolls back/closes every failed attempt; reacquire the
++	// complete graph under a fresh snapshot before any caller write executes.
++	// Refusals, canceled contexts and mutation-transaction errors never retry.
++	for attempt := 0; attempt < 3; attempt++ {
++		if err = ctx.Err(); err != nil {
++			return ctx, nil, err
++		}
++		read, err = r.derived.BeginMemoryDerivedRead(ctx, scope)
++		if err == nil {
++			break
++		}
++		var state interface{ SQLState() string }
++		if r.db.Dialector.Name() != "postgres" || !errors.As(err, &state) || state.SQLState() != "40001" {
++			return ctx, nil, err
++		}
++	}
+ 	if err != nil {
+ 		return ctx, nil, err
+ 	}
+diff --git a/internal/application/repository/memory_derived_topic.go b/internal/application/repository/memory_derived_topic.go
+index 34ca5531..3487d535 100644
+--- a/internal/application/repository/memory_derived_topic.go
++++ b/internal/application/repository/memory_derived_topic.go
+@@ -34,6 +34,9 @@ func (r *memoryOriginalAdmissionRepository) applyMemoryDerivedTopicInTx(tx *gorm
+ 		if fact.ID != op.TargetPublicationID || fact.MaterialDigest != op.TargetDigest || fact.DerivationID != op.TargetDerivationID {
+ 			return nil, types.ErrMemoryOriginalUnavailable
+ 		}
++		// The existing target is selected by its captured ID and scope. A new
++		// row UUID must not become an additional GORM primary-key predicate.
++		row = &types.MemoryTopicStat{}
+ 		if err = tx.Session(&gorm.Session{NewDB: true}).Clauses(forUpdateClause()).Where("id=? AND tenant_id=? AND subject_id=?", op.TargetID, scope.TenantID, scope.SubjectID).Take(row).Error; err != nil {
+ 			return nil, err
+ 		}
+diff --git a/internal/application/service/mem_original_atomic_actual_test.go b/internal/application/service/mem_original_atomic_actual_test.go
+index 6890f18a..0ec12649 100644
+--- a/internal/application/service/mem_original_atomic_actual_test.go
++++ b/internal/application/service/mem_original_atomic_actual_test.go
+@@ -432,13 +432,22 @@ func runMemAtomicSQLWholeResult(t *testing.T, pg bool) {
+ 					expected = 2
+ 				}
+ 				assert.Equal(t, expected, memAtomicSQLCount(t, f, "memory_items"))
+-				assert.Equal(t, expected, memAtomicSQLCount(t, f, "memory_original_derivations"), "each committed operation has its own original dependency fact")
++				expectedOrigins := expected
++				if expected > 0 {
++					expectedOrigins++
++				} // separately proved resident-block render
++				assert.Equal(t, expectedOrigins, memAtomicSQLCount(t, f, "memory_original_derivations"), "complete model and resident-block effect set")
+ 				assert.EqualValues(t, 1, memAtomicSQLCount(t, f, "memory_original_checkpoints"), "whole result has one successful immutable checkpoint")
+ 				after := actualMemoryProgress(t, f.db, f.scope, f.session.ID)
+ 				assert.False(t, after.Pending)
+ 				assert.True(t, after.Cursor.After(before.Cursor))
+ 				var receipt types.MemoryOriginalCheckpoint
+ 				require.NoError(t, f.db.Table("memory_original_checkpoints").Where("tenant_id=? AND subject_id=? AND session_id=?", f.scope.TenantID, f.scope.SubjectID, f.session.ID).Take(&receipt).Error)
++				expectedEffects := map[string]int{}
++				if expected > 0 {
++					expectedEffects = map[string]int{"memory_item/add": 2, "memory_block/render": 1}
++				}
++				assertMemNativeOriginalEffectsSQL(t, f, receipt.ID, expectedEffects)
+ 				assert.Equal(t, before.OriginalAdmissionID, receipt.InputAdmissionID)
+ 				assert.Equal(t, before.Revision, receipt.PendingRevision)
+ 				assert.Equal(t, before.Cursor, receipt.From)
+@@ -474,8 +483,13 @@ func runMemAtomicSQLWholeResult(t *testing.T, pg bool) {
+ 				assert.Equal(t, receipt.Digest, expectedReceiptDigest, "PG roundtrip must preserve the successful checkpoint digest")
+ 				var origins []types.MemoryOriginalDerivation
+ 				require.NoError(t, f.db.Where("commit_id=?", receipt.ID).Find(&origins).Error)
+-				assert.Len(t, origins, int(expected))
++				assert.Len(t, origins, int(expectedOrigins))
++				originKinds := map[string]int{}
++				seenOperations := map[string]bool{}
+ 				for _, origin := range origins {
++					require.False(t, seenOperations[origin.OperationID])
++					seenOperations[origin.OperationID] = true
++					originKinds[origin.ObjectKind+"/"+origin.Action]++
+ 					originCopy := origin
+ 					originCopy.Digest = ""
+ 					expectedOriginDigest, digestErr := repository.KnowledgeInputDigest(originCopy)
+@@ -484,6 +498,7 @@ func runMemAtomicSQLWholeResult(t *testing.T, pg bool) {
+ 					assert.Equal(t, receipt.InputAdmissionID, origin.InputAdmissionID)
+ 					assert.Equal(t, receipt.ExecutionAdmissionID, origin.ExecutionAdmissionID)
+ 				}
++				assert.Equal(t, expectedEffects, originKinds, "the full exact model and resident-block operation set is retained")
+ 				var payload types.MemoryExtractPayload
+ 				require.NoError(t, json.Unmarshal(f.queue.task.Payload(), &payload))
+ 				completed, verifyErr := f.outbox.VerifyMemoryOriginalCompletion(f.ctx, payload)
+diff --git a/internal/application/service/mem_original_capacity_whole_result_actual_test.go b/internal/application/service/mem_original_capacity_whole_result_actual_test.go
+index 596d242f..728344d2 100644
+--- a/internal/application/service/mem_original_capacity_whole_result_actual_test.go
++++ b/internal/application/service/mem_original_capacity_whole_result_actual_test.go
+@@ -30,8 +30,7 @@ func runMemOriginalCapacityWholeResultSQL(t *testing.T, pg bool) {
+ 			cfg.MaxItems = 1
+ 			require.Equal(t, f.model.GetModelID(), cfg.ExtractModelID)
+ 			require.Empty(t, cfg.ExtractInstructions)
+-			tenant.MemoryConfig = &cfg
+-			require.NoError(t, tenants.UpdateTenant(f.ctx, tenant))
++			authorMemNativeFixturePolicySQL(t, f, cfg)
+ 			saved, err := tenants.GetTenantByID(f.ctx, f.scope.TenantID)
+ 			require.NoError(t, err)
+ 			require.Equal(t, 1, saved.MemoryConfig.MaxItems)
+@@ -106,13 +105,14 @@ func runMemOriginalCapacityWholeResultSQL(t *testing.T, pg bool) {
+ 				require.True(t, receipt.Drained)
+ 				var manifest []types.MemoryOriginalEffect
+ 				require.NoError(t, json.Unmarshal([]byte(receipt.OperationManifest), &manifest))
+-				require.Len(t, manifest, 3)
++				require.Len(t, manifest, 4)
++				assertMemNativeOriginalEffectsSQL(t, f, receipt.ID, map[string]int{"memory_item/add": 2, "memory_item/archive": 1, "memory_block/render": 1})
+ 				operationsDigest, err := repository.KnowledgeInputDigest(manifest)
+ 				require.NoError(t, err)
+ 				assert.Equal(t, receipt.OperationsDigest, operationsDigest)
+ 				var origins []types.MemoryOriginalDerivation
+ 				require.NoError(t, f.db.Where("commit_id=?", receipt.ID).Find(&origins).Error)
+-				require.Len(t, origins, 3)
++				require.Len(t, origins, 4)
+ 				modelOrigins := map[string]types.MemoryOriginalDerivation{}
+ 				var archive *types.MemoryOriginalDerivation
+ 				for index := range origins {
+diff --git a/internal/application/service/mem_original_cross_input_actual_test.go b/internal/application/service/mem_original_cross_input_actual_test.go
+index 87ca18cc..36c1becb 100644
+--- a/internal/application/service/mem_original_cross_input_actual_test.go
++++ b/internal/application/service/mem_original_cross_input_actual_test.go
+@@ -148,8 +148,7 @@ func runMemCrossInputCheckpointSQL(t *testing.T, pg bool) {
+ 	require.Equal(t, f.model.GetModelID(), cfg.ExtractModelID)
+ 	require.Empty(t, cfg.ExtractInstructions)
+ 	cfg.ExtractMinIntervalSeconds = 1
+-	tenant.MemoryConfig = &cfg
+-	require.NoError(t, tenants.UpdateTenant(f.ctx, tenant))
++	authorMemNativeFixturePolicySQL(t, f, cfg)
+ 	persisted, err := tenants.GetTenantByID(f.ctx, f.scope.TenantID)
+ 	require.NoError(t, err)
+ 	require.NotNil(t, persisted.MemoryConfig)
+@@ -228,7 +227,8 @@ func runMemCrossInputCheckpointSQL(t *testing.T, pg bool) {
+ 	require.NoError(t, err)
+ 	require.True(t, completedA)
+ 	require.EqualValues(t, 1, memAtomicSQLCount(t, f, "memory_items"))
+-	require.EqualValues(t, 1, memAtomicSQLCount(t, f, "memory_original_derivations"))
++	require.EqualValues(t, 2, memAtomicSQLCount(t, f, "memory_original_derivations"))
++	assertMemNativeOriginalEffectsSQL(t, f, progressB.OriginalCheckpointID, map[string]int{"memory_item/add": 1, "memory_block/render": 1})
+ 	require.EqualValues(t, 2, memAtomicSQLCount(t, f, "memory_original_checkpoints"))
+ 	require.Equal(t, firstFacts, actualMemoryFacts(t, f.db, firstUserID))
+ 	assertMemAtomicSQLLeasesClosed(t, f)
+diff --git a/internal/application/service/mem_original_native_fixture_protocol_test.go b/internal/application/service/mem_original_native_fixture_protocol_test.go
+new file mode 100644
+index 00000000..86dde2bc
+--- /dev/null
++++ b/internal/application/service/mem_original_native_fixture_protocol_test.go
+@@ -0,0 +1,312 @@
++package service
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// A fixture configuration is authored before original capture, using the same
++// producer and independent current reader as the policy SQL contract tests.
++func authorMemNativeFixturePolicySQL(t *testing.T, f *memAtomicSQLFixture, cfg types.MemoryConfig) types.MemoryPolicyProof {
++	t.Helper()
++	_, writer, reader := actualPolicyRepository(t, f)
++	_, before, err := reader.ReadMemoryPolicyOriginal(f.ctx, f.scope.TenantID)
++	require.NoError(t, err)
++	require.NotNil(t, before)
++	require.True(t, before.Valid())
++	_, authored, err := writer.ReplaceMemoryPolicyOriginal(f.ctx, f.scope.TenantID, cfg)
++	require.NoError(t, err)
++	require.NotNil(t, authored)
++	require.True(t, authored.Valid())
++	require.Greater(t, authored.Revision, before.Revision)
++	_, _, independent := actualPolicyRepository(t, f)
++	actual, proof, err := independent.ReadMemoryPolicyOriginal(f.ctx, f.scope.TenantID)
++	require.NoError(t, err)
++	require.NotNil(t, proof)
++	require.True(t, proof.Valid())
++	require.Equal(t, *authored, *proof)
++	want, err := types.MemoryPolicyBytes(&cfg)
++	require.NoError(t, err)
++	got, err := types.MemoryPolicyBytes(actual)
++	require.NoError(t, err)
++	require.Equal(t, string(want), string(got))
++	require.Equal(t, types.MemoryOriginalBytesDigest(want), proof.PolicyDigest)
++	return *proof
++}
++
++// Assert the complete typed receipt, rather than treating every derived row
++// as a model item operation. These native transports emit no topic operation;
++// resident block rendering and capacity retirement are separate exact effects.
++func assertMemNativeOriginalEffectsSQL(t *testing.T, f *memAtomicSQLFixture, checkpointID string, expected map[string]int) {
++	t.Helper()
++	var receipt types.MemoryOriginalCheckpoint
++	require.NoError(t, f.db.Where("id=?", checkpointID).Take(&receipt).Error)
++	require.Equal(t, f.scope.TenantID, receipt.TenantID)
++	require.Equal(t, f.scope.SubjectID, receipt.SubjectID)
++	// Historical effect verification consumes the actual retained immutable
++	// envelope. The worker loader intentionally requires Pending=true and is
++	// not a history or recall API after a successful checkpoint drains it.
++	var original types.MemoryOriginalAdmission
++	require.NoError(t, f.db.Where("id=?", receipt.InputAdmissionID).Take(&original).Error)
++	input := &types.MemoryOriginalInput{}
++	require.NoError(t, json.Unmarshal([]byte(original.Envelope), input))
++	require.Equal(t, original.ID, input.ID)
++	require.Equal(t, original.Digest, input.Digest)
++	unsignedInput := *input
++	unsignedInput.Digest = ""
++	digest, err := repository.KnowledgeInputDigest(unsignedInput)
++	require.NoError(t, err)
++	require.Equal(t, original.Digest, digest, "the immutable full metadata envelope must verify independently")
++	require.Equal(t, f.scope.TenantID, original.TenantID)
++	require.Equal(t, f.scope.SubjectID, original.SubjectID)
++	require.Equal(t, receipt.SessionID, original.SessionID)
++	require.Equal(t, receipt.PendingRevision, original.PendingRevision)
++	require.Equal(t, original.TenantID, input.Request.TenantID)
++	require.Equal(t, original.SubjectID, input.Request.SubjectID)
++	require.Equal(t, original.SessionID, input.Request.SessionID)
++	require.Equal(t, original.PendingRevision, input.Request.PendingRevision)
++	require.Equal(t, original.PreviousAdmissionID, input.Request.PreviousAdmissionID)
++	require.Equal(t, input.Request.TenantID, input.Actor.CallerTenantID)
++	require.Equal(t, input.Request.SubjectID, input.Actor.Principal.StorageID())
++	require.Equal(t, types.CallerFromContext(f.ctx).UserID, input.Actor.UserID)
++	require.True(t, input.Request.EnqueuePolicyProof.Valid())
++	require.Equal(t, input.Request.EnqueuePolicyProof.PolicyDigest, input.Request.EnqueuePolicyDigest)
++	require.True(t, input.Request.EnqueueModelProof.Valid())
++	require.Equal(t, input.Request.EnqueueModelProof.ModelID, input.Request.EnqueueModelID)
++	require.Equal(t, input.Request.EnqueueModelProof.Digest, input.Request.EnqueueModelDigest)
++	require.NotNil(t, input.Plan)
++	require.NotNil(t, input.Material)
++	require.Empty(t, input.Material.Messages, "retained input metadata is not a current body read")
++	require.NoError(t, input.Plan.SourceLineage.RequireComplete())
++	require.Equal(t, input.Plan.MetadataDigest, input.Material.MetadataDigest)
++	require.NotEmpty(t, input.Plan.MetadataDigest)
++	requestDigest, err := repository.KnowledgeInputDigest(input.Request.MaterialRequest)
++	require.NoError(t, err)
++	for _, request := range []types.MessageMaterialReadRequest{input.Plan.Request, input.Material.Request} {
++		actual, err := repository.KnowledgeInputDigest(request)
++		require.NoError(t, err)
++		require.Equal(t, requestDigest, actual)
++	}
++	selected := map[string]bool{}
++	for _, id := range input.Request.MaterialRequest.MessageIDs {
++		require.NotEmpty(t, id)
++		require.False(t, selected[id])
++		selected[id] = true
++	}
++	require.True(t, selected[input.Request.TriggerMessageID])
++	require.Len(t, input.Material.Proofs, len(selected))
++	seenProofs := map[string]bool{}
++	for _, proof := range input.Material.Proofs {
++		require.NotNil(t, proof)
++		require.True(t, selected[proof.MessageID])
++		require.False(t, seenProofs[proof.MessageID])
++		seenProofs[proof.MessageID] = true
++		require.Equal(t, input.Request.TenantID, proof.TenantID)
++		require.Equal(t, input.Request.SessionID, proof.SessionID)
++		require.Equal(t, input.Material.SessionOwnerID, proof.OwnerID)
++		require.NotEmpty(t, proof.AdmissionID)
++		require.NotEmpty(t, proof.GenerationID)
++		require.Len(t, proof.BodyDigest, 64)
++		require.Positive(t, proof.Revision)
++		require.NoError(t, proof.SourceLineage.RequireComplete())
++		for _, field := range proof.GeneratedFields {
++			require.NotNil(t, field)
++			require.NotEmpty(t, field.AdmissionID)
++			require.Len(t, field.BodyDigest, 64)
++			require.Positive(t, field.Revision)
++			require.NoError(t, field.SourceLineage.RequireComplete())
++		}
++	}
++	require.Equal(t, input.Digest, receipt.InputDigest)
++	var execution types.MemoryOriginalExecution
++	require.NoError(t, f.db.Where("id=?", receipt.ExecutionAdmissionID).Take(&execution).Error)
++	require.Equal(t, input.ID, execution.InputAdmissionID)
++	require.Equal(t, input.Digest, execution.InputDigest)
++	unsignedExecution := execution
++	unsignedExecution.Digest = ""
++	executionDigest, err := repository.KnowledgeInputDigest(unsignedExecution)
++	require.NoError(t, err)
++	require.Equal(t, execution.Digest, executionDigest)
++	var model types.ModelOriginalProof
++	require.NoError(t, json.Unmarshal([]byte(execution.ModelProofJSON), &model))
++	require.True(t, model.Valid())
++	require.Equal(t, input.Request.EnqueueModelProof, model)
++	require.Equal(t, input.Request.EnqueueModelDigest, model.Digest)
++	require.Equal(t, execution.ModelDigest, model.Digest)
++	var effects []types.MemoryOriginalEffect
++	require.NoError(t, json.Unmarshal([]byte(receipt.OperationManifest), &effects))
++	digest, err = repository.KnowledgeInputDigest(effects)
++	require.NoError(t, err)
++	require.Equal(t, receipt.OperationsDigest, digest)
++	unsignedReceipt := receipt
++	unsignedReceipt.Digest = ""
++	digest, err = repository.KnowledgeInputDigest(unsignedReceipt)
++	require.NoError(t, err)
++	require.Equal(t, receipt.Digest, digest)
++	total := 0
++	for _, count := range expected {
++		total += count
++	}
++	require.Len(t, effects, total)
++	var origins []types.MemoryOriginalDerivation
++	require.NoError(t, f.db.Where("commit_id=?", receipt.ID).Find(&origins).Error)
++	require.Len(t, origins, total)
++	byID := map[string]types.MemoryOriginalDerivation{}
++	for _, origin := range origins {
++		_, duplicate := byID[origin.ID]
++		require.False(t, duplicate)
++		byID[origin.ID] = origin
++	}
++	seen := map[string]bool{}
++	actualCounts := map[string]int{}
++	publications := map[string]types.MemoryDerivedPublication{}
++	var block *types.MemoryDerivedBlock
++	for _, effect := range effects {
++		require.False(t, seen[effect.DerivationID], "no duplicate or unknown effect may disappear from the manifest")
++		seen[effect.DerivationID] = true
++		key := effect.ObjectKind + "/" + effect.Action
++		require.Contains(t, expected, key, "unexpected typed effect")
++		actualCounts[key]++
++		origin, ok := byID[effect.DerivationID]
++		require.True(t, ok)
++		require.Equal(t, types.MemoryOriginalEffect{OperationID: origin.OperationID, DerivationID: origin.ID, ObjectKind: origin.ObjectKind, ObjectID: origin.ObjectID, Action: origin.Action, BodyDigest: origin.BodyDigest, ParentDerivationID: origin.ParentDerivationID}, effect)
++		require.NotEmpty(t, origin.OperationID)
++		require.Equal(t, input.ID, origin.InputAdmissionID)
++		require.Equal(t, execution.ID, origin.ExecutionAdmissionID)
++		require.Equal(t, f.scope.TenantID, origin.TenantID)
++		require.Equal(t, f.scope.SubjectID, origin.SubjectID)
++		unsigned := origin
++		unsigned.Digest = ""
++		digest, err := repository.KnowledgeInputDigest(unsigned)
++		require.NoError(t, err)
++		require.Equal(t, origin.Digest, digest)
++		var dependency struct{ InputID, InputDigest, ExecutionID, ExecutionDigest, ModelResultDigest, Recipe, Parent, EffectRole string }
++		require.NoError(t, json.Unmarshal([]byte(origin.DependencyJSON), &dependency))
++		require.Equal(t, input.ID, dependency.InputID)
++		require.Equal(t, input.Digest, dependency.InputDigest)
++		require.Equal(t, execution.ID, dependency.ExecutionID)
++		require.Equal(t, execution.Digest, dependency.ExecutionDigest)
++		require.Equal(t, receipt.ModelResultDigest, dependency.ModelResultDigest)
++		require.Equal(t, receipt.Recipe, dependency.Recipe)
++		require.Equal(t, origin.ParentDerivationID, dependency.Parent)
++		roles := map[string]string{"memory_item/add": "model_result", "memory_item/archive": "capacity_retirement", "memory_block/render": "resident_block"}
++		require.Equal(t, roles[key], dependency.EffectRole)
++		var publication types.MemoryDerivedPublication
++		// This is an oracle for the real producer output, read through installed
++		// body callbacks. It neither creates a publication nor signs current data.
++		require.NoError(t, f.db.Where("derivation_id=?", origin.ID).Take(&publication).Error)
++		require.Equal(t, "worker", publication.ProducerKind)
++		require.Equal(t, input.ID, publication.InputAdmissionID)
++		require.Equal(t, execution.ID, publication.ExecutionAdmissionID)
++		require.Equal(t, receipt.ID, publication.CommitID)
++		require.Equal(t, origin.ObjectID, publication.ObjectID)
++		require.Equal(t, origin.ObjectKind, publication.ObjectKind)
++		require.Equal(t, f.scope.TenantID, publication.TenantID)
++		require.Equal(t, f.scope.SubjectID, publication.SubjectID)
++		require.Equal(t, origin.BodyDigest, publication.MaterialDigest)
++		require.Equal(t, types.MemoryOriginalBytesDigest([]byte(publication.MaterialJSON)), publication.MaterialSHA256)
++		unsignedPublication := publication
++		unsignedPublication.Digest = ""
++		unsignedPublication.MaterialJSON = ""
++		digest, err = repository.KnowledgeInputDigest(unsignedPublication)
++		require.NoError(t, err)
++		require.Equal(t, publication.Digest, digest)
++		var body types.MemoryDerivedBodyReceipt
++		require.NoError(t, f.db.Where("publication_id=?", publication.ID).Take(&body).Error)
++		require.Equal(t, publication.Digest, body.PublicationDigest)
++		require.Equal(t, publication.MaterialSHA256, body.MaterialSHA256)
++		unsignedBody := body
++		unsignedBody.Digest = ""
++		digest, err = repository.KnowledgeInputDigest(unsignedBody)
++		require.NoError(t, err)
++		require.Equal(t, body.Digest, digest)
++		var head struct {
++			SlotID, BodyID, SourceTable, RowKey, ColumnName, OwnerKind, OwnerID, SourceIdentitySHA256 string
++			TenantID                                                                                  uint64
++			Revision                                                                                  int64
++		}
++		require.NoError(t, f.db.Table("original_body_field_heads").Where("slot_id=?", body.SlotID).Take(&head).Error)
++		require.Equal(t, body.BodyID, head.BodyID)
++		require.Equal(t, body.HeadRevision, head.Revision)
++		require.Equal(t, body.SourceIdentitySHA256, head.SourceIdentitySHA256)
++		require.Equal(t, "memory_derived_publications", head.SourceTable)
++		require.Equal(t, publication.ID, head.RowKey)
++		require.Equal(t, "material_json", head.ColumnName)
++		require.Equal(t, publication.ID, head.OwnerID)
++		require.Equal(t, "memory_derived_publications", head.OwnerKind)
++		require.Equal(t, publication.TenantID, head.TenantID)
++		var payloadBody struct {
++			ID, BodySHA256, State string
++			TenantID              uint64
++		}
++		require.NoError(t, f.db.Table("original_body_payloads").Select("id,tenant_id,body_sha256,state").Where("id=?", body.BodyID).Take(&payloadBody).Error)
++		require.Equal(t, publication.TenantID, payloadBody.TenantID)
++		require.Equal(t, publication.MaterialSHA256, payloadBody.BodySHA256)
++		require.Equal(t, "live", payloadBody.State)
++		if origin.ParentDerivationID != "" {
++			parent, exists := byID[origin.ParentDerivationID]
++			require.True(t, exists, "native capacity parent must be one of the exact model effects")
++			require.Equal(t, "add", parent.Action)
++			require.Equal(t, origin.ObjectID, parent.ObjectID)
++			var parentPublication types.MemoryDerivedPublication
++			require.NoError(t, f.db.Select("id").Where("derivation_id=?", parent.ID).Take(&parentPublication).Error)
++			require.Equal(t, parentPublication.ID, publication.ParentPublicationID)
++		} else {
++			require.Empty(t, publication.ParentPublicationID)
++		}
++		publications[publication.ID] = publication
++		if key == "memory_block/render" {
++			block = &types.MemoryDerivedBlock{}
++			require.NoError(t, json.Unmarshal([]byte(publication.MaterialJSON), block))
++			digest, err = repository.KnowledgeInputDigest(block)
++			require.NoError(t, err)
++			require.Equal(t, origin.BodyDigest, digest)
++			require.Equal(t, origin.ObjectID, block.ID)
++			require.Equal(t, f.scope.TenantID, block.TenantID)
++			require.Equal(t, f.scope.SubjectID, block.SubjectID)
++		}
++	}
++	require.Equal(t, expected, actualCounts)
++	if block != nil {
++		active := expected["memory_item/add"] - expected["memory_item/archive"]
++		require.Equal(t, active, block.ItemCount)
++		require.Len(t, block.Inputs, active)
++		seenInputs := map[string]bool{}
++		for _, proof := range block.Inputs {
++			require.False(t, seenInputs[proof.PublicationID])
++			seenInputs[proof.PublicationID] = true
++			publication, present := publications[proof.PublicationID]
++			require.True(t, present)
++			require.Equal(t, "memory_item", proof.ObjectKind)
++			require.Equal(t, publication.Digest, proof.PublicationDigest)
++			require.Equal(t, publication.DerivationID, proof.DerivationID)
++			require.Equal(t, publication.ObjectID, proof.ObjectID)
++			require.Equal(t, publication.Revision, proof.Revision)
++			require.Equal(t, publication.MaterialDigest, proof.MaterialDigest)
++			var body types.MemoryDerivedBodyReceipt
++			require.NoError(t, f.db.Where("publication_id=?", proof.PublicationID).Take(&body).Error)
++			require.Equal(t, body.Digest, proof.BodyReceiptDigest)
++		}
++	}
++	var payload types.MemoryExtractPayload
++	var dispatch types.MemoryOriginalDispatch
++	require.NoError(t, f.db.Where("admission_id=?", input.ID).Take(&dispatch).Error)
++	require.Equal(t, types.MemoryOriginalBytesDigest([]byte(dispatch.Payload)), dispatch.PayloadDigest)
++	require.NoError(t, json.Unmarshal([]byte(dispatch.Payload), &payload))
++	require.Equal(t, input.ID, payload.OriginalAdmissionID)
++	require.Equal(t, input.Digest, payload.OriginalDigest)
++	require.Equal(t, input.Request.PendingRevision, payload.OriginalRevision)
++	require.Equal(t, input.Request.TenantID, payload.TenantID)
++	require.Equal(t, input.Request.SubjectID, payload.SubjectID)
++	require.Equal(t, input.Request.SessionID, payload.SessionID)
++	require.Equal(t, input.Request.TriggerMessageID, payload.MessageID)
++	require.Equal(t, input.Request.ChatModelID, payload.ChatModelID)
++	require.Equal(t, input.Request.Language, payload.Language)
++	completed, err := f.outbox.VerifyMemoryOriginalCompletion(f.ctx, payload)
++	require.NoError(t, err)
++	require.True(t, completed, "only the genuine immutable complete receipt can acknowledge this payload")
++}
+diff --git a/internal/application/service/mem_original_outbox_sql_actual_test.go b/internal/application/service/mem_original_outbox_sql_actual_test.go
+index 96413bcf..73a34449 100644
+--- a/internal/application/service/mem_original_outbox_sql_actual_test.go
++++ b/internal/application/service/mem_original_outbox_sql_actual_test.go
+@@ -189,11 +189,12 @@ func runMemOutboxSQLTransportPoison(t *testing.T, pg bool) {
+ 	require.NoError(t, handleErr)
+ 	require.Equal(t, 1, healthy.model.calls)
+ 	require.EqualValues(t, 1, memAtomicSQLCount(t, healthy, "memory_items"))
+-	require.EqualValues(t, 1, memAtomicSQLCount(t, healthy, "memory_original_derivations"))
++	require.EqualValues(t, 2, memAtomicSQLCount(t, healthy, "memory_original_derivations"))
+ 	require.EqualValues(t, 1, memAtomicSQLCount(t, healthy, "memory_original_checkpoints"))
+ 	progress := actualMemoryProgress(t, healthy.db, healthy.scope, healthy.session.ID)
+ 	require.False(t, progress.Pending)
+ 	require.True(t, progress.Cursor.After(types.MemoryMessageCursor{}))
++	assertMemNativeOriginalEffectsSQL(t, healthy, progress.OriginalCheckpointID, map[string]int{"memory_item/add": 1, "memory_block/render": 1})
+ 	completed, err := healthy.outbox.VerifyMemoryOriginalCompletion(healthy.ctx, healthyPayload)
+ 	require.NoError(t, err)
+ 	require.True(t, completed, "real original dependencies and successful whole-result receipt must prove completion")
+diff --git a/internal/application/service/mem_original_queued_policy_actual_test.go b/internal/application/service/mem_original_queued_policy_actual_test.go
+index 0fd2495c..1328ab0f 100644
+--- a/internal/application/service/mem_original_queued_policy_actual_test.go
++++ b/internal/application/service/mem_original_queued_policy_actual_test.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -31,9 +32,31 @@ func runMemOriginalQueuedPolicySQL(t *testing.T, pg bool) {
+ 			require.NoError(t, f.db.Where("id=? AND tenant_id=?", f.model.GetModelID(), f.scope.TenantID).Take(&originalModel).Error)
+ 			modelWire, err := json.Marshal(originalModel)
+ 			require.NoError(t, err)
+-			queuedModelDigest := types.MemoryOriginalBytesDigest(modelWire)
+-			require.Equal(t, original.Request.EnqueueModelID, originalModel.ID)
+-			require.Equal(t, original.Request.EnqueueModelDigest, queuedModelDigest)
++			modelMetadataDigest := types.MemoryOriginalBytesDigest(modelWire)
++			modelReader, ok := f.admissions.(interfaces.ModelOriginalLifetimeReader)
++			require.True(t, ok)
++			held, err := modelReader.BeginModelOriginalRead(f.ctx, original.Request.EnqueueModelID, &original.Request.EnqueueModelProof)
++			require.NoError(t, err)
++			modelSnapshot, proof, err := held.Snapshot()
++			require.NoError(t, err)
++			require.NotNil(t, modelSnapshot)
++			require.NotNil(t, proof)
++			require.True(t, proof.Valid())
++			require.Equal(t, originalModel.ID, proof.ModelID)
++			require.Equal(t, originalModel.TenantID, proof.OwnerTenantID)
++			require.Equal(t, original.Request.EnqueueModelID, modelSnapshot.ID)
++			require.Equal(t, original.Request.EnqueueModelProof, *proof)
++			require.Equal(t, original.Request.EnqueueModelDigest, proof.Digest)
++			var durable types.MemoryOriginalAdmission
++			require.NoError(t, f.db.Where("id=?", original.ID).Take(&durable).Error)
++			var wire struct {
++				Request types.MemoryOriginalCaptureRequest
++			}
++			require.NoError(t, json.Unmarshal([]byte(durable.Envelope), &wire))
++			require.Equal(t, *proof, wire.Request.EnqueueModelProof)
++			require.Equal(t, proof.Digest, wire.Request.EnqueueModelDigest)
++			require.NoError(t, held.Recheck())
++			require.NoError(t, held.Close())
+ 			faultApplied := false
+ 			fault := func() error {
+ 				tenants := repository.NewTenantRepository(f.db)
+@@ -94,7 +117,13 @@ func runMemOriginalQueuedPolicySQL(t *testing.T, pg bool) {
+ 			require.NoError(t, f.db.Where("id=? AND tenant_id=?", originalModel.ID, f.scope.TenantID).Take(&actualModel).Error)
+ 			afterModelWire, err := json.Marshal(actualModel)
+ 			require.NoError(t, err)
+-			assert.Equal(t, queuedModelDigest, types.MemoryOriginalBytesDigest(afterModelWire), "model metadata is unchanged")
++			assert.Equal(t, modelMetadataDigest, types.MemoryOriginalBytesDigest(afterModelWire), "model metadata is unchanged")
++			afterRead, err := modelReader.BeginModelOriginalRead(f.ctx, original.Request.EnqueueModelID, &original.Request.EnqueueModelProof)
++			require.NoError(t, err)
++			_, afterProof, err := afterRead.Snapshot()
++			require.NoError(t, err)
++			require.Equal(t, original.Request.EnqueueModelProof, *afterProof)
++			require.NoError(t, afterRead.Close())
+ 			var saved types.MemoryOriginalAdmission
+ 			require.NoError(t, f.db.Where("id=?", original.ID).Take(&saved).Error)
+ 			assert.Equal(t, original.Digest, saved.Digest)
+diff --git a/internal/application/service/mem_public_writer_concurrency_actual_test.go b/internal/application/service/mem_public_writer_concurrency_actual_test.go
+index 0e80b3e9..aeef2300 100644
+--- a/internal/application/service/mem_public_writer_concurrency_actual_test.go
++++ b/internal/application/service/mem_public_writer_concurrency_actual_test.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"regexp"
+@@ -43,6 +44,14 @@ func (r *memObservedCommitRepository) VerifyMemoryOriginalCompletion(ctx context
+ 	return verifier.VerifyMemoryOriginalCompletion(ctx, p)
+ }
+ 
++func (r *memObservedCommitRepository) BeginMemoryDerivedRead(ctx context.Context, scope interfaces.MemoryScope) (interfaces.MemoryDerivedRead, error) {
++	reader, ok := r.MemoryOriginalAdmissionRepository.(interfaces.MemoryDerivedLifetimeReader)
++	if !ok {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	return reader.BeginMemoryDerivedRead(ctx, scope)
++}
++
+ type memWriterObservedState struct {
+ 	Receipt, Origins, Active, Archived int64
+ 	Err                                error
+@@ -50,14 +59,13 @@ type memWriterObservedState struct {
+ 
+ func TestPostgresMemoryOriginalCommitSerializesPublicCreateItem(t *testing.T) {
+ 	f := newMemAtomicSQLFixture(t, true)
+-	tenants := repository.NewTenantRepository(f.db)
++	tenants, _, _ := actualPolicyRepository(t, f)
+ 	tenant, err := tenants.GetTenantByID(f.ctx, f.scope.TenantID)
+ 	require.NoError(t, err)
+ 	cfg := *tenant.MemoryConfig
+ 	cfg.Normalize()
+ 	cfg.MaxItems = 1
+-	tenant.MemoryConfig = &cfg
+-	require.NoError(t, tenants.UpdateTenant(f.ctx, tenant))
++	authorMemNativeFixturePolicySQL(t, f, cfg)
+ 	f.model.twoOperations = true
+ 	pool, err := f.db.DB()
+ 	require.NoError(t, err)
+@@ -79,6 +87,14 @@ func TestPostgresMemoryOriginalCommitSerializesPublicCreateItem(t *testing.T) {
+ 	writerDB, err := gorm.Open(postgres.New(postgres.Config{Conn: writerConn, PreferSimpleProtocol: true}), &gorm.Config{})
+ 	require.NoError(t, err)
+ 	require.NoError(t, repository.InstallOriginalBodyRetentionCallbacks(writerDB))
++	writerMaterial := repository.NewKnowledgeInputProvenanceStore(writerDB)
++	writerAdmissions := repository.NewMemoryOriginalAdmissionRepository(writerDB, writerMaterial)
++	writerGroups := NewGroupAccessService(repository.NewGroupAccessRepository(writerDB))
++	ConfigureMemoryOriginalAtomicAuthority(writerAdmissions, writerMaterial, writerGroups, nil)
++	writerRepo := repository.NewMemoryRepository(writerDB)
++	writerBinder, ok := writerRepo.(interfaces.MemoryDerivedWriterBinder)
++	require.True(t, ok)
++	writerBinder.BindMemoryDerivedAuthority(writerAdmissions)
+ 	dsn := os.Getenv("WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN")
+ 	require.NotEmpty(t, dsn)
+ 	observer, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+@@ -228,20 +244,48 @@ func TestPostgresMemoryOriginalCommitSerializesPublicCreateItem(t *testing.T) {
+ 	require.NotEqual(t, writerPID, commitPID)
+ 	manual := &types.MemoryItem{ID: uuid.NewString(), TenantID: f.scope.TenantID, SubjectID: f.scope.SubjectID, Kind: types.MemoryKindFact, Content: "owned public writer observation", Topic: "writer control", NormalizedKey: "owned-public-writer-control", Origin: types.MemoryOriginManual, Status: types.MemoryStatusArchived, Importance: 1, ValidFrom: time.Now().UTC().Truncate(time.Microsecond)}
+ 	writerStarted = true
+-	go func() { writerDone <- repository.NewMemoryRepository(writerDB).CreateItem(writerCtx, manual) }()
++	go func() { writerDone <- writerRepo.CreateItem(writerCtx, manual) }()
+ 	blocked := false
+ 	for !blocked {
+ 		select {
+-		case <-writerDone:
++		case writerErr := <-writerDone:
+ 			writerJoined = true
+-			require.FailNow(t, "public CreateItem escaped held subject fence")
++			identity := "other_error"
++			switch {
++			case writerErr == nil:
++				identity = "nil"
++			case errors.Is(writerErr, repository.ErrOriginalBodyUnavailable):
++				identity = "original_body_unavailable"
++			case errors.Is(writerErr, types.ErrMemoryOriginalUnavailable):
++				identity = "memory_original_unavailable"
++			case errors.Is(writerErr, gorm.ErrRecordNotFound):
++				identity = "record_not_found"
++			case errors.Is(writerErr, context.DeadlineExceeded):
++				identity = "deadline_exceeded"
++			case errors.Is(writerErr, context.Canceled):
++				identity = "context_canceled"
++			}
++			t.Logf("owned_public_create_before_fence error_identity=%s error_type=%T", identity, writerErr)
++			require.FailNow(t, "public CreateItem escaped held subject fence", "static error identity="+identity)
+ 		case <-operation.Done():
+ 			require.FailNow(t, "real PostgreSQL lock observation deadline")
+ 		default:
+ 		}
+-		var wait struct{ Waiting, BlockedByCommit, SubjectStatement bool }
+-		require.NoError(t, observer.Raw("SELECT wait_event_type='Lock' AS waiting,?=ANY(pg_blocking_pids(pid)) AS blocked_by_commit,lower(query) LIKE '%memory_subjects%' AS subject_statement FROM pg_stat_activity WHERE pid=? AND datname=current_database()", commitPID, writerPID).Scan(&wait).Error)
+-		blocked = wait.Waiting && wait.BlockedByCommit && wait.SubjectStatement
++		var wait struct{ Waiting, BlockedByCommit, SubjectStatement, CollectionStatement, OwnedRelation bool }
++		// The real native writer first captures its derived collection, then
++		// takes the subject write fence. Either exact prerequisite can wait on
++		// this same commit; a different table/backend/scope is not evidence.
++		require.NoError(t, observer.Raw(`SELECT a.wait_event_type='Lock' AS waiting,
++            ?=ANY(pg_blocking_pids(a.pid)) AS blocked_by_commit,
++            lower(a.query) LIKE '%memory_subjects%' AND lower(a.query) LIKE '%for update%' AS subject_statement,
++            lower(a.query) LIKE '%memory_derived_collections%' AND lower(a.query) LIKE '%for share%' AS collection_statement,
++            EXISTS(SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
++              JOIN pg_namespace n ON n.oid=c.relnamespace
++              WHERE l.pid=a.pid AND l.locktype='relation' AND l.granted AND l.mode='RowShareLock' AND n.nspname=?
++                AND ((c.relname='memory_subjects' AND lower(a.query) LIKE '%memory_subjects%')
++                  OR (c.relname='memory_derived_collections' AND lower(a.query) LIKE '%memory_derived_collections%'))) AS owned_relation
++            FROM pg_stat_activity a WHERE a.pid=? AND a.datname=current_database()`, commitPID, identity.Schema, writerPID).Scan(&wait).Error)
++		blocked = wait.Waiting && wait.BlockedByCommit && wait.OwnedRelation && (wait.SubjectStatement || wait.CollectionStatement)
+ 	}
+ 	releaseOnce.Do(func() { close(release) })
+ 	select {
+@@ -268,7 +312,7 @@ func TestPostgresMemoryOriginalCommitSerializesPublicCreateItem(t *testing.T) {
+ 	case seen := <-writerSaw:
+ 		require.NoError(t, seen.Err)
+ 		assert.EqualValues(t, 1, seen.Receipt)
+-		assert.EqualValues(t, 3, seen.Origins)
++		assert.EqualValues(t, 4, seen.Origins)
+ 		assert.EqualValues(t, 1, seen.Active)
+ 		assert.EqualValues(t, 1, seen.Archived)
+ 		// These were read inside the writer's actual subject-fenced TX before
+@@ -278,6 +322,8 @@ func TestPostgresMemoryOriginalCommitSerializesPublicCreateItem(t *testing.T) {
+ 	}
+ 	require.Equal(t, 1, f.model.calls)
+ 	assert.EqualValues(t, 1, memAtomicSQLCount(t, f, "memory_original_checkpoints"))
+-	assert.EqualValues(t, 3, memAtomicSQLCount(t, f, "memory_original_derivations"))
++	assert.EqualValues(t, 4, memAtomicSQLCount(t, f, "memory_original_derivations"))
++	progress := actualMemoryProgress(t, f.db, f.scope, f.session.ID)
++	assertMemNativeOriginalEffectsSQL(t, f, progress.OriginalCheckpointID, map[string]int{"memory_item/add": 2, "memory_item/archive": 1, "memory_block/render": 1})
+ 	assertMemAtomicSQLLeasesClosed(t, f)
+ }
+diff --git a/internal/application/service/memory_derived_original_sql_actual_test.go b/internal/application/service/memory_derived_original_sql_actual_test.go
+index bfffa3d0..70a19fb7 100644
+--- a/internal/application/service/memory_derived_original_sql_actual_test.go
++++ b/internal/application/service/memory_derived_original_sql_actual_test.go
+@@ -97,10 +97,39 @@ func handleMemDerivedSQL(t *testing.T, f *memAtomicSQLFixture) error {
+ 	defer cancel()
+ 	return f.service.Handle(worker, f.queue.task)
+ }
++func prepareMemoryDerivedProductiveTimerSQL(t *testing.T, f *memAtomicSQLFixture) {
++	t.Helper()
++	tenantRepo, writer, reader := actualPolicyRepository(t, f)
++	_, before, err := reader.ReadMemoryPolicyOriginal(f.ctx, f.scope.TenantID)
++	require.NoError(t, err)
++	require.NotNil(t, before)
++	require.True(t, before.Valid())
++	tenant, err := tenantRepo.GetTenantByID(f.ctx, f.scope.TenantID)
++	require.NoError(t, err)
++	cfg := *tenant.MemoryConfig
++	cfg.ExtractDelaySeconds = types.MinMemoryExtractDelaySeconds
++	cfg.ExtractMinIntervalSeconds = 1
++	_, after, err := writer.ReplaceMemoryPolicyOriginal(f.ctx, f.scope.TenantID, cfg)
++	require.NoError(t, err)
++	require.NotNil(t, after)
++	require.True(t, after.Valid())
++	require.Greater(t, after.Revision, before.Revision)
++	actualConfig, current, err := reader.ReadMemoryPolicyOriginal(f.ctx, f.scope.TenantID)
++	require.NoError(t, err)
++	require.NotNil(t, actualConfig)
++	require.NotNil(t, current)
++	require.Equal(t, *after, *current)
++	require.Equal(t, 1, actualConfig.ExtractMinIntervalSeconds)
++	require.Equal(t, types.MinMemoryExtractDelaySeconds, actualConfig.ExtractDelaySeconds)
++}
++
+ func runMemoryDerivedProductiveSQL(t *testing.T, pg bool) {
+ 	for _, mode := range []string{"productive_update", "raw_target_ABA_before_model", "model_definition_successor", "model_credential_successor", "source_before_model", "source_after_model", "body_before_model", "body_after_model", "actor_before_model", "actor_after_model", "lease_after_model"} {
+ 		t.Run(mode, func(t *testing.T) {
+ 			f, agent, ownerID := newMemSharedAgentNoKBFixture(t, pg)
++			// Both A and B consume this genuine policy. No queue deadline,
++			// cursor, original fact or reader proof is rewritten.
++			prepareMemoryDerivedProductiveTimerSQL(t, f)
+ 			model := attachMemDerivedSQLTransport(f)
+ 			f.service.ScheduleExtraction(f.ctx, f.session.ID, f.assistant.ID, model.GetModelID())
+ 			relayMemAtomicSQLScheduled(t, f)
+diff --git a/internal/application/service/model.go b/internal/application/service/model.go
+index a7f48387..7a6b16fd 100644
+--- a/internal/application/service/model.go
++++ b/internal/application/service/model.go
+@@ -671,17 +671,30 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 
+ 	// Get the model directly from repository to avoid status checks
+ 	read, borrowed := repository.OriginalModelReadFromContext(ctx, modelId)
++	acquisitionCtx := ctx
++	var releaseOwner func()
++	var transferOwner func() error
+ 	if !borrowed {
+ 		var acquireErr error
+-		read, acquireErr = s.BeginModelOriginalRead(ctx, modelId, nil)
++		acquisitionCtx, releaseOwner, transferOwner, acquireErr = originalModelAcquisitionContext(ctx)
+ 		if acquireErr != nil {
+ 			return nil, acquireErr
+ 		}
++		read, acquireErr = s.BeginModelOriginalRead(acquisitionCtx, modelId, nil)
++		if acquireErr != nil {
++			if releaseOwner != nil {
++				releaseOwner()
++			}
++			return nil, acquireErr
++		}
+ 	}
+ 	closeOnFailure := !borrowed
+ 	defer func() {
+ 		if closeOnFailure {
+ 			_ = read.Close()
++			if releaseOwner != nil {
++				releaseOwner()
++			}
+ 		}
+ 	}()
+ 	model, proof, err := read.Snapshot()
+@@ -715,7 +728,7 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 		return nil, err
+ 	}
+ 
+-	bound, err := bindOriginalModelClient(ctx, chatModel, read, !borrowed)
++	bound, err := bindOriginalModelClient(acquisitionCtx, chatModel, read, !borrowed, releaseOwner, transferOwner)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/internal/application/service/model_original_lifetime.go b/internal/application/service/model_original_lifetime.go
+index 1fc5fc06..9d478b7d 100644
+--- a/internal/application/service/model_original_lifetime.go
++++ b/internal/application/service/model_original_lifetime.go
+@@ -15,18 +15,19 @@ type originalModelClientLifetime interface {
+ 	CloseOriginal() error
+ }
+ type modelOriginalChatClient struct {
+-	inner       chat.Chat
+-	read        interfaces.ModelOriginalRead
+-	owner       bool
+-	autoClose   bool
+-	mu          sync.Mutex
+-	closed      bool
+-	closeErr    error
+-	closeJoined chan struct{}
+-	closeSignal chan struct{}
+-	calls       map[uint64]context.CancelFunc
+-	next        uint64
+-	wg          sync.WaitGroup
++	inner        chat.Chat
++	read         interfaces.ModelOriginalRead
++	owner        bool
++	releaseOwner func()
++	autoClose    bool
++	mu           sync.Mutex
++	closed       bool
++	closeErr     error
++	closeJoined  chan struct{}
++	closeSignal  chan struct{}
++	calls        map[uint64]context.CancelFunc
++	next         uint64
++	wg           sync.WaitGroup
+ }
+ 
+ func (w *modelOriginalChatClient) GetModelName() string { return w.inner.GetModelName() }
+@@ -55,6 +56,9 @@ func sameOriginalModelCaller(a, b context.Context) bool {
+ 	return xok == yok && (!xok || x.KeyID == y.KeyID)
+ }
+ func (w *modelOriginalChatClient) begin(ctx context.Context) (context.Context, func(), context.CancelFunc, error) {
++	if err := ctx.Err(); err != nil {
++		return ctx, nil, nil, err
++	}
+ 	if !sameOriginalModelCaller(ctx, w.read.Context()) {
+ 		return ctx, nil, nil, types.ErrMemoryOriginalUnavailable
+ 	}
+@@ -256,16 +260,19 @@ func (w *modelOriginalChatClient) CloseOriginal() error {
+ 	if w.owner {
+ 		err = w.read.Close()
+ 	}
++	if w.releaseOwner != nil {
++		w.releaseOwner()
++	}
+ 	w.mu.Lock()
+ 	w.closeErr = err
+ 	close(w.closeJoined)
+ 	w.mu.Unlock()
+ 	return err
+ }
+-func bindOriginalModelClient(ctx context.Context, inner chat.Chat, read interfaces.ModelOriginalRead, owner bool) (chat.Chat, error) {
+-	wrapper := &modelOriginalChatClient{inner: inner, read: read, owner: owner, autoClose: owner, calls: map[uint64]context.CancelFunc{}, closeJoined: make(chan struct{}), closeSignal: make(chan struct{})}
++func bindOriginalModelClient(ctx context.Context, inner chat.Chat, read interfaces.ModelOriginalRead, owner bool, releaseOwner func(), transferOwner func() error) (chat.Chat, error) {
++	wrapper := &modelOriginalChatClient{inner: inner, read: read, owner: owner, releaseOwner: releaseOwner, autoClose: owner, calls: map[uint64]context.CancelFunc{}, closeJoined: make(chan struct{}), closeSignal: make(chan struct{})}
+ 	if owner {
+-		retained, err := retainOriginalModelClient(ctx, wrapper)
++		retained, err := retainOriginalModelClient(ctx, wrapper, transferOwner)
+ 		if err != nil {
+ 			read.Close()
+ 			return nil, err
+@@ -278,7 +285,7 @@ func bindOriginalModelClient(ctx context.Context, inner chat.Chat, read interfac
+ 	return wrapper, nil
+ }
+ 
+-func retainOriginalModelClient(ctx context.Context, client originalModelClientLifetime) (bool, error) {
++func retainOriginalModelClient(ctx context.Context, client originalModelClientLifetime, transferOwner func() error) (bool, error) {
+ 	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
+ 	if !ok {
+ 		return false, nil
+@@ -291,6 +298,50 @@ func retainOriginalModelClient(ctx context.Context, client originalModelClientLi
+ 	if slot.Closed || slot.Failed != nil {
+ 		return false, types.ErrMemoryOriginalUnavailable
+ 	}
++	if transferOwner != nil {
++		if err := transferOwner(); err != nil {
++			return false, err
++		}
++	}
+ 	slot.Models = append(slot.Models, client)
+ 	return true, nil
+ }
++
++// The producer's stream context can end at provider Done while HTTP still
++// owns the same message boundary. Keep identity/private values from this
++// actual caller, but acquire the model hold under that boundary's lifetime.
++// Provider calls continue to use their original cancellable operation context.
++func originalModelAcquisitionContext(ctx context.Context) (context.Context, func(), func() error, error) {
++	if err := ctx.Err(); err != nil {
++		return ctx, nil, nil, err
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok {
++		return ctx, nil, nil, nil
++	}
++	slot.mu.Lock()
++	owner, closed, failed := slot.OwnerContext, slot.Closed, slot.Failed
++	slot.mu.Unlock()
++	if closed || failed != nil || owner == nil {
++		return ctx, nil, nil, types.ErrMemoryOriginalUnavailable
++	}
++	if err := owner.Err(); err != nil {
++		return ctx, nil, nil, err
++	}
++	held, cancel := context.WithCancel(context.WithoutCancel(ctx))
++	stopOwner := context.AfterFunc(owner, cancel)
++	// SQL acquisition, Snapshot, construction and the last current recheck are
++	// still cancelled by the original operation until the live owner adopts it.
++	stopAcquire := context.AfterFunc(ctx, cancel)
++	var once sync.Once
++	release := func() { once.Do(func() { stopAcquire(); stopOwner(); cancel() }) }
++	transfer := func() error {
++		stopAcquire()
++		if err := ctx.Err(); err != nil {
++			cancel()
++			return err
++		}
++		return held.Err()
++	}
++	return held, release, transfer, nil
++}
+diff --git a/internal/application/service/normal_model_original_http_fixture_test.go b/internal/application/service/normal_model_original_http_fixture_test.go
+index 4f9253e4..109c24e3 100644
+--- a/internal/application/service/normal_model_original_http_fixture_test.go
++++ b/internal/application/service/normal_model_original_http_fixture_test.go
+@@ -2,20 +2,85 @@ package service
+ 
+ import (
+ 	"context"
++	"fmt"
+ 	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/models/chat"
+ 	"github.com/Tencent/WeKnora/internal/models/embedding"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	"github.com/stretchr/testify/require"
+ 	"gorm.io/gorm"
+ 	"os"
++	"sync"
+ 	"testing"
++	"time"
+ )
+ 
+ // Retrieval retains its existing bounded embedding transport. The final model
+ // uses genuine authoring, actor authorization, body holds and the actual HTTP
+ // SDK constructor. This component fixture is not full migration/app acceptance.
+-type normalOriginalModelsForTest struct{ interfaces.ModelService }
++type normalOriginalModelsForTest struct {
++	interfaces.ModelService
++	observer *normalModelLifetimeDiagnosticForTest
++}
++
++// This observes the real concrete production client. It does not wrap Chat,
++// inject a hold, modify completion, or supply a replacement original proof.
++type normalModelLifetimeDiagnosticForTest struct {
++	mu sync.Mutex
++	lines []string
++	callbacks []normalModelLifetimeCallbackForTest
++}
++type normalModelLifetimeCallbackForTest struct {
++	stop func() bool
++	joined <-chan struct{}
++}
++
++func (d *normalModelLifetimeDiagnosticForTest) record(line string) {
++	d.mu.Lock()
++	d.lines = append(d.lines, line)
++	d.mu.Unlock()
++}
++
++func (m normalOriginalModelsForTest) GetChatModel(ctx context.Context, id string) (chat.Chat, error) {
++	client, err := m.ModelService.GetChatModel(ctx, id)
++	if err != nil || m.observer == nil { return client, err }
++	native, ok := client.(*modelOriginalChatClient)
++	if !ok { return client, nil }
++	slot, attached := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	native.mu.Lock()
++	owner, autoClose, closed := native.owner, native.autoClose, native.closed
++	native.mu.Unlock()
++	refs, slotClosed := -1, false
++	if attached {slot.mu.Lock(); refs, slotClosed = slot.Refs, slot.Closed; slot.mu.Unlock()}
++	m.observer.record(fmt.Sprintf("ordinary_model_lifetime phase=constructor concrete=true owner=%t auto_close=%t closed=%t read_ctx_err=%t slot_attached=%t slot_refs=%d slot_closed=%t", owner,autoClose,closed,native.read.Context().Err()!=nil,attached,refs,slotClosed))
++	joined := make(chan struct{})
++	stop := context.AfterFunc(ctx, func() {
++		defer close(joined)
++		refs, slotClosed := -1, false
++		if attached {slot.mu.Lock(); refs, slotClosed = slot.Refs, slot.Closed; slot.mu.Unlock()}
++		native.mu.Lock(); closed := native.closed; native.mu.Unlock()
++		m.observer.record(fmt.Sprintf("ordinary_model_lifetime phase=constructor_ctx_cancel concrete=true ctx_err=%t owner=%t auto_close=%t closed=%t read_ctx_err=%t slot_refs=%d slot_closed=%t",ctx.Err()!=nil,owner,autoClose,closed,native.read.Context().Err()!=nil,refs,slotClosed))
++		select {case <-native.closeJoined: case <-time.After(3*time.Second):}
++		native.mu.Lock(); finalClosed := native.closed; native.mu.Unlock()
++		m.observer.record(fmt.Sprintf("ordinary_model_lifetime phase=after_original_close_wait closed=%t read_ctx_err=%t",finalClosed,native.read.Context().Err()!=nil))
++	})
++	m.observer.mu.Lock()
++	m.observer.callbacks = append(m.observer.callbacks,normalModelLifetimeCallbackForTest{stop:stop,joined:joined})
++	m.observer.mu.Unlock()
++	return client, nil
++}
++
++func (d *normalModelLifetimeDiagnosticForTest) finish(t *testing.T) {
++	t.Helper()
++	d.mu.Lock(); callbacks:=append([]normalModelLifetimeCallbackForTest(nil),d.callbacks...); d.mu.Unlock()
++	for _, callback:=range callbacks {
++		if callback.stop() {continue}
++		select {case <-callback.joined: case <-time.After(4*time.Second):t.Error("owned model diagnostic callback did not join");return}
++	}
++	d.mu.Lock(); lines:=append([]string(nil),d.lines...);d.mu.Unlock()
++	for _,line:=range lines {t.Log(line)}
++}
+ 
+ func (m normalOriginalModelsForTest) GetEmbeddingModel(context.Context, string) (embedding.Embedder, error) {
+ 	return parentChildEmbedder{}, nil
+@@ -23,7 +88,8 @@ func (m normalOriginalModelsForTest) GetEmbeddingModel(context.Context, string)
+ 
+ func NewNormalOriginalModelHTTPFixtureForTest(t *testing.T, pg bool, endpoint string) *NormalReferencesHTTPFixtureForTest {
+ 	t.Helper()
+-	return newNormalReferencesHTTPFixtureForTest(t, pg, nil, func(m *machinePipelineFixture, migration *gorm.DB) interfaces.ModelService {
++	observer := &normalModelLifetimeDiagnosticForTest{}
++	fixture := newNormalReferencesHTTPFixtureForTest(t, pg, nil, func(m *machinePipelineFixture, migration *gorm.DB) interfaces.ModelService {
+ 		db := m.f.db
+ 		require.NoError(t, db.AutoMigrate(&types.MemorySubject{}, &types.MemoryItem{}, &types.MemoryTombstone{}, &types.MemoryTopicStat{}, &types.MemoryDocAffinity{}, &types.MemoryItemEmbedding{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.PermissionVersion{}))
+ 		require.NoError(t, db.Migrator().CreateTable(&memAtomicLegacyExtraction{}))
+@@ -42,6 +108,11 @@ func NewNormalOriginalModelHTTPFixtureForTest(t *testing.T, pg bool, endpoint st
+ 		model.Parameters.BaseURL = endpoint
+ 		require.NoError(t, models.CreateModel(m.f.ctx, model))
+ 		require.NotNil(t, model.OriginalProof)
+-		return normalOriginalModelsForTest{ModelService: models}
++		return normalOriginalModelsForTest{ModelService: models, observer: observer}
+ 	})
++	// Later test resources register their cleanup after this point. Their HTTP
++	// teardown therefore precedes this joined observer drain; callbacks never
++	// call testing.T or emit body/error diagnostics from an asynchronous task.
++	t.Cleanup(func() { observer.finish(t) })
++	return fixture
+ }

@@ -1,0 +1,1928 @@
+{
+  "schema_version": 1,
+  "status": "private_component_adoption_draft_component_passed_full_V1_pending",
+  "created_utc": "2026-10-10T02:35:19.691263+00:00",
+  "main_repo_written": false,
+  "candidate_adoption_accepted": false,
+  "scope": "Actual local directory publication atomicity, live HTTP periodic directory sync and PostgreSQL transaction overlap components; not normal app/external LDAP/V1 acceptance.",
+  "source_contexts": {
+    "red_matched_fixture": {
+      "head": "f1a90f7f89ad0366555672e9c35b2da1d6ffbdf9",
+      "tree": "85c44708602f903ce0210d518f0f4c006cae1bed",
+      "fixture_sha256": "39a3227a04148acae6be8e51bd76bfbc52ee138dbf2841ea9be8aea7a7805510"
+    },
+    "production_green": {
+      "head": "e842b1487701c44f72fffe8c0e01b7dcdfdc7748",
+      "tree": "31a47098e03ef1a62bed5d9934af3cb8b5ce1b1b"
+    },
+    "rag_final_with_test_supplement": {
+      "head": "853c19cc6dad5312392733260e244b94f06dea7a",
+      "tree": "fe3ed8be0038e5217943b7fbd9805cf6df4f7559"
+    },
+    "c6_final_mirror": {
+      "head": "7e1d5ce4ba8b23c80bdf5371b550999d3ce1fd87",
+      "tree": "20cd1af873a54276159fba33f450ca315095ee72"
+    },
+    "production_files_byte_identical_across_green_rag_c6": [
+      "internal/application/access/nextcloud_publication.go",
+      "internal/application/repository/directory.go",
+      "internal/types/interfaces/directory.go"
+    ],
+    "main_manifest_at_draft": {
+      "path": "/Users/abner/My_Project/ai-server/nextcloud/integration/candidates/manifest.json",
+      "sha256": "447621a1a0a9acb05d34e2c3fecae5529e8ed0ee907f1b4bd1bdc9bdcc3a7a68",
+      "profiles": {
+        "c6": {
+          "base": "c6c4bd445a8ee49e742da9d804957a3fe4bf52d4",
+          "candidate_commit": "b43afa538fd820ca087769eabdb20ad35a5a3782",
+          "candidate_tree": "9b448a629a025ef01831cc1194f68fb6cfe79015",
+          "base_tree": "f34b409392178a4c03de580640f3da6ac4d1b21b",
+          "patch_sha256": "fee54113ae345335c1e480e96db427535252cca6af1396b7e49a4e80775d9be3",
+          "patch_bytes": 8399164,
+          "clean_index_apply_and_reverse_exact": true,
+          "path": "integration/candidates/weknora-phase3-c6.patch"
+        },
+        "rag": {
+          "base": "b6ea8b560b886cef77fb32fb2e092123cdce4ed3",
+          "candidate_commit": "1bbd0cc8ec83f03d8376b9c54cd9e3f81c95e866",
+          "candidate_tree": "02f33801e5f4bd4ace2b607a79d6e93325f6e3e6",
+          "base_tree": "861433ecca1a226a67410699a0e9f893f1c76eb1",
+          "patch_sha256": "4c5f9fdb8586d82c2052d416f1c09836af97e28efd6828254d29f01c0e42349b",
+          "patch_bytes": 8399445,
+          "clean_index_apply_and_reverse_exact": true,
+          "path": "integration/candidates/weknora-phase3-rag.patch"
+        }
+      },
+      "new_sources_promoted": false,
+      "main_head_root_reported": "fcd1d263a9a9f4ac68f44dbc42bb00f08c55414e"
+    }
+  },
+  "component_interpretation": {
+    "matched_red_green": {
+      "red_stage": "red-full",
+      "green_stage": "green-full",
+      "red_leaf_causes": [
+        "Unchanged completed ApplySnapshot between split getters invalidates legitimate old/current version assembly.",
+        "Cross-directory user link created between split getters can escape previously collected cardinality."
+      ],
+      "red_failing_leaves": 4,
+      "red_failing_aggregate_parents": 2,
+      "green_test_nodes": 16
+    },
+    "existing_publication_guards": {
+      "stage": "green-existing",
+      "nodes": 42
+    },
+    "periodic_true_http": {
+      "stage": "http-full",
+      "nodes": 10,
+      "dbs": [
+        "SQLite",
+        "PostgreSQL"
+      ],
+      "modes": [
+        "unchanged_complete_sync",
+        "disabled",
+        "out_of_scope",
+        "unlinked"
+      ],
+      "two_actual_complete_sync_epochs": true,
+      "actual_handler_knowledgeqa_provider_original_material": true,
+      "positive_done_only_after_open_provider_windows": true,
+      "negative_provider_closes_only_on_actual_cancel": true,
+      "required_terminal_oracles": [
+        "HTTP original8s",
+        "Actual producer returned",
+        "Actual model ctx canceled for negatives",
+        "Original/body/source leases zero before final DB oracle",
+        "Negative completed assistant/current completed input manifest zero",
+        "No answer/complete/source-bearing sentinel exposure after fault"
+      ],
+      "external_ldap_accepted": false,
+      "sole_group_grant_authorization_accepted": false
+    },
+    "pg_transaction_overlap": {
+      "stage": "pg-concurrency",
+      "nodes": 7,
+      "modes": [
+        "unchanged_complete_sync",
+        "disabled",
+        "out_of_scope",
+        "directory_disabled",
+        "link_phantom_point_in_time",
+        "cancel_waiting_for_share"
+      ],
+      "actual_independent_connections": true,
+      "bounded_whole_transaction_retry_on_sqlstate_40001": 3,
+      "all_user_links_same_repeatable_read_view": true,
+      "directory_lock_scope": "sole routed directory FOR SHARE",
+      "point_in_time_limit": "A link phantom committed after RR snapshot is absent from the first point-in-time view and denied by the next fresh read; not a claim of global serializability."
+    },
+    "c6_components": {
+      "stage": "c6-components",
+      "nodes": 62
+    },
+    "counts_are_stage_counts_do_not_sum_duplicate_tests": true
+  },
+  "actual_records": [
+    {
+      "stage": "c6-components",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 124.246,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-atomic-periodic-final-c6-20261011-history",
+      "head": "7e1d5ce4ba8b23c80bdf5371b550999d3ce1fd87",
+      "tree": "20cd1af873a54276159fba33f450ca315095ee72",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "20m",
+        "-run",
+        "NextcloudPublication|^Test(DirectoryPeriodicSyncActualHTTPSQLite|PostgresDirectoryPeriodicSyncActualHTTP)$",
+        "./internal/application/access",
+        "./internal/application/service"
+      ],
+      "container_id": "cefa4253ea26a2f6b293d77ca3708f2b006f01dfd37df07babce302850e3b3a9",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 62,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/c6-components.private.jsonl",
+      "log_sha256": "290bd01c683b9470eb4df0c22cd50dc0b699d30fb13176209cae016a7515814a",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/c6-components.result.json",
+      "result_sha256": "d7ce430b437cccf436cfcbb236d866bca767db9c769e69d2a90ee49f3fe7368a",
+      "raw_bytes": 843035,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/c6-components.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "green-all-compile-r2",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 173.392,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-atomic-validated-rag-20261010-root",
+      "head": "e842b1487701c44f72fffe8c0e01b7dcdfdc7748",
+      "tree": "31a47098e03ef1a62bed5d9934af3cb8b5ce1b1b",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./..."
+      ],
+      "container_id": "cced9aa665175836c4f75b05f1fde82d350baeaeecb8d89f4aafd63c194892c7",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 115,
+        "fail": 0,
+        "skip": 40
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-all-compile-r2.private.jsonl",
+      "log_sha256": "288ccc0b726aa89aebb10e9d581c15b0225457765127873a50547113f28c9b02",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-all-compile-r2.result.json",
+      "result_sha256": "1746645f559eef737950ddc1c0443b2f02e42cd8298bdb700e9f53630e7e895c",
+      "raw_bytes": 113553,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "compile_package_no_test_metadata_count": 40,
+      "test_skip_count": 0,
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-all-compile-r2.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "green-all-compile",
+      "terminal": 1,
+      "attach_terminal": 1,
+      "duration_seconds": 231.426,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-atomic-validated-rag-20261010-root",
+      "head": "e842b1487701c44f72fffe8c0e01b7dcdfdc7748",
+      "tree": "31a47098e03ef1a62bed5d9934af3cb8b5ce1b1b",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./..."
+      ],
+      "container_id": "5e362d66099d10441e1f10112247a83c0aae7f7a6f9820704cb92c528004c9a9",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 53,
+        "fail": 62,
+        "skip": 40
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-all-compile.private.jsonl",
+      "log_sha256": "15e0e7cc517cd7f8d2b66bd2c47919cba58882fc2bd74d012df6e7346a11aded",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-all-compile.result.json",
+      "result_sha256": "ed6e60a04c6737958ce7754eb6863e91f45e4328f455a3979abafe38c97c71fb",
+      "raw_bytes": 133681,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "compile_package_no_test_metadata_count": 40,
+      "test_skip_count": 0,
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-all-compile.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "green-compile",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 26.279,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-atomic-validated-rag-20261010-root",
+      "head": "e842b1487701c44f72fffe8c0e01b7dcdfdc7748",
+      "tree": "31a47098e03ef1a62bed5d9934af3cb8b5ce1b1b",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./internal/application/access"
+      ],
+      "container_id": "8c8dbeb0b28125da160059dc5a25aac511ec40de3df8d235cba3dc16ad707cdd",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-compile.private.jsonl",
+      "log_sha256": "9fc1fe6627a9295b699140473f9c139424d90f4cbf1f1ecc7503e43ba46225fe",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-compile.result.json",
+      "result_sha256": "d52eb94ca9ac22ca687e8f9865f0e50d32036b7013523e50262b625c3f3bcff7",
+      "raw_bytes": 813,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-compile.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "green-existing",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 5.987,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-atomic-validated-rag-20261010-root",
+      "head": "e842b1487701c44f72fffe8c0e01b7dcdfdc7748",
+      "tree": "31a47098e03ef1a62bed5d9934af3cb8b5ce1b1b",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "NextcloudPublication|NextcloudKnowledgeLeaseScope|NextcloudKBRead",
+        "./internal/application/access"
+      ],
+      "container_id": "9952525fbe27e2bb81007a273cc9e62c4f4a04b7c6f934b8a440c29559d3e3df",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 42,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-existing.private.jsonl",
+      "log_sha256": "4c3c25237819a5e658684617b78b09852b8e8ddc71a0c0f874c34fd16c2d2911",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-existing.result.json",
+      "result_sha256": "8c826001367f05622f8039e3c9387e03a622c53cefce650e65055eeb9ee25f2f",
+      "raw_bytes": 42059,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-existing.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "green-full",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 5.714,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-atomic-validated-rag-20261010-root",
+      "head": "e842b1487701c44f72fffe8c0e01b7dcdfdc7748",
+      "tree": "31a47098e03ef1a62bed5d9934af3cb8b5ce1b1b",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^Test(NextcloudPublicationDirectorySnapshotActualSQLite|PostgresNextcloudPublicationDirectorySnapshotActual)$",
+        "./internal/application/access"
+      ],
+      "container_id": "2c3e8753bbb4bec9b2c0c030d9a512f90503b987a6317c125311d83fa34514a5",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-full.private.jsonl",
+      "log_sha256": "7d6e952f77299f48a2acb94874dacb65c55567e92149d4043745ffc61c00087b",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-full.result.json",
+      "result_sha256": "b9d862ccaa0f7998fc20e4d64cf0bd86908e358c20170f0cbbec462953604d0e",
+      "raw_bytes": 16776,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-full.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "http-compile-r2",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 8.662,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-extra-validated-rag-20261010-root",
+      "head": "24a5e92c7bd48c183dafce55078bd34e6553ebfc",
+      "tree": "bce24af7b458923a05499a5d76b1383df21dd8b9",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./internal/application/service"
+      ],
+      "container_id": "5e4ccaccd07793de064faa0b64175de189dc1a914c123ca389bea82a32225bb1",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-compile-r2.private.jsonl",
+      "log_sha256": "584bcf4fa6236911bf81c239f0794cb627a130b99d0ee41b2e61476c5c089195",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-compile-r2.result.json",
+      "result_sha256": "65700ce2c1be967eba53be016e0d68071e429ab1930d920c6436de6173c93f9a",
+      "raw_bytes": 818,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-compile-r2.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "http-compile",
+      "terminal": 1,
+      "attach_terminal": 1,
+      "duration_seconds": 27.941,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-extra-validated-rag-20261010-root",
+      "head": "3093ce3926493d060c21a3d9fcdb09c2fd80a566",
+      "tree": "a39eec4f654b5514e38890ffdf2e7d3a1a576509",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./internal/application/service"
+      ],
+      "container_id": "a3000b707687aa6a132093ee5085d68a635cc0157ddda8573667a0fc80906dfd",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-compile.private.jsonl",
+      "log_sha256": "a6a1314d8da4cae686a5bea6ee4f88a9348778dac86ab84d2e3c1086823a6056",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-compile.result.json",
+      "result_sha256": "e0279b3fe6af99de9e5fbfe24c250fdd43c765549923794e6c53ad1d5660dd3d",
+      "raw_bytes": 1660,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-compile.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "http-full",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 64.007,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-extra-validated-rag-20261010-root",
+      "head": "853c19cc6dad5312392733260e244b94f06dea7a",
+      "tree": "fe3ed8be0038e5217943b7fbd9805cf6df4f7559",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^Test(DirectoryPeriodicSyncActualHTTPSQLite|PostgresDirectoryPeriodicSyncActualHTTP)$",
+        "./internal/application/service"
+      ],
+      "container_id": "b9e3c4336598ef589c51a1c78e31c2ece8a327fbfbbdbcc284da2dbaede77f62",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 10,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-full.private.jsonl",
+      "log_sha256": "66c4e09a8bcd4aaf1cb9c26ca730f30251a3b0b71f9a1f9178d326cd138367f3",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-full.result.json",
+      "result_sha256": "015d3f5a4d532d24b3911501167029bed60de3614d651cc70376b914f1289a21",
+      "raw_bytes": 782474,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-full.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "http-legal-r2",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 47.488,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-extra-validated-rag-20261010-root",
+      "head": "853c19cc6dad5312392733260e244b94f06dea7a",
+      "tree": "fe3ed8be0038e5217943b7fbd9805cf6df4f7559",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^Test(DirectoryPeriodicSyncActualHTTPSQLite|PostgresDirectoryPeriodicSyncActualHTTP)$/^unchanged_complete_sync$",
+        "./internal/application/service"
+      ],
+      "container_id": "0c04eaba59046c5c02f57f261ae433c2f866baffcf987be5109df247b6f8d081",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-legal-r2.private.jsonl",
+      "log_sha256": "82c7ef5d052d9f1a9827e2f6bdc3aee3f5bff1d479f93a9079cd0507106c2a66",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-legal-r2.result.json",
+      "result_sha256": "003b772929da1d9082302789ae749606e16e2866efd7589afec8ac4c40fabe1e",
+      "raw_bytes": 204055,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-legal-r2.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "http-legal",
+      "terminal": 1,
+      "attach_terminal": 1,
+      "duration_seconds": 14.684,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-extra-validated-rag-20261010-root",
+      "head": "24a5e92c7bd48c183dafce55078bd34e6553ebfc",
+      "tree": "bce24af7b458923a05499a5d76b1383df21dd8b9",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^Test(DirectoryPeriodicSyncActualHTTPSQLite|PostgresDirectoryPeriodicSyncActualHTTP)$/^unchanged_complete_sync$",
+        "./internal/application/service"
+      ],
+      "container_id": "20e586d9f5cf598b015a530cf8607f83f013ec9e507d89241bc5d4fedf26e64d",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 2,
+        "fail": 2,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-legal.private.jsonl",
+      "log_sha256": "4ff2a8ccce642fde4dfde29f96e52af20b2e4614e411a2bf029687312b7751e3",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-legal.result.json",
+      "result_sha256": "8e0a407634addc69cd9042cdcac0243d351e446d24c50dff90beb9048adaf0ea",
+      "raw_bytes": 105992,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-legal.result.json",
+      "failed_test_names": [
+        "TestPostgresDirectoryPeriodicSyncActualHTTP/unchanged_complete_sync",
+        "TestPostgresDirectoryPeriodicSyncActualHTTP"
+      ]
+    },
+    {
+      "stage": "pg-concurrency",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 8.673,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-extra-validated-rag-20261010-root",
+      "head": "853c19cc6dad5312392733260e244b94f06dea7a",
+      "tree": "fe3ed8be0038e5217943b7fbd9805cf6df4f7559",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "20m",
+        "-run",
+        "^TestPostgresNextcloudPublicationDirectorySnapshotConcurrentTransactions$",
+        "./internal/application/access"
+      ],
+      "container_id": "b82f2a9d5bbaf37097c63e1a2c7b9e6e2e94ca44866ccde8a55d6f53ab394bf7",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/pg-concurrency.private.jsonl",
+      "log_sha256": "0121799ac9b8af85c8127bd6cf5ecea52680e6df8aafd00229e209da4f32823e",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/pg-concurrency.result.json",
+      "result_sha256": "4ee42db1e2b32c47e7e4284457069fe61bed8fe96ba0ae7f673ebb70a48c8de8",
+      "raw_bytes": 8601,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/pg-concurrency.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "red-compile-r2",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 4.932,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-race-red-prep-rag-20261010-audit",
+      "head": "177a051acfc4503feb429a8f8f6a1036d484fbc9",
+      "tree": "6a60d545961a2160873ca2efa931de522c033f09",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./internal/application/access"
+      ],
+      "container_id": "9a3062e7e8eaef2f8083ed395b72362fc26acdc03a6cbfbc8d6161117034c994",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-compile-r2.private.jsonl",
+      "log_sha256": "ae6a365a43e78404b201671cd7d0820f07fc9ea76ec85618ed3e05005f60943a",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-compile-r2.result.json",
+      "result_sha256": "76f621323d98e2c144918659b017a261ca8e8fdac71b557cead0326c32c02095",
+      "raw_bytes": 812,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-compile-r2.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "red-compile",
+      "terminal": 1,
+      "attach_terminal": 1,
+      "duration_seconds": 22.458,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-race-red-prep-rag-20261010-audit",
+      "head": "177a051acfc4503feb429a8f8f6a1036d484fbc9",
+      "tree": "6a60d545961a2160873ca2efa931de522c033f09",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./internal/application/access"
+      ],
+      "container_id": "266ba37cc0dd262f9ea5fb9d9d2f978c2fb749857976746317ec7ac354a70bcc",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-compile.private.jsonl",
+      "log_sha256": "99ff3779a361742e8bbabc8e562ba8c2075094a4538f843647ba77a59ad8d787",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-compile.result.json",
+      "result_sha256": "7de8683c904176fd316efcb8999cd07995c11fe46533c498f52960ffb77a07e3",
+      "raw_bytes": 685,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-compile.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "red-full",
+      "terminal": 1,
+      "attach_terminal": 1,
+      "duration_seconds": 5.599,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-race-red-prep-rag-20261010-audit",
+      "head": "f1a90f7f89ad0366555672e9c35b2da1d6ffbdf9",
+      "tree": "85c44708602f903ce0210d518f0f4c006cae1bed",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^Test(NextcloudPublicationDirectorySnapshotActualSQLite|PostgresNextcloudPublicationDirectorySnapshotActual)$",
+        "./internal/application/access"
+      ],
+      "container_id": "6266f4357299e59c1463f048aa10c495de8b6741e0154e59974b9487fdc25c76",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 10,
+        "fail": 6,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-full.private.jsonl",
+      "log_sha256": "739feeba8e99551c32eaed3b83b3a86867c93c8080ef260f761d7720eced4511",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-full.result.json",
+      "result_sha256": "4429bb546b6bff4f3ffcf55419cdb83d70d0fa4250605223a98806999cafaf8c",
+      "raw_bytes": 23173,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-full.result.json",
+      "failed_test_names": [
+        "TestNextcloudPublicationDirectorySnapshotActualSQLite/unchanged_complete_sync",
+        "TestNextcloudPublicationDirectorySnapshotActualSQLite/cross_directory_link",
+        "TestNextcloudPublicationDirectorySnapshotActualSQLite",
+        "TestPostgresNextcloudPublicationDirectorySnapshotActual/unchanged_complete_sync",
+        "TestPostgresNextcloudPublicationDirectorySnapshotActual/cross_directory_link",
+        "TestPostgresNextcloudPublicationDirectorySnapshotActual"
+      ]
+    },
+    {
+      "stage": "red-legal-r2",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 5.418,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-race-red-prep-rag-20261010-audit",
+      "head": "f1a90f7f89ad0366555672e9c35b2da1d6ffbdf9",
+      "tree": "85c44708602f903ce0210d518f0f4c006cae1bed",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^Test(NextcloudPublicationDirectorySnapshotActualSQLite|PostgresNextcloudPublicationDirectorySnapshotActual)$/^current$",
+        "./internal/application/access"
+      ],
+      "container_id": "2ec0e866f41b1438f634303cd0c3309f55aa611a6b4cb10c875fef2894ed14c9",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-legal-r2.private.jsonl",
+      "log_sha256": "d70c4d71b0f0316751e8e5f41dcfa572835f3e5199dc3290b744f61e602b86e2",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-legal-r2.result.json",
+      "result_sha256": "74989c7ca6c9f89c3d1e563fdfe99bdeea8e28e02107b814d5aac63e6c222670",
+      "raw_bytes": 4468,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-legal-r2.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "red-legal",
+      "terminal": 1,
+      "attach_terminal": 1,
+      "duration_seconds": 5.137,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-publication-race-red-prep-rag-20261010-audit",
+      "head": "177a051acfc4503feb429a8f8f6a1036d484fbc9",
+      "tree": "6a60d545961a2160873ca2efa931de522c033f09",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^Test(NextcloudPublicationDirectorySnapshotActualSQLite|PostgresNextcloudPublicationDirectorySnapshotActual)$/^current$",
+        "./internal/application/access"
+      ],
+      "container_id": "1d21c48bdc1b088ee53d5e0d43fe904678fbbdc2938c0fdcdc471e0dea68abee",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 2,
+        "fail": 2,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-legal.private.jsonl",
+      "log_sha256": "b43bf3d2e347c7cde1d66386179f76a67994eb00a0ea1e95acd9b676888ad429",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-legal.result.json",
+      "result_sha256": "1055a56914cb70447a6db1cd7a3029213ad51b10926d3d3b17debe9b0f3f190b",
+      "raw_bytes": 6283,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "test_nodes_match": true,
+        "invalid_json_lines": 0
+      },
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-legal.result.json",
+      "failed_test_names": [
+        "TestPostgresNextcloudPublicationDirectorySnapshotActual/current",
+        "TestPostgresNextcloudPublicationDirectorySnapshotActual"
+      ]
+    },
+    {
+      "stage": "c6-all-compile",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 258.736,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-atomic-periodic-final-c6-20261011-history",
+      "head": "7e1d5ce4ba8b23c80bdf5371b550999d3ce1fd87",
+      "tree": "20cd1af873a54276159fba33f450ca315095ee72",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./..."
+      ],
+      "container_id": "b9c3922fabe36452b3c8870dd72dd09807ad0770a387a3fdd22bed2ba639553c",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 115,
+        "fail": 0,
+        "skip": 40
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/c6-all-compile.private.jsonl",
+      "log_sha256": "306c509836ee2425930bb86b8fe52ccce9870c46ebb2e3516d38d2db954d9512",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/c6-all-compile.result.json",
+      "result_sha256": "530615e50faa0734900b043e0a4bc2b29a140125b5de001e12f6bb0804639e1d",
+      "raw_bytes": 113570,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "package_counts_match": true,
+        "invalid_json_lines": 0
+      },
+      "compile_package_no_test_metadata_count": 40,
+      "test_skip_count": 0,
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/c6-all-compile.result.json",
+      "failed_test_names": []
+    },
+    {
+      "stage": "rag-final-all-compile",
+      "terminal": 0,
+      "attach_terminal": 0,
+      "duration_seconds": 178.761,
+      "source": "/Users/abner/My_Project/ai-server/.weknora-directory-extra-validated-rag-20261010-root",
+      "head": "853c19cc6dad5312392733260e244b94f06dea7a",
+      "tree": "fe3ed8be0038e5217943b7fbd9805cf6df4f7559",
+      "command": [
+        "go",
+        "test",
+        "-buildvcs=false",
+        "-json",
+        "-tags",
+        "sqlite_fts5",
+        "-p",
+        "1",
+        "-parallel",
+        "1",
+        "-count=1",
+        "-timeout",
+        "2m",
+        "-run",
+        "^$",
+        "./..."
+      ],
+      "container_id": "fff1e936359567cb347dd9d830fc7aaf46fbcca062c8fd35b7e9854877421b72",
+      "container_removed": true,
+      "oom": false,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_metadata": {
+        "pass": 115,
+        "fail": 0,
+        "skip": 40
+      },
+      "invalid_json_lines": 0,
+      "log": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/rag-final-all-compile.private.jsonl",
+      "log_sha256": "e7059c34b6b45db4882e3a3177d19ddd55dba5f3651533c583e12579f4b464f2",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "shared_cache_policy": "module RO/build RW; retained; bytes may change",
+      "result_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/rag-final-all-compile.result.json",
+      "result_sha256": "76118712456383e0724a74ec58a45dc952cd00fc5daac331d8cbfccc5ed1b747",
+      "raw_bytes": 113517,
+      "draft_readonly_raw_recheck": {
+        "sha256_matches": true,
+        "test_counts_match": true,
+        "package_counts_match": true,
+        "invalid_json_lines": 0
+      },
+      "compile_package_no_test_metadata_count": 40,
+      "test_skip_count": 0,
+      "actual_node_names_reference": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/rag-final-all-compile.result.json",
+      "failed_test_names": []
+    }
+  ],
+  "preparation_failures_preserved": [
+    {
+      "stage": "red-compile",
+      "classification": "preparation_failure",
+      "cause": "Owned tmpfs was noexec; execution failed before business regression.",
+      "repair": "Owned exec-capable build temp; red-compile-r2 terminal0; original log preserved.",
+      "source_head": "177a051acfc4503feb429a8f8f6a1036d484fbc9",
+      "terminal": 1,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "raw_sha256": "99ff3779a361742e8bbabc8e562ba8c2075094a4538f843647ba77a59ad8d787",
+      "raw_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-compile.private.jsonl"
+    },
+    {
+      "stage": "green-all-compile",
+      "classification": "preparation_failure",
+      "cause": "Owned 512MiB linker temp exhausted disk space; source compile acceptance cannot be inferred.",
+      "repair": "Exact owned disk build temp; same e842 green-all-compile-r2 terminal0,115 test packages+40 no-test package metadata.",
+      "source_head": "e842b1487701c44f72fffe8c0e01b7dcdfdc7748",
+      "terminal": 1,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "raw_sha256": "15e0e7cc517cd7f8d2b66bd2c47919cba58882fc2bd74d012df6e7346a11aded",
+      "raw_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/green-all-compile.private.jsonl"
+    },
+    {
+      "stage": "red-legal",
+      "classification": "fixture_preparation_failure",
+      "cause": "Private PostgreSQL search_path could not resolve public uuid_generate_v4; PG did not enter business assertion.",
+      "repair": "Exact f1 fixture adds private wrapper delegating public extension, keeping relation search_path private; red-legal-r2 4PASS.",
+      "source_head": "177a051acfc4503feb429a8f8f6a1036d484fbc9",
+      "terminal": 1,
+      "counts": {
+        "pass": 2,
+        "fail": 2,
+        "skip": 0
+      },
+      "raw_sha256": "b43bf3d2e347c7cde1d66386179f76a67994eb00a0ea1e95acd9b676888ad429",
+      "raw_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/red-legal.private.jsonl"
+    },
+    {
+      "stage": "http-compile",
+      "classification": "fixture_compile_failure",
+      "cause": "Embedded chat.Chat field conflicted with explicit Chat method.",
+      "repair": "Only redundant embedding removed; same actual interface methods and assertions retained; http-compile-r2 terminal0.",
+      "source_head": "3093ce3926493d060c21a3d9fcdb09c2fd80a566",
+      "terminal": 1,
+      "counts": {
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      },
+      "raw_sha256": "a6a1314d8da4cae686a5bea6ee4f88a9348778dac86ab84d2e3c1086823a6056",
+      "raw_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-compile.private.jsonl"
+    },
+    {
+      "stage": "http-legal",
+      "classification": "fixture_preparation_failure",
+      "cause": "Real production directory TLS CHECK rejected old partial machine-ad fixture empty TLS/config.",
+      "repair": "Only opt-in full-directory fixture seeded constraint-valid directory config; production DDL/guards retained; http-legal-r2 4PASS.",
+      "source_head": "24a5e92c7bd48c183dafce55078bd34e6553ebfc",
+      "terminal": 1,
+      "counts": {
+        "pass": 2,
+        "fail": 2,
+        "skip": 0
+      },
+      "raw_sha256": "4ff2a8ccce642fde4dfde29f96e52af20b2e4614e411a2bf029687312b7751e3",
+      "raw_path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/http-legal.private.jsonl"
+    }
+  ],
+  "source_mirror": {
+    "metadata_path": "/private/tmp/nc-directory-c6-source-mirror-5zcovlyw/source-mirror.metadata.json",
+    "metadata_sha256": "bd2857c277931ca36988e819f6feded20095a4ecfb1ef52cafd5337730a8abf0",
+    "delta": {
+      "rag-delta": {
+        "base": "1bbd0cc8ec83f03d8376b9c54cd9e3f81c95e866",
+        "head": "853c19cc6dad5312392733260e244b94f06dea7a",
+        "path": "/private/tmp/nc-directory-c6-source-mirror-5zcovlyw/rag-delta.full-index.patch",
+        "sha256": "a2c463766dc6ac26d9ea40d8f3fbd433da5bd803cbbf2294a8a6437f7afc7c40",
+        "bytes": 74982
+      },
+      "c6-delta": {
+        "base": "b43afa538fd820ca087769eabdb20ad35a5a3782",
+        "head": "7e1d5ce4ba8b23c80bdf5371b550999d3ce1fd87",
+        "path": "/private/tmp/nc-directory-c6-source-mirror-5zcovlyw/c6-delta.full-index.patch",
+        "sha256": "a2c463766dc6ac26d9ea40d8f3fbd433da5bd803cbbf2294a8a6437f7afc7c40",
+        "bytes": 74982
+      },
+      "rag-profile": {
+        "base": "b6ea8b560b886cef77fb32fb2e092123cdce4ed3",
+        "head": "853c19cc6dad5312392733260e244b94f06dea7a",
+        "path": "/private/tmp/nc-directory-c6-source-mirror-5zcovlyw/rag-profile.full-index.patch",
+        "sha256": "2418afc2917a7e1d2d5b02037e7b0fbc1dec5522eb8cd467e6e3778443e2deac",
+        "bytes": 8869489
+      },
+      "c6-profile": {
+        "base": "c6c4bd445a8ee49e742da9d804957a3fe4bf52d4",
+        "head": "7e1d5ce4ba8b23c80bdf5371b550999d3ce1fd87",
+        "path": "/private/tmp/nc-directory-c6-source-mirror-5zcovlyw/c6-profile.full-index.patch",
+        "sha256": "ca7abd34a4417b9f0bb82114bb2f13f1cda3fc6014c574b78a6d9c8bd3596621",
+        "bytes": 8869208
+      }
+    },
+    "checks": {
+      "changed_files": [
+        "internal/application/access/nextcloud_publication.go",
+        "internal/application/access/nextcloud_publication_directory_concurrency_actual_test.go",
+        "internal/application/access/nextcloud_publication_directory_snapshot_actual_test.go",
+        "internal/application/access/nextcloud_publication_test.go",
+        "internal/application/repository/directory.go",
+        "internal/application/service/directory_periodic_http_actual_test.go",
+        "internal/application/service/knowledge_enrichment_input_test.go",
+        "internal/application/service/knowledge_machine_pipeline_test.go",
+        "internal/application/service/normal_references_http_fixture_test.go",
+        "internal/handler/knowledge_collection_nextcloud_test.go",
+        "internal/handler/nextcloud_publication_test.go",
+        "internal/types/interfaces/directory.go"
+      ],
+      "production_files": [
+        "internal/application/access/nextcloud_publication.go",
+        "internal/application/repository/directory.go",
+        "internal/types/interfaces/directory.go"
+      ],
+      "modified_preimages_equal": true,
+      "modified_postimages_equal": true,
+      "full_index_increment_bytes_equal": true,
+      "remaining_profile_diff_exactly_equal": true,
+      "diff_check_exit": 0,
+      "conflicts": []
+    }
+  },
+  "independent_audit_snapshot": {
+    "path": "/private/tmp/nc-directory-actual-http-concurrency-audit-20261011-xo0qb1av/raw-results.metadata.json",
+    "sha256": "20600943889ab294630c81d8ce5379bb5b43b3e71caee6f1e1584b5d61e85f7d",
+    "classification": "Runtime agent private raw audit; no resource mutation by this draft author."
+  },
+  "pending": {
+    "new_sources_full_original_selection": "Planned 47 required parents (original42 + getter2 + periodicHTTP2 + concurrency1), not run on new source.",
+    "new_normal_images": null,
+    "fresh_normal_qa_running_replay_dual_db_restore": null,
+    "P5_100_samples_and_ABBA_uploads": null,
+    "external_LDAP_provider_integration": null,
+    "existing_linux_CI_8s_HTTP_and_20m_package_failures_resolution": null
+  },
+  "V1_scope": {
+    "complete": false,
+    "memory_original_material": {
+      "foundation_commit": "383dfd860dc5c4aeaf76a236361a57a1f8e2f7c7",
+      "classification": "source_only_foundation",
+      "durable_admission_worker_atomic_checkpoint_and_transitive_inputs_wired": false,
+      "accepted": false,
+      "actual_pre_fix_regression": {
+        "summary_path": "/Users/abner/My_Project/ai-server/.memory-original-gate-history-20261010-4cvxe628/memory-red-causal-summary.metadata.json",
+        "summary_sha256": "17e71bb361363a0068a7fbfe6c0357ded9dfa2321068dcb817c4f1f8ae4e6e3d",
+        "source": "/Users/abner/My_Project/ai-server/.weknora-memory-original-material-final-prep-20261010-history",
+        "head": "515b710e33b3da9316eff570ed8a7f08317ee155",
+        "tree": "75b0d5692b4c35d0d809bcc371f8e206f7958874",
+        "legal": {
+          "terminal": 0,
+          "counts": {
+            "pass": 8,
+            "fail": 0,
+            "skip": 0
+          },
+          "log": "/Users/abner/My_Project/ai-server/.memory-original-gate-history-20261010-4cvxe628/legal-r2.private.jsonl",
+          "log_sha256": "eac87d2cc89b13ffb988e7943d3edf428758b6ada5ad137ca87d9f0277c96988",
+          "duration_seconds": 13.054
+        },
+        "red": {
+          "terminal": 1,
+          "counts": {
+            "pass": 0,
+            "fail": 20,
+            "skip": 0
+          },
+          "log": "/Users/abner/My_Project/ai-server/.memory-original-gate-history-20261010-4cvxe628/red-r1.private.jsonl",
+          "log_sha256": "b3fb717bfd27745718cbb551d9e8f060da864b20b24e2e80f66a9d38349d4e85",
+          "duration_seconds": 22.918
+        },
+        "negative_modes": [
+          {
+            "mode": "unadmitted_content_after_queue",
+            "handle_returned_nil": true,
+            "actual_model_calls": 1,
+            "actual_memory_writes_original_scope": 1,
+            "actual_memory_writes_all_scopes": 1,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": true,
+            "original_scope_pending_preserved": false
+          },
+          {
+            "mode": "actor_withdrawn_after_queue",
+            "handle_returned_nil": true,
+            "actual_model_calls": 1,
+            "actual_memory_writes_original_scope": 1,
+            "actual_memory_writes_all_scopes": 1,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": true,
+            "original_scope_pending_preserved": false
+          },
+          {
+            "mode": "unadmitted_prior_after_queue",
+            "handle_returned_nil": true,
+            "actual_model_calls": 1,
+            "actual_memory_writes_original_scope": 1,
+            "actual_memory_writes_all_scopes": 1,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": true,
+            "original_scope_pending_preserved": false
+          },
+          {
+            "mode": "task_tenant_tampered",
+            "handle_returned_nil": true,
+            "actual_model_calls": 0,
+            "actual_memory_writes_original_scope": 0,
+            "actual_memory_writes_all_scopes": 0,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": false,
+            "original_scope_pending_preserved": true
+          },
+          {
+            "mode": "task_subject_tampered",
+            "handle_returned_nil": true,
+            "actual_model_calls": 1,
+            "actual_memory_writes_original_scope": 0,
+            "actual_memory_writes_all_scopes": 1,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": false,
+            "original_scope_pending_preserved": true
+          },
+          {
+            "mode": "task_session_tampered",
+            "handle_returned_nil": true,
+            "actual_model_calls": 1,
+            "actual_memory_writes_original_scope": 1,
+            "actual_memory_writes_all_scopes": 1,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": true,
+            "original_scope_pending_preserved": false
+          },
+          {
+            "mode": "unproved_cursor_after_queue",
+            "handle_returned_nil": true,
+            "actual_model_calls": 0,
+            "actual_memory_writes_original_scope": 0,
+            "actual_memory_writes_all_scopes": 0,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": false,
+            "original_scope_pending_preserved": false
+          },
+          {
+            "mode": "actor_withdrawn_after_model",
+            "handle_returned_nil": true,
+            "actual_model_calls": 1,
+            "actual_memory_writes_original_scope": 1,
+            "actual_memory_writes_all_scopes": 1,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": true,
+            "original_scope_pending_preserved": false
+          },
+          {
+            "mode": "model_withdrawn_after_model",
+            "handle_returned_nil": true,
+            "actual_model_calls": 1,
+            "actual_memory_writes_original_scope": 1,
+            "actual_memory_writes_all_scopes": 1,
+            "fixture_unexpected_error": false,
+            "final_body_source_leases0_assertions_passed": true,
+            "source_original_facts_unchanged_assertion_passed": true,
+            "original_scope_cursor_advanced": true,
+            "original_scope_pending_preserved": false
+          }
+        ],
+        "negative_mode_count": 9,
+        "DBs": [
+          "SQLite",
+          "PostgreSQL"
+        ],
+        "genuine_red_after_legal": true,
+        "production_delta_files": 0,
+        "no_unexpected_fixture_error": true,
+        "limits": [
+          "captured enqueuer and controlled model transport, not actual broker fault acceptance",
+          "current non-active model status is an explicit tested contract; no modelpolicy/config digest protocol implemented",
+          "18 leaf results do not validate full memory pipeline or immutable prior existing-memory dependencies",
+          "wrong-subject derived row is observed by all-scope count; only the original scope cursor/pending is asserted, wrong-subject progress details not claimed"
+        ],
+        "silent_ack_scope_note": "task_tenant_tampered and impossible_unproved_cursor have model0/write0: silent ack and pending-policy failures, not body exposure. task_subject_tampered creates a wrong-subject derived row; only original-scope cursor/pending checked."
+      }
+    },
+    "local_inventory_and_physical_receipt_credential_retirement": "pending; no inventory complete ACK/global flags reopened"
+  },
+  "privacy": "Raw logs remain private at original owned paths; this draft includes only commands, metadata, test names, IDs and hashes, no body/credentials.",
+  "completed_final_compile": {
+    "final_c6_global_compile": {
+      "stage": "c6-all-compile",
+      "source_head": "7e1d5ce4ba8b23c80bdf5371b550999d3ce1fd87",
+      "tree": "20cd1af873a54276159fba33f450ca315095ee72",
+      "terminal": 0,
+      "duration_seconds": 258.736,
+      "test_package_pass": 115,
+      "no_test_package_metadata": 40,
+      "runtime_test_events": 0,
+      "test_skips": 0,
+      "raw_sha256": "306c509836ee2425930bb86b8fe52ccce9870c46ebb2e3516d38d2db954d9512"
+    },
+    "final_rag853_global_compile": {
+      "stage": "rag-final-all-compile",
+      "source_head": "853c19cc6dad5312392733260e244b94f06dea7a",
+      "tree": "fe3ed8be0038e5217943b7fbd9805cf6df4f7559",
+      "terminal": 0,
+      "duration_seconds": 178.761,
+      "test_package_pass": 115,
+      "no_test_package_metadata": 40,
+      "runtime_test_events": 0,
+      "test_skips": 0,
+      "raw_sha256": "e7059c34b6b45db4882e3a3177d19ddd55dba5f3651533c583e12579f4b464f2"
+    }
+  },
+  "completed_exact_owner_release": {
+    "path": "/Users/abner/My_Project/ai-server/nc-directory-snapshot-gate-20261010-6l2evh9m/exact-owner-cleanup.metadata.json",
+    "sha256": "0685888642351fe26a5655f56155f15f9df75342f8f1d6d814237324cdbd447d",
+    "record": {
+      "status": "exact_owned_resources_removed_heavy_window_released",
+      "owner_nonce": "43b54dbc5ff817614dd4285b",
+      "pg_id": "29fa44756f8ef3864cadd33701b4bdb8e011e1b0cc9e3696d7d296258a930a12",
+      "network_id": "1fc9fe8cafacdd26a0e995a82771df91ff6bd4144ee4790dc9f5fcb5b12abc9e",
+      "pg_volume": "nc-dir-snapshot-pg-43b54dbc5ff817614dd4285b",
+      "compile_temp_volume": "nc-dir-build-temp-43b54dbc5ff817614dd4285b",
+      "all_owned_Go_actors_removed": true,
+      "shared_caches": "module RO/build RW; neither removed nor cleared; bytes may change",
+      "failed_normal_owners_and_shared_runtime_touched": false,
+      "private_logs_and_source_preserved": true,
+      "started_at": 1791599528.7419589,
+      "finished_at": 1791599529.831891
+    },
+    "root_reported_absence_checks": {
+      "exact_pg_absent": true,
+      "exact_network_absent": true,
+      "exact_pg_volume_absent": true,
+      "exact_compile_temp_volume_absent": true,
+      "evidence_authority": "Direct Root actual observation and exact cleanup receipt; this draft author executed no Docker/resource inspection."
+    }
+  },
+  "independent_final_HTTP_PG_audits": [
+    {
+      "path": "/private/tmp/nc-directory-actual-http-concurrency-audit-20261011-xo0qb1av/concise-actual-oracles.metadata.json",
+      "sha256": "3e71eb48dbebe97f2d58b8f7c6008730642c1c972c0d4efc5016bf223227ef1f",
+      "classification": "independent actual HTTP/PG production path, precise final oracle and source binding audit",
+      "actual_complete_record_reference": "/private/tmp/nc-directory-actual-http-concurrency-audit-20261011-xo0qb1av/concise-actual-oracles.metadata.json"
+    },
+    {
+      "path": "/private/tmp/nc-directory-actual-http-concurrency-audit-20261011-xo0qb1av/actual-oracle-source-binding.metadata.json",
+      "sha256": "146feb01d44a4c1aba07a23924cb2ec067c5d077673b1cc5131b56c24dddd405",
+      "classification": "independent actual HTTP/PG production path, precise final oracle and source binding audit",
+      "actual_complete_record_reference": "/private/tmp/nc-directory-actual-http-concurrency-audit-20261011-xo0qb1av/actual-oracle-source-binding.metadata.json"
+    }
+  ],
+  "independent_component_audit_complete": true,
+  "private_planned_CI_selection": {
+    "classification": "source_only_not_adopted_or_executed",
+    "workflow_path": "/private/tmp/nc-directory-CI-47-private-20261010-njbai386/integration.yml",
+    "workflow_sha256": "eff8f3e48765e5e6c9056527a75dc61ea0aca06348efe28babac147dbd550278",
+    "metadata_path": "/private/tmp/nc-directory-CI-47-private-20261010-njbai386/selection.metadata.json",
+    "metadata_sha256": "8cc08701e43360eb737f332993cf4ac2fe0ff4f9ce14f76e9eb0adf8fcd46789",
+    "record": {
+      "classification": "private planned full candidate CI selection, not executed or adopted",
+      "original_main_head": "fcd1d263a9a9f4ac68f44dbc42bb00f08c55414e",
+      "original_required_producer": 42,
+      "new_required_producer": 47,
+      "added_parents": [
+        "TestNextcloudPublicationDirectorySnapshotActualSQLite",
+        "TestPostgresNextcloudPublicationDirectorySnapshotActual",
+        "TestDirectoryPeriodicSyncActualHTTPSQLite",
+        "TestPostgresDirectoryPeriodicSyncActualHTTP",
+        "TestPostgresNextcloudPublicationDirectorySnapshotConcurrentTransactions"
+      ],
+      "new_package": "./internal/application/access",
+      "original_12_package_relative_order_preserved": true,
+      "original_HTTP_8s_assertions_unchanged": true,
+      "original_test_count_and_package_timeout_preserved": true,
+      "workflow_sha256": "eff8f3e48765e5e6c9056527a75dc61ea0aca06348efe28babac147dbd550278",
+      "main_modified": false,
+      "source_profiles_declarations_verified": true,
+      "full_selection_actual_execution": false
+    },
+    "old_required": 42,
+    "new_required": 47,
+    "added_parents": [
+      "TestNextcloudPublicationDirectorySnapshotActualSQLite",
+      "TestPostgresNextcloudPublicationDirectorySnapshotActual",
+      "TestDirectoryPeriodicSyncActualHTTPSQLite",
+      "TestPostgresDirectoryPeriodicSyncActualHTTP",
+      "TestPostgresNextcloudPublicationDirectorySnapshotConcurrentTransactions"
+    ],
+    "new_access_package": true,
+    "original_12_package_relative_order_preserved": true,
+    "count1_and_package20m_unchanged": true,
+    "source_declarations_also_have_actual_component_pass": true
+  },
+  "profile_capacity": {
+    "root_reported_available_GiB": 14.2,
+    "fixed_preflight_required_GiB": 16,
+    "executed": false,
+    "preflight_result": "insufficient",
+    "limitation": "No capacity threshold lowered; no Go/profile executed after release."
+  },
+  "supersedes_private_draft_only": {
+    "path": "/private/tmp/nc-directory-component-evidence-draft-mt_wxgq3/directory-components.final-component.evidence.json",
+    "sha256": "770cdd8289f619046abceb614fe567ece1b5ac31b680ea581259a905c856706f"
+  },
+  "unresolved_actual_CI_a38": {
+    "summary_path": "/private/tmp/nc-a38-ci-failure-readonly-20261010-vr07pqpd/summary.metadata.json",
+    "summary_sha256": "56c9f4e3392f5c4f8e046b34742792669417ef88881174c0eb82cd454f79ba21",
+    "full_record_path": "/private/tmp/nc-a38-ci-failure-readonly-20261010-vr07pqpd/ci-failure-causal-compact.metadata.json",
+    "full_record_sha256": "45bfe18fa3440821218dab80c6e8d5026df9939d4bfd261272753c70b6a1b223",
+    "main_head": "a38e15207286f43a982b6c785f88064fb7405acf",
+    "cases": [
+      {
+        "run": 38006915089,
+        "profile": "rag",
+        "candidate_commit": "1bbd0cc8ec83f03d8376b9c54cd9e3f81c95e866",
+        "candidate_tree": "02f33801e5f4bd4ace2b607a79d6e93325f6e3e6",
+        "job_id": 114077707969,
+        "raw_sha256": "d08aaf1b78ce6339d13e6f2113e5d3a3d7a18d99b56d0b2ded89c4c75139287c",
+        "test_run": 1144,
+        "test_pass": 1140,
+        "test_fail": 1,
+        "selected_test_skip": 0,
+        "package_skip_no_tests": [
+          "github.com/Tencent/WeKnora/cmd/capacity-reconcile"
+        ],
+        "required42_pass": 34,
+        "required_not_passed": [
+          {
+            "test": "TestPostgresNormalReferencesActualHTTP",
+            "actions": {
+              "run": 1,
+              "output": 300,
+              "fail": 1
+            }
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPBoundaries",
+            "actions": {
+              "run": 1,
+              "output": 1
+            }
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPRemainingAsyncSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPRemainingAsync",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPIdleMaterial",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPLateIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPLateIdleMaterial",
+            "actions": {}
+          }
+        ],
+        "package_elapsed": 1200.764,
+        "panic_current_test": "TestPostgresNormalReferencesActualHTTPBoundaries/source-before-refs",
+        "safe_stack_path": "/private/tmp/nc-a38-ci-failure-readonly-20261010-vr07pqpd/38006915089-rag.panic-safe-stack.metadata.json",
+        "safe_stack_sha256": "d3a5296c19df24e0cddd7295fdbde1cfa6b70aab004b8d24c12aca503e1c4693",
+        "later_compile_and_ui": "actual skipped",
+        "accepted": false
+      },
+      {
+        "run": 38006915089,
+        "profile": "c6",
+        "candidate_commit": "b43afa538fd820ca087769eabdb20ad35a5a3782",
+        "candidate_tree": "9b448a629a025ef01831cc1194f68fb6cfe79015",
+        "job_id": 114077707825,
+        "raw_sha256": "e55fd4a0e5fc374ba644e6d38d55f6261c52807ce3b0ca643a16b73ca075c77a",
+        "test_run": 1147,
+        "test_pass": 1142,
+        "test_fail": 2,
+        "selected_test_skip": 0,
+        "package_skip_no_tests": [
+          "github.com/Tencent/WeKnora/cmd/capacity-reconcile"
+        ],
+        "required42_pass": 34,
+        "required_not_passed": [
+          {
+            "test": "TestPostgresNormalReferencesActualHTTP",
+            "actions": {
+              "run": 1,
+              "output": 300,
+              "fail": 1
+            }
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPBoundaries",
+            "actions": {
+              "run": 1,
+              "output": 1
+            }
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPRemainingAsyncSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPRemainingAsync",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPIdleMaterial",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPLateIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPLateIdleMaterial",
+            "actions": {}
+          }
+        ],
+        "package_elapsed": 1200.894,
+        "panic_current_test": "TestPostgresNormalReferencesActualHTTPBoundaries/unknown-prefix",
+        "safe_stack_path": "/private/tmp/nc-a38-ci-failure-readonly-20261010-vr07pqpd/38006915089-c6.panic-safe-stack.metadata.json",
+        "safe_stack_sha256": "828eeacd1e3ca608340d10261209710eb58cbdf77b9cbd2ba14d7163214642b3",
+        "later_compile_and_ui": "actual skipped",
+        "accepted": false
+      },
+      {
+        "run": 38006918049,
+        "profile": "rag",
+        "candidate_commit": "1bbd0cc8ec83f03d8376b9c54cd9e3f81c95e866",
+        "candidate_tree": "02f33801e5f4bd4ace2b607a79d6e93325f6e3e6",
+        "job_id": 114077717010,
+        "raw_sha256": "ece08d15873f3db48a3bed717409a5dcf85f3b10ffad2e057774881988053c87",
+        "test_run": 1142,
+        "test_pass": 1138,
+        "test_fail": 1,
+        "selected_test_skip": 0,
+        "package_skip_no_tests": [
+          "github.com/Tencent/WeKnora/cmd/capacity-reconcile"
+        ],
+        "required42_pass": 33,
+        "required_not_passed": [
+          {
+            "test": "TestPostgresNormalReferencesActualHTTP",
+            "actions": {
+              "run": 1,
+              "output": 300,
+              "fail": 1
+            }
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPBoundariesSQLite",
+            "actions": {
+              "run": 1,
+              "output": 1
+            }
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPBoundaries",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPRemainingAsyncSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPRemainingAsync",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPIdleMaterial",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPLateIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPLateIdleMaterial",
+            "actions": {}
+          }
+        ],
+        "package_elapsed": 1200.758,
+        "panic_current_test": "TestNormalReferencesActualHTTPBoundariesSQLite/source-after-start-open",
+        "safe_stack_path": "/private/tmp/nc-a38-ci-failure-readonly-20261010-vr07pqpd/38006918049-rag.panic-safe-stack.metadata.json",
+        "safe_stack_sha256": "ec64da8a8e92e64a4b440d290643ddcccf145ed91d74a7cb396d4845648622b4",
+        "later_compile_and_ui": "actual skipped",
+        "accepted": false
+      },
+      {
+        "run": 38006918049,
+        "profile": "c6",
+        "candidate_commit": "b43afa538fd820ca087769eabdb20ad35a5a3782",
+        "candidate_tree": "9b448a629a025ef01831cc1194f68fb6cfe79015",
+        "job_id": 114077717072,
+        "raw_sha256": "e1bbe8c1c87bdfe81ac4f638f10eabe79eed597b69b23cc6d168ee58b4afef75",
+        "test_run": 1136,
+        "test_pass": 1132,
+        "test_fail": 1,
+        "selected_test_skip": 0,
+        "package_skip_no_tests": [
+          "github.com/Tencent/WeKnora/cmd/capacity-reconcile"
+        ],
+        "required42_pass": 33,
+        "required_not_passed": [
+          {
+            "test": "TestPostgresNormalReferencesActualHTTP",
+            "actions": {
+              "run": 1,
+              "output": 300,
+              "fail": 1
+            }
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPBoundariesSQLite",
+            "actions": {
+              "run": 1,
+              "output": 1
+            }
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPBoundaries",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPRemainingAsyncSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPRemainingAsync",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPIdleMaterial",
+            "actions": {}
+          },
+          {
+            "test": "TestNormalReferencesActualHTTPLateIdleMaterialSQLite",
+            "actions": {}
+          },
+          {
+            "test": "TestPostgresNormalReferencesActualHTTPLateIdleMaterial",
+            "actions": {}
+          }
+        ],
+        "package_elapsed": 1200.82,
+        "panic_current_test": "TestNormalReferencesActualHTTPBoundariesSQLite/empty-fixed",
+        "safe_stack_path": "/private/tmp/nc-a38-ci-failure-readonly-20261010-vr07pqpd/38006918049-c6.panic-safe-stack.metadata.json",
+        "safe_stack_sha256": "cdb799e020501c14d751a8016bf67b123131ee8ea4f304a7c767ce4b65a2af4e",
+        "later_compile_and_ui": "actual skipped",
+        "accepted": false
+      }
+    ],
+    "shared_primary_failure": "TestPostgresNormalReferencesActualHTTP -> normal_references_http_actual_test.go264: body.ReadFrom deadline exceeded under original HTTP8s; production Stream.model_started once; later HTTPdone/producerReturned/history/lease assertions not executed after require failure",
+    "root_cause_of_8s_failure_proven": false,
+    "new_directory_components_prove_resolution": false,
+    "scope": "Exact PG normal body ReadFrom original8s failure is distinct from service cumulative20m deadline; later final producer/history/lease assertions were not reached after fatal ReadFrom; required unfinished nodes are not PASS/SKIP."
+  },
+  "new_stage_cache_inventory": {
+    "path": "/private/tmp/nc-directory-component-evidence-draft-mt_wxgq3/new-stage-cache-inventory.readonly.metadata.json",
+    "sha256": "15f820c30f3daf71dbdd3fd9c417b259b61cc734e3c043d7b484f7af043056d7",
+    "confirmed_eligible": 0,
+    "old_family_delegated_readonly": true
+  }
+}

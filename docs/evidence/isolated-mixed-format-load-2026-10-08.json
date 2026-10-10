@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "observed_date_utc": "2026-10-08",
+  "kind": "isolated_tiny_mixed_format_event_to_publication_probe",
+  "source": {
+    "nextcloud_worktree_commit": "d1c48929ac0183f4ef737aa7009e23fdad53e5d7",
+    "nextcloud_registry_image_digest": "sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c",
+    "weknora_local_image_tag": "weknora-ldap-app:nextcloud-rag",
+    "weknora_local_image_id": "sha256:ac6c3a5c975886ada55fbcd0c65058516fa4ac7d245a9a32c656d39e428b9365",
+    "weknora_image_upstream_revision_label": "77c97fd72f26e84435503d24eeed88cb5dfe1f01",
+    "weknora_image_patch_sha256_label": "176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef",
+    "current_worktree_patch_sha256": "b81174da65cbfcc4bebe72d9b49e78a60bfc58e56c97d500236c32f2f70b07c2"
+  },
+  "fixture": {
+    "isolated_owned_compose_project": true,
+    "nextcloud_source_paired": true,
+    "initial_source_text_file_bootstrapped": true,
+    "measured_files": 3,
+    "measured_total_payload_bytes": 1974,
+    "measured_formats": [
+      "txt",
+      "txt",
+      "pdf"
+    ],
+    "pdf_type": "one-page born-digital synthetic PDF",
+    "identity_provider": "local AD-shaped synthetic LDAP",
+    "embedding_provider": "local mock embedding",
+    "event_delivery": "owned Nextcloud container ran repository deliver-events command in a manually launched loop with 5-second sleep",
+    "measurement_pattern": "sequential; previous event applied before each next PUT"
+  },
+  "method": {
+    "start": "host monotonic timestamp just before WebDAV PUT",
+    "durable_job": "first observed dispatched watermark covering the latest file outbox hint, plus linked source sync_logs row",
+    "publication": "first observed published source candidate with current ETag, completed parse, ready chunk, enabled embedding; PDF ready chunk also contained protected synthetic marker",
+    "applied": "first observed WeKnora applied watermark covering the latest file outbox hint",
+    "poll_interval_seconds": 0.5,
+    "timing_interpretation": "all observed durations are upper bounds including WebDAV, event-ID lookup, HTTP/SQL query time and polling",
+    "sync_log_duration_interpretation": "successful source scan duration; parsing and publication continue asynchronously"
+  },
+  "samples": [
+    {
+      "ordinal": 1,
+      "format": "txt",
+      "payload_bytes": 500,
+      "outbox_latest_event_id": 2,
+      "outbox_hints_for_put": 2,
+      "webdav_put_response_observed_ms": 642.2,
+      "outbox_event_id_observed_ms": 1054.8,
+      "durable_job_observed_ms": 3461.5,
+      "published_ready_observed_ms": 4678.3,
+      "applied_watermark_observed_ms": 13406.9,
+      "sync_log_duration_ms": 176.58,
+      "ready_chunks": 2,
+      "enabled_embeddings": 2,
+      "pdf_text_marker_in_ready_chunk": null
+    },
+    {
+      "ordinal": 2,
+      "format": "txt",
+      "payload_bytes": 505,
+      "outbox_latest_event_id": 4,
+      "outbox_hints_for_put": 2,
+      "webdav_put_response_observed_ms": 336.3,
+      "outbox_event_id_observed_ms": 701.0,
+      "durable_job_observed_ms": 5464.5,
+      "published_ready_observed_ms": 7832.2,
+      "applied_watermark_observed_ms": 15008.0,
+      "sync_log_duration_ms": 169.87,
+      "ready_chunks": 2,
+      "enabled_embeddings": 2,
+      "pdf_text_marker_in_ready_chunk": null
+    },
+    {
+      "ordinal": 3,
+      "format": "pdf",
+      "payload_bytes": 969,
+      "outbox_latest_event_id": 6,
+      "outbox_hints_for_put": 2,
+      "webdav_put_response_observed_ms": 346.6,
+      "outbox_event_id_observed_ms": 706.0,
+      "durable_job_observed_ms": 5434.5,
+      "published_ready_observed_ms": 8398.9,
+      "applied_watermark_observed_ms": 14644.7,
+      "sync_log_duration_ms": 171.069,
+      "ready_chunks": 2,
+      "enabled_embeddings": 2,
+      "pdf_text_marker_in_ready_chunk": true
+    }
+  ],
+  "result": {
+    "all_three_published_ready": true,
+    "all_three_applied": true,
+    "sync_logs_successful": 3,
+    "owned_fixture_resources_removed": true,
+    "private_fixture_scratch_removed": true,
+    "prd_sustained_p95_accepted": false,
+    "current_weknora_patch_accepted": false
+  },
+  "limits": [
+    "Only three sequential tiny files were measured; no sustained P95, 10,000-file/100-GB capacity or upload-latency comparison follows.",
+    "The synthetic LDAP and mock embedding exclude real enterprise AD and model throughput.",
+    "The manually launched delivery loop used the production worker command and five-second sleep, but the fixture did not include the dedicated Compose event-worker service.",
+    "The existing WeKnora image carries a different patch SHA-256 from the current worktree and cannot certify the current RAG patch.",
+    "The PDF was born-digital; scanned-PDF OCR, Office formats, large files, concurrent writes and failure recovery were not measured.",
+    "The observation gap between publication and applied watermark is 6.25–8.73 seconds across these samples; its internal cause was not isolated."
+  ]
+}

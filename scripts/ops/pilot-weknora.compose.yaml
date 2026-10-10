@@ -1,0 +1,57 @@
+# Disposable WeKnora side of scripts/ops/pilot-load.py. Supply absolute paths
+# through a private env file and use an explicit pilot-* Compose project name.
+services:
+  pg:
+    image: paradedb/paradedb:v0.22.6-pg17
+    env_file: ${PILOT_WEKNORA_ENV_FILE:?set a private env file}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weknora -d weknora"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7.0-alpine
+    volumes:
+      - redis_data:/data
+
+  docreader:
+    image: wechatopenai/weknora-docreader:latest
+    environment:
+      DOCREADER_IMAGE_OUTPUT_DIR: /tmp/docreader
+    volumes:
+      - docreader_tmp:/tmp/docreader
+
+  app:
+    image: ${PILOT_WEKNORA_IMAGE:?build the current patched image}
+    env_file: ${PILOT_WEKNORA_ENV_FILE:?set a private env file}
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      docreader:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${PILOT_WEKNORA_PORT:?set a free loopback port}:8080"
+    volumes:
+      - files:/data/files
+      - docreader_tmp:/tmp/docreader:ro
+      - ${PILOT_WEKNORA_CONFIG_FILE:?set the WeKnora config path}:/app/config/config.yaml:ro
+      - ${PILOT_MODELS_FILE:?set the mock model catalog path}:/run/config/pilot-models.yaml:ro
+    networks:
+      - default
+      - ncnet
+
+networks:
+  ncnet:
+    external: true
+    name: ${PILOT_NEXTCLOUD_PROJECT:?set pilot-* Nextcloud project}_default
+
+volumes:
+  pg_data: {}
+  redis_data: {}
+  docreader_tmp: {}
+  files: {}

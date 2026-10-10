@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "classification": "actual_matched_generated_current_policy_GREEN_and_stale_component_pass",
+  "source": {
+    "head": "54ce8e732cbab89573a9bf90f71fd84d2e80131f",
+    "tree": "f4be66348c3fc4b038083f1170f1943a0912176d",
+    "matched_RED": "e27ef96b40b62d1702d97eb1187e70a982ba2597",
+    "identical_diagnostic_test_SHA256": "0a23c6c185eb16aac7b8517d0423e40e1b2469b85da246cfb099125af9d43ee9",
+    "production_fix": "checkMemoryGeneratedHoldInTx current tenant lock/current policy revision and proof equality",
+    "policy_fix_production_lines_added": 14,
+    "lock_order": "tenant then actor then policy control; tenant identity lock before reading policy body",
+    "candidate_manifest_changed": false
+  },
+  "actual": {
+    "RUN": 26,
+    "PASS": 26,
+    "FAIL": 0,
+    "SKIP": 0,
+    "terminal": 0,
+    "OOMKilled": false,
+    "stage_seconds": 96.556,
+    "raw_SHA256": "0b9339f864d61f18bbdb845ee64dd9f899eb9ad290fc15394d8d090acbeec533",
+    "raw_bytes": 358725,
+    "mandatory_parent_and_exact_leaf_RUN_PASS": true,
+    "strict_policy_diagnostics": [
+      {
+        "test": "TestMemoryStaleTaskMaintenanceActualSQLite/policy_after_model",
+        "metadata": "revision=2->3 proof_changed=true fault_applied=true model_calls=1 publications_delta=0 receipts_delta=0 importance=5->5 err_nil=false"
+      },
+      {
+        "test": "TestPostgresMemoryStaleTaskMaintenanceActual/policy_after_model",
+        "metadata": "revision=2->3 proof_changed=true fault_applied=true model_calls=1 publications_delta=0 receipts_delta=0 importance=5->5 err_nil=false"
+      }
+    ]
+  },
+  "behavior": "Same actual committed revision2->3 and model1 now return rejection; publication/receipt increments0 and importance5 stays5. Legal stale demotion/no-candidate maintenance/model decline/productive merge, recent/young/low/expired task and actor/source/body/input-hold refusals pass on both databases.",
+  "format_compile": {
+    "parsed_changed_Go_files": 168,
+    "applied_formatted_files": 167,
+    "one_matched_diagnostic_parsed_but_source_bytes_preserved": true,
+    "packages_PASS": 10,
+    "business_RUN": 0,
+    "compile_seconds": 93.625,
+    "raw_SHA256": "8793a5d4a01ed81ecbba243c6c9823687db47bcdc86ee29288d6792239229991"
+  },
+  "runtime": {
+    "component_in_larger_live_window": false,
+    "whole_window_cleanup_not_yet_claimed": false,
+    "failed_RED_owners_stopped_and_volumes_preserved": true,
+    "whole_window_terminal": 0,
+    "whole_window_seconds": 511.151,
+    "final_combination_evidence": "memory-final-integrated-components-20261010.json"
+  },
+  "acceptance": {
+    "matched_current_policy_and_stale_component": true,
+    "all_combined_privacy_model_gates": true,
+    "all_ancestor_TTL_or_multiple_clusters": false,
+    "full_V1": false
+  },
+  "privacy": {
+    "raw_bodies_credentials_private_paths_omitted": true
+  }
+}

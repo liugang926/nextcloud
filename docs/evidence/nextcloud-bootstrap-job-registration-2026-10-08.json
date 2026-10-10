@@ -1,0 +1,15 @@
+{
+  "assertion": "outbox_retention_http_smoke.py expected exactly one OutboxRetentionJob",
+  "correction": "bootstrap stops cron/event workers before app enable, verifies exactly one retention job after routing is ready, then starts workers; existing HTTP count assertion remains exactly one and now reports observed count.",
+  "diagnosis": "Possible installer/cron class-resolution race inferred from source; absent count detail prevents distinguishing missing/duplicate from that failed job alone.",
+  "failed_job": 113287643278,
+  "failed_log_sha256": "90bedb572a7a32d972cadd714ffba21c6f873ebe9fec590933c3c20168a91fdb",
+  "failed_run": 37770200486,
+  "failed_step": "API and event smoke",
+  "inspection": "Installed pinned Nextcloud JobList.php removes an unresolved job class; Installer.php registers jobs before final app enable; dev-up previously started cron before bootstrap enabled the app.",
+  "old_assertion_count_value": "not included in the failed log",
+  "other_run": 37770193727,
+  "other_run_result": "same commit all four jobs passed; not substituted for failing PR run",
+  "source_commit": "29bc245e87909ce6153229740cc26d918d7053bf",
+  "verification_at_commit": "bash syntax and Python compile; full CI is required after push; no shared runtime bootstrap executed"
+}

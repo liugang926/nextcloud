@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "classification": "actual CI failure observation; not V1/application acceptance",
+  "integration_head": "06811da8680147f0e5dd3a9c6e4f79f6da2a9df5",
+  "candidate_sources": {
+    "c6": "aac58fa70e2dbda20febac6875e82378c6b549ed",
+    "rag": "1ab47546dd8a2ddd564de8e526216d79916b56c2"
+  },
+  "inspection": "GitHub run/job API and original candidate JSONL artifacts; no rerun or source repair",
+  "runs": [
+    {
+      "run_id": 37989539395,
+      "event": "push",
+      "url": "https://github.com/liugang926/nextcloud/actions/runs/37989539395",
+      "status": "completed",
+      "conclusion": "failure",
+      "updated_at": "2026-10-09T21:23:55Z",
+      "jobs": [
+        {
+          "name": "local-smoke",
+          "id": 114019885256,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989539395/job/114019885256",
+          "conclusion": "failure",
+          "failed_step": "Static checks",
+          "observed_cause": "Docker Hub unauthenticated image pull rate limit at PHP container; previous static/package checks reached runtime-file verification"
+        },
+        {
+          "name": "weknora-rag-patch",
+          "id": 114019885397,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989539395/job/114019885397",
+          "conclusion": "success",
+          "failed_step": null,
+          "observed_cause": null
+        },
+        {
+          "name": "weknora-patch",
+          "id": 114019885406,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989539395/job/114019885406",
+          "conclusion": "success",
+          "failed_step": null,
+          "observed_cause": null
+        },
+        {
+          "name": "weknora-development-candidate (c6)",
+          "id": 114019885422,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989539395/job/114019885422",
+          "conclusion": "failure",
+          "failed_step": "Test candidate producers and recovery contracts",
+          "observed_cause": "actual default PostgreSQL HTTP deadline failure plus cumulative service package deadline"
+        },
+        {
+          "name": "direct-upgrade",
+          "id": 114019885526,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989539395/job/114019885526",
+          "conclusion": "failure",
+          "failed_step": "Recover from an isolated failed app upgrade",
+          "observed_cause": "docker pull exit 1 before upgrade-fault/restore assertions; registry cause unavailable"
+        },
+        {
+          "name": "weknora-development-candidate (rag)",
+          "id": 114019885551,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989539395/job/114019885551",
+          "conclusion": "failure",
+          "failed_step": "Initialize containers",
+          "observed_cause": "Docker Hub unauthenticated image pull rate limit; candidate source was not executed"
+        }
+      ],
+      "c6_candidate": {
+        "artifact_id": 11646180863,
+        "artifact_name": "weknora-development-c6",
+        "raw_zip": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/push-c6-artifact.private.zip",
+          "bytes": 4634366,
+          "sha256": "fd590a1b58c873d370fc5618c593303b65712e9e51099d9c281c327afb8414aa"
+        },
+        "jsonl_bytes": 135697048,
+        "jsonl_sha256": "c7a03ce09d4e8d8014318c9dc3fbb343c81b3b8fe755e75bfc6ecc10846641fb",
+        "test_node_terminal_counts": {
+          "pass": 1138,
+          "fail": 1,
+          "skip": 0
+        },
+        "compile_only_capacity_package_no_tests": "package skip is not a skipped test node",
+        "failed_test_exact": "TestPostgresNormalReferencesActualHTTP",
+        "case": "default current; no subtest or Stop request",
+        "unchanged_http_deadline_seconds": 8,
+        "failure": "context deadline exceeded while reading actual HTTP response body",
+        "failed_assertion": "actual normal sender must terminate within the unchanged 8-second bound",
+        "producer_later_completed": true,
+        "failure_does_not_prove_deadlock": true,
+        "package_timeout_seconds": 1200,
+        "panic_running_tests": [
+          "panic: test timed out after 20m0s",
+          "running tests:",
+          "TestNormalReferencesActualHTTPBoundariesSQLite (1m14s)",
+          "TestNormalReferencesActualHTTPBoundariesSQLite/source-after-start-open (5s)"
+        ],
+        "goroutine_state_histogram": {
+          "running": 1,
+          "chan receive": 5,
+          "select": 316,
+          "sync.Mutex.Lock": 1,
+          "IO wait": 10,
+          "runnable": 1
+        },
+        "dominant_connection_opener_goroutines": 298,
+        "active_goroutines": 334,
+        "goroutine_identifier_is_cumulative_not_live_count": true,
+        "safe_diagnosis": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/push-safe-diagnosis.json",
+          "bytes": 18120,
+          "sha256": "6193ad69c7aec5db5294607980e3dbad372e06288280fdfd5ec635a9d0ff87af"
+        },
+        "safe_scheduler": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/push-panic-scheduler-safe.json",
+          "bytes": 5417,
+          "sha256": "eeb77344917175b704730edb4fb024f9654e9b8135fe0e0ea93602de39e3b885"
+        },
+        "safe_direct_upgrade": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/push-direct-safe.json",
+          "bytes": 1171,
+          "sha256": "781b30341e92f2c990a1a9d6e5206074070331ffc871a1bc76d25c3cf9f69b1e"
+        }
+      }
+    },
+    {
+      "run_id": 37989545150,
+      "event": "pull_request",
+      "url": "https://github.com/liugang926/nextcloud/actions/runs/37989545150",
+      "status": "completed",
+      "conclusion": "failure",
+      "updated_at": "2026-10-09T21:24:02Z",
+      "jobs": [
+        {
+          "name": "weknora-patch",
+          "id": 114019904246,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989545150/job/114019904246",
+          "conclusion": "success",
+          "failed_step": null,
+          "observed_cause": null
+        },
+        {
+          "name": "direct-upgrade",
+          "id": 114019904418,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989545150/job/114019904418",
+          "conclusion": "failure",
+          "failed_step": "Verify historical binding tombstones on direct upgrade",
+          "observed_cause": "isolated legacy stack compose up exit 1 with empty ps/log diagnostics before tombstone assertions; registry cause unavailable"
+        },
+        {
+          "name": "weknora-rag-patch",
+          "id": 114019904499,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989545150/job/114019904499",
+          "conclusion": "failure",
+          "failed_step": "Initialize containers",
+          "observed_cause": "Docker Hub unauthenticated image pull rate limit; source was not executed"
+        },
+        {
+          "name": "local-smoke",
+          "id": 114019904504,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989545150/job/114019904504",
+          "conclusion": "failure",
+          "failed_step": "Static checks",
+          "observed_cause": "Docker Hub unauthenticated image pull rate limit at PHP container; previous static/package checks reached runtime-file verification"
+        },
+        {
+          "name": "weknora-development-candidate (c6)",
+          "id": 114019904562,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989545150/job/114019904562",
+          "conclusion": "failure",
+          "failed_step": "Test candidate producers and recovery contracts",
+          "observed_cause": "actual default PostgreSQL HTTP deadline failure plus cumulative service package deadline"
+        },
+        {
+          "name": "weknora-development-candidate (rag)",
+          "id": 114019904633,
+          "url": "https://github.com/liugang926/nextcloud/actions/runs/37989545150/job/114019904633",
+          "conclusion": "failure",
+          "failed_step": "Initialize containers",
+          "observed_cause": "Docker Hub unauthenticated image pull rate limit; candidate source was not executed"
+        }
+      ],
+      "c6_candidate": {
+        "artifact_id": 11646205857,
+        "artifact_name": "weknora-development-c6",
+        "raw_zip": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/pr-c6-artifact.private.zip",
+          "bytes": 4606292,
+          "sha256": "d70dea75d1683fd870f95746fb70f6888252434dfd82b6baf3a7d34f3151554e"
+        },
+        "jsonl_bytes": 135214178,
+        "jsonl_sha256": "5d160bb53171856357b1bde7e6912c6b7cdc284fe7c36c51bb34677c513ba607",
+        "test_node_terminal_counts": {
+          "pass": 1135,
+          "fail": 1,
+          "skip": 0
+        },
+        "compile_only_capacity_package_no_tests": "package skip is not a skipped test node",
+        "failed_test_exact": "TestPostgresNormalReferencesActualHTTP",
+        "case": "default current; no subtest or Stop request",
+        "unchanged_http_deadline_seconds": 8,
+        "failure": "context deadline exceeded while reading actual HTTP response body",
+        "failed_assertion": "actual normal sender must terminate within the unchanged 8-second bound",
+        "producer_later_completed": true,
+        "failure_does_not_prove_deadlock": true,
+        "package_timeout_seconds": 1200,
+        "panic_running_tests": [
+          "panic: test timed out after 20m0s",
+          "running tests:",
+          "TestNormalReferencesActualHTTPBoundariesSQLite (52s)",
+          "TestNormalReferencesActualHTTPBoundariesSQLite/lease-after-start (4s)"
+        ],
+        "goroutine_state_histogram": {
+          "running": 1,
+          "chan receive": 6,
+          "select": 313,
+          "IO wait": 10,
+          "runnable": 2
+        },
+        "dominant_connection_opener_goroutines": 295,
+        "active_goroutines": 332,
+        "goroutine_identifier_is_cumulative_not_live_count": true,
+        "safe_diagnosis": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/pr-safe-diagnosis.json",
+          "bytes": 19062,
+          "sha256": "890567c29967770cebc4f4ec275f022cedbd0c8236cb5c46e359e7185f280657"
+        },
+        "safe_scheduler": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/pr-panic-scheduler-safe.json",
+          "bytes": 3101,
+          "sha256": "29241a012a3f71c5abdcacaa9ed1b871f91f834586359f26cea111ea5c0c7f9f"
+        },
+        "safe_direct_upgrade": {
+          "private_path": "/private/tmp/nc-ci-06811da-diagnosis-vfjrl5m4/pr-direct-safe.json",
+          "bytes": 1732,
+          "sha256": "7dfe14b4e29280f469042eb94c3240fee713953a7abea9b086a5c779ec61126e"
+        }
+      }
+    }
+  ],
+  "remaining_work": [
+    "Diagnose and reduce actual ordinary-QA database/actor/journal/check overhead while preserving the 8-second HTTP guard.",
+    "Keep the cumulative 20-minute package gate; its timeout occurred during later short-running cases and does not establish a case deadlock.",
+    "Address image-pull availability without weakening pinned image provenance or restoring assertions.",
+    "Direct-upgrade failures need safe command diagnostics to establish their hidden registry/startup cause before claiming an application regression."
+  ],
+  "unproven": [
+    "A production deadlock, renewal busy loop, or millions of simultaneously live goroutines.",
+    "The exact registry cause of either direct-upgrade failure.",
+    "RAG candidate producer execution in either run.",
+    "Fresh normal application QA/replay/full-restore acceptance."
+  ],
+  "production_source_or_remote_modified": false,
+  "workflow_or_timeout_changed": false,
+  "go_or_docker_started_by_this_audit": false
+}

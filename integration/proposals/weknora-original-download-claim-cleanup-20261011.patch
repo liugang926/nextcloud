@@ -1,0 +1,200 @@
+diff --git a/internal/application/repository/model_original_download.go b/internal/application/repository/model_original_download.go
+index 774a2c2f..7edc634c 100644
+--- a/internal/application/repository/model_original_download.go
++++ b/internal/application/repository/model_original_download.go
+@@ -210,7 +210,11 @@ type modelDownloadClosedReleaseOwner struct {
+ }
+ 
+ func (o *modelDownloadClosedReleaseOwner) RetryOriginalRelease(ctx context.Context) error {
+-	return errors.Join(o.owner.RetryOriginalRelease(ctx), o.repo.FinishModelOriginalDownload(ctx, o.ctx))
++	var bodyErr error
++	if o.owner != nil {
++		bodyErr = o.owner.RetryOriginalRelease(ctx)
++	}
++	return errors.Join(bodyErr, o.repo.FinishModelOriginalDownload(ctx, o.ctx))
+ }
+ 
+ type modelDownloadInitializationError struct {
+@@ -236,7 +240,11 @@ func (r *modelRepository) closeDownloadInitialization(ctx context.Context, err e
+ 	bounded, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+ 	defer cancel()
+ 	cleanup = errors.Join(cleanup, r.FinishModelOriginalDownload(bounded, ctx))
+-	if owner != nil {
++	// An authorization or acquisition refusal can precede every body lease.
++	// Retain the actual private claim's release capability when its Finish failed;
++	// it only relinquishes that captured attempt and grants no model/body read.
++	_, claimed := ctx.Value(modelDownloadClaimKey{}).(*modelDownloadClaim)
++	if owner != nil || claimed && cleanup != nil {
+ 		owner = &modelDownloadClosedReleaseOwner{owner: owner, repo: r, ctx: ctx}
+ 	}
+ 	return &modelDownloadInitializationError{op: op, cleanup: cleanup, owner: owner}
+diff --git a/internal/application/service/model_original_download_claim_cleanup_actual_test.go b/internal/application/service/model_original_download_claim_cleanup_actual_test.go
+new file mode 100644
+index 00000000..e0cdf2e1
+--- /dev/null
++++ b/internal/application/service/model_original_download_claim_cleanup_actual_test.go
+@@ -0,0 +1,164 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// Genuine creation and Claim precede the native author refusal. No body lease,
++// claim selector, proof, expiry or completion fact is supplied by the fixture.
++func runOriginalDownloadClaimCleanupActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"finish_failure_before_body_acquisition", "clean_finish_before_body_acquisition"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			repo, models, _, _ := actualOriginalModelServices(t, f)
++			dispatcher := repo.(interfaces.ModelOriginalDownloadDispatcher)
++			downloader := repo.(interfaces.ModelOriginalDownloader)
++			life := models.(interfaces.ModelOriginalDownloadLifecycle)
++			ctx, cancel := context.WithTimeout(f.ctx, 8*time.Second)
++			defer cancel()
++			var calls atomic.Int64
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				calls.Add(1)
++				w.WriteHeader(http.StatusInternalServerError)
++			}))
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			triggerInstalled := false
++			var owner interfaces.ModelOriginalReleaseRetry
++			clean := func(c context.Context) *gorm.DB { return f.db.Session(&gorm.Session{NewDB: true, Context: c}) }
++			drop := func(c context.Context) error {
++				if !triggerInstalled {
++					return nil
++				}
++				var err error
++				if pg {
++					err = clean(c).Exec("DROP TRIGGER actual_claim_finish_failure ON model_download_dispatches").Error
++					if err == nil {
++						err = clean(c).Exec("DROP FUNCTION actual_claim_finish_failure()").Error
++					}
++				} else {
++					err = clean(c).Exec("DROP TRIGGER actual_claim_finish_failure").Error
++				}
++				if err == nil {
++					triggerInstalled = false
++				}
++				return err
++			}
++			t.Cleanup(func() {
++				bounded, stop := context.WithTimeout(context.WithoutCancel(f.ctx), 5*time.Second)
++				defer stop()
++				var releaseErr error
++				dropErr := drop(bounded)
++				if owner != nil {
++					releaseErr = owner.RetryOriginalRelease(bounded)
++				}
++				life.StopOriginalDownloads()
++				server.Close()
++				if err := errors.Join(dropErr, releaseErr); err != nil {
++					t.Errorf("actual claim-only cleanup: %v", err)
++				}
++			})
++			model := &types.Model{ID: "actual-claim-only-cleanup", TenantID: 7, Name: "nomic-embed-text:claim-only", Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{BaseURL: server.URL, EmbeddingParameters: types.EmbeddingParameters{Dimension: 2}}}
++			require.NoError(t, models.CreateModel(ctx, model))
++			require.NotNil(t, model.OriginalProof)
++			claimed, proof, done, err := dispatcher.ClaimModelOriginalDownload(ctx, model.ID)
++			require.NoError(t, err)
++			require.False(t, done)
++			require.Equal(t, model.OriginalProof, proof)
++			var before struct {
++				ID, AttemptID string
++				LeaseUntilMS  int64
++				Attempts      uint64
++			}
++			require.NoError(t, clean(ctx).Table("model_download_dispatches").Where("model_id=?", model.ID).Take(&before).Error)
++			require.NotEmpty(t, before.AttemptID)
++			require.Positive(t, before.LeaseUntilMS)
++			require.Equal(t, uint64(1), before.Attempts)
++			require.Zero(t, originalDownloadDurableCount(t, f.db, "model_download_lease_owners", "attempt_id=?", before.AttemptID))
++			change := clean(ctx).Model(&types.User{}).Where("id=?", types.CallerFromContext(f.ctx).UserID).Update("is_active", false)
++			require.NoError(t, change.Error)
++			require.Equal(t, int64(1), change.RowsAffected)
++			var user types.User
++			require.NoError(t, clean(ctx).Where("id=?", types.CallerFromContext(f.ctx).UserID).Take(&user).Error)
++			require.False(t, user.IsActive)
++			if mode == "finish_failure_before_body_acquisition" {
++				literal := "'" + strings.ReplaceAll(before.AttemptID, "'", "''") + "'"
++				if pg {
++					require.NoError(t, clean(ctx).Exec("CREATE FUNCTION actual_claim_finish_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.attempt_id="+literal+" AND NEW.attempt_id='' THEN RAISE EXCEPTION 'actual claimed download finish refused'; END IF; RETURN NEW; END $$").Error)
++					require.NoError(t, clean(ctx).Exec("CREATE TRIGGER actual_claim_finish_failure BEFORE UPDATE OF attempt_id ON model_download_dispatches FOR EACH ROW EXECUTE FUNCTION actual_claim_finish_failure()").Error)
++				} else {
++					require.NoError(t, clean(ctx).Exec("CREATE TRIGGER actual_claim_finish_failure BEFORE UPDATE OF attempt_id ON model_download_dispatches WHEN OLD.attempt_id="+literal+" AND NEW.attempt_id='' BEGIN SELECT RAISE(ABORT,'actual claimed download finish refused'); END").Error)
++				}
++				triggerInstalled = true
++			}
++			read, terminalErr := downloader.BeginModelOriginalDownload(claimed, model.ID, *proof)
++			require.Nil(t, read)
++			require.Error(t, terminalErr)
++			var failed interfaces.ModelOriginalInitializationFailure
++			require.ErrorAs(t, terminalErr, &failed)
++			operationErr, cleanupErr, capturedOwner := failed.OriginalInitializationCleanup()
++			owner = capturedOwner
++			require.Error(t, operationErr)
++			require.ErrorIs(t, terminalErr, operationErr)
++			require.Zero(t, calls.Load())
++			require.Zero(t, originalDownloadDurableCount(t, f.db, "model_download_lease_owners", "attempt_id=?", before.AttemptID))
++			require.Zero(t, originalDownloadDurableCount(t, f.db, "model_download_originals", "model_id=?", model.ID))
++			if mode == "finish_failure_before_body_acquisition" {
++				require.ErrorContains(t, cleanupErr, "actual claimed download finish refused")
++				require.ErrorIs(t, terminalErr, cleanupErr)
++				require.NotNil(t, owner)
++				require.ErrorContains(t, owner.RetryOriginalRelease(ctx), "actual claimed download finish refused")
++				var held struct {
++					AttemptID    string
++					LeaseUntilMS int64
++					Attempts     uint64
++				}
++				require.NoError(t, clean(ctx).Table("model_download_dispatches").Where("id=?", before.ID).Take(&held).Error)
++				require.Equal(t, before.AttemptID, held.AttemptID)
++				require.Equal(t, before.LeaseUntilMS, held.LeaseUntilMS)
++				require.Equal(t, before.Attempts, held.Attempts)
++				require.NoError(t, drop(ctx))
++				require.NoError(t, owner.RetryOriginalRelease(ctx))
++				require.NoError(t, owner.RetryOriginalRelease(ctx))
++				require.ErrorIs(t, terminalErr, cleanupErr, "cleanup success preserves the original terminal causes")
++			} else {
++				require.NoError(t, cleanupErr)
++				require.Nil(t, owner)
++			}
++			var after struct {
++				AttemptID    string
++				LeaseUntilMS int64
++				Attempts     uint64
++			}
++			require.NoError(t, clean(ctx).Table("model_download_dispatches").Where("id=?", before.ID).Take(&after).Error)
++			require.Empty(t, after.AttemptID)
++			require.Zero(t, after.LeaseUntilMS)
++			require.Equal(t, before.Attempts, after.Attempts)
++			require.Equal(t, int64(1), originalDownloadDurableCount(t, f.db, "model_download_attempts", "dispatch_id=?", before.ID))
++			require.Zero(t, originalDownloadDurableCount(t, f.db, "model_download_lease_owners", "attempt_id=?", before.AttemptID))
++			require.Zero(t, calls.Load())
++			assertMemAtomicSQLLeasesClosed(t, f)
++		})
++	}
++}
++
++func TestSQLiteOriginalDownloadClaimCleanupActual(t *testing.T) {
++	runOriginalDownloadClaimCleanupActual(t, false)
++}
++
++func TestPostgresOriginalDownloadClaimCleanupActual(t *testing.T) {
++	runOriginalDownloadClaimCleanupActual(t, true)
++}

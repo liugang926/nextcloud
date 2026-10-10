@@ -1,0 +1,225 @@
+{
+  "recordedAt": "2026-10-08T08:20:22.679400+00:00",
+  "nextcloudBase": "7846c41c46c325eaa0a217ea4ac6e204ad568c2e",
+  "scope": "Integrate independently approved unused Phase 2 source-lineage policy into complete c6/RAG pinned patches; no runtime deployment",
+  "deltaInputsInApplyOrder": {
+    ".weknora-source-lineage-policy-20f11799.delta.patch": {
+      "sha256": "280eb32c8a437179e72b9cbeae55e098eae9be1a59fcdaeced45a357d61cca08"
+    },
+    ".weknora-lineage-guard-review-fix-27fc5d45.delta.patch": {
+      "sha256": "d8a42c77d69d6839595e8575aab767eac8037be429907edbfb3f1904d63ebb1b"
+    }
+  },
+  "profiles": {
+    "c6": {
+      "profile": "c6",
+      "base": "c6c4bd445a8ee49e742da9d804957a3fe4bf52d4",
+      "patchSha256": "daf84ca5d095a466482a7f09d2133dbba4705ee5fb70cf4fc17246216aa4bc53",
+      "fullSourceCommit": "8104fb8ec5f8a0588f5ede9fdda64b85bf9ff9fc",
+      "fullSourceTree": "24fe1038ba99d9161a1cc1a09e6402fe3ca17c7d",
+      "cleanApply": true,
+      "stagedTreeMatchesFullSource": true,
+      "reverseRestoresExactBase": true,
+      "diffCheck": true,
+      "precedingCompletePatchSha256": "d1da3e88d0db424e0248e572b9e24e436b35695cb79725d7221853d22af96de4",
+      "precedingFullSourceBaselineCommit": "a68495824fb3dc7618d962a546e47b5ed962c1d7",
+      "frozenPolicyCommit": "27fc5d45f35162e51737f85a017e7f207922c255",
+      "policyFilesByteEqual": {
+        "internal/application/access/nextcloud_publication.go": "27455c60c0df8df89ce71fa31fafd9052588301b1e9073b077ac017710fca8c5",
+        "internal/application/access/nextcloud_source_lineage.go": "311e450470ff89b14611ccf22010f1126cc2b0e884e361220bb58f8f68669663",
+        "internal/application/access/nextcloud_source_lineage_test.go": "4a2fc7190c5c85ccef33a2aa27c0b11f44fd728b5be97ce62f891a54d6e274cb",
+        "internal/application/access/nextcloud_source_lineage_review_test.go": "3a870832a010fca1edf395c421a640085d16bf0ddd2ab35ad71df4f5faff894c",
+        "internal/application/repository/nextcloud_source_lineage.go": "f5fec706629f7b9c17c8e2aafab0f5b7874b03f02eb136095e14843d29b17c07",
+        "internal/application/repository/nextcloud_source_lineage_test.go": "01ac3e43a6e1d244d2f7ef270cbd0e85a62e26beab8a7ec98ff11af25f212649",
+        "internal/types/source_lineage.go": "d1dfab36b1789eaf5ce5bd7d9a7b91f39d41c443fb8988ce4f6caeedb800d491",
+        "docs/source-lineage-foundation.md": "1c416af50f6d0d7c8cab233deeda2f24e214ce4f98bf4bddd52750c8585f80a5",
+        "docs/source-lineage-policy.md": "760b37056d08d86598345c0050ac182a80380d8ddaca1ec28b9e09b220d567b3"
+      },
+      "preservedFiles": {
+        "frontend/package.json": "5cf28aebb19801e35a74e676bb65c358421cfa645f91040e445450d1c38577c0",
+        "frontend/package-lock.json": "ad75f911f914547264fc7ed7645f18846f17054000caba550edc3f30da9d93d5",
+        "frontend/src/utils/markdownDependencySecurity.test.ts": "3e1471626fd595267d480dae0f85351dcd2337bd1482bfe13fc5e45b4a491486",
+        "internal/database/migration_source_lineage_test.go": "7ee22128eba4dfa6471d17ec360f33412a27102af9fd6bb4619bad24177d7c80"
+      },
+      "preservedFrontendTree": "48f5cde90608b1faed72eb58ce44b63c94c5c04d",
+      "independentReview": {
+        "passedTestsIncludingSubtests": 104,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "logSha256": "7d387439f54e500c672cc1f59ef5f8e2f48b30d10f7a048360294636262dfc36",
+        "allReviewedPassesRetained": true
+      },
+      "integration": {
+        "policy": {
+          "command": "go test -json -p 1 ./internal/application/access ./internal/application/repository ./internal/types -run ^Test(NextcloudSourceLineage|PostgresNextcloudSourceLineage|SourceLineage|NextcloudPublication) -count=1",
+          "logSha256": "2d8b8a71c13bc43384318da27e5d7b3f836123e05b9460f75f331d73dc9aea26",
+          "passedTestsIncludingSubtests": 118,
+          "failedTests": 0,
+          "skippedTests": 0,
+          "passedPackages": [
+            "github.com/Tencent/WeKnora/internal/application/access",
+            "github.com/Tencent/WeKnora/internal/application/repository",
+            "github.com/Tencent/WeKnora/internal/types"
+          ]
+        },
+        "consumerCompilation": {
+          "command": "go test -json -p 1 ./internal/container ./internal/application/service ./internal/handler/session ./internal/agent/tools -run ^$ -count=1",
+          "logSha256": "1582f8b8993c512ed34243c51e6132148db53bba15a8ec4f8bebb324bc466f5c",
+          "passedTestsIncludingSubtests": 0,
+          "failedTests": 0,
+          "skippedTests": 0,
+          "passedPackages": [
+            "github.com/Tencent/WeKnora/internal/container",
+            "github.com/Tencent/WeKnora/internal/application/service",
+            "github.com/Tencent/WeKnora/internal/handler/session",
+            "github.com/Tencent/WeKnora/internal/agent/tools"
+          ]
+        }
+      },
+      "additionalExistingPublicationRepositoryPasses": [
+        "TestNextcloudPublicationClosesAfterConcurrentPairRetirement",
+        "TestNextcloudPublicationFailsClosedBeforeCommit",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints/broad",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints/metadata-rename",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints/null-etag",
+        "TestNextcloudPublicationRechecksSourceBeforeAndAfterCommit",
+        "TestNextcloudPublicationRejectsConcurrentStageAndPairClosure",
+        "TestNextcloudPublicationRejectsConcurrentStageAndPairClosure/new_candidate",
+        "TestNextcloudPublicationRejectsConcurrentStageAndPairClosure/pair_closed",
+        "TestNextcloudPublicationRejectsRemoteChangeBetweenChecks",
+        "TestNextcloudPublicationRejectsRemoteChangeBetweenChecks/publication_withdrawn",
+        "TestNextcloudPublicationRejectsRemoteChangeBetweenChecks/source_etag_advanced",
+        "TestNextcloudPublicationUnprovenRetryWakesOnlyForSignedImportableHint"
+      ]
+    },
+    "rag": {
+      "profile": "rag",
+      "base": "77c97fd72f26e84435503d24eeed88cb5dfe1f01",
+      "patchSha256": "4fd0bde201c9ac542da74569051202370ffc87145584289ec4962dd957ae3891",
+      "fullSourceCommit": "bd4c1469a3c57228c5740dd2089408bbd4023daf",
+      "fullSourceTree": "9c999b6dfb21686ff506625a73398d2d7ecd683a",
+      "cleanApply": true,
+      "stagedTreeMatchesFullSource": true,
+      "reverseRestoresExactBase": true,
+      "diffCheck": true,
+      "precedingCompletePatchSha256": "ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea",
+      "precedingFullSourceBaselineCommit": "413ec89a7b7bdca58936f9d5e9f733df0e3b552c",
+      "frozenPolicyCommit": "5d898cb609ec14ac25a4a52c1a1eca51d84ed263",
+      "policyFilesByteEqual": {
+        "internal/application/access/nextcloud_publication.go": "27455c60c0df8df89ce71fa31fafd9052588301b1e9073b077ac017710fca8c5",
+        "internal/application/access/nextcloud_source_lineage.go": "311e450470ff89b14611ccf22010f1126cc2b0e884e361220bb58f8f68669663",
+        "internal/application/access/nextcloud_source_lineage_test.go": "4a2fc7190c5c85ccef33a2aa27c0b11f44fd728b5be97ce62f891a54d6e274cb",
+        "internal/application/access/nextcloud_source_lineage_review_test.go": "3a870832a010fca1edf395c421a640085d16bf0ddd2ab35ad71df4f5faff894c",
+        "internal/application/repository/nextcloud_source_lineage.go": "f5fec706629f7b9c17c8e2aafab0f5b7874b03f02eb136095e14843d29b17c07",
+        "internal/application/repository/nextcloud_source_lineage_test.go": "01ac3e43a6e1d244d2f7ef270cbd0e85a62e26beab8a7ec98ff11af25f212649",
+        "internal/types/source_lineage.go": "d1dfab36b1789eaf5ce5bd7d9a7b91f39d41c443fb8988ce4f6caeedb800d491",
+        "docs/source-lineage-foundation.md": "1c416af50f6d0d7c8cab233deeda2f24e214ce4f98bf4bddd52750c8585f80a5",
+        "docs/source-lineage-policy.md": "760b37056d08d86598345c0050ac182a80380d8ddaca1ec28b9e09b220d567b3"
+      },
+      "preservedFiles": {
+        "frontend/package.json": "5cf28aebb19801e35a74e676bb65c358421cfa645f91040e445450d1c38577c0",
+        "frontend/package-lock.json": "ad75f911f914547264fc7ed7645f18846f17054000caba550edc3f30da9d93d5",
+        "frontend/src/utils/markdownDependencySecurity.test.ts": "3e1471626fd595267d480dae0f85351dcd2337bd1482bfe13fc5e45b4a491486",
+        "internal/database/migration_source_lineage_test.go": "7ee22128eba4dfa6471d17ec360f33412a27102af9fd6bb4619bad24177d7c80"
+      },
+      "preservedFrontendTree": "f1f5297c6f42b50f8d2dcde0bb5aca03f6f21d17",
+      "independentReview": {
+        "passedTestsIncludingSubtests": 104,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "logSha256": "a89054a91c2d6189c13622ebfa155103de0b81f4084cb9bb304db3e555696cf9",
+        "allReviewedPassesRetained": true
+      },
+      "integration": {
+        "policy": {
+          "command": "go test -json -p 1 ./internal/application/access ./internal/application/repository ./internal/types -run ^Test(NextcloudSourceLineage|PostgresNextcloudSourceLineage|SourceLineage|NextcloudPublication) -count=1",
+          "logSha256": "9fb8b65bc9a86ea05ffc17e739b0b59c8286d50013e49d42585edc97dbfc5021",
+          "passedTestsIncludingSubtests": 118,
+          "failedTests": 0,
+          "skippedTests": 0,
+          "passedPackages": [
+            "github.com/Tencent/WeKnora/internal/application/access",
+            "github.com/Tencent/WeKnora/internal/application/repository",
+            "github.com/Tencent/WeKnora/internal/types"
+          ]
+        },
+        "consumerCompilation": {
+          "command": "go test -json -p 1 ./internal/container ./internal/application/service ./internal/handler/session ./internal/agent/tools -run ^$ -count=1",
+          "logSha256": "10fb0b9ec4831ebdd7319b8d232bc3abeeb29859735a6c96814e83c68e85e5ab",
+          "passedTestsIncludingSubtests": 0,
+          "failedTests": 0,
+          "skippedTests": 0,
+          "passedPackages": [
+            "github.com/Tencent/WeKnora/internal/container",
+            "github.com/Tencent/WeKnora/internal/application/service",
+            "github.com/Tencent/WeKnora/internal/handler/session",
+            "github.com/Tencent/WeKnora/internal/agent/tools"
+          ]
+        }
+      },
+      "additionalExistingPublicationRepositoryPasses": [
+        "TestNextcloudPublicationClosesAfterConcurrentPairRetirement",
+        "TestNextcloudPublicationFailsClosedBeforeCommit",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints/broad",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints/metadata-rename",
+        "TestNextcloudPublicationProofRejectsUnboundLatestHints/null-etag",
+        "TestNextcloudPublicationRechecksSourceBeforeAndAfterCommit",
+        "TestNextcloudPublicationRejectsConcurrentStageAndPairClosure",
+        "TestNextcloudPublicationRejectsConcurrentStageAndPairClosure/new_candidate",
+        "TestNextcloudPublicationRejectsConcurrentStageAndPairClosure/pair_closed",
+        "TestNextcloudPublicationRejectsRemoteChangeBetweenChecks",
+        "TestNextcloudPublicationRejectsRemoteChangeBetweenChecks/publication_withdrawn",
+        "TestNextcloudPublicationRejectsRemoteChangeBetweenChecks/source_etag_advanced",
+        "TestNextcloudPublicationUnprovenRetryWakesOnlyForSignedImportableHint"
+      ]
+    }
+  },
+  "reviewLeafCases": 9,
+  "validation": {
+    "gofmtPolicyGoFiles": "passed; both policy sets byte-identical; c6 gofmt -l returned empty",
+    "shellSyntax": "bash -n both build scripts passed",
+    "workflowYaml": "Ruby YAML parse passed",
+    "currentPatchPins": "workflow, both build scripts and current docs match generated SHA-256",
+    "historicalEvidence": "all existing tracked evidence JSON byte-identical to Nextcloud base",
+    "remainingTestSchemas": 0,
+    "ownedTestCleanup": "owned container ids, nonce labels, mounts and exact network peers verified; owned containers and network removed; shared caches retained",
+    "postgresImage": "postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416",
+    "goImageId": "sha256:5a74e8b5137496d3e22c72c01d862c4cbb1fe6ce476ddf5616fd9a807d6ae9ac",
+    "resourceLimits": {
+      "goCpu": 1,
+      "goMemory": "2 GiB",
+      "postgresCpu": 1,
+      "postgresMemory": "512 MiB",
+      "postgresData": "owned tmpfs, 256 MiB",
+      "network": "owned internal network, no host ports",
+      "goMaxProcs": 2,
+      "goParallelPackages": 1,
+      "moduleProxy": "off",
+      "sourceMounts": "read-only",
+      "sharedModuleBuildCaches": "reused and retained"
+    },
+    "unchangedFullFrontendSuitesOrBuildsRepeated": false,
+    "unchangedMigrationSuitesRepeated": false,
+    "fullDockerBuildsRun": false,
+    "remoteCi": "pending for complete new hashes"
+  },
+  "runtimeBoundary": {
+    "tagsOrSharedDatabaseChanged": false,
+    "backendImageId": "sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d",
+    "backendPatchSha256": "7f9c7f6a0027e42a4dd01b33366051ee7533aeddb9369653b83653165d5b5517",
+    "backendSchema": 131,
+    "frontendImageId": "sha256:3e5feb7e70f4fda72f270435a85a60656615689df14a02572e57e6996586d1ca",
+    "frontendBuiltFromPrecedingRagPatchSha256": "ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea",
+    "runtimeEvidence": "weknora-frontend-security-runtime-2026-10-08.json"
+  },
+  "limitations": [
+    "Policy unused; no producer or DI wiring",
+    "Atomic answer/SSE lineage persistence and output/replay enforcement remain open",
+    "History, compaction, memories, attachments, forks, indexes and derived outputs require propagation/enforcement",
+    "Legacy NULL/unknown policy and physical derived-copy GC coverage remain open",
+    "Directory and Nextcloud service stubs do not prove real AD acceptance or complete V1",
+    "Existing 100GB original-volume and eight-volume closed-restore evidence unchanged"
+  ]
+}

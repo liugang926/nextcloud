@@ -1,0 +1,605 @@
+name: Nextcloud integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  local-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # This job intentionally uses local Nextcloud accounts and fake GUIDs.
+      WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: '1'
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/integration_weknora/package-lock.json
+
+      - name: Static checks
+        run: |
+          bash -n scripts/*.sh
+          bash -n scripts/ops/*.sh
+          npm ci --prefix apps/integration_weknora
+          npm run build --prefix apps/integration_weknora
+          git diff --exit-code -- apps/integration_weknora/js/weknora-sidebar.js
+          node --check apps/integration_weknora/js/weknora-admin.js
+          node --check apps/integration_weknora/js/weknora-sidebar.js
+          python3 -m compileall -q apps/integration_weknora/tests scripts
+          python3 scripts/ops/test-ad-permission-acceptance.py
+          python3 scripts/ops/test-synthetic-ldap-topology.py
+          python3 scripts/ops/test-synthetic-ldap-fixture-state.py
+          python3 scripts/ops/test-synthetic-ldap-resource-profile.py
+          python3 scripts/ops/test-synthetic-ldap-normal-restore.py
+          python3 scripts/ops/test-synthetic-ldap-pending-auto-restore.py
+          python3 scripts/ops/test-synthetic-ldap-history-acceptance.py
+          python3 scripts/ops/test-synthetic-ldap-running-replay.py
+          python3 scripts/ops/test-synthetic-ldap-performance.py
+          python3 scripts/ops/test-synthetic-ldap-resource-watch.py
+          python3 scripts/ops/test_local_source_rotation_rebind.py
+          python3 scripts/ops/test-synthetic-identity-conflict-smoke.py
+          python3 scripts/ops/test-synthetic-ldap-revocation-watch.py
+          python3 scripts/ops/test-pilot-load.py
+          python3 scripts/ops/test-pilot-original-volume.py
+          python3 scripts/test-rotate-lan-ip.py
+          python3 scripts/ops/test_candidate_image_provenance.py
+          python3 scripts/ops/test-verify-go-test-evidence.py
+          python3 scripts/ops/test_shared_cold_checkpoint.py
+          python3 scripts/ops/test_publication_recovery_journal.py
+          python3 scripts/ops/test_shared_cold_restore_plan.py
+          python3 scripts/ops/test_shared_cold_restore_drill.py
+          python3 scripts/ops/test_shared_application_restore_drill.py
+          python3 scripts/package-nextcloud-app.py
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            sh -c 'find apps/integration_weknora -name "*.php" -exec php -l "{}" ";"'
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/ldap_guid_identity_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/event_health_evaluator_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/browser_file_url_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/remote_file_status_signature_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/employee_file_status_observation_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/publication_reconcile_hint_contract.php
+          docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/publication_decision_audit_contract.php
+          docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/publication_recovery_ledger_contract.php
+          docker run --rm --network none -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php -d memory_limit=512M apps/integration_weknora/tests/manifest_10k_synthetic_contract.php
+
+      - name: Install packaged app on an empty isolated stack
+        run: python3 scripts/ops/isolated-publication-recovery-smoke.py
+
+      - name: Start isolated Docker stack
+        run: ./scripts/dev-up.sh
+
+      - name: Install app and sample binding
+        run: ./scripts/bootstrap.sh
+
+      - name: API and event smoke
+        run: |
+          python3 apps/integration_weknora/tests/machine_signature_http_smoke.py
+          python3 apps/integration_weknora/tests/machine_rotation_http_smoke.py
+          ./scripts/smoke.sh
+          ./scripts/smoke-manifest.py
+          python3 apps/integration_weknora/tests/publication_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/binding_publication_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/source_pairing_http_smoke.py
+          python3 apps/integration_weknora/tests/authorization_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/changes_http_smoke.py
+          python3 apps/integration_weknora/tests/root_events_http_smoke.py
+          python3 apps/integration_weknora/tests/runtime_binding_scope_http_smoke.py --simulate-missing-bind-lock
+          python3 apps/integration_weknora/tests/outbox_retention_http_smoke.py
+          python3 apps/integration_weknora/tests/event_delivery_http_smoke.py
+          python3 apps/integration_weknora/tests/employee_file_status_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/diagnostics_http_smoke.py
+          ./scripts/ops/isolated-restore-drill.sh
+
+      - name: Check out the fixed WeKnora baseline for live signature verification
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          path: weknora
+          persist-credentials: false
+
+      - name: Set up Go for live signature verification
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora/go.mod
+          cache-dependency-path: weknora/go.sum
+
+      - name: Verify Go-signed GET and POST against the running PHP app
+        run: |
+          git -C weknora apply --check ../integration/weknora.patch
+          git -C weknora apply ../integration/weknora.patch
+          set -a
+          source .env
+          set +a
+          cd weknora
+          NEXTCLOUD_LIVE_BASE_URL="http://127.0.0.1:${NEXTCLOUD_HTTP_PORT:-18082}" \
+            NEXTCLOUD_LIVE_TOKEN="$WEKNORA_SERVICE_TOKEN" \
+            go test -p 2 ./internal/datasource/connector/nextcloud \
+              -run TestLiveSignedNextcloudMachineRequests -count=1
+
+  weknora-development-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: c6
+            base: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          - profile: rag
+            base: b6ea8b560b886cef77fb32fb2e092123cdce4ed3
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+        env:
+          POSTGRES_PASSWORD: candidate-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      pgvector:
+        image: paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2
+        env:
+          POSTGRES_PASSWORD: candidate-vector-test-only
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          path: nextcloud
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: ${{ matrix.base }}
+          path: candidate
+          persist-credentials: false
+      - name: Verify complete candidate patch and exact trees
+        run: |
+          python3 nextcloud/scripts/ops/verify-weknora-candidate.py --profile=${{ matrix.profile }} --source-repo=candidate
+          git -C candidate apply ../nextcloud/integration/candidates/weknora-phase3-${{ matrix.profile }}.patch
+          git -C candidate diff --check
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: candidate/go.sum
+      - name: Prepare isolated test databases
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          for kind in lease migration sourcehealth pairing auto faq capacity gc; do
+            docker exec "$PG_CONTAINER" createdb -U postgres "candidate_$kind"
+          done
+      - name: Test candidate producers and recovery contracts
+        working-directory: candidate
+        env:
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_lease sslmode=disable
+          WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:candidate-test-only@127.0.0.1:5432/candidate_migration?sslmode=disable&options=-c%20app.skip_embedding%3Dtrue
+          WEKNORA_SOURCE_HEALTH_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_sourcehealth sslmode=disable
+          WEKNORA_PAIRING_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_pairing sslmode=disable
+          WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_auto sslmode=disable
+          WEKNORA_AUTO_COMPLETION_TEST_REDIS_ADDR: 127.0.0.1:6379
+          WEKNORA_FAQ_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_faq sslmode=disable
+          WEKNORA_CAPACITY_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_capacity sslmode=disable
+          WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_gc sslmode=disable
+        run: |
+          go build -buildvcs=false -p 1 -o /tmp/capacity-reconcile ./cmd/capacity-reconcile
+          export WEKNORA_CAPACITY_RECONCILE_CLI=/tmp/capacity-reconcile
+          go build -tags sqlite_fts5 -buildvcs=false -p 1 -o /tmp/original-body-retention ./cmd/original-body-retention
+          export WEKNORA_ORIGINAL_BODY_TEST_CLI=/tmp/original-body-retention
+          go test -json -tags sqlite_fts5 -p 1 ./internal/config ./internal/application/readlease ./internal/application/repository ./internal/application/service ./internal/application/service/file ./internal/agent ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
+            -run 'SteerMaterial|SteerOriginalMaterialActualHTTP|AgentSteerOriginal|AgentSteerUnknown|PostgresSteerOriginalUpgradeFrom153|MessageRewindMaterial|OriginalRewind|RAGPhysicalActual|NextcloudKBRead|NextcloudKnowledgeLeaseScope|NativeLive|MessageNativeLive|NormalReferencesActualHTTP|OriginalBody|PostgresOriginalBody|ParentBodyCopy|ParentCopy|KnowledgeAutoCompletion|PostgresKnowledgeAutoCompletion|AgentHistoryActual|AgentHistoryPostgresActual|CommittedHistoryParentRequest|MessageGeneratedField|MessageFork|MessageActual|NativeSavedReplay|MessageMaterialLiveHTTP|ChunkOutputHTTP|KnowledgeMachine|PostgresKnowledgeMachine|DataSourceName|MessageMaterial|KnowledgeHistory|NextcloudGCManualActual|NextcloudGCAdminStatus|NextcloudGCActualAdminHTTPPreview|NextcloudGCAdminPagination|^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery' -count=1 -timeout 20m > candidate-tests.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-tests.jsonl \
+            --require-test TestMessageMaterialActualHTTPProducerReadSingleConnection \
+            --require-test TestMessageMaterialActualControlledSavedHTTPAndCurrentSourceRevoke \
+            --require-test TestAgentHistoryPostgresActualModelCheckpointAndParentRevokeSingleConnection \
+            --require-test TestKnowledgeAutoCompletionActualRedisSQLite \
+            --require-test TestPostgresKnowledgeAutoCompletionActualRedis \
+            --require-test TestRAGPhysicalActualShortSummarySQLite \
+            --require-test TestPostgresRAGPhysicalActualShortSummary \
+            --require-test TestSteerOriginalMaterialActualHTTPAfterCreatesExactNewInitialAndCompletion \
+            --require-test TestSteerOriginalMaterialActualHTTPAfterRejectsCurrentOriginSlotAndControlChanges \
+            --require-test TestSteerMaterialLegacyMessageRequestJSONAndDigestStayExact \
+            --require-test TestSteerMaterialActualFollowUpKeepsOriginalAndBindsExactNewInitial \
+            --require-test TestPostgresSteerOriginalUpgradeFrom153PreservesUnknownHistory \
+            --require-test TestAgentSteerUnknownSinkCannotCertifyCachedBodyOrEnterModel \
+            --require-test TestSteerOriginalMaterialActualHTTPAgentHonorsDisableTitle \
+            --require-test TestParentBodyCopyActual793SQLite \
+            --require-test TestPostgresParentBodyCopyActual793 \
+            --require-test TestParentBodyCopyUnknownProofSQLite \
+            --require-test TestPostgresParentBodyCopyUnknownProof \
+            --require-test TestParentBodyCopyUnknownOriginalScopeSQLite \
+            --require-test TestPostgresParentBodyCopyUnknownOriginalScope \
+            --require-test TestParentBodyCopyMultipleLiveHostsSQLite \
+            --require-test TestPostgresParentBodyCopyMultipleLiveHosts \
+            --require-test TestParentCopyActualGeneratedDependencySQLite \
+            --require-test TestPostgresParentCopyActualGeneratedDependency \
+            --require-test TestMessageMaterialOwnGrowthActualSQLite \
+            --require-test TestPostgresMessageMaterialOwnGrowthActual \
+            --require-test TestNormalReferencesActualHTTPSQLite \
+            --require-test TestPostgresNormalReferencesActualHTTP \
+            --require-test TestNormalReferencesActualHTTPBoundariesSQLite \
+            --require-test TestPostgresNormalReferencesActualHTTPBoundaries \
+            --require-test TestOriginalBodyInlineRowActualSQLite \
+            --require-test TestPostgresOriginalBodyInlineRowActual \
+            --require-test TestOriginalBodyFileReadCancelActualSQLite \
+            --require-test TestPostgresOriginalBodyFileReadCancelActual \
+            --require-test TestNormalReferencesActualHTTPRemainingAsyncSQLite \
+            --require-test TestPostgresNormalReferencesActualHTTPRemainingAsync \
+            --require-test TestOriginalBodySchemaProbeCancelActualSQLite \
+            --require-test TestPostgresOriginalBodySchemaProbeCancelActual \
+            --require-test TestNormalReferencesActualHTTPIdleMaterialSQLite \
+            --require-test TestPostgresNormalReferencesActualHTTPIdleMaterial \
+            --require-test TestNormalReferencesActualHTTPLateIdleMaterialSQLite \
+            --require-test TestPostgresNormalReferencesActualHTTPLateIdleMaterial
+      - name: Verify full candidate compile
+        working-directory: candidate
+        run: |
+          go test -json -p 2 ./... -run '^TestNonexistentCandidateCompile$' > candidate-compile.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-compile.jsonl --compile-only
+      - name: Verify failed QA streams terminate without retained source text
+        working-directory: candidate
+        run: |
+          go test -json -p 1 ./internal/handler/session \
+            -run '^Test.*(Steer|SetupSSEStream|NativeLive|LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError)' -count=1 > candidate-qa-terminal.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-qa-terminal.jsonl \
+            --require-test TestLiveSSEProducerErrorWithRefusedOriginalMaterialHolder \
+            --require-test TestSteerProductionMissingOriginalServiceRejectsCachedInput \
+            --require-test TestSteerFollowUpHandoffKeepsSessionLiveAcrossPreviousClear
+      - name: Verify actual SQLite FTS5 and PostgreSQL derived collection
+        working-directory: candidate
+        env:
+          WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_auto sslmode=disable
+          WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=candidate-test-only dbname=candidate_gc sslmode=disable
+        run: |
+          go test -json -tags sqlite_fts5 -p 1 ./internal/application/service ./internal/application/service/file ./internal/application/repository/retriever/sqlite \
+            -run 'NextcloudLocalDerived|PostgresNextcloudLocalDerived|LocalGC|LocalPath|RetrieveReturns|VectorRetrieveFiltersBeforeTopK' -count=1 > candidate-local-derived.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-local-derived.jsonl
+      - name: Verify actual native halfvec collection
+        working-directory: candidate
+        env:
+          WEKNORA_AUTO_TAG_TEST_POSTGRES_DSN: host=127.0.0.1 port=5433 user=postgres password=candidate-vector-test-only dbname=postgres sslmode=disable
+          WEKNORA_LOCAL_DERIVED_NATIVE_VECTOR: '1'
+        run: |
+          go test -json -p 1 ./internal/application/service \
+            -run '^TestPostgresNextcloudLocalDerivedActualPipeline$' -count=1 > candidate-native-derived.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-native-derived.jsonl \
+            --require-test TestPostgresNextcloudLocalDerivedActualPipeline
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: candidate/frontend/package-lock.json
+      - name: Typecheck and build candidate capacity UI
+        working-directory: candidate/frontend
+        run: |
+          npm ci
+          npx vue-tsc --noEmit -p tsconfig.app.json
+          npm run build
+      - name: Retain candidate test logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: weknora-development-${{ matrix.profile }}
+          path: candidate/candidate-*.jsonl
+
+  weknora-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+        env:
+          POSTGRES_PASSWORD: nextcloud-event-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      pgvector:
+        image: paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2
+        env:
+          POSTGRES_PASSWORD: nextcloud-vector-test-only
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: Check out integration repository
+        uses: actions/checkout@v7.0.1
+        with:
+          path: nextcloud
+
+      - name: Check out the fixed WeKnora baseline
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: c6c4bd445a8ee49e742da9d804957a3fe4bf52d4
+          path: weknora
+          persist-credentials: false
+
+      - name: Apply connector and authorization patch
+        run: |
+          echo 'dbf8c4926f9b8fa1e9e5adefd38affc0f0e00281f2c44a570c3d345bbdd13d09  nextcloud/integration/weknora.patch' | sha256sum --check --
+          git -C weknora apply --check ../nextcloud/integration/weknora.patch
+          git -C weknora apply ../nextcloud/integration/weknora.patch
+
+      - name: Check WeKnora Nextcloud OpenAPI contract
+        run: python3 nextcloud/scripts/ops/check-weknora-openapi-contract.py weknora
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora/go.mod
+          cache-dependency-path: weknora/go.sum
+
+      - name: Compile and test Nextcloud integration paths
+        working-directory: weknora
+        run: |
+          go test -p 2 -run 'RawSearch|SavedAgent|HistoryFiltering|StopSessionAndSteer|AgentHistoryAdmission|LoadAgentHistory|Nextcloud|KnowledgeBaseProfile|GlobalKnowledgeSearch|KBEditorCannotRepoint|KBStorageBinding|UpdateKBConfigEmbeddingChange|Publication|ContinueStream|LiveSSE|Resource|GuardedFile|PresignedFile|KBFile|Preview|BatchDownload|LeasedFile' \
+            ./internal/application/access \
+            ./internal/application/readlease \
+            ./internal/application/repository \
+            ./internal/application/service \
+            ./internal/application/service/file \
+            ./internal/datasource \
+            ./internal/agent/tools \
+            ./internal/handler \
+            ./internal/handler/dto \
+            ./internal/handler/session \
+            ./internal/router \
+            ./internal/mcpserver \
+            ./internal/types \
+            ./internal/container
+          go test -p 2 ./internal/datasource/connector/nextcloud ./internal/application/service/chat_pipeline
+          go test -p 2 ./internal/datasource -run Nextcloud -count=1
+          go test -p 2 ./internal/agent/tools -run '^TestQueryKnowledgeGraph' -count=1
+
+      - name: Verify source lineage codec and independent tombstone lookup
+        working-directory: weknora
+        run: |
+          go test -p 2 ./internal/types -run '^TestSourceLineage' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestNextcloudSourceTombstone' -count=1
+
+      - name: Verify dormant SourceLineage policy and PostgreSQL batch snapshot
+        working-directory: weknora
+        env:
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+        run: |
+          go test -p 1 ./internal/application/access ./internal/application/repository ./internal/types \
+            -run '^Test(NextcloudSourceLineage|PostgresNextcloudSourceLineage|SourceLineage|NextcloudPublication)' -count=1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: weknora/frontend/package-lock.json
+
+      - name: Test and build patched browser SSE scope
+        working-directory: weknora/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm audit --registry=https://registry.npmjs.org
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts src/utils/markdownDependencySecurity.test.ts
+          npm run type-check
+          VITE_IS_DOCKER=true npm run build
+
+      - name: Verify event receipt and pairing in PostgreSQL and SQLite
+        working-directory: weknora
+        env:
+          NEXTCLOUD_EVENT_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_PAIRING_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_GC_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_INDEXED_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 user=postgres password=nextcloud-event-test-only dbname=postgres sslmode=disable
+        run: |
+          go test -p 2 ./internal/handler -run '^TestNextcloudEvent' -count=1
+          go test -p 2 ./internal/application/repository \
+            -run '^Test(PostgresNextcloud|NextcloudSourcePairingPostgres)' -count=1
+          go test -p 2 ./internal/database -run '^TestSQLite' -count=1
+
+      - name: Verify pgvector retirement races and exact-ID receipts
+        working-directory: weknora
+        env:
+          WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+        run: |
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(GlobalAndScopedHistoryAdmission|EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation)' -count=1
+          go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
+
+      - name: Verify full PostgreSQL migrations, concurrent index and isolated lineage upgrade
+        working-directory: weknora
+        env:
+          WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable
+        run: |
+          docker exec "${{ job.services.pgvector.id }}" createdb -U postgres weknora_migration_test
+          go test -p 2 ./internal/database -run '^Test(PostgresMigrationsServeAgentHistory|PostgresSourceLineage)' -count=1
+
+  weknora-rag-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      pgvector:
+        image: paradedb/paradedb:v0.22.6-pg17@sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2
+        env:
+          POSTGRES_PASSWORD: nextcloud-vector-test-only
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: Check out integration repository
+        uses: actions/checkout@v7.0.1
+        with:
+          path: nextcloud
+
+      - name: Check out the pinned WeKnora RAG baseline
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: liugang926/WeKnora_ldapsa
+          ref: b6ea8b560b886cef77fb32fb2e092123cdce4ed3
+          path: weknora-rag
+          persist-credentials: false
+
+      - name: Apply and check RAG adaptation
+        run: |
+          echo '8bbffc98f1fbdc03f08be0e7f6d959da61536b17b1b75b8b3a4258b914e612ae  nextcloud/integration/weknora-rag-b6ea8b56.patch' | sha256sum --check --
+          git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-b6ea8b56.patch
+          git -C weknora-rag apply ../nextcloud/integration/weknora-rag-b6ea8b56.patch
+          git -C weknora-rag diff --check
+
+      - name: Check RAG WeKnora Nextcloud OpenAPI contract
+        run: python3 nextcloud/scripts/ops/check-weknora-openapi-contract.py weknora-rag
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: weknora-rag/go.mod
+          cache-dependency-path: weknora-rag/go.sum
+
+      - name: Test patched RAG authorization paths
+        working-directory: weknora-rag
+        run: |
+          go test -p 2 -run 'Test(RawSearch|SavedAgent|HistoryFiltering|StopSessionAndSteer|AgentHistoryAdmission|LoadAgentHistory|Nextcloud|SQLiteNextcloudSourceRegistrationFencesGeneratedProfileWrite|KnowledgeBaseProfile|ManualNextcloud|GlobalKnowledgeSearch|KBStorageBinding|UpdateKBConfigEmbeddingChange|FetchStreamEventRetryProvesFreshManifestAfterSettledChanges|FetchStreamRetryDoesNotReadChangedNeighborContent|FetchStreamRetriesFailedFileWithoutETagChange|ProcessSyncStreamingNextcloud|IngestItem_Nextcloud|HybridSearch|AgentReadDocumentLease|AgentListDocuments|Preview|BatchDownload|LeasedFile)' -count=1 \
+            ./internal/application/access \
+            ./internal/application/readlease \
+            ./internal/application/repository \
+            ./internal/application/service \
+            ./internal/datasource \
+            ./internal/datasource/connector/nextcloud \
+            ./internal/agent/tools \
+            ./internal/handler \
+            ./internal/handler/dto \
+            ./internal/router \
+            ./internal/container \
+            ./internal/mcpserver
+          go test -p 2 ./internal/handler/session -run '^Test(LiveSSE|ContinueStream|StopSessionAndSteer)' -count=1
+          go test -p 2 ./internal/database -run '^TestSQLite' -count=1
+          go test -p 2 ./internal/agent/tools -run '^TestQueryKnowledgeGraph' -count=1
+
+      - name: Verify RAG source lineage codec and independent tombstone lookup
+        working-directory: weknora-rag
+        run: |
+          go test -p 2 ./internal/types -run '^TestSourceLineage' -count=1
+          go test -p 2 ./internal/application/repository -run '^TestNextcloudSourceTombstone' -count=1
+
+      - name: Verify dormant RAG SourceLineage policy and PostgreSQL batch snapshot
+        working-directory: weknora-rag
+        env:
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: host=127.0.0.1 port=5433 user=postgres password=nextcloud-vector-test-only dbname=postgres sslmode=disable
+        run: |
+          go test -p 1 ./internal/application/access ./internal/application/repository ./internal/types \
+            -run '^Test(NextcloudSourceLineage|PostgresNextcloudSourceLineage|SourceLineage|NextcloudPublication)' -count=1
+
+      - name: Verify pgvector retirement races and exact-ID receipts
+        working-directory: weknora-rag
+        env:
+          WEKNORA_PGVECTOR_RACE_TEST_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+          WEKNORA_LEASE_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+          WEKNORA_INDEXED_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/postgres?sslmode=disable
+        run: |
+          go test -p 2 ./internal/application/repository -run '^TestPostgresNextcloud(GlobalAndScopedHistoryAdmission|EarlyWorker|StalePublish|StageThenTombstone|FailedCandidateListUnderLocaleCollation|IndexedWithdrawalFencesAndInventories|ProfileWriteWaitsForSourceMarker)' -count=1
+          go test -p 2 ./internal/application/repository/retriever/postgres -run '^TestNextcloudPGVector' -count=1
+
+      - name: Verify full PostgreSQL migrations, concurrent index and isolated lineage upgrade
+        working-directory: weknora-rag
+        env:
+          WEKNORA_MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:nextcloud-vector-test-only@127.0.0.1:5433/weknora_migration_test?sslmode=disable
+        run: |
+          docker exec "${{ job.services.pgvector.id }}" createdb -U postgres weknora_migration_test
+          go test -p 2 ./internal/database -run '^Test(PostgresMigrationsServeAgentHistory|PostgresSourceLineage)' -count=1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: weknora-rag/frontend/package-lock.json
+
+      - name: Typecheck and build RAG browser UI
+        working-directory: weknora-rag/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm audit --registry=https://registry.npmjs.org
+          npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts src/utils/markdownDependencySecurity.test.ts
+          npm run type-check
+          VITE_IS_DOCKER=true npm run build
+
+  direct-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Generate disposable test credentials
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from secrets import token_urlsafe
+          values = {
+              'NEXTCLOUD_ADMIN_USER': 'devadmin',
+              'NEXTCLOUD_ADMIN_PASSWORD': 'x' + token_urlsafe(24),
+              'NEXTCLOUD_DB_PASSWORD': 'x' + token_urlsafe(24),
+              'WEKNORA_SERVICE_TOKEN': token_urlsafe(32),
+              'NEXTCLOUD_HTTP_PORT': '18082',
+          }
+          path = Path('.env')
+          path.write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+          path.chmod(0o600)
+          PY
+
+      - name: Verify historical binding tombstones on direct upgrade
+        run: python3 scripts/ops/direct-upgrade-tombstone-smoke.py
+
+      - name: Recover from an isolated failed app upgrade
+        run: python3 scripts/ops/isolated-upgrade-failure-recovery.py
