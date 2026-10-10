@@ -21,6 +21,18 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+The latest private memory source is `674e77cc`, integrating model lifetime
+repairs with whole-result validation. Unsupported or invalid model decisions
+now reject the complete result before writes; explicit NoOp and proven
+snapshot duplicate/tombstone suppression remain. Two new SQLite/PostgreSQL
+parents contain four mixed-valid-invalid cases (six declared nodes), with
+genuine scheduling, dispatch and Handle plus zero-effect/checkpoint oracles.
+A test-only baseline has identical tests for a future matched regression.
+These are source checks only: neither baseline nor fix has executed, and the
+fused source is still unformatted/uncompiled. The complete core patch again
+round-trips to the exact base. See the
+[whole-result source record](evidence/memory-whole-result-source-20261010.json).
+
 Model provider lifetime repairs are now integrated privately at `dd7f6e24`.
 The source captures complete remote protocol/URL/query/header/auth/settings
 recipes, reauthorizes the current actor in the same SQL transaction, retains
