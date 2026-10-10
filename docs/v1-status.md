@@ -218,8 +218,11 @@ supersession, preserve active ancestor bodies and do not enable physical GC.
 The same cd9375 full SQLite/realParadeDB17 migration38 also passes,
 including retirement table inventory, genuine schema/FK refusal and unchanged
 ANYDROP-first protection; seven owned resources are independently absent.
-Existing worker/generated/UNKNOWN and new-table-specific DOWN coverage remain
-required. See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
+The same cd9375 source now passes all159 selected native55/productive24/
+policy58/lifecycle22 regressions in813.853s, with ten exact resources independently
+absent. Genuine generated multi-effect/model-successor paths remain compatible;
+see the [current core159 record](evidence/memory-rank-retirement-core159-GREEN-20261011.json).
+UNKNOWN and new-table-specific genuine DOWN coverage remain required. See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
 See the [20-pass/4-failure record](evidence/memory-rank10-retirement10-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
