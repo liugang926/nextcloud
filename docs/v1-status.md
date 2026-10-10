@@ -21,6 +21,27 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+Private memory source `856ea3b1` now compiles the final worker lease union and
+original-bound consolidation across all six selected packages, with zero
+runtime tests. All 121 changed Go files parsed/formatted successfully. The first
+compile failed on one unused import; removing it passed in 96.385 seconds.
+Successful owned resources are absent, while the first failure actor/temp remain.
+Twelve host SQLite schema-only checks passed the fused guard: 17 fact tables
+are checked before any DROP, mutated controls above seed revision one are
+retained, and UNKNOWN seed rows still allow empty DOWN. Revision one cannot
+distinguish initialization from a first raw insert. No full journal/chain or
+business proof is claimed from these schema checks.
+
+The first actual SQLite/PostgreSQL worker gate failed all six nodes: its four
+leaves found no pending extraction row after ScheduleExtraction, before any
+model call or final-clock hook. The gate is unaccepted and is not a TTL business
+RED. Its Go is absent; stopped PG/Redis, three volumes, network and raw/source
+are retained. A ten-node test-only enqueue diagnostic is prepared. Independent
+stale-maintenance and model-SDK privacy repairs are also fused at `35c80847`,
+but remain unformatted/uncompiled/unexecuted. RAG caller logs, embedding, full
+workflows/migrations/broker/restore and V1 acceptance remain open. See the
+[consolidation and enqueue prelude record](evidence/memory-consolidation-enqueue-prelude-20261010.json).
+
 Private formatted memory source `2e088198` now passed parsing/formatting
 on all 102 changed Go files and compiled all six selected packages, including
 chat constructor tests, with zero runtime test nodes and no failures/skips/OOM.
