@@ -4,6 +4,17 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+The original-memory atomic-result and recovery slices are now integrated into
+one private source proposal, `386a68a5`, with four overlapping files resolved
+and all additional SQL test sources bound to its exact tree. A private index
+applies its patch to `1bbd0cc8` and reverses it to the exact original tree.
+Six in-memory SQLite checks passed on its fused pending schema; a separate
+13-case schema-only probe checked foreign keys, immutable facts and DOWN guards.
+These checks executed no model, Go, PostgreSQL, broker or restore cases. The
+proposal still needs formatting, shared-permission mutation fences, capacity
+effects, complete derived-memory workflows and actual acceptance; it is not
+in the candidate manifest. See the [integrated source record](evidence/memory-original-integrated-source-20261010.json).
+
 Memory task source preparation now persists an original-bound dispatch intent
 with the admission and pending revision in one transaction. Its recovery relay
 retains that exact intent after broker or post-commit failures, while completion
