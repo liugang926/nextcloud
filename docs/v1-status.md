@@ -326,6 +326,18 @@ No business tests run. The package boundary is being repaired, and independent
 review also requires an exact PostgreSQL withdrawal kind CHECK witness before
 bootstrap acceptance. See the [preserved compile failure](evidence/joint-readonly-business-full-compile-import-cycle-failure-20261011.json).
 
+The next `76925343` compile resolves the import cycle and includes the exact PG
+withdrawal CHECK plus genuine nonempty-original upgrade fixtures. It parses436
+Go files and compiles116 test-bearing/40 no-test packages, but two external-test
+cursor references use a nonexistent `MessageID` field. A two-field test-only
+repair uses the actual `ID` and preserves the no-advance assertion. No business
+RUN occurs; failed compiler/temp evidence remains retained. See the [cursor ABI
+record](evidence/joint-PGcheck-nonempty-full-compile-cursor-ABI-failure-20261011.json).
+The next source also adds33 explicit full-joint directory snapshot/concurrency/
+periodic nodes. Nonempty upgrade6, source-path HTTP6 and directory33 are source
+drafts pending compilation and actual gates; controlled directory model
+transports are a component limit, not real provider/whole-app acceptance.
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
