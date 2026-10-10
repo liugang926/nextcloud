@@ -49,11 +49,15 @@ A fresh corrected-plan ordinary-model HTTP gate now passes10/10 on unchanged
 [ordinary HTTP10 record](evidence/memory-message-owner-ordinaryHTTP10-GREEN-20261011.json).
 Prior query22/concurrency8 failures remain preserved.
 
-The vector reader/ranking/receipt component now passes20/20 nodes on `545eebcb`.
-Recall SQL runs16 nodes (12PASS/4FAIL); the two late-expiry observers did not
-reach their actual crossing after the Render completion boundary changed.
-Recall HTTP and Local/Ollama were not dispatched afterward. See the
-[vector20 and RecallSQL record](evidence/memory-vector20-GREEN-RecallSQL16-failure-20261011.json).
+The vector reader/ranking/receipt component passes20/20 nodes on `545eebcb`.
+After binding the observer to the actual terminal consumption clock, Recall SQL
+passes16/16 nodes on production-identical `930df22a`, including genuine late
+lease expiry and readback in both databases. Recall HTTP runs14 nodes with
+5PASS/9FAIL: SQLite caller cancellation observes one completed output, while
+all PostgreSQL completion preludes exceed the original8s bound. Local/Ollama
+was not dispatched afterward and is scheduled as an independent unchanged-source
+gate. See the [Recall16 and HTTP14 record](evidence/memory-RecallSQL16-GREEN-RecallHTTP14-failure-20261011.json).
+The earlier observer failure remains in its evidence record.
 
 The real ParadeDB17/SQLite full migration now passes all34 nodes on `b6b15c59`,
 zero failures/skips/OOM, with all seven exact owned resources independently
