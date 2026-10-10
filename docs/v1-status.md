@@ -4,6 +4,17 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+The complete original service selection is prepared with 178 planned parents,
+including 28 of the original 42 mandatory parents across 12 packages. Its
+driver preserves source `1bbd0cc8`, count one, the cumulative 20-minute service
+budget and eight-second HTTP bound. The first actual launch stopped at storage
+preflight: host free space was 10.380 GiB against the fixed 12 GiB diagnostic
+floor. It created no containers, networks or volumes and ran no business tests;
+Root and an independent audit verified all nine prospective names absent.
+The 24 pure driver checks passed, but service, full-selection, normal-application
+and restore acceptance remain pending. Resume requires adequate storage and a
+serial heavy resource window. See the [preflight record](evidence/ordinary-qa-whole-service-preflight-20261010.json).
+
 A fresh source-exact PostgreSQL ordinary-QA profiling run on `1bbd0cc8`
 passed its single required parent under the original eight-second HTTP and
 20-minute package limits. The original binary, CPU/block/mutex profiles and
