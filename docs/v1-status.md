@@ -122,6 +122,10 @@ A source review found missing absent-candidate every-read control checks; its
 narrow child is being compiled. Real semantic current4 now executes on corrected fixtures, but both database
 HTTP8s preludes fail before savedhistory assertions. The source remains
 unaccepted as full semantic functionality; see the [current4 failure](evidence/memory-semantic-current4-HTTP8s-failure-20261011.json).
+The sameTX rank capture optimization compiles292 files and passes10 actual
+SQL count/current/late-actor/querybody/vectorbody nodes, but semantic current4
+still fails the original8s prelude. Its final full checks remain intact; the
+optimization alone is insufficient. See the [rank10/current4 record](evidence/memory-rank-capture10-GREEN-current4-failure-20261011.json).
 Actualsemantic completion/history and lawful different-output vector successor
 gates remain required. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
