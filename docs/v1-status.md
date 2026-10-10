@@ -99,7 +99,10 @@ after the scope change; see the [actual performance failure](evidence/memory-PG-
 [scope12 record](evidence/memory-Recall-body-scope12-GREEN-20261011.json).
 The outer-history-group sameTXscope compiles and preserves SQLite history6,
 but its multi3 still exceeds second-request8s before the final union fault.
-Remaining initialization/direct message-capture paths need targeted counts;
+Targeted operation diagnostics now show B initial history1call/65ms,
+message capture298calls and historygroup58calls; nested durations are not
+additive wall time. Repeated capture IO is the next measured target. See the
+[B operation record](evidence/memory-SECOND-B-operation-profile-failure-20261011.json);
 see the [group-scope actual record](evidence/memory-history-group-scope6-GREEN-multi3-failure-20261011.json).
 Actual multi-read late-clock and PostgreSQL history still need matched gates.
 Focused PG/current
