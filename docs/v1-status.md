@@ -30,29 +30,31 @@ Actual mutation and expiry-readback prerequisites were strengthened before
 acceptance; earlier failures remain preserved. This is not a single46-node run
 or full PRD performance acceptance. See the [partial and clock record](evidence/memory-original-partial-and-clock-GREEN-20261011.json).
 
-The next `1e70c75b` candidate combines query/vector/rank, ordinary Recall,
-Local/Ollama original embedding, complete155/74→156/75 migration and latejournal
-snapshot checks. All237 changed Go files parsed and11 selected packages compiled
-in129.439s with zero runtime tests. The50-node original/body/clock regression now
-passes in213.065s, zero failures/skips/OOM, with11 exact resources absent. Query follow-up now passes all11 SQLite nodes; PostgreSQL fails its11 setup
-checks at the immutabletrigger catalog predicate before provider entry. This is
-a fixture prelude requiring exact schema review, not a PostgreSQL business RED.
-See the [query follow-up](evidence/memory-query-SQLite11-PG-prelude-failure-20261011.json).
-The first
-112-node consumer window stopped at a query expiry observer precondition after
-nine SQLite leaves passed; no consumer gate is accepted. The full migration
-window executed30 nodes (4PASS/26FAIL/0SKIP), exposing a removed fixture column
-and real duplicate trigger semantics at155/74. Both are under repair. See the
-[query failure](evidence/memory-query-observer-precondition-failure-20261011.json)
-and [actual migration failure](evidence/memory-full-migration30-failure-20261011.json).
-See the [latejournal50 record](evidence/memory-last-journal-50-GREEN-20261011.json). See the
-[compile record](evidence/memory-recall-local-integrated-compile-20261011.json).
+The newer `32c2597` candidate includes the durable ordinary Recall completion
+manifest bridge, exact PostgreSQL immutable-body trigger fixture, and migration
+schema/transaction repairs. All242 changed Go files parsed and11 selected
+packages compiled; no business tests ran in that compile window. See the
+[compile record](evidence/memory-completion-query-migration-compile-20261011.json).
+The50-node original/body/clock regression remains green on the earlier
+production snapshot; see the [latejournal record](evidence/memory-last-journal-50-GREEN-20261011.json).
 
-Source inspection found that actual Recall dependency binding is not stored in
-the completed assistant input manifest. Its historical reader therefore lacks
-an exact memory publication/body/policy/model graph; this is a confirmed source
-gap, awaiting matched realhistory evidence and a durable bridge. Explicit local
-model download also still needs its original endpoint/lifetime. Tenant-cloud
+Both database query original gates now pass all22 nodes. The following
+single-pool/Close concurrency stage runs8 nodes, with6PASS and2FAIL: pipeline
+cancellation closes the still-owned HTTP user-message guard before its current
+check. Vector, Recall and Local stages were not dispatched after that failure.
+See the [query22 and concurrency8 record](evidence/memory-query22-GREEN-concurrency8-failure-20261011.json).
+
+The real ParadeDB17/SQLite full migration rerun improves to30PASS/4FAIL across
+34 nodes. Its remaining failure is missing UNKNOWN controls for old native
+memory inventory; the removed fixture column, PG125 cross-schema trigger leak
+and SQLite74 nested transaction failures are closed within this rerun's scope.
+A four-kind UNKNOWN-only initialization repair is frozen and independently
+reviewed, awaiting the same actual gate. See the [migration34 record](evidence/memory-full-migration34-failure-20261011.json).
+Earlier failed attempts remain in their evidence files.
+
+Exact saved-history Recall reopening is now a separate source candidate and
+needs matched actual tests. Semantic query/vector completion dependencies and
+explicit local model download shutdown also remain underway. Tenant-cloud
 credentials, complete history, application/broker/recovery and PRD performance
 remain required. The full V1 goal remains active; deployment and coverage flags
 remain disabled.
