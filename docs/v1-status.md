@@ -4,6 +4,17 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+The private original-memory proposal now joins public memory mutations to the
+same subject transaction and joins sharing/organization mutations to the same
+permission epochs used by its reader. Original Agent ownership and transitive
+parent metadata expand the fenced tenant set without reading current grants
+as new authority. Source `ef1cdcc4` includes the previous atomic/recovery work
+plus real-runtime single-pool and capacity/SQL-rollback test sources. Its patch
+applies and reverses exactly, but it is unformatted/uncompiled and no business
+tests have run. Raw SQL/restore writers, remaining permission dependencies and
+complete derived-memory workflows still need implementation and actual gates.
+The current manifest is unchanged. See the [common writer source record](evidence/memory-original-common-writer-source-20261010.json).
+
 The original-memory atomic-result and recovery slices are now integrated into
 one private source proposal, `386a68a5`, with four overlapping files resolved
 and all additional SQL test sources bound to its exact tree. A private index
