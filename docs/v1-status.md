@@ -71,6 +71,10 @@ absent. The four native kinds initialize UNKNOWN controls without publishing
 originals or re-signing old text; empty blocks do not acquire false controls.
 The original ANY-DROP downgrade protection remains unchanged. This is SQL
 migration/schema/FK/control acceptance only. See the [migration34 record](evidence/memory-full-migration34-GREEN-20261011.json).
+The updated4b53 download tail also passes all36 actual nodes, including the two
+new download-fact DOWN cases. All36 raw RUN/PASS pairs are independently
+verified exactly once, although the copied legacy plan still listed34 required
+pairs. Seven owned resources are absent. See the [migration36 record](evidence/memory-full-migration36-download-GREEN-20261011.json).
 Earlier30-node and34-node failed attempts remain preserved.
 
 Exact saved-history Recall reopening now has an actual12-node failure: SQLite
