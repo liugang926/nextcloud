@@ -4,6 +4,26 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Private integrated source `7aff9c5f` now passed all 82 selected component
+nodes, zero failures/skips, in 200.643 seconds including preparation and cleanup.
+This adds actual two-call first-create concurrency, repeated-subject/error/cancel
+behavior, current/history model lifetimes and one-pool checks, captured provider
+configuration, real HTTP wrapping and whole-result refusal. All required parents
+and exact leaves were observed RUN/PASS. The original 20-minute package timeout,
+eight-second HTTP bound and three-second race barrier were retained. Prior
+formatting parsed 162 changed Go files; all nine selected packages compiled,
+with zero runtime test nodes and the old515 business assertions byte-identical.
+See the [integrated component record](evidence/memory-integrated-model-components-20261010.json).
+
+The generated consolidation baseline on `a01f9c40` failed all 16 nodes before
+the first model call: its model fixture omitted the genuine lifetime reader,
+so Schedule returned before a pending row existed. This is a retained setup
+failure, not a consolidation business RED. The isolated fixture repair supplies
+the actual configured service capability. Its business rerun is underway.
+Worker/topic-log and enabled telemetry privacy follow-ons, full consolidation,
+stale maintenance, final ancestor TTL, full original workflows/migrations,
+durable broker, normal application/restore and V1 acceptance remain pending.
+
 The complete original service diagnostic on `1bbd0cc8` passed all 604 test
 nodes and 178 parents, including all 28 required original service parents,
 with zero failures or test skips. The original eight-second HTTP bound,
