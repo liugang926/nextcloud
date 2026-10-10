@@ -114,7 +114,13 @@ records114,437 callbacks with fewer head/payload/journal queries, while the
 original8s test still fails. Instrumentation differs, so this is observed query
 reduction rather than a paired walltime benchmark; see the [counter-only
 record](evidence/memory-PG-counteronly-scope-profile-failure-20261011.json). See the [SQLite history
-record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion dependencies remain underway. The download/host
+record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion and named historical dependencies now compile
+285 Go files/12 test packages plus cmd/server on c345a3b1. Existing query22,
+vector20 and RecallSQL16 pass58/58 in171.590s with nine exact resources absent;
+see the [existing58 record](evidence/memory-semantic-existing58-GREEN-20261011.json).
+A source review found missing absent-candidate every-read control checks; its
+narrow child is being compiled. Actualsemantic completion/history and lawful
+different-output vector successor gates remain required. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
 cmd/server package-only terminal; an old parser misclassified that terminal
 and retained its stopped owner. See the [compile parser record](evidence/memory-download-host-compile-parser-failure-20261011.json).
