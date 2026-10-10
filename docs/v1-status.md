@@ -82,7 +82,11 @@ The fields-scope/multi-dependency union repair now passes the four original
 SQLite current/subject-disabled/body-unavailable nodes on `42ae5379`. The new
 model-successor fixture fails at UpdateModelOriginal before creating its successor
 or testing the historical read; this is a setup refusal. Actual multi-read late
-clock and PostgreSQL history still need matched gates. See the [SQLite history
+clock and PostgreSQL history still need matched gates. Focused PG/current
+profiling retains the original8s failure and records64,207 Recall-boundary and
+34,937 message-guard-boundary SQL callbacks; observer stack scanning adds CPU
+cost, so this is diagnostic evidence rather than an uninstrumented benchmark.
+See the [PG profile](evidence/memory-PG-Recall-current-profile-failure-20261011.json). See the [SQLite history
 record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion dependencies and
 explicit local model download shutdown also remain underway. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
