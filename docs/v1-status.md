@@ -168,7 +168,12 @@ cmd/server. Its actual semantic pipeline diagnostic4 still fails HTTP8s in both
 databases; HTTP material-output checks dominate measured nested duration,
 with large repeated SQL counts. Nested timings overlap and do not establish
 paired performance acceptance. See the [pipeline diagnostic](evidence/memory-semantic-pipeline4-operation-profile-failure-20261011.json).
-A single full116 window remains to be rerun after the repair. Newservice-instance
+The next d34 source also retains a claim-only release owner when initialization
+refuses before acquiring body leases and native Finish fails. It compiles295 Go
+files and passes all138 nodes in one380.834s window: new cleanup6, the complete
+old116, and durable startup/replay16. Every selected RUN/PASS pair is exact once;
+14 owned resources are independently absent. See the [138-node record](evidence/memory-download-claim-cleanup-existing138-GREEN-20261011.json)
+and [reviewable claim cleanup proposal](../integration/proposals/weknora-original-download-claim-cleanup-20261011.json). Newservice-instance
 recovery is explicitly separate from real OS-kill/11-minute-claim-expiry E2E;
 those cross-crash gates remain required. The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
