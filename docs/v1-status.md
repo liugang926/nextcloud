@@ -289,7 +289,14 @@ tests require a missing real SourceAuthorizeCalls transport counter. Assertions
 are kept and the fixture ABI is being restored; see the [full compile ABI
 record](evidence/joint-atomic-full-compile-fixture-ABI-failure-20261011.json).
 A separate one-line child also wires a sameTX onboarding path resolver into
-the final original-input transaction; late signed-path behavior remains pending.
+the final original-input transaction; late signed-path behavior remains pending. The nextdf4bb joint source now parses418 changed Go files and fully
+compiles117 test-bearing plus40 no-test packages in133.495s, with zero business
+RUN/SKIP/OOM and exact compiler/temp absence. Source now includes restored
+real authorization counting; see the [first full joint compile pass](evidence/joint-auto-space-full-compile-GREEN-20261011.json).
+A first lineage bootstrap child is source-frozen to refuse conflicting/mixed
+history before Up or Force, but supports only fresh/common absence so far.
+Installed Root catalogue positives and peerApplied forward bridge remain
+required; this incremental gate is not normal joint app acceptance.
 
 ## Prior component checkpoints — 2026-10-10
 
