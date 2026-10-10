@@ -4,6 +4,26 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Native fixture follow-up on `c42071de` passes40/55 nodes, with15 failures and
+no skips/OOM; the gate is unaccepted. The new complete-effect verifier uses
+a pending-only loader after successful completion, which needs a historical
+metadata oracle; the public-writer barrier has a separate unresolved error.
+Original partial tests still pass SQLite and fail PostgreSQL second Handle at
+20s after same-TX metadata reuse on `71d92523`. The old20s bound and test body
+remain unchanged. Query-count/profile pairs are prepared for real bottleneck
+measurement; no optimized-performance acceptance is claimed. All failed
+owners/raw/volumes/networks remain preserved.
+
+Embedding memory follow-up now passes24 nodes on test-only child `5766a09b`:
+exact leased document input and same-TX vector/output/body receipts, current
+actor/policy/dimension refusals, and public Remember/Update/optional-failure
+entry behavior. The genuine manual origin fixture repair changes no production
+code; the prior80 four-protocol model gates remain separately attributed.
+The window took77.147 seconds, zero failures/skips/OOM, with original write10s
+unchanged. Query/receipt-backed rank/history/sync/local/cloud routes remain
+in progress. The [embedding proposal](../integration/proposals/weknora-original-embedding-20261010.json)
+round-trips to its exact tree and is kept separate from the adopted manifest.
+
 New private embedding source `f3a4f1b1` parsed186 changed Go files and compiled
 all11 selected packages (127.796 seconds, zero runtime tests). Its true remote
 model original producers/held constructors now pass80 SQL/HTTP nodes across
