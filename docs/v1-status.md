@@ -4,12 +4,24 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Source-identical test child `e90ba8b6` now passes all32 additional nodes: all12
+current-bound original workflows per SQLite/PostgreSQL (26 nodes), and exact
+two-cluster prompts plus later-cluster whole-transaction rollback (six nodes).
+The window took264.265 seconds, zero failures/skips/OOM, under unchanged20m
+package and10s worker bounds. Genuine producer/DI/outbox scheduling honors
+actual NotBefore and RelayOne; prior context is established by true completed
+Handle/checkpoint. Later-cluster refusal is checked after actual first-cluster
+SQL writes, with complete rollback. Production bytes match `54ce8e73`; the
+original unbound515 function stays unchanged and is not declared recovered.
+All eight successful identities are independently absent. The first fixture
+compile missed an assertion import; it ran no business tests and its failed
+SQL owner/three volumes/network/raw remain. See the [workflow and multi-cluster evidence](evidence/memory-current-workflow-multicluster-20261010.json) and [test proposal](../integration/proposals/weknora-original-memory-workflow-tests-20261010.json).
+
 The [reviewable original-memory proposal](../integration/proposals/weknora-original-memory-20261010.json)
 now contains the exact source patch from RAG `1bbd0cc8` to `54ce8e73`; its
 SHA/tree round-trip is verified. It is kept separate from the adopted candidate
 manifest. Source-identical test children now exercise all12 current-bound
-original workflows and two-cluster prompt/rollback boundaries; these new gates
-are running and do not yet expand the passing scope. The [remaining functional
+original workflows and two-cluster prompt/rollback boundaries; their32-node passing scope is recorded above. The [remaining functional
 contracts](evidence/memory-functional-remaining-contracts-20261010.json) identify
 embedding/backfill/recall and model variants that still need genuine original
 inputs/results and complete lifetimes.
