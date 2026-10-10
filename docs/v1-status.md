@@ -86,6 +86,9 @@ The repaired exact saved-history path now passes all6 SQLite nodes on4b53:
 current reading, subject-disabled/body-unavailable refusal, and a genuinely
 written model successor while old history stays readable with no second SDK
 call. Seven exact resources are absent; see the [SQLite history6 record](evidence/memory-SQLite-savedhistory6-GREEN-20261011.json).
+The first multi-read SQLite3 run fails its real HTTP8s prelude before the final
+union fault is reached. It does not establish a final-clock failure; both real
+request timings are being inspected. See the [multihistory prelude record](evidence/memory-SQLite-multihistory3-prelude-failure-20261011.json).
 Actual multi-read late-clock and PostgreSQL history still need matched gates.
 Focused PG/current
 profiling retains the original8s failure and records64,207 Recall-boundary and
