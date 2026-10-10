@@ -75,7 +75,12 @@ legal completion succeeds but fresh history refuses before negatives; PostgreSQL
 completion preludes exceed the original HTTP8s bound. Failed owners/raw/data
 are retained, and the later vector/Recall/Local stages did not run. See the
 [history12 record](evidence/memory-saved-Recall-history12-failure-20261011.json).
-The historical reader and multi-dependency final-clock union remain under repair. Semantic query/vector completion dependencies and
+The fields-scope/multi-dependency union repair now passes the four original
+SQLite current/subject-disabled/body-unavailable nodes on `42ae5379`. The new
+model-successor fixture fails at UpdateModelOriginal before creating its successor
+or testing the historical read; this is a setup refusal. Actual multi-read late
+clock and PostgreSQL history still need matched gates. See the [SQLite history
+record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion dependencies and
 explicit local model download shutdown also remain underway. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
 cmd/server package-only terminal; an old parser misclassified that terminal
