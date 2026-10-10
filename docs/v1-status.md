@@ -21,6 +21,24 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+Private formatted memory source `2e088198` now passed parsing/formatting
+on all 102 changed Go files and compiled all six selected packages, including
+chat constructor tests, with zero runtime test nodes and no failures/skips/OOM.
+65 files changed only through formatting; the original 515 business function
+remained byte-identical. Compilation took 118.762 seconds; formatting and
+compilation completed naturally in 121.787 seconds. All three owned identities
+(two Go actors and one temporary volume) are absent. Raw logs and frozen
+sources remain. Independent review found a cross-process clock-epoch flaw in
+the executed wrapper: its passing natural duration does not prove strict
+480-second outer-timeout enforcement; future drivers are being repaired.
+
+Final all-hold TTL validation also remains incomplete: policy/current-model
+and derived ancestor policy/historical-model holds need a final union check
+after subsequent SQL IO. Compilation accepts types/wiring only. Actual new
+model/derived/whole-result gates, full legacy workflows, migrations, broker,
+normal application and restore remain pending. See the
+[format and compilation record](evidence/model-whole-result-compilation-20261010.json).
+
 The latest private memory source is `674e77cc`, integrating model lifetime
 repairs with whole-result validation. Unsupported or invalid model decisions
 now reject the complete result before writes; explicit NoOp and proven
