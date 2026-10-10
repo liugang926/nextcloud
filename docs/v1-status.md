@@ -225,7 +225,14 @@ see the [current core159 record](evidence/memory-rank-retirement-core159-GREEN-2
 UNKNOWN and new-table-specific genuine DOWN coverage remain required. Reviewable exact-source patches are available for [rank sameTX checks](../integration/proposals/weknora-rank-recheck-same-TX-20261011.json)
 and [publication retirement facts](../integration/proposals/weknora-memory-publication-retirement-20261011.json).
 They reproduce the selected files from cd9375 and have exact forward/reverse
-tree proofs; proposal heads remain separately unrun and unadopted. See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
+tree proofs; proposal heads remain separately unrun and unadopted. A copied boundary plan listed14 batch nodes while the current unchanged
+test file contains18, including four final-journal fault cases. Raw partial2,
+inline22 and batch18 all pass, but the strict plan correctly rejects the extra
+nodes and later stages do not run. The repaired50-node plan uses a fresh owner;
+see the [preserved plan mismatch](evidence/memory-rank-retirement-boundary-plan-mismatch-20261011.json).
+A test-only candidate compiles309 files, but inherited-rank callbacks contain a
+known FailNow/WG failure-path issue that is being repaired before execution; see
+the [compile-only record](evidence/memory-rank-retirement-extra-test-compile-20261011.json). See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
 See the [20-pass/4-failure record](evidence/memory-rank10-retirement10-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
