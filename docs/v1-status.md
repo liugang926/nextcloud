@@ -21,6 +21,18 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+A separate original-policy proposal is integrated as private source `71a1911b`.
+It adds authorized full-policy authoring, immutable origin/body receipts,
+retained version controls, real successor binding and owned policy body leases.
+The integration preserves the native fixture repairs and fixes an inherited
+context marker in the rollback test. Seven host SQLite fragment checks passed
+for UNKNOWN initialization, ABA/delete-recreate versions, immutable controls
+and DOWN guards. They used no full body schema, Go, PostgreSQL or model calls.
+The source is not formatted, compiled, business-tested or adopted. Model
+originals and complete existing-memory workflows remain under development;
+mutable settings views are separate from the policy lifetime reader. See the
+[policy source and schema record](evidence/memory-policy-original-source-20261010.json).
+
 The original-memory SQL proposal `fe254893` now passed its native admission
 selection on both SQLite and PostgreSQL: six nodes, zero failures or skips.
 The subsequent 19-parent component run passed 52 of 55 nodes and failed three,
