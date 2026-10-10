@@ -85,7 +85,7 @@ uses the actual emitted queue payload, and both database rollback cases verify
 that the hook ran, the owned context was canceled and all original state rolled
 back. Production checks and business expectations are unchanged. The complete
 prepare/authoring/component window finished naturally in 204.080 seconds under
-its coordinated 300-second outer cap, retaining the original 20-minute package
+its planned coordinated 300-second window, retaining the original 20-minute package
 timeout. All eight exact owned runtime identities are absent; earlier failed
 volumes, raw evidence and source are retained. This accepts the policy component
 slice; old full legal memory, model/derived workflows, full migrations, real
