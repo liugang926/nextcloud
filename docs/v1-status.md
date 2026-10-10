@@ -201,7 +201,9 @@ and [embedding output succession](../integration/proposals/weknora-embedding-out
 Both reproduce the selected source files from the tested fusion and have exact
 forward/reverse tree proofs; separate proposal heads are not runtime-run or adopted. The same f5d full canonical migration also passes38/38 on real ParadeDB17
 and SQLite in30.834s, with seven exact resources independently absent. See the
-[current migration38 record](evidence/memory-current-full-migration38-successor-GREEN-20261011.json). A matched-observer pipeline4 run on f5d still fails the original HTTP8s
+[current migration38 record](evidence/memory-current-full-migration38-successor-GREEN-20261011.json). Existing query22/vector20/RecallSQL16 also passes58/58 on the samef5d
+source in116.672s, with nine exact owned resources independently absent; see
+the [current existing58 record](evidence/memory-f5d-existing58-GREEN-20261011.json). A matched-observer pipeline4 run on f5d still fails the original HTTP8s
 prelude. Policy receipt table reads fall from47170→6291 (SQLite) and19606→3179
 (PG), while more HTTP checks finish. Source progress differs and nested times
 overlap, so this is observed duplicate-read reduction rather than an exact
