@@ -1,0 +1,533 @@
+diff --git a/internal/application/repository/memory_embedding_model_bridge.go b/internal/application/repository/memory_embedding_model_bridge.go
+index a24e38f9..52d15eab 100644
+--- a/internal/application/repository/memory_embedding_model_bridge.go
++++ b/internal/application/repository/memory_embedding_model_bridge.go
+@@ -21,6 +21,7 @@ func (r *memoryOriginalAdmissionRepository) beginMemoryEmbeddingHistoricalModel(
+ }
+ 
+ func checkMemoryEmbeddingHistoricalModelInTx(ctx context.Context, tx *gorm.DB, original *types.MemoryEmbeddingOriginal) (types.ModelOriginalProof, error) {
++	ctx = withOriginalBodyAvailabilityScope(tx, ctx)
+ 	var proof types.ModelOriginalProof
+ 	if json.Unmarshal([]byte(original.ModelProofJSON), &proof) != nil || !proof.Valid() || proof.ModelID != original.ModelID || proof.Digest != original.ModelDigest {
+ 		return proof, types.ErrMemoryOriginalUnavailable
+diff --git a/internal/application/repository/memory_embedding_rank.go b/internal/application/repository/memory_embedding_rank.go
+index 272e3c1c..359589c7 100644
+--- a/internal/application/repository/memory_embedding_rank.go
++++ b/internal/application/repository/memory_embedding_rank.go
+@@ -26,6 +26,20 @@ type memoryEmbeddingRankRead struct {
+ 	selections []*types.MemorySemanticConsumption
+ }
+ type memoryEmbeddingRankReadKey struct{}
++type memoryRankRecheckScopeKey struct{}
++
++// Diagnostic ownership only, never an authorization or cached success.
++func MemoryRankRecheckScope(tx *gorm.DB) bool {
++	if tx == nil || tx.Statement == nil || tx.Statement.Context == nil {
++		return false
++	}
++	scope, _ := tx.Statement.Context.Value(originalBodyAvailabilityScopeKey{}).(*originalBodyAvailabilityScope)
++	if scope == nil || scope.pool != tx.Statement.ConnPool {
++		return false
++	}
++	marked, _ := scope.ctx.Value(memoryRankRecheckScopeKey{}).(bool)
++	return marked
++}
+ 
+ // Only the concrete query capability determines the model/vector. A fabricated
+ // interface returning a real context plus different bytes cannot affect rank.
+@@ -105,7 +119,40 @@ func (read *memoryEmbeddingRankRead) Recheck() error {
+ 	if err := read.start(); err != nil {
+ 		return err
+ 	}
+-	err := read.vectors.repo.db.WithContext(read.ctx).Transaction(read.finalInTx, memoryWriteOptions(read.vectors.repo.db))
++	err := read.vectors.repo.db.WithContext(read.ctx).Transaction(func(tx *gorm.DB) (resultErr error) {
++		marked := context.WithValue(tx.Statement.Context, memoryRankRecheckScopeKey{}, true)
++		scoped, finish, err := beginOriginalBodyAvailabilityScope(tx.Session(&gorm.Session{NewDB: true, Context: marked}))
++		if err != nil {
++			return err
++		}
++		defer func() {
++			if resultErr != nil {
++				abortOriginalBodyAvailabilityScope(scoped, resultErr)
++			}
++		}()
++		// Every existing current actor/model/policy/graph check still runs.
++		if err = read.finalInTx(scoped); err != nil {
++			return err
++		}
++		query, _ := read.query.Context().Value(memoryQueryEmbeddingResultKey{}).(*memoryQueryEmbeddingRead)
++		if query == nil || !sameMemoryEmbeddingPool(query.repo.db, scoped) || !sameMemoryRecallCaller(read.ctx, query.ctx) {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		inheritedSemantic, _ := scoped.Statement.Context.Value(actualMemorySemanticCompletionsKey{}).([]actualMemorySemanticCompletion)
++		semantic := append(append([]actualMemorySemanticCompletion(nil), inheritedSemantic...), actualMemorySemanticCompletion{Rank: read, Query: query})
++		clockCtx := context.WithValue(scoped.Statement.Context, actualMemorySemanticCompletionsKey{}, semantic)
++		// A current rank inherits actual Recall resources as well as its named
++		// query/vector holds. These add final expiry checks, never a read grant.
++		if recall, _ := read.ctx.Value(memoryRecallReadKey{}).(*memoryRecallRead); recall != nil {
++			if !sameMemoryEmbeddingPool(recall.repo.db, scoped) || !sameMemoryRecallCaller(read.ctx, recall.ctx) {
++				return types.ErrMemoryOriginalUnavailable
++			}
++			inheritedRecall, _ := clockCtx.Value(actualMemoryRecallCompletionsKey{}).([]actualMemoryRecallCompletion)
++			recalls := append(append([]actualMemoryRecallCompletion(nil), inheritedRecall...), actualMemoryRecallCompletion{Read: recall})
++			clockCtx = context.WithValue(clockCtx, actualMemoryRecallCompletionsKey{}, recalls)
++		}
++		return checkActualMemorySemanticClockWithAvailabilityInTx(scoped.Session(&gorm.Session{NewDB: true, Context: clockCtx}), finish)
++	}, memoryWriteOptions(read.vectors.repo.db))
+ 	return read.finish(err)
+ }
+ func (read *memoryEmbeddingRankRead) Close() error {
+diff --git a/internal/application/repository/memory_embedding_vector_check.go b/internal/application/repository/memory_embedding_vector_check.go
+index 27cbddb7..135283c6 100644
+--- a/internal/application/repository/memory_embedding_vector_check.go
++++ b/internal/application/repository/memory_embedding_vector_check.go
+@@ -247,7 +247,8 @@ func (read *memoryEmbeddingVectorRead) checkForCommitInTx(tx *gorm.DB, selfCommi
+ 			return err
+ 		}
+ 		policy, _ := read.policies[id].Context().Value(memoryPolicyHoldKey{}).(memoryPolicyHold)
+-		local := tx.Session(&gorm.Session{NewDB: true}).WithContext(context.WithValue(read.policies[id].Context(), memoryPolicyHoldKey{}, policy))
++		policyContext := withOriginalBodyAvailabilityScope(tx, read.policies[id].Context())
++		local := tx.Session(&gorm.Session{NewDB: true}).WithContext(context.WithValue(policyContext, memoryPolicyHoldKey{}, policy))
+ 		if err = checkMemoryPolicyHoldsInTx(local, read.scope.TenantID, policy.Current, policy.Queued); err != nil {
+ 			return err
+ 		}
+diff --git a/internal/application/repository/memory_embedding_vectors.go b/internal/application/repository/memory_embedding_vectors.go
+index 05001e27..37168d98 100644
+--- a/internal/application/repository/memory_embedding_vectors.go
++++ b/internal/application/repository/memory_embedding_vectors.go
+@@ -337,5 +337,5 @@ func CheckMemoryEmbeddingVectorHoldsInTx(ctx context.Context, tx *gorm.DB) error
+ 	if err := read.start(); err != nil {
+ 		return err
+ 	}
+-	return read.finish(read.checkInTx(tx.Session(&gorm.Session{NewDB: true}).WithContext(ctx)))
++	return read.finish(read.checkInTx(tx.Session(&gorm.Session{NewDB: true}).WithContext(withOriginalBodyAvailabilityScope(tx, ctx))))
+ }
+diff --git a/internal/application/repository/memory_query_embedding_read.go b/internal/application/repository/memory_query_embedding_read.go
+index 8747e432..e7edcb28 100644
+--- a/internal/application/repository/memory_query_embedding_read.go
++++ b/internal/application/repository/memory_query_embedding_read.go
+@@ -283,7 +283,7 @@ func CheckMemoryQueryEmbeddingResultInTx(ctx context.Context, tx *gorm.DB) (*typ
+ 	if err := read.startCheck(); err != nil {
+ 		return nil, err
+ 	}
+-	out, err := read.resultSnapshotInTx(tx.Session(&gorm.Session{NewDB: true}).WithContext(ctx))
++	out, err := read.resultSnapshotInTx(tx.Session(&gorm.Session{NewDB: true}).WithContext(withOriginalBodyAvailabilityScope(tx, ctx)))
+ 	if err = read.finishCheck(err); err != nil {
+ 		return nil, err
+ 	}
+diff --git a/internal/application/repository/memory_semantic_completion_clock.go b/internal/application/repository/memory_semantic_completion_clock.go
+index 48c4ecb2..720574c8 100644
+--- a/internal/application/repository/memory_semantic_completion_clock.go
++++ b/internal/application/repository/memory_semantic_completion_clock.go
+@@ -12,6 +12,10 @@ import (
+ // Only tuples taken from genuine live readers enter this union; no lease ID
+ // supplied by a manifest or a caller is turned into an additional grant.
+ func checkActualMemorySemanticCompletionClockInTx(tx *gorm.DB) error {
++	return checkActualMemorySemanticClockWithAvailabilityInTx(tx, nil)
++}
++
++func checkActualMemorySemanticClockWithAvailabilityInTx(tx *gorm.DB, finishAvailability func() error) error {
+ 	if err := NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx); err != nil {
+ 		return err
+ 	}
+@@ -165,6 +169,11 @@ func checkActualMemorySemanticCompletionClockInTx(tx *gorm.DB) error {
+ 		ordered = append(ordered, lease)
+ 	}
+ 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
++	if finishAvailability != nil {
++		if err := finishAvailability(); err != nil {
++			return err
++		}
++	}
+ 	clock := &memoryQueryEmbeddingRead{ctx: tx.Statement.Context, bodyBindings: all, content: ordered}
+ 	if err := clock.finalStateClock(tx.Session(&gorm.Session{NewDB: true}).Set("memory:completion_semantic_final_union", true), nil); err != nil {
+ 		return err
+diff --git a/internal/application/repository/model_original_body.go b/internal/application/repository/model_original_body.go
+index f76f56bb..ff54709a 100644
+--- a/internal/application/repository/model_original_body.go
++++ b/internal/application/repository/model_original_body.go
+@@ -364,7 +364,7 @@ func (r *modelOriginalRead) checkInTx(tx *gorm.DB) error {
+ 	if err := r.ctx.Err(); err != nil {
+ 		return err
+ 	}
+-	fresh, err := r.authorize(r.ctx, tx, r.hold.Proof)
++	fresh, err := r.authorize(withOriginalBodyAvailabilityScope(tx, r.ctx), tx, r.hold.Proof)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -501,6 +501,7 @@ func WithActualModelOriginalReads(ctx context.Context, reads []interfaces.ModelO
+ // Exact current lifetime capability, for a caller's already-owned transaction.
+ // A digest/current row alone cannot create this context or authorize this read.
+ func CheckCurrentModelOriginalHolds(ctx context.Context, tx *gorm.DB, proof types.ModelOriginalProof) error {
++	ctx = withOriginalBodyAvailabilityScope(tx, ctx)
+ 	if err := ctx.Err(); err != nil {
+ 		return err
+ 	}
+diff --git a/internal/application/repository/model_original_history.go b/internal/application/repository/model_original_history.go
+index 6f217626..24548223 100644
+--- a/internal/application/repository/model_original_history.go
++++ b/internal/application/repository/model_original_history.go
+@@ -217,6 +217,7 @@ func historicalModelDescends(tx *gorm.DB, current, original *modelOriginalFacts)
+ }
+ 
+ func CheckHistoricalModelOriginalHolds(ctx context.Context, tx *gorm.DB, proof types.ModelOriginalProof) error {
++	ctx = withOriginalBodyAvailabilityScope(tx, ctx)
+ 	holds, ok := ctx.Value(historicalModelHoldKey{}).(map[string]historicalModelHold)
+ 	hold, found := holds[proof.Digest]
+ 	if !ok || !found || hold.Hold.Proof != proof || hold.Authorize == nil {
+diff --git a/internal/application/repository/original_body_availability_scope.go b/internal/application/repository/original_body_availability_scope.go
+index 8f8c4ed7..902d6b96 100644
+--- a/internal/application/repository/original_body_availability_scope.go
++++ b/internal/application/repository/original_body_availability_scope.go
+@@ -12,6 +12,26 @@ import (
+ 
+ type originalBodyAvailabilityScopeKey struct{}
+ 
++// Copy only the active operation's private availability scope into an actual
++// reader context. Original actor, cancellation and held capabilities remain
++// that reader's values. A foreign/closed scope never enables a cache hit.
++func withOriginalBodyAvailabilityScope(tx *gorm.DB, ctx context.Context) context.Context {
++	if tx == nil || tx.Statement == nil || tx.Statement.Context == nil || ctx == nil {
++		return ctx
++	}
++	scope, _ := tx.Statement.Context.Value(originalBodyAvailabilityScopeKey{}).(*originalBodyAvailabilityScope)
++	if scope == nil || scope.pool != tx.Statement.ConnPool {
++		return ctx
++	}
++	scope.mu.Lock()
++	closed := scope.closed
++	scope.mu.Unlock()
++	if closed {
++		return ctx
++	}
++	return context.WithValue(ctx, originalBodyAvailabilityScopeKey{}, scope)
++}
++
+ type messageCaptureOpeningKey struct{}
+ 
+ // Only openDependency constructs this token around genuine historical read
+diff --git a/internal/application/service/memory_rank_recheck_body_scope_sql_actual_test.go b/internal/application/service/memory_rank_recheck_body_scope_sql_actual_test.go
+new file mode 100644
+index 00000000..759608b7
+--- /dev/null
++++ b/internal/application/service/memory_rank_recheck_body_scope_sql_actual_test.go
+@@ -0,0 +1,319 @@
++package service
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	memoryservice "github.com/Tencent/WeKnora/internal/application/service/memory"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"sort"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++// Genuine authoring, Remember, document/query SDK, human message and private rank
++// setup are copied from the existing actual fixture; no receipt or vector is seeded.
++func runRankRecheckAvailabilityScopeSQL(t *testing.T, pg bool) {
++	for _, testMode := range []string{"current", "foreign_transaction", "last_head_mutation", "last_payload_mutation"} {
++		t.Run(testMode, func(t *testing.T) {
++			mode := "current"
++			f := newMemAtomicSQLFixture(t, pg)
++			installMemoryQueryActualDDL(t, f, pg)
++			_, models, _, _ := actualOriginalModelServices(t, f)
++			var calls atomic.Int64
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, err := io.ReadAll(r.Body)
++				if err != nil {
++					t.Error("actual vector reader SDK request unavailable")
++					return
++				}
++				sequence := calls.Add(1)
++				expectedKey := "synthetic-vector-reader-key"
++				if mode == "credential_successor" && sequence == 2 {
++					expectedKey = "synthetic-vector-reader-successor-key"
++				}
++				if r.Header.Get("Authorization") != "Bearer "+expectedKey {
++					t.Error("actual original provider credential mismatch")
++					w.WriteHeader(400)
++					return
++				}
++				expectedText := "Use the original vector reader for this fact"
++				if sequence == 2 {
++					expectedText = f.user.Content
++				}
++				if !bytes.Contains(body, []byte(expectedText)) {
++					t.Error("actual vector SDK transport lost genuine original input")
++					w.WriteHeader(400)
++					return
++				}
++				w.Header().Set("Content-Type", "application/json")
++				_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{map[string]interface{}{"index": 0, "embedding": []float32{1, 0}}}})
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			model := &types.Model{ID: "actual-vector-reader-model", TenantID: 7, Name: "actual vector reader model", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "synthetic-vector-reader-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++			require.NoError(t, models.CreateModel(f.ctx, model))
++			tenants := repository.NewTenantRepository(f.db)
++			ConfigureTenantMemoryPolicyAuthority(tenants, f.machine.f.store, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil)
++			_, _, err := tenants.(interfaces.MemoryPolicyOriginalWriter).ReplaceMemoryPolicyOriginal(f.ctx, 7, types.MemoryConfig{Enabled: true, WriteMode: types.MemoryWriteAuto, ExtractModelID: f.model.GetModelID(), EmbeddingModelID: model.ID})
++			require.NoError(t, err)
++			f.service = memoryservice.NewOriginalBoundMemoryService(f.repo, tenants, repository.NewMessageRepository(f.db), models, f.queue, nil, f.reader, f.admissions)
++			item, err := f.service.Remember(f.ctx, types.MemoryItem{Origin: types.MemoryOriginManual, Kind: types.MemoryKindFact, Topic: "editor preference", Content: "Use the original vector reader for this fact", Importance: 4})
++			require.NoError(t, err)
++			require.NotNil(t, item)
++			require.EqualValues(t, 1, calls.Load())
++			var receipt types.MemoryEmbeddingReceipt
++			require.NoError(t, f.db.Select("id,original_id,model_id,digest,vector_digest,vector_revision").Where("item_id=?", item.ID).Take(&receipt).Error)
++			require.NotEmpty(t, receipt.Digest)
++			// Genuine authored successors keep old output provenance readable without
++			// invoking the old model or exposing/decrypting the old credential.
++			if mode == "credential_successor" {
++				key := "synthetic-vector-reader-successor-key"
++				_, err = models.UpdateModelCredentials(f.ctx, model.ID, &key, nil)
++				require.NoError(t, err)
++			}
++			if mode == "definition_successor" {
++				model.Description = "authorized definition successor"
++				require.NoError(t, models.UpdateModel(f.ctx, model))
++			}
++			var original types.MemoryEmbeddingOriginal
++			require.NoError(t, f.db.Select("id,model_proof_json").Where("id=?", receipt.OriginalID).Take(&original).Error)
++			if mode == "unknown_vector_no_read" {
++				require.NoError(t, f.db.Model(&types.MemoryItemEmbedding{}).Where("item_id=?", item.ID).Update("vector", types.EncodeEmbedding([]float32{0, 1})).Error)
++			}
++			vectorRepo, ok := f.admissions.(interfaces.MemoryEmbeddingVectorRepository)
++			require.True(t, ok)
++			read, err := vectorRepo.BeginMemoryEmbeddingVectors(f.ctx, f.scope, model.ID, []string{item.ID})
++			if mode == "unknown_vector_no_read" {
++				require.Error(t, err)
++				require.Nil(t, read)
++				require.EqualValues(t, 1, calls.Load())
++				assertMemAtomicSQLLeasesClosed(t, f)
++				return
++			}
++			require.NoError(t, err)
++			defer read.Close()
++			snapshot, err := read.Snapshot()
++			require.NoError(t, err)
++			require.Len(t, snapshot.Materials, 1)
++			require.Equal(t, item.ID, snapshot.Materials[0].Item.ID)
++			require.Equal(t, []float32{1, 0}, snapshot.Materials[0].Vector)
++			require.Equal(t, receipt.Digest, snapshot.Materials[0].ReceiptDigest)
++			ids, err := repository.MemoryEmbeddingVectorLeaseBindings(read.Context())
++			require.NoError(t, err)
++			require.NotEmpty(t, ids)
++			switch mode {
++			case "actor_after_read":
++				require.NoError(t, f.db.Model(&types.User{}).Where("id=?", types.CallerFromContext(f.ctx).UserID).Update("is_active", false).Error)
++			case "vector_raw_ABA":
++				var row types.MemoryItemEmbedding
++				require.NoError(t, f.db.Where("item_id=?", item.ID).Take(&row).Error)
++				old := append([]byte(nil), row.Vector...)
++				require.NoError(t, f.db.Model(&types.MemoryItemEmbedding{}).Where("item_id=?", item.ID).Update("vector", types.EncodeEmbedding([]float32{0, 1})).Error)
++				require.NoError(t, f.db.Model(&types.MemoryItemEmbedding{}).Where("item_id=?", item.ID).Update("vector", old).Error)
++			case "receipt_body_after_read", "model_body_after_read":
++				table, key, column := "memory_embedding_receipts", receipt.ID, "vector_json"
++				if mode == "model_body_after_read" {
++					var proof types.ModelOriginalProof
++					require.NoError(t, json.Unmarshal([]byte(original.ModelProofJSON), &proof))
++					table, key, column = "model_definition_originals", proof.DefinitionID, "definition_json"
++				}
++				var body struct{ BodyID string }
++				require.NoError(t, f.db.Table("original_body_field_heads").Select("body_id").Where("source_table=? AND row_key=? AND column_name=?", table, key, column).Take(&body).Error)
++				require.NotEmpty(t, body.BodyID)
++				require.NoError(t, f.db.Table("original_body_payloads").Where("id=?", body.BodyID).Update("state", "purged").Error)
++			case "closed_read_refuses":
++				require.NoError(t, read.Close())
++			}
++			negative := mode == "actor_after_read" || mode == "vector_raw_ABA" || mode == "receipt_body_after_read" || mode == "model_body_after_read" || mode == "closed_read_refuses"
++			if negative {
++				require.Error(t, read.Recheck())
++				_, err = read.Snapshot()
++				require.Error(t, err)
++				_ = read.Close()
++				require.EqualValues(t, 1, calls.Load())
++				assertMemAtomicSQLLeasesClosed(t, f)
++				return
++			}
++			require.NoError(t, read.Recheck())
++			require.EqualValues(t, 1, calls.Load(), "history reads must not invoke a previous provider")
++			require.NoError(t, read.Close())
++			// Real human-message proof, real query HTTP producer and actual private
++			// result are required by the ranking API; a raw query vector is rejected.
++			ctx, cancel := context.WithTimeout(f.ctx, 8*time.Second)
++			defer cancel()
++			writer := WithMessageMaterialOutputBoundary(ctx)
++			defer CloseMessageMaterialOutputBoundary(writer)
++			_, err = f.messages.GetMessage(writer, f.session.ID, f.user.ID)
++			require.NoError(t, err)
++			callctx, err := bindMemoryQueryMessageOriginal(writer, f.session.ID, f.user.ID)
++			require.NoError(t, err)
++			queryRepo, ok := f.admissions.(interfaces.MemoryQueryEmbeddingOriginalRepository)
++			require.True(t, ok)
++			query, err := memoryservice.EmbedOriginalMemoryQuery(callctx, queryRepo, models, f.scope, model.ID)
++			require.NoError(t, err)
++			defer query.Close()
++			rank, err := vectorRepo.BeginMemoryEmbeddingRank(callctx, f.scope, query, []string{types.MemoryKindFact}, 0.5, 20)
++			require.NoError(t, err)
++			defer rank.Close()
++			retained, err := RetainMemoryEmbeddingConsumer(callctx, rank)
++			require.NoError(t, err)
++			require.True(t, retained)
++			var proof types.ModelOriginalProof
++			require.NoError(t, json.Unmarshal([]byte(original.ModelProofJSON), &proof))
++			require.True(t, proof.Valid())
++			var head struct {
++				SlotID, BodyID string
++				Revision       int64
++			}
++			require.NoError(t, f.db.Table("original_body_field_heads").Select("slot_id,body_id,revision").Where("source_table='model_definition_originals' AND row_key=?", proof.DefinitionID).Take(&head).Error)
++			require.NotEmpty(t, head.BodyID)
++			var currentQuery types.MemoryQueryEmbeddingOriginal
++			require.NoError(t, f.db.Select("id").Where("tenant_id=? AND subject_id=?", f.scope.TenantID, f.scope.SubjectID).Take(&currentQuery).Error)
++			require.NotEmpty(t, currentQuery.ID)
++			var queryHead struct{ BodyID string }
++			require.NoError(t, f.db.Table("original_body_field_heads").Select("body_id").Where("source_table='memory_query_embedding_originals' AND row_key=?", currentQuery.ID).Take(&queryHead).Error)
++			require.NotEmpty(t, queryHead.BodyID)
++			var triggered atomic.Bool
++			var batchQueries, vectorChecks, queryChecks atomic.Int64
++			counts := map[string]int{}
++			var observedContext context.Context
++			var observedPool gorm.ConnPool
++			const callback = "test:actual_single_rank_scope"
++			require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
++				if tx.Statement.Table == "memory_embedding_originals" {
++					vectorChecks.Add(1)
++				}
++				if tx.Statement.Table == "memory_query_embedding_originals" {
++					queryChecks.Add(1)
++				}
++				if tx.Statement.Table == "memory_policy_body_receipts" {
++					require.True(t, repository.MemoryRankRecheckScope(tx), "each immutable policy receipt remains inside the real rank-owned transaction scope")
++					where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
++					require.True(t, ok)
++					for _, part := range where.Exprs {
++						e, ok := part.(clause.Expr)
++						if ok && e.SQL == "origin_id=?" && len(e.Vars) == 1 {
++							id, ok := e.Vars[0].(string)
++							require.True(t, ok)
++							counts[id]++
++						}
++					}
++				}
++				if tx.Statement.Table != "original_body_field_heads" || !repository.MemoryRankRecheckScope(tx) || triggered.Load() {
++					return
++				}
++				where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
++				if !ok {
++					return
++				}
++				matched := false
++				for _, part := range where.Exprs {
++					expressions := []clause.Expression{part}
++					if nested, ok := part.(clause.OrConditions); ok {
++						expressions = nested.Exprs
++					}
++					for _, expression := range expressions {
++						e, ok := expression.(clause.Expr)
++						if !ok || e.SQL != "source_table=? AND row_key IN ?" || len(e.Vars) != 2 || e.Vars[0] != "model_definition_originals" {
++							continue
++						}
++						ids, ok := e.Vars[1].([]string)
++						if !ok {
++							continue
++						}
++						for _, id := range ids {
++							matched = matched || id == proof.DefinitionID
++						}
++					}
++				}
++				if !matched {
++					return
++				}
++				batchQueries.Add(1)
++				observedContext = tx.Statement.Context
++				observedPool = tx.Statement.ConnPool
++				if testMode == "current" || testMode == "foreign_transaction" || !triggered.CompareAndSwap(false, true) {
++					return
++				}
++				fresh := func() *gorm.DB { return tx.Session(&gorm.Session{NewDB: true}) }
++				if testMode == "last_head_mutation" {
++					update := fresh().Table("original_body_field_heads").Where("slot_id=? AND body_id=? AND revision=?", head.SlotID, head.BodyID, head.Revision).Update("revision", head.Revision+1)
++					require.NoError(t, update.Error)
++					require.EqualValues(t, 1, update.RowsAffected)
++					var after struct {
++						BodyID   string
++						Revision int64
++					}
++					require.NoError(t, fresh().Table("original_body_field_heads").Select("body_id,revision").Where("slot_id=?", head.SlotID).Take(&after).Error)
++					require.Equal(t, head.BodyID, after.BodyID)
++					require.Equal(t, head.Revision+1, after.Revision)
++				} else {
++					update := fresh().Table("original_body_payloads").Where("id=? AND state='live'", queryHead.BodyID).Update("state", "purged")
++					require.NoError(t, update.Error)
++					require.EqualValues(t, 1, update.RowsAffected)
++					var after struct{ ID, State string }
++					require.NoError(t, fresh().Table("original_body_payloads").Select("id,state").Where("id=?", queryHead.BodyID).Take(&after).Error)
++					require.Equal(t, queryHead.BodyID, after.ID)
++					require.Equal(t, "purged", after.State)
++				}
++			}))
++			t.Cleanup(func() { _ = f.db.Callback().Query().Remove(callback) })
++			err = rank.Recheck()
++			require.Positive(t, batchQueries.Load(), "the outer rank scope flushes all captured physical heads")
++			require.Positive(t, vectorChecks.Load(), "the full vector authorization still runs")
++			require.Positive(t, queryChecks.Load(), "the full query authorization still runs")
++			require.NotEmpty(t, counts, "the receipt observer must see actual SQL")
++			if testMode == "current" || testMode == "foreign_transaction" {
++				require.NoError(t, err)
++				keys := []string{}
++				for id := range counts {
++					keys = append(keys, id)
++				}
++				sort.Strings(keys)
++				for _, id := range keys {
++					require.Equal(t, 1, counts[id], "a validated immutable receipt is queried once in the actual transaction")
++				}
++				if testMode == "foreign_transaction" {
++					require.NotNil(t, observedContext)
++					_ = f.db.Callback().Query().Remove(callback)
++					update := f.db.Table("original_body_payloads").Where("id=? AND state='live'", head.BodyID).Update("state", "purged")
++					require.NoError(t, update.Error)
++					require.EqualValues(t, 1, update.RowsAffected)
++					err = f.db.WithContext(observedContext).Transaction(func(tx *gorm.DB) error {
++						require.True(t, tx.Statement.ConnPool != observedPool)
++						require.False(t, repository.MemoryRankRecheckScope(tx))
++						return repository.CheckOriginalBodyAvailableInTx(observedContext, tx, "model_definition_originals", proof.DefinitionID)
++					})
++					require.Error(t, err)
++				}
++			} else {
++				require.True(t, triggered.Load())
++				require.Error(t, err)
++			}
++			_ = rank.Close()
++			_ = query.Close()
++			CloseMessageMaterialOutputBoundary(writer)
++			assertMemAtomicSQLLeasesClosed(t, f)
++			require.EqualValues(t, 2, calls.Load(), "rechecks never construct or invoke another provider")
++		})
++	}
++}
++
++func TestMemoryRankRecheckBodyScopeActualSQLite(t *testing.T) {
++	runRankRecheckAvailabilityScopeSQL(t, false)
++}
++func TestPostgresMemoryRankRecheckBodyScopeActual(t *testing.T) {
++	runRankRecheckAvailabilityScopeSQL(t, true)
++}

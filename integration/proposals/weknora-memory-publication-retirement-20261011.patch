@@ -1,0 +1,719 @@
+diff --git a/internal/application/repository/memory_derived_publication.go b/internal/application/repository/memory_derived_publication.go
+index 3b00cb2e..c69787ef 100644
+--- a/internal/application/repository/memory_derived_publication.go
++++ b/internal/application/repository/memory_derived_publication.go
+@@ -179,6 +179,9 @@ func createMemoryDerivedPublicationInTx(tx *gorm.DB, fact *types.MemoryDerivedPu
+ 	if err = tx.Session(&gorm.Session{NewDB: true}).Create(receipt).Error; err != nil {
+ 		return err
+ 	}
++	if err = recordMemoryDerivedRetirementInTx(tx, fact, receipt); err != nil {
++		return err
++	}
+ 	if own, _ := tx.Statement.Context.Value(memoryDerivedOwnPublicationsKey{}).(map[string]bool); own != nil {
+ 		own[fact.ID] = true
+ 	}
+diff --git a/internal/application/repository/memory_derived_retirement.go b/internal/application/repository/memory_derived_retirement.go
+new file mode 100644
+index 00000000..53614806
+--- /dev/null
++++ b/internal/application/repository/memory_derived_retirement.go
+@@ -0,0 +1,107 @@
++package repository
++
++import (
++	"errors"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++func memoryDerivedRetirementDigest(fact *types.MemoryDerivedRetirement) (string, error) {
++	copy := *fact
++	copy.Digest = ""
++	return KnowledgeInputDigest(copy)
++}
++
++// Called only by the genuine common publication producer, after its actual
++// body receipt is stored. Existing scope writers own the real subject row;
++// the current control remains locked until this entire transaction commits.
++// No body deadline, graph edge, original fact or read grant is changed here.
++func recordMemoryDerivedRetirementInTx(tx *gorm.DB, successor *types.MemoryDerivedPublication, receipt *types.MemoryDerivedBodyReceipt) error {
++	scope := interfaces.MemoryScope{TenantID: successor.TenantID, SubjectID: successor.SubjectID}
++	control, err := memoryDerivedControlInTx(tx, scope, successor.ObjectKind, successor.ObjectID)
++	if err != nil {
++		return err
++	}
++	if control.Revision != successor.Revision || control.Present != successor.Present {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	var previous types.MemoryDerivedPublication
++	err = tx.Session(&gorm.Session{NewDB: true}).Select(memoryDerivedPublicationFields).
++		Where("tenant_id=? AND subject_id=? AND object_kind=? AND object_id=? AND revision<?", scope.TenantID, scope.SubjectID, successor.ObjectKind, successor.ObjectID, successor.Revision).
++		Order("revision DESC").Take(&previous).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil // Initial/UNKNOWN material has no proven predecessor to retire.
++	}
++	if err != nil {
++		return err
++	}
++	own, _ := tx.Statement.Context.Value(memoryDerivedOwnPublicationsKey{}).(map[string]bool)
++	sameResult := successor.CommitID != "" && previous.CommitID == successor.CommitID &&
++		previous.ProducerKind == successor.ProducerKind && previous.InputAdmissionID == successor.InputAdmissionID &&
++		previous.ExecutionAdmissionID == successor.ExecutionAdmissionID
++	if previous.ID != successor.ParentPublicationID && !own[previous.ID] && !sameResult {
++		// A raw/legacy gap is not repaired by observing a later producer. A
++		// previous effect from this exact result/transaction is an actual
++		// predecessor even when its graph points to the consumed original parent.
++		return nil
++	}
++	actual, err := loadMemoryDerivedPublication(tx, previous.ID)
++	if err != nil {
++		return err
++	}
++	previousProof, previousHead, err := memoryDerivedProofInTx(tx, actual)
++	if err != nil {
++		return err
++	}
++	successorProof, successorHead, err := memoryDerivedProofInTx(tx, successor)
++	if err != nil {
++		return err
++	}
++	if actual.Revision >= control.Revision || successorProof.BodyReceiptDigest != receipt.Digest || receipt.PublicationID != successor.ID {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	// Both immutable receipts must still be the exact rows selected above.
++	// These metadata locks do not replace any body lease or authorize GC.
++	for _, id := range []string{previous.ID, successor.ID} {
++		var locked types.MemoryDerivedBodyReceipt
++		if err = tx.Session(&gorm.Session{NewDB: true}).Clauses(clause.Locking{Strength: "SHARE"}).Where("publication_id=?", id).Take(&locked).Error; err != nil {
++			return err
++		}
++		want := previousProof.BodyReceiptDigest
++		if id == successor.ID {
++			want = successorProof.BodyReceiptDigest
++		}
++		digest, digestErr := memoryDerivedBodyReceiptDigest(&locked)
++		if digestErr != nil || digest != want || locked.Digest != want {
++			return types.ErrMemoryOriginalUnavailable
++		}
++	}
++	now, err := nextcloudLeaseNowMS(bodyInternal(tx))
++	if err != nil {
++		return err
++	}
++	reason := "publication_superseded"
++	if !control.Present {
++		reason = "publication_deleted"
++	}
++	fact := &types.MemoryDerivedRetirement{
++		PreviousPublicationID: previous.ID, SuccessorPublicationID: successor.ID,
++		TenantID: scope.TenantID, SubjectID: scope.SubjectID, ObjectKind: successor.ObjectKind, ObjectID: successor.ObjectID,
++		PreviousRevision: actual.Revision, ControlRevision: control.Revision, ControlPresent: control.Present,
++		PreviousPublicationDigest: actual.Digest, SuccessorPublicationDigest: successor.Digest,
++		PreviousReceiptDigest: previousProof.BodyReceiptDigest, SuccessorReceiptDigest: successorProof.BodyReceiptDigest,
++		PreviousSlotID: previousHead.SlotID, SuccessorSlotID: successorHead.SlotID,
++		PreviousBodyID: previousHead.BodyID, SuccessorBodyID: successorHead.BodyID,
++		PreviousHeadRevision: previousHead.Revision, SuccessorHeadRevision: successorHead.Revision,
++		PreviousSourceIdentitySHA256: previousHead.SourceIdentitySHA256, SuccessorSourceIdentitySHA256: successorHead.SourceIdentitySHA256,
++		Reason: reason, RetiredAtMS: now,
++	}
++	fact.Digest, err = memoryDerivedRetirementDigest(fact)
++	if err != nil {
++		return err
++	}
++	return tx.Session(&gorm.Session{NewDB: true}).Create(fact).Error
++}
+diff --git a/internal/application/service/memory_derived_retirement_sql_actual_test.go b/internal/application/service/memory_derived_retirement_sql_actual_test.go
+new file mode 100644
+index 00000000..303b98a8
+--- /dev/null
++++ b/internal/application/service/memory_derived_retirement_sql_actual_test.go
+@@ -0,0 +1,201 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// Genuine native producers and the exact migrated schema create every fact.
++// These source-only drafts do not execute GC or treat retirement metadata as
++// deletion permission. Parent bodies must survive active descendant reads.
++func memoryRetirementCurrentSQL(t *testing.T, f *memAtomicSQLFixture, itemID string) types.MemoryDerivedPublication {
++	t.Helper()
++	var control types.MemoryDerivedControl
++	require.NoError(t, f.db.Where("tenant_id=? AND subject_id=? AND object_kind='memory_item' AND object_id=?", f.scope.TenantID, f.scope.SubjectID, itemID).Take(&control).Error)
++	var fact types.MemoryDerivedPublication
++	require.NoError(t, f.db.Where("tenant_id=? AND subject_id=? AND object_kind='memory_item' AND object_id=? AND revision=?", f.scope.TenantID, f.scope.SubjectID, itemID, control.Revision).Take(&fact).Error)
++	require.Equal(t, control.Present, fact.Present)
++	return fact
++}
++func memoryRetirementClockSQL(t *testing.T, db *gorm.DB) int64 {
++	t.Helper()
++	query := "SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)"
++	if db.Dialector.Name() == "postgres" {
++		query = "SELECT CAST(floor(extract(epoch FROM clock_timestamp())*1000) AS BIGINT)"
++	}
++	var now int64
++	require.NoError(t, db.Session(&gorm.Session{NewDB: true}).Raw(query).Scan(&now).Error)
++	return now
++}
++func assertMemoryRetirementSQL(t *testing.T, f *memAtomicSQLFixture, before, after types.MemoryDerivedPublication, low, high int64) types.MemoryDerivedRetirement {
++	t.Helper()
++	var fact types.MemoryDerivedRetirement
++	require.NoError(t, f.db.Where("previous_publication_id=?", before.ID).Take(&fact).Error)
++	var previous, successor types.MemoryDerivedBodyReceipt
++	require.NoError(t, f.db.Where("publication_id=?", before.ID).Take(&previous).Error)
++	require.NoError(t, f.db.Where("publication_id=?", after.ID).Take(&successor).Error)
++	require.Equal(t, before.ID, after.ParentPublicationID)
++	require.Equal(t, before.ID, fact.PreviousPublicationID)
++	require.Equal(t, after.ID, fact.SuccessorPublicationID)
++	require.Equal(t, before.Digest, fact.PreviousPublicationDigest)
++	require.Equal(t, after.Digest, fact.SuccessorPublicationDigest)
++	require.Equal(t, before.Revision, fact.PreviousRevision)
++	require.Equal(t, after.Revision, fact.ControlRevision)
++	require.Equal(t, after.Present, fact.ControlPresent)
++	require.Equal(t, f.scope.TenantID, fact.TenantID)
++	require.Equal(t, f.scope.SubjectID, fact.SubjectID)
++	require.Equal(t, "memory_item", fact.ObjectKind)
++	require.Equal(t, before.ObjectID, fact.ObjectID)
++	require.Equal(t, previous.Digest, fact.PreviousReceiptDigest)
++	require.Equal(t, successor.Digest, fact.SuccessorReceiptDigest)
++	require.Equal(t, previous.BodyID, fact.PreviousBodyID)
++	require.Equal(t, successor.BodyID, fact.SuccessorBodyID)
++	require.Equal(t, previous.SlotID, fact.PreviousSlotID)
++	require.Equal(t, successor.SlotID, fact.SuccessorSlotID)
++	require.Equal(t, previous.HeadRevision, fact.PreviousHeadRevision)
++	require.Equal(t, successor.HeadRevision, fact.SuccessorHeadRevision)
++	require.Equal(t, previous.SourceIdentitySHA256, fact.PreviousSourceIdentitySHA256)
++	require.Equal(t, successor.SourceIdentitySHA256, fact.SuccessorSourceIdentitySHA256)
++	require.GreaterOrEqual(t, fact.RetiredAtMS, low)
++	require.LessOrEqual(t, fact.RetiredAtMS, high)
++	unsigned := fact
++	unsigned.Digest = ""
++	digest, err := repository.KnowledgeInputDigest(unsigned)
++	require.NoError(t, err)
++	require.Equal(t, digest, fact.Digest)
++	require.Error(t, f.db.Model(&types.MemoryDerivedRetirement{}).Where("previous_publication_id=?", before.ID).Update("reason", "publication_deleted").Error)
++	require.Error(t, f.db.Where("previous_publication_id=?", before.ID).Delete(&types.MemoryDerivedRetirement{}).Error)
++	var unchanged types.MemoryDerivedRetirement
++	require.NoError(t, f.db.Where("previous_publication_id=?", before.ID).Take(&unchanged).Error)
++	require.Equal(t, fact, unchanged)
++	return fact
++}
++func memoryRetirementInsertFaultSQL(t *testing.T, f *memAtomicSQLFixture, publicationID string) {
++	t.Helper()
++	name := "retirement_fault_" + strings.ReplaceAll(uuid.NewString(), "-", "")
++	var install, remove []string
++	if f.db.Dialector.Name() == "postgres" {
++		install = []string{fmt.Sprintf("CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.previous_publication_id='%s' THEN RAISE EXCEPTION 'owned retirement insert refusal'; END IF; RETURN NEW; END; $$", name, publicationID), fmt.Sprintf("CREATE TRIGGER %s BEFORE INSERT ON memory_derived_retirements FOR EACH ROW EXECUTE FUNCTION %s()", name, name)}
++		remove = []string{"DROP TRIGGER IF EXISTS " + name + " ON memory_derived_retirements", "DROP FUNCTION IF EXISTS " + name + "()"}
++	} else {
++		install = []string{fmt.Sprintf("CREATE TRIGGER %s BEFORE INSERT ON memory_derived_retirements WHEN NEW.previous_publication_id='%s' BEGIN SELECT RAISE(ABORT,'owned retirement insert refusal'); END", name, publicationID)}
++		remove = []string{"DROP TRIGGER IF EXISTS " + name}
++	}
++	t.Cleanup(func() {
++		cleanup, cancel := context.WithTimeout(context.WithoutCancel(f.ctx), 5*time.Second)
++		defer cancel()
++		var joined error
++		for _, sql := range remove {
++			joined = errors.Join(joined, f.db.Session(&gorm.Session{NewDB: true, Context: cleanup}).Exec(sql).Error)
++		}
++		if joined != nil {
++			t.Errorf("owned retirement fault cleanup: %v", joined)
++		}
++	})
++	for _, sql := range install {
++		require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Exec(sql).Error)
++	}
++}
++func runMemoryDerivedRetirementSQL(t *testing.T, pg bool) {
++	for _, mode := range []string{"successor_preserves_ancestor", "delete_all", "retirement_insert_rolls_back", "reversible_disable"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			item, err := f.service.Remember(f.ctx, types.MemoryItem{Kind: types.MemoryKindFact, Topic: "manual editor preference", Content: "The user's editor for daily coding is Neovim.", Importance: 5, Origin: types.MemoryOriginManual})
++			require.NoError(t, err)
++			before := memoryRetirementCurrentSQL(t, f, item.ID)
++			require.True(t, before.Present)
++			var oldReceipt types.MemoryDerivedBodyReceipt
++			require.NoError(t, f.db.Where("publication_id=?", before.ID).Take(&oldReceipt).Error)
++			beforeFacts := memAtomicSQLCount(t, f, "memory_derived_publications")
++			beforeRetirements := memAtomicSQLCount(t, f, "memory_derived_retirements")
++			var beforeBodyCount int64
++			require.NoError(t, f.db.Table("original_body_payloads").Count(&beforeBodyCount).Error)
++			low := memoryRetirementClockSQL(t, f.db)
++			switch mode {
++			case "reversible_disable":
++				require.NoError(t, f.service.SetEnabled(f.ctx, false))
++				require.NoError(t, f.service.SetEnabled(f.ctx, true))
++				require.Equal(t, before, memoryRetirementCurrentSQL(t, f, item.ID))
++				require.Equal(t, beforeRetirements, memAtomicSQLCount(t, f, "memory_derived_retirements"))
++			case "retirement_insert_rolls_back":
++				memoryRetirementInsertFaultSQL(t, f, before.ID)
++				_, err = f.service.UpdateItem(f.ctx, item.ID, "The user's editor for daily coding is VS Code.", 4)
++				require.ErrorContains(t, err, "owned retirement insert refusal", "actual native SQL trigger must fire")
++				require.Equal(t, before, memoryRetirementCurrentSQL(t, f, item.ID))
++				require.Equal(t, beforeFacts, memAtomicSQLCount(t, f, "memory_derived_publications"))
++				require.Equal(t, beforeRetirements, memAtomicSQLCount(t, f, "memory_derived_retirements"))
++				var afterBodyCount int64
++				require.NoError(t, f.db.Table("original_body_payloads").Count(&afterBodyCount).Error)
++				require.Equal(t, beforeBodyCount, afterBodyCount)
++				actual, getErr := f.repo.GetItem(f.ctx, f.scope, item.ID)
++				require.NoError(t, getErr)
++				require.NotNil(t, actual)
++				require.Equal(t, item.Content, actual.Content)
++			case "delete_all":
++				deleted, deleteErr := f.repo.DeleteAll(f.ctx, f.scope)
++				require.NoError(t, deleteErr)
++				require.EqualValues(t, 1, deleted)
++				after := memoryRetirementCurrentSQL(t, f, item.ID)
++				require.False(t, after.Present)
++				fact := assertMemoryRetirementSQL(t, f, before, after, low, memoryRetirementClockSQL(t, f.db))
++				require.Equal(t, "publication_deleted", fact.Reason)
++			case "successor_preserves_ancestor":
++				updated, updateErr := f.service.UpdateItem(f.ctx, item.ID, "The user's editor for daily coding is VS Code.", 4)
++				require.NoError(t, updateErr)
++				after := memoryRetirementCurrentSQL(t, f, item.ID)
++				fact := assertMemoryRetirementSQL(t, f, before, after, low, memoryRetirementClockSQL(t, f.db))
++				require.Equal(t, "publication_superseded", fact.Reason)
++				reader, ok := f.admissions.(interfaces.MemoryDerivedLifetimeReader)
++				require.True(t, ok)
++				read, beginErr := reader.BeginMemoryDerivedRead(f.ctx, f.scope)
++				require.NoError(t, beginErr)
++				t.Cleanup(func() {
++					if closeErr := read.Close(); closeErr != nil {
++						t.Errorf("close actual descendant read: %v", closeErr)
++					}
++				})
++				snapshot, snapshotErr := read.Snapshot()
++				require.NoError(t, snapshotErr)
++				found := false
++				for _, actual := range snapshot.Items {
++					if actual.ID == item.ID {
++						found = true
++						require.Equal(t, updated.Content, actual.Content)
++					}
++				}
++				require.True(t, found)
++				var held int64
++				require.NoError(t, f.db.Table("original_body_leases").Where("body_id=? AND kind='read' AND released_at_ms IS NULL", oldReceipt.BodyID).Count(&held).Error)
++				require.Positive(t, held, "the current descendant still leases the retired ancestor")
++				require.NoError(t, read.Recheck())
++				require.NoError(t, read.Close())
++			}
++			var unchanged types.MemoryDerivedPublication
++			require.NoError(t, f.db.Where("id=?", before.ID).Take(&unchanged).Error)
++			require.Equal(t, before, unchanged, "retirement never rewrites the original bytes or immutable graph")
++			var body struct {
++				State                       string
++				RetiredAtMS, BodyDeadlineMS *int64
++			}
++			require.NoError(t, f.db.Table("original_body_payloads").Select("state,retired_at_ms,body_deadline_ms").Where("id=?", oldReceipt.BodyID).Take(&body).Error)
++			require.Equal(t, "live", body.State)
++			require.Nil(t, body.RetiredAtMS)
++			require.Nil(t, body.BodyDeadlineMS)
++			require.Zero(t, f.model.calls)
++			assertMemAtomicSQLLeasesClosed(t, f)
++		})
++	}
++}
++func TestMemoryDerivedRetirementActualSQLite(t *testing.T)   { runMemoryDerivedRetirementSQL(t, false) }
++func TestPostgresMemoryDerivedRetirementActual(t *testing.T) { runMemoryDerivedRetirementSQL(t, true) }
+diff --git a/internal/database/migration_memory_original_full_chain_test.go b/internal/database/migration_memory_original_full_chain_test.go
+index 64bd6b72..e2fb089f 100644
+--- a/internal/database/migration_memory_original_full_chain_test.go
++++ b/internal/database/migration_memory_original_full_chain_test.go
+@@ -23,7 +23,7 @@ var memoryFullMigrationTables = []string{
+ 	"memory_original_admissions", "memory_original_executions", "memory_original_checkpoints", "memory_original_derivations", "memory_original_dispatches",
+ 	"memory_policy_control_versions", "memory_policy_originals", "memory_policy_body_receipts",
+ 	"model_original_control_versions", "model_definition_originals", "model_credential_originals", "model_state_originals", "model_original_body_receipts", "model_download_originals", "model_download_dispatches", "model_download_attempts", "model_download_lease_owners",
+-	"memory_derived_collections", "memory_derived_controls", "memory_derived_publications", "memory_derived_body_receipts",
++	"memory_derived_collections", "memory_derived_controls", "memory_derived_publications", "memory_derived_body_receipts", "memory_derived_retirements",
+ 	"memory_generated_originals", "memory_generated_receipts", "memory_generated_body_receipts",
+ 	"memory_embedding_vector_controls", "memory_embedding_originals", "memory_embedding_receipts", "memory_embedding_body_receipts",
+ 	"memory_query_embedding_originals", "memory_query_embedding_receipts", "memory_embedding_rank_receipts",
+@@ -170,7 +170,7 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&count))
+ 	}
+-	for _, table := range []string{"memory_original_admissions", "memory_policy_originals", "model_definition_originals", "memory_derived_publications", "memory_derived_body_receipts", "memory_generated_originals", "memory_embedding_originals", "memory_query_embedding_originals", "model_download_dispatches", "model_download_attempts", "model_download_lease_owners"} {
++	for _, table := range []string{"memory_original_admissions", "memory_policy_originals", "model_definition_originals", "memory_derived_publications", "memory_derived_body_receipts", "memory_derived_retirements", "memory_generated_originals", "memory_embedding_originals", "memory_query_embedding_originals", "model_download_dispatches", "model_download_attempts", "model_download_lease_owners"} {
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&count))
+ 		require.Zero(t, count, "complete migrations never authenticate a legacy original")
+@@ -184,6 +184,10 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 	err = memoryFullExec(db, dialect, "INSERT INTO memory_embedding_rank_receipts(id,receipt_id,receipt_digest,tenant_id,subject_id,item_id,model_id,source_vector_revision,vector_revision,vector_digest,rank_vector_digest,rank_json,digest,created_at) VALUES('invalid-schema-rank','missing-vector-receipt','x',7,'unproven-schema-subject','missing-item','full-schema-model',1,2,'x','x','[0]','x',CURRENT_TIMESTAMP)")
+ 	requireMemoryFullForeignKeyViolation(t, dialect, err)
+ 
++	// Retirement facts cannot be attached to invented publications/receipts.
++	err = memoryFullExec(db, dialect, "INSERT INTO memory_derived_retirements(previous_publication_id,successor_publication_id,tenant_id,subject_id,object_kind,object_id,previous_revision,control_revision,control_present,previous_publication_digest,successor_publication_digest,previous_receipt_digest,successor_receipt_digest,previous_slot_id,successor_slot_id,previous_body_id,successor_body_id,previous_head_revision,successor_head_revision,previous_source_identity_sha256,successor_source_identity_sha256,reason,retired_at_ms,digest) VALUES('missing-previous-publication','missing-successor-publication',7,'unproven-schema-subject','memory_item','full-schema-item',1,2,TRUE,?,?,?,?, 'before-slot','after-slot','before-body','after-body',1,1,?,?,'publication_superseded',1,?)", strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64))
++	requireMemoryFullForeignKeyViolation(t, dialect, err)
++
+ 	// Exact production download FK, not an AutoMigrate approximation.
+ 	err = memoryFullExec(db, dialect, "INSERT INTO model_download_originals(id,model_id,tenant_id,input_state_id,input_proof_digest,definition_id,credential_id,output_state_id,output_state_digest,recipe_digest,status,transcript_json,transcript_digest,author_selector,digest,created_at) VALUES('invalid-schema-download','full-schema-model',7,'missing-input-state',?,'missing-definition','missing-credential','missing-output-state',?,?,'active','{}',?,'schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64))
+ 	requireMemoryFullForeignKeyViolation(t, dialect, err)
+diff --git a/internal/types/memory_derived_retirement.go b/internal/types/memory_derived_retirement.go
+new file mode 100644
+index 00000000..3fd59ea7
+--- /dev/null
++++ b/internal/types/memory_derived_retirement.go
+@@ -0,0 +1,34 @@
++package types
++
++// MemoryDerivedRetirement records a real producer's supersession in the same
++// transaction as its successor publication. It is not a GC eligibility proof:
++// live descendants, historical consumers and leases may still need both bodies.
++// Unknown legacy predecessors never receive a reconstructed retirement fact.
++type MemoryDerivedRetirement struct {
++	PreviousPublicationID         string `gorm:"primaryKey"`
++	SuccessorPublicationID        string
++	TenantID                      uint64
++	SubjectID                     string
++	ObjectKind                    string
++	ObjectID                      string
++	PreviousRevision              uint64
++	ControlRevision               uint64
++	ControlPresent                bool
++	PreviousPublicationDigest     string
++	SuccessorPublicationDigest    string
++	PreviousReceiptDigest         string
++	SuccessorReceiptDigest        string
++	PreviousSlotID                string
++	SuccessorSlotID               string
++	PreviousBodyID                string
++	SuccessorBodyID               string
++	PreviousHeadRevision          int64
++	SuccessorHeadRevision         int64
++	PreviousSourceIdentitySHA256  string
++	SuccessorSourceIdentitySHA256 string
++	Reason                        string
++	RetiredAtMS                   int64
++	Digest                        string
++}
++
++func (MemoryDerivedRetirement) TableName() string { return "memory_derived_retirements" }
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
+index 049b42a4..877bead2 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
+@@ -30,6 +30,29 @@ CREATE TABLE memory_derived_body_receipts (
+  publication_id TEXT PRIMARY KEY REFERENCES memory_derived_publications(id), publication_digest TEXT NOT NULL,
+  slot_id TEXT NOT NULL, body_id TEXT NOT NULL, head_revision INTEGER NOT NULL, source_identity_sha256 TEXT NOT NULL,
+  material_sha256 TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64), created_at DATETIME NOT NULL);
++-- Producer retirement metadata is not a body-purge authorization. Retained
++-- graph/consumer references and actual leases remain independent barriers.
++CREATE TABLE memory_derived_retirements (
++ previous_publication_id TEXT PRIMARY KEY REFERENCES memory_derived_body_receipts(publication_id),
++ successor_publication_id TEXT NOT NULL UNIQUE REFERENCES memory_derived_body_receipts(publication_id),
++ tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
++ previous_revision INTEGER NOT NULL CHECK(previous_revision>0), control_revision INTEGER NOT NULL CHECK(control_revision>previous_revision),
++ control_present INTEGER NOT NULL,
++ previous_publication_digest TEXT NOT NULL CHECK(length(previous_publication_digest)=64), successor_publication_digest TEXT NOT NULL CHECK(length(successor_publication_digest)=64),
++ previous_receipt_digest TEXT NOT NULL CHECK(length(previous_receipt_digest)=64), successor_receipt_digest TEXT NOT NULL CHECK(length(successor_receipt_digest)=64),
++ previous_slot_id TEXT NOT NULL, successor_slot_id TEXT NOT NULL, previous_body_id TEXT NOT NULL, successor_body_id TEXT NOT NULL,
++ previous_head_revision INTEGER NOT NULL CHECK(previous_head_revision>0), successor_head_revision INTEGER NOT NULL CHECK(successor_head_revision>0),
++ previous_source_identity_sha256 TEXT NOT NULL CHECK(length(previous_source_identity_sha256)=64), successor_source_identity_sha256 TEXT NOT NULL CHECK(length(successor_source_identity_sha256)=64),
++ reason TEXT NOT NULL CHECK(reason IN ('publication_superseded','publication_deleted')),
++ retired_at_ms INTEGER NOT NULL CHECK(retired_at_ms>0), digest TEXT NOT NULL CHECK(length(digest)=64),
++ CHECK(previous_publication_id<>successor_publication_id),
++ CHECK((control_present=TRUE AND reason='publication_superseded') OR (control_present=FALSE AND reason='publication_deleted')),
++ FOREIGN KEY(tenant_id,subject_id,object_kind,object_id) REFERENCES memory_derived_controls(tenant_id,subject_id,object_kind,object_id)
++);
++CREATE INDEX memory_derived_retirements_scope ON memory_derived_retirements(tenant_id,subject_id,object_kind,object_id,retired_at_ms);
++CREATE TRIGGER memory_derived_retirements_no_replace BEFORE INSERT ON memory_derived_retirements WHEN EXISTS(SELECT 1 FROM memory_derived_retirements WHERE previous_publication_id=NEW.previous_publication_id OR successor_publication_id=NEW.successor_publication_id) BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
++CREATE TRIGGER memory_derived_retirements_immutable_update BEFORE UPDATE ON memory_derived_retirements BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
++CREATE TRIGGER memory_derived_retirements_immutable_delete BEFORE DELETE ON memory_derived_retirements BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_json TEXT NOT NULL DEFAULT '';
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_digest TEXT NOT NULL DEFAULT '';
+ CREATE TRIGGER memory_items_derived_insert AFTER INSERT ON memory_items BEGIN
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql
+index f3c30fa4..a262f59d 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql
+@@ -1,6 +1,6 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+ CREATE TEMP TABLE all_memory_original_down_guard(value INTEGER CHECK(value=0));
+-INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
++INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_retirements) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
+ DROP TABLE all_memory_original_down_guard;
+ 
+ DROP TABLE model_download_lease_owners;
+@@ -55,7 +55,7 @@ DROP TABLE memory_generated_receipts;
+ DROP TABLE memory_generated_originals;
+ 
+ CREATE TEMP TABLE memory_derived_down_guard(value INTEGER CHECK(value=0));
+-INSERT INTO memory_derived_down_guard SELECT (SELECT COUNT(*) FROM memory_derived_controls)+(SELECT COUNT(*) FROM memory_derived_publications)+(SELECT COUNT(*) FROM memory_derived_body_receipts);
++INSERT INTO memory_derived_down_guard SELECT (SELECT COUNT(*) FROM memory_derived_controls)+(SELECT COUNT(*) FROM memory_derived_publications)+(SELECT COUNT(*) FROM memory_derived_body_receipts)+(SELECT COUNT(*) FROM memory_derived_retirements);
+ DROP TABLE memory_derived_down_guard;
+ DROP TRIGGER memory_items_derived_insert;
+ DROP TRIGGER memory_items_derived_update;
+@@ -78,6 +78,7 @@ DROP TRIGGER memory_derived_collections_guard_replace;
+ DROP TRIGGER memory_derived_controls_guard_update;
+ DROP TRIGGER memory_derived_controls_guard_delete;
+ DROP TRIGGER memory_derived_controls_guard_replace;
++DROP TABLE memory_derived_retirements;
+ DROP TABLE memory_derived_body_receipts;
+ DROP TABLE memory_derived_publications;
+ DROP TABLE memory_derived_controls;
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+index c932264c..4ad5b641 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+@@ -177,6 +177,29 @@ CREATE TABLE memory_derived_body_receipts (
+  publication_id TEXT PRIMARY KEY REFERENCES memory_derived_publications(id), publication_digest TEXT NOT NULL,
+  slot_id TEXT NOT NULL, body_id TEXT NOT NULL, head_revision INTEGER NOT NULL, source_identity_sha256 TEXT NOT NULL,
+  material_sha256 TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64), created_at DATETIME NOT NULL);
++-- Producer retirement metadata is not a body-purge authorization. Retained
++-- graph/consumer references and actual leases remain independent barriers.
++CREATE TABLE memory_derived_retirements (
++ previous_publication_id TEXT PRIMARY KEY REFERENCES memory_derived_body_receipts(publication_id),
++ successor_publication_id TEXT NOT NULL UNIQUE REFERENCES memory_derived_body_receipts(publication_id),
++ tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
++ previous_revision INTEGER NOT NULL CHECK(previous_revision>0), control_revision INTEGER NOT NULL CHECK(control_revision>previous_revision),
++ control_present INTEGER NOT NULL,
++ previous_publication_digest TEXT NOT NULL CHECK(length(previous_publication_digest)=64), successor_publication_digest TEXT NOT NULL CHECK(length(successor_publication_digest)=64),
++ previous_receipt_digest TEXT NOT NULL CHECK(length(previous_receipt_digest)=64), successor_receipt_digest TEXT NOT NULL CHECK(length(successor_receipt_digest)=64),
++ previous_slot_id TEXT NOT NULL, successor_slot_id TEXT NOT NULL, previous_body_id TEXT NOT NULL, successor_body_id TEXT NOT NULL,
++ previous_head_revision INTEGER NOT NULL CHECK(previous_head_revision>0), successor_head_revision INTEGER NOT NULL CHECK(successor_head_revision>0),
++ previous_source_identity_sha256 TEXT NOT NULL CHECK(length(previous_source_identity_sha256)=64), successor_source_identity_sha256 TEXT NOT NULL CHECK(length(successor_source_identity_sha256)=64),
++ reason TEXT NOT NULL CHECK(reason IN ('publication_superseded','publication_deleted')),
++ retired_at_ms INTEGER NOT NULL CHECK(retired_at_ms>0), digest TEXT NOT NULL CHECK(length(digest)=64),
++ CHECK(previous_publication_id<>successor_publication_id),
++ CHECK((control_present=TRUE AND reason='publication_superseded') OR (control_present=FALSE AND reason='publication_deleted')),
++ FOREIGN KEY(tenant_id,subject_id,object_kind,object_id) REFERENCES memory_derived_controls(tenant_id,subject_id,object_kind,object_id)
++);
++CREATE INDEX memory_derived_retirements_scope ON memory_derived_retirements(tenant_id,subject_id,object_kind,object_id,retired_at_ms);
++CREATE TRIGGER memory_derived_retirements_no_replace BEFORE INSERT ON memory_derived_retirements WHEN EXISTS(SELECT 1 FROM memory_derived_retirements WHERE previous_publication_id=NEW.previous_publication_id OR successor_publication_id=NEW.successor_publication_id) BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
++CREATE TRIGGER memory_derived_retirements_immutable_update BEFORE UPDATE ON memory_derived_retirements BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
++CREATE TRIGGER memory_derived_retirements_immutable_delete BEFORE DELETE ON memory_derived_retirements BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_json TEXT NOT NULL DEFAULT '';
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_digest TEXT NOT NULL DEFAULT '';
+ CREATE TRIGGER memory_items_derived_insert AFTER INSERT ON memory_items BEGIN
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
+index fbad6ad1..9e3f8b3c 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
+@@ -30,6 +30,27 @@ CREATE TABLE memory_derived_body_receipts (
+  publication_id TEXT PRIMARY KEY REFERENCES memory_derived_publications(id), publication_digest TEXT NOT NULL,
+  slot_id TEXT NOT NULL, body_id TEXT NOT NULL, head_revision BIGINT NOT NULL, source_identity_sha256 TEXT NOT NULL,
+  material_sha256 TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64), created_at TIMESTAMPTZ NOT NULL);
++-- Producer retirement metadata is not a body-purge authorization. Retained
++-- graph/consumer references and actual leases remain independent barriers.
++CREATE TABLE memory_derived_retirements (
++ previous_publication_id TEXT PRIMARY KEY REFERENCES memory_derived_body_receipts(publication_id),
++ successor_publication_id TEXT NOT NULL UNIQUE REFERENCES memory_derived_body_receipts(publication_id),
++ tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
++ previous_revision BIGINT NOT NULL CHECK(previous_revision>0), control_revision BIGINT NOT NULL CHECK(control_revision>previous_revision),
++ control_present BOOLEAN NOT NULL,
++ previous_publication_digest TEXT NOT NULL CHECK(length(previous_publication_digest)=64), successor_publication_digest TEXT NOT NULL CHECK(length(successor_publication_digest)=64),
++ previous_receipt_digest TEXT NOT NULL CHECK(length(previous_receipt_digest)=64), successor_receipt_digest TEXT NOT NULL CHECK(length(successor_receipt_digest)=64),
++ previous_slot_id TEXT NOT NULL, successor_slot_id TEXT NOT NULL, previous_body_id TEXT NOT NULL, successor_body_id TEXT NOT NULL,
++ previous_head_revision BIGINT NOT NULL CHECK(previous_head_revision>0), successor_head_revision BIGINT NOT NULL CHECK(successor_head_revision>0),
++ previous_source_identity_sha256 TEXT NOT NULL CHECK(length(previous_source_identity_sha256)=64), successor_source_identity_sha256 TEXT NOT NULL CHECK(length(successor_source_identity_sha256)=64),
++ reason TEXT NOT NULL CHECK(reason IN ('publication_superseded','publication_deleted')),
++ retired_at_ms BIGINT NOT NULL CHECK(retired_at_ms>0), digest TEXT NOT NULL CHECK(length(digest)=64),
++ CHECK(previous_publication_id<>successor_publication_id),
++ CHECK((control_present=TRUE AND reason='publication_superseded') OR (control_present=FALSE AND reason='publication_deleted')),
++ FOREIGN KEY(tenant_id,subject_id,object_kind,object_id) REFERENCES memory_derived_controls(tenant_id,subject_id,object_kind,object_id)
++);
++CREATE INDEX memory_derived_retirements_scope ON memory_derived_retirements(tenant_id,subject_id,object_kind,object_id,retired_at_ms);
++CREATE TRIGGER memory_derived_retirements_immutable BEFORE UPDATE OR DELETE ON memory_derived_retirements FOR EACH ROW EXECUTE FUNCTION memory_original_admission_immutable();
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_json TEXT NOT NULL DEFAULT '';
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_digest TEXT NOT NULL DEFAULT '';
+ CREATE FUNCTION memory_items_derived_control() RETURNS trigger LANGUAGE plpgsql AS $$
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql
+index 123f87fd..ef8b130c 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql
+@@ -1,5 +1,5 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_retirements) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
+ 
+ DROP TABLE model_download_lease_owners;
+ DROP TABLE model_download_attempts;
+@@ -42,7 +42,7 @@ DROP TABLE memory_generated_body_receipts;
+ DROP TABLE memory_generated_receipts;
+ DROP TABLE memory_generated_originals;
+ 
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) THEN RAISE EXCEPTION 'memory derived original facts must be preserved'; END IF; END; $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_retirements) THEN RAISE EXCEPTION 'memory derived original facts must be preserved'; END IF; END; $$;
+ DROP TRIGGER memory_items_derived_control ON memory_items;
+ DROP TRIGGER memory_items_derived_identity ON memory_items;
+ DROP FUNCTION memory_items_derived_control();
+@@ -63,6 +63,7 @@ DROP TRIGGER memory_derived_collections_guard ON memory_derived_collections;
+ DROP FUNCTION memory_derived_collections_guard();
+ DROP TRIGGER memory_derived_controls_guard ON memory_derived_controls;
+ DROP FUNCTION memory_derived_controls_guard();
++DROP TABLE memory_derived_retirements;
+ DROP TABLE memory_derived_body_receipts;
+ DROP TABLE memory_derived_publications;
+ DROP TABLE memory_derived_controls;
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+index e0884c80..b3a62c87 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+@@ -189,6 +189,27 @@ CREATE TABLE memory_derived_body_receipts (
+  publication_id TEXT PRIMARY KEY REFERENCES memory_derived_publications(id), publication_digest TEXT NOT NULL,
+  slot_id TEXT NOT NULL, body_id TEXT NOT NULL, head_revision BIGINT NOT NULL, source_identity_sha256 TEXT NOT NULL,
+  material_sha256 TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64), created_at TIMESTAMPTZ NOT NULL);
++-- Producer retirement metadata is not a body-purge authorization. Retained
++-- graph/consumer references and actual leases remain independent barriers.
++CREATE TABLE memory_derived_retirements (
++ previous_publication_id TEXT PRIMARY KEY REFERENCES memory_derived_body_receipts(publication_id),
++ successor_publication_id TEXT NOT NULL UNIQUE REFERENCES memory_derived_body_receipts(publication_id),
++ tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
++ previous_revision BIGINT NOT NULL CHECK(previous_revision>0), control_revision BIGINT NOT NULL CHECK(control_revision>previous_revision),
++ control_present BOOLEAN NOT NULL,
++ previous_publication_digest TEXT NOT NULL CHECK(length(previous_publication_digest)=64), successor_publication_digest TEXT NOT NULL CHECK(length(successor_publication_digest)=64),
++ previous_receipt_digest TEXT NOT NULL CHECK(length(previous_receipt_digest)=64), successor_receipt_digest TEXT NOT NULL CHECK(length(successor_receipt_digest)=64),
++ previous_slot_id TEXT NOT NULL, successor_slot_id TEXT NOT NULL, previous_body_id TEXT NOT NULL, successor_body_id TEXT NOT NULL,
++ previous_head_revision BIGINT NOT NULL CHECK(previous_head_revision>0), successor_head_revision BIGINT NOT NULL CHECK(successor_head_revision>0),
++ previous_source_identity_sha256 TEXT NOT NULL CHECK(length(previous_source_identity_sha256)=64), successor_source_identity_sha256 TEXT NOT NULL CHECK(length(successor_source_identity_sha256)=64),
++ reason TEXT NOT NULL CHECK(reason IN ('publication_superseded','publication_deleted')),
++ retired_at_ms BIGINT NOT NULL CHECK(retired_at_ms>0), digest TEXT NOT NULL CHECK(length(digest)=64),
++ CHECK(previous_publication_id<>successor_publication_id),
++ CHECK((control_present=TRUE AND reason='publication_superseded') OR (control_present=FALSE AND reason='publication_deleted')),
++ FOREIGN KEY(tenant_id,subject_id,object_kind,object_id) REFERENCES memory_derived_controls(tenant_id,subject_id,object_kind,object_id)
++);
++CREATE INDEX memory_derived_retirements_scope ON memory_derived_retirements(tenant_id,subject_id,object_kind,object_id,retired_at_ms);
++CREATE TRIGGER memory_derived_retirements_immutable BEFORE UPDATE OR DELETE ON memory_derived_retirements FOR EACH ROW EXECUTE FUNCTION memory_original_admission_immutable();
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_json TEXT NOT NULL DEFAULT '';
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_digest TEXT NOT NULL DEFAULT '';
+ CREATE FUNCTION memory_items_derived_control() RETURNS trigger LANGUAGE plpgsql AS $$
+diff --git a/migrations/sqlite/000075_memory_original_protocols.down.sql b/migrations/sqlite/000075_memory_original_protocols.down.sql
+index f3c30fa4..a262f59d 100644
+--- a/migrations/sqlite/000075_memory_original_protocols.down.sql
++++ b/migrations/sqlite/000075_memory_original_protocols.down.sql
+@@ -1,6 +1,6 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+ CREATE TEMP TABLE all_memory_original_down_guard(value INTEGER CHECK(value=0));
+-INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
++INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_retirements) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
+ DROP TABLE all_memory_original_down_guard;
+ 
+ DROP TABLE model_download_lease_owners;
+@@ -55,7 +55,7 @@ DROP TABLE memory_generated_receipts;
+ DROP TABLE memory_generated_originals;
+ 
+ CREATE TEMP TABLE memory_derived_down_guard(value INTEGER CHECK(value=0));
+-INSERT INTO memory_derived_down_guard SELECT (SELECT COUNT(*) FROM memory_derived_controls)+(SELECT COUNT(*) FROM memory_derived_publications)+(SELECT COUNT(*) FROM memory_derived_body_receipts);
++INSERT INTO memory_derived_down_guard SELECT (SELECT COUNT(*) FROM memory_derived_controls)+(SELECT COUNT(*) FROM memory_derived_publications)+(SELECT COUNT(*) FROM memory_derived_body_receipts)+(SELECT COUNT(*) FROM memory_derived_retirements);
+ DROP TABLE memory_derived_down_guard;
+ DROP TRIGGER memory_items_derived_insert;
+ DROP TRIGGER memory_items_derived_update;
+@@ -78,6 +78,7 @@ DROP TRIGGER memory_derived_collections_guard_replace;
+ DROP TRIGGER memory_derived_controls_guard_update;
+ DROP TRIGGER memory_derived_controls_guard_delete;
+ DROP TRIGGER memory_derived_controls_guard_replace;
++DROP TABLE memory_derived_retirements;
+ DROP TABLE memory_derived_body_receipts;
+ DROP TABLE memory_derived_publications;
+ DROP TABLE memory_derived_controls;
+diff --git a/migrations/sqlite/000075_memory_original_protocols.up.sql b/migrations/sqlite/000075_memory_original_protocols.up.sql
+index c932264c..4ad5b641 100644
+--- a/migrations/sqlite/000075_memory_original_protocols.up.sql
++++ b/migrations/sqlite/000075_memory_original_protocols.up.sql
+@@ -177,6 +177,29 @@ CREATE TABLE memory_derived_body_receipts (
+  publication_id TEXT PRIMARY KEY REFERENCES memory_derived_publications(id), publication_digest TEXT NOT NULL,
+  slot_id TEXT NOT NULL, body_id TEXT NOT NULL, head_revision INTEGER NOT NULL, source_identity_sha256 TEXT NOT NULL,
+  material_sha256 TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64), created_at DATETIME NOT NULL);
++-- Producer retirement metadata is not a body-purge authorization. Retained
++-- graph/consumer references and actual leases remain independent barriers.
++CREATE TABLE memory_derived_retirements (
++ previous_publication_id TEXT PRIMARY KEY REFERENCES memory_derived_body_receipts(publication_id),
++ successor_publication_id TEXT NOT NULL UNIQUE REFERENCES memory_derived_body_receipts(publication_id),
++ tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
++ previous_revision INTEGER NOT NULL CHECK(previous_revision>0), control_revision INTEGER NOT NULL CHECK(control_revision>previous_revision),
++ control_present INTEGER NOT NULL,
++ previous_publication_digest TEXT NOT NULL CHECK(length(previous_publication_digest)=64), successor_publication_digest TEXT NOT NULL CHECK(length(successor_publication_digest)=64),
++ previous_receipt_digest TEXT NOT NULL CHECK(length(previous_receipt_digest)=64), successor_receipt_digest TEXT NOT NULL CHECK(length(successor_receipt_digest)=64),
++ previous_slot_id TEXT NOT NULL, successor_slot_id TEXT NOT NULL, previous_body_id TEXT NOT NULL, successor_body_id TEXT NOT NULL,
++ previous_head_revision INTEGER NOT NULL CHECK(previous_head_revision>0), successor_head_revision INTEGER NOT NULL CHECK(successor_head_revision>0),
++ previous_source_identity_sha256 TEXT NOT NULL CHECK(length(previous_source_identity_sha256)=64), successor_source_identity_sha256 TEXT NOT NULL CHECK(length(successor_source_identity_sha256)=64),
++ reason TEXT NOT NULL CHECK(reason IN ('publication_superseded','publication_deleted')),
++ retired_at_ms INTEGER NOT NULL CHECK(retired_at_ms>0), digest TEXT NOT NULL CHECK(length(digest)=64),
++ CHECK(previous_publication_id<>successor_publication_id),
++ CHECK((control_present=TRUE AND reason='publication_superseded') OR (control_present=FALSE AND reason='publication_deleted')),
++ FOREIGN KEY(tenant_id,subject_id,object_kind,object_id) REFERENCES memory_derived_controls(tenant_id,subject_id,object_kind,object_id)
++);
++CREATE INDEX memory_derived_retirements_scope ON memory_derived_retirements(tenant_id,subject_id,object_kind,object_id,retired_at_ms);
++CREATE TRIGGER memory_derived_retirements_no_replace BEFORE INSERT ON memory_derived_retirements WHEN EXISTS(SELECT 1 FROM memory_derived_retirements WHERE previous_publication_id=NEW.previous_publication_id OR successor_publication_id=NEW.successor_publication_id) BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
++CREATE TRIGGER memory_derived_retirements_immutable_update BEFORE UPDATE ON memory_derived_retirements BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
++CREATE TRIGGER memory_derived_retirements_immutable_delete BEFORE DELETE ON memory_derived_retirements BEGIN SELECT RAISE(ABORT,'memory retirement facts are immutable'); END;
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_json TEXT NOT NULL DEFAULT '';
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_digest TEXT NOT NULL DEFAULT '';
+ CREATE TRIGGER memory_items_derived_insert AFTER INSERT ON memory_items BEGIN
+diff --git a/migrations/versioned/000156_memory_original_protocols.down.sql b/migrations/versioned/000156_memory_original_protocols.down.sql
+index 123f87fd..ef8b130c 100644
+--- a/migrations/versioned/000156_memory_original_protocols.down.sql
++++ b/migrations/versioned/000156_memory_original_protocols.down.sql
+@@ -1,5 +1,5 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_dispatches) OR EXISTS(SELECT 1 FROM model_download_attempts) OR EXISTS(SELECT 1 FROM model_download_lease_owners) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_retirements) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
+ 
+ DROP TABLE model_download_lease_owners;
+ DROP TABLE model_download_attempts;
+@@ -42,7 +42,7 @@ DROP TABLE memory_generated_body_receipts;
+ DROP TABLE memory_generated_receipts;
+ DROP TABLE memory_generated_originals;
+ 
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) THEN RAISE EXCEPTION 'memory derived original facts must be preserved'; END IF; END; $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_retirements) THEN RAISE EXCEPTION 'memory derived original facts must be preserved'; END IF; END; $$;
+ DROP TRIGGER memory_items_derived_control ON memory_items;
+ DROP TRIGGER memory_items_derived_identity ON memory_items;
+ DROP FUNCTION memory_items_derived_control();
+@@ -63,6 +63,7 @@ DROP TRIGGER memory_derived_collections_guard ON memory_derived_collections;
+ DROP FUNCTION memory_derived_collections_guard();
+ DROP TRIGGER memory_derived_controls_guard ON memory_derived_controls;
+ DROP FUNCTION memory_derived_controls_guard();
++DROP TABLE memory_derived_retirements;
+ DROP TABLE memory_derived_body_receipts;
+ DROP TABLE memory_derived_publications;
+ DROP TABLE memory_derived_controls;
+diff --git a/migrations/versioned/000156_memory_original_protocols.up.sql b/migrations/versioned/000156_memory_original_protocols.up.sql
+index e0884c80..b3a62c87 100644
+--- a/migrations/versioned/000156_memory_original_protocols.up.sql
++++ b/migrations/versioned/000156_memory_original_protocols.up.sql
+@@ -189,6 +189,27 @@ CREATE TABLE memory_derived_body_receipts (
+  publication_id TEXT PRIMARY KEY REFERENCES memory_derived_publications(id), publication_digest TEXT NOT NULL,
+  slot_id TEXT NOT NULL, body_id TEXT NOT NULL, head_revision BIGINT NOT NULL, source_identity_sha256 TEXT NOT NULL,
+  material_sha256 TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64), created_at TIMESTAMPTZ NOT NULL);
++-- Producer retirement metadata is not a body-purge authorization. Retained
++-- graph/consumer references and actual leases remain independent barriers.
++CREATE TABLE memory_derived_retirements (
++ previous_publication_id TEXT PRIMARY KEY REFERENCES memory_derived_body_receipts(publication_id),
++ successor_publication_id TEXT NOT NULL UNIQUE REFERENCES memory_derived_body_receipts(publication_id),
++ tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
++ previous_revision BIGINT NOT NULL CHECK(previous_revision>0), control_revision BIGINT NOT NULL CHECK(control_revision>previous_revision),
++ control_present BOOLEAN NOT NULL,
++ previous_publication_digest TEXT NOT NULL CHECK(length(previous_publication_digest)=64), successor_publication_digest TEXT NOT NULL CHECK(length(successor_publication_digest)=64),
++ previous_receipt_digest TEXT NOT NULL CHECK(length(previous_receipt_digest)=64), successor_receipt_digest TEXT NOT NULL CHECK(length(successor_receipt_digest)=64),
++ previous_slot_id TEXT NOT NULL, successor_slot_id TEXT NOT NULL, previous_body_id TEXT NOT NULL, successor_body_id TEXT NOT NULL,
++ previous_head_revision BIGINT NOT NULL CHECK(previous_head_revision>0), successor_head_revision BIGINT NOT NULL CHECK(successor_head_revision>0),
++ previous_source_identity_sha256 TEXT NOT NULL CHECK(length(previous_source_identity_sha256)=64), successor_source_identity_sha256 TEXT NOT NULL CHECK(length(successor_source_identity_sha256)=64),
++ reason TEXT NOT NULL CHECK(reason IN ('publication_superseded','publication_deleted')),
++ retired_at_ms BIGINT NOT NULL CHECK(retired_at_ms>0), digest TEXT NOT NULL CHECK(length(digest)=64),
++ CHECK(previous_publication_id<>successor_publication_id),
++ CHECK((control_present=TRUE AND reason='publication_superseded') OR (control_present=FALSE AND reason='publication_deleted')),
++ FOREIGN KEY(tenant_id,subject_id,object_kind,object_id) REFERENCES memory_derived_controls(tenant_id,subject_id,object_kind,object_id)
++);
++CREATE INDEX memory_derived_retirements_scope ON memory_derived_retirements(tenant_id,subject_id,object_kind,object_id,retired_at_ms);
++CREATE TRIGGER memory_derived_retirements_immutable BEFORE UPDATE OR DELETE ON memory_derived_retirements FOR EACH ROW EXECUTE FUNCTION memory_original_admission_immutable();
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_json TEXT NOT NULL DEFAULT '';
+ ALTER TABLE memory_original_executions ADD COLUMN derived_inputs_digest TEXT NOT NULL DEFAULT '';
+ CREATE FUNCTION memory_items_derived_control() RETURNS trigger LANGUAGE plpgsql AS $$

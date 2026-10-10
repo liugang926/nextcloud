@@ -222,7 +222,10 @@ The same cd9375 source now passes all159 selected native55/productive24/
 policy58/lifecycle22 regressions in813.853s, with ten exact resources independently
 absent. Genuine generated multi-effect/model-successor paths remain compatible;
 see the [current core159 record](evidence/memory-rank-retirement-core159-GREEN-20261011.json).
-UNKNOWN and new-table-specific genuine DOWN coverage remain required. See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
+UNKNOWN and new-table-specific genuine DOWN coverage remain required. Reviewable exact-source patches are available for [rank sameTX checks](../integration/proposals/weknora-rank-recheck-same-TX-20261011.json)
+and [publication retirement facts](../integration/proposals/weknora-memory-publication-retirement-20261011.json).
+They reproduce the selected files from cd9375 and have exact forward/reverse
+tree proofs; proposal heads remain separately unrun and unadopted. See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
 See the [20-pass/4-failure record](evidence/memory-rank10-retirement10-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
