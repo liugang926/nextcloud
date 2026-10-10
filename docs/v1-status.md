@@ -175,7 +175,16 @@ old116, and durable startup/replay16. Every selected RUN/PASS pair is exact once
 14 owned resources are independently absent. See the [138-node record](evidence/memory-download-claim-cleanup-existing138-GREEN-20261011.json)
 and [reviewable claim cleanup proposal](../integration/proposals/weknora-original-download-claim-cleanup-20261011.json). Newservice-instance
 recovery is explicitly separate from real OS-kill/11-minute-claim-expiry E2E;
-those cross-crash gates remain required. A combined policy/vector/crash-helper source now parses302 Go files and
+The genuine SQLite process-crash gate now passes on f5d: independently launched
+child killed by actual SIGKILL9, immutable660s SQL claim expires naturally, second
+process performs production startup recovery and current-author validation. Two
+actual SDK requests produce one result, replay adds no third request, original
+fact/body fingerprints stay unchanged, and four exact leases are released. The
+681.499s window includes runtime resource preparation and finishes under1200s;
+three owned resources are independently absent. The [reviewable crash helper and owned drivers](../integration/proposals/weknora-original-download-real-crash-helper-20261011.json)
+reproduce the executed helper/runner bytes and keep separate proposal heads. See the [actual OS-crash record](evidence/memory-original-download-OS-SIGKILL-SQLite-GREEN-20261011.json).
+PG crash, durable broker/ACK, application recovery and physical weight inventory
+remain required. A combined policy/vector/crash-helper source now parses302 Go files and
 compiles12 test packages plus cmd/server, with zero business RUN. Independent
 review found a policy final-payload ordering gap and a crash-fixture expiry
 boundary race; both are being repaired before runtime acceptance. See the
@@ -187,7 +196,9 @@ those26 correctness nodes; the performance gate remains unaccepted. See the
 [26-pass/4-failure record](evidence/memory-policy12-vector14-GREEN-semanticcurrent4-failure-20261011.json). Exact review proposals are available for [policy sameTX reads](../integration/proposals/weknora-policy-same-TX-read-20261011.json)
 and [embedding output succession](../integration/proposals/weknora-embedding-output-succession-20261011.json).
 Both reproduce the selected source files from the tested fusion and have exact
-forward/reverse tree proofs; separate proposal heads are not runtime-run or adopted. The shared model final-binding repair preserves its earlier test-only compile
+forward/reverse tree proofs; separate proposal heads are not runtime-run or adopted. The same f5d full canonical migration also passes38/38 on real ParadeDB17
+and SQLite in30.834s, with seven exact resources independently absent. See the
+[current migration38 record](evidence/memory-current-full-migration38-successor-GREEN-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
