@@ -4,27 +4,51 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
-The private original-memory proposal now joins public memory mutations to the
-same subject transaction and joins sharing/organization mutations to the same
-permission epochs used by its reader. Original Agent ownership and transitive
-parent metadata expand the fenced tenant set without reading current grants
-as new authority. Source `ef1cdcc4` includes the previous atomic/recovery work
-plus real-runtime single-pool and capacity/SQL-rollback test sources. Its patch
-applies and reverses exactly, but it is unformatted/uncompiled and no business
-tests have run. Raw SQL/restore writers, remaining permission dependencies and
-complete derived-memory workflows still need implementation and actual gates.
-The current manifest is unchanged. See the [common writer source record](evidence/memory-original-common-writer-source-20261010.json).
+The complete original service diagnostic on `1bbd0cc8` passed all 604 test
+nodes and 178 parents, including all 28 required original service parents,
+with zero failures or test skips. The original eight-second HTTP bound,
+20-minute package timeout and count one were retained. Package JSON reports
+905.111 seconds; compilation, test and attach took 957.246 seconds; the complete
+driver took 1057.413 seconds. Both ordinary HTTP parents passed with their
+original subsequent assertions present; no individual assertion trace was
+captured. Original binaries and profiles are independently hashed. All nine
+owned resources were removed and their absence verified. See the
+[whole-service profiling record](evidence/ordinary-qa-whole-service-profiling-20261010.json).
 
-The original-memory atomic-result and recovery slices are now integrated into
-one private source proposal, `386a68a5`, with four overlapping files resolved
+A foreign runtime was observed during that timed run and subsequently
+disappeared. This result does not establish strict isolation or explain old
+CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
+normal application, restore and V1 acceptance remain pending for the current
+proposals. The earlier storage preflight is retained as history below.
+
+The private original-memory format checkpoint is `652df78f`, tree `4e523143`,
+with atomic output/capacity receipts, durable recovery, Lite worker shutdown and
+shared permission/public mutation fences integrated. Formatting and parsing
+passed, but its subsequent actual compilation exited 1 on two lineage-interface
+wiring errors; no business tests ran, and its runtime owner was cleaned up.
+Current source `5e071eef`, tree `a2ceaa09`, corrects those interfaces and the
+transaction-bound KnowledgeBase service wiring. Its second compilation passed
+all five selected packages in 212.012 seconds, with zero test skips and zero
+business tests (`-run ^$`). Its owned compile actor and temporary volume were
+removed while shared caches remained. This accepts compilation only; complete
+derived-memory workflows, remaining writer/permission paths and business gates
+still require work. The candidate manifest is unchanged. See the
+[memory compilation record](evidence/memory-integrated-compilation-20261010.json).
+The [service evidence](evidence/ordinary-qa-whole-service-profiling-20261010.json)
+retains the historical memory format checkpoint separately from its tested
+service source.
+
+An earlier original-memory atomic-result and recovery integration froze
+private source proposal `386a68a5`, with four overlapping files resolved
 and all additional SQL test sources bound to its exact tree. A private index
 applies its patch to `1bbd0cc8` and reverses it to the exact original tree.
 Six in-memory SQLite checks passed on its fused pending schema; a separate
 13-case schema-only probe checked foreign keys, immutable facts and DOWN guards.
 These checks executed no model, Go, PostgreSQL, broker or restore cases. The
-proposal still needs formatting, shared-permission mutation fences, capacity
-effects, complete derived-memory workflows and actual acceptance; it is not
-in the candidate manifest. See the [integrated source record](evidence/memory-original-integrated-source-20261010.json).
+formatting, fence and capacity gaps described by that earlier record have
+subsequent source work above; complete workflows and actual acceptance remain
+pending. This historical proposal is not in the candidate manifest. See the
+[integrated source record](evidence/memory-original-integrated-source-20261010.json).
 
 Memory task source preparation now persists an original-bound dispatch intent
 with the admission and pending revision in one transaction. Its recovery relay
@@ -32,29 +56,25 @@ retains that exact intent after broker or post-commit failures, while completion
 still requires an immutable successful receipt. A separate Lite executor change
 cancels and joins its workers and refuses new tasks after shutdown. Fixed-image
 source parsing/formatting passed; 14 test declarations have not run, and no
-compilation, SQL, broker or restore acceptance is claimed. These changes are
-frozen on private source `ca5f9233`, awaiting the atomic-output/completion reader,
-full legal memory workflows and actual gates. They are not in the current
-candidate manifest. See the [memory source preparation record](evidence/memory-original-source-preparation-20261010.json).
+compilation, SQL, broker or restore acceptance is claimed. These earlier changes
+were frozen on private source `ca5f9233` and are included in the newer integration
+above; full legal memory workflows and actual gates remain pending. They are
+not in the current candidate manifest. See the [memory source preparation record](evidence/memory-original-source-preparation-20261010.json).
 
-The complete original service selection is prepared with 178 planned parents,
-including 28 of the original 42 mandatory parents across 12 packages. Its
-driver preserves source `1bbd0cc8`, count one, the cumulative 20-minute service
-budget and eight-second HTTP bound. The first actual launch stopped at storage
-preflight: host free space was 10.380 GiB against the fixed 12 GiB diagnostic
-floor. It created no containers, networks or volumes and ran no business tests;
-Root and an independent audit verified all nine prospective names absent.
-The 24 pure driver checks passed, but service, full-selection, normal-application
-and restore acceptance remain pending. Resume requires adequate storage and a
-serial heavy resource window. See the [preflight record](evidence/ordinary-qa-whole-service-preflight-20261010.json).
+The first whole-service attempt stopped at storage preflight: host free space
+was 10.380 GiB against its fixed 12 GiB diagnostic floor. It created no runtime
+resources and ran no business tests; all nine prospective names were verified
+absent, and 24 pure driver checks passed. This is a historical attempt, not a
+current blocker for the completed service diagnostic above. See the
+[preflight record](evidence/ordinary-qa-whole-service-preflight-20261010.json).
 
 A fresh source-exact PostgreSQL ordinary-QA profiling run on `1bbd0cc8`
 passed its single required parent under the original eight-second HTTP and
 20-minute package limits. The original binary, CPU/block/mutex profiles and
 raw output are source-bound and independently hashed. This isolated run did
 not reproduce the four a38 Linux-CI body deadlines; it does not accept the
-full test selection. The next diagnostic retains all selected service cases
-and their cumulative package budget. See the [focused profiling record](evidence/ordinary-qa-fresh-focused-profiling-20261010.json).
+full test selection. The complete selected service diagnostic above has now
+passed under its original cumulative package budget. See the [focused profiling record](evidence/ordinary-qa-fresh-focused-profiling-20261010.json).
 
 The proposed directory-publication correction reads the unique user binding,
 current directory, identity and groups in one consistent transaction. Its
