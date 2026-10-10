@@ -4,6 +4,17 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+New private embedding source `f3a4f1b1` parsed186 changed Go files and compiled
+all11 selected packages (127.796 seconds, zero runtime tests). Its true remote
+model original producers/held constructors now pass80 SQL/HTTP nodes across
+OpenAI, DashScope, Ark and Google, including exact recipe/body/dimensions and
+current-authority/active-cancel cases. Memory input/result tests failed all10
+nodes before provider entry because their Remember fixture omitted explicit
+manual origin; existing defaults classify it as unproven extracted output and
+correctly refuse it. A two-line test-only authoring repair is prepared, not
+executed. Query/vector-receipt/history/rank/sync and local/cloud variants remain
+required. See the [embedding gates](evidence/original-embedding-models-and-memory-gates-20261010.json).
+
 The matched ordinary original-model HTTP selection now passes all10 nodes
 on private source `e8b2dd63`, zero failures/skips/OOM. Real old-source observer
 confirmed constructor cancellation closed the model read while HTTP still
