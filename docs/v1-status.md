@@ -33,16 +33,26 @@ catalog/default fallback and current actor/provider lifetime defects remain
 under repair; legitimate ordinary/builtin/embedding and complete old-memory
 flows remain required. See the [integrated source record](evidence/memory-model-derived-integration-source-20261010.json).
 
-Original-policy source `862fd486` now passed actual SQLite/PostgreSQL authoring:
-two parents and 20 nodes, no failures or skips. Its six-parent component run
-passed 48 of 58 nodes. Eight legal queue leaves completed Handle, one model
-call, item/checkpoint commit and policy-proof checks before their test-created
-ACK payload omitted the original language field; both queue parents failed.
-The repair consumes the actual emitted task payload and strengthens rollback
-cancellation assertions without changing production checks or expectations.
-It awaits a fresh rerun. Body lease/availability groups passed; failed runtime
-volumes and raw evidence are retained. See the
-[policy SQL partial record](evidence/memory-policy-SQL-partial-20261010.json).
+Original-policy source `f9375193` now passed the complete six-parent SQLite/
+PostgreSQL component selection: all 58 nodes (52 leaves), zero failures or
+skips, in 151.950 seconds. Every node ran and passed once. A separate two-parent
+authoring stage passed 20 nodes in 47.711 seconds; those nodes are included in
+the full 58 and are not added to its count. The earlier ACK fixture repair now
+uses the actual emitted queue payload, and both database rollback cases verify
+that the hook ran, the owned context was canceled and all original state rolled
+back. Production checks and business expectations are unchanged. The complete
+prepare/authoring/component window finished naturally in 204.080 seconds under
+its coordinated 300-second outer cap, retaining the original 20-minute package
+timeout. All eight exact owned runtime identities are absent; earlier failed
+volumes, raw evidence and source are retained. This accepts the policy component
+slice; old full legal memory, model/derived workflows, full migrations, real
+broker and restore remain pending. See the
+[policy SQL pass record](evidence/memory-policy-SQL-pass-20261010.json).
+
+The preceding `862fd486` run remains recorded as 48/58 because its test-created
+ACK payload omitted Language after successful Handle/model/item/checkpoint
+checks. Its failed volumes and raw evidence remain retained. See the
+[historical policy SQL partial record](evidence/memory-policy-SQL-partial-20261010.json).
 
 Integrated original-policy source `862fd486` now compiled all five selected
 packages successfully in 115.442 seconds, with no OOM or compiler errors.
