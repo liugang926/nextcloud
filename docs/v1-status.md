@@ -38,11 +38,14 @@ packages compiled; no business tests ran in that compile window. See the
 The50-node original/body/clock regression remains green on the earlier
 production snapshot; see the [latejournal record](evidence/memory-last-journal-50-GREEN-20261011.json).
 
-Both database query original gates now pass all22 nodes. The following
-single-pool/Close concurrency stage runs8 nodes, with6PASS and2FAIL: pipeline
-cancellation closes the still-owned HTTP user-message guard before its current
-check. Vector, Recall and Local stages were not dispatched after that failure.
-See the [query22 and concurrency8 record](evidence/memory-query22-GREEN-concurrency8-failure-20261011.json).
+Both database query original gates now pass all22 nodes. The actual HTTP-owner
+fix also passes all8 single-pool/Close concurrency nodes on `545eebcb`: producer
+cancellation leaves the real consumed message guard alive until final HTTP
+release. See the [query30 record](evidence/memory-query-owner30-GREEN-20261011.json)
+and [reviewable owner proposal](../integration/proposals/weknora-message-HTTP-owner-20261011.json).
+The copied ordinary-model stage plan omitted its expected-node parser key;
+its raw tests passed but that gate is awaiting a fresh corrected-plan rerun.
+Prior query22/concurrency8 failures remain preserved.
 
 The real ParadeDB17/SQLite full migration now passes all34 nodes on `b6b15c59`,
 zero failures/skips/OOM, with all seven exact owned resources independently
