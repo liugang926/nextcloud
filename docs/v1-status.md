@@ -21,6 +21,19 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+The original-memory SQL proposal `fe254893` now passed its native admission
+selection on both SQLite and PostgreSQL: six nodes, zero failures or skips.
+The subsequent 19-parent component run passed 52 of 55 nodes and failed three,
+with no OOM or skip. Whole-result commits, capacity rollback, durable intent
+relay, queued policy rejection, configured single-pool reads and public writer
+concurrency passed. PostgreSQL cross-input cursor comparison and both shared
+Agent fixtures remain under repair; the complete component stage is unaccepted.
+The first attempt exposed a missing permission epoch schema in its fixture;
+adding its empty schema introduced no grants or original facts. Failed runtime
+volumes and private raw evidence are retained. Unit/lifecycle, full legal memory,
+broker and restore gates remain pending. See the
+[memory SQL component record](evidence/memory-native-components-20261010.json).
+
 The private original-memory format checkpoint is `652df78f`, tree `4e523143`,
 with atomic output/capacity receipts, durable recovery, Lite worker shutdown and
 shared permission/public mutation fences integrated. Formatting and parsing
