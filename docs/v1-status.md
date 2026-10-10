@@ -119,8 +119,11 @@ record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json).
 vector20 and RecallSQL16 pass58/58 in171.590s with nine exact resources absent;
 see the [existing58 record](evidence/memory-semantic-existing58-GREEN-20261011.json).
 A source review found missing absent-candidate every-read control checks; its
-narrow child is being compiled. Actualsemantic completion/history and lawful
-different-output vector successor gates remain required. The download/host
+narrow child is being compiled. Real semantic current4 now executes on corrected fixtures, but both database
+HTTP8s preludes fail before savedhistory assertions. The source remains
+unaccepted as full semantic functionality; see the [current4 failure](evidence/memory-semantic-current4-HTTP8s-failure-20261011.json).
+Actualsemantic completion/history and lawful different-output vector successor
+gates remain required. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
 cmd/server package-only terminal; an old parser misclassified that terminal
 and retained its stopped owner. See the [compile parser record](evidence/memory-download-host-compile-parser-failure-20261011.json).
