@@ -4,6 +4,30 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+Final-source policy58 and unit/lifecycle22 nodes now also pass, zero failures/
+skips/OOM. Their independent two-stage window took182.309 seconds, with all
+eight exact resources confirmed absent and original package20m retained. This
+adds those current-source gates alongside model-author58; ordinary, native and
+derived failures below remain unaccepted and under repair.
+
+Remaining regressions on `e90ba8b6` expose gaps beyond the previous selected
+passes. Model authoring/memory/body passes all58 nodes, including genuine model
+producers and both databases. Ordinary HTTP passes4/10: all legal current/
+done_open cases fail at final material checks despite actual provider call/join.
+Source analysis identifies premature model cancellation at lineage completion;
+a cancellation-preserving owner-lifetime repair and exact diagnostic
+are prepared but unexecuted. Derived passes0/26: productive B cases stop at
+the real five-minute subject cadence instead of the fixture7s relay bound;
+partial Handle has an independent record-not-found failure. Native passes34/55
+and is unaccepted; topic effects, policy-origin setup and proof hash oracles
+need source-backed repairs. Failed owners are stopped and their raw/volumes/
+networks retained. See the [remaining regression evidence](evidence/memory-final-remaining-regressions-20261010.json).
+
+The embedding implementation now has an isolated genuine remote model recipe
+and held client source draft. Exact input/result/vector receipts and service
+backfill are being implemented separately; no format/compile/HTTP or functional
+embedding acceptance is claimed yet.
+
 Source-identical test child `e90ba8b6` now passes all32 additional nodes: all12
 current-bound original workflows per SQLite/PostgreSQL (26 nodes), and exact
 two-cluster prompts plus later-cluster whole-transaction rollback (six nodes).
