@@ -21,6 +21,17 @@ CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
 normal application, restore and V1 acceptance remain pending for the current
 proposals. The earlier storage preflight is retained as history below.
 
+Repaired private source `a35ab0c3` passed all 16 selected unit/lifecycle parents
+and 22 test nodes across three packages, without failures or skips. Its SQLite/
+PostgreSQL component run passed 53 of 55 nodes; the PostgreSQL cross-input
+checkpoint path now passed. Both shared-Agent cases still stopped at fixture
+message hydration because the transaction authority lacks its Agent share
+service, before memory scheduling/model execution. Full native acceptance
+remains pending; failed runtime volumes are retained. Policy source `2a847047`
+also passed formatting/parsing on 19 changed Go files, without compilation or
+business execution. See the
+[repaired component and unit record](evidence/memory-repaired-components-and-units-20261010.json).
+
 A separate original-policy proposal is integrated as private source `71a1911b`.
 It adds authorized full-policy authoring, immutable origin/body receipts,
 retained version controls, real successor binding and owned policy body leases.
