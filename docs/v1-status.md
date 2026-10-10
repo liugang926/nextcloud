@@ -102,7 +102,11 @@ Focused PG/current
 profiling retains the original8s failure and records64,207 Recall-boundary and
 34,937 message-guard-boundary SQL callbacks; observer stack scanning adds CPU
 cost, so this is diagnostic evidence rather than an uninstrumented benchmark.
-See the [PG profile](evidence/memory-PG-Recall-current-profile-failure-20261011.json). See the [SQLite history
+See the [PG profile](evidence/memory-PG-Recall-current-profile-failure-20261011.json). A new counter-only diagnostic (no stack scans)
+records114,437 callbacks with fewer head/payload/journal queries, while the
+original8s test still fails. Instrumentation differs, so this is observed query
+reduction rather than a paired walltime benchmark; see the [counter-only
+record](evidence/memory-PG-counteronly-scope-profile-failure-20261011.json). See the [SQLite history
 record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion dependencies remain underway. The download/host
 combination parses265 Go files and compiles12 test-bearing packages plus the
 cmd/server package-only terminal; an old parser misclassified that terminal
