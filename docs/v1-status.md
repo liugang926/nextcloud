@@ -4,6 +4,48 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-10
 
+The [reviewable original-memory proposal](../integration/proposals/weknora-original-memory-20261010.json)
+now contains the exact source patch from RAG `1bbd0cc8` to `54ce8e73`; its
+SHA/tree round-trip is verified. It is kept separate from the adopted candidate
+manifest. Source-identical test children now exercise all12 current-bound
+original workflows and two-cluster prompt/rollback boundaries; these new gates
+are running and do not yet expand the passing scope. The [remaining functional
+contracts](evidence/memory-functional-remaining-contracts-20261010.json) identify
+embedding/backfill/recall and model variants that still need genuine original
+inputs/results and complete lifetimes.
+
+Final private source `54ce8e73` now passes201 test/subtest nodes across12
+serial component stages, zero failures/skips/OOM, with all182 mandatory
+parent/leaf pairs observed RUN/PASS. The combined window took511.151 seconds
+under a fixed20-minute dual clock bound; original package20m/HTTP8s/race3s
+bounds remain. Current-policy rollback, productive consolidation, stale
+maintenance, SDK/caller/worker/topic/actual OTLP span privacy, production SQL
+bound-variable logging, and the earlier82 model/DAO nodes all pass together.
+All18 exact successful identities are independently absent. The complete Go
+package selection compiled156 packages:116 test-bearing PASS and40 package-only
+SKIP with actual no-test-files output; no business tests ran or skipped. The
+first wrapper miscounted no-test packages despite actual Go Exit0; its stopped
+actor/temp/raw are preserved. A corrected rerun passed in16.124 seconds and
+removed its two exact resources. Eight specified failed SQL owners remain
+stopped with24 volumes and eight networks. See the [final component
+record](evidence/memory-final-integrated-components-20261010.json).
+
+This accepts those selected components. RootTrace/direct Generation/opaque
+metadata, SQL literals/error bodies/independent handles, complete original
+workflows, multiple clusters/final ancestor TTL, model embedding variants,
+full migrations/broker/normal application/restore and V1 remain open.
+
+The byte-identical strict policy diagnostic now passes all26 stale-maintenance
+nodes on final private source `54ce8e73`, zero failures/skips/OOM. Both databases
+still prove real policy2→3 replacement and model1, but the old call is rejected
+with zero publication/receipt increments and importance5 unchanged. The14-line
+production check locks tenant before actor/control and compares actual current
+policy revision/proof in the same transaction. Legal maintenance/no-candidate/
+model-decline/merge and original rollback assertions pass. Final source parsing
+covered168 Go files;167 formatted outputs were applied while preserving the
+one matched diagnostic byte-for-byte, and10 selected packages compiled.
+The broader combined window passed as recorded above. See the [matched current-policy GREEN](evidence/memory-generated-policy-successor-GREEN-20261010.json).
+
 A stricter test-only stale diagnostic on `e27ef96b` confirms an actual
 generated-policy commit defect on both databases: real current policy proof
 changed from revision2 to3 during model1; the old call still published one
