@@ -105,7 +105,10 @@ shared model final-binding repair is frozen; its first compile fails only on an
 unused new test variable, with production repository compiled. The test-only
 correction now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
-Existing broad model/clock regressions and matched old-source RED remain pending.
+Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
+pass68/68 together on the same4b53 source in208.040s, with eight exact resources
+absent. See the [existing68 record](evidence/memory-model-finalbinding-existing68-GREEN-20261011.json).
+Remaining ancestor worker clocks and matched old-source RED remain pending.
 See the [final-binding38 record](evidence/memory-model-finalbinding38-GREEN-20261011.json). See the
 [compile failure](evidence/memory-model-finalbinding-compile-failure-20261011.json). Tenant-cloud
 credentials, complete history, application/broker/recovery and PRD performance
