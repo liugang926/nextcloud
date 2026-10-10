@@ -179,7 +179,12 @@ those cross-crash gates remain required. A combined policy/vector/crash-helper s
 compiles12 test packages plus cmd/server, with zero business RUN. Independent
 review found a policy final-payload ordering gap and a crash-fixture expiry
 boundary race; both are being repaired before runtime acceptance. See the
-[compile-only record](evidence/memory-policy-vector-crash-helper-compile-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
+[compile-only record](evidence/memory-policy-vector-crash-helper-compile-20261011.json). The repaired f5d source also compiles302 files and passes policy12 plus
+vector final-union/lifecycle14 in one selected30 window. Its four original
+semantic-current nodes still fail HTTP8s before saved-history assertions. The
+final inline-byte/state and actual pool/Close checks are accepted only within
+those26 correctness nodes; the performance gate remains unaccepted. See the
+[26-pass/4-failure record](evidence/memory-policy12-vector14-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
 failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
 failures/skips/OOM; all seven exact owned resources are independently absent.
 Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
