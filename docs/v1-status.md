@@ -433,6 +433,14 @@ True old-producer facts across new-reader/credential updates and embedding
 RawSettings/SpaceDigest compatibility remain separately required. See the
 [compile-only record](evidence/joint-chat-JSONB-regression-fixtures-full-compile-GREEN-20261011.json).
 
+The subsequent `1f7d6c87` candidate includes the reviewed prewrite preservation
+fix and compiles452 changed Go files/all157 packages in211.398s, with0 business
+RUN/OOM and exact compiler/temp absence. Its actual17 gate is being dispatched:
+new bounded Settings tests, genuine PG creation/representation/meaning change,
+the unchanged producer diagnostic and nonempty upgrade/revocation6. True
+old-producer/new-reader compatibility remains a separate required two-process
+gate. See the [compile record](evidence/joint-chat-JSONB-legacy-preserve-full-compile-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
