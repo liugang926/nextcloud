@@ -3753,3 +3753,20 @@ The verified component uses WebAdmin, linked GUID and GraphRequired=false
 through explicit private producers. True JWT/middleware personal QA and the
 source-only nonmember current/historical/answer model namespace matrix remain
 under development, together with normal startup/registry and sourced history.
+
+
+## 2026-10-12 normal original-query startup dependency audit
+
+Current source witnesses enumerate exactly9 joint modules per dialect. The
+canonical source verifier rejects additional module files without their exact
+path/version/SHA witness. PendingSQLite90/91/93 andPG172 remain outside that
+canonical inventory; the read-only Ready checks qualify existing selected routes.
+Static and dynamic SQLite factories both still use the legacy adapter. Moving
+the pending files or changing the registry alone cannot qualify normal original
+query/epoch startup. See the [source dependency audit](evidence/normal-original-query-startup-pending90-91-93-SOURCE-dependency-audit-20261012.json).
+
+The next startup integration requires genuine route/source/catalogue/body
+wrapper and actual-pool Ready qualification, including fresh/prefix upgrades,
+partial/dirty/tampered histories and DOWN/restart. Existing canonical and peer
+SQL bytes must remain intact. This audit runs noSQL/business test and enables
+no registry, Ready or deployment capability.
