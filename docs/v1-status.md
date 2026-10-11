@@ -4,6 +4,21 @@ This repository implements a local development slice of the [PRD](development-pl
 
 ## Current checkpoint — 2026-10-11
 
+Latest verified work on the integrated development candidate is summarized here;
+older component snapshots below retain their separate scope and failure history.
+
+| Work item | Latest actual result | Remaining work |
+| --- | --- | --- |
+| Startup/schema qualification | `3707fce5`: full157-package compile; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup and PeerApplied forward route |
+| Original-memory source path | `ab3b1193`: PG/current leaf passes; complete6 has1PASS/5FAIL | SQLite ordinary HTTP and post-SDK same-transaction publication refusal |
+| Directory authorization | `3707fce5`: snapshot/concurrency23 pass; periodic10 fails real ledger fixture prelude | Merge proven real-store fixture binding and run periodic10 |
+| Pending169 guard repair | `3707fce5`: real Parade17 existing15 pass; new wrapper6 fail libpq/GORM fixture driver prelude | Exact real-driver fixture repair, whole21 and historical upgrade/restart |
+| Historical PeerApplied forward upgrade | Frozen exact SQL assets; private readonly161/80 observer source in review | Actual nonempty prefix tests, allpartialprefixes,169→171/88→89, final startup routing |
+
+The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
+AD pilot, model/capacity measurements, coordinated restore and physical GC are
+still open; component passes are not a full release acceptance.
+
 Ordinary original-model HTTP now passes10 selected nodes after fixing the
 constructor-to-HTTP owner lifetime. Four remote embedding protocols pass80
 SQL/HTTP nodes; a production-identical manual-fixture child passes24 memory
