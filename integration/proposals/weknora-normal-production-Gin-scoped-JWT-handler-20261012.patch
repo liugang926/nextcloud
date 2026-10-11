@@ -1,286 +1,601 @@
 diff --git a/internal/application/service/normal_original_public_handler_fixture_bridge_test.go b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
 new file mode 100644
-index 000000000..49f2c3d8b
+index 000000000..c3a441f39
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,263 @@
 +package service
 +
 +import (
-+ "context"
-+ "errors"
-+ "sync"
-+ "testing"
-+ "time"
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
 +
-+ "github.com/Tencent/WeKnora/internal/application/access"
-+ "github.com/Tencent/WeKnora/internal/application/repository"
-+ chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
-+ "github.com/Tencent/WeKnora/internal/application/service/retriever"
-+ "github.com/Tencent/WeKnora/internal/config"
-+ "github.com/Tencent/WeKnora/internal/event"
-+ "github.com/Tencent/WeKnora/internal/models/chat"
-+ "github.com/Tencent/WeKnora/internal/types"
-+ "github.com/Tencent/WeKnora/internal/types/interfaces"
-+ "github.com/stretchr/testify/require"
-+ "gorm.io/gorm"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
 +)
 +
 +// Test-only actual composition for the real public Handler/Auth tests. This
 +// exports real services, no Caller/Principal/material slot/query/model cap.
 +type NormalOriginalPublicHandlerFixtureForTest struct {
-+ Source *ScopedKnowledgePurposeFixtureForTest
-+ DB *gorm.DB
-+ Config *config.Config
-+ Sessions interfaces.SessionService
-+ Messages interfaces.MessageService
-+ KBs interfaces.KnowledgeBaseService
-+ Models interfaces.ModelService
-+ Tenants interfaces.TenantService
-+ Users interfaces.UserService
-+ Members interfaces.TenantMemberService
-+ Groups interfaces.GroupAccessService
-+ ProducerStarted,ProducerDone,CompletionDone <-chan struct{}
-+ CompletionResult <-chan error
-+ QueryText,AnswerID,KBID string
-+ SDKCalls func()int64
-+ Error func()error
-+ SetQueryHook func(func()error)
-+ ActualTurn func()(string,string,string,bool)
-+ NativeObserved func()bool
++	Source                                        *ScopedKnowledgePurposeFixtureForTest
++	DB                                            *gorm.DB
++	Config                                        *config.Config
++	Sessions                                      interfaces.SessionService
++	Messages                                      interfaces.MessageService
++	KBs                                           interfaces.KnowledgeBaseService
++	Models                                        interfaces.ModelService
++	Tenants                                       interfaces.TenantService
++	Users                                         interfaces.UserService
++	Members                                       interfaces.TenantMemberService
++	Groups                                        interfaces.GroupAccessService
++	ProducerStarted, ProducerDone, CompletionDone <-chan struct{}
++	CompletionResult                              <-chan error
++	QueryText, AnswerID, KBID                     string
++	SDKCalls                                      func() int64
++	Error                                         func() error
++	SetQueryHook                                  func(func() error)
++	ActualTurn                                    func() (string, string, string, bool)
++	NativeObserved                                func() bool
 +}
 +
 +type normalPublicHandlerObservations struct {
-+ mu sync.Mutex
-+ ctx context.Context
-+ session,assistant,request string
-+ nativeObserved bool
-+ errors error
-+ started,done,completed chan struct{}
-+ result chan error
-+ beginOnce,endOnce,completeOnce sync.Once
-+}
-+func (o *normalPublicHandlerObservations) fail(err error){o.mu.Lock();o.errors=errors.Join(o.errors,err);o.mu.Unlock()}
-+func (o *normalPublicHandlerObservations) snapshot()context.Context{o.mu.Lock();defer o.mu.Unlock();return o.ctx}
-+func (o *normalPublicHandlerObservations) error()error{o.mu.Lock();defer o.mu.Unlock();return o.errors}
-+
-+func NewNormalOriginalPublicHandlerFixtureForTest(t *testing.T,endpoint string)*NormalOriginalPublicHandlerFixtureForTest{
-+ t.Helper()
-+ f:=NewScopedKnowledgePurposeFixtureForTest(t)
-+ answer:=*f.Answer;answer.Parameters.BaseURL=endpoint;answer.Parameters.OriginalChat=nil
-+ require.NoError(t,f.Models.UpdateModel(f.Creator,&answer));require.NotNil(t,answer.OriginalProof)
-+ var kb types.KnowledgeBase;require.NoError(t,f.DB.Where("id=? AND tenant_id=?",f.KB,7).Take(&kb).Error)
-+ require.Equal(t,answer.ID,kb.SummaryModelID);require.False(t,kb.IndexingStrategy.GraphRequired);require.False(t,kb.IndexingStrategy.GraphEnabled)
-+ registry:=retriever.NewRetrieveEngineRegistry(nil,nil)
-+ require.NoError(t,registry.Register(retriever.NewKVHybridRetrieveEngine(f.index,types.SQLiteRetrieverEngineType)))
-+ knowRepo:=repository.NewKnowledgeRepository(f.DB);repository.ConfigureKnowledgeCurrentReadActor(knowRepo,f.Store)
-+ chunkRepo:=repository.NewChunkRepository(f.DB)
-+ publication:=access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(f.DB),repository.NewDataSourceRepository(f.DB));publication.ConfigureSourcePathResolver(repository.NewNextcloudOnboardingStore(f.DB))
-+ guard,ok:=f.messages.sourceLineageGuard.(*access.NextcloudSourceLineageGuard);require.True(t,ok)
-+ kbs:=&knowledgeBaseService{repo:repository.NewKnowledgeBaseRepository(f.DB),kgRepo:knowRepo,chunkRepo:chunkRepo,modelService:f.Models,retrieveEngine:registry,tenantRepo:repository.NewTenantRepository(f.DB),contentLeases:f.Store.ContentLeaseStore(),groupAccess:f.Groups,publicationGuard:publication}
-+ ConfigureKnowledgeBaseRAGChunkHydration(kbs,repository.NewRAGChunkSnapshotReader(f.DB,f.Store),guard)
-+ require.NoError(t,ConfigureKnowledgeBaseOriginalQueries(kbs,f.Store,f.ModelRepository))
-+ var tenant types.Tenant;require.NoError(t,f.DB.Where("id=?",7).Take(&tenant).Error)
-+ composite,err:=retriever.CreateRetrieveEngineForKB(context.WithValue(f.Creator,types.TenantInfoContextKey,&tenant),registry,nil,7,kb.VectorStoreID);require.NoError(t,err)
-+ require.NoError(t,ConfigureKnowledgeBaseOriginalQueryEngine(kbs,composite))
-+ cfg:=&config.Config{Conversation:&config.ConversationConfig{MaxRounds:0,EmbeddingTopK:1,RerankTopK:1,EnableRewrite:false,EnableQueryExpansion:false,FallbackStrategy:"fixed",FallbackResponse:"CURRENT FIXED SAFE FALLBACK",Summary:&config.SummaryConfig{Prompt:"Answer using the admitted original source",ContextTemplate:"{{query}}\n{{contexts}}"}}}
-+ chunks:=NewChunkService(chunkRepo,knowRepo,kbs.repo,f.Models,registry,nil,nil,nil)
-+ tenants:=NewTenantService(repository.NewTenantRepository(f.DB),repository.NewStorageBackendRepository(f.DB))
-+ userRepo:=repository.NewUserRepository(f.DB);tokenRepo:=repository.NewAuthTokenRepository(f.DB)
-+ members:=NewTenantMemberService(repository.NewTenantMemberRepository(f.DB),nil,userRepo,tokenRepo)
-+ users:=NewUserService(cfg,userRepo,tokenRepo,tenants,members,nil,repository.NewDirectoryRepository(f.DB),f.Groups)
-+ knowledge:=&knowledgeService{config:cfg,repo:knowRepo,kbService:kbs,tenantRepo:repository.NewTenantRepository(f.DB),tenantService:tenants,chunkService:chunks,chunkRepo:chunkRepo,modelService:f.Models,retrieveEngine:registry,groupAccess:f.Groups,publicationGuard:publication,contentLeases:f.Store.ContentLeaseStore(),knowledgeInputs:f.Store}
-+ messages:=f.messages;messages.kbService=kbs;messages.knowService=knowledge;messages.modelService=f.Models
-+ manager:=chatpipeline.NewEventManager()
-+ sessions:=&sessionService{cfg:cfg,sessionRepo:repository.NewSessionRepository(f.DB),messageRepo:repository.NewMessageRepository(f.DB),knowledgeBaseService:kbs,knowledgeService:knowledge,chunkService:chunks,modelService:f.Models,tenantService:tenants,eventManager:manager,busyGate:NewSessionBusyGate(),groupAccess:f.Groups}
-+ ConfigureMessageSourceLineage(messages,sessions,&SessionForkService{},manager,guard)
-+ chatpipeline.NewPluginLoadHistory(manager,messages,cfg);chatpipeline.NewPluginMemoryRecall(manager,nil)
-+ chatpipeline.NewPluginQueryUnderstand(manager,f.Models,messages,nil,cfg)
-+ chatpipeline.NewPluginSearchParallel(manager,kbs,knowledge,chunks,cfg,nil,tenants,sessions,nil,nil,nil,chunkRepo,knowRepo)
-+ chatpipeline.NewPluginRerank(manager,f.Models);chatpipeline.NewPluginMerge(manager,chunkRepo,chunks);chatpipeline.ConfigureRAGChunkMergeHydration(manager,kbs)
-+ chatpipeline.NewPluginFilterTopK(manager);chatpipeline.NewPluginIntoChatMessage(manager,messages,knowledge)
-+ obs:=&normalPublicHandlerObservations{started:make(chan struct{}),done:make(chan struct{}),completed:make(chan struct{}),result:make(chan error,1)}
-+ models:=normalPublicHandlerModelsObserver{ModelService:f.Models,observations:obs,kb:f.KB,model:f.Embedding.ID,answer:answer.ID}
-+ chatpipeline.NewPluginChatCompletionStream(manager,models)
-+ observedSessions:=normalPublicHandlerSessionsObserver{SessionService:sessions,observations:obs}
-+ observedMessages:=&normalPublicHandlerMessagesObserver{messageService:messages,observations:obs,groups:f.Groups,kb:f.KB,model:f.Embedding.ID}
-+ return &NormalOriginalPublicHandlerFixtureForTest{Source:f,DB:f.DB,Config:cfg,Sessions:observedSessions,Messages:observedMessages,KBs:kbs,Models:models,Tenants:tenants,Users:users,Members:members,Groups:f.Groups,ProducerStarted:obs.started,ProducerDone:obs.done,CompletionDone:obs.completed,CompletionResult:obs.result,QueryText:personalQueryText,AnswerID:answer.ID,KBID:f.KB,SDKCalls:f.SDKCalls,Error:obs.error,SetQueryHook:f.SetQueryHook,ActualTurn:func()(string,string,string,bool){obs.mu.Lock();defer obs.mu.Unlock();return obs.session,obs.assistant,obs.request,obs.session!=""&&obs.assistant!=""&&obs.request!=""},NativeObserved:func()bool{obs.mu.Lock();defer obs.mu.Unlock();return obs.nativeObserved}}
++	mu                               sync.Mutex
++	ctx                              context.Context
++	session, assistant, request      string
++	nativeObserved                   bool
++	errors                           error
++	started, done, completed         chan struct{}
++	result                           chan error
++	beginOnce, endOnce, completeOnce sync.Once
 +}
 +
-+type normalPublicHandlerSessionsObserver struct{interfaces.SessionService;observations *normalPublicHandlerObservations}
-+func (s normalPublicHandlerSessionsObserver) KnowledgeQA(ctx context.Context,req *types.QARequest,bus *event.EventBus)(err error){
-+ // Actual handler already created and attached its owned HTTP material slot.
-+ s.observations.mu.Lock();s.observations.ctx=ctx;s.observations.session=req.Session.ID;s.observations.assistant=req.AssistantMessageID;s.observations.request=req.UserMessageID;s.observations.mu.Unlock()
-+ s.observations.beginOnce.Do(func(){close(s.observations.started)})
-+ defer s.observations.endOnce.Do(func(){close(s.observations.done)})
-+ err=s.SessionService.KnowledgeQA(ctx,req,bus)
-+ if err!=nil{
-+  if observed:=normalPublicHandlerActualNativeObserved(ctx);observed{s.observations.mu.Lock();s.observations.nativeObserved=true;s.observations.mu.Unlock()}
-+ }
-+ return err
++func (o *normalPublicHandlerObservations) fail(err error) {
++	o.mu.Lock()
++	o.errors = errors.Join(o.errors, err)
++	o.mu.Unlock()
 +}
++func (o *normalPublicHandlerObservations) snapshot() context.Context {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	return o.ctx
++}
++func (o *normalPublicHandlerObservations) error() error {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	return o.errors
++}
++
++func NewNormalOriginalPublicHandlerFixtureForTest(t *testing.T, endpoint string) *NormalOriginalPublicHandlerFixtureForTest {
++	t.Helper()
++	f := NewScopedKnowledgePurposeFixtureForTest(t)
++	answer := *f.Answer
++	answer.Parameters.BaseURL = endpoint
++	answer.Parameters.OriginalChat = nil
++	require.NoError(t, f.Models.UpdateModel(f.Creator, &answer))
++	require.NotNil(t, answer.OriginalProof)
++	var kb types.KnowledgeBase
++	require.NoError(t, f.DB.Where("id=? AND tenant_id=?", f.KB, 7).Take(&kb).Error)
++	require.Equal(t, answer.ID, kb.SummaryModelID)
++	require.False(t, kb.IndexingStrategy.GraphRequired)
++	require.False(t, kb.IndexingStrategy.GraphEnabled)
++	registry := retriever.NewRetrieveEngineRegistry(nil, nil)
++	require.NoError(t, registry.Register(retriever.NewKVHybridRetrieveEngine(f.index, types.SQLiteRetrieverEngineType)))
++	knowRepo := repository.NewKnowledgeRepository(f.DB)
++	repository.ConfigureKnowledgeCurrentReadActor(knowRepo, f.Store)
++	chunkRepo := repository.NewChunkRepository(f.DB)
++	publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(f.DB), repository.NewDataSourceRepository(f.DB))
++	publication.ConfigureSourcePathResolver(repository.NewNextcloudOnboardingStore(f.DB))
++	guard, ok := f.messages.sourceLineageGuard.(*access.NextcloudSourceLineageGuard)
++	require.True(t, ok)
++	kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(f.DB), kgRepo: knowRepo, chunkRepo: chunkRepo, modelService: f.Models, retrieveEngine: registry, tenantRepo: repository.NewTenantRepository(f.DB), contentLeases: f.Store.ContentLeaseStore(), groupAccess: f.Groups, publicationGuard: publication}
++	ConfigureKnowledgeBaseRAGChunkHydration(kbs, repository.NewRAGChunkSnapshotReader(f.DB, f.Store), guard)
++	require.NoError(t, ConfigureKnowledgeBaseOriginalQueries(kbs, f.Store, f.ModelRepository))
++	var tenant types.Tenant
++	require.NoError(t, f.DB.Where("id=?", 7).Take(&tenant).Error)
++	composite, err := retriever.CreateRetrieveEngineForKB(context.WithValue(f.Creator, types.TenantInfoContextKey, &tenant), registry, nil, 7, kb.VectorStoreID)
++	require.NoError(t, err)
++	require.NoError(t, ConfigureKnowledgeBaseOriginalQueryEngine(kbs, composite))
++	cfg := &config.Config{Conversation: &config.ConversationConfig{MaxRounds: 0, EmbeddingTopK: 1, RerankTopK: 1, EnableRewrite: false, EnableQueryExpansion: false, FallbackStrategy: "fixed", FallbackResponse: "CURRENT FIXED SAFE FALLBACK", Summary: &config.SummaryConfig{Prompt: "Answer using the admitted original source", ContextTemplate: "{{query}}\n{{contexts}}"}}}
++	chunks := NewChunkService(chunkRepo, knowRepo, kbs.repo, f.Models, registry, nil, nil, nil)
++	tenants := NewTenantService(repository.NewTenantRepository(f.DB), repository.NewStorageBackendRepository(f.DB))
++	userRepo := repository.NewUserRepository(f.DB)
++	tokenRepo := repository.NewAuthTokenRepository(f.DB)
++	members := NewTenantMemberService(repository.NewTenantMemberRepository(f.DB), nil, userRepo, tokenRepo)
++	users := NewUserService(cfg, userRepo, tokenRepo, tenants, members, nil, repository.NewDirectoryRepository(f.DB), f.Groups)
++	knowledge := &knowledgeService{config: cfg, repo: knowRepo, kbService: kbs, tenantRepo: repository.NewTenantRepository(f.DB), tenantService: tenants, chunkService: chunks, chunkRepo: chunkRepo, modelService: f.Models, retrieveEngine: registry, groupAccess: f.Groups, publicationGuard: publication, contentLeases: f.Store.ContentLeaseStore(), knowledgeInputs: f.Store}
++	messages := f.messages
++	messages.kbService = kbs
++	messages.knowService = knowledge
++	messages.modelService = f.Models
++	manager := chatpipeline.NewEventManager()
++	sessions := &sessionService{cfg: cfg, sessionRepo: repository.NewSessionRepository(f.DB), messageRepo: repository.NewMessageRepository(f.DB), knowledgeBaseService: kbs, knowledgeService: knowledge, chunkService: chunks, modelService: f.Models, tenantService: tenants, eventManager: manager, busyGate: NewSessionBusyGate(), groupAccess: f.Groups}
++	ConfigureMessageSourceLineage(messages, sessions, &SessionForkService{}, manager, guard)
++	chatpipeline.NewPluginLoadHistory(manager, messages, cfg)
++	chatpipeline.NewPluginMemoryRecall(manager, nil)
++	chatpipeline.NewPluginQueryUnderstand(manager, f.Models, messages, nil, cfg)
++	chatpipeline.NewPluginSearchParallel(manager, kbs, knowledge, chunks, cfg, nil, tenants, sessions, nil, nil, nil, chunkRepo, knowRepo)
++	chatpipeline.NewPluginRerank(manager, f.Models)
++	chatpipeline.NewPluginMerge(manager, chunkRepo, chunks)
++	chatpipeline.ConfigureRAGChunkMergeHydration(manager, kbs)
++	chatpipeline.NewPluginFilterTopK(manager)
++	chatpipeline.NewPluginIntoChatMessage(manager, messages, knowledge)
++	obs := &normalPublicHandlerObservations{started: make(chan struct{}), done: make(chan struct{}), completed: make(chan struct{}), result: make(chan error, 1)}
++	models := normalPublicHandlerModelsObserver{ModelService: f.Models, observations: obs, kb: f.KB, model: f.Embedding.ID, answer: answer.ID}
++	chatpipeline.NewPluginChatCompletionStream(manager, models)
++	observedSessions := normalPublicHandlerSessionsObserver{SessionService: sessions, observations: obs}
++	observedMessages := &normalPublicHandlerMessagesObserver{messageService: messages, observations: obs, groups: f.Groups, kb: f.KB, model: f.Embedding.ID}
++	return &NormalOriginalPublicHandlerFixtureForTest{Source: f, DB: f.DB, Config: cfg, Sessions: observedSessions, Messages: observedMessages, KBs: kbs, Models: models, Tenants: tenants, Users: users, Members: members, Groups: f.Groups, ProducerStarted: obs.started, ProducerDone: obs.done, CompletionDone: obs.completed, CompletionResult: obs.result, QueryText: personalQueryText, AnswerID: answer.ID, KBID: f.KB, SDKCalls: f.SDKCalls, Error: obs.error, SetQueryHook: f.SetQueryHook, ActualTurn: func() (string, string, string, bool) {
++		obs.mu.Lock()
++		defer obs.mu.Unlock()
++		return obs.session, obs.assistant, obs.request, obs.session != "" && obs.assistant != "" && obs.request != ""
++	}, NativeObserved: func() bool { obs.mu.Lock(); defer obs.mu.Unlock(); return obs.nativeObserved }}
++}
++
++type normalPublicHandlerSessionsObserver struct {
++	interfaces.SessionService
++	observations *normalPublicHandlerObservations
++}
++
++func (s normalPublicHandlerSessionsObserver) KnowledgeQA(ctx context.Context, req *types.QARequest, bus *event.EventBus) (err error) {
++	// Actual handler already created and attached its owned HTTP material slot.
++	s.observations.mu.Lock()
++	s.observations.ctx = ctx
++	s.observations.session = req.Session.ID
++	s.observations.assistant = req.AssistantMessageID
++	s.observations.request = req.UserMessageID
++	s.observations.mu.Unlock()
++	s.observations.beginOnce.Do(func() { close(s.observations.started) })
++	defer s.observations.endOnce.Do(func() { close(s.observations.done) })
++	err = s.SessionService.KnowledgeQA(ctx, req, bus)
++	if err != nil {
++		if observed := normalPublicHandlerActualNativeObserved(ctx); observed {
++			s.observations.mu.Lock()
++			s.observations.nativeObserved = true
++			s.observations.mu.Unlock()
++		}
++	}
++	return err
++}
++
 +// The real public handler probes these production optional interfaces before
 +// creating a turn. The observer must not hide them behind SessionService.
-+func (s normalPublicHandlerSessionsObserver) RejectSendIfRewinding(ctx context.Context,session string)error{
-+ actual,ok:=s.SessionService.(*sessionService)
-+ if !ok||actual==nil{return repository.ErrKnowledgeSQLiteEmbeddingUnknown}
-+ return actual.RejectSendIfRewinding(ctx,session)
++func (s normalPublicHandlerSessionsObserver) RejectSendIfRewinding(ctx context.Context, session string) error {
++	actual, ok := s.SessionService.(*sessionService)
++	if !ok || actual == nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return actual.RejectSendIfRewinding(ctx, session)
 +}
-+func (s normalPublicHandlerSessionsObserver) HoldSandboxTurn(ctx context.Context,session,configID string)(func(),error){
-+ actual,ok:=s.SessionService.(*sessionService)
-+ if !ok||actual==nil{return nil,repository.ErrKnowledgeSQLiteEmbeddingUnknown}
-+ return actual.HoldSandboxTurn(ctx,session,configID)
-+}
-+type normalPublicHandlerModelsObserver struct{interfaces.ModelService;observations *normalPublicHandlerObservations;kb,model,answer string}
-+func (m normalPublicHandlerModelsObserver) GetChatModel(ctx context.Context,id string)(chat.Chat,error){
-+ if id!=m.answer{return nil,errors.New("actual public handler answer selector changed")}
-+ if err:=normalEventOriginalContextCheck(ctx,m.observations.snapshot(),m.kb,m.model);err!=nil{m.observations.fail(err);return nil,err}
-+ return m.ModelService.GetChatModel(ctx,id)
-+}
-+type normalPublicHandlerMessagesObserver struct{*messageService;observations *normalPublicHandlerObservations;groups interfaces.GroupAccessService;kb,model string}
-+func (m *normalPublicHandlerMessagesObserver) UpdateMessage(ctx context.Context,message *types.Message)error{
-+ if message.Role=="assistant"&&message.IsCompleted{
-+  if err:=normalEventOriginalContextCheck(ctx,m.observations.snapshot(),m.kb,m.model);err!=nil{m.observations.fail(err);return err}
-+  caller:=types.CallerFromContext(ctx);role,err:=m.groups.EffectiveTenantRole(ctx,caller.UserID,caller.TenantID,time.Now().UTC());if err!=nil{return err}
-+  // Presence is only an observation; the real UpdateMessage below must still
-+  // reauthorize concrete current models/source/inputs/fulllease finalclock.
-+  if role.ScopedOnly&&!repository.ScopedKnowledgeModelPurposePresent(ctx){return errors.New("actual public handler lost scoped answer context")}
-+ }
-+ err:=m.messageService.UpdateMessage(ctx,message)
-+ if message.Role=="assistant"&&message.IsCompleted{m.observations.completeOnce.Do(func(){m.observations.result<-err;close(m.observations.completed)})}
-+ return err
++func (s normalPublicHandlerSessionsObserver) HoldSandboxTurn(ctx context.Context, session, configID string) (func(), error) {
++	actual, ok := s.SessionService.(*sessionService)
++	if !ok || actual == nil {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return actual.HoldSandboxTurn(ctx, session, configID)
 +}
 +
++type normalPublicHandlerModelsObserver struct {
++	interfaces.ModelService
++	observations      *normalPublicHandlerObservations
++	kb, model, answer string
++}
++
++func (m normalPublicHandlerModelsObserver) GetChatModel(ctx context.Context, id string) (chat.Chat, error) {
++	if id != m.answer {
++		return nil, errors.New("actual public handler answer selector changed")
++	}
++	if err := normalEventOriginalContextCheck(ctx, m.observations.snapshot(), m.kb, m.model); err != nil {
++		m.observations.fail(err)
++		return nil, err
++	}
++	return m.ModelService.GetChatModel(ctx, id)
++}
++
++type normalPublicHandlerMessagesObserver struct {
++	*messageService
++	observations *normalPublicHandlerObservations
++	groups       interfaces.GroupAccessService
++	kb, model    string
++}
++
++func (m *normalPublicHandlerMessagesObserver) UpdateMessage(ctx context.Context, message *types.Message) error {
++	if message.Role == "assistant" && message.IsCompleted {
++		if err := normalEventOriginalContextCheck(ctx, m.observations.snapshot(), m.kb, m.model); err != nil {
++			m.observations.fail(err)
++			return err
++		}
++		caller := types.CallerFromContext(ctx)
++		role, err := m.groups.EffectiveTenantRole(ctx, caller.UserID, caller.TenantID, time.Now().UTC())
++		if err != nil {
++			return err
++		}
++		// Presence is only an observation; the real UpdateMessage below must still
++		// reauthorize concrete current models/source/inputs/fulllease finalclock.
++		if role.ScopedOnly && !repository.ScopedKnowledgeModelPurposePresent(ctx) {
++			return errors.New("actual public handler lost scoped answer context")
++		}
++	}
++	err := m.messageService.UpdateMessage(ctx, message)
++	if message.Role == "assistant" && message.IsCompleted {
++		m.observations.completeOnce.Do(func() { m.observations.result <- err; close(m.observations.completed) })
++	}
++	return err
++}
 +
 +// No holder is made here. Only actual resources still owned by the handler's
 +// material slot can establish that native retrieval preceded a refusal.
-+func normalPublicHandlerActualNativeObserved(ctx context.Context)bool{
-+ slot,ok:=ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot);if !ok||slot==nil{return false}
-+ queries:=[]*repository.KnowledgeQueryEmbeddingResultRead{};vectors:=[]*repository.KnowledgeSQLiteEmbeddingVectorRead{}
-+ slot.mu.Lock();for _,resource:=range slot.Models{switch actual:=resource.(type){case *knowledgeQueryBoundaryResource:if actual!=nil&&actual.read!=nil&&actual.retained.Load(){queries=append(queries,actual.read)};case *knowledgeEmbeddingBoundaryResource:if actual!=nil&&actual.read!=nil&&actual.query!=nil{vectors=append(vectors,actual.read)}}};slot.mu.Unlock()
-+ if len(queries)!=1||len(vectors)!=1{return false}
-+ snapshot,err:=queries[0].Snapshot();if err!=nil||snapshot==nil{return false}
-+ _,actual,err:=repository.WithActualKnowledgeCompletionReads(queries[0].Context(),queries,vectors)
-+ return err==nil&&len(actual)==1&&actual[0].QueryReceiptID==snapshot.ReceiptID&&len(actual[0].Candidates)>0&&len(actual[0].Hits)>0&&actual[0].SourceLineage.RequireComplete()==nil&&len(actual[0].SourceLineage.Sources)==1&&vectors[0].Recheck()==nil
++func normalPublicHandlerActualNativeObserved(ctx context.Context) bool {
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return false
++	}
++	queries := []*repository.KnowledgeQueryEmbeddingResultRead{}
++	vectors := []*repository.KnowledgeSQLiteEmbeddingVectorRead{}
++	slot.mu.Lock()
++	for _, resource := range slot.Models {
++		switch actual := resource.(type) {
++		case *knowledgeQueryBoundaryResource:
++			if actual != nil && actual.read != nil && actual.retained.Load() {
++				queries = append(queries, actual.read)
++			}
++		case *knowledgeEmbeddingBoundaryResource:
++			if actual != nil && actual.read != nil && actual.query != nil {
++				vectors = append(vectors, actual.read)
++			}
++		}
++	}
++	slot.mu.Unlock()
++	if len(queries) != 1 || len(vectors) != 1 {
++		return false
++	}
++	snapshot, err := queries[0].Snapshot()
++	if err != nil || snapshot == nil {
++		return false
++	}
++	_, actual, err := repository.WithActualKnowledgeCompletionReads(queries[0].Context(), queries, vectors)
++	return err == nil && len(actual) == 1 && actual[0].QueryReceiptID == snapshot.ReceiptID && len(actual[0].Candidates) > 0 && len(actual[0].Hits) > 0 && actual[0].SourceLineage.RequireComplete() == nil && len(actual[0].SourceLineage.Sources) == 1 && vectors[0].Recheck() == nil
 +}
 diff --git a/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
 new file mode 100644
-index 000000000..d2fa13a55
+index 000000000..dbfb98fad
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,324 @@
 +package service_test
 +
 +import (
-+ "bytes"
-+ "context"
-+ "encoding/json"
-+ "errors"
-+ "fmt"
-+ "io"
-+ "net/http"
-+ "net/http/httptest"
-+ "strings"
-+ "sync"
-+ "sync/atomic"
-+ "testing"
-+ "time"
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
 +
-+ "github.com/Tencent/WeKnora/internal/application/repository"
-+ service "github.com/Tencent/WeKnora/internal/application/service"
-+ sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
-+ "github.com/Tencent/WeKnora/internal/middleware"
-+ "github.com/Tencent/WeKnora/internal/stream"
-+ "github.com/Tencent/WeKnora/internal/types"
-+ "github.com/alicebob/miniredis/v2"
-+ "github.com/gin-gonic/gin"
-+ "github.com/google/uuid"
-+ "github.com/stretchr/testify/require"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	service "github.com/Tencent/WeKnora/internal/application/service"
++	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
++	"github.com/Tencent/WeKnora/internal/middleware"
++	"github.com/Tencent/WeKnora/internal/stream"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
 +)
 +
 +// Real JWT middleware and the production session handler own and save the turn.
 +// No test invokes KnowledgeQAByEvent, creates user/assistant messages, opens a
 +// material boundary or supplies a SourceLineage/query/vector/model capability.
-+func TestNormalOriginalPublicHandlerActualSQLiteJWT(t *testing.T){
-+ for _,mode:=range []string{"configured_summary_public_handler_completion","unrelated_summary_public_handler_denied","A_grant_after_query_SDK_public_handler_denied"}{
-+  t.Run(mode,func(t *testing.T){
-+   var calls atomic.Int64;var mu sync.Mutex;var providerErr error
-+   fail:=func(e error){mu.Lock();providerErr=errors.Join(providerErr,e);mu.Unlock()}
-+   var f *service.NormalOriginalPublicHandlerFixtureForTest
-+   provider:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
-+    calls.Add(1)
-+    var wire struct{Stream bool;Messages []struct{Role,Content string}}
-+    if json.NewDecoder(r.Body).Decode(&wire)!=nil||r.URL.Path!="/chat/completions"||!wire.Stream||r.Header.Get("Authorization")!="Bearer owned-ancestor-embedding"{fail(errors.New("actual public answer SSE wire mismatch"));w.WriteHeader(400);return}
-+    text:="";for _,m:=range wire.Messages{text+=m.Content}
-+    if f==nil||!strings.Contains(text,f.QueryText)||!strings.Contains(text,"Original configuration influence"){fail(errors.New("actual public answer input lost original source"));w.WriteHeader(400);return}
-+    w.Header().Set("Content-Type","text/event-stream")
-+    if _,e:=fmt.Fprint(w,"data: {\"id\":\"actual-public-answer\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Actual normal original event answer.\"},\"finish_reason\":null}]}\n\n");e!=nil{fail(e);return}
-+    if flush,ok:=w.(http.Flusher);ok{flush.Flush()}
-+    if _,e:=fmt.Fprint(w,"data: {\"id\":\"actual-public-answer\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");e!=nil{fail(e)}
-+   }));t.Cleanup(provider.Close)
-+   f=service.NewNormalOriginalPublicHandlerFixtureForTest(t,provider.URL)
-+   baseline:=f.SDKCalls();require.EqualValues(t,1,baseline)
-+   email:="public-handler-"+uuid.NewString()+"@example.test";password:="Owned-public-handler-password-71!"
-+   user,err:=f.Users.Register(context.Background(),&types.RegisterRequest{Username:"actual-public-"+uuid.NewString()[:8],Email:email,Password:password,TenantProvisioning:types.TenantProvisioningTenantless});require.NoError(t,err);require.Zero(t,user.TenantID);require.False(t,user.IsSystemAdmin)
-+   login,err:=f.Users.Login(context.Background(),&types.LoginRequest{Email:email,Password:password});require.NoError(t,err);require.True(t,login.Success)
-+   var directory types.Directory;require.NoError(t,f.DB.Where("id=?",f.Source.Directory).Take(&directory).Error)
-+   guid:="aabbccdd-0011-2233-4455-667788990011";var known int64;require.NoError(t,f.DB.Model(&types.DirectoryIdentity{}).Where("directory_id=? AND object_guid=?",f.Source.Directory,guid).Count(&known).Error);require.Zero(t,known)
-+   dirs:=service.NewDirectoryService(repository.NewDirectoryRepository(f.DB))
-+   _,err=dirs.ApplySnapshot(f.Source.Creator,&types.DirectorySnapshot{DirectoryID:f.Source.Directory,ExpectedConfigVersion:directory.ConfigVersion,Complete:true,PaginationComplete:true,StartedAt:time.Now().UTC(),Identities:[]types.DirectoryIdentitySnapshot{{ObjectGUID:f.Source.CreatorGUID,DN:"cn=actual-creator,ou=People,dc=example,dc=test",SAMAccountName:"actual-creator",UPN:"actual-creator@example.test",Enabled:true},{ObjectGUID:guid,DN:"cn=actual-public-handler,ou=People,dc=example,dc=test",SAMAccountName:"actual-public-handler",UPN:email,Email:email,Enabled:true}}});require.NoError(t,err)
-+   var identity types.DirectoryIdentity;require.NoError(t,f.DB.Where("directory_id=? AND object_guid=? AND status=?",f.Source.Directory,guid,types.DirectoryObjectActive).Take(&identity).Error);require.Nil(t,identity.UserID);require.NoError(t,dirs.LinkIdentity(f.Source.Creator,identity.ID,user.ID))
-+   require.NoError(t,f.Source.Grant(f.Source.Creator,guid,true))
-+   var direct,groups int64;require.NoError(t,f.DB.Model(&types.TenantMember{}).Where("user_id=? AND tenant_id=? AND deleted_at IS NULL",user.ID,7).Count(&direct).Error);require.Zero(t,direct);require.NoError(t,f.DB.Model(&types.TenantGroupRoleGrant{}).Where("tenant_id=?",7).Count(&groups).Error);require.Zero(t,groups)
-+   mini:=miniredis.RunT(t)
-+   redis,err:=stream.NewRedisStreamManager(mini.Addr(),"","",0,"actual-original-public-handler",time.Minute);require.NoError(t,err);t.Cleanup(func(){if e:=redis.Close();e!=nil{t.Error(e)}})
-+   h:=sessionhandler.NewHandler(f.Sessions,f.Messages,nil,redis,f.Config,f.KBs,nil,f.Tenants,nil,nil,nil,nil,nil,f.Models,nil,nil,nil,nil,nil,nil,nil,f.Users,f.Members,nil,nil,nil,nil,nil,nil,nil,nil,f.Groups)
-+   gin.SetMode(gin.TestMode);router:=gin.New();router.Use(middleware.ErrorHandler());router.Use(middleware.Auth(f.Tenants,f.Users,f.Members,nil,f.Config,f.Groups))
-+   var authObserved atomic.Bool
-+   router.Use(func(c *gin.Context){caller:=types.CallerFromContext(c.Request.Context());principal,present:=types.PrincipalFromContext(c.Request.Context());if !present||principal.Type!=types.PrincipalWebUser||principal.ID!=user.ID||caller.UserID!=user.ID||caller.TenantID!=7||caller.Role!=types.TenantRoleViewer{c.AbortWithStatus(http.StatusForbidden);return};role,e:=f.Groups.EffectiveTenantRole(c.Request.Context(),user.ID,7,time.Now().UTC());if e!=nil||!role.ScopedOnly||!role.Member||role.DirectRole!=nil||len(role.GroupMatches)!=0{c.AbortWithStatus(http.StatusForbidden);return};authObserved.Store(true);c.Next()})
-+   router.POST("/api/v1/sessions",h.CreateSession)
-+   router.POST("/api/v1/knowledge-chat/:session_id",h.KnowledgeQA)
-+   router.POST("/api/v1/sessions/:session_id/stop",h.StopSession)
-+   var HTTPreturned chan struct{}=make(chan struct{});var serverOnce sync.Once
-+   server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){if strings.Contains(r.URL.Path,"/knowledge-chat/"){defer serverOnce.Do(func(){close(HTTPreturned)})};router.ServeHTTP(w,r)}))
-+   client:=&http.Client{Timeout:8*time.Second}
-+   post:=func(path string,body any)(*http.Response,error){raw,e:=json.Marshal(body);if e!=nil{return nil,e};request,e:=http.NewRequest(http.MethodPost,server.URL+path,bytes.NewReader(raw));if e!=nil{return nil,e};request.Header.Set("Content-Type","application/json");request.Header.Set("Authorization","Bearer "+login.Token);request.Header.Set("X-Tenant-ID","7");return client.Do(request)}
-+   created,e:=post("/api/v1/sessions",map[string]any{"title":"actual public original question"});require.NoError(t,e);var sessionBody struct{Data types.Session};require.NoError(t,json.NewDecoder(created.Body).Decode(&sessionBody));created.Body.Close();require.Equal(t,http.StatusCreated,created.StatusCode);require.NotEmpty(t,sessionBody.Data.ID);require.Equal(t,user.ID,sessionBody.Data.UserID);require.EqualValues(t,7,sessionBody.Data.TenantID)
-+   var started atomic.Bool
-+   t.Cleanup(func(){
-+    cleanup,done:=context.WithTimeout(context.Background(),3*time.Second);defer done()
-+    if started.Load(){
-+     select{case <-f.ProducerDone:default:
-+      sid,aid,_,known:=f.ActualTurn()
-+      if !known{t.Error("actual public turn selectors missing for authorized StopSession")}else{
-+       body,_:=json.Marshal(map[string]any{"message_id":aid});request,e:=http.NewRequestWithContext(cleanup,http.MethodPost,server.URL+"/api/v1/sessions/"+sid+"/stop",bytes.NewReader(body))
-+       if e!=nil{t.Error(e)}else{request.Header.Set("Content-Type","application/json");request.Header.Set("Authorization","Bearer "+login.Token);request.Header.Set("X-Tenant-ID","7");response,e:=client.Do(request);if e!=nil{t.Error(e)}else{if response.StatusCode!=http.StatusOK{t.Errorf("actual StopSession failed with status %d",response.StatusCode)};if e=response.Body.Close();e!=nil{t.Error(e)}}}
-+      }
-+     }
-+     select{case <-f.ProducerDone:case <-cleanup.Done():t.Error("actual public producer did not join after real StopSession")}
-+     select{case <-HTTPreturned:case <-cleanup.Done():t.Error("actual public HTTP handler did not return after real StopSession")}
-+    }
-+    f.SetQueryHook(nil);client.CloseIdleConnections();server.Close();f.Source.AssertNoLiveLeases(t);if e:=f.Error();e!=nil{t.Error(e)};mu.Lock();e:=providerErr;mu.Unlock();if e!=nil{t.Error(e)}
-+   })
-+   var faultApplied atomic.Bool
-+   if mode=="A_grant_after_query_SDK_public_handler_denied"{f.SetQueryHook(func()error{e:=f.Source.Grant(f.Source.Creator,guid,false);if e==nil{faultApplied.Store(true)};return e})}
-+   answerID:=f.AnswerID;if mode=="unrelated_summary_public_handler_denied"{answerID=f.Source.Unrelated.ID}
-+   started.Store(true)
-+   response,e:=post("/api/v1/knowledge-chat/"+sessionBody.Data.ID,map[string]any{"query":f.QueryText,"knowledge_base_ids":[]string{f.KBID},"summary_model_id":answerID,"disable_title":true});require.NoError(t,e)
-+   raw,e:=io.ReadAll(response.Body);response.Body.Close();require.NoError(t,e);require.Equal(t,http.StatusOK,response.StatusCode);require.True(t,authObserved.Load())
-+   select{case <-f.ProducerDone:case <-time.After(3*time.Second):t.Fatal("actual public KnowledgeQA did not return")}
-+   select{case <-HTTPreturned:case <-time.After(3*time.Second):t.Fatal("actual public handler did not return")}
-+   var actualMessages []*types.Message;require.NoError(t,f.DB.Where("session_id=?",sessionBody.Data.ID).Find(&actualMessages).Error);require.Len(t,actualMessages,2)
-+   var actualUser,assistant *types.Message;for _,m:=range actualMessages{if m.Role=="user"{actualUser=m};if m.Role=="assistant"{assistant=m}};require.NotNil(t,actualUser);require.NotNil(t,assistant);require.Equal(t,f.QueryText,actualUser.Content);require.NotEmpty(t,actualUser.RequestID);require.Equal(t,actualUser.RequestID,assistant.RequestID)
-+   var manifests int64;require.NoError(t,f.DB.Table("message_completion_input_manifests m").Joins("JOIN message_material_admissions a ON a.id=m.assistant_admission_id").Where("a.message_id=? AND a.session_id=?",assistant.ID,sessionBody.Data.ID).Count(&manifests).Error)
-+   if mode=="configured_summary_public_handler_completion"{
-+    select{case <-f.CompletionDone:case <-time.After(3*time.Second):t.Fatal("actual public handler did not save completion")};select{case e:=<-f.CompletionResult:require.NoError(t,e);default:t.Fatal("actual completion result missing")}
-+    require.True(t,assistant.IsCompleted);require.Equal(t,"Actual normal original event answer.",assistant.Content);require.NoError(t,assistant.SourceLineage.RequireComplete());require.Len(t,assistant.SourceLineage.Sources,1);require.Equal(t,f.Source.Knowledge,assistant.SourceLineage.Sources[0].KnowledgeID);require.EqualValues(t,1,manifests);require.EqualValues(t,1,calls.Load());require.Equal(t,baseline+1,f.SDKCalls());require.Contains(t,string(raw),"Actual normal original event answer.");require.NotContains(t,string(raw),"generation_failed")
-+   }else{
-+    require.False(t,assistant.IsCompleted);require.Empty(t,assistant.Content);require.Zero(t,manifests);require.Zero(t,calls.Load());require.Equal(t,baseline+1,f.SDKCalls());if mode=="unrelated_summary_public_handler_denied"{require.True(t,f.NativeObserved(),"actual native consumer must precede Summary selector refusal")};require.NotContains(t,string(raw),"Actual normal original event answer.");require.Contains(t,string(raw),"generation_failed")
-+    if mode=="A_grant_after_query_SDK_public_handler_denied"{require.True(t,faultApplied.Load());var a,b int64;require.NoError(t,f.DB.Model(&types.NextcloudSourceGrant{}).Where("knowledge_base_id=? AND object_guid=?",f.KBID,guid).Count(&a).Error);require.Zero(t,a);require.NoError(t,f.DB.Model(&types.NextcloudSourceGrant{}).Where("knowledge_base_id=? AND object_guid=?",f.Source.SecondGrantedKB,guid).Count(&b).Error);require.EqualValues(t,1,b)}
-+   }
-+   require.NoError(t,f.Error())
-+  })
-+ }
++func TestNormalOriginalPublicHandlerActualSQLiteJWT(t *testing.T) {
++	for _, mode := range []string{"configured_summary_public_handler_completion", "unrelated_summary_public_handler_denied", "A_grant_after_query_SDK_public_handler_denied"} {
++		t.Run(mode, func(t *testing.T) {
++			var calls atomic.Int64
++			var mu sync.Mutex
++			var providerErr error
++			fail := func(e error) { mu.Lock(); providerErr = errors.Join(providerErr, e); mu.Unlock() }
++			var f *service.NormalOriginalPublicHandlerFixtureForTest
++			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				calls.Add(1)
++				var wire struct {
++					Stream   bool
++					Messages []struct{ Role, Content string }
++				}
++				if json.NewDecoder(r.Body).Decode(&wire) != nil || r.URL.Path != "/chat/completions" || !wire.Stream || r.Header.Get("Authorization") != "Bearer owned-ancestor-embedding" {
++					fail(errors.New("actual public answer SSE wire mismatch"))
++					w.WriteHeader(400)
++					return
++				}
++				text := ""
++				for _, m := range wire.Messages {
++					text += m.Content
++				}
++				if f == nil || !strings.Contains(text, f.QueryText) || !strings.Contains(text, "Original configuration influence") {
++					fail(errors.New("actual public answer input lost original source"))
++					w.WriteHeader(400)
++					return
++				}
++				w.Header().Set("Content-Type", "text/event-stream")
++				if _, e := fmt.Fprint(w, "data: {\"id\":\"actual-public-answer\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Actual normal original event answer.\"},\"finish_reason\":null}]}\n\n"); e != nil {
++					fail(e)
++					return
++				}
++				if flush, ok := w.(http.Flusher); ok {
++					flush.Flush()
++				}
++				if _, e := fmt.Fprint(w, "data: {\"id\":\"actual-public-answer\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"); e != nil {
++					fail(e)
++				}
++			}))
++			t.Cleanup(provider.Close)
++			f = service.NewNormalOriginalPublicHandlerFixtureForTest(t, provider.URL)
++			baseline := f.SDKCalls()
++			require.EqualValues(t, 1, baseline)
++			email := "public-handler-" + uuid.NewString() + "@example.test"
++			password := "Owned-public-handler-password-71!"
++			user, err := f.Users.Register(context.Background(), &types.RegisterRequest{Username: "actual-public-" + uuid.NewString()[:8], Email: email, Password: password, TenantProvisioning: types.TenantProvisioningTenantless})
++			require.NoError(t, err)
++			require.Zero(t, user.TenantID)
++			require.False(t, user.IsSystemAdmin)
++			login, err := f.Users.Login(context.Background(), &types.LoginRequest{Email: email, Password: password})
++			require.NoError(t, err)
++			require.True(t, login.Success)
++			var directory types.Directory
++			require.NoError(t, f.DB.Where("id=?", f.Source.Directory).Take(&directory).Error)
++			guid := "aabbccdd-0011-2233-4455-667788990011"
++			var known int64
++			require.NoError(t, f.DB.Model(&types.DirectoryIdentity{}).Where("directory_id=? AND object_guid=?", f.Source.Directory, guid).Count(&known).Error)
++			require.Zero(t, known)
++			dirs := service.NewDirectoryService(repository.NewDirectoryRepository(f.DB))
++			_, err = dirs.ApplySnapshot(f.Source.Creator, &types.DirectorySnapshot{DirectoryID: f.Source.Directory, ExpectedConfigVersion: directory.ConfigVersion, Complete: true, PaginationComplete: true, StartedAt: time.Now().UTC(), Identities: []types.DirectoryIdentitySnapshot{{ObjectGUID: f.Source.CreatorGUID, DN: "cn=actual-creator,ou=People,dc=example,dc=test", SAMAccountName: "actual-creator", UPN: "actual-creator@example.test", Enabled: true}, {ObjectGUID: guid, DN: "cn=actual-public-handler,ou=People,dc=example,dc=test", SAMAccountName: "actual-public-handler", UPN: email, Email: email, Enabled: true}}})
++			require.NoError(t, err)
++			var identity types.DirectoryIdentity
++			require.NoError(t, f.DB.Where("directory_id=? AND object_guid=? AND status=?", f.Source.Directory, guid, types.DirectoryObjectActive).Take(&identity).Error)
++			require.Nil(t, identity.UserID)
++			require.NoError(t, dirs.LinkIdentity(f.Source.Creator, identity.ID, user.ID))
++			require.NoError(t, f.Source.Grant(f.Source.Creator, guid, true))
++			var direct, groups int64
++			require.NoError(t, f.DB.Model(&types.TenantMember{}).Where("user_id=? AND tenant_id=? AND deleted_at IS NULL", user.ID, 7).Count(&direct).Error)
++			require.Zero(t, direct)
++			require.NoError(t, f.DB.Model(&types.TenantGroupRoleGrant{}).Where("tenant_id=?", 7).Count(&groups).Error)
++			require.Zero(t, groups)
++			mini := miniredis.RunT(t)
++			redis, err := stream.NewRedisStreamManager(mini.Addr(), "", "", 0, "actual-original-public-handler", time.Minute)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if e := redis.Close(); e != nil {
++					t.Error(e)
++				}
++			})
++			h := sessionhandler.NewHandler(f.Sessions, f.Messages, nil, redis, f.Config, f.KBs, nil, f.Tenants, nil, nil, nil, nil, nil, f.Models, nil, nil, nil, nil, nil, nil, nil, f.Users, f.Members, nil, nil, nil, nil, nil, nil, nil, nil, f.Groups)
++			gin.SetMode(gin.TestMode)
++			router := gin.New()
++			router.Use(middleware.ErrorHandler())
++			router.Use(middleware.Auth(f.Tenants, f.Users, f.Members, nil, f.Config, f.Groups))
++			var authObserved atomic.Bool
++			router.Use(func(c *gin.Context) {
++				caller := types.CallerFromContext(c.Request.Context())
++				principal, present := types.PrincipalFromContext(c.Request.Context())
++				if !present || principal.Type != types.PrincipalWebUser || principal.ID != user.ID || caller.UserID != user.ID || caller.TenantID != 7 || caller.Role != types.TenantRoleViewer {
++					c.AbortWithStatus(http.StatusForbidden)
++					return
++				}
++				role, e := f.Groups.EffectiveTenantRole(c.Request.Context(), user.ID, 7, time.Now().UTC())
++				if e != nil || !role.ScopedOnly || !role.Member || role.DirectRole != nil || len(role.GroupMatches) != 0 {
++					c.AbortWithStatus(http.StatusForbidden)
++					return
++				}
++				authObserved.Store(true)
++				c.Next()
++			})
++			router.POST("/api/v1/sessions", h.CreateSession)
++			router.POST("/api/v1/knowledge-chat/:session_id", h.KnowledgeQA)
++			router.POST("/api/v1/sessions/:session_id/stop", h.StopSession)
++			var HTTPreturned chan struct{} = make(chan struct{})
++			var serverOnce sync.Once
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if strings.Contains(r.URL.Path, "/knowledge-chat/") {
++					defer serverOnce.Do(func() { close(HTTPreturned) })
++				}
++				router.ServeHTTP(w, r)
++			}))
++			client := &http.Client{Timeout: 8 * time.Second}
++			post := func(path string, body any) (*http.Response, error) {
++				raw, e := json.Marshal(body)
++				if e != nil {
++					return nil, e
++				}
++				request, e := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(raw))
++				if e != nil {
++					return nil, e
++				}
++				request.Header.Set("Content-Type", "application/json")
++				request.Header.Set("Authorization", "Bearer "+login.Token)
++				request.Header.Set("X-Tenant-ID", "7")
++				return client.Do(request)
++			}
++			created, e := post("/api/v1/sessions", map[string]any{"title": "actual public original question"})
++			require.NoError(t, e)
++			var sessionBody struct{ Data types.Session }
++			require.NoError(t, json.NewDecoder(created.Body).Decode(&sessionBody))
++			created.Body.Close()
++			require.Equal(t, http.StatusCreated, created.StatusCode)
++			require.NotEmpty(t, sessionBody.Data.ID)
++			require.Equal(t, user.ID, sessionBody.Data.UserID)
++			require.EqualValues(t, 7, sessionBody.Data.TenantID)
++			var started atomic.Bool
++			t.Cleanup(func() {
++				cleanup, done := context.WithTimeout(context.Background(), 3*time.Second)
++				defer done()
++				if started.Load() {
++					select {
++					case <-f.ProducerDone:
++					default:
++						sid, aid, _, known := f.ActualTurn()
++						if !known {
++							t.Error("actual public turn selectors missing for authorized StopSession")
++						} else {
++							body, _ := json.Marshal(map[string]any{"message_id": aid})
++							request, e := http.NewRequestWithContext(cleanup, http.MethodPost, server.URL+"/api/v1/sessions/"+sid+"/stop", bytes.NewReader(body))
++							if e != nil {
++								t.Error(e)
++							} else {
++								request.Header.Set("Content-Type", "application/json")
++								request.Header.Set("Authorization", "Bearer "+login.Token)
++								request.Header.Set("X-Tenant-ID", "7")
++								response, e := client.Do(request)
++								if e != nil {
++									t.Error(e)
++								} else {
++									if response.StatusCode != http.StatusOK {
++										t.Errorf("actual StopSession failed with status %d", response.StatusCode)
++									}
++									if e = response.Body.Close(); e != nil {
++										t.Error(e)
++									}
++								}
++							}
++						}
++					}
++					select {
++					case <-f.ProducerDone:
++					case <-cleanup.Done():
++						t.Error("actual public producer did not join after real StopSession")
++					}
++					select {
++					case <-HTTPreturned:
++					case <-cleanup.Done():
++						t.Error("actual public HTTP handler did not return after real StopSession")
++					}
++				}
++				f.SetQueryHook(nil)
++				client.CloseIdleConnections()
++				server.Close()
++				f.Source.AssertNoLiveLeases(t)
++				if e := f.Error(); e != nil {
++					t.Error(e)
++				}
++				mu.Lock()
++				e := providerErr
++				mu.Unlock()
++				if e != nil {
++					t.Error(e)
++				}
++			})
++			var faultApplied atomic.Bool
++			if mode == "A_grant_after_query_SDK_public_handler_denied" {
++				f.SetQueryHook(func() error {
++					e := f.Source.Grant(f.Source.Creator, guid, false)
++					if e == nil {
++						faultApplied.Store(true)
++					}
++					return e
++				})
++			}
++			answerID := f.AnswerID
++			if mode == "unrelated_summary_public_handler_denied" {
++				answerID = f.Source.Unrelated.ID
++			}
++			started.Store(true)
++			response, e := post("/api/v1/knowledge-chat/"+sessionBody.Data.ID, map[string]any{"query": f.QueryText, "knowledge_base_ids": []string{f.KBID}, "summary_model_id": answerID, "disable_title": true})
++			require.NoError(t, e)
++			raw, e := io.ReadAll(response.Body)
++			response.Body.Close()
++			require.NoError(t, e)
++			require.Equal(t, http.StatusOK, response.StatusCode)
++			require.True(t, authObserved.Load())
++			select {
++			case <-f.ProducerDone:
++			case <-time.After(3 * time.Second):
++				t.Fatal("actual public KnowledgeQA did not return")
++			}
++			select {
++			case <-HTTPreturned:
++			case <-time.After(3 * time.Second):
++				t.Fatal("actual public handler did not return")
++			}
++			var actualMessages []*types.Message
++			require.NoError(t, f.DB.Where("session_id=?", sessionBody.Data.ID).Find(&actualMessages).Error)
++			require.Len(t, actualMessages, 2)
++			var actualUser, assistant *types.Message
++			for _, m := range actualMessages {
++				if m.Role == "user" {
++					actualUser = m
++				}
++				if m.Role == "assistant" {
++					assistant = m
++				}
++			}
++			require.NotNil(t, actualUser)
++			require.NotNil(t, assistant)
++			require.Equal(t, f.QueryText, actualUser.Content)
++			require.NotEmpty(t, actualUser.RequestID)
++			require.Equal(t, actualUser.RequestID, assistant.RequestID)
++			var manifests int64
++			require.NoError(t, f.DB.Table("message_completion_input_manifests m").Joins("JOIN message_material_admissions a ON a.id=m.assistant_admission_id").Where("a.message_id=? AND a.session_id=?", assistant.ID, sessionBody.Data.ID).Count(&manifests).Error)
++			if mode == "configured_summary_public_handler_completion" {
++				select {
++				case <-f.CompletionDone:
++				case <-time.After(3 * time.Second):
++					t.Fatal("actual public handler did not save completion")
++				}
++				select {
++				case e := <-f.CompletionResult:
++					require.NoError(t, e)
++				default:
++					t.Fatal("actual completion result missing")
++				}
++				require.True(t, assistant.IsCompleted)
++				require.Equal(t, "Actual normal original event answer.", assistant.Content)
++				require.NoError(t, assistant.SourceLineage.RequireComplete())
++				require.Len(t, assistant.SourceLineage.Sources, 1)
++				require.Equal(t, f.Source.Knowledge, assistant.SourceLineage.Sources[0].KnowledgeID)
++				require.EqualValues(t, 1, manifests)
++				require.EqualValues(t, 1, calls.Load())
++				require.Equal(t, baseline+1, f.SDKCalls())
++				require.Contains(t, string(raw), "Actual normal original event answer.")
++				require.NotContains(t, string(raw), "generation_failed")
++			} else {
++				require.False(t, assistant.IsCompleted)
++				require.Empty(t, assistant.Content)
++				require.Zero(t, manifests)
++				require.Zero(t, calls.Load())
++				require.Equal(t, baseline+1, f.SDKCalls())
++				if mode == "unrelated_summary_public_handler_denied" {
++					require.True(t, f.NativeObserved(), "actual native consumer must precede Summary selector refusal")
++				}
++				require.NotContains(t, string(raw), "Actual normal original event answer.")
++				require.Contains(t, string(raw), "generation_failed")
++				if mode == "A_grant_after_query_SDK_public_handler_denied" {
++					require.True(t, faultApplied.Load())
++					var a, b int64
++					require.NoError(t, f.DB.Model(&types.NextcloudSourceGrant{}).Where("knowledge_base_id=? AND object_guid=?", f.KBID, guid).Count(&a).Error)
++					require.Zero(t, a)
++					require.NoError(t, f.DB.Model(&types.NextcloudSourceGrant{}).Where("knowledge_base_id=? AND object_guid=?", f.Source.SecondGrantedKB, guid).Count(&b).Error)
++					require.EqualValues(t, 1, b)
++				}
++			}
++			require.NoError(t, f.Error())
++		})
++	}
 +}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
 index 0865fd80c..49855c0d3 100644
