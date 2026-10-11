@@ -29,6 +29,7 @@ older component snapshots below retain their separate scope and failure history.
 | Explicit no-event current epoch originals | `5eaa2498`:559 files format/full157 compile; SQLite13 + PG4 + existing75 all PASS92/FAIL0/SKIP0;39 runtime and3 compiler resources absent | Explicit component only; normal registry/startup93/172, concurrent availability, whole restore and personal sourced QA remain open |
 | Personal source query and completion | `5ac10a32`:565 files format/full157 compile; actual8 PASS8/FAIL0/SKIP0 and7 runtime+3 compiler resources absent; production/SQL/old92 exact to parent559, whose existing92 regressions pass | Explicit WebAdmin/GraphRequired=false pipeline only; source-only nonmember KB/Agent/model boundary, normal QA/registry, graph-required inputs and sourced history remain open |
 | Source-only nonmember model isolation | Source audit confirms virtual ScopedOnly viewer can reach same-tenant current/historical model reads without exact KB/model purpose; bounded query/vector/answer purpose fix and true JWT matrix under development | Production child/compile/actual permission matrix and normal-entry binding pending; no permission acceptance yet |
+| Actual original-query store access | `1bff7738`:566 files format/all157 packages compile, zero business RUN; actual SQLite→KV→unique vector Composite getter and safe nil ctor verified by source audit;3 compiler resources absent | Normal DI/typed query context propagation and startup qualification remain open; getter grants no caller permission |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -3770,3 +3771,18 @@ wrapper and actual-pool Ready qualification, including fresh/prefix upgrades,
 partial/dirty/tampered histories and DOWN/restart. Existing canonical and peer
 SQL bytes must remain intact. This audit runs noSQL/business test and enables
 no registry, Ready or deployment capability.
+
+
+## 2026-10-12 original-query store access bridge
+
+`1bff7738` exposes the original adapter store through actual SQLite/KV/Composite
+instances after trusted KB/store selection. It retains the configured source
+factory and validates the same three DB pools, allowing legitimate different
+DI instances. Nil/zero/typed-nil dependencies now refuse before unsafe DB calls.
+The unique vector candidate may coexist with keyword-only engines; neither the
+getter nor those engines gain query grants. All566 files format and157 packages
+compile in284.453s, zero business RUN;3 resources are independently absent.
+See the [compile-only record](evidence/normal-original-query-actual-store-bridge-full157-compile-PASS-20261012.json)
+and [source proposal](../integration/proposals/weknora-normal-original-query-actual-store-bridge-20261012.json).
+Normal query context propagation, genuine startup qualification and default
+registry integration remain open.

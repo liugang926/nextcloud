@@ -1,0 +1,137 @@
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_read.go b/internal/application/repository/knowledge_sqlite_embedding_read.go
+index 738c962ed551efdcb350c0c3a975bed4ce5b9b92..1ac2e986cf75712dce9254b40494e4a7cf233737 100644
+--- a/internal/application/repository/knowledge_sqlite_embedding_read.go
++++ b/internal/application/repository/knowledge_sqlite_embedding_read.go
+@@ -28,8 +28,11 @@ type KnowledgeSQLiteEmbeddingStore struct {
+ }
+ 
+ func NewKnowledgeSQLiteEmbeddingStore(db *gorm.DB, material *KnowledgeInputProvenanceStore, models interfaces.ModelRepository) *KnowledgeSQLiteEmbeddingStore {
++	validDB := func(value *gorm.DB) bool {
++		return value != nil && value.Config != nil && value.Statement != nil
++	}
+ 	actual, ok := models.(*modelRepository)
+-	if !ok || material == nil {
++	if !ok || actual == nil || material == nil || !validDB(db) || !validDB(actual.db) || !validDB(material.db) {
+ 		return nil
+ 	}
+ 	pool, e := db.DB()
+diff --git a/internal/application/repository/retriever/sqlite/original_vector_source_configuration.go b/internal/application/repository/retriever/sqlite/original_vector_source_configuration.go
+index a55bcbf9e920901a914496fa8e20424aff1b3a00..d5dc44e3c3db903f2a543b5e6f93cf7309377355 100644
+--- a/internal/application/repository/retriever/sqlite/original_vector_source_configuration.go
++++ b/internal/application/repository/retriever/sqlite/original_vector_source_configuration.go
+@@ -1,6 +1,8 @@
+ package sqlite
+ 
+ import (
++	"context"
++
+ 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ )
+@@ -14,3 +16,27 @@ func ConfigureOriginalSQLiteVectorSourceReads(engine interfaces.RetrieveEngineRe
+ 	}
+ 	return apprepo.ConfigureKnowledgeSQLiteVectorSourceReads(actual.originals, factory)
+ }
++
++// OriginalKnowledgeQueryStore resolves this concrete adapter's existing store.
++// The trusted material/model dependencies must belong to its actual DB pool.
++// This exposes no query result or read grant; Begin still checks the caller,
++// leased message plan, current KB/model and complete original schema.
++func OriginalKnowledgeQueryStore(ctx context.Context, engine interfaces.RetrieveEngineRepository, material *apprepo.KnowledgeInputProvenanceStore, models interfaces.ModelRepository) (*apprepo.KnowledgeSQLiteEmbeddingStore, error) {
++	if ctx == nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	actual, ok := engine.(*sqliteRepository)
++	if !ok || actual == nil || actual.originals == nil || actual.initErr != nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	// The existing constructor validates the concrete dependency identities.
++	// It performs no SQL and creates neither a lease nor an SDK capability.
++	// Return the configured adapter store, preserving its original source factory.
++	if apprepo.NewKnowledgeSQLiteEmbeddingStore(actual.db, material, models) == nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return actual.originals, nil
++}
+diff --git a/internal/application/service/retriever/composite.go b/internal/application/service/retriever/composite.go
+index 0115194d6c1dc5b525bec5c49abc773b0fc4b24f..a698bf82db903557ec1a43ae4f6155854e963061 100644
+--- a/internal/application/service/retriever/composite.go
++++ b/internal/application/service/retriever/composite.go
+@@ -100,6 +100,39 @@ func (c *CompositeRetrieveEngine) SelectedBackendTypes() []types.RetrieverEngine
+ 	return result
+ }
+ 
++// OriginalKnowledgeQueryStore is used after CreateRetrieveEngineForKB has
++// resolved the authorized KB/store binding. It accepts only one actual vector
++// engine and does not turn registry selection into caller authorization.
++func (c *CompositeRetrieveEngine) OriginalKnowledgeQueryStore(ctx context.Context, material *apprepo.KnowledgeInputProvenanceStore, models interfaces.ModelRepository) (*apprepo.KnowledgeSQLiteEmbeddingStore, error) {
++	if ctx == nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if c == nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	var selected *engineInfo
++	for _, info := range c.engineInfos {
++		if info == nil || !slices.Contains(info.retrieverType, types.VectorRetrieverType) {
++			continue
++		}
++		if selected != nil {
++			return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		selected = info
++	}
++	if selected == nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	actual, ok := selected.retrieveEngine.(*KeywordsVectorHybridRetrieveEngineService)
++	if !ok || actual == nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return actual.OriginalKnowledgeQueryStore(ctx, material, models)
++}
++
+ func (c *CompositeRetrieveEngine) PrepareNextcloudStorageSelection(ctx context.Context) error {
+ 	return apprepo.RecordNextcloudDerivedBackendSelection(ctx, c.SelectedBackendTypes())
+ }
+diff --git a/internal/application/service/retriever/keywords_vector_hybrid_indexer.go b/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
+index 608809a752dd8a864689f0afb33d75377ac1d5f7..2d7fa0e1bc80ad8a73845f88a0f995dd0a04821b 100644
+--- a/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
++++ b/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
+@@ -10,6 +10,8 @@ import (
+ 	"time"
+ 	"unicode/utf8"
+ 
++	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
++	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/logprivacy"
+ 	"github.com/Tencent/WeKnora/internal/models/embedding"
+@@ -60,6 +62,21 @@ func (v *KeywordsVectorHybridRetrieveEngineService) EngineType() types.Retriever
+ 	return v.engineType
+ }
+ 
++// OriginalKnowledgeQueryStore resolves only the actual original SQLite adapter.
++// A declared engine type or structural capability cannot substitute its store.
++func (v *KeywordsVectorHybridRetrieveEngineService) OriginalKnowledgeQueryStore(ctx context.Context, material *apprepo.KnowledgeInputProvenanceStore, models interfaces.ModelRepository) (*apprepo.KnowledgeSQLiteEmbeddingStore, error) {
++	if ctx == nil {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if v == nil || v.engineType != types.SQLiteRetrieverEngineType {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return sqliteindex.OriginalKnowledgeQueryStore(ctx, v.indexRepository, material, models)
++}
++
+ // Retrieve performs retrieval based on the provided parameters
+ func (v *KeywordsVectorHybridRetrieveEngineService) Retrieve(ctx context.Context,
+ 	params types.RetrieveParams,
