@@ -815,6 +815,17 @@ See [whole-result/consolidation](evidence/remaining-component-whole-result6-GREE
 [multicluster](evidence/remaining-component-multicluster6-sharedagent-message-read-failure-20261011.json)
 and [finalclock6](evidence/remaining-component-worker-finalclock6-GREEN-20261011.json).
 
+
+Explicitcommon129/48 source_revision evolution now compiles andpasses sourcepure6
+on `d389cc29` in15.440s (8resourcesabsent). In matchedprivateprefix14, all4legal
+nonempty/issuedwrapper observations passcompletecatalogue/digests/core125;
+remaining6failures areline186 Rootpreflight expectedPeerBridge versus actual
+SourceMismatch, whose fixture/canonicalsource cause isunderreview. Missingtrigger
+negative nowactuallyreachesnamedtrigger, mixedRoot/dirty/sourcechanged refuse.
+No privateobservation iswired toReady/access/upgrade. See [compile](evidence/peer-typed-common129-48-evolution-selected-compile-GREEN-20261011.json),
+[observeradvanced/Rootassertion](evidence/peer-common129-48-private-positive-root-source-refusal-assertion-failure-20261011.json)
+and [exactcommonpure6](evidence/peer-typed-common129-48-fullDDL-projection-pure6-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
