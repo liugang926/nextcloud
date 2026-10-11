@@ -1,0 +1,49 @@
+{
+  "classification": "test_only_fulljoint_fixture_unused_import_compile_failure",
+  "head": "26dd1c798ea72900208645b882c354b54962a31a",
+  "tree": "a706219c234dd112c42d8d0e92fb3c04eb2b1117",
+  "compiler": {
+    "command": [
+      "go",
+      "test",
+      "-buildvcs=false",
+      "-tags",
+      "sqlite_fts5",
+      "-p",
+      "1",
+      "-json",
+      "-run",
+      "^$",
+      "./internal/application/service",
+      "./cmd/server"
+    ],
+    "actual_terminal": 1,
+    "attach_terminal": 1,
+    "duration_seconds": 8.531,
+    "counts": {
+      "build-fail": 1,
+      "fail": 1,
+      "skip": 1
+    },
+    "log_sha256": "91173959780fe160aa3ac37a21615ed14784df222d1b7dfb6540b0132afabf6b",
+    "business_tests": 0,
+    "oom": false,
+    "compiler_errors": [
+      "internal/application/service/normal_model_original_http_fixture_test.go:9:2: \"github.com/Tencent/WeKnora/internal/types\" imported and not used"
+    ]
+  },
+  "independent_terminal": {
+    "actor": "1b9618c78fdce014d5a7543dd2773d47e7b4d9ec2f9a2b1c352650185b0bfb91",
+    "terminal": 1,
+    "running": false,
+    "nonce_verified": true,
+    "volume_retained": "nc-memory-compile-dfda9b3c2d2023139eb154cb-tmp",
+    "source_unchanged": true,
+    "raw_SHA256": "91173959780fe160aa3ac37a21615ed14784df222d1b7dfb6540b0132afabf6b",
+    "business_RUN": 0,
+    "error": "unused types import after obsolete partialDDL removal"
+  },
+  "fix": "remove only now unused types import in fresh child; no source or business assertion changes",
+  "accepted": false,
+  "full_V1": false
+}
