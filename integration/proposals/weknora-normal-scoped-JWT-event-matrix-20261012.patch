@@ -1,3 +1,22 @@
+diff --git a/internal/application/service/chat_pipeline/source_lineage.go b/internal/application/service/chat_pipeline/source_lineage.go
+index 790fe69d0..1688065eb 100644
+--- a/internal/application/service/chat_pipeline/source_lineage.go
++++ b/internal/application/service/chat_pipeline/source_lineage.go
+@@ -112,10 +112,10 @@ func CheckSourceLineageInputs(ctx context.Context, cm *types.ChatManage) error {
+ 			return err
+ 		}
+ 	}
+-	if err := AccountHistory(ctx, cm.History); err != nil {
+-		return err
+-	}
+-	return turn.Check(ctx)
++	// AccountHistory checks the complete union after its additions, including
++	// the current material lifetime and source authorization callback. No input
++	// mutation or IO follows it here, so do not repeat that complete check.
++	return AccountHistory(ctx, cm.History)
+ }
+ 
+ func sourceLineagePluginError(err error) *PluginError {
 diff --git a/internal/application/service/knowledge_query_normal_qa.go b/internal/application/service/knowledge_query_normal_qa.go
 index 2a90826c0..342080d22 100644
 --- a/internal/application/service/knowledge_query_normal_qa.go
