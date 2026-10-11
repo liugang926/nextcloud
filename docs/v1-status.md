@@ -373,6 +373,18 @@ is being repaired with trigger integrity checks retained. The full79 gate
 remains unaccepted and business45 has not run. See the [compile record](evidence/joint-restart-representation-repair-full-compile-GREEN-20261011.json)
 and [actual79 failure](evidence/joint-repaired79-PG-GREEN-SQLite-object-kind-failure-20261011.json).
 
+The typed repair `cf4d9887` now parses442 Go files, compiles all157 packages
+in127.099s, and passes the complete actual91-node lineage gate in65.871s.
+Every selected RUN/PASS pair occurs exactly once, with0FAIL/SKIP/OOM and7 exact
+owned resources independently absent. Both databases accept all9 lawful Root/
+joint prefixes and complete restarts while unknown/source/dirty/constraint/
+trigger/index/type faults remain refused. This closes the selected schema
+lineage correctness gate, including all earlier restart failures. It does not
+accept nonempty original preservation, PeerApplied forward route or full app
+behavior. See [actual91](evidence/joint-full-lineage91-GREEN-20261011.json),
+[full compile](evidence/joint-typed-catalogue-full-compile-GREEN-20261011.json) and
+[exact reviewable source](../integration/proposals/weknora-joint-catalogue-restart-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.

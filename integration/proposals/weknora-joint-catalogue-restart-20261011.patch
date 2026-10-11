@@ -1,0 +1,794 @@
+diff --git a/internal/database/migration_joint_catalogue.go b/internal/database/migration_joint_catalogue.go
+index aea2865d..c44a4bb8 100644
+--- a/internal/database/migration_joint_catalogue.go
++++ b/internal/database/migration_joint_catalogue.go
+@@ -830,12 +830,10 @@ func jointExpectedTrigger(definition string) (jointTriggerIdentity, error) {
+ 		return identity, ErrJointSchemaSourceIdentity
+ 	}
+ 	identity.Function = m[1]
+-	when := strings.Index(strings.ToUpper(definition), " WHEN ")
+-	if when < 0 {
+-		when = strings.Index(strings.ToUpper(definition), "\nWHEN ")
+-	}
+-	if when >= 0 {
+-		identity.When = jointCanonicalExpression(definition[when+6 : exec])
++	var whenErr error
++	identity.When, whenErr = jointTriggerWhenExpression(definition)
++	if whenErr != nil {
++		return identity, whenErr
+ 	}
+ 	return identity, nil
+ }
+@@ -884,11 +882,16 @@ func jointVerifyTrigger(ctx context.Context, db *sql.DB, dialect, name, definiti
+ 	}
+ 	var got jointTriggerIdentity
+ 	var columnList sql.NullString
+-	query := `SELECT t.tgname,c.relname,p.proname,p.prosrc,l.lanname,p.prorettype::regtype::text,p.pronargs,p.prosecdef,t.tgtype,t.tgenabled,COALESCE(pg_get_expr(t.tgqual,t.tgrelid),''),array_to_string(ARRAY(SELECT a.attname FROM pg_attribute a WHERE a.attrelid=t.tgrelid AND a.attnum=ANY(t.tgattr::smallint[]) ORDER BY a.attnum),',') FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace f ON f.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname=current_schema() AND f.nspname=current_schema() AND t.tgname=$1 AND c.relname=$2 AND NOT t.tgisinternal`
+-	if db.QueryRowContext(ctx, query, name, want.Table).Scan(&got.Name, &got.Table, &got.Function, &got.Body, &got.Language, &got.ReturnType, &got.Args, &got.Security, &got.Type, &got.Enabled, &got.When, &columnList) != nil {
++	var actualTriggerDefinition string
++	query := `SELECT t.tgname,c.relname,p.proname,p.prosrc,l.lanname,p.prorettype::regtype::text,p.pronargs,p.prosecdef,t.tgtype,t.tgenabled,pg_get_triggerdef(t.oid,false),array_to_string(ARRAY(SELECT a.attname FROM pg_attribute a WHERE a.attrelid=t.tgrelid AND a.attnum=ANY(t.tgattr::smallint[]) ORDER BY a.attnum),',') FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace f ON f.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname=current_schema() AND f.nspname=current_schema() AND t.tgname=$1 AND c.relname=$2 AND NOT t.tgisinternal`
++	if db.QueryRowContext(ctx, query, name, want.Table).Scan(&got.Name, &got.Table, &got.Function, &got.Body, &got.Language, &got.ReturnType, &got.Args, &got.Security, &got.Type, &got.Enabled, &actualTriggerDefinition, &columnList) != nil {
+ 		return ErrJointSchemaUnknown
+ 	}
+-	if got.Name != want.Name || got.Table != want.Table || got.Type != want.Type || got.Enabled != "O" || got.Language != "plpgsql" || got.ReturnType != "trigger" || got.Args != 0 || got.Security || jointCanonicalExpression(got.When) != want.When {
++	got.When, err = jointTriggerWhenExpression(actualTriggerDefinition)
++	if err != nil {
++		return err
++	}
++	if got.Name != want.Name || got.Table != want.Table || got.Type != want.Type || got.Enabled != "O" || got.Language != "plpgsql" || got.ReturnType != "trigger" || got.Args != 0 || got.Security || got.When != want.When {
+ 		return ErrJointSchemaUnknown
+ 	}
+ 	gotCols := []string{}
+@@ -957,6 +960,106 @@ func jointVerifyFunctions(ctx context.Context, db *sql.DB, expected jointCatalog
+ 	}
+ 	return nil
+ }
++
++// pg_get_expr assumes a single relation varno. A trigger WHEN can contain
++// both OLD and NEW; pg_get_triggerdef reconstructs their correct namespaces.
++// The catalogue query separately pins table/function namespaces, event/type,
++// enablement and function identity. This parser never omits the WHEN expression.
++func jointTriggerWhenExpression(definition string) (string, error) {
++	tokens := jointSQLTokens(definition)
++	when := -1
++	for i, token := range tokens {
++		if token == "when" {
++			if when >= 0 {
++				return "", ErrJointSchemaUnknown
++			}
++			when = i
++		}
++	}
++	if when < 0 {
++		return "", nil
++	}
++	if when+1 >= len(tokens) || tokens[when+1] != "(" {
++		return "", ErrJointSchemaUnknown
++	}
++	depth, end := 0, -1
++	for i := when + 1; i < len(tokens); i++ {
++		if tokens[i] == "(" {
++			depth++
++		}
++		if tokens[i] == ")" {
++			depth--
++			if depth == 0 {
++				end = i
++				break
++			}
++		}
++	}
++	if end < 0 || end == when+2 || end+2 >= len(tokens) || tokens[end+1] != "execute" || (tokens[end+2] != "function" && tokens[end+2] != "procedure") {
++		return "", ErrJointSchemaUnknown
++	}
++	return jointCanonicalExpression(strings.Join(tokens[when+2:end], " ")), nil
++}
++
++// PostgreSQL deparses partial predicates with redundant grouping and literal
++// text casts. Normalize only that expression; uniqueness, columns, opclasses,
++// numeric/function casts and every predicate operator remain visible. Explicit
++// default btree is equivalent to the source's omitted default access method.
++func jointCanonicalIndexDefinition(definition, namespace string) (string, error) {
++	tokens := jointSQLTokens(jointCanonicalSQL(strings.TrimSuffix(definition, ";"), namespace))
++	if len(tokens) < 6 || tokens[0] != "create" {
++		return "", ErrJointSchemaUnknown
++	}
++	index := 1
++	if tokens[index] == "unique" {
++		index++
++	}
++	if index+3 >= len(tokens) || tokens[index] != "index" || tokens[index+2] != "on" {
++		return "", ErrJointSchemaUnknown
++	}
++	depth, where := 0, -1
++	for i, token := range tokens {
++		if token == "(" {
++			depth++
++		}
++		if token == ")" {
++			depth--
++			if depth < 0 {
++				return "", ErrJointSchemaUnknown
++			}
++		}
++		if depth == 0 && token == "where" {
++			if where >= 0 {
++				return "", ErrJointSchemaUnknown
++			}
++			where = i
++		}
++	}
++	if depth != 0 {
++		return "", ErrJointSchemaUnknown
++	}
++	prefix := tokens
++	if where >= 0 {
++		prefix = tokens[:where]
++	}
++	core := make([]string, 0, len(prefix))
++	for i := 0; i < len(prefix); i++ {
++		if prefix[i] == "using" && i+1 < len(prefix) && prefix[i+1] == "btree" {
++			i++
++			continue
++		}
++		core = append(core, prefix[i])
++	}
++	value := strings.Join(core, " ")
++	if where >= 0 {
++		if where+1 >= len(tokens) {
++			return "", ErrJointSchemaUnknown
++		}
++		value += " where " + jointCanonicalExpression(strings.Join(tokens[where+1:], " "))
++	}
++	return value, nil
++}
++
+ func jointVerifyIndexes(ctx context.Context, db *sql.DB, dialect string, expected jointCatalogueExpected) error {
+ 	for name, definition := range expected.Indexes {
+ 		var actual string
+@@ -978,14 +1081,43 @@ func jointVerifyIndexes(ctx context.Context, db *sql.DB, dialect string, expecte
+ 		if db.QueryRowContext(ctx, query, name).Scan(&actual, &valid) != nil || !valid {
+ 			return ErrJointSchemaUnknown
+ 		}
+-		canonical := jointCanonicalSQL(actual, namespace)
+-		canonical = strings.ReplaceAll(canonical, " using btree ", " ")
+-		if canonical != jointCanonicalSQL(strings.TrimSuffix(definition, ";"), namespace) {
++		canonical, canonicalErr := jointCanonicalIndexDefinition(actual, namespace)
++		wanted, wantedErr := jointCanonicalIndexDefinition(definition, namespace)
++		if canonicalErr != nil || wantedErr != nil || canonical != wanted {
+ 			return ErrJointSchemaUnknown
+ 		}
+ 	}
+ 	return nil
+ }
++
++// Sentinel names are shared between engines, but their schema object kinds
++// are not. SQLite implements several PG guard functions as same-named triggers.
++// Every actually observed kind of a known sentinel must have that exact kind
++// in this installed prefix. Wrong-kind or future temporary objects still close.
++func jointVerifySentinelObjectKinds(objects map[string]bool, sentinels jointLineageSentinels, expected jointCatalogueExpected) error {
++	names := map[string]bool{}
++	for _, list := range [][]string{sentinels.Tables, sentinels.Functions, sentinels.Triggers, sentinels.Indexes} {
++		for _, name := range list {
++			names[name] = true
++		}
++	}
++	kinds := map[string]map[string]string{
++		"table": expected.Tables, "function": expected.Functions,
++		"trigger": expected.Triggers, "index": expected.Indexes,
++		"relation": nil, "view": nil,
++	}
++	for name := range names {
++		for kind, known := range kinds {
++			if objects[kind+"/"+name] {
++				if _, ok := known[name]; !ok {
++					return ErrJointSchemaUnknown
++				}
++			}
++		}
++	}
++	return nil
++}
++
+ func verifyJointRootCatalogue(ctx context.Context, db *sql.DB, dialect string, version uint) error {
+ 	expected, err := jointExpectedCatalogue(dialect, version)
+ 	if err != nil {
+@@ -999,33 +1131,8 @@ func verifyJointRootCatalogue(ctx context.Context, db *sql.DB, dialect string, v
+ 	if err != nil {
+ 		return err
+ 	}
+-	for _, name := range witness.Sentinels.Tables {
+-		if objects[name] {
+-			if _, ok := expected.Tables[name]; !ok {
+-				return ErrJointSchemaUnknown
+-			}
+-		}
+-	}
+-	for _, name := range witness.Sentinels.Functions {
+-		if objects[name] {
+-			if _, ok := expected.Functions[name]; !ok {
+-				return ErrJointSchemaUnknown
+-			}
+-		}
+-	}
+-	for _, name := range witness.Sentinels.Triggers {
+-		if objects[name] {
+-			if _, ok := expected.Triggers[name]; !ok {
+-				return ErrJointSchemaUnknown
+-			}
+-		}
+-	}
+-	for _, name := range witness.Sentinels.Indexes {
+-		if objects[name] {
+-			if _, ok := expected.Indexes[name]; !ok {
+-				return ErrJointSchemaUnknown
+-			}
+-		}
++	if err = jointVerifySentinelObjectKinds(objects, witness.Sentinels, expected); err != nil {
++		return err
+ 	}
+ 	for table, columns := range witness.Sentinels.Columns {
+ 		for _, name := range columns {
+diff --git a/internal/database/migration_joint_catalogue_restart_diagnostic_test.go b/internal/database/migration_joint_catalogue_restart_diagnostic_test.go
+new file mode 100644
+index 00000000..187de4ea
+--- /dev/null
++++ b/internal/database/migration_joint_catalogue_restart_diagnostic_test.go
+@@ -0,0 +1,222 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"sort"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Diagnostic only: production full Up, then exact existing verifier calls.
++// Output is restricted to compiled object/column names, booleans and fixed
++// error codes. No business row, function body, definition or DSN is logged.
++func jointRestartDiagnosticCode(err error) string {
++	switch {
++	case err == nil:
++		return "ok"
++	case errors.Is(err, ErrJointSchemaUnknown):
++		return "unknown"
++	case errors.Is(err, ErrJointSchemaSourceIdentity):
++		return "source_identity"
++	case errors.Is(err, ErrJointSchemaUnavailable):
++		return "unavailable"
++	case errors.Is(err, ErrJointSchemaPeerForwardBridge):
++		return "peer_bridge"
++	case errors.Is(err, context.Canceled):
++		return "canceled"
++	case errors.Is(err, context.DeadlineExceeded):
++		return "deadline"
++	default:
++		return "other"
++	}
++}
++func jointRestartDiagnosticNames[V any](entries map[string]V) []string {
++	names := make([]string, 0, len(entries))
++	for name := range entries {
++		names = append(names, name)
++	}
++	sort.Strings(names)
++	return names
++}
++func jointRestartDiagnosticTable(t *testing.T, ctx context.Context, db *sql.DB, dialect, name, definition string) {
++	t.Helper()
++	actual, err := jointCatalogueColumns(ctx, db, dialect, name)
++	t.Logf("joint_catalogue stage=table_columns object=%s code=%s", name, jointRestartDiagnosticCode(err))
++	if err != nil {
++		return
++	}
++	parts, err := jointColumnParts(definition)
++	if err != nil {
++		t.Logf("joint_catalogue stage=table_source object=%s code=%s", name, jointRestartDiagnosticCode(err))
++		return
++	}
++	wanted := []jointColumnIdentity{}
++	pk := map[string]bool{}
++	for _, part := range parts {
++		tokens := jointSQLTokens(part)
++		if len(tokens) == 0 {
++			continue
++		}
++		if tokens[0] == "primary" || tokens[0] == "foreign" || tokens[0] == "unique" || tokens[0] == "check" || tokens[0] == "constraint" {
++			if tokens[0] == "primary" {
++				for _, token := range tokens[3 : len(tokens)-1] {
++					if jointIdentifier.MatchString(token) {
++						pk[token] = true
++					}
++				}
++			}
++			continue
++		}
++		column, parseErr := jointColumnDeclaration(part)
++		if parseErr != nil {
++			t.Logf("joint_catalogue stage=column_source object=%s code=%s", name, jointRestartDiagnosticCode(parseErr))
++			continue
++		}
++		for i, token := range tokens {
++			if token == "primary" && i+1 < len(tokens) && tokens[i+1] == "key" {
++				pk[column.Name] = true
++			}
++		}
++		wanted = append(wanted, column)
++	}
++	if dialect == "versioned" {
++		for i := range wanted {
++			if pk[wanted[i].Name] {
++				wanted[i].NotNull = true
++			}
++		}
++	}
++	t.Logf("joint_catalogue stage=column_count object=%s equal=%t", name, len(actual) == len(wanted))
++	byName := map[string]jointColumnIdentity{}
++	for _, column := range actual {
++		byName[column.Name] = column
++	}
++	for position, want := range wanted {
++		got, present := byName[want.Name]
++		ordered := position < len(actual) && actual[position].Name == want.Name
++		t.Logf("joint_catalogue stage=column_identity object=%s column=%s present=%t order=%t type=%t nullability=%t default=%t", name, want.Name, present, ordered, got.Type == want.Type, got.NotNull == want.NotNull, got.Default == want.Default)
++	}
++	if dialect == "versioned" {
++		// Count/semantic shape diagnostics only. The production table verifier
++		// still owns the complete constraint comparison; no success is forged.
++		rows, qerr := db.QueryContext(ctx, `SELECT p.convalidated,p.condeferrable FROM pg_constraint p JOIN pg_class c ON c.oid=p.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname=$1 ORDER BY p.oid`, name)
++		if qerr != nil {
++			t.Logf("joint_catalogue stage=constraints object=%s code=unavailable", name)
++			return
++		}
++		valid, closed := true, true
++		for rows.Next() {
++			var v, d bool
++			if rows.Scan(&v, &d) != nil {
++				valid = false
++				break
++			}
++			valid = valid && v
++			closed = closed && !d
++		}
++		qerr = rows.Err()
++		closeErr := rows.Close()
++		t.Logf("joint_catalogue stage=constraints object=%s validated=%t nondeferrable=%t read_ok=%t close_ok=%t", name, valid, closed, qerr == nil, closeErr == nil)
++	}
++}
++func runJointCatalogueRestartDiagnostic(t *testing.T, pg bool) {
++	t.Helper()
++	root := sqliteRepoRoot(t)
++	chdirAndRestore(t, root)
++	db, dsn, options := jointLineageFixture(t, pg)
++	require.NoError(t, RunMigrationsWithOptions(dsn, options), "actual first full production Up must succeed")
++	version, dirty := jointLineageMigrationState(t, db)
++	require.False(t, dirty)
++	dialect, latest := "sqlite", uint(87)
++	if pg {
++		dialect, latest = "versioned", 168
++	}
++	require.Equal(t, latest, version)
++	ctx := context.Background()
++	expected, err := jointExpectedCatalogue(dialect, version)
++	require.NoError(t, err)
++	witness, err := jointLineageWitnessesFromSource()
++	require.NoError(t, err)
++	objects, _, err := jointLineageObjectSets(ctx, db, dialect)
++	require.NoError(t, err)
++	for _, category := range []struct {
++		kind     string
++		names    []string
++		expected map[string]string
++	}{
++		{"table", witness.Sentinels.Tables, expected.Tables},
++		{"function", witness.Sentinels.Functions, expected.Functions},
++		{"trigger", witness.Sentinels.Triggers, expected.Triggers},
++		{"index", witness.Sentinels.Indexes, expected.Indexes},
++	} {
++		names := append([]string(nil), category.names...)
++		sort.Strings(names)
++		for _, name := range names {
++			_, known := category.expected[name]
++			t.Logf("joint_catalogue stage=sentinel kind=%s object=%s present=%t expected=%t", category.kind, name, objects[category.kind+"/"+name], known)
++		}
++	}
++	for _, table := range jointRestartDiagnosticNames(witness.Sentinels.Columns) {
++		names := append([]string(nil), witness.Sentinels.Columns[table]...)
++		sort.Strings(names)
++		for _, name := range names {
++			present, columnErr := jointLineageIntroducedColumn(ctx, db, dialect, table, name)
++			_, known := expected.Columns[table][name]
++			t.Logf("joint_catalogue stage=future_column object=%s column=%s present=%t expected=%t code=%s", table, name, present, known, jointRestartDiagnosticCode(columnErr))
++		}
++	}
++	failures := 0
++	logCheck := func(stage, name string, checkErr error) {
++		t.Logf("joint_catalogue stage=%s object=%s code=%s", stage, name, jointRestartDiagnosticCode(checkErr))
++		if checkErr != nil {
++			failures++
++		}
++	}
++	for _, name := range jointRestartDiagnosticNames(expected.Tables) {
++		checkErr := jointVerifyTable(ctx, db, dialect, name, expected.Tables[name])
++		logCheck("table", name, checkErr)
++		if checkErr != nil {
++			jointRestartDiagnosticTable(t, ctx, db, dialect, name, expected.Tables[name])
++		}
++	}
++	for _, table := range jointRestartDiagnosticNames(expected.Columns) {
++		for _, name := range jointRestartDiagnosticNames(expected.Columns[table]) {
++			single := jointCatalogueExpected{Columns: map[string]map[string]string{table: {name: expected.Columns[table][name]}}}
++			logCheck("existing_column", table+"."+name, jointVerifyExistingColumns(ctx, db, dialect, single))
++		}
++	}
++	if pg {
++		logCheck("withdrawal_kind", "nextcloud_indexed_withdrawal_items_kind_check", jointVerifyWithdrawalKindConstraint(ctx, db, expected.RegistryConstraint))
++		for _, name := range jointRestartDiagnosticNames(expected.Functions) {
++			single := jointCatalogueExpected{Functions: map[string]string{name: expected.Functions[name]}}
++			logCheck("function", name, jointVerifyFunctions(ctx, db, single))
++		}
++	}
++	for _, name := range jointRestartDiagnosticNames(expected.Triggers) {
++		logCheck("trigger", name, jointVerifyTrigger(ctx, db, dialect, name, expected.Triggers[name], expected))
++	}
++	for _, name := range jointRestartDiagnosticNames(expected.Indexes) {
++		single := jointCatalogueExpected{Indexes: map[string]string{name: expected.Indexes[name]}}
++		logCheck("index", name, jointVerifyIndexes(ctx, db, dialect, single))
++	}
++	if pg && objects["embeddings"] {
++		definition := "CREATE TRIGGER nextcloud_indexed_embedding_guard BEFORE INSERT OR UPDATE OR DELETE ON embeddings FOR EACH ROW EXECUTE FUNCTION nextcloud_indexed_withdrawal_write_guard();"
++		logCheck("optional_embedding_trigger", "nextcloud_indexed_embedding_guard", jointVerifyTrigger(ctx, db, dialect, "nextcloud_indexed_embedding_guard", definition, expected))
++	}
++	logCheck("root_catalogue", "compiled_root_catalogue", verifyJointRootCatalogue(ctx, db, dialect, version))
++	logCheck("preflight", "compiled_joint_lineage", preflightJointSchemaLineage(ctx, dsn, options, version, dirty, true))
++	// Keep the failure oracle, after every diagnostic has been collected.
++	restartErr := RunMigrationsWithOptions(dsn, options)
++	logCheck("production_restart", "compiled_joint_lineage", restartErr)
++	t.Logf("joint_catalogue stage=summary object=compiled_joint_lineage all_checks_ok=%t", failures == 0)
++	require.NoError(t, restartErr, "full production restart stays required; diagnostic is not an allow hook")
++}
++func TestJointCatalogueRestartDiagnosticActualSQLite(t *testing.T) {
++	runJointCatalogueRestartDiagnostic(t, false)
++}
++func TestPostgresJointCatalogueRestartDiagnosticActual(t *testing.T) {
++	runJointCatalogueRestartDiagnostic(t, true)
++}
+diff --git a/internal/database/migration_joint_catalogue_specs.json b/internal/database/migration_joint_catalogue_specs.json
+index 30fefe85..3ca98494 100644
+--- a/internal/database/migration_joint_catalogue_specs.json
++++ b/internal/database/migration_joint_catalogue_specs.json
+@@ -593,7 +593,7 @@
+           "nextcloud_graph_tasks": "CREATE TABLE nextcloud_graph_tasks (\n operation_id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, knowledge_base_id TEXT NOT NULL,\n knowledge_id TEXT NOT NULL, attempt INTEGER NOT NULL, chunk_id TEXT NOT NULL,\n build_epoch BIGINT NOT NULL, config_digest TEXT NOT NULL,config_revision BIGINT NOT NULL,\n payload_json TEXT NOT NULL DEFAULT '',queue_state TEXT NOT NULL DEFAULT 'unprepared' CHECK(queue_state IN ('unprepared','pending','queued')),queue_attempts INTEGER NOT NULL DEFAULT 0,queue_next_at BIGINT NOT NULL DEFAULT 0,\n state TEXT NOT NULL CHECK(state IN ('pending','running','succeeded','succeeded_empty','failed','skipped','cancelled','unverified')),\n persisted BOOLEAN NOT NULL DEFAULT FALSE, finalized BOOLEAN NOT NULL DEFAULT FALSE, error_code TEXT NOT NULL DEFAULT '',\n created_at BIGINT NOT NULL, completed_at BIGINT,\n UNIQUE(tenant_id,knowledge_id,attempt,chunk_id)\n);",
+           "nextcloud_graph_records": "CREATE TABLE nextcloud_graph_records (\n operation_id TEXT PRIMARY KEY REFERENCES nextcloud_graph_tasks(operation_id) ON DELETE RESTRICT,\n tenant_id BIGINT NOT NULL, knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL,\n backend TEXT NOT NULL CHECK(backend='scoped_sql_v1'), generation BIGINT NOT NULL, build_lease_id TEXT NOT NULL,\n body_json TEXT NOT NULL, body_sha256 TEXT NOT NULL, node_count INTEGER NOT NULL,\n edge_count INTEGER NOT NULL, committed_at BIGINT NOT NULL\n);",
+           "nextcloud_source_status_epochs": "CREATE TABLE nextcloud_source_status_epochs (\n connection_id TEXT PRIMARY KEY, publication_epoch BIGINT NOT NULL CHECK(publication_epoch>=0),\n pair_operation_id TEXT NOT NULL, verified_at BIGINT NOT NULL\n);",
+-          "nextcloud_gc_items_processing_v2": "CREATE TABLE nextcloud_gc_items_processing_v2 (\n job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,\n kind TEXT NOT NULL CHECK(kind IN ('knowledge','source_file','extracted_image','derived_index','derived_chunk','postgres_embedding','sqlite_embedding','scoped_sql_graph')),\n object_ref TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','blocked','deleting','collected')),\n estimated_bytes INTEGER NOT NULL DEFAULT 0,confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,\n lease_token TEXT NOT NULL DEFAULT '',lease_until DATETIME,\n created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n PRIMARY KEY(job_id,kind,object_ref)\n);"
++          "nextcloud_gc_items": "CREATE TABLE nextcloud_gc_items (\n job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,\n kind TEXT NOT NULL CHECK(kind IN ('knowledge','source_file','extracted_image','derived_index','derived_chunk','postgres_embedding','sqlite_embedding','scoped_sql_graph')),\n object_ref TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','blocked','deleting','collected')),\n estimated_bytes INTEGER NOT NULL DEFAULT 0,confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,\n lease_token TEXT NOT NULL DEFAULT '',lease_until DATETIME,\n created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n PRIMARY KEY(job_id,kind,object_ref)\n);"
+         },
+         "Triggers": [
+           "CREATE TRIGGER nextcloud_graph_record_insert_fence BEFORE INSERT ON nextcloud_graph_records BEGIN\n SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM nextcloud_content_fences f JOIN nextcloud_content_fences kb ON kb.tenant_id=f.tenant_id AND kb.knowledge_base_id=f.knowledge_base_id AND kb.knowledge_id='' JOIN nextcloud_source_versions v ON v.tenant_id=f.tenant_id AND v.knowledge_base_id=f.knowledge_base_id AND v.datasource_id=f.datasource_id AND v.external_id=f.external_id JOIN nextcloud_graph_tasks t ON t.operation_id=NEW.operation_id WHERE f.tenant_id=NEW.tenant_id AND f.knowledge_base_id=NEW.knowledge_base_id AND f.knowledge_id=NEW.knowledge_id AND f.state='open' AND kb.state='open' AND f.epoch=NEW.generation AND t.build_epoch=f.epoch AND t.state='running' AND t.tenant_id=f.tenant_id AND t.knowledge_id=f.knowledge_id AND v.candidate_knowledge_id=f.knowledge_id AND v.state IN ('staging','published') AND t.config_revision=(SELECT revision FROM knowledge_configuration_control_versions WHERE knowledge_base_id=f.knowledge_base_id) AND t.attempt=(SELECT MAX(attempt) FROM knowledge_processing_spans WHERE knowledge_id=f.knowledge_id) AND EXISTS(SELECT 1 FROM nextcloud_content_leases l WHERE l.lease_id=NEW.build_lease_id AND l.tenant_id=f.tenant_id AND l.knowledge_base_id=f.knowledge_base_id AND l.knowledge_id=f.knowledge_id AND l.kind='build' AND l.epoch=f.epoch AND l.released_at_ms IS NULL AND l.expires_at_ms>CAST((julianday('now')-2440587.5)*86400000 AS INTEGER))) THEN RAISE(ABORT,'nextcloud_graph_generation_closed') END;\nEND;",
+diff --git a/internal/database/migration_joint_lineage.go b/internal/database/migration_joint_lineage.go
+index dc0e390d..5b2fa33a 100644
+--- a/internal/database/migration_joint_lineage.go
++++ b/internal/database/migration_joint_lineage.go
+@@ -167,7 +167,7 @@ func jointLineageObjectSets(ctx context.Context, db *sql.DB, dialect string) (ma
+ 	objects, tables := map[string]bool{}, map[string]bool{}
+ 	query := "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+ 	if dialect == "versioned" {
+-		query = `SELECT c.relname, CASE WHEN c.relkind IN ('r','p') THEN 'table' ELSE 'relation' END
++		query = `SELECT c.relname, CASE WHEN c.relkind IN ('r','p') THEN 'table' WHEN c.relkind IN ('i','I') THEN 'index' ELSE 'relation' END
+ 		 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema()
+ 		 UNION ALL SELECT t.tgname,'trigger' FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+ 		 JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND NOT t.tgisinternal
+@@ -183,7 +183,10 @@ func jointLineageObjectSets(ctx context.Context, db *sql.DB, dialect string) (ma
+ 		if rows.Scan(&name, &kind) != nil {
+ 			return nil, nil, ErrJointSchemaUnavailable
+ 		}
++		// The flat key remains the conservative early absence witness. Typed
++		// keys distinguish a SQLite trigger from a same-named PG function.
+ 		objects[name] = true
++		objects[kind+"/"+name] = true
+ 		if kind == "table" {
+ 			tables[name] = true
+ 		}
+diff --git a/internal/database/migration_joint_pg_representation_actual_test.go b/internal/database/migration_joint_pg_representation_actual_test.go
+new file mode 100644
+index 00000000..af251302
+--- /dev/null
++++ b/internal/database/migration_joint_pg_representation_actual_test.go
+@@ -0,0 +1,178 @@
++package database
++
++import (
++	"context"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestJointPartialIndexCatalogueRepresentationExact(t *testing.T) {
++	for _, pair := range []struct{ source, catalogue string }{
++		{"CREATE INDEX memory_original_dispatch_due ON memory_original_dispatches(next_attempt_at,admission_id) WHERE completed_at IS NULL;", "CREATE INDEX memory_original_dispatch_due ON owned_schema.memory_original_dispatches USING btree (next_attempt_at, admission_id) WHERE (completed_at IS NULL)"},
++		{"CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id) WHERE state='prepared';", "CREATE UNIQUE INDEX nextcloud_root_migration_live ON owned_schema.nextcloud_root_migrations USING btree (pair_operation_id) WHERE (state = 'prepared'::text)"},
++	} {
++		want, err := jointCanonicalIndexDefinition(pair.source, "owned_schema")
++		require.NoError(t, err)
++		actual, err := jointCanonicalIndexDefinition(pair.catalogue, "owned_schema")
++		require.NoError(t, err)
++		require.Equal(t, want, actual)
++	}
++	source := "CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id) WHERE state='prepared';"
++	want, err := jointCanonicalIndexDefinition(source, "owned_schema")
++	require.NoError(t, err)
++	for _, changed := range []string{
++		"CREATE UNIQUE INDEX nextcloud_root_migration_live ON foreign_schema.nextcloud_root_migrations(pair_operation_id) WHERE state='prepared';",
++		"CREATE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id) WHERE state='prepared';",
++		"CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id) WHERE state<>'prepared';",
++		"CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id) WHERE state='finalized';",
++		"CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id);",
++		"CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id text_pattern_ops) WHERE state='prepared';",
++		"CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id::integer) WHERE state='prepared';",
++		"CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id) WHERE length(state)::integer=8;",
++	} {
++		got, parseErr := jointCanonicalIndexDefinition(changed, "owned_schema")
++		require.NoError(t, parseErr)
++		require.NotEqual(t, want, got, "predicate/type/operator/namespace changes stay visible")
++	}
++	nullSource, err := jointCanonicalIndexDefinition("CREATE INDEX memory_original_dispatch_due ON memory_original_dispatches(next_attempt_at,admission_id) WHERE completed_at IS NULL;", "")
++	require.NoError(t, err)
++	notNull, err := jointCanonicalIndexDefinition("CREATE INDEX memory_original_dispatch_due ON memory_original_dispatches(next_attempt_at,admission_id) WHERE completed_at IS NOT NULL;", "")
++	require.NoError(t, err)
++	require.NotEqual(t, nullSource, notNull)
++}
++func TestJointTriggerWhenCatalogueRepresentationExact(t *testing.T) {
++	source := "CREATE TRIGGER memory_subjects_derived_block AFTER UPDATE ON memory_subjects FOR EACH ROW WHEN (OLD.block_text IS DISTINCT FROM NEW.block_text OR OLD.item_count IS DISTINCT FROM NEW.item_count) EXECUTE FUNCTION memory_subjects_derived_block();"
++	catalogue := "CREATE TRIGGER memory_subjects_derived_block AFTER UPDATE ON owned_schema.memory_subjects FOR EACH ROW WHEN (((old.block_text IS DISTINCT FROM new.block_text) OR (old.item_count IS DISTINCT FROM new.item_count))) EXECUTE FUNCTION owned_schema.memory_subjects_derived_block()"
++	want, err := jointTriggerWhenExpression(source)
++	require.NoError(t, err)
++	got, err := jointTriggerWhenExpression(catalogue)
++	require.NoError(t, err)
++	require.Equal(t, want, got)
++	for _, changed := range []string{
++		"CREATE TRIGGER memory_subjects_derived_block AFTER UPDATE ON memory_subjects FOR EACH ROW EXECUTE FUNCTION memory_subjects_derived_block();",
++		"CREATE TRIGGER memory_subjects_derived_block AFTER UPDATE ON memory_subjects FOR EACH ROW WHEN (OLD.block_text IS DISTINCT FROM NEW.block_text AND OLD.item_count IS DISTINCT FROM NEW.item_count) EXECUTE FUNCTION memory_subjects_derived_block();",
++		"CREATE TRIGGER memory_subjects_derived_block AFTER UPDATE ON memory_subjects FOR EACH ROW WHEN (OLD.block_text IS DISTINCT FROM NEW.block_text OR OLD.item_count::integer IS DISTINCT FROM NEW.item_count) EXECUTE FUNCTION memory_subjects_derived_block();",
++	} {
++		actual, parseErr := jointTriggerWhenExpression(changed)
++		require.NoError(t, parseErr)
++		require.NotEqual(t, want, actual)
++	}
++	_, err = jointTriggerWhenExpression("CREATE TRIGGER owned AFTER UPDATE ON memory_subjects FOR EACH ROW WHEN () EXECUTE FUNCTION memory_subjects_derived_block();")
++	require.Error(t, err)
++}
++
++// Real pg_catalog and native DDL changes, never an authored permission witness.
++// Existing true full bootstrap and no-mutation assertions remain strict.
++func TestPostgresJointPartialIndexRepresentationActual(t *testing.T) {
++	for _, mode := range []string{"current", "dispatch_predicate", "root_predicate"} {
++		t.Run(mode, func(t *testing.T) {
++			root := sqliteRepoRoot(t)
++			chdirAndRestore(t, root)
++			db, dsn, options := jointLineageFixture(t, true)
++			require.NoError(t, RunMigrationsWithOptions(dsn, options))
++			version, dirty := jointLineageMigrationState(t, db)
++			require.EqualValues(t, 168, version)
++			require.False(t, dirty)
++			expected, err := jointExpectedCatalogue("versioned", version)
++			require.NoError(t, err)
++			require.NoError(t, jointVerifyIndexes(context.Background(), db, "versioned", expected), "canonical current partial predicates must be accepted")
++			if mode != "current" {
++				name, create := "memory_original_dispatch_due", "CREATE INDEX memory_original_dispatch_due ON memory_original_dispatches(next_attempt_at,admission_id) WHERE completed_at IS NOT NULL;"
++				if mode == "root_predicate" {
++					name, create = "nextcloud_root_migration_live", "CREATE UNIQUE INDEX nextcloud_root_migration_live ON nextcloud_root_migrations(pair_operation_id) WHERE state='finalized';"
++				}
++				_, err = db.Exec("DROP INDEX " + name)
++				require.NoError(t, err)
++				_, err = db.Exec(create)
++				require.NoError(t, err)
++				var actual, namespace string
++				var valid bool
++				require.NoError(t, db.QueryRow(`SELECT pg_get_indexdef(i.indexrelid),n.nspname,i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname=$1`, name).Scan(&actual, &namespace, &valid))
++				require.True(t, valid)
++				fault, err := jointCanonicalIndexDefinition(actual, namespace)
++				require.NoError(t, err)
++				original, err := jointCanonicalIndexDefinition(expected.Indexes[name], namespace)
++				require.NoError(t, err)
++				require.NotEqual(t, original, fault, "actual native predicate change confirmed before refusal")
++				require.ErrorIs(t, jointVerifyIndexes(context.Background(), db, "versioned", expected), ErrJointSchemaUnknown)
++			}
++			before := memoryFullSchemaSnapshot(t, db, "versioned")
++			err = RunMigrationsWithOptions(dsn, options)
++			if mode == "current" {
++				require.NoError(t, err)
++			} else {
++				require.ErrorIs(t, err, ErrJointSchemaUnknown)
++			}
++			require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "versioned"))
++			afterVersion, afterDirty := jointLineageMigrationState(t, db)
++			require.Equal(t, version, afterVersion)
++			require.Equal(t, dirty, afterDirty)
++		})
++	}
++}
++func TestPostgresJointTriggerWhenRepresentationActual(t *testing.T) {
++	for _, mode := range []string{"current", "changed_when", "removed_when", "foreign_function"} {
++		t.Run(mode, func(t *testing.T) {
++			root := sqliteRepoRoot(t)
++			chdirAndRestore(t, root)
++			db, dsn, options := jointLineageFixture(t, true)
++			require.NoError(t, RunMigrationsWithOptions(dsn, options))
++			version, dirty := jointLineageMigrationState(t, db)
++			require.EqualValues(t, 168, version)
++			require.False(t, dirty)
++			expected, err := jointExpectedCatalogue("versioned", version)
++			require.NoError(t, err)
++			name := "memory_subjects_derived_block"
++			definition := expected.Triggers[name]
++			require.NoError(t, jointVerifyTrigger(context.Background(), db, "versioned", name, definition, expected), "real OLD/NEW trigger WHEN must be deparsed by trigger context")
++			if mode != "current" {
++				_, err = db.Exec("DROP TRIGGER memory_subjects_derived_block ON memory_subjects")
++				require.NoError(t, err)
++				when, call := " WHEN (OLD.block_text IS DISTINCT FROM NEW.block_text AND OLD.item_count IS DISTINCT FROM NEW.item_count)", "memory_subjects_derived_block()"
++				if mode == "removed_when" {
++					when = ""
++				}
++				if mode == "foreign_function" {
++					_, err = db.Exec("CREATE SCHEMA owned_trigger_binding_fault")
++					require.NoError(t, err)
++					t.Cleanup(func() {
++						_, cleanupErr := db.Exec("DROP SCHEMA IF EXISTS owned_trigger_binding_fault CASCADE")
++						if cleanupErr != nil {
++							t.Errorf("owned trigger namespace cleanup: %v", cleanupErr)
++						}
++					})
++					_, err = db.Exec("CREATE FUNCTION owned_trigger_binding_fault.memory_subjects_derived_block() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
++					require.NoError(t, err)
++					call = "owned_trigger_binding_fault.memory_subjects_derived_block()"
++					when = " WHEN (OLD.block_text IS DISTINCT FROM NEW.block_text OR OLD.item_count IS DISTINCT FROM NEW.item_count)"
++				}
++				_, err = db.Exec("CREATE TRIGGER memory_subjects_derived_block AFTER UPDATE ON memory_subjects FOR EACH ROW" + when + " EXECUTE FUNCTION " + call)
++				require.NoError(t, err)
++				var actual, namespace string
++				require.NoError(t, db.QueryRow(`SELECT pg_get_triggerdef(t.oid,false),f.nspname FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace f ON f.oid=p.pronamespace WHERE n.nspname=current_schema() AND c.relname='memory_subjects' AND t.tgname=$1`, name).Scan(&actual, &namespace))
++				if mode == "foreign_function" {
++					require.Equal(t, "owned_trigger_binding_fault", namespace)
++				} else {
++					fault, parseErr := jointTriggerWhenExpression(actual)
++					require.NoError(t, parseErr)
++					original, parseErr := jointTriggerWhenExpression(definition)
++					require.NoError(t, parseErr)
++					require.NotEqual(t, original, fault, "actual native WHEN change confirmed before refusal")
++				}
++				require.ErrorIs(t, jointVerifyTrigger(context.Background(), db, "versioned", name, definition, expected), ErrJointSchemaUnknown)
++			}
++			before := memoryFullSchemaSnapshot(t, db, "versioned")
++			err = RunMigrationsWithOptions(dsn, options)
++			if mode == "current" {
++				require.NoError(t, err)
++			} else {
++				require.ErrorIs(t, err, ErrJointSchemaUnknown)
++			}
++			require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "versioned"))
++			afterVersion, afterDirty := jointLineageMigrationState(t, db)
++			require.Equal(t, version, afterVersion)
++			require.Equal(t, dirty, afterDirty)
++		})
++	}
++}
+diff --git a/internal/database/migration_joint_typed_sentinels_sql_actual_test.go b/internal/database/migration_joint_typed_sentinels_sql_actual_test.go
+new file mode 100644
+index 00000000..9ab9d57c
+--- /dev/null
++++ b/internal/database/migration_joint_typed_sentinels_sql_actual_test.go
+@@ -0,0 +1,108 @@
++package database
++
++import (
++	"context"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Names are not object types. These pure checks exercise compiled declarations,
++// not a synthesized permission/original/schema-success hook.
++func TestJointSchemaSentinelKindsExact(t *testing.T) {
++	witness, err := jointLineageWitnessesFromSource()
++	require.NoError(t, err)
++	sqlite, err := jointExpectedCatalogue("sqlite", 87)
++	require.NoError(t, err)
++	pg, err := jointExpectedCatalogue("versioned", 168)
++	require.NoError(t, err)
++	for _, test := range []struct {
++		name     string
++		objects  map[string]bool
++		expected jointCatalogueExpected
++		refuse   bool
++	}{
++		{"sqlite_trigger_is_not_pg_function", map[string]bool{"memory_policy_version_guard": true, "trigger/memory_policy_version_guard": true}, sqlite, false},
++		{"pg_function_is_verified_as_function", map[string]bool{"memory_policy_version_guard": true, "function/memory_policy_version_guard": true}, pg, false},
++		{"wrong_kind_table_refuses", map[string]bool{"memory_policy_version_guard": true, "table/memory_policy_version_guard": true}, sqlite, true},
++		{"transient_table_still_refuses", map[string]bool{"nextcloud_gc_items_processing_v2": true, "table/nextcloud_gc_items_processing_v2": true}, sqlite, true},
++		{"unknown_pg_trigger_same_function_name_refuses", map[string]bool{"memory_original_admission_immutable": true, "trigger/memory_original_admission_immutable": true}, pg, true},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			err := jointVerifySentinelObjectKinds(test.objects, witness.Sentinels, test.expected)
++			if test.refuse {
++				require.ErrorIs(t, err, ErrJointSchemaUnknown)
++			} else {
++				require.NoError(t, err)
++			}
++		})
++	}
++}
++
++func TestJointSchemaTypedSentinelRestartActualSQLite(t *testing.T) {
++	for _, mode := range []string{"current", "missing_trigger", "changed_trigger", "unexpected_transient_table", "same_name_wrong_kind"} {
++		t.Run(mode, func(t *testing.T) {
++			root := sqliteRepoRoot(t)
++			chdirAndRestore(t, root)
++			db, dsn, options := jointLineageFixture(t, false)
++			require.NoError(t, RunMigrationsWithOptions(dsn, options))
++			version, dirty := jointLineageMigrationState(t, db)
++			require.EqualValues(t, 87, version)
++			require.False(t, dirty)
++			expected, err := jointExpectedCatalogue("sqlite", version)
++			require.NoError(t, err)
++			witness, err := jointLineageWitnessesFromSource()
++			require.NoError(t, err)
++			objects, _, err := jointLineageObjectSets(context.Background(), db, "sqlite")
++			require.NoError(t, err)
++			require.True(t, objects["trigger/memory_policy_version_guard"])
++			require.False(t, objects["function/memory_policy_version_guard"], "SQLite guard is a trigger, not an installed schema function")
++			require.NoError(t, jointVerifySentinelObjectKinds(objects, witness.Sentinels, expected))
++			require.NoError(t, verifyJointRootCatalogue(context.Background(), db, "sqlite", version))
++			switch mode {
++			case "missing_trigger":
++				_, err = db.Exec("DROP TRIGGER memory_policy_version_guard")
++				require.NoError(t, err)
++				var actual int
++				require.NoError(t, db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='memory_policy_version_guard'").Scan(&actual))
++				require.Zero(t, actual)
++			case "changed_trigger":
++				_, err = db.Exec("DROP TRIGGER memory_policy_version_guard")
++				require.NoError(t, err)
++				_, err = db.Exec("CREATE TRIGGER memory_policy_version_guard BEFORE UPDATE ON memory_policy_control_versions BEGIN SELECT RAISE(ABORT,'owned_changed_guard'); END;")
++				require.NoError(t, err)
++				var actual string
++				require.NoError(t, db.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memory_policy_version_guard'").Scan(&actual))
++				require.NotEqual(t, jointCanonicalSQL(expected.Triggers["memory_policy_version_guard"], ""), jointCanonicalSQL(actual, ""))
++			case "unexpected_transient_table":
++				_, err = db.Exec("CREATE TABLE nextcloud_gc_items_processing_v2(owned_unknown INTEGER)")
++				require.NoError(t, err)
++			case "same_name_wrong_kind":
++				_, err = db.Exec("CREATE TABLE memory_policy_version_guard(owned_unknown INTEGER)")
++				require.NoError(t, err)
++			}
++			objects, _, err = jointLineageObjectSets(context.Background(), db, "sqlite")
++			require.NoError(t, err)
++			if mode == "unexpected_transient_table" {
++				require.True(t, objects["table/nextcloud_gc_items_processing_v2"])
++				require.ErrorIs(t, jointVerifySentinelObjectKinds(objects, witness.Sentinels, expected), ErrJointSchemaUnknown)
++			}
++			if mode == "same_name_wrong_kind" {
++				require.True(t, objects["table/memory_policy_version_guard"])
++				require.True(t, objects["trigger/memory_policy_version_guard"])
++				require.ErrorIs(t, jointVerifySentinelObjectKinds(objects, witness.Sentinels, expected), ErrJointSchemaUnknown)
++			}
++			before := memoryFullSchemaSnapshot(t, db, "sqlite")
++			err = RunMigrationsWithOptions(dsn, options)
++			if mode == "current" {
++				require.NoError(t, err)
++			} else {
++				require.ErrorIs(t, err, ErrJointSchemaUnknown)
++			}
++			require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "sqlite"), "native schema faults must not be repaired or advance the ledger")
++			afterVersion, afterDirty := jointLineageMigrationState(t, db)
++			require.Equal(t, version, afterVersion)
++			require.Equal(t, dirty, afterDirty)
++		})
++	}
++}
