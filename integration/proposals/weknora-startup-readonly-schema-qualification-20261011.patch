@@ -1,0 +1,1117 @@
+diff --git a/internal/container/container.go b/internal/container/container.go
+index 37c7b1e9..2fae10d2 100644
+--- a/internal/container/container.go
++++ b/internal/container/container.go
+@@ -985,6 +985,17 @@ func initRedisClient() (*redis.Client, error) {
+ //   - Configured database connection
+ //   - Error if connection fails
+ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
++	// Preserve the existing DI startup context and its absence of a new timer.
++	return initDatabaseWithContext(context.Background(), cfg)
++}
++
++func initDatabaseWithContext(ctx context.Context, cfg *config.Config) (databaseHandle *gorm.DB, bootstrapErr error) {
++	if ctx == nil {
++		return nil, database.ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
+ 	var dialector gorm.Dialector
+ 	var migrateDSN string
+ 	var sqliteDBPath string
+@@ -1043,7 +1054,10 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
+ 			}
+ 		}
+ 		sqlite_vec.Auto()
+-		dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on"
++		dsn, err := database.SQLiteRuntimeDSN(dbPath)
++		if err != nil {
++			return nil, err
++		}
+ 		dialector = sqlite.Open(dsn)
+ 		sqliteDBPath = dbPath
+ 		migrateDSN = "sqlite3://" + dbPath
+@@ -1051,7 +1065,17 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
+ 	default:
+ 		return nil, fmt.Errorf("unsupported database driver: %s", os.Getenv("DB_DRIVER"))
+ 	}
+-	db, err := gorm.Open(dialector, &gorm.Config{
++	// Qualify the actual database before opening GORM (including SQLite WAL
++	// pragmas). An unknown/refused lineage cannot reach connection-side setup.
++	migrationOpts := database.MigrationOptions{
++		AutoRecoverDirty: os.Getenv("AUTO_RECOVER_DIRTY") != "false",
++		SQLiteDBPath:     sqliteDBPath,
++	}
++	autoMigrate := os.Getenv("AUTO_MIGRATE") != "false"
++	if err := bootstrapDatabaseSchema(ctx, migrateDSN, migrationOpts, autoMigrate); err != nil {
++		return nil, err
++	}
++	db, err := openStartupDatabase(dialector, &gorm.Config{
+ 		Logger: newProductionSQLLogger(nil),
+ 		NowFunc: func() time.Time {
+ 			return time.Now().UTC()
+@@ -1060,6 +1084,16 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// This provider has not transferred an opened pool to DI on any failure.
++	defer func() {
++		if databaseHandle == nil {
++			if pool, err := db.DB(); err != nil {
++				bootstrapErr = errors.Join(bootstrapErr, err)
++			} else {
++				bootstrapErr = errors.Join(bootstrapErr, pool.Close())
++			}
++		}
++	}()
+ 
+ 	// Sanity check: dialect-specific code in services (notably the
+ 	// vector_stores delete guard) compares Dialector.Name() to "postgres" /
+@@ -1083,53 +1117,36 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
+ 		}
+ 	}
+ 
+-	// Run database migrations automatically (optional, can be disabled via env var)
+-	// To disable auto-migration, set AUTO_MIGRATE=false
+-	// To enable auto-recovery from dirty state, set AUTO_RECOVER_DIRTY=true
+-	if os.Getenv("AUTO_MIGRATE") != "false" {
+-		logger.Infof(context.Background(), "Running database migrations...")
+-
+-		autoRecover := os.Getenv("AUTO_RECOVER_DIRTY") != "false"
+-		migrationOpts := database.MigrationOptions{
+-			AutoRecoverDirty: autoRecover,
+-			SQLiteDBPath:     sqliteDBPath,
+-		}
+-
+-		// Run base migrations (all versioned migrations including embeddings)
+-		// The embeddings migration will be conditionally executed based on skip_embedding parameter in DSN
+-		if err := database.RunMigrationsWithOptions(migrateDSN, migrationOpts); err != nil {
+-			// Log warning but don't fail startup - migrations might be handled externally
+-			logger.Warnf(context.Background(), "Database migration failed: %v", err)
+-			logger.Warnf(
+-				context.Background(),
+-				"Continuing with application startup. Please run migrations manually if needed.",
+-			)
+-		}
+-
+-		// Post-migration: resolve __pending_env__ storage provider markers for historical KBs.
+-		// The SQL migration marks KBs that have documents but no provider with "__pending_env__";
+-		// we replace that with the actual STORAGE_TYPE from the environment.
+-		resolveStorageProviderPending(db)
+-		migrateLegacyStorageBackends(db)
+-
+-		// Post-migration: declarative built-in models from config/builtin_models.yaml (optional).
+-		// The loader validates each row's catalog parameters through this hook;
+-		// the wiring lives here because internal/types cannot import the catalog.
++	// Automatic migration is optional; complete schema readiness is mandatory.
++	// No post-migration producer/retention writes may run on a refused lineage.
++	// Recheck after opening the pool before any application initializer writes.
++	openedPool, err := db.DB()
++	if err != nil {
++		return nil, err
++	}
++	if err := database.VerifyJointSchemaReadyOnDB(ctx, openedPool, db.Dialector.Name()); err != nil {
++		return nil, fmt.Errorf("database schema changed during startup: %w", err)
++	}
++	bootstrapDB := db.WithContext(ctx)
++	if autoMigrate {
++		// Preserve the existing post-upgrade actions, after the read-only gate.
++		resolveStorageProviderPending(bootstrapDB)
++		migrateLegacyStorageBackends(bootstrapDB)
+ 		types.ValidateModelParameters = catalog.ValidateRow
+-		if err := types.LoadBuiltinModelsConfig(context.Background(), db, config.ConfigDir()); err != nil {
+-			logger.Warnf(context.Background(), "Load builtin models config failed: %v", err)
++		if err := types.LoadBuiltinModelsConfig(ctx, bootstrapDB, config.ConfigDir()); err != nil {
++			logger.Warnf(ctx, "Load builtin models config failed: %v", err)
+ 		}
+ 	} else {
+-		logger.Infof(context.Background(), "Auto-migration is disabled (AUTO_MIGRATE=false)")
++		logger.Infof(ctx, "Auto-migration is disabled; installed schema verified read-only")
+ 	}
+ 
+-	if err := repository.InstallOriginalBodyRetentionTriggers(db); err != nil {
++	if err := repository.InstallOriginalBodyRetentionTriggers(bootstrapDB); err != nil {
+ 		return nil, fmt.Errorf("original body retention trigger protocol unavailable: %w", err)
+ 	}
+-	if err := repository.NewOriginalBodyRetentionStore(db).VerifyJournalReady(); err != nil {
++	if err := repository.NewOriginalBodyRetentionStore(bootstrapDB).VerifyJournalReady(); err != nil {
+ 		return nil, fmt.Errorf("original body external purge journal unavailable or reconciliation required: %w", err)
+ 	}
+-	if err := repository.InstallOriginalBodyRetentionCallbacks(db); err != nil {
++	if err := repository.InstallOriginalBodyRetentionCallbacks(bootstrapDB); err != nil {
+ 		return nil, err
+ 	}
+ 	// Get underlying SQL DB object
+diff --git a/internal/container/database_schema_initial_ping_cleanup_test.go b/internal/container/database_schema_initial_ping_cleanup_test.go
+new file mode 100644
+index 00000000..6b7e5615
+--- /dev/null
++++ b/internal/container/database_schema_initial_ping_cleanup_test.go
+@@ -0,0 +1,75 @@
++package container
++
++import (
++	"context"
++	"database/sql"
++	"database/sql/driver"
++	"errors"
++	"fmt"
++	"sync/atomic"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++	gormlogger "gorm.io/gorm/logger"
++)
++
++// This driver tests only actual GORM initial Ping/Close lifecycle. It provides
++// no schema, row, body, original, successful authorization or app readiness.
++type startupPingFaultDriver struct{ state *startupPingFaultState }
++type startupPingFaultState struct {
++	pingErr, closeErr                error
++	opens, pings, closes, statements atomic.Int32
++}
++type startupPingFaultConn struct{ state *startupPingFaultState }
++
++func (d *startupPingFaultDriver) Open(string) (driver.Conn, error) {
++	d.state.opens.Add(1)
++	return &startupPingFaultConn{state: d.state}, nil
++}
++func (c *startupPingFaultConn) Prepare(string) (driver.Stmt, error) {
++	c.state.statements.Add(1)
++	return nil, errors.New("startup_cleanup_driver_has_no_SQL_authority")
++}
++func (c *startupPingFaultConn) Begin() (driver.Tx, error) {
++	c.state.statements.Add(1)
++	return nil, errors.New("startup_cleanup_driver_has_no_transaction_authority")
++}
++func (c *startupPingFaultConn) Close() error { c.state.closes.Add(1); return c.state.closeErr }
++func (c *startupPingFaultConn) Ping(context.Context) error {
++	c.state.pings.Add(1)
++	return c.state.pingErr
++}
++
++var startupPingDriverSequence atomic.Uint64
++
++func TestDatabaseStartupInitialPingFailureClosesActualPool(t *testing.T) {
++	for _, mode := range []string{"ping_only", "ping_and_close_failure"} {
++		t.Run(mode, func(t *testing.T) {
++			pingCause := errors.New("actual_startup_driver_ping_failure")
++			state := &startupPingFaultState{pingErr: pingCause}
++			if mode == "ping_and_close_failure" {
++				state.closeErr = errors.New("actual_startup_driver_close_failure")
++			}
++			name := fmt.Sprintf("owned_startup_ping_driver_%d", startupPingDriverSequence.Add(1))
++			sql.Register(name, &startupPingFaultDriver{state: state})
++			pool, err := sql.Open(name, "")
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = pool.Close() })
++			opened, err := openStartupDatabase(postgres.New(postgres.Config{Conn: pool, WithoutReturning: true}), &gorm.Config{Logger: gormlogger.Discard})
++			require.Nil(t, opened, "a Ping-refused handle must never transfer to DI")
++			require.ErrorIs(t, err, pingCause)
++			if state.closeErr != nil {
++				require.ErrorIs(t, err, state.closeErr)
++			}
++			require.Equal(t, int32(1), state.opens.Load())
++			require.Equal(t, int32(1), state.pings.Load())
++			require.Equal(t, int32(1), state.closes.Load(), "the actual driver connection must be closed before returning refusal")
++			require.Zero(t, state.statements.Load(), "cleanup fixture must mint no fake schema or grants")
++			require.Error(t, pool.Ping(), "the actual SQL pool is closed, not just hidden by a nil return")
++			require.Equal(t, int32(1), state.pings.Load())
++			require.Equal(t, int32(1), state.closes.Load())
++		})
++	}
++}
+diff --git a/internal/container/database_schema_ready.go b/internal/container/database_schema_ready.go
+new file mode 100644
+index 00000000..693df4a1
+--- /dev/null
++++ b/internal/container/database_schema_ready.go
+@@ -0,0 +1,42 @@
++package container
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"gorm.io/gorm"
++
++	"github.com/Tencent/WeKnora/internal/database"
++)
++
++// A migration refusal is terminal for database DI. Disabling automatic Up
++// changes who installs the schema, never whether the installed schema is ready.
++func bootstrapDatabaseSchema(ctx context.Context, dsn string, opts database.MigrationOptions, autoMigrate bool) error {
++	if autoMigrate {
++		if err := database.RunMigrationsWithContext(ctx, dsn, opts); err != nil {
++			return fmt.Errorf("database schema migration refused: %w", err)
++		}
++	}
++	if err := database.VerifyJointSchemaReady(ctx, dsn, opts); err != nil {
++		return fmt.Errorf("database schema startup readiness refused: %w", err)
++	}
++	return nil
++}
++
++// GORM can return a non-nil initialized handle with an automatic Ping error.
++// No failing initial pool has transferred to DI, so release it and retain both
++// initialization and cleanup causes. A prior Initialize Close is idempotent.
++func openStartupDatabase(dialector gorm.Dialector, cfg *gorm.Config) (*gorm.DB, error) {
++	opened, err := gorm.Open(dialector, cfg)
++	if err == nil {
++		return opened, nil
++	}
++	if opened == nil {
++		return nil, err
++	}
++	pool, poolErr := opened.DB()
++	if poolErr != nil {
++		return nil, errors.Join(err, poolErr)
++	}
++	return nil, errors.Join(err, pool.Close())
++}
+diff --git a/internal/container/database_schema_ready_sql_actual_test.go b/internal/container/database_schema_ready_sql_actual_test.go
+new file mode 100644
+index 00000000..c281465b
+--- /dev/null
++++ b/internal/container/database_schema_ready_sql_actual_test.go
+@@ -0,0 +1,281 @@
++package container
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/database"
++	"github.com/golang-migrate/migrate/v4"
++	"github.com/stretchr/testify/require"
++	"go.uber.org/dig"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func startupSchemaRepoRoot(t *testing.T) string {
++	t.Helper()
++	root, err := filepath.Abs(filepath.Join("..", ".."))
++	require.NoError(t, err)
++	_, err = os.Stat(filepath.Join(root, "migrations", "sqlite", "000087_nextcloud_graph_recovery_fence.up.sql"))
++	require.NoError(t, err)
++	return root
++}
++
++func startupSchemaChdir(t *testing.T, path string) {
++	t.Helper()
++	old, err := os.Getwd()
++	require.NoError(t, err)
++	require.NoError(t, os.Chdir(path))
++	t.Cleanup(func() {
++		if err := os.Chdir(old); err != nil {
++			t.Errorf("restore owned startup cwd: %v", err)
++		}
++	})
++}
++
++func startupSchemaSource(t *testing.T, root string, through uint) string {
++	t.Helper()
++	copyRoot := t.TempDir()
++	directory := filepath.Join(copyRoot, "migrations", "sqlite")
++	require.NoError(t, os.MkdirAll(directory, 0700))
++	paths, err := filepath.Glob(filepath.Join(root, "migrations", "sqlite", "*.up.sql"))
++	require.NoError(t, err)
++	for _, path := range paths {
++		var version uint
++		_, err := fmt.Sscanf(filepath.Base(path), "%d_", &version)
++		require.NoError(t, err)
++		if version > through {
++			continue
++		}
++		body, err := os.ReadFile(path)
++		require.NoError(t, err)
++		require.NoError(t, os.WriteFile(filepath.Join(directory, filepath.Base(path)), body, 0600))
++	}
++	return copyRoot
++}
++
++func startupSchemaSnapshot(t *testing.T, db *sql.DB) []string {
++	t.Helper()
++	rows, err := db.Query("SELECT type,name,COALESCE(sql,'') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
++	require.NoError(t, err)
++	defer rows.Close()
++	var result []string
++	for rows.Next() {
++		var kind, name, definition string
++		require.NoError(t, rows.Scan(&kind, &name, &definition))
++		result = append(result, kind+"|"+name+"|"+definition)
++	}
++	require.NoError(t, rows.Err())
++	return result
++}
++
++func startupSchemaLedger(t *testing.T, db *sql.DB) []string {
++	t.Helper()
++	var exists int
++	require.NoError(t, db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'").Scan(&exists))
++	if exists == 0 {
++		return nil
++	}
++	var version uint
++	var dirty bool
++	require.NoError(t, db.QueryRow("SELECT version,dirty FROM schema_migrations").Scan(&version, &dirty))
++	return []string{fmt.Sprint(version), fmt.Sprint(dirty)}
++}
++
++func TestDatabaseStartupRejectsBeforePostMigrationActualSQLite(t *testing.T) {
++	for _, mode := range []string{"full_clean_auto", "full_clean_external", "unknown_historyless_auto", "dirty_auto", "clean_prefix_external", "missing_module_auto", "changed_source_external", "canceled_before_open", "missing_storage_external"} {
++		t.Run(mode, func(t *testing.T) {
++			root := startupSchemaRepoRoot(t)
++			startupSchemaChdir(t, root)
++			path := filepath.Join(t.TempDir(), "startup with spaces.db")
++			if strings.HasPrefix(mode, "full_clean") {
++				path = filepath.Join(filepath.Dir(path), "startup with spaces ? # %.db")
++			}
++			dsn := "sqlite3://" + path
++			opts := database.MigrationOptions{SQLiteDBPath: path, AutoRecoverDirty: true}
++			t.Setenv("DB_DRIVER", "sqlite")
++			t.Setenv("DB_PATH", path)
++			t.Setenv("AUTO_RECOVER_DIRTY", "true")
++			t.Setenv("AUTO_MIGRATE", "true")
++			t.Setenv("BUILTIN_MODELS_CONFIG", filepath.Join(t.TempDir(), "not-configured.yaml"))
++			if strings.HasSuffix(mode, "external") {
++				t.Setenv("AUTO_MIGRATE", "false")
++			}
++			if mode == "missing_storage_external" {
++				t.Setenv("AUTO_MIGRATE", "false")
++				path = filepath.Join(t.TempDir(), "missing ? # %.db")
++				t.Setenv("DB_PATH", path)
++				db, err := initDatabaseWithContext(context.Background(), &config.Config{})
++				require.Nil(t, db)
++				require.Error(t, err)
++				_, statErr := os.Stat(path)
++				require.ErrorIs(t, statErr, os.ErrNotExist, "AUTO=false may not create storage, ledger or WAL")
++				entries, readErr := os.ReadDir(filepath.Dir(path))
++				require.NoError(t, readErr)
++				require.Empty(t, entries)
++				return
++			}
++			if mode == "canceled_before_open" {
++				ctx, cancel := context.WithCancel(context.Background())
++				cancel()
++				db, err := initDatabaseWithContext(ctx, &config.Config{})
++				require.Nil(t, db)
++				require.ErrorIs(t, err, context.Canceled)
++				_, statErr := os.Stat(path)
++				require.ErrorIs(t, statErr, os.ErrNotExist, "a canceled startup must not even open/create SQLite storage")
++				return
++			}
++			if mode == "clean_prefix_external" {
++				copied := startupSchemaSource(t, root, 75)
++				m, err := migrate.New("file://"+filepath.Join(copied, "migrations", "sqlite"), dsn)
++				require.NoError(t, err)
++				require.NoError(t, m.Up(), "direct canonical prefix fixture, not a fake complete schema")
++				se, de := m.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++			} else if mode != "unknown_historyless_auto" {
++				require.NoError(t, database.RunMigrationsWithOptions(dsn, opts))
++			}
++			inspectionDSN, err := database.SQLiteRuntimeDSN(path)
++			require.NoError(t, err)
++			if mode == "unknown_historyless_auto" {
++				// Explicit negative-only owned fixture creation. Reuse the same
++				// escaped filename; production runtime remains existing-only rw.
++				ownedURI, err := url.Parse(inspectionDSN)
++				require.NoError(t, err)
++				query := ownedURI.Query()
++				query.Set("mode", "rwc")
++				ownedURI.RawQuery = query.Encode()
++				inspectionDSN = ownedURI.String()
++			}
++			inspectDB, err := sql.Open("sqlite3", inspectionDSN)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if err := inspectDB.Close(); err != nil {
++					t.Errorf("close owned startup inspector: %v", err)
++				}
++			})
++			_, err = inspectDB.Exec("CREATE TABLE owned_startup_marker(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
++			require.NoError(t, err)
++			_, err = inspectDB.Exec("INSERT INTO owned_startup_marker(id,value) VALUES(1,'preserved-marker')")
++			require.NoError(t, err)
++			if strings.HasPrefix(mode, "full_clean") {
++				// Initialize the genuine external journal once. Startup only verifies
++				// it; no new pin/anchor is fabricated by the readiness capability.
++				owned, err := gorm.Open(sqlite.Open(inspectionDSN), &gorm.Config{})
++				require.NoError(t, err)
++				pool, err := owned.DB()
++				require.NoError(t, err)
++				t.Cleanup(func() {
++					if err := pool.Close(); err != nil {
++						t.Errorf("close owned journal pool: %v", err)
++					}
++				})
++				directory := t.TempDir()
++				require.NoError(t, os.Chmod(directory, 0700))
++				key := filepath.Join(directory, "key")
++				require.NoError(t, os.WriteFile(key, []byte(strings.Repeat("owned-startup-journal-key-", 3)), 0600))
++				t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY", directory)
++				t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_KEY", key)
++				t.Setenv("WEKNORA_ORIGINAL_BODY_JOURNAL_PIN", filepath.Join(directory, "pin"))
++				require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(owned))
++				require.NoError(t, repository.NewOriginalBodyRetentionStore(owned).InitializeJournal())
++			}
++			if mode == "dirty_auto" {
++				copied := startupSchemaSource(t, root, 87)
++				require.NoError(t, os.WriteFile(filepath.Join(copied, "migrations", "sqlite", "000088_owned_startup_failure.up.sql"), []byte("SELECT * FROM owned_missing_startup_failure;\n"), 0600))
++				m, err := migrate.New("file://"+filepath.Join(copied, "migrations", "sqlite"), dsn)
++				require.NoError(t, err)
++				require.Error(t, m.Up(), "real failing migration, no ledger rewrite")
++				se, de := m.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++				require.Equal(t, []string{"88", "true"}, startupSchemaLedger(t, inspectDB))
++			}
++			if mode == "missing_module_auto" {
++				_, err := inspectDB.Exec("DROP TABLE nextcloud_root_migrations")
++				require.NoError(t, err)
++			}
++			if mode == "changed_source_external" {
++				copied := startupSchemaSource(t, root, 87)
++				file := filepath.Join(copied, "migrations", "sqlite", "000087_nextcloud_graph_recovery_fence.up.sql")
++				body, err := os.ReadFile(file)
++				require.NoError(t, err)
++				require.NoError(t, os.WriteFile(file, append(body, []byte("\n-- source identity negative\n")...), 0600))
++				startupSchemaChdir(t, copied)
++			}
++			beforeSchema, beforeLedger := startupSchemaSnapshot(t, inspectDB), startupSchemaLedger(t, inspectDB)
++			var originalCount int
++			if mode != "unknown_historyless_auto" {
++				require.NoError(t, inspectDB.QueryRow("SELECT count(*) FROM memory_original_admissions").Scan(&originalCount))
++			}
++			// Real dig error propagation: a downstream constructor cannot run
++			// without the database provider, so no router/worker consumer runs.
++			container := dig.New()
++			require.NoError(t, container.Provide(func() (*gorm.DB, error) { return initDatabaseWithContext(context.Background(), &config.Config{}) }))
++			type readyConsumer struct{ db *gorm.DB }
++			consumerCalls := 0
++			require.NoError(t, container.Provide(func(db *gorm.DB) *readyConsumer { consumerCalls++; return &readyConsumer{db: db} }))
++			var started *gorm.DB
++			err = container.Invoke(func(consumer *readyConsumer) { started = consumer.db })
++			if strings.HasPrefix(mode, "full_clean") {
++				require.NoError(t, err)
++				require.Equal(t, 1, consumerCalls)
++				require.NotNil(t, started)
++				pool, poolErr := started.DB()
++				require.NoError(t, poolErr)
++				t.Cleanup(func() {
++					if err := pool.Close(); err != nil {
++						t.Errorf("close actual started pool: %v", err)
++					}
++				})
++				require.NoError(t, database.VerifyJointSchemaReady(context.Background(), dsn, opts), "production retention wrapper remains a legal exact witness")
++				require.NoError(t, database.VerifyJointSchemaReadyOnDB(context.Background(), pool, "sqlite"))
++				var seq int
++				var name, actualPath string
++				require.NoError(t, pool.QueryRow("PRAGMA database_list").Scan(&seq, &name, &actualPath))
++				require.Equal(t, "main", name)
++				require.Equal(t, path, actualPath, "the actual runtime pool must reference the same qualified special filename")
++
++			} else {
++				require.Error(t, err)
++				require.Zero(t, consumerCalls)
++				require.Nil(t, started)
++				switch mode {
++				case "clean_prefix_external":
++					require.True(t, errors.Is(err, database.ErrJointSchemaNotReady))
++				case "dirty_auto":
++					require.True(t, errors.Is(err, database.ErrJointSchemaAmbiguousDirty))
++				case "changed_source_external":
++					require.True(t, errors.Is(err, database.ErrJointSchemaSourceIdentity))
++				default:
++					require.True(t, errors.Is(err, database.ErrJointSchemaUnknown))
++				}
++				require.Equal(t, beforeSchema, startupSchemaSnapshot(t, inspectDB), "refused startup has no retention/producer/postmigration DDL")
++				require.Equal(t, beforeLedger, startupSchemaLedger(t, inspectDB), "no initialized ledger or Force")
++				if mode != "unknown_historyless_auto" {
++					var afterCount int
++					require.NoError(t, inspectDB.QueryRow("SELECT count(*) FROM memory_original_admissions").Scan(&afterCount))
++					require.Equal(t, originalCount, afterCount)
++				}
++			}
++			entries, err := os.ReadDir(filepath.Dir(path))
++			require.NoError(t, err)
++			for _, entry := range entries {
++				require.Contains(t, []string{filepath.Base(path), filepath.Base(path) + "-wal", filepath.Base(path) + "-shm"}, entry.Name(), "no shortened/alternate filename or WAL may be created")
++			}
++			var marker string
++			require.NoError(t, inspectDB.QueryRow("SELECT value FROM owned_startup_marker WHERE id=1").Scan(&marker))
++			require.Equal(t, "preserved-marker", marker)
++		})
++	}
++}
+diff --git a/internal/database/migration.go b/internal/database/migration.go
+index 86e76ee0..8e12c125 100644
+--- a/internal/database/migration.go
++++ b/internal/database/migration.go
+@@ -95,11 +95,27 @@ type MigrationOptions struct {
+ 	// parsing a URL-based DSN, which avoids breakage when the path contains
+ 	// spaces (e.g. macOS "Application Support").
+ 	SQLiteDBPath string
++
++	// Set only by the read-only application readiness observer. Migration Up
++	// keeps its existing writable fresh-bootstrap behavior.
++	jointReadOnly bool
+ }
+ 
+ // RunMigrationsWithOptions executes all pending database migrations with custom options
+ func RunMigrationsWithOptions(dsn string, opts MigrationOptions) error {
+-	ctx := context.Background()
++	return RunMigrationsWithContext(context.Background(), dsn, opts)
++}
++
++// RunMigrationsWithContext keeps the existing driver operation/timeouts while
++// using the supplied startup context for all read-only preflight phases.
++// An already-running migrate Up still follows its existing driver semantics.
++func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOptions) error {
++	if ctx == nil {
++		return ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
+ 
+ 	logger.Infof(ctx, "Starting database migration...")
+ 
+@@ -122,7 +138,13 @@ func RunMigrationsWithOptions(dsn string, opts MigrationOptions) error {
+ 
+ 	var m *migrate.Migrate
+ 	if opts.SQLiteDBPath != "" {
+-		sqlDB, err := sql.Open("sqlite3", opts.SQLiteDBPath)
++		// Preserve writable fresh bootstrap while treating the complete
++		// filename as URI data, including spaces, ?, # and percent signs.
++		raw, err := jointSQLiteFilenameDSN(opts.SQLiteDBPath, "rwc")
++		if err != nil {
++			return err
++		}
++		sqlDB, err := sql.Open("sqlite3", raw)
+ 		if err != nil {
+ 			logger.Errorf(ctx, "Failed to open sqlite db for migration: %v", err)
+ 			wrapped := fmt.Errorf("failed to open sqlite db for migration: %w", err)
+@@ -213,7 +235,11 @@ func RunMigrationsWithOptions(dsn string, opts MigrationOptions) error {
+ 	// golang-migrate marks 43 dirty, so an operator can review that operation
+ 	// without the generic dirty-state recovery retrying this safety check.
+ 	if opts.SQLiteDBPath != "" && !oldDirty && oldVersion == 42 {
+-		preflightDB, err := sql.Open("sqlite3", opts.SQLiteDBPath)
++		raw, err := jointSQLiteFilenameDSN(opts.SQLiteDBPath, "ro")
++		if err != nil {
++			return captureMigrationFailure(m, err)
++		}
++		preflightDB, err := sql.Open("sqlite3", raw)
+ 		if err != nil {
+ 			return captureMigrationFailure(m, fmt.Errorf("open SQLite decommission preflight: %w", err))
+ 		}
+diff --git a/internal/database/migration_joint_lineage.go b/internal/database/migration_joint_lineage.go
+index 5b2fa33a..ac408e13 100644
+--- a/internal/database/migration_joint_lineage.go
++++ b/internal/database/migration_joint_lineage.go
+@@ -115,6 +115,16 @@ func openJointLineageDB(dsn string, options MigrationOptions) (*sql.DB, string,
+ 		if raw == "" {
+ 			raw = strings.TrimPrefix(dsn, "sqlite3://")
+ 		}
++		mode := "rwc"
++		if options.jointReadOnly {
++			mode = "ro"
++		}
++		var pathErr error
++		raw, pathErr = jointSQLiteFilenameDSN(raw, mode)
++		if pathErr != nil {
++			return nil, dialect, pathErr
++		}
++
+ 	}
+ 	db, err := sql.Open(driver, raw)
+ 	if err != nil {
+@@ -131,6 +141,10 @@ func observeJointSchemaHistoryBeforeDriver(ctx context.Context, dsn string, opti
+ 		return 0, false, false, err
+ 	}
+ 	defer db.Close()
++	return observeJointSchemaHistoryOnDB(ctx, db, dialect)
++}
++
++func observeJointSchemaHistoryOnDB(ctx context.Context, db *sql.DB, dialect string) (uint, bool, bool, error) {
+ 	_, tables, err := jointLineageObjectSets(ctx, db, dialect)
+ 	if err != nil {
+ 		return 0, false, false, err
+diff --git a/internal/database/migration_joint_ready.go b/internal/database/migration_joint_ready.go
+new file mode 100644
+index 00000000..5e044eeb
+--- /dev/null
++++ b/internal/database/migration_joint_ready.go
+@@ -0,0 +1,89 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++)
++
++var ErrJointSchemaNotReady = errors.New("joint_schema_not_ready_for_application_startup")
++
++// VerifyJointSchemaReady is read-only: no migrate driver, Up, Force, ledger
++// creation, body producer, installer or grant is invoked. A clean supported
++// prefix can be eligible for migration without being ready for this app.
++func VerifyJointSchemaReady(ctx context.Context, dsn string, opts MigrationOptions) error {
++	if ctx == nil {
++		return ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	// Both the initial ledger observer and every catalogue connection are
++	// truly read-only for readiness; SQL-only inspection must not create a DB.
++	opts.jointReadOnly = true
++	version, dirty, known, err := observeJointSchemaHistoryBeforeDriver(ctx, dsn, opts)
++	if err != nil {
++		return err
++	}
++	if err := preflightJointSchemaLineage(ctx, dsn, opts, version, dirty, known); err != nil {
++		return err
++	}
++	witness, err := jointLineageWitnessesFromSource()
++	if err != nil {
++		return err
++	}
++	var latest uint
++	for _, module := range witness.Modules[jointLineageDialect(dsn, opts)] {
++		if module.Version > latest {
++			latest = module.Version
++		}
++	}
++	if latest == 0 || !known || dirty || version != latest {
++		return ErrJointSchemaNotReady
++	}
++	return ctx.Err()
++}
++
++// VerifyJointSchemaReadyOnDB qualifies the pool that will actually serve the
++// app. It never reopens a DSN/path or initializes a migrate driver/ledger.
++func VerifyJointSchemaReadyOnDB(ctx context.Context, db *sql.DB, dialect string) error {
++	if ctx == nil || db == nil {
++		return ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if dialect == "postgres" {
++		dialect = "versioned"
++	}
++	if dialect != "versioned" && dialect != "sqlite" {
++		return ErrJointSchemaUnavailable
++	}
++	witness, err := jointLineageWitnessesFromSource()
++	if err != nil {
++		return err
++	}
++	if err := jointLineageVerifyAvailableSources(dialect, witness); err != nil {
++		return err
++	}
++	version, dirty, known, err := observeJointSchemaHistoryOnDB(ctx, db, dialect)
++	if err != nil {
++		return err
++	}
++	if dirty && version >= jointLineageFirstVersion(dialect) {
++		return ErrJointSchemaAmbiguousDirty
++	}
++	var latest uint
++	for _, module := range witness.Modules[dialect] {
++		if module.Version > latest {
++			latest = module.Version
++		}
++	}
++	if latest == 0 || !known || dirty || version != latest {
++		return ErrJointSchemaNotReady
++	}
++	if err := verifyJointRootCatalogue(ctx, db, dialect, version); err != nil {
++		return err
++	}
++	return ctx.Err()
++}
+diff --git a/internal/database/migration_joint_ready_sql_actual_test.go b/internal/database/migration_joint_ready_sql_actual_test.go
+new file mode 100644
+index 00000000..6b4dbad4
+--- /dev/null
++++ b/internal/database/migration_joint_ready_sql_actual_test.go
+@@ -0,0 +1,198 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/golang-migrate/migrate/v4"
++	"github.com/stretchr/testify/require"
++)
++
++func runJointSchemaStartupReadinessActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"full_clean_readonly", "clean_root_prefix_not_ready", "genuine_dirty_no_force", "unknown_historyless_no_ledger", "missing_current_module", "changed_source_no_mutation", "canceled_readonly"} {
++		t.Run(mode, func(t *testing.T) {
++			root := sqliteRepoRoot(t)
++			chdirAndRestore(t, root)
++			db, dsn, opts := jointLineageFixture(t, pg)
++			dialect, latest, prefix := "sqlite", uint(87), uint(75)
++			actualDSN := "sqlite3://" + opts.SQLiteDBPath
++			if pg {
++				dialect, latest, prefix = "versioned", 168, 156
++				actualDSN = dsn
++			}
++			if mode == "clean_root_prefix_not_ready" {
++				copied := jointLineageCopiedSource(t, root, dialect, prefix)
++				m, err := migrate.New("file://"+filepath.Join(copied, "migrations", dialect), actualDSN)
++				require.NoError(t, err)
++				require.NoError(t, m.Up(), "real exact canonical prefix is eligible for Up, not app startup")
++				se, de := m.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++			} else if mode != "unknown_historyless_no_ledger" {
++				require.NoError(t, RunMigrationsWithOptions(dsn, opts), "positive preparation is a complete actual production upgrade")
++				version, dirty := jointLineageMigrationState(t, db)
++				require.Equal(t, latest, version)
++				require.False(t, dirty)
++			}
++			requireStartupSentinel(t, db)
++			if mode == "genuine_dirty_no_force" {
++				copied := jointLineageCopiedSource(t, root, dialect, latest)
++				fault := filepath.Join(copied, "migrations", dialect, fmt.Sprintf("%06d_owned_startup_failure.up.sql", latest+1))
++				require.NoError(t, os.WriteFile(fault, []byte("SELECT * FROM owned_missing_startup_fault;\n"), 0600))
++				m, err := migrate.New("file://"+filepath.Join(copied, "migrations", dialect), actualDSN)
++				require.NoError(t, err)
++				require.Error(t, m.Up(), "real failed SQL produces dirty history; no direct ledger edits")
++				se, de := m.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++				version, dirty := jointLineageMigrationState(t, db)
++				require.Equal(t, latest+1, version)
++				require.True(t, dirty)
++			}
++			if mode == "missing_current_module" {
++				_, err := db.Exec("DROP TABLE nextcloud_root_migrations")
++				require.NoError(t, err, "actual current module loss; no invented witness")
++			}
++			if mode == "changed_source_no_mutation" {
++				copied := jointLineageCopiedSource(t, root, dialect, latest)
++				paths, err := filepath.Glob(filepath.Join(copied, "migrations", dialect, fmtJointVersion(latest)+"_*.up.sql"))
++				require.NoError(t, err)
++				require.Len(t, paths, 1)
++				body, err := os.ReadFile(paths[0])
++				require.NoError(t, err)
++				require.NoError(t, os.WriteFile(paths[0], append(body, []byte("\n-- owned source identity fault\n")...), 0600))
++				chdirAndRestore(t, copied)
++			}
++			before := memoryFullSchemaSnapshot(t, db, dialect)
++			ledger := startupReadinessLedger(t, db, dialect)
++			ctx := context.Background()
++			if mode == "canceled_readonly" {
++				var cancel context.CancelFunc
++				ctx, cancel = context.WithCancel(ctx)
++				cancel()
++			}
++			err := VerifyJointSchemaReady(ctx, dsn, opts)
++			switch mode {
++			case "full_clean_readonly":
++				require.NoError(t, err)
++				require.NoError(t, VerifyJointSchemaReady(ctx, dsn, opts), "repeat startup validates exact full catalogue again")
++			case "clean_root_prefix_not_ready":
++				require.ErrorIs(t, err, ErrJointSchemaNotReady)
++			case "genuine_dirty_no_force":
++				require.ErrorIs(t, err, ErrJointSchemaAmbiguousDirty)
++			case "changed_source_no_mutation":
++				require.ErrorIs(t, err, ErrJointSchemaSourceIdentity)
++			case "canceled_readonly":
++				require.ErrorIs(t, err, context.Canceled)
++			default:
++				require.ErrorIs(t, err, ErrJointSchemaUnknown)
++			}
++			require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect), "readiness has no schema/driver/installer effects")
++			require.Equal(t, ledger, startupReadinessLedger(t, db, dialect), "no ledger creation or Force")
++			var value string
++			require.NoError(t, db.QueryRow("SELECT marker FROM owned_startup_sentinel WHERE id=1").Scan(&value))
++			require.Equal(t, "unchanged-startup-marker", value)
++		})
++	}
++}
++
++func requireStartupSentinel(t *testing.T, db *sql.DB) {
++	t.Helper()
++	_, err := db.Exec("CREATE TABLE owned_startup_sentinel(id INTEGER PRIMARY KEY,marker TEXT NOT NULL)")
++	require.NoError(t, err)
++	_, err = db.Exec("INSERT INTO owned_startup_sentinel(id,marker) VALUES(1,'unchanged-startup-marker')")
++	require.NoError(t, err)
++}
++
++func startupReadinessLedger(t *testing.T, db *sql.DB, dialect string) []string {
++	t.Helper()
++	query := "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
++	if dialect == "versioned" {
++		query = "SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name='schema_migrations'"
++	}
++	var count int
++	require.NoError(t, db.QueryRow(query).Scan(&count))
++	if count == 0 {
++		return nil
++	}
++	version, dirty := jointLineageMigrationState(t, db)
++	return []string{fmt.Sprint(version), fmt.Sprint(dirty)}
++}
++
++func TestJointSchemaStartupReadinessActualSQLite(t *testing.T) {
++	runJointSchemaStartupReadinessActual(t, false)
++}
++func TestJointSchemaStartupReadinessActualPostgres(t *testing.T) {
++	runJointSchemaStartupReadinessActual(t, true)
++}
++
++func TestJointSchemaStartupReadinessMissingStorageActualSQLite(t *testing.T) {
++	root := sqliteRepoRoot(t)
++	chdirAndRestore(t, root)
++	directory := t.TempDir()
++	missing := filepath.Join(directory, "database ? # %.db")
++	before, err := os.ReadDir(directory)
++	require.NoError(t, err)
++	require.Empty(t, before)
++	err = VerifyJointSchemaReady(context.Background(), "sqlite3://"+missing, MigrationOptions{SQLiteDBPath: missing})
++	require.Error(t, err)
++	after, readErr := os.ReadDir(directory)
++	require.NoError(t, readErr)
++	require.Empty(t, after, "mode=ro must create no database, WAL, SHM or ledger")
++	_, statErr := os.Stat(missing)
++	require.ErrorIs(t, statErr, os.ErrNotExist)
++}
++
++func TestJointSchemaStartupActualOpenedSQLitePool(t *testing.T) {
++	root := sqliteRepoRoot(t)
++	chdirAndRestore(t, root)
++	directory := t.TempDir()
++	path := filepath.Join(directory, "complete database ? # %.db")
++	opts := MigrationOptions{SQLiteDBPath: path}
++	require.NoError(t, RunMigrationsWithOptions("sqlite3://"+path, opts), "real writable canonical bootstrap must create the exact requested filename")
++	raw, err := SQLiteRuntimeDSN(path)
++	require.NoError(t, err)
++	pool, err := sql.Open("sqlite3", raw)
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		if err := pool.Close(); err != nil {
++			t.Errorf("close actual qualified runtime pool: %v", err)
++		}
++	})
++	require.NoError(t, VerifyJointSchemaReadyOnDB(context.Background(), pool, "sqlite"))
++	var seq int
++	var name, actualPath string
++	require.NoError(t, pool.QueryRow("PRAGMA database_list").Scan(&seq, &name, &actualPath))
++	require.Equal(t, "main", name)
++	require.Equal(t, path, actualPath)
++	foreignPath := filepath.Join(t.TempDir(), "unqualified-other.db")
++	foreignDSN, err := jointSQLiteFilenameDSN(foreignPath, "rwc")
++	require.NoError(t, err)
++	foreign, err := sql.Open("sqlite3", foreignDSN)
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		if err := foreign.Close(); err != nil {
++			t.Errorf("close owned rejected runtime pool: %v", err)
++		}
++	})
++	_, err = foreign.Exec("CREATE TABLE actual_wrong_pool_sentinel(id INTEGER PRIMARY KEY,marker TEXT NOT NULL)")
++	require.NoError(t, err)
++	_, err = foreign.Exec("INSERT INTO actual_wrong_pool_sentinel(id,marker) VALUES(1,'wrong-pool-preserved')")
++	require.NoError(t, err)
++	before := memoryFullSchemaSnapshot(t, foreign, "sqlite")
++	require.NoError(t, VerifyJointSchemaReady(context.Background(), "sqlite3://"+path, opts), "the requested file remains legitimately complete")
++	require.ErrorIs(t, VerifyJointSchemaReadyOnDB(context.Background(), foreign, "sqlite"), ErrJointSchemaUnknown, "checking the qualified filename cannot authorize an actually different pool")
++	require.Equal(t, before, memoryFullSchemaSnapshot(t, foreign, "sqlite"))
++	var marker string
++	require.NoError(t, foreign.QueryRow("SELECT marker FROM actual_wrong_pool_sentinel WHERE id=1").Scan(&marker))
++	require.Equal(t, "wrong-pool-preserved", marker)
++	entries, err := os.ReadDir(directory)
++	require.NoError(t, err)
++	for _, entry := range entries {
++		require.Contains(t, []string{filepath.Base(path), filepath.Base(path) + "-wal", filepath.Base(path) + "-shm"}, entry.Name())
++	}
++}
+diff --git a/internal/database/migration_sqlite_filename.go b/internal/database/migration_sqlite_filename.go
+new file mode 100644
+index 00000000..99abfcde
+--- /dev/null
++++ b/internal/database/migration_sqlite_filename.go
+@@ -0,0 +1,45 @@
++package database
++
++import (
++	"net/url"
++	"path/filepath"
++)
++
++func jointSQLiteFilenameDSN(path, mode string) (string, error) {
++	if path == ":memory:" && mode == "rwc" {
++		return path, nil
++	}
++	if path == "" || path == ":memory:" || (mode != "ro" && mode != "rw" && mode != "rwc") {
++		return "", ErrJointSchemaUnavailable
++	}
++	absolute, err := filepath.Abs(path)
++	if err != nil {
++		return "", ErrJointSchemaUnavailable
++	}
++	uri := url.URL{Scheme: "file", Path: absolute}
++	query := url.Values{"mode": {mode}}
++	if mode == "ro" {
++		query.Set("_query_only", "on")
++	}
++	uri.RawQuery = query.Encode()
++	return uri.String(), nil
++}
++
++// SQLiteRuntimeDSN consumes the same filename as migration/readiness. It can
++// open an existing qualified database, never silently create an alternate file.
++func SQLiteRuntimeDSN(path string) (string, error) {
++	raw, err := jointSQLiteFilenameDSN(path, "rw")
++	if err != nil {
++		return "", err
++	}
++	uri, err := url.Parse(raw)
++	if err != nil {
++		return "", ErrJointSchemaUnavailable
++	}
++	query := uri.Query()
++	query.Set("_journal_mode", "WAL")
++	query.Set("_busy_timeout", "5000")
++	query.Set("_foreign_keys", "on")
++	uri.RawQuery = query.Encode()
++	return uri.String(), nil
++}
+diff --git a/internal/database/migration_sqlite_legacy42_filename_sql_actual_test.go b/internal/database/migration_sqlite_legacy42_filename_sql_actual_test.go
+new file mode 100644
+index 00000000..056f04b4
+--- /dev/null
++++ b/internal/database/migration_sqlite_legacy42_filename_sql_actual_test.go
+@@ -0,0 +1,107 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/golang-migrate/migrate/v4"
++	sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
++	"github.com/stretchr/testify/require"
++)
++
++func TestSQLiteLegacy42SpecialFilenamePreflightActual(t *testing.T) {
++	for _, mode := range []string{"empty_actual_upgrade", "observed_legacy_decommission_refused_clean"} {
++		t.Run(mode, func(t *testing.T) {
++			root := sqliteRepoRoot(t)
++			prefix := copySQLiteMigrationsThrough(t, root, 42)
++			path := filepath.Join(t.TempDir(), "legacy42 database ? # %.db")
++			raw, err := jointSQLiteFilenameDSN(path, "rwc")
++			require.NoError(t, err)
++			setup, err := sql.Open("sqlite3", raw)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if err := setup.Close(); err != nil {
++					t.Errorf("close owned42 preparation pool: %v", err)
++				}
++			})
++			actualDriver, err := sqlite3migrate.WithInstance(setup, &sqlite3migrate.Config{})
++			require.NoError(t, err)
++			m, err := migrate.NewWithDatabaseInstance("file://"+filepath.Join(prefix, "migrations", "sqlite"), "sqlite3", actualDriver)
++			require.NoError(t, err)
++			migrationClosed := false
++			t.Cleanup(func() {
++				if !migrationClosed {
++					se, de := m.Close()
++					if se != nil {
++						t.Errorf("close owned42 source: %v", se)
++					}
++					if de != nil {
++						t.Errorf("close owned42 driver: %v", de)
++					}
++				}
++			})
++			require.NoError(t, m.Migrate(42), "actual canonical predecessor is installed at its honest old version")
++			se, de := m.Close()
++			migrationClosed = true
++			require.NoError(t, se)
++			require.NoError(t, de)
++			runtimeDSN, err := SQLiteRuntimeDSN(path)
++			require.NoError(t, err)
++			db, err := sql.Open("sqlite3", runtimeDSN)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if err := db.Close(); err != nil {
++					t.Errorf("close actual legacy42 pool: %v", err)
++				}
++			})
++			if mode == "observed_legacy_decommission_refused_clean" {
++				// Negative-only old observed operation, same untrusted legacy shape
++				// as the existing42 safety gate. This is no valid current original,
++				// signed source, read grant, successful decommission or fake ledger.
++				statements := []string{
++					`INSERT INTO tenants(id,name,business) VALUES(7,'paired','test')`,
++					`INSERT INTO knowledge_bases(id,name,tenant_id,embedding_model_id,summary_model_id) VALUES('kb-review','review',7,'embed','summary')`,
++					`INSERT INTO data_sources(id,tenant_id,knowledge_base_id,name,type,config,status) VALUES('ds-review',7,'kb-review','review','nextcloud','{}','paused')`,
++					`INSERT INTO nextcloud_source_pairings(operation_id,tenant_id,knowledge_base_id,datasource_id,nextcloud_instance_id,binding_id,datasource_base_url,datasource_config_sha256,publication_epoch,key_id,state) VALUES('pair-review',7,'kb-review','ds-review','instance','binding','https://nextcloud.example','hash',1,'pair_key','pending')`,
++					`INSERT INTO nextcloud_source_decommissions(operation_id,pair_operation_id,tenant_id,knowledge_base_id,datasource_id,nextcloud_instance_id,binding_id,publication_epoch,key_id,state) VALUES('decommission-review','pair-review',7,'kb-review','ds-review','instance','binding',1,'pair_key','prepared')`,
++				}
++				for _, statement := range statements {
++					_, err := db.Exec(statement)
++					require.NoError(t, err)
++				}
++			}
++			before := memoryFullSchemaSnapshot(t, db, "sqlite")
++			version, dirty := sqliteMigrationState(t, db)
++			require.Equal(t, 42, version)
++			require.False(t, dirty)
++			chdirAndRestore(t, root)
++			opts := MigrationOptions{SQLiteDBPath: path, AutoRecoverDirty: true}
++			err = RunMigrationsWithOptions("sqlite3://"+path, opts)
++			if mode == "empty_actual_upgrade" {
++				require.NoError(t, err)
++				version, dirty = sqliteMigrationState(t, db)
++				require.Equal(t, 87, version)
++				require.False(t, dirty)
++				require.NoError(t, VerifyJointSchemaReady(context.Background(), "sqlite3://"+path, opts))
++			} else {
++				require.ErrorContains(t, err, "review existing Nextcloud decommissions")
++				version, dirty = sqliteMigrationState(t, db)
++				require.Equal(t, 42, version)
++				require.False(t, dirty)
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "sqlite"), "refusal precedes migration43 dirty or schema writes")
++				var state string
++				require.NoError(t, db.QueryRow("SELECT state FROM nextcloud_source_decommissions WHERE operation_id='decommission-review'").Scan(&state))
++				require.Equal(t, "prepared", state)
++				require.False(t, sqliteTableExists(t, db, "nextcloud_pair_rebuild_history"))
++			}
++			entries, err := os.ReadDir(filepath.Dir(path))
++			require.NoError(t, err)
++			for _, entry := range entries {
++				require.Contains(t, []string{filepath.Base(path), filepath.Base(path) + "-wal", filepath.Base(path) + "-shm"}, entry.Name(), "old42 reader must not create another DB filename")
++			}
++		})
++	}
++}
