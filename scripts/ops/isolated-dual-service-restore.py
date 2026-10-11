@@ -64,7 +64,21 @@ def run(command, *, input_file=None, output_file=None, timeout=180):
 
 
 def compose(directory, state, *args, timeout=600):
+    validate_owned_fixture(directory, state)
     return run(owner["compose_command"](directory, state, *args), timeout=timeout)
+
+
+def validate_owned_fixture(directory, state):
+    """Bind every Compose mutation to the current marker and resource nonce."""
+    checked_dir, checked = owner["owned_state"](directory)
+    expected = {key: value for key, value in state.items()
+                if key != "_compose_sha256"}
+    require(checked_dir == directory and checked == expected,
+            "synthetic project ownership marker changed")
+    if "_compose_sha256" in state:
+        require(sha256(directory / "compose.yaml") == state["_compose_sha256"],
+                "generated Compose configuration changed after fixture creation")
+    owner["assert_owned_resources"](directory, checked)
 
 
 def inspect_json(kind, target):
@@ -99,6 +113,7 @@ def assert_project_unoccupied(state):
 
 def owned_resources(directory, state, *, require_containers):
     """Check the marker, labels, service allowlist and every named volume."""
+    validate_owned_fixture(directory, state)
     checked_dir, checked = owner["owned_state"](directory)
     expected_state = {key: value for key, value in state.items()
                       if key != "_compose_sha256"}
@@ -154,8 +169,11 @@ def volume_name(state, role):
     require(role in VOLUMES, "unknown synthetic volume role")
     name = state["project"] + "_" + role
     info = inspect_json("volume", name)
-    require((info.get("Labels") or {}).get("com.docker.compose.project") ==
-            state["project"], "volume does not belong to synthetic project")
+    labels = info.get("Labels") or {}
+    require(labels.get("com.docker.compose.project") == state["project"] and
+            labels.get("com.docker.compose.volume") == role and
+            labels.get(owner["OWNER_LABEL"]) == state["owner_token"],
+            "volume does not belong to synthetic project owner and role")
     return name
 
 

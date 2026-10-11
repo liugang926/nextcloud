@@ -72,3 +72,19 @@ exec gosu appuser original-body-retention -driver postgres -mode "$1"
 Repeat the same owned packaged CLI call with `verify`, save each terminal and inspect that no app container/stream/sender has started between them. The separate publication recovery CLI requires its exact signed private plan/inventory/pin and source reconciliation receipt; do not replace it with the body journal command or an HTTP status.
 
 `synthetic-ldap-history-acceptance.py --scratch OWNED_SCRATCH --revoke-source-share` already exercises new QA/history/completed replay/citation/source-only revoke (`:94–107,114–141`); extend it to accept privately pinned pre-backup session/message IDs and restored-original checks before revocation. Do not rerun bootstrap or revoke before recording restored-positive evidence. This review supplies a sequence and script gaps, not a measured restore result.
+
+## Ownership guard update — 2026-10-11
+
+The existing dual-service script now validates the current marker, state and
+Compose fingerprint, then calls the fixture's full resource nonce validator
+before every Compose operation. Direct archive/restore volume mounts also
+require the exact owner nonce and volume role. Matching project labels alone
+cannot authorize a mutation. Four offline boundary tests cover foreign
+container/volume/network nonces, a replaced marker, and wrong volume ownership;
+the four existing fixture-state tests also pass. These checks use the real
+marker/resource validator with controlled Docker-read responses.
+
+This resolves the ownership-check portion of the table above. The body-volume
+topology, independent anchor retention, honest quiesce/reconcile/verify, normal
+application QA/history acceptance and actual restore execution remain open.
+No Docker service or volume was changed by this update.
