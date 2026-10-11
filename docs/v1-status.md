@@ -10,11 +10,11 @@ older component snapshots below retain their separate scope and failure history.
 | Work item | Latest actual result | Remaining work |
 | --- | --- | --- |
 | Startup/schema qualification | `3707fce5`: full157-package compile; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup and PeerApplied forward route |
-| Original-memory source path | `e3ab8442`:4PASS/2FAIL; real HTTP session returns SQLite busy_snapshot | Diagnose exact read-to-write transaction; matched full6 and normal application |
+| Original-memory source path | `c5e9a07f`:4PASS/2FAIL; real SQLite CREATE on original_body_leases returns busy inside the message body scope transaction; earlier e3ab busy_snapshot is retained | Fix same-transaction writer contention without extending 8s/10s bounds; matched full6 and normal application |
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `0621bef7`: real Parade17 pending16921 all pass | Historical upgrade/restart and startup route binding |
-| Native and productive memory | `e3ab8442`:55+24 all79 pass; earliercab8 policy58/QVR58 also pass separatewindows | Whole-result/remaining worker gates and matched final195/app acceptance |
-| Historical PeerApplied forward upgrade | Historical125/44 projection corrected; full157 compile on `e3ab8442` | Matched private14+source6, allpartialprefixes,169→171/88→89, final startup routing |
+| Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
+| Historical PeerApplied forward upgrade | `0e56af90`: private historical prefix14 and source projection6 all pass in separate windows; original Root PeerForwardBridge refusal preserved | Production clean161/80 route, allpartialprefixes,169→171/88→89, final startup routing |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
@@ -825,6 +825,25 @@ negative nowactuallyreachesnamedtrigger, mixedRoot/dirty/sourcechanged refuse.
 No privateobservation iswired toReady/access/upgrade. See [compile](evidence/peer-typed-common129-48-evolution-selected-compile-GREEN-20261011.json),
 [observeradvanced/Rootassertion](evidence/peer-common129-48-private-positive-root-source-refusal-assertion-failure-20261011.json)
 and [exactcommonpure6](evidence/peer-typed-common129-48-fullDDL-projection-pure6-GREEN-20261011.json).
+
+The canonical cwd helper correction now preserves all original historical14
+assertions on `0e56af90`:14 PASS, zero failures/skips/OOM,22.053s. All7 owned
+resources are independently absent. Source assets/projection6 also pass in a
+separate15.783s window, with8 resources absent. The unchanged Root preflight
+still rejects the peer branch with PeerForwardBridge. This accepts the private
+observer and source projection only; production upgrade/startup remains open.
+See [prefix14](evidence/historical-root-cwd-private-prefix14-GREEN-20261011.json),
+[source6](evidence/historical-cwd-source-projection6-GREEN-20261011.json) and
+[reviewable test delta](../integration/proposals/weknora-historical-cwd-joint-generated-entries-20261011.json).
+
+On `0e56af90`, the new fulljoint shared-Agent entries pass all16 consolidation
+and6 multicluster nodes in separate fresh165.478s and53.247s windows. Each
+window has7 independently absent resources, zero failures/skips/OOM. These
+entries run the original business bodies with complete production87/168
+schema; they preserve genuine sharing and add no source-tenant membership.
+The old partial-schema component22 failures remain preserved. See
+[consolidation16](evidence/joint-sharedagent-consolidation16-GREEN-20261011.json)
+and [multicluster6](evidence/joint-sharedagent-multicluster6-GREEN-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
