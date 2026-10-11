@@ -20,7 +20,7 @@ older component snapshots below retain their separate scope and failure history.
 | Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
 | Knowledge query SDK/completion and named history | `17d75ff3`: full157 compile and actual query13+named history7 PASS20/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, sourced history, different-output vector succession, empty/multi-KB/rewrite and Nextcloud final union |
 | Nextcloud original upload / machine index purpose | `f1e85131`:544 files format, all157 packages compile; existing query/history20 pass on this source; new machine12 fails fixture identity preparation and old HTTP25 has15PASS/10FAIL before ordinary SDK | Genuine isolated fixture, authenticated-human lifetime vs scoped machine purpose, nonempty ancestor and personal native consumption; candidate remains unadopted |
-| Nextcloud authenticated upload compatibility | `c9a0c1e0`: full157 compile, machine12 0PASS/12FAIL and HTTP25 15PASS/10FAIL at content tuple precheck; intermediate `44046f20` query/history20 18PASS/2FAIL; failed owners stopped, Go absent | SQL column mapping under investigation; recurrent model-definition lease cleanup, nonempty ancestor and personal native consumption still open |
+| Nextcloud authenticated upload compatibility | `2461bdfa`:545 files format/full157 compile; actual GORM mapping1 and ordinary HTTP25 pass; machine12 fails at model original protocol-coverage precheck; failed owners stopped, successful resources absent | Machine model coverage/SDK/publication, recurrent model-definition lease cleanup, human classification5, nonempty ancestor and personal native consumption still open |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -136,6 +136,18 @@ mapping is under investigation; no runtime acceptance is claimed. See the
 [compatibility proposal](../integration/proposals/weknora-Nextcloud-human-upload-and-zero-revision-compatibility-20261011.json),
 [intermediate failure evidence](evidence/Nextcloud-human-upload-intermediate440-regression-failures-20261011.json)
 and [current tuple failure evidence](evidence/Nextcloud-canonical-zero-c9-full157-and-content-tuple-failure-20261011.json).
+
+The explicit `datasource_id` scan tag fixes the final union's field mapping
+without changing its SQL, clock or exact lease predicates. On `2461bdfa`, all
+545 Go files parse and all157 packages compile in273.177s. The actual GORM
+mapping oracle passes, and unchanged HTTP owner5/vector10/ordinary model10
+pass25 with zero failures/skips in57.465s; seven resources are independently
+absent. Machine12 now passes upload admission, parsing and chunk creation but
+fails at the genuine model original read with protocol coverage unproven before
+SDK. Its Go actors are absent and owned SQL/data retained. Query/history20 is
+not rerun on this head while its earlier lease-cleanup failure remains open.
+See the [scan fix proposal](../integration/proposals/weknora-Nextcloud-final-content-datasource-column-20261011.json)
+and [current actual evidence](evidence/Nextcloud-scanner-full157-HTTP25-GREEN-machine12-model-coverage-failure-20261011.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
