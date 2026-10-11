@@ -397,6 +397,15 @@ preparation before upgrade, with original-input unavailable/changed. The entire
 PG/Redis stopped, failed logs/network/volumes retained. See the [actual nonempty
 record](evidence/joint-nonempty-SQLite-live-upgrade-GREEN-revoke-PG-failure-20261011.json).
 
+The current actor repair `f126d3cd` parses445 changed Go files and compiles
+all157 packages in224.989s with zero business RUN and exact compiler/temp
+absence. Independent policy reads and10 child consumers use the actual bound
+current-actor factory on the active transaction; viewer reading remains legal
+and writer admin checks stay separate. The fixed PG Model.Create phase observer
+records only compiled stages/booleans. New14 test cleanup must first preserve
+the existing sticky operation error on repeated Close; no runtime acceptance
+is claimed yet. See the [compile record](evidence/joint-policy-actor-model-diagnostic-full-compile-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
