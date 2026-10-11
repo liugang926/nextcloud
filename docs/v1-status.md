@@ -420,6 +420,19 @@ failed overall, with both Go actors absent and owned PG/Redis stopped. See the
 The [reviewable policy actor source](../integration/proposals/weknora-policy-standalone-current-actor-20261011.json) reproduces the tested files and has exact
 forward/reverse tree proof; complete child-consumer regressions remain required.
 
+The bounded chat JSONB repair candidate `3944b8b2` parses451 changed Go files
+and compiles157 packages in348.816s under480s. It retains raw stored
+definition/fact/body digests and normalizes only four established chat recipe
+Settings objects, with exact numbers, duplicate-key refusal and array order.
+Independent review finds a legacy SQLite unchanged-definition update regression:
+prewrite normalization could bump the old definition revision. A subsequent
+private child restores authenticated old Settings bytes before such writes,
+retaining the control guard; it is being compiled before runtime acceptance.
+Fulljoint policy/query/vector/Recall/native/productive opt-ins remain0RUN.
+True old-producer facts across new-reader/credential updates and embedding
+RawSettings/SpaceDigest compatibility remain separately required. See the
+[compile-only record](evidence/joint-chat-JSONB-regression-fixtures-full-compile-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
