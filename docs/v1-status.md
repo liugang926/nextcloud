@@ -23,6 +23,7 @@ older component snapshots below retain their separate scope and failure history.
 | Nextcloud authenticated upload compatibility | `2461bdfa`:545 files format/full157 compile; actual GORM mapping1 and ordinary HTTP25 pass; machine12 fails at chunk-write backend-coverage precheck; failed owners stopped, successful resources absent | Machine backend-selection fixture/SDK/publication, recurrent model-definition lease cleanup, human classification5, nonempty ancestor and personal native consumption still open |
 | Actual backend selection and owned model release | `e75d0b7e`:547 files format/full157 compile; concurrent release3 + query/history20 PASS23; ordinary HTTP25 PASS25; machine12 7PASS/5FAIL | Machine save caller adapter, genuine current epoch fault and final-clock positive remain; source-only human/ancestor/personal drafts require further repairs and actual validation |
 | Event-managed machine original save and current epoch | `eac6b136`:549 files format/full157 compile; actual machine12, arithmetic6/schema1, HTTP25 and release/history23 all PASS67;24 runtime resources and3 compiler resources independently absent | General no-event manual sync, cross-app onboarding readiness, legal root successor, normal application publication/QA, personal and inherited-source gates remain incomplete |
+| Typed derived template and nonempty ancestor | `9d9280a5`:551 files format/full157 compile; existing67 regressions pass; new ancestor8 all fail at sourceA published precondition | Fixture omits the production indexed-success enabled transition; test-only repair pending, no inherited-source acceptance |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -186,6 +187,25 @@ an independent signed-current observation protocol. Source inspection proves
 the normal new-onboarding Pair/Grants/Refresh chain, but cross-app runtime and
 its readiness gap remain unverified. See the [source proposal](../integration/proposals/weknora-Nextcloud-machine-save-current-epoch-20261012.json)
 and [actual67 evidence](evidence/Nextcloud-machine12-current-epoch-schema7-HTTP25-history23-actual67-GREEN-20261012.json).
+
+The typed template producer now holds current source heads/payloads before full
+snapshot reads, requires an authentic independent target configuration, and
+joins extra holds with the current publication/body/content clock. Its four-path
+fusion compiles all157 packages on `9d9280a5`; the unchanged67 regressions pass.
+The new ancestor8 fails before B: A is indexed and completed but remains staging.
+Completion does attempt publication, and chunk creation already defaults to
+ready. The fixture omitted the real indexed-success transition that enables A;
+the next test-only child uses the production helper and protected update after
+actual index success. No raw published-state write or weakened assertion is
+accepted. See the [proposal](../integration/proposals/weknora-Nextcloud-typed-derived-template-and-nonempty-ancestor-20261012.json)
+and [actual first failure](evidence/Nextcloud-typed-ancestor8-first-publication-prelude-failure-old67-GREEN-20261012.json).
+
+Normal personal QA activation still requires the original user query capability
+to survive embedding and retrieval fan-out; the current float-only interface
+drops it. Completion also needs source content leases and KB fences in its final
+union, and named history still rejects nonempty sources. Pending90/91 require
+the complete startup catalogue/source-route qualification. These dependencies
+must close before the original adapter replaces the normal registry.
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
