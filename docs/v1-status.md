@@ -803,6 +803,18 @@ change has been applied. Goabsent/SQLstopped and faileddata retained.
 See [SQLobserver compile](evidence/actual-SQLite-operation-observer-selected-compile-GREEN-20261011.json)
 and [actual lease-create busy](evidence/joint-SQLite-message-body-scope-lease-create-busy-failure-20261011.json).
 
+
+Remainingworker component34 now has actual evidence inthree independent windows:
+whole-result6 PASS6, generatedconsolidation16 FAIL16, multicluster6 FAIL6, and
+finalclock6 PASS6. The22generated failures allstop attrue shared-agent message
+GetMessage (helper91), beforeoperationassertions; fixedsource error is
+ErrNextcloudOnboardingDenied andactualschema/authority wiring isunder diagnosis.
+No component scope is widenedto fulljoint87/168/fullV1; original10s/20s preserved.
+Finalclock6 runs40.325s/7resourcesabsent; failedowners stopped/dataretained.
+See [whole-result/consolidation](evidence/remaining-component-whole-result6-GREEN-consolidation16-sharedagent-failure-20261011.json),
+[multicluster](evidence/remaining-component-multicluster6-sharedagent-message-read-failure-20261011.json)
+and [finalclock6](evidence/remaining-component-worker-finalclock6-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
