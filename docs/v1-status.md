@@ -10,10 +10,10 @@ older component snapshots below retain their separate scope and failure history.
 | Work item | Latest actual result | Remaining work |
 | --- | --- | --- |
 | Startup/schema qualification | `3707fce5`: full157-package compile; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup and PeerApplied forward route |
-| Original-memory source path | `ab3b1193`: PG/current leaf passes; complete6 has1PASS/5FAIL | SQLite ordinary HTTP and post-SDK same-transaction publication refusal |
-| Directory authorization | `3707fce5`: snapshot/concurrency23 pass; periodic10 fails real ledger fixture prelude | Merge proven real-store fixture binding and run periodic10 |
-| Pending169 guard repair | `3707fce5`: real Parade17 existing15 pass; new wrapper6 fail libpq/GORM fixture driver prelude | Exact real-driver fixture repair, whole21 and historical upgrade/restart |
-| Historical PeerApplied forward upgrade | Frozen exact SQL assets; private readonly161/80 observer source in review | Actual nonempty prefix tests, allpartialprefixes,169→171/88→89, final startup routing |
+| Original-memory source path | `cab8df4e`: PG parent+2leaves and SQLite/current pass;6 has4PASS/2FAIL | SQLite publication-withdrawal HTTP prelude; final unified regressions |
+| Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
+| Pending169 guard repair | `0621bef7`: real Parade17 pending16921 all pass | Historical upgrade/restart and startup route binding |
+| Historical PeerApplied forward upgrade | Private nonempty161/80 observer14:6PASS/8FAIL | Resolve exact catalogue refusal, allpartialprefixes,169→171/88→89, final startup routing |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
@@ -681,6 +681,39 @@ the real graph-ledger fixture prelude before directory assertions. That startup
 branch did not yet contain the earlier proven four-line actual store binding.
 All Go actors are absent, SQL stopped, failed data retained; sourcepath6 and
 whole33 remain unaccepted. See [snapshot23 and periodic10 failure](evidence/joint-directory-snapshot23-GREEN-periodic10-real-ledger-failure-20261011.json).
+
+
+Current `0621bef7` parses477 Go files and compiles all157 packages after the
+Root DB-entry signature correction; the failed compile is retained separately.
+The real graph-ledger fixture is now merged: periodic directory10 passes all
+actual nodes in113.722s, zero failures/skips/OOM and7 owned resources absent.
+Snapshot23 passed on earlier3707 in another window; this is not one33-node run.
+See [corrected full compilation](evidence/joint-peer-prefix-root-ABI-postSDK-full-compile-GREEN-20261011.json),
+[compile failure](evidence/peer-prefix-readonly-interface-root-ABI-compile-failure-20261011.json)
+and [periodic10](evidence/joint-real-graph-ledger-directory-periodic10-GREEN-20261011.json).
+
+
+The real libpq/GORM fixture correction now passes the entire pending16921 on
+`0621bef7`, including actual current/missing bare guard, known other-table
+wrappers, local-OID-only locking, foreign/function/shape/index/sequence refusal
+and preserved data/ledger. It remains unwired. The next private historical
+prefix14 runs6PASS/8FAIL: nonempty clean161/80 positives and issued-wrapper
+positives refuseUnknown; mixedRoot unexpectedly passes the private observer because its compiled
+core table definition mistakenly includes Root155 additional enum kinds. Sourceassets3 has0RUN. All Go actors are absent, SQL
+stopped and failed data retained. See [16921 and prefix14](evidence/pending169-Parade17-full21-GREEN-peer-prefix14-failure-20261011.json).
+
+
+Actual postSDK authority10 on `cab8df4e` passes both databases in104.723s,
+including genuine actor/model mutation and actual lease CAS/readback followed
+by SQLclock expiry, with7 resources absent. Original sourcepath6 improves to
+4PASS/2FAIL: SQLite/current and allPG nodes pass; the only remaining leaf fails
+SQLite ordinaryHTTP answer before extraction. Its producer observation count
+is0, so the diagnostic context binding and exact cause remain pending.
+The private peer-prefix projection also needs correction: historical core125/44
+metadata was copied after a Root155 enum overlay, which rejects purepeer and
+incorrectly accepts the mixedtable. It is unwired; Root startup/access remains
+closed to that route. See [postSDK10](evidence/joint-postSDK-sameTX-authority-real-expiry10-GREEN-20261011.json)
+and [sourcepath4/2](evidence/joint-sourcepath-PG3-SQLite-current1-GREEN-SQLiteHTTP2-failure-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
