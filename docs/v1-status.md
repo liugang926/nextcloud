@@ -20,6 +20,7 @@ older component snapshots below retain their separate scope and failure history.
 | Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
 | Knowledge query SDK/completion and named history | `17d75ff3`: full157 compile and actual query13+named history7 PASS20/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, sourced history, different-output vector succession, empty/multi-KB/rewrite and Nextcloud final union |
 | Nextcloud original upload / machine index purpose | `f1e85131`:544 files format, all157 packages compile; existing query/history20 pass on this source; new machine12 fails fixture identity preparation and old HTTP25 has15PASS/10FAIL before ordinary SDK | Genuine isolated fixture, authenticated-human lifetime vs scoped machine purpose, nonempty ancestor and personal native consumption; candidate remains unadopted |
+| Nextcloud authenticated upload compatibility | `c9a0c1e0`: full157 compile, machine12 0PASS/12FAIL and HTTP25 15PASS/10FAIL at content tuple precheck; intermediate `44046f20` query/history20 18PASS/2FAIL; failed owners stopped, Go absent | SQL column mapping under investigation; recurrent model-definition lease cleanup, nonempty ancestor and personal native consumption still open |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -113,6 +114,28 @@ automatically gains machine access. See the [machine proposal](../integration/pr
 [compile](evidence/Nextcloud-machine-held-upload-SDK-full157-compile-PASS-20261011.json),
 [machine12 failure](evidence/Nextcloud-machine12-first-fixture-identity-collision-failure-20261011.json)
 and [ordinary prelude failure](evidence/Nextcloud-machine-candidate-HTTP25-ordinary-prelude-failure-20261011.json).
+
+The compatibility child retains the real Web principal and current KB/source
+authority for authenticated legacy uploads while reserving machine purpose for
+genuine onboarding. A human holder rejects any later same-named onboarding
+operation; nil purpose comparisons safely refuse. The isolated machine source
+fixture preserves all original assertions. Intermediate `44046f20` compiles all
+157 packages, but its actual machine12 still rejects the fixture's incorrect
+allow reason and ordinary HTTP10 still rejects the old v1 empty zero revision
+against the source API's canonical `"0"`. Query/history20 passes18/fails2,
+including the parent and naked-vector completion cleanup, which observes one
+unreleased model-definition body lease. Its cause remains unestablished; no
+forced Close or weakened zero-lease assertion is used. All three failed owners
+are terminal, with Go absent and owned SQL/data retained. The next `c9a0c1e0`
+proposal repairs the exact allow response and normalizes only the revision
+comparison, preserving immutable original bytes and digests. All157 packages
+compile on that source in269.586s, with three resources independently absent.
+Fresh machine12 and HTTP25 pass the earlier reason/revision checks but still
+fail before SDK at the content tuple precheck. The SQL data-source column
+mapping is under investigation; no runtime acceptance is claimed. See the
+[compatibility proposal](../integration/proposals/weknora-Nextcloud-human-upload-and-zero-revision-compatibility-20261011.json),
+[intermediate failure evidence](evidence/Nextcloud-human-upload-intermediate440-regression-failures-20261011.json)
+and [current tuple failure evidence](evidence/Nextcloud-canonical-zero-c9-full157-and-content-tuple-failure-20261011.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
