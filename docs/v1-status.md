@@ -18,6 +18,7 @@ older component snapshots below retain their separate scope and failure history.
 | Historical PeerApplied forward upgrade | `7cb5c6ce`: partial SQL110, preupgrade Ready/DOWN38 and original route20/Root91/startup34 pass; Linux32 and nativeDarwin20 include original6, genuinepartial7 and retainedFD7 | Other platforms/filesystems and full application upgrade/restore |
 | SQLite original vector storage | `be76d2d6`: actual SDK/storage/native-read10 PASS10/FAIL0/SKIP0, including genuine credential successor, original lease-before-hydration and final lease expiry | Nextcloud input/query/HTTP completion owner union, production migration/registry and exact durable cleanup remain open |
 | Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
+| Knowledge query SDK/completion | `f6b4ea8a`: full157 compile and actual query13 PASS13/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, saved history, empty/multi-KB/rewrite and Nextcloud final union |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -47,6 +48,37 @@ the ordinary fixture now starts from real fulljoint87/168 rather than a partial
 schema missing current maintenance controls. Production guards are unchanged.
 The new provider-done leaf uses producer-context cancellation; it does not
 establish normal knowledge QA streaming/completion. See the [actual25 record](evidence/HTTP-knowledge-owner5-vector10-ordinary-model10-actual25-GREEN-20261011.json).
+
+The next explicit query candidate binds the original user message to a genuine
+SDK response capability, native-vector consumption and a typed completion
+manifest. All157 packages compile on `440a3837`; old owner5/vector10/model10
+pass25 in one separate window with seven resources independently absent.
+The new query13 now passes on `f6b4ea8a`. Its first run fails because a fresh lineage
+repository lacks the current-actor binding. The test-only `539ad9a2` fixes that
+configuration and compiles, then the next run exposes a production query lease
+request of15 minutes against the unchanged5-minute content-lease maximum.
+The `68f8d52f` child uses the existing2-minute message-read duration and adds a
+real SDK endpoint prerequisite to the error leaf, which previously accepted an
+unrelated prelude error. Its real query13 then reaches query SDK, native retrieval
+and answer SDK with9PASS/4FAIL. Completion rejects the fixture's nil lineage from
+the deliberately reduced public raw-user DTO; the genuine held original proof
+is the correct source. The test-only `f6b4ea8a` uses that verified proof and
+diagnoses the separate one-lease cleanup failure without forcing its Close.
+Its532 files parse and all157 packages compile. All13 exact actual nodes then
+pass in47.849s, including genuine completion, actual SDK-error execution, bare
+and substituted SDK-capability refusal, and real final-clock lease expiry.
+The naked-vector refusal and zero live read leases also pass on this fixture;
+the earlier one-lease observation is retained without an independently isolated
+root-cause claim. Seven exact resources are independently absent. Earlier
+failures and stopped owned data remain recorded.
+Normal registry/startup90/91, saved history, empty candidates, multi-KB, rewrite
+and Nextcloud ingestion remain open. See the [HTTP25 regression](evidence/knowledge-query-candidate-existing-HTTP25-GREEN-20261011.json),
+[current-actor failure](evidence/knowledge-query13-current-actor-fixture-failure-20261011.json)
+and [content-lease failure](evidence/knowledge-query13-content-lease-TTL-failure-20261011.json),
+[completion/release failure](evidence/knowledge-query13-completion-source-and-release-failure-20261011.json)
+and [held-lineage compile](evidence/knowledge-query-held-lineage-full157-compile-PASS-20261011.json).
+See the [actual13 record](evidence/knowledge-query13-actual-SDK-native-completion-GREEN-20261011.json)
+and [reviewable source proposal](../integration/proposals/weknora-knowledge-query-SDK-result-and-typed-completion-20261011.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
