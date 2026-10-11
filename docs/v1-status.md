@@ -27,7 +27,7 @@ older component snapshots below retain their separate scope and failure history.
 | Nonempty ancestor indexed-success fixture | `2023169f`:551 files format/full157 compile; ancestor8 6PASS/2FAIL including parent, existing67 regressions pass | Positive inheritance/native save and five fault leaves pass; last-clock fault probe has a wrong lease-table column reference and remains unaccepted |
 | Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
 | Explicit no-event current epoch originals | `5eaa2498`:559 files format/full157 compile; SQLite13 + PG4 + existing75 all PASS92/FAIL0/SKIP0;39 runtime and3 compiler resources absent | Explicit component only; normal registry/startup93/172, concurrent availability, whole restore and personal sourced QA remain open |
-| Personal source query and completion | `78232977` source repair fused byte-exactly onto `5eaa2498` as `e2567217`; final local authority, original upload body and exact source fence union prepared | Independent source audit and actual validation pending; source-only nonmember KB/Agent/model boundary, graph-required sources and normal registry still open |
+| Personal source query and completion | `559e70fb`:565 files format/full157 compile; first actual8 has5PASS/3FAIL, zero skips; existing92 regressions all pass; true source publication→human query/native→answer/completion positive passes | Grant/epoch post-journal fault observers fail their mutation prerequisites; two negatives remain unqualified. Source-only nonmember KB/Agent/model boundary, graph-required sources and normal registry remain open |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -3706,3 +3706,29 @@ whole coordinated restore and normal concurrent availability remain open.
 Personal sourced query/completion is a separate source candidate under review,
 including immutable upload input and a final local authority/fence union.
 Its admin fixture cannot establish the PRD source-only nonmember access matrix.
+
+
+## 2026-10-12 personal sourced query/completion first runtime
+
+`559e70fb` integrates the independently reviewed personal source candidate
+onto the verified no-event source without changing its17 paths. All565 changed
+Go files format and157 packages compile. The first real personal8 run has
+5PASS/3FAIL including the parent, with no skips. Its complete positive goes
+through actual signed source publication, real human message/query SDK, native
+retrieval, answer SDK and saved typed completion. Actual source lease, KB fence,
+exact fence identity and user-revocation leaves pass. Source grant and epoch
+mutations fail the observer prerequisites and do not qualify final refusal or
+rollback. Failed owned SQL/data/logs remain stopped and retained, Go is absent.
+See the [first actual8 record](evidence/personal-source-query-completion-first-actual5PASS3FAIL-20261012.json)
+and [source proposal](../integration/proposals/weknora-personal-source-query-completion-20261012.json).
+
+The current fixture uses WebAdmin and GraphRequired=false. A virtual scoped
+viewer from source grants is a separate PRD permission matrix: same-tenant
+model authority needs exact configured KB/model purposes before current or
+historical model hydration. That source-only boundary is under development.
+Normal application binding and sourced saved history remain closed.
+
+The same `559e70fb` source also passes existing NoEvent17 and old75 across
+five serial windows, with39 resources independently absent. That regression
+does not qualify the two failed personal fault prerequisites. See the
+[matched existing92 record](evidence/personal-source-candidate-existing-NoEvent17-old75-actual92-GREEN-20261012.json).
