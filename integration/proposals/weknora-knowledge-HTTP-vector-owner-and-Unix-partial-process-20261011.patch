@@ -1,0 +1,541 @@
+diff --git a/internal/application/repository/retriever/sqlite/original_vector_retrieve.go b/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
+index ec6dcc88081f69e0da4307bad0d58f6170e92c42..4e55e4d02e4aa9792558a662fee31fa03a1e1673 100644
+--- a/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
++++ b/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+ 	"gorm.io/gorm"
+ )
+@@ -49,12 +50,25 @@ func (r *sqliteRepository) originalVectorRetrieve(ctx context.Context, params ty
+ 	if len(ids) > 4096 {
+ 		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
+ 	}
+-	held, err := r.originals.BeginVectorRead(ctx, ids)
++	owner, releaseOwner, transferOwner, err := interfaces.AcquireKnowledgeEmbeddingConsumerContext(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	held, err := r.originals.BeginVectorRead(owner, ids)
++	if err != nil {
++		if releaseOwner != nil {
++			releaseOwner()
++		}
++		return nil, err
++	}
++	retained := false
+ 	defer func() {
+-		resultErr = errors.Join(resultErr, held.Close())
++		if !retained {
++			resultErr = errors.Join(resultErr, held.Close())
++			if releaseOwner != nil {
++				releaseOwner()
++			}
++		}
+ 		if resultErr != nil {
+ 			result = nil
+ 		}
+@@ -142,6 +156,13 @@ func (r *sqliteRepository) originalVectorRetrieve(ctx context.Context, params ty
+ 		info := v.Info
+ 		items = append(items, &types.IndexWithScore{ID: fmt.Sprintf("%d", v.RowID), SourceID: info.SourceID, SourceType: info.SourceType, ChunkID: info.ChunkID, KnowledgeID: info.KnowledgeID, KnowledgeBaseID: info.KnowledgeBaseID, TagID: info.TagID, Content: info.Content, Score: score, MatchType: types.MatchTypeEmbedding, IsEnabled: info.IsEnabled})
+ 	}
++	// Transfer only the genuine checked reader. When no owner is installed, keep
++	// the standalone method lifetime. Registered owners preserve it until the
++	// last real HTTP reference closes, and check it at every output boundary.
++	retained, err = interfaces.RetainKnowledgeEmbeddingConsumerRead(ctx, held, releaseOwner, transferOwner)
++	if err != nil {
++		return nil, err
++	}
+ 	return []*types.RetrieveResult{{Results: items, RetrieverEngineType: types.SQLiteRetrieverEngineType, RetrieverType: types.VectorRetrieverType}}, nil
+ }
+ func originalCosineDistance(a, b []float32) (float64, error) {
+diff --git a/internal/application/service/knowledge_embedding_consumer_boundary.go b/internal/application/service/knowledge_embedding_consumer_boundary.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..42a420759d9ec911857054c70dbd5e2a0d8822d1
+--- /dev/null
++++ b/internal/application/service/knowledge_embedding_consumer_boundary.go
+@@ -0,0 +1,49 @@
++package service
++
++import (
++	"context"
++	"sync"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++// This concrete resource is deliberately distinct from memory consumers. The
++// current completion dispatcher rejects it: no generic checker-only resource
++// is silently omitted from a successful assistant's influencing-input union.
++type knowledgeEmbeddingBoundaryResource struct {
++	read    *repository.KnowledgeSQLiteEmbeddingVectorRead
++	release func()
++	once    sync.Once
++	err     error
++}
++
++func (r *knowledgeEmbeddingBoundaryResource) RecheckOriginal() error {
++	if r == nil || r.read == nil {
++		return interfaces.ErrKnowledgeEmbeddingConsumerUnavailable
++	}
++	return r.read.Recheck()
++}
++func (r *knowledgeEmbeddingBoundaryResource) CloseOriginal() error {
++	r.once.Do(func() {
++		r.err = r.read.Close()
++		if r.release != nil {
++			r.release()
++		}
++	})
++	return r.err
++}
++
++// Prepare only: there are no production callers in this slice. Actual query
++// and durable completion originals must be joined before normal QA binds it.
++func withKnowledgeEmbeddingConsumerOwner(ctx context.Context) context.Context {
++	return interfaces.WithKnowledgeEmbeddingConsumerBoundary(ctx, originalModelAcquisitionContext, retainKnowledgeEmbeddingConsumer)
++}
++func retainKnowledgeEmbeddingConsumer(ctx context.Context, read interfaces.KnowledgeEmbeddingConsumerRead, release func(), transfer func() error) (bool, error) {
++	actual, ok := read.(*repository.KnowledgeSQLiteEmbeddingVectorRead)
++	if !ok || actual == nil || !sameOriginalModelCaller(ctx, actual.Context()) {
++		return false, interfaces.ErrKnowledgeEmbeddingConsumerUnavailable
++	}
++	resource := &knowledgeEmbeddingBoundaryResource{read: actual, release: release}
++	return retainOriginalModelClient(ctx, resource, transfer)
++}
+diff --git a/internal/application/service/knowledge_embedding_consumer_owner_sql_http_actual_test.go b/internal/application/service/knowledge_embedding_consumer_owner_sql_http_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f39fe3ef2a7adbe7338cc876b1721419ce7aa53a
+--- /dev/null
++++ b/internal/application/service/knowledge_embedding_consumer_owner_sql_http_actual_test.go
+@@ -0,0 +1,181 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// This exercises only the explicit pending90 constructor and real HTTP owner
++// lifecycle. It does not supply a query original or complete a QA assistant.
++func knowledgeConsumerIndexActual(t *testing.T) (*gorm.DB, context.Context, interfaces.RetrieveEngineRepository, types.RetrieveParams, *atomic.Int64) {
++	t.Helper()
++	knowledgeSQLiteOriginalVecAuto.Do(sqlite_vec.Auto)
++	store, db, ctx := jointFullSchemaBusinessFixture(t, false)
++	installKnowledgeSQLiteOriginal90ForTest(t, db)
++	modelRepo := repository.NewModelRepository(db)
++	ConfigureModelOriginalAuthority(modelRepo, store, NewGroupAccessService(repository.NewGroupAccessRepository(db)), nil)
++	models := NewModelService(modelRepo, nil, nil, nil, nil, nil)
++	calls := &atomic.Int64{}
++	var mu sync.Mutex
++	var observed error
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls.Add(1)
++		var body struct {
++			Input      []string `json:"input"`
++			Dimensions int      `json:"dimensions"`
++		}
++		err := json.NewDecoder(r.Body).Decode(&body)
++		if err == nil && (r.URL.Path != "/embeddings" || r.Header.Get("Authorization") != "Bearer actual-consumer-key" || body.Dimensions != 2 || len(body.Input) != 1 || body.Input[0] != "consumer-title\nretained-original-input") {
++			err = errors.New("actual consumer SDK input/recipe mismatch")
++		}
++		mu.Lock()
++		observed = errors.Join(observed, err)
++		mu.Unlock()
++		if err != nil {
++			w.WriteHeader(400)
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{map[string]interface{}{"index": 0, "embedding": []float32{1, 0}}}})
++	}))
++	t.Cleanup(server.Close)
++	utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++	t.Cleanup(utils.ResetSSRFWhitelistForTest)
++	model := &types.Model{ID: "actual-consumer-embedding", TenantID: 7, Name: "consumer model", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "actual-consumer-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++	require.NoError(t, models.CreateModel(ctx, model))
++	require.NotNil(t, model.OriginalProof)
++	kb := &types.KnowledgeBase{ID: "consumer-original-kb", TenantID: 7, Name: "consumer original KB", EmbeddingModelID: model.ID, ChunkingConfig: types.ChunkingConfig{ChunkSize: 512}, IndexingStrategy: types.IndexingStrategy{VectorEnabled: true}}
++	require.NoError(t, store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(ctx), kb))
++	knowledge := &types.Knowledge{ID: "consumer-original-knowledge", TenantID: 7, KnowledgeBaseID: kb.ID, Type: types.KnowledgeTypeManual, Title: "consumer-title", ParseStatus: types.ParseStatusCompleted, EnableStatus: "enabled"}
++	text := "retained-original-input"
++	require.NoError(t, knowledge.SetManualMetadata(types.NewManualKnowledgeMetadata(text, types.ManualKnowledgeStatusPublish, 1)))
++	proof, err := store.CreateKnowledgeWithInput(repository.WithIndependentKnowledgeInput(ctx), knowledge, text)
++	require.NoError(t, err)
++	require.NotNil(t, proof)
++	build, err := store.RestoreKnowledgeBuildActor(ctx, proof)
++	require.NoError(t, err)
++	build = repository.WithKnowledgeBuildInputProof(build, store, proof)
++	chunk := &types.Chunk{ID: "consumer-original-chunk", TenantID: 7, KnowledgeBaseID: kb.ID, KnowledgeID: knowledge.ID, Content: text, ChunkType: types.ChunkTypeText, IsEnabled: true}
++	require.NoError(t, repository.NewChunkRepository(db).CreateChunks(build, []*types.Chunk{chunk}))
++	index := sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(db, store, modelRepo)
++	engine := retriever.NewKVHybridRetrieveEngine(index, types.SQLiteRetrieverEngineType)
++	op, cancel := context.WithTimeout(build, 10*time.Second)
++	defer cancel()
++	sdk, err := models.GetEmbeddingModel(op, model.ID)
++	require.NoError(t, err)
++	info := &types.IndexInfo{Content: buildKnowledgeIndexContent(knowledge, chunk.EmbeddingContent()), SourceID: chunk.ID, SourceType: types.ChunkSourceType, ChunkID: chunk.ID, KnowledgeID: knowledge.ID, KnowledgeBaseID: kb.ID, IsEnabled: true}
++	require.NoError(t, engine.BatchIndex(op, sdk, []*types.IndexInfo{info}, []types.RetrieverType{types.VectorRetrieverType}))
++	require.EqualValues(t, 1, calls.Load())
++	mu.Lock()
++	err = observed
++	mu.Unlock()
++	require.NoError(t, err)
++	require.NotNil(t, model.Parameters.OriginalEmbedding)
++	params := types.RetrieveParams{Embedding: []float32{1, 0}, KnowledgeBaseIDs: []string{kb.ID}, TopK: 1, RetrieverType: types.VectorRetrieverType, AdditionalParams: map[string]interface{}{"embedding_space_digest": model.Parameters.OriginalEmbedding.SpaceDigest}}
++	return db, ctx, index, params, calls
++}
++
++func TestKnowledgeEmbeddingConsumerOwnerActualHTTP(t *testing.T) {
++	for _, mode := range []string{"provider_done_keeps_originals", "owner_cancellation_refuses_output", "current_actor_refuses_output", "invalid_boundary_refuses"} {
++		t.Run(mode, func(t *testing.T) {
++			db, base, index, params, calls := knowledgeConsumerIndexActual(t)
++			owner, cancelOwner := context.WithTimeout(base, 8*time.Second)
++			defer cancelOwner()
++			httpctx, attach, check, releaseHTTP := BeginMessageMaterialHTTPBoundary(owner)
++			pipeline, cancelPipeline := context.WithCancel(attach(httpctx))
++			releaseProducer := RetainMessageMaterialHTTPProducer(pipeline)
++			t.Cleanup(func() { cancelPipeline(); releaseProducer(); releaseHTTP(); cancelOwner() })
++			if mode == "invalid_boundary_refuses" {
++				broken := interfaces.WithKnowledgeEmbeddingConsumerBoundary(pipeline, nil, nil)
++				results, err := index.Retrieve(broken, params)
++				require.ErrorIs(t, err, interfaces.ErrKnowledgeEmbeddingConsumerUnavailable)
++				require.Nil(t, results)
++				var live int64
++				require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++				require.Zero(t, live)
++				return
++			}
++			results, err := index.Retrieve(withKnowledgeEmbeddingConsumerOwner(pipeline), params)
++			require.NoError(t, err)
++			require.Len(t, results, 1)
++			require.Len(t, results[0].Results, 1)
++			require.Equal(t, "consumer-original-chunk", results[0].Results[0].ChunkID)
++			slot := httpctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++			slot.mu.Lock()
++			resources := append([]originalModelClientLifetime(nil), slot.Models...)
++			slot.mu.Unlock()
++			require.Len(t, resources, 1)
++			resource, ok := resources[0].(*knowledgeEmbeddingBoundaryResource)
++			require.True(t, ok)
++			require.NotNil(t, resource.read)
++			markMessageMaterialReady(httpctx)
++			require.NoError(t, check())
++			type heldTuple struct {
++				LeaseID, BodyID, OwnerID, Kind string
++				Epoch                          int64
++				ReleasedAtMS                   *int64
++			}
++			var captured []heldTuple
++			require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Order("lease_id").Find(&captured).Error)
++			require.NotEmpty(t, captured)
++			// Provider Done cancels the producer context, while the real HTTP reference
++			// still owns these exact private knowledge/model/input/result read leases.
++			cancelPipeline()
++			releaseProducer()
++			require.NoError(t, resource.read.Context().Err())
++			require.NoError(t, check())
++			require.EqualValues(t, 1, calls.Load())
++			for _, want := range captured {
++				var actual heldTuple
++				require.NoError(t, db.Table("original_body_leases").Where("lease_id=?", want.LeaseID).Take(&actual).Error)
++				require.Equal(t, want, actual)
++				require.Nil(t, actual.ReleasedAtMS)
++			}
++			if mode == "owner_cancellation_refuses_output" {
++				cancelOwner()
++				require.Error(t, check())
++			}
++			if mode == "current_actor_refuses_output" {
++				uid := types.CallerFromContext(base).UserID
++				write := db.Table("users").Where("id=? AND is_active=?", uid, true).Update("is_active", false)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var active bool
++				require.NoError(t, db.Table("users").Select("is_active").Where("id=?", uid).Scan(&active).Error)
++				require.False(t, active)
++				require.Error(t, check())
++			}
++			releaseHTTP()
++			require.Error(t, resource.RecheckOriginal())
++			for _, want := range captured {
++				var actual heldTuple
++				require.NoError(t, db.Table("original_body_leases").Where("lease_id=?", want.LeaseID).Take(&actual).Error)
++				require.Equal(t, want.BodyID, actual.BodyID)
++				require.Equal(t, want.OwnerID, actual.OwnerID)
++				require.Equal(t, want.Kind, actual.Kind)
++				require.Equal(t, want.Epoch, actual.Epoch)
++				require.NotNil(t, actual.ReleasedAtMS)
++			}
++			var live int64
++			require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++			require.Zero(t, live)
++		})
++	}
++}
+diff --git a/internal/database/migration_peer_partial_unix_process_actual_test.go b/internal/database/migration_peer_partial_unix_process_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d7ee072baef14b7e79a13c60336e06d700fe5b6
+--- /dev/null
++++ b/internal/database/migration_peer_partial_unix_process_actual_test.go
+@@ -0,0 +1,173 @@
++//go:build linux || darwin
++
++package database
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"os"
++	"path/filepath"
++	"runtime"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// This fixture is authored by the original historical migration driver. Its
++// tenant and GC rows are legacy business data, not original bodies or grants.
++func peerPartialUnixProcessFixture(t *testing.T, prefix uint) (*sql.DB, string, MigrationOptions) {
++	t.Helper()
++	root := sqliteRepoRoot(t)
++	chdirAndRestore(t, root)
++	pool, dsn, options := jointLineageFixture(t, false)
++	options.AutoRecoverDirty = false
++	old := peerPrefixActualDriver(t, root, "sqlite", dsn, options)
++	closed := false
++	closeOld := func() error {
++		if closed {
++			return nil
++		}
++		closed = true
++		sourceErr, driverErr := old.Close()
++		return errors.Join(sourceErr, driverErr)
++	}
++	t.Cleanup(func() {
++		if err := closeOld(); err != nil {
++			t.Error("owned historical process fixture driver close failed")
++		}
++	})
++	require.NoError(t, old.Migrate(73))
++	require.NoError(t, memoryFullExec(pool, "sqlite", "INSERT INTO tenants(id,name,business) VALUES(7,'partial-process-owned','retained actual process data')"))
++	_, err := pool.Exec("INSERT INTO nextcloud_gc_jobs(id,tenant_id,knowledge_base_id,datasource_id,external_id,knowledge_id,reason,state,not_before,original_not_before,next_attempt_at) VALUES('owned-partial-process-gc',7,'legacy-kb','legacy-source','legacy-file','legacy-knowledge','retired','blocked',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
++	require.NoError(t, err)
++	_, err = pool.Exec("INSERT INTO nextcloud_gc_items(job_id,kind,object_ref,state,estimated_bytes,confirmed_released_bytes,lease_token) VALUES('owned-partial-process-gc','source_file','retained legacy process object','blocked',27,3,'')")
++	require.NoError(t, err)
++	require.NoError(t, old.Migrate(prefix), "actual historical 74/75 source creates the nonempty partial ledger")
++	require.NoError(t, closeOld())
++	var journalMode string
++	require.NoError(t, pool.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode))
++	require.Equal(t, "wal", journalMode)
++	version, dirty := jointLineageMigrationState(t, pool)
++	require.Equal(t, prefix, version)
++	require.False(t, dirty)
++	return pool, dsn, options
++}
++
++func peerPartialUnixProcessData(t *testing.T, pool *sql.DB) []string {
++	t.Helper()
++	var tenant, gc string
++	require.NoError(t, pool.QueryRow("SELECT business FROM tenants WHERE id=7").Scan(&tenant))
++	require.NoError(t, pool.QueryRow("SELECT kind||'/'||object_ref||'/'||state||'/'||estimated_bytes||'/'||confirmed_released_bytes||'/'||lease_token FROM nextcloud_gc_items WHERE job_id='owned-partial-process-gc'").Scan(&gc))
++	return []string{tenant, gc}
++}
++
++// The unchanged helper uses an independent real process and a real failed OFD
++// acquisition before public Run. PEER_OFD_BLOCKED proves that kernel probe;
++// PEER_UP_COMPLETE plus Cmd.Wait proves the public operation completed. It does
++// not purport to observe the later public acquire's exact scheduling instant.
++func TestPeerPartialUnixProcessReadinessActual(t *testing.T) {
++	for _, prefix := range []uint{74, 75} {
++		t.Run(fmtJointVersion(prefix), func(t *testing.T) {
++			for _, mode := range []string{"public_remaining_upgrade_restart", "first_migrator_then_public_restart"} {
++				t.Run(mode, func(t *testing.T) {
++					t.Logf("peer_partial_process_platform=%s", runtime.GOOS)
++					pool, dsn, options := peerPartialUnixProcessFixture(t, prefix)
++					before := memoryFullSchemaSnapshot(t, pool, "sqlite")
++					dataBefore := peerPartialUnixProcessData(t, pool)
++					ctx := context.Background()
++					require.ErrorIs(t, VerifyJointSchemaReady(ctx, dsn, options), ErrJointSchemaNotReady)
++					require.ErrorIs(t, VerifyJointSchemaReadyOnDB(ctx, pool, "sqlite"), ErrJointSchemaNotReady)
++					require.Equal(t, before, memoryFullSchemaSnapshot(t, pool, "sqlite"), "both readiness checks are read-only on the nonempty partial")
++					require.Equal(t, dataBefore, peerPartialUnixProcessData(t, pool))
++					version, dirty := jointLineageMigrationState(t, pool)
++					require.Equal(t, prefix, version)
++					require.False(t, dirty)
++					alias := filepath.Join(t.TempDir(), "actual-partial-process-alias.sqlite")
++					require.NoError(t, os.Symlink(options.SQLiteDBPath, alias))
++					originalInfo, err := os.Stat(options.SQLiteDBPath)
++					require.NoError(t, err)
++					aliasInfo, err := os.Stat(alias)
++					require.NoError(t, err)
++					require.True(t, os.SameFile(originalInfo, aliasInfo))
++					held, err := acquirePeerSQLiteMigrationExclusion(ctx, dsn, options)
++					require.NoError(t, err)
++					t.Cleanup(func() {
++						if err := held.Close(); err != nil {
++							t.Error("owned partial inode hold close failed")
++						}
++					})
++					heldContext := context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++					captured, err := selectJointMigrationRoute(heldContext, dsn, options, prefix, false, true)
++					require.NoError(t, err)
++					require.Equal(t, jointHistoricalPeerForwardSource, captured.lineage)
++					var closeFirst func() error
++					if mode == "first_migrator_then_public_restart" {
++						first, err := newJointPeerRouteMigrate(heldContext, "file://"+filepath.ToSlash(captured.directory), dsn, options, prefix, captured)
++						require.NoError(t, err)
++						closed := false
++						closeFirst = func() error {
++							if closed {
++								return nil
++							}
++							closed = true
++							sourceErr, driverErr := first.Close()
++							return errors.Join(sourceErr, driverErr)
++						}
++						t.Cleanup(func() {
++							if err := closeFirst(); err != nil {
++								t.Error("owned first partial migrator close failed")
++							}
++						})
++						child := startPeerSQLiteProcess(t, alias, "up")
++						// On failure close the actual driver then inode descriptor before
++						// the existing child's bounded join/kill cleanup runs.
++						t.Cleanup(func() {
++							if err := errors.Join(closeFirst(), held.Close()); err != nil {
++								t.Error("owned partial migrator release failed")
++							}
++						})
++						peerSQLiteToken(t, child, "PEER_OFD_BLOCKED")
++						require.NoError(t, first.Up(), "real first migrator runs remaining historical SQL and honest 88/89 bridge")
++						require.NoError(t, closeFirst())
++						require.NoError(t, held.Close())
++						peerSQLiteToken(t, child, "PEER_UP_COMPLETE")
++						peerSQLiteJoin(t, child, true)
++					} else {
++						child := startPeerSQLiteProcess(t, alias, "up")
++						t.Cleanup(func() {
++							if err := held.Close(); err != nil {
++								t.Error("owned partial process hold release failed")
++							}
++						})
++						peerSQLiteToken(t, child, "PEER_OFD_BLOCKED")
++						require.NoError(t, held.Close())
++						peerSQLiteToken(t, child, "PEER_UP_COMPLETE")
++						peerSQLiteJoin(t, child, true)
++					}
++					version, dirty = jointLineageMigrationState(t, pool)
++					require.EqualValues(t, 89, version)
++					require.False(t, dirty)
++					require.Equal(t, dataBefore, peerPartialUnixProcessData(t, pool))
++					require.NoError(t, VerifyJointSchemaReady(ctx, dsn, options))
++					require.NoError(t, VerifyJointSchemaReadyOnDB(ctx, pool, "sqlite"))
++					aliasOptions := options
++					aliasOptions.SQLiteDBPath = alias
++					require.NoError(t, VerifyJointSchemaReady(ctx, dsn, aliasOptions))
++					ready := memoryFullSchemaSnapshot(t, pool, "sqlite")
++					require.NoError(t, RunMigrationsWithOptions(dsn, aliasOptions), "same inode honest final lineage restarts through the public router")
++					require.Equal(t, ready, memoryFullSchemaSnapshot(t, pool, "sqlite"))
++					version, dirty = jointLineageMigrationState(t, pool)
++					require.EqualValues(t, 89, version)
++					require.False(t, dirty)
++					require.Equal(t, dataBefore, peerPartialUnixProcessData(t, pool))
++					var facts int
++					require.NoError(t, pool.QueryRow("SELECT count(*) FROM memory_original_admissions").Scan(&facts))
++					require.Zero(t, facts, "migration never signs legacy data into originals")
++					require.NoError(t, pool.QueryRow("SELECT count(*) FROM model_definition_originals").Scan(&facts))
++					require.Zero(t, facts)
++				})
++			}
++		})
++	}
++}
+diff --git a/internal/types/interfaces/knowledge_embedding_consumer_context.go b/internal/types/interfaces/knowledge_embedding_consumer_context.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8100d38fd599833b4eb6abb808d130cc4bb0398c
+--- /dev/null
++++ b/internal/types/interfaces/knowledge_embedding_consumer_context.go
+@@ -0,0 +1,60 @@
++package interfaces
++
++import (
++	"context"
++	"errors"
++)
++
++// A consumer owns a real repository read. This interface cannot author query,
++// vector, knowledge, model, message completion or source lineage originals.
++type KnowledgeEmbeddingConsumerRead interface {
++	Context() context.Context
++	Recheck() error
++	Close() error
++}
++type knowledgeEmbeddingConsumerKey struct{}
++type knowledgeEmbeddingConsumerBoundary struct {
++	acquire func(context.Context) (context.Context, func(), func() error, error)
++	retain  func(context.Context, KnowledgeEmbeddingConsumerRead, func(), func() error) (bool, error)
++}
++
++var ErrKnowledgeEmbeddingConsumerUnavailable = errors.New("knowledge_embedding_consumer_owner_unavailable")
++
++// This is an internal owner registration, not an authorization decision.
++// Production QA must not install it until query originals and completion's
++// exact typed knowledge dependency/clock union are implemented together.
++func WithKnowledgeEmbeddingConsumerBoundary(ctx context.Context, acquire func(context.Context) (context.Context, func(), func() error, error), retain func(context.Context, KnowledgeEmbeddingConsumerRead, func(), func() error) (bool, error)) context.Context {
++	return context.WithValue(ctx, knowledgeEmbeddingConsumerKey{}, knowledgeEmbeddingConsumerBoundary{acquire, retain})
++}
++func AcquireKnowledgeEmbeddingConsumerContext(ctx context.Context) (context.Context, func(), func() error, error) {
++	if ctx == nil {
++		return ctx, nil, nil, ErrKnowledgeEmbeddingConsumerUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return ctx, nil, nil, err
++	}
++	boundary, present := ctx.Value(knowledgeEmbeddingConsumerKey{}).(knowledgeEmbeddingConsumerBoundary)
++	if !present {
++		return ctx, nil, nil, nil
++	}
++	if boundary.acquire == nil || boundary.retain == nil {
++		return ctx, nil, nil, ErrKnowledgeEmbeddingConsumerUnavailable
++	}
++	return boundary.acquire(ctx)
++}
++func RetainKnowledgeEmbeddingConsumerRead(ctx context.Context, read KnowledgeEmbeddingConsumerRead, release func(), transfer func() error) (bool, error) {
++	if ctx == nil || read == nil {
++		return false, ErrKnowledgeEmbeddingConsumerUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return false, err
++	}
++	boundary, present := ctx.Value(knowledgeEmbeddingConsumerKey{}).(knowledgeEmbeddingConsumerBoundary)
++	if !present {
++		return false, nil
++	}
++	if boundary.acquire == nil || boundary.retain == nil {
++		return false, ErrKnowledgeEmbeddingConsumerUnavailable
++	}
++	return boundary.retain(ctx, read, release, transfer)
++}
