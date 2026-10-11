@@ -28,7 +28,7 @@ older component snapshots below retain their separate scope and failure history.
 | Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
 | Explicit no-event current epoch originals | `5eaa2498`:559 files format/full157 compile; SQLite13 + PG4 + existing75 all PASS92/FAIL0/SKIP0;39 runtime and3 compiler resources absent | Explicit component only; normal registry/startup93/172, concurrent availability, whole restore and personal sourced QA remain open |
 | Personal source query and completion | `5ac10a32`:565 files format/full157 compile; actual8 PASS8/FAIL0/SKIP0 and7 runtime+3 compiler resources absent; production/SQL/old92 exact to parent559, whose existing92 regressions pass | Explicit WebAdmin/GraphRequired=false pipeline only; source-only nonmember KB/Agent/model boundary, normal QA/registry, graph-required inputs and sourced history remain open |
-| Source-only nonmember model isolation | Source audit confirms virtual ScopedOnly viewer can reach same-tenant current/historical model reads without exact KB/model purpose; bounded query/vector/answer purpose fix and true JWT matrix under development | Production child/compile/actual permission matrix and normal-entry binding pending; no permission acceptance yet |
+| Source-only nonmember model isolation | `c6747061`:571 files format/full157 compile; first realJWT13 has7PASS/6FAIL and oldpersonal8 has0PASS/8FAIL; failedGo absent/ownedSQL stopped retained | Query model lease payload capture ordering regressed beforeSDK; minimal production repair underreview. A10 functional matrix and normal QA remain unaccepted |
 | Actual original-query store access | `1bff7738`:566 files format/all157 packages compile, zero business RUN; actual SQLite→KV→unique vector Composite getter and safe nil ctor verified by source audit;3 compiler resources absent | Normal DI/typed query context propagation and startup qualification remain open; getter grants no caller permission |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
@@ -3786,3 +3786,16 @@ See the [compile-only record](evidence/normal-original-query-actual-store-bridge
 and [source proposal](../integration/proposals/weknora-normal-original-query-actual-store-bridge-20261012.json).
 Normal query context propagation, genuine startup qualification and default
 registry integration remain open.
+
+
+## 2026-10-12 A10 first real JWT runtime failure
+
+`c6747061` formats571 files and compiles157 packages, but real JWT13 has7PASS/6FAIL
+and the existing personal8 has0PASS/8FAIL. The configured positive fails before
+query SDK with original-body availability changed; bare refusal cases alone
+do not qualify functioning scoped access. Source diagnosis finds real model
+leases merged after initial payload capture without capture before the query
+producer clock. A minimal same-TX capture correction is under review, preserving
+all leases/proofs/clock predicates. Failed owners are stopped with Go absent
+and original data/raw evidence retained. See the [first runtime record](evidence/A10-JWT13-first7PASS6FAIL-personal8-allFAIL-model-payload-order-20261012.json)
+and [unaccepted source proposal](../integration/proposals/weknora-scoped-knowledge-model-purpose-JWT-matrix-20261012.json).
