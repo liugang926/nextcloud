@@ -21,6 +21,7 @@ older component snapshots below retain their separate scope and failure history.
 | Knowledge query SDK/completion and named history | `17d75ff3`: full157 compile and actual query13+named history7 PASS20/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, sourced history, different-output vector succession, empty/multi-KB/rewrite and Nextcloud final union |
 | Nextcloud original upload / machine index purpose | `f1e85131`:544 files format, all157 packages compile; existing query/history20 pass on this source; new machine12 fails fixture identity preparation and old HTTP25 has15PASS/10FAIL before ordinary SDK | Genuine isolated fixture, authenticated-human lifetime vs scoped machine purpose, nonempty ancestor and personal native consumption; candidate remains unadopted |
 | Nextcloud authenticated upload compatibility | `2461bdfa`:545 files format/full157 compile; actual GORM mapping1 and ordinary HTTP25 pass; machine12 fails at chunk-write backend-coverage precheck; failed owners stopped, successful resources absent | Machine backend-selection fixture/SDK/publication, recurrent model-definition lease cleanup, human classification5, nonempty ancestor and personal native consumption still open |
+| Actual backend selection and owned model release | `e75d0b7e`:547 files format/full157 compile; concurrent release3 + query/history20 PASS23; ordinary HTTP25 PASS25; machine12 7PASS/5FAIL | Machine save caller adapter, genuine current epoch fault and final-clock positive remain; source-only human/ancestor/personal drafts require further repairs and actual validation |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -149,6 +150,23 @@ artifact writer; the next test-only correction must use that actual producer. It
 not rerun on this head while its earlier lease-cleanup failure remains open.
 See the [scan fix proposal](../integration/proposals/weknora-Nextcloud-final-content-datasource-column-20261011.json)
 and [current actual evidence](evidence/Nextcloud-scanner-full157-HTTP25-GREEN-machine12-model-coverage-failure-20261011.json).
+
+The machine fixture now records the actual tenant/KB-selected original SQLite
+backend through the production plan producer before writing chunks. The same
+candidate reserves SQLite's writer before each owned model lease release;
+caller-owned release behavior and all original query assertions are preserved.
+On `e75d0b7e`,547 files format and all157 packages compile. Actual concurrent
+Close/owner-cancel tests pass3 and the unchanged query13/named-history7 pass20,
+with eight resources independently absent. Ordinary HTTP25 also passes, with
+seven resources absent. The prior one-lease failure did not record a driver
+error code, so its exact cause remains unisolated despite the current zero-lease
+result. Machine12 has7PASS/5FAIL: five post-SDK fault refusals and bare/wire
+refusals pass, while positive saves still hit the ordinary Principal comparator.
+The epoch fault attempts to change an immutable pair row and is correctly
+rejected by its trigger; the final-clock hook is blocked by save admission.
+These are required remaining fixes, not accepted machine publication. See the
+[reviewable proposal](../integration/proposals/weknora-model-original-owned-release-and-actual-backend-selection-20261011.json)
+and [current actual record](evidence/model-owned-release3-query-history20-HTTP25-PASS-machine12-partial-20261011.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old

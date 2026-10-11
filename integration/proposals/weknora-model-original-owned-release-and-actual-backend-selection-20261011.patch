@@ -1,0 +1,400 @@
+diff --git a/internal/application/repository/model_original_release.go b/internal/application/repository/model_original_release.go
+index 75a06a1ad..60114cc29 100644
+--- a/internal/application/repository/model_original_release.go
++++ b/internal/application/repository/model_original_release.go
+@@ -15,7 +15,17 @@ func releaseCapturedModelLease(ctx context.Context, db *gorm.DB, bound originalB
+ 	if bound.LeaseID == "" || bound.BodyID == "" || bound.OwnerID == "" || bound.Kind != "read" {
+ 		return ErrOriginalBodyUnavailable
+ 	}
+-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return releaseCapturedModelLeaseInTx(ctx, tx, bound) }, memoryWriteOptions(db))
++	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		// This owned release transaction must become SQLite's writer before
++		// inspecting its lease. Concurrent genuine Close/owner cancellation
++		// must not upgrade two earlier read snapshots into conflicting writes.
++		if err := reserveMessageBodyLeaseWriterInTx(tx); err != nil {
++			return err
++		}
++		return releaseCapturedModelLeaseInTx(ctx, tx, bound)
++	}, memoryWriteOptions(db))
++	observeModelOriginalReleaseFailure(ctx, bound, err)
++	return err
+ }
+ func releaseCapturedModelLeaseInTx(ctx context.Context, tx *gorm.DB, bound originalBodyLease) error {
+ 	var actual originalBodyLease
+diff --git a/internal/application/repository/model_original_release_diagnostic.go b/internal/application/repository/model_original_release_diagnostic.go
+new file mode 100644
+index 000000000..9e4700701
+--- /dev/null
++++ b/internal/application/repository/model_original_release_diagnostic.go
+@@ -0,0 +1,61 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"strings"
++
++	"github.com/mattn/go-sqlite3"
++)
++
++type modelOriginalReleaseDiagnosticKey struct{}
++
++// ModelOriginalReleaseFailure contains metadata only. It never exports a
++// lease/body/owner ID, SQL, parameters, original text, credential or error string.
++type ModelOriginalReleaseFailure struct {
++	Phase              string
++	ErrorClass         string
++	SQLiteCode         int
++	SQLiteExtendedCode int
++	OwnershipKind      string
++	LeaseKind          string
++}
++
++// WithModelOriginalReleaseFailureObserver is an opt-in diagnostic, not an
++// authority. Existing callers do not install it; no checks/results are changed.
++func WithModelOriginalReleaseFailureObserver(ctx context.Context, observer func(ModelOriginalReleaseFailure)) context.Context {
++	if ctx == nil || observer == nil {
++		return ctx
++	}
++	return context.WithValue(ctx, modelOriginalReleaseDiagnosticKey{}, observer)
++}
++
++func observeModelOriginalReleaseFailure(ctx context.Context, bound originalBodyLease, err error) {
++	if err == nil || ctx == nil {
++		return
++	}
++	observer, _ := ctx.Value(modelOriginalReleaseDiagnosticKey{}).(func(ModelOriginalReleaseFailure))
++	if observer == nil {
++		return
++	}
++	metadata := ModelOriginalReleaseFailure{Phase: "model_original_owned_release", ErrorClass: "other", OwnershipKind: "other", LeaseKind: "read"}
++	if strings.HasPrefix(bound.OwnerID, "model-original-read/") {
++		metadata.OwnershipKind = "model_original_read"
++	}
++	if bound.Kind != "read" {
++		metadata.LeaseKind = "other"
++	}
++	var driver sqlite3.Error
++	if errors.As(err, &driver) {
++		metadata.ErrorClass = "sqlite_driver"
++		metadata.SQLiteCode = int(driver.Code)
++		metadata.SQLiteExtendedCode = int(driver.ExtendedCode)
++	} else if errors.Is(err, context.DeadlineExceeded) {
++		metadata.ErrorClass = "context_deadline"
++	} else if errors.Is(err, context.Canceled) {
++		metadata.ErrorClass = "context_cancelled"
++	} else if errors.Is(err, ErrOriginalBodyUnavailable) {
++		metadata.ErrorClass = "body_unavailable"
++	}
++	observer(metadata)
++}
+diff --git a/internal/application/service/knowledge_query_embedding_sql_http_actual_test.go b/internal/application/service/knowledge_query_embedding_sql_http_actual_test.go
+index 29dabbe48..c3ae3f009 100644
+--- a/internal/application/service/knowledge_query_embedding_sql_http_actual_test.go
++++ b/internal/application/service/knowledge_query_embedding_sql_http_actual_test.go
+@@ -69,6 +69,25 @@ func TestKnowledgeQueryEmbeddingCompletionActualSQLiteHTTP(t *testing.T) {
+ 		t.Run(mode, func(t *testing.T) {
+ 			knowledgeSQLiteOriginalVecAuto.Do(sqlite_vec.Auto)
+ 			store, db, base := jointFullSchemaBusinessFixture(t, false)
++			if os.Getenv("WEKNORA_MODEL_ORIGINAL_RELEASE_DIAGNOSTIC") == "1" {
++				var releaseMu sync.Mutex
++				var releaseFailures []repository.ModelOriginalReleaseFailure
++				base = repository.WithModelOriginalReleaseFailureObserver(base, func(metadata repository.ModelOriginalReleaseFailure) {
++					releaseMu.Lock()
++					releaseFailures = append(releaseFailures, metadata)
++					releaseMu.Unlock()
++				})
++				// LIFO records only after the existing actual HTTP/model cleanup;
++				// worker callbacks never log after the test or change a result.
++				t.Cleanup(func() {
++					releaseMu.Lock()
++					observed := append([]repository.ModelOriginalReleaseFailure(nil), releaseFailures...)
++					releaseMu.Unlock()
++					for _, metadata := range observed {
++						t.Logf("actual model release failure metadata: %+v", metadata)
++					}
++				})
++			}
+ 			installKnowledgeSQLiteOriginal90ForTest(t, db)
+ 			installKnowledgeQuery91Actual(t, db)
+ 			var embeddingCalls, chatCalls atomic.Int64
+diff --git a/internal/application/service/model_original_release_sqlite_writer_actual_test.go b/internal/application/service/model_original_release_sqlite_writer_actual_test.go
+new file mode 100644
+index 000000000..5c252317a
+--- /dev/null
++++ b/internal/application/service/model_original_release_sqlite_writer_actual_test.go
+@@ -0,0 +1,235 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++type modelReleaseActualOwnerKey struct{}
++
++func TestModelOriginalOwnedReleaseSQLiteWALActual(t *testing.T) {
++	for _, mode := range []string{"parallel_current_model_Close", "AfterFunc_HTTP_owner_cancel"} {
++		t.Run(mode, func(t *testing.T) {
++			store, db, base := jointFullSchemaBusinessFixture(t, false)
++			var journal string
++			require.NoError(t, db.Raw("PRAGMA journal_mode").Scan(&journal).Error)
++			require.Equal(t, "wal", strings.ToLower(journal))
++			pool, err := db.DB()
++			require.NoError(t, err)
++			pool.SetMaxOpenConns(2)
++			pool.SetMaxIdleConns(2)
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			modelRepo := repository.NewModelRepository(db)
++			ConfigureModelOriginalAuthority(modelRepo, store, NewGroupAccessService(repository.NewGroupAccessRepository(db)), nil)
++			models := NewModelService(modelRepo, nil, nil, nil, nil, nil)
++			model := actualModelLiteral(uuid.NewString(), 7)
++			model.Parameters.BaseURL = server.URL
++			require.NoError(t, models.CreateModel(base, model))
++			require.NotNil(t, model.OriginalProof)
++			require.True(t, model.OriginalProof.Valid())
++
++			bound, cancel := context.WithTimeout(base, 8*time.Second)
++			defer cancel()
++			ownerA, cancelA := context.WithCancel(context.WithValue(bound, modelReleaseActualOwnerKey{}, "A"))
++			ownerB, cancelB := context.WithCancel(context.WithValue(bound, modelReleaseActualOwnerKey{}, "B"))
++			ctxA, _, _, releaseA := BeginMessageMaterialHTTPBoundary(ownerA)
++			ctxB, _, _, releaseB := BeginMessageMaterialHTTPBoundary(ownerB)
++			allowA, enteredA, attemptB, enteredB := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
++			var openOnce sync.Once
++			open := func() { openOnce.Do(func() { close(allowA) }) }
++			var clientA, clientB *modelOriginalChatClient
++			resultA, resultB := make(chan error, 1), make(chan error, 1)
++			startedA, startedB, joinedA, joinedB := false, false, false, false
++			queryName, rawName := "actual-model-release-read-barrier", "actual-model-release-writer-reservation"
++			queryRegistered, rawRegistered := false, false
++			// Any setup/assertion failure first unblocks real SQL, then cancels
++			// and joins the actual client closes before server/database cleanup.
++			t.Cleanup(func() {
++				open()
++				cancelA()
++				cancelB()
++				if clientA != nil {
++					if err := clientA.CloseOriginal(); err != nil {
++						t.Error(err)
++					}
++				}
++				if clientB != nil {
++					if err := clientB.CloseOriginal(); err != nil {
++						t.Error(err)
++					}
++				}
++				releaseA()
++				releaseB()
++				joinCtx, joinCancel := context.WithTimeout(context.WithoutCancel(bound), 3*time.Second)
++				defer joinCancel()
++				if startedA && !joinedA {
++					select {
++					case <-resultA:
++						joinedA = true
++					case <-joinCtx.Done():
++						t.Error("actual first Close waiter did not join")
++					}
++				}
++				if startedB && !joinedB {
++					select {
++					case <-resultB:
++						joinedB = true
++					case <-joinCtx.Done():
++						t.Error("actual second Close waiter did not join")
++					}
++				}
++				if queryRegistered {
++					if err := db.Callback().Query().Remove(queryName); err != nil {
++						t.Error(err)
++					}
++				}
++				if rawRegistered {
++					if err := db.Callback().Raw().Remove(rawName); err != nil {
++						t.Error(err)
++					}
++				}
++			})
++			valueA, err := models.GetChatModel(ctxA, model.ID)
++			require.NoError(t, err)
++			var ok bool
++			clientA, ok = valueA.(*modelOriginalChatClient)
++			require.True(t, ok)
++			valueB, err := models.GetChatModel(ctxB, model.ID)
++			require.NoError(t, err)
++			clientB, ok = valueB.(*modelOriginalChatClient)
++			require.True(t, ok)
++			require.True(t, clientA.owner)
++			require.True(t, clientB.owner)
++			require.False(t, clientA.autoClose)
++			require.False(t, clientB.autoClose)
++			idsA, err := repository.ModelOriginalLeaseIDs(clientA.read.Context())
++			require.NoError(t, err)
++			idsB, err := repository.ModelOriginalLeaseIDs(clientB.read.Context())
++			require.NoError(t, err)
++			require.Len(t, idsA, 2)
++			require.Len(t, idsB, 2)
++			ids := append(append([]string(nil), idsA...), idsB...)
++			require.NotEqual(t, idsA, idsB)
++			var live int64
++			require.NoError(t, db.Table("original_body_leases").Where("lease_id IN ? AND released_at_ms IS NULL", ids).Count(&live).Error)
++			require.EqualValues(t, 4, live)
++
++			var onceA, onceB, firstB atomic.Bool
++			var reservationA atomic.Bool
++			var observerMu sync.Mutex
++			var observerErr error
++			record := func(err error) { observerMu.Lock(); observerErr = errors.Join(observerErr, err); observerMu.Unlock() }
++			require.NoError(t, db.Callback().Raw().Before("gorm:raw").Register(rawName, func(tx *gorm.DB) {
++				statement := tx.Statement.SQL.String()
++				if !strings.Contains(statement, "UPDATE original_body_leases SET expires_at_ms=expires_at_ms WHERE 1=0") {
++					return
++				}
++				switch tx.Statement.Context.Value(modelReleaseActualOwnerKey{}) {
++				case "A":
++					reservationA.Store(true)
++				case "B":
++					if onceB.CompareAndSwap(false, true) {
++						close(attemptB)
++					}
++				}
++			}))
++			rawRegistered = true
++			require.NoError(t, db.Callback().Query().Before("gorm:query").Register(queryName, func(tx *gorm.DB) {
++				if tx.Statement.Table != "original_body_leases" {
++					return
++				}
++				switch tx.Statement.Context.Value(modelReleaseActualOwnerKey{}) {
++				case "A":
++					if !onceA.CompareAndSwap(false, true) {
++						return
++					}
++					close(enteredA)
++					select {
++					case <-allowA:
++					case <-tx.Statement.Context.Done():
++						record(errors.New("actual release read barrier expired"))
++					}
++				case "B":
++					if firstB.CompareAndSwap(false, true) {
++						close(enteredB)
++					}
++				}
++			}))
++			queryRegistered = true
++			// Callbacks never Fatal/Goexit, AddError or fabricate SQL results.
++			wait := func(ch <-chan struct{}) bool {
++				select {
++				case <-ch:
++					return true
++				case <-bound.Done():
++					return false
++				}
++			}
++			if mode == "AfterFunc_HTTP_owner_cancel" {
++				cancelA()
++				require.True(t, wait(clientA.closeSignal), "actual owner cancellation starts Close before an explicit waiter")
++			}
++			startedA = true
++			go func() { resultA <- clientA.CloseOriginal() }()
++			require.True(t, wait(enteredA))
++			require.True(t, reservationA.Load(), "actual writer reservation completed before the captured-lease read")
++			if mode == "AfterFunc_HTTP_owner_cancel" {
++				cancelB()
++				require.True(t, wait(clientB.closeSignal))
++			}
++			startedB = true
++			go func() { resultB <- clientB.CloseOriginal() }()
++			require.True(t, wait(attemptB), "second actual Close reaches its real writer reservation")
++			select {
++			case <-enteredB:
++				t.Error("second lease read passed the first transaction's retained writer")
++			case <-time.After(60 * time.Millisecond):
++			case <-bound.Done():
++				t.Error("actual parallel release boundary expired")
++			}
++			open()
++			join := func(result <-chan error, joined *bool) error {
++				select {
++				case err := <-result:
++					*joined = true
++					return err
++				case <-bound.Done():
++					return bound.Err()
++				}
++			}
++			errA, errB := join(resultA, &joinedA), join(resultB, &joinedB)
++			require.NoError(t, errA)
++			require.NoError(t, errB)
++			require.True(t, wait(enteredB))
++			observerMu.Lock()
++			actualErr := observerErr
++			observerMu.Unlock()
++			require.NoError(t, actualErr)
++			require.NoError(t, clientA.CloseOriginal(), "repeated Close preserves the actual terminal result")
++			require.NoError(t, clientB.CloseOriginal())
++			releaseA()
++			releaseB()
++			require.NoError(t, db.Table("original_body_leases").Where("lease_id IN ? AND released_at_ms IS NULL", ids).Count(&live).Error)
++			require.Zero(t, live)
++			var released int64
++			require.NoError(t, db.Table("original_body_leases").Where("lease_id IN ? AND released_at_ms IS NOT NULL", ids).Count(&released).Error)
++			require.EqualValues(t, 4, released)
++		})
++	}
++}
+diff --git a/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go b/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
+index 1d89c8d90..5176ea263 100644
+--- a/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
++++ b/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
+@@ -358,6 +358,25 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			require.NoError(t, err)
+ 			require.NotNil(t, proof)
+ 			buildCtx := repository.WithKnowledgeBuildInputProof(held.Context(), f.store, proof)
++			// Match production processChunks: select the actual original backend and
++			// record its real plan before the first derived chunk is written. A
++			// missing plan is UNKNOWN; neither a lease nor an engine DTO creates it.
++			selectedTenant, err := repository.NewTenantRepository(f.db).GetTenantByID(buildCtx, payload.TenantID)
++			require.NoError(t, err)
++			require.NotNil(t, selectedTenant)
++			require.Equal(t, payload.TenantID, selectedTenant.ID)
++			selectedKB, err := repository.NewKnowledgeBaseRepository(f.db).GetKnowledgeBaseByIDAndTenant(buildCtx, operation.KnowledgeBaseID, payload.TenantID)
++			require.NoError(t, err)
++			require.NotNil(t, selectedKB)
++			require.Equal(t, payload.TenantID, selectedKB.TenantID)
++			indexBackend := retriever.NewKVHybridRetrieveEngine(sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(f.db, f.store, modelRepo), types.SQLiteRetrieverEngineType)
++			indexRegistry := retriever.NewRetrieveEngineRegistry(nil, nil)
++			require.NoError(t, indexRegistry.Register(indexBackend))
++			selectionCtx := context.WithValue(buildCtx, types.TenantInfoContextKey, selectedTenant)
++			selected, err := retriever.CreateRetrieveEngineForKB(selectionCtx, indexRegistry, nil, selectedTenant.ID, selectedKB.VectorStoreID)
++			require.NoError(t, err)
++			require.Equal(t, []types.RetrieverEngineType{types.SQLiteRetrieverEngineType}, selected.SelectedBackendTypes())
++			require.NoError(t, repository.RecordNextcloudDerivedBackendSelection(buildCtx, selected.SelectedBackendTypes()))
+ 			parsed, err := (&docparser.SimpleFormatReader{}).Read(buildCtx, &types.ReadRequest{FileContent: bytes, FileName: payload.FileName, FileType: payload.FileType})
+ 			require.NoError(t, err)
+ 			split := chunker.SplitText(parsed.MarkdownContent, chunker.SplitterConfig{ChunkSize: 512, ChunkOverlap: 0})
+@@ -527,7 +546,7 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 					}))
+ 					clockInstalled = true
+ 				}
+-				engine := retriever.NewKVHybridRetrieveEngine(sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(f.db, f.store, modelRepo), types.SQLiteRetrieverEngineType)
++				engine := indexBackend
+ 				err = engine.BatchIndex(modelRead.Context(), sdk, infos, []types.RetrieverType{types.VectorRetrieverType})
+ 				negative := mode == "delegation_after_SDK" || mode == "source_after_SDK" || mode == "epoch_after_SDK" || mode == "upload_body_after_SDK" || mode == "model_after_SDK" || mode == "directory_after_SDK" || mode == "late_result_content_union_clock"
+ 				if negative {
