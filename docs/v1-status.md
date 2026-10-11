@@ -19,6 +19,7 @@ older component snapshots below retain their separate scope and failure history.
 | SQLite original vector storage | `be76d2d6`: actual SDK/storage/native-read10 PASS10/FAIL0/SKIP0, including genuine credential successor, original lease-before-hydration and final lease expiry | Nextcloud input/query/HTTP completion owner union, production migration/registry and exact durable cleanup remain open |
 | Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
 | Knowledge query SDK/completion and named history | `17d75ff3`: full157 compile and actual query13+named history7 PASS20/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, sourced history, different-output vector succession, empty/multi-KB/rewrite and Nextcloud final union |
+| Nextcloud original upload / machine index purpose | `f1e85131`:544 files format, all157 packages compile; existing query/history20 pass on this source; new machine12 fails fixture identity preparation and old HTTP25 has15PASS/10FAIL before ordinary SDK | Genuine isolated fixture, authenticated-human lifetime vs scoped machine purpose, nonempty ancestor and personal native consumption; candidate remains unadopted |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -92,6 +93,26 @@ the final SQL clock. This covers the explicit manual single-KB path; sourced
 history and different-output vector succession remain open. See the [actual20
 record](evidence/knowledge-query13-named-history7-actual20-GREEN-20261011.json)
 and [named-history proposal](../integration/proposals/weknora-knowledge-named-history-original-reopening-20261011.json).
+
+The next Nextcloud proposal moves typed upload/body/content/build holds before
+plaintext, adds scoped configured-model execution for genuine onboarding and
+DirGUID authority, and checks exact original index text before SDK IO. Source
+review repairs caller-context laundering and reserves the SDK input owner's
+SQLite writer before schema/fact reads. `f1e85131` formats544 Go files and
+compiles all157 packages after a retained real assignment compile failure.
+Existing query/history20 passes on that exact source, with seven resources
+independently absent. The new machine12 fails before SDK because its sourcepair
+and linked-identity setup collides with existing fixture rows; an isolated
+test-only child is prepared without deleting old rows or weakening constraints.
+Old HTTP25 has15PASS/10FAIL: owner5/vector10 pass, while ordinary modelHTTP10
+fails in the Nextcloud processing prelude. Its headless legacy-pair preparation
+does not supply a genuine onboarding purpose. The corrected path must retain
+original leases for legitimate authenticated-human uploads while keeping
+machine authority limited to real onboarding credentials; no legacy pair
+automatically gains machine access. See the [machine proposal](../integration/proposals/weknora-Nextcloud-original-upload-machine-index-purpose-20261011.json),
+[compile](evidence/Nextcloud-machine-held-upload-SDK-full157-compile-PASS-20261011.json),
+[machine12 failure](evidence/Nextcloud-machine12-first-fixture-identity-collision-failure-20261011.json)
+and [ordinary prelude failure](evidence/Nextcloud-machine-candidate-HTTP25-ordinary-prelude-failure-20261011.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
