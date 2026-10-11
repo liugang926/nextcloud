@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "classification": "scoped_SQLite_message_lease_writer_real_two_connection_WAL5_GREEN",
+  "head": "1128547691b729dd4038a8f27cf8d2fc9a0b2701",
+  "tree": "a9a311849c5d38a77fc7b587ff12cf999c41c31c",
+  "PASS": 5,
+  "FAIL": 0,
+  "SKIP": 0,
+  "OOM": false,
+  "seconds": 42.738,
+  "raw_SHA256": "2e62729136bf2eb3cfff673a3328731772fd90114a2c11efdf387535ed7f2b16",
+  "raw_bytes": 70744,
+  "nodes": [
+    "TestMessageBodyScopeSQLiteWriterReservationActual/zero_row_changes_no_fact_and_no_row_trigger",
+    "TestMessageBodyScopeSQLiteWriterReservationActual/acquire_serializes_actual_renew_on_two_connections",
+    "TestMessageBodyScopeSQLiteWriterReservationActual/changed_original_plan_refuses_without_claim",
+    "TestMessageBodyScopeSQLiteWriterReservationActual/nested_read_snapshot_never_assumed_writer",
+    "TestMessageBodyScopeSQLiteWriterReservationActual"
+  ],
+  "exact_once_RUN_PASS_independently_reparsed": true,
+  "independent_absent_resources": [
+    {
+      "kind": "container",
+      "identity": "49c733011a6a950aaafd1433fc947729a27a99bed7f77c42d06b36ebfaf90638",
+      "independent_absent": true
+    },
+    {
+      "kind": "container",
+      "identity": "b7efa3b7cdb7ae8737c46b22a8ceca9f2e23a49c01bae7884890ca6af11622c8",
+      "independent_absent": true
+    },
+    {
+      "kind": "network",
+      "identity": "9516004e22fa87045f0643e187f679d63770959fa57cc1bfa49c9a0bb6655baf",
+      "independent_absent": true
+    },
+    {
+      "kind": "volume",
+      "identity": "nc-memory-pgdata-cc95602fe48e47fb8af65d8139e147a6",
+      "independent_absent": true
+    },
+    {
+      "kind": "volume",
+      "identity": "nc-memory-redisdata-cc95602fe48e47fb8af65d8139e147a6",
+      "independent_absent": true
+    },
+    {
+      "kind": "volume",
+      "identity": "nc-memory-gotmp-cc95602fe48e47fb8af65d8139e147a6",
+      "independent_absent": true
+    },
+    {
+      "kind": "container",
+      "identity": "14527165f48fb97e6577bfc11fae6ecbfa065a3e6d628495938459f8f24a178e",
+      "independent_absent": true
+    }
+  ],
+  "production_scope": "Acquire+Renew reserve SQLite writer before reading using zero-row UPDATE; unchanged PG and later authority/body/journal/epoch checks.",
+  "actual_oracles": [
+    "no lease tuple changes at reservation and real row trigger fires only for real matching row",
+    "two actual connections on same owned WAL database: zero-busy-timeout probe proves actual lock, real Renew waits and completes with SQL-clock live readback",
+    "changed original message plan refuses and creates no lease",
+    "nested old read snapshot after actual second-connection committed Renew returns real Busy and creates no lease"
+  ],
+  "scope": "Existing fulljoint fixture executes87/168-beforedata; independent pair correctness only. OriginalHTTP6 remainsunaccepted model permission recheck busy_snapshot on prior production-identical1f029. No timeout/retry/pool/authority weakening.",
+  "full_V1": false
+}

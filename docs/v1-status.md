@@ -10,7 +10,7 @@ older component snapshots below retain their separate scope and failure history.
 | Work item | Latest actual result | Remaining work |
 | --- | --- | --- |
 | Startup/schema qualification | `3707fce5`: full157-package compile; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup and PeerApplied forward route |
-| Original-memory source path | `c5e9a07f`:4PASS/2FAIL; real SQLite CREATE on original_body_leases returns busy inside the message body scope transaction; earlier e3ab busy_snapshot is retained | Fix same-transaction writer contention without extending 8s/10s bounds; matched full6 and normal application |
+| Original-memory source path | `01f02907`: scoped lease writer compiles; original6 still4PASS/2FAIL with model permission recheck busy_snapshot; earlier lease CREATE busy retained | WAL5 real pair passes on112854; fix model permission transaction; unchanged8s/10s/2pool; matched full6 and normal application |
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `0621bef7`: real Parade17 pending16921 all pass | Historical upgrade/restart and startup route binding |
 | Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
@@ -844,6 +844,33 @@ schema; they preserve genuine sharing and add no source-tenant membership.
 The old partial-schema component22 failures remain preserved. See
 [consolidation16](evidence/joint-sharedagent-consolidation16-GREEN-20261011.json)
 and [multicluster6](evidence/joint-sharedagent-multicluster6-GREEN-20261011.json).
+
+The scoped SQLite lease-writer candidate `01f02907` parses484Go files and
+compiles repository/database/service plus server with zero business RUN. It
+reserves the writer before Acquire/Renew metadata reads without changing a
+lease row. Original SQL/HTTP6 remains4PASS/2FAIL: SQLite/current passes,
+withdrawal's HTTP prelude returns busy_snapshot from model-original permission
+recheck; allPG nodes pass. Failed Go is absent and bothSQL actors are stopped.
+IndependentWAL5 initially refused an uppercase plan stage beforeGo, then all5
+failed the fixture's WAL prerequisite before writer assertions. Both failures
+remain recorded; test-only complete-schema fixture correction is pending.
+See [compile](evidence/scoped-SQLite-message-lease-writer-selected-compile-GREEN-20261011.json),
+[original6](evidence/scoped-SQLite-writer-sourcepath6-busy-snapshot-failure-20261011.json),
+[plan refusal](evidence/scoped-SQLite-WAL5-stage-name-pre-Go-refusal-20261011.json),
+[WAL prerequisite](evidence/scoped-SQLite-WAL5-fixture-mode-prerequisite-failure-20261011.json)
+and [reviewable candidate](../integration/proposals/weknora-scoped-SQLite-message-body-lease-writer-20261011.json).
+
+The one-line fulljoint fixture optin on `11285476` now passes all5 genuine
+SQLite WAL writer nodes in42.738s, zero failures/skips/OOM,7 resources
+independently absent. Real competing Acquire/Renew complete; zero-row
+reservation leaves every existing lease tuple unchanged and fires no row
+trigger; changed original plans and stale nested snapshots still refuse without
+claims. The same candidate parses484Go files and selected compilation passes.
+The original6 failure remains separate: actual modelOriginalRead.Recheck
+reads actor/member/tenant permissions before creating directory_permission_versions,
+which can upgrade an old snapshot. That owning transaction is the next minimal
+fix; no permission upsert is removed. See [realWAL5](evidence/scoped-SQLite-message-lease-writer-WAL5-GREEN-20261011.json)
+and [compile](evidence/fulljoint-SQLite-WAL5-fixture-selected-compile-GREEN-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
