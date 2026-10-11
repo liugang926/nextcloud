@@ -9,34 +9,33 @@ older component snapshots below retain their separate scope and failure history.
 
 | Work item | Latest actual result | Remaining work |
 | --- | --- | --- |
-| Startup/schema qualification | `fb46bcca`: all157 packages compile, zero business RUN; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup |
+| Startup/schema qualification | `be76d2d6`: all157 packages compile, zero business RUN; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup |
 | Original-memory source path | `a3741d26`: original SQL/HTTP6 all pass; `112854`:lease WAL5 passes; `92b1bc76`:model permission WAL7 passes; original8s/10s/2pool retained | Whole normal application and matched final model/memory/authority regressions |
 | Ordinary embedding operation | `a3741d26`:actualSQL/HTTP12 pass; `92b1bc76`:originalfourprotocol80 pass; same proved reader across retries/Wiki two batches | Actual local vector input/result receipts, sameTX publication authority, graph/status/personalQA and external backend atomicity |
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `1f185e4d`: genuine Peer161→169→171 upgrade/restart and actual local guard repair pass on Parade17 | Partial-prefix and normal application regression |
 | Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
-| Historical PeerApplied forward upgrade | `fb46bcca`: genuine partial155–160/74–79 SQL110 and original route20/Root91/startup34/Linux process6 all pass in five separate windows; exact resources absent; earlier Darwin process6 passes on `1f185e4d` | Partial preupgrade read-only Ready and DOWN protection; Darwin partial74/75 and full application upgrade/restore |
-| SQLite original vector storage | `ff660a7c`: production identical to full157-compiled `fb46bcca`; real migration-source repair compiles; actual vector10 has8PASS/2FAIL (parent and legal credential successor) | Fix genuine credential successor and rerun all10; Nextcloud input/query/HTTP owner and production migration/registry remain open |
+| Historical PeerApplied forward upgrade | `be76d2d6`: partial SQL110, preupgrade Ready/DOWN38 and original route20/Root91/startup34/Linux process6 all pass in separate windows; exact resources absent; earlier Darwin process6 passes on `1f185e4d` | Darwin partial74/75 and full application upgrade/restore |
+| SQLite original vector storage | `be76d2d6`: actual SDK/storage/native-read10 PASS10/FAIL0/SKIP0, including genuine credential successor, original lease-before-hydration and final lease expiry | Nextcloud input/query/HTTP completion owner union, production migration/registry and exact durable cleanup remain open |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
 still open; component passes are not a full release acceptance.
 
-The current partial upgrade source preserves historical SQL bytes and now
-passes110 genuine partial-prefix nodes. Its original route20, Root91,
-startup34 and Linux OFD process6 also pass on the same source in separate
-windows. The261 selected nodes are not one combined release test. Independent
-raw parsing verifies exact RUN/PASS pairs and Root verifies each window's
-7/7/7/8/7 resources are absent. See the [partial SQL110 record](evidence/Peer-partial-prefix110-actual-SQL-GREEN-20261011.json)
-and [source proposal](../integration/proposals/weknora-partial-Peer-route-and-SQLite-original-vector-storage-20261011.json).
+The current `be76d2d6` source preserves historical SQL bytes. Its partial
+SQL110, preupgrade Ready/DOWN38, original route20/Root91/startup34/Linux process6
+and original-vector10 pass in seven separate windows. The309 exact selected
+nodes are not one combined release test. Root reparses RUN/PASS pairs and
+verifies all50 owned resources are absent. See the [matched309 record](evidence/partial-route-Ready-DOWN-vector-matched309-seven-windows-GREEN-20261011.json)
+and [latest source proposal](../integration/proposals/weknora-partial-DOWN-preupgrade-Ready-and-credential-successor-20261011.json).
 
-The original-vector candidate remains unaccepted. After repairing a real
-current87→pending90 migration-source prerequisite, eight nodes pass actual SDK
-save/native retrieve, canonical ABA, cache mutation/missing, actor revocation,
-late SQL clock, unknown old index and lease-before-body hydration. A legal
-credential successor still fails; the parent therefore fails too. The
-production registry and normal Nextcloud/query/HTTP owner chain are not bound.
-See the [actual partial result](evidence/SQLite-vector-original10-partial8-credential-successor-failure-20261011.json).
+The explicit original-vector component now passes all10 actual SDK, SQL and
+native retrieval nodes. The fixture uses the real canonical87 and pending90
+migration files, and the existing credential-specific author API creates a
+genuine successor with stable definition/space and no extra SDK call. Earlier
+prelude and generic-model-update failures remain recorded. The production
+registry and normal Nextcloud/query/HTTP completion owner chain are not bound;
+full vector functionality and V1 remain unaccepted. See the [vector10 record](evidence/SQLite-original-vector10-actual-SQL-HTTP-native-GREEN-20261011.json).
 
 Ordinary original-model HTTP now passes10 selected nodes after fixing the
 constructor-to-HTTP owner lifetime. Four remote embedding protocols pass80
