@@ -2,7 +2,7 @@
 
 This repository implements a local development slice of the [PRD](development-plan.md), not a V1 enterprise release. The PRD describes requirements; the table records the historical implementation and tests through 2026-09-24, with a newer addendum below. Only synthetic local data has been used for cross-system testing.
 
-## Current checkpoint — 2026-10-11
+## Current checkpoint — 2026-10-12
 
 Latest verified work on the integrated development candidate is summarized here;
 older component snapshots below retain their separate scope and failure history.
@@ -27,7 +27,8 @@ older component snapshots below retain their separate scope and failure history.
 | Nonempty ancestor indexed-success fixture | `2023169f`:551 files format/full157 compile; ancestor8 6PASS/2FAIL including parent, existing67 regressions pass | Positive inheritance/native save and five fault leaves pass; last-clock fault probe has a wrong lease-table column reference and remains unaccepted |
 | Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
 | Explicit no-event current epoch originals | `5eaa2498`:559 files format/full157 compile; SQLite13 + PG4 + existing75 all PASS92/FAIL0/SKIP0;39 runtime and3 compiler resources absent | Explicit component only; normal registry/startup93/172, concurrent availability, whole restore and personal sourced QA remain open |
-| Personal source query and completion | `559e70fb`:565 files format/full157 compile; first actual8 has5PASS/3FAIL, zero skips; existing92 regressions all pass; true source publication→human query/native→answer/completion positive passes | Grant/epoch post-journal fault observers fail their mutation prerequisites; two negatives remain unqualified. Source-only nonmember KB/Agent/model boundary, graph-required sources and normal registry remain open |
+| Personal source query and completion | `5ac10a32`:565 files format/full157 compile; actual8 PASS8/FAIL0/SKIP0 and7 runtime+3 compiler resources absent; production/SQL/old92 exact to parent559, whose existing92 regressions pass | Explicit WebAdmin/GraphRequired=false pipeline only; source-only nonmember KB/Agent/model boundary, normal QA/registry, graph-required inputs and sourced history remain open |
+| Source-only nonmember model isolation | Source audit confirms virtual ScopedOnly viewer can reach same-tenant current/historical model reads without exact KB/model purpose; bounded query/vector/answer purpose fix and true JWT matrix under development | Production child/compile/actual permission matrix and normal-entry binding pending; no permission acceptance yet |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -3732,3 +3733,23 @@ The same `559e70fb` source also passes existing NoEvent17 and old75 across
 five serial windows, with39 resources independently absent. That regression
 does not qualify the two failed personal fault prerequisites. See the
 [matched existing92 record](evidence/personal-source-candidate-existing-NoEvent17-old75-actual92-GREEN-20261012.json).
+
+
+## 2026-10-12 personal source completion fault producer validation
+
+The sole-test clean-statement correction `5ac10a32` passes all8 exact personal
+nodes with zero failures/skips, after565 Go files format and157 packages compile.
+Both grant and signed current-epoch mutations now reach actual public producers,
+full readbacks, refusal and completion rollback. Root verifies7 runtime and3
+compiler resource absences. The Go parent takes12.47s; the container stage51.149s
+and whole owned window58.919s include setup/runner overhead. The first5PASS/3FAIL
+raw evidence remains retained. See the [actual8 record](evidence/personal-source-query-completion-fault-producer-fixed-actual8-GREEN-20261012.json)
+and [current proposal](../integration/proposals/weknora-personal-source-query-completion-20261012.json).
+
+Only the new personal test changes from `559e70fb`; production, SQL and the old92
+test sources are byte-exact to that parent, where92 regressions passed. These
+separate source windows are not100 nodes run on one head or a release test.
+The verified component uses WebAdmin, linked GUID and GraphRequired=false
+through explicit private producers. True JWT/middleware personal QA and the
+source-only nonmember current/historical/answer model namespace matrix remain
+under development, together with normal startup/registry and sourced history.

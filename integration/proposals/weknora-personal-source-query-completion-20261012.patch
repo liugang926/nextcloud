@@ -1461,10 +1461,10 @@ index 0000000000000000000000000000000000000000..b7e67e7616d4fc013570f6f4f63f6cf3
 +}
 diff --git a/internal/application/service/nextcloud_personal_query_completion_source_sql_http_actual_test.go b/internal/application/service/nextcloud_personal_query_completion_source_sql_http_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..ba6229d51016201c84b6f7dc5e92a026e1e406f7
+index 0000000000000000000000000000000000000000..fb5ad28f5d7486371914d9bfe40be22a3322c19d
 --- /dev/null
 +++ b/internal/application/service/nextcloud_personal_query_completion_source_sql_http_actual_test.go
-@@ -0,0 +1,686 @@
+@@ -0,0 +1,694 @@
 +package service
 +
 +import (
@@ -2024,22 +2024,22 @@ index 0000000000000000000000000000000000000000..ba6229d51016201c84b6f7dc5e92a026
 +					case "source_grant_after_last_journal_IO":
 +						currentOp := aOp
 +						if e := local.Where("operation_id=?", aOp.OperationID).Take(&currentOp).Error; e != nil {
-+							fail()
++							recordFault(errors.New("actual grant current-operation lookup failed"))
 +							return
 +						}
-+						if e := repository.NewNextcloudOnboardingStore(local).ApplyGrantSnapshot(tx.Statement.Context, currentOp, types.NextcloudGrantSnapshot{Complete: true, PermissionVersion: currentOp.PermissionVersion + 1, PublicationEpoch: 1, Subjects: []types.NextcloudGrantSubject{}}); e != nil {
-+							fail()
++						if e := repository.NewNextcloudOnboardingStore(personalCompletionMutationProducerDB(local)).ApplyGrantSnapshot(tx.Statement.Context, currentOp, types.NextcloudGrantSnapshot{Complete: true, PermissionVersion: currentOp.PermissionVersion + 1, PublicationEpoch: 1, Subjects: []types.NextcloudGrantSubject{}}); e != nil {
++							recordFault(errors.New("actual grant public producer refused"))
 +							return
 +						}
 +						var remaining int64
 +						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Model(&types.NextcloudSourceGrant{}).Where("operation_id=?", aOp.OperationID).Count(&remaining).Error; e != nil || remaining != 0 {
-+							fail()
++							recordFault(errors.New("actual grant zero-row readback failed"))
 +							return
 +						}
 +					case "source_epoch_after_last_journal_IO":
 +						ancestorEpoch.Store(2)
-+						if e := repository.NewNextcloudOnboardingStore(local).RefreshGrantEpoch(tx.Statement.Context, aOp); e != nil {
-+							fail()
++						if e := repository.NewNextcloudOnboardingStore(personalCompletionMutationProducerDB(local)).RefreshGrantEpoch(tx.Statement.Context, aOp); e != nil {
++							recordFault(errors.New("actual signed epoch public producer refused"))
 +							return
 +						}
 +						var after struct {
@@ -2047,12 +2047,12 @@ index 0000000000000000000000000000000000000000..ba6229d51016201c84b6f7dc5e92a026
 +							PublicationEpoch, VerifiedAt int64
 +						}
 +						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_source_status_epochs").Where("connection_id=?", aConnection).Take(&after).Error; e != nil || after.PairOperationID != aOp.OperationID || after.PublicationEpoch != 2 || after.VerifiedAt <= 0 {
-+							fail()
++							recordFault(errors.New("actual signed epoch current-status readback failed"))
 +							return
 +						}
 +						var pairEpoch int64
 +						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_source_pairings").Select("publication_epoch").Where("operation_id=?", aPair.OperationID).Scan(&pairEpoch).Error; e != nil || pairEpoch != 1 {
-+							fail()
++							recordFault(errors.New("actual immutable pairing epoch readback failed"))
 +							return
 +						}
 +					}
@@ -2150,4 +2150,12 @@ index 0000000000000000000000000000000000000000..ba6229d51016201c84b6f7dc5e92a026
 +	digest, err := repository.KnowledgeInputDigest(facts)
 +	require.NoError(t, err)
 +	return digest
++}
++
++// This observer invokes public producer APIs from a live Query/Row callback.
++// WithContext alone creates clone2 and would preserve the observed SELECT's
++// SQL/model/select/where. Materialize a same-TX empty statement first, then use
++// NewDB for every internal producer query; no authority or producer is replaced.
++func personalCompletionMutationProducerDB(tx *gorm.DB) *gorm.DB {
++	return tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context, Initialized: true}).Session(&gorm.Session{NewDB: true})
 +}
