@@ -10,7 +10,8 @@ older component snapshots below retain their separate scope and failure history.
 | Work item | Latest actual result | Remaining work |
 | --- | --- | --- |
 | Startup/schema qualification | `3707fce5`: full157-package compile; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup and PeerApplied forward route |
-| Original-memory source path | `01f02907`: scoped lease writer compiles; original6 still4PASS/2FAIL with model permission recheck busy_snapshot; earlier lease CREATE busy retained | WAL5 real pair passes on112854; fix model permission transaction; unchanged8s/10s/2pool; matched full6 and normal application |
+| Original-memory source path | `a3741d26`: original SQL/HTTP6 all pass; `112854`:lease WAL5 passes; `92b1bc76`:model permission WAL7 passes; original8s/10s/2pool retained | Whole normal application and matched final model/memory/authority regressions |
+| Ordinary embedding operation | `a3741d26`:actualSQL/HTTP12 pass; `92b1bc76`:originalfourprotocol80 pass; same proved reader across retries/Wiki two batches | Actual local vector input/result receipts, sameTX publication authority, graph/status/personalQA and external backend atomicity |
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `0621bef7`: real Parade17 pending16921 all pass | Historical upgrade/restart and startup route binding |
 | Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
@@ -871,6 +872,36 @@ reads actor/member/tenant permissions before creating directory_permission_versi
 which can upgrade an old snapshot. That owning transaction is the next minimal
 fix; no permission upsert is removed. See [realWAL5](evidence/scoped-SQLite-message-lease-writer-WAL5-GREEN-20261011.json)
 and [compile](evidence/fulljoint-SQLite-WAL5-fixture-selected-compile-GREEN-20261011.json).
+
+Model permission Recheck now reserves the SQLite writer before its first
+permission read/upsert. On `a3741d26`, the original SQL/HTTP6 passes completely
+in110.314s and the new embedding operation12 passes in29.466s. Each separate
+window has7 independently absent resources. The source has a full157-package
+compile,490parsedGo files andzero business RUN in that compiler window.
+The prior compile failed a new test-only SSRF utility import and remains
+recorded. No authority/upsert/original/HTTP8s/write10s/pool2 requirement changed.
+
+On production-identical `92b1bc76`, stronger model writer7 passes in43.573s.
+The earlier caller-owned test incorrectly expected a refused reader to revive
+after SQL rollback; its new oracle requires the original failure to remain
+latched, actualClose, then a genuinely fresh authorized same-proof reader to
+succeed. All original four remote embedding protocol80 tests then pass in one
+103.872s window, with8 resources absent and originalfixtures/parents unchanged.
+The operation uses the same actualmodel/credential reader through backoff,
+Wiki batches and index saves, retains per-call current checks, joins cancelled
+SDK/watchers before closing, and preserves borrowed outer holds.
+
+These are source-specific component windows. Real external backend writes,
+knowledge embedding input/output receipts and sameTX final publication,
+graph/status/personalQA andV1 remain incomplete. Peer-forward route has a
+verified SQLite per-instance-lock race; a Linux same-inode OFD-lock child is
+being reviewed, with other platforms and partialprefixes still open.
+See [fullcompile](evidence/model-Recheck-embedding-operation-full157-compile-GREEN-20261011.json),
+[original6](evidence/model-Recheck-writer-original-sourcepath6-GREEN-20261011.json),
+[operation12](evidence/original-embedding-operation-SQL-HTTP12-GREEN-20261011.json),
+[writer7](evidence/model-original-Recheck-writer-WAL7-GREEN-20261011.json),
+[original80](evidence/model-Recheck-embedding-original-four-protocols80-GREEN-20261011.json)
+and [exactreviewable source](../integration/proposals/weknora-model-recheck-writer-and-embedding-operation-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
