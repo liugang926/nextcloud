@@ -9,16 +9,16 @@ older component snapshots below retain their separate scope and failure history.
 
 | Work item | Latest actual result | Remaining work |
 | --- | --- | --- |
-| Startup/schema qualification | `be76d2d6`: all157 packages compile, zero business RUN; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup |
+| Startup/schema qualification | `7cb5c6ce`: all157 packages compile, zero business RUN; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup |
 | Original-memory source path | `a3741d26`: original SQL/HTTP6 all pass; `112854`:lease WAL5 passes; `92b1bc76`:model permission WAL7 passes; original8s/10s/2pool retained | Whole normal application and matched final model/memory/authority regressions |
 | Ordinary embedding operation | `a3741d26`:actualSQL/HTTP12 pass; `92b1bc76`:originalfourprotocol80 pass; same proved reader across retries/Wiki two batches | Actual local vector input/result receipts, sameTX publication authority, graph/status/personalQA and external backend atomicity |
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `1f185e4d`: genuine Peer161→169→171 upgrade/restart and actual local guard repair pass on Parade17 | Partial-prefix and normal application regression |
 | Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
-| Historical PeerApplied forward upgrade | `be76d2d6`: partial SQL110, preupgrade Ready/DOWN38 and original route20/Root91/startup34/Linux process6 all pass in separate windows; exact resources absent; earlier Darwin process6 passes on `1f185e4d` | Darwin partial74/75 and full application upgrade/restore |
+| Historical PeerApplied forward upgrade | `7cb5c6ce`: partial SQL110, preupgrade Ready/DOWN38 and original route20/Root91/startup34 pass; Linux32 and nativeDarwin20 include original6, genuinepartial7 and retainedFD7 | Other platforms/filesystems and full application upgrade/restore |
 | SQLite original vector storage | `be76d2d6`: actual SDK/storage/native-read10 PASS10/FAIL0/SKIP0, including genuine credential successor, original lease-before-hydration and final lease expiry | Nextcloud input/query/HTTP completion owner union, production migration/registry and exact durable cleanup remain open |
 | Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
-| Partial Unix process upgrade | `190c1da0` and diagnostic `0ea85f63`: actual2PASS/5FAIL; fresh process reads89 while original parent reads74/75, with parent POSIX shared lock lost after custom FD Close | Production descriptor release fix, unchanged parent-pool7, original process6 and real Darwin7 validation |
+| Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
@@ -48,14 +48,20 @@ schema missing current maintenance controls. Production guards are unchanged.
 The new provider-done leaf uses producer-context cancellation; it does not
 establish normal knowledge QA streaming/completion. See the [actual25 record](evidence/HTTP-knowledge-owner5-vector10-ordinary-model10-actual25-GREEN-20261011.json).
 
-New independent-process tests expose a production migration-lock release
-defect that the older gates did not cover. Closing the custom main-inode file
-descriptor clears the parent process's SQLite POSIX locks. A real independent
-probe reads final89 while the unchanged parent remains on74/75; the lock probe
-changes from parent SHARED to successful F_UNLCK. The parent pool is kept open
-and its original89 assertion remains. An explicit OFD unlock with safely
-retained descriptors is being implemented; the Unix7 gate remains failed and
-nativeDarwin7 is deferred. See the [actual diagnostic](evidence/Unix-partial7-actual-POSIX-lock-loss-stale-WAL-diagnostic-20261011.json).
+Independent process tests exposed a migration-lock release defect: closing the
+extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
+pool on74/75 while fresh readers saw89. The fixed `7cb5c6ce` explicitly unlocks
+OFD and retains bounded descriptors without closing them. A cancellable local
+owner gate prevents same-process reentry; unlock failure poisons the entry.
+The unchanged old pool/Conn now sees89 and retains its POSIX shared lock.
+Linux32 and nativeDarwin20 pass, followed by all293 migration/Ready regression
+nodes on the same source in separate Linux windows. The six Linux windows have
+325 unique RUN/PASS pairs and43 independently absent resources; native20 is a
+separate platform run. Actual Linux FS class is ext4; the other allowlisted FS
+are source contracts rather than mounted-runtime acceptance. See the [matched
+record](evidence/retained-FD-matched-Linux325-nativeDarwin20-GREEN-20261011.json).
+The [prior diagnostic](evidence/Unix-partial7-actual-POSIX-lock-loss-stale-WAL-diagnostic-20261011.json)
+and first conservative native-monitor refusal remain preserved.
 
 Ordinary original-model HTTP now passes10 selected nodes after fixing the
 constructor-to-HTTP owner lifetime. Four remote embedding protocols pass80
