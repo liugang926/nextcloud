@@ -1,3 +1,67 @@
+diff --git a/internal/application/service/knowledge_query_normal_qa.go b/internal/application/service/knowledge_query_normal_qa.go
+index 2a90826c0..342080d22 100644
+--- a/internal/application/service/knowledge_query_normal_qa.go
++++ b/internal/application/service/knowledge_query_normal_qa.go
+@@ -83,6 +83,8 @@ type normalKnowledgeQueryTurn struct {
+ 	kb, text         string
+ 	caller           types.Caller
+ 	owner            context.Context
++	slot             *messageMaterialOutputSlot
++	boundaryOwner    context.Context
+ 	answerSelector   string
+ 	mu               sync.Mutex
+ 	nativeResults    map[string]types.SearchResult
+@@ -124,15 +126,47 @@ func (s *sessionService) bindNormalKnowledgeQueryTurn(ctx context.Context, req *
+ 	if err != nil {
+ 		return ctx, true, err
+ 	}
+-	turn := &normalKnowledgeQueryTurn{base: base, session: req.Session.ID, message: req.UserMessageID, kb: kbIDs[0], text: m.Content, caller: caller, owner: ctx, answerSelector: req.SummaryModelID}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return ctx, true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	slot.mu.Lock()
++	boundaryOwner, closed, failed := slot.OwnerContext, slot.Closed, slot.Failed
++	slot.mu.Unlock()
++	if closed || failed != nil || boundaryOwner == nil || boundaryOwner.Err() != nil || !sameKnowledgeQueryOwnedCaller(ctx, boundaryOwner) {
++		return ctx, true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	turn := &normalKnowledgeQueryTurn{base: base, session: req.Session.ID, message: req.UserMessageID, kb: kbIDs[0], text: m.Content, caller: caller, owner: ctx, slot: slot, boundaryOwner: boundaryOwner, answerSelector: req.SummaryModelID}
+ 	return context.WithValue(bound, normalKnowledgeQueryTurnKey{}, turn), true, nil
+ }
+ 
+ func checkNormalKnowledgeQueryTurn(ctx context.Context, turn *normalKnowledgeQueryTurn) error {
+-	if turn == nil || turn.base == nil || turn.owner == nil || ctx == nil || ctx.Err() != nil || turn.owner.Err() != nil || types.CallerFromContext(ctx) != turn.caller || !sameKnowledgeQueryOwnedCaller(ctx, turn.owner) {
++	if turn == nil || turn.base == nil || turn.owner == nil || turn.slot == nil || turn.boundaryOwner == nil || ctx == nil || types.CallerFromContext(ctx) != turn.caller || !sameKnowledgeQueryOwnedCaller(ctx, turn.owner) || !sameKnowledgeQueryOwnedCaller(ctx, turn.boundaryOwner) {
+ 		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
+ 	}
+-	return CheckMessageMaterialOutputBoundary(ctx)
++	for _, current := range []context.Context{ctx, turn.owner, turn.boundaryOwner} {
++		if err := current.Err(); err != nil {
++			return err
++		}
++	}
++	// The raw OwnerContext precedes attach(), so it has no slot key itself.
++	if ctx.Value(messageMaterialOutputKey{}) != turn.slot || turn.owner.Value(messageMaterialOutputKey{}) != turn.slot {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	turn.slot.mu.Lock()
++	owner, closed, failed := turn.slot.OwnerContext, turn.slot.Closed, turn.slot.Failed
++	turn.slot.mu.Unlock()
++	if failed != nil {
++		return failed
++	}
++	if closed || owner != turn.boundaryOwner {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	// This is owner/shape validation, not an authorization checkpoint. The
++	// event loop immediately retains its existing CheckSourceLineageInputs ->
++	// CheckHistoryMaterialLifetime full boundary. Original SDK/native/merge,
++	// typed completion and HTTP output checks remain independent current reads.
++	return nil
+ }
+ 
+ // OriginalKnowledgeQuerySearch is an optional concrete service boundary used by
 diff --git a/internal/application/service/normal_event_original_query_scoped_fixture_bridge_test.go b/internal/application/service/normal_event_original_query_scoped_fixture_bridge_test.go
 new file mode 100644
 index 000000000..d5e6c2749
