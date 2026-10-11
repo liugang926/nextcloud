@@ -524,6 +524,14 @@ and six owned resources are independently absent. The two-process same-volume
 SQLite chat/embedding opaque-space lifecycle tests are prepared but not run;
 see the [two-source compile record](evidence/two-source-model-compat-test-compile-GREEN-20261011.json).
 
+The first actual61 window on `afd1c6c8` passes the embedding pure node, then
+stops in controller preflight before an embedding-current actor is created.
+The later60 business nodes have0 RUN. Both owned SQL actors are independently
+stopped; raw logs and owned network/volumes remain retained. Empty AssertionError
+metadata cannot identify the failed assertion, so a fresh-owner diagnostic
+adds only code basename/function/line, preserving all assertions and bounds.
+See the [controller failure](evidence/joint61-controller-preflight-after-pure1-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
