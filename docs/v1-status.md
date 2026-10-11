@@ -417,6 +417,8 @@ Create success assertion remains. A stable serialization repair is required;
 no original hash or source check is relaxed. The78.850s combined window is
 failed overall, with both Go actors absent and owned PG/Redis stopped. See the
 [policy14 and actual model diagnostic](evidence/joint-policy-actor14-GREEN-PG-model-JSONB-diagnostic-failure-20261011.json).
+The [reviewable policy actor source](../integration/proposals/weknora-policy-standalone-current-actor-20261011.json) reproduces the tested files and has exact
+forward/reverse tree proof; complete child-consumer regressions remain required.
 
 ## Prior component checkpoints — 2026-10-10
 

@@ -1,0 +1,407 @@
+diff --git a/internal/application/repository/memory_derived_native.go b/internal/application/repository/memory_derived_native.go
+index 04fc3087..eb5b9701 100644
+--- a/internal/application/repository/memory_derived_native.go
++++ b/internal/application/repository/memory_derived_native.go
+@@ -96,7 +96,7 @@ func (r *memoryRepository) prepareMemoryNativeWrite(ctx context.Context, scope i
+ 		read.Close()
+ 		return ctx, nil, err
+ 	}
+-	policy, err := beginMemoryPolicyOriginalRead(read.Context(), r.db, scope.TenantID, proof)
++	policy, err := r.derived.BeginMemoryPolicyOriginalRead(read.Context(), scope.TenantID, proof)
+ 	if err != nil {
+ 		read.Close()
+ 		return ctx, nil, err
+diff --git a/internal/application/repository/memory_derived_reader.go b/internal/application/repository/memory_derived_reader.go
+index b5249861..b2a80c0c 100644
+--- a/internal/application/repository/memory_derived_reader.go
++++ b/internal/application/repository/memory_derived_reader.go
+@@ -464,7 +464,7 @@ func (r *memoryOriginalAdmissionRepository) beginMemoryDerivedRead(ctx context.C
+ 		}
+ 		policy := policyReads[queued]
+ 		if policy == nil {
+-			policy, err = beginMemoryPolicyOriginalRead(read.ctx, r.db, scope.TenantID, queued)
++			policy, err = r.BeginMemoryPolicyOriginalRead(read.ctx, scope.TenantID, queued)
+ 			if err != nil {
+ 				read.Close()
+ 				return nil, err
+diff --git a/internal/application/repository/memory_embedding_input.go b/internal/application/repository/memory_embedding_input.go
+index a90b97bb..554f135b 100644
+--- a/internal/application/repository/memory_embedding_input.go
++++ b/internal/application/repository/memory_embedding_input.go
+@@ -146,7 +146,7 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryEmbedding(ctx context.Con
+ 		read.Close()
+ 		return nil, err
+ 	}
+-	read.policy, err = beginMemoryPolicyOriginalRead(read.ctx, r.db, scope.TenantID, policy)
++	read.policy, err = r.BeginMemoryPolicyOriginalRead(read.ctx, scope.TenantID, policy)
+ 	if err != nil {
+ 		read.Close()
+ 		return nil, err
+diff --git a/internal/application/repository/memory_embedding_vectors.go b/internal/application/repository/memory_embedding_vectors.go
+index 37168d98..ec8f5303 100644
+--- a/internal/application/repository/memory_embedding_vectors.go
++++ b/internal/application/repository/memory_embedding_vectors.go
+@@ -187,7 +187,7 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryEmbeddingVectors(ctx cont
+ 			read.Close()
+ 			return nil, types.ErrMemoryOriginalUnavailable
+ 		}
+-		policyRead, err := beginMemoryPolicyOriginalRead(read.ctx, r.db, scope.TenantID, policy)
++		policyRead, err := r.BeginMemoryPolicyOriginalRead(read.ctx, scope.TenantID, policy)
+ 		if err != nil {
+ 			read.Close()
+ 			return nil, err
+diff --git a/internal/application/repository/memory_generated_input.go b/internal/application/repository/memory_generated_input.go
+index 73c06cdc..15c10bbe 100644
+--- a/internal/application/repository/memory_generated_input.go
++++ b/internal/application/repository/memory_generated_input.go
+@@ -79,7 +79,7 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryGenerated(ctx context.Con
+ 		read.cancel()
+ 		return nil, err
+ 	}
+-	read.policy, err = beginMemoryPolicyOriginalRead(read.ctx, r.db, scope.TenantID, policy)
++	read.policy, err = r.BeginMemoryPolicyOriginalRead(read.ctx, scope.TenantID, policy)
+ 	if err != nil {
+ 		read.cancel()
+ 		return nil, err
+diff --git a/internal/application/repository/memory_policy_body.go b/internal/application/repository/memory_policy_body.go
+index 9040e6ac..b4fee203 100644
+--- a/internal/application/repository/memory_policy_body.go
++++ b/internal/application/repository/memory_policy_body.go
+@@ -23,11 +23,12 @@ type memoryPolicyProducerBoundary struct {
+ }
+ type memoryPolicyHoldKey struct{}
+ type memoryPolicyHold struct {
+-	Tenant  uint64
+-	Current types.MemoryPolicyProof
+-	Queued  types.MemoryPolicyProof
+-	Heads   map[string]originalBodyFieldHead
+-	Leases  map[string]originalBodyLease
++	Authorize MemoryPolicyAuthorizer
++	Tenant    uint64
++	Current   types.MemoryPolicyProof
++	Queued    types.MemoryPolicyProof
++	Heads     map[string]originalBodyFieldHead
++	Leases    map[string]originalBodyLease
+ }
+ 
+ func memoryPolicyCapturedBodyHeadInTx(tx *gorm.DB, origin *types.MemoryPolicyOriginal) (originalBodyFieldHead, error) {
+@@ -237,6 +238,13 @@ func checkMemoryPolicyHoldsInTx(tx *gorm.DB, tenant uint64, current, queued type
+ 			return err
+ 		}
+ 	}
++	// Current authority is never an immutable/cacheable fact. Refresh after
++	// physical/journal IO, before the final lease+payload union and SQL clock.
++	fresh, err := authorizeMemoryPolicyCurrentActorInTx(tx, tx.Statement.Context, hold)
++	if err != nil {
++		return err
++	}
++	tx = tx.WithContext(fresh)
+ 	// Re-read every real lease after the final availability/journal IO. A
+ 	// same-TX callback can alter a locked row and wall time can cross expiry.
+ 	ids := []string{}
+@@ -333,14 +341,76 @@ type memoryPolicyOriginalRead struct {
+ 	closed bool
+ }
+ 
+-func beginMemoryPolicyOriginalRead(ctx context.Context, db *gorm.DB, tenant uint64, queued types.MemoryPolicyProof) (interfaces.MemoryPolicyOriginalRead, error) {
+-	read := &memoryPolicyOriginalRead{db: db, hold: memoryPolicyHold{Tenant: tenant, Queued: queued, Heads: map[string]originalBodyFieldHead{}, Leases: map[string]originalBodyLease{}}}
++// Reading a policy is not authoring one: valid current viewer/web/API/worker
++// callers are allowed by the configured current actor provider. This checks
++// their exact identity/tenant on this transaction, without requiring admin.
++func authorizeMemoryPolicyCurrentActorInTx(tx *gorm.DB, ctx context.Context, hold memoryPolicyHold) (context.Context, error) {
++	if tx == nil || hold.Authorize == nil || ctx == nil {
++		return ctx, types.ErrMemoryOriginalUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return ctx, err
++	}
++	caller := types.CallerFromContext(ctx)
++	principal, ok := types.PrincipalFromContext(ctx)
++	if !ok || caller.TenantID != hold.Tenant || !principal.Valid() {
++		return ctx, types.ErrMemoryOriginalUnavailable
++	}
++	if executionTenant, bound := types.TenantIDFromContext(ctx); bound && executionTenant != hold.Tenant {
++		return ctx, types.ErrMemoryOriginalUnavailable
++	}
++	clean := tx.Session(&gorm.Session{NewDB: true, Context: ctx})
++	if err := lockMemoryPolicyAuthor(clean, ctx, hold.Tenant); err != nil {
++		return ctx, err
++	}
++	fresh, err := hold.Authorize(ctx, clean)
++	if err != nil {
++		return ctx, err
++	}
++	if fresh == nil {
++		return ctx, types.ErrMemoryOriginalUnavailable
++	}
++	current := types.CallerFromContext(fresh)
++	currentPrincipal, currentOK := types.PrincipalFromContext(fresh)
++	if !currentOK || currentPrincipal != principal || current.TenantID != caller.TenantID || current.UserID != caller.UserID || !current.Role.IsValid() {
++		return ctx, types.ErrMemoryOriginalUnavailable
++	}
++	return fresh, fresh.Err()
++}
++
++func (r *memoryOriginalAdmissionRepository) authorizeMemoryPolicyCurrentRead(ctx context.Context, tx *gorm.DB) (context.Context, error) {
++	if r.authorityFactory == nil || tx == nil {
++		return ctx, types.ErrMemoryOriginalUnavailable
++	}
++	authority := r.authorityFactory(tx.Session(&gorm.Session{NewDB: true, Context: ctx}))
++	if authority == nil || authority.Store == nil || authority.CheckRuntime == nil || authority.Store.db.Statement.ConnPool != tx.Statement.ConnPool {
++		return ctx, types.ErrMemoryOriginalUnavailable
++	}
++	if err := authority.CheckRuntime(ctx); err != nil {
++		return ctx, err
++	}
++	return authority.Store.RefreshCurrentReadActor(ctx)
++}
++
++func beginMemoryPolicyOriginalRead(ctx context.Context, db *gorm.DB, tenant uint64, queued types.MemoryPolicyProof, authorize MemoryPolicyAuthorizer) (interfaces.MemoryPolicyOriginalRead, error) {
++	if authorize == nil || tenant == 0 {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	read := &memoryPolicyOriginalRead{db: db, hold: memoryPolicyHold{Authorize: authorize, Tenant: tenant, Queued: queued, Heads: map[string]originalBodyFieldHead{}, Leases: map[string]originalBodyLease{}}}
+ 	read.ctx, read.cancel = context.WithCancel(ctx)
+ 	err := db.WithContext(read.ctx).Transaction(func(tx *gorm.DB) error {
++		if _, err := authorize(read.ctx, tx.Session(&gorm.Session{NewDB: true})); err != nil {
++			return err
++		}
+ 		var row types.Tenant
+ 		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=?", tenant).Take(&row).Error; err != nil {
+ 			return err
+ 		}
++		fresh, err := authorizeMemoryPolicyCurrentActorInTx(tx, read.ctx, read.hold)
++		if err != nil {
++			return err
++		}
++		tx = tx.WithContext(fresh)
+ 		_, current, err := readMemoryPolicyOriginalInTx(tx, &row)
+ 		if err != nil {
+ 			return err
+@@ -383,10 +453,10 @@ func beginMemoryPolicyOriginalRead(ctx context.Context, db *gorm.DB, tenant uint
+ }
+ 
+ func (r *tenantRepository) BeginMemoryPolicyOriginalRead(ctx context.Context, tenant uint64, queued types.MemoryPolicyProof) (interfaces.MemoryPolicyOriginalRead, error) {
+-	return beginMemoryPolicyOriginalRead(ctx, r.db, tenant, queued)
++	return beginMemoryPolicyOriginalRead(ctx, r.db, tenant, queued, r.policyAuthorizer)
+ }
+ func (r *memoryOriginalAdmissionRepository) BeginMemoryPolicyOriginalRead(ctx context.Context, tenant uint64, queued types.MemoryPolicyProof) (interfaces.MemoryPolicyOriginalRead, error) {
+-	return beginMemoryPolicyOriginalRead(ctx, r.db, tenant, queued)
++	return beginMemoryPolicyOriginalRead(ctx, r.db, tenant, queued, r.authorizeMemoryPolicyCurrentRead)
+ }
+ func (r *memoryPolicyOriginalRead) Context() context.Context { return r.ctx }
+ func (r *memoryPolicyOriginalRead) Recheck() error {
+@@ -399,10 +469,21 @@ func (r *memoryPolicyOriginalRead) Recheck() error {
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
+ 	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
++		if r.hold.Authorize == nil {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		if _, err := r.hold.Authorize(r.ctx, tx.Session(&gorm.Session{NewDB: true})); err != nil {
++			return err
++		}
+ 		var row types.Tenant
+ 		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=?", r.hold.Tenant).Take(&row).Error; err != nil {
+ 			return err
+ 		}
++		fresh, err := authorizeMemoryPolicyCurrentActorInTx(tx, r.ctx, r.hold)
++		if err != nil {
++			return err
++		}
++		tx = tx.WithContext(fresh)
+ 		_, origin, err := readMemoryPolicyOriginalInTx(tx, &row)
+ 		if err != nil {
+ 			return err
+diff --git a/internal/application/repository/memory_query_embedding_input.go b/internal/application/repository/memory_query_embedding_input.go
+index e6b720a7..c927ef08 100644
+--- a/internal/application/repository/memory_query_embedding_input.go
++++ b/internal/application/repository/memory_query_embedding_input.go
+@@ -187,7 +187,7 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryQueryEmbedding(ctx contex
+ 	if err != nil {
+ 		return fail(err)
+ 	}
+-	read.policy, err = beginMemoryPolicyOriginalRead(read.ctx, r.db, scope.TenantID, policy)
++	read.policy, err = r.BeginMemoryPolicyOriginalRead(read.ctx, scope.TenantID, policy)
+ 	if err != nil {
+ 		return fail(err)
+ 	}
+diff --git a/internal/application/repository/memory_recall_history.go b/internal/application/repository/memory_recall_history.go
+index 1bd34d39..c0b972ef 100644
+--- a/internal/application/repository/memory_recall_history.go
++++ b/internal/application/repository/memory_recall_history.go
+@@ -577,7 +577,7 @@ func (r *memoryOriginalAdmissionRepository) beginMemoryRecallHistorical(ctx cont
+ 	if !queued.Valid() {
+ 		return fail(types.ErrMemoryOriginalUnavailable)
+ 	}
+-	read.policy, err = beginMemoryPolicyOriginalRead(read.ctx, r.db, copy.TenantID, queued)
++	read.policy, err = r.BeginMemoryPolicyOriginalRead(read.ctx, copy.TenantID, queued)
+ 	if err != nil {
+ 		return fail(err)
+ 	}
+diff --git a/internal/application/repository/memory_recall_original.go b/internal/application/repository/memory_recall_original.go
+index 9e8e0bcd..978c6771 100644
+--- a/internal/application/repository/memory_recall_original.go
++++ b/internal/application/repository/memory_recall_original.go
+@@ -93,7 +93,7 @@ func (r *memoryOriginalAdmissionRepository) BeginMemoryRecall(ctx context.Contex
+ 	if err != nil {
+ 		return fail(err)
+ 	}
+-	read.policy, err = beginMemoryPolicyOriginalRead(read.ctx, r.db, scope.TenantID, proof)
++	read.policy, err = r.BeginMemoryPolicyOriginalRead(read.ctx, scope.TenantID, proof)
+ 	if err != nil {
+ 		return fail(err)
+ 	}
+diff --git a/internal/application/repository/memory_semantic_history_query.go b/internal/application/repository/memory_semantic_history_query.go
+index 46537538..6009b72d 100644
+--- a/internal/application/repository/memory_semantic_history_query.go
++++ b/internal/application/repository/memory_semantic_history_query.go
+@@ -122,7 +122,7 @@ func (r *memoryOriginalAdmissionRepository) beginMemorySemanticHistoricalQuery(c
+ 	if !queued.Valid() {
+ 		return fail(types.ErrMemoryOriginalUnavailable)
+ 	}
+-	read.policy, err = beginMemoryPolicyOriginalRead(read.ctx, r.db, c.TenantID, queued)
++	read.policy, err = r.BeginMemoryPolicyOriginalRead(read.ctx, c.TenantID, queued)
+ 	if err != nil {
+ 		return fail(err)
+ 	}
+diff --git a/internal/application/repository/memory_semantic_history_vectors.go b/internal/application/repository/memory_semantic_history_vectors.go
+index 826dad19..93857758 100644
+--- a/internal/application/repository/memory_semantic_history_vectors.go
++++ b/internal/application/repository/memory_semantic_history_vectors.go
+@@ -143,7 +143,7 @@ func (r *memoryOriginalAdmissionRepository) beginMemorySemanticHistoricalVectors
+ 		if json.Unmarshal([]byte(original.PolicyProofJSON), &queued) != nil {
+ 			return fail(types.ErrMemoryOriginalUnavailable)
+ 		}
+-		policy, err := beginMemoryPolicyOriginalRead(read.ctx, r.db, scope.TenantID, queued)
++		policy, err := r.BeginMemoryPolicyOriginalRead(read.ctx, scope.TenantID, queued)
+ 		if err != nil {
+ 			return fail(err)
+ 		}
+diff --git a/internal/application/service/memory_policy_standalone_actor_sql_actual_test.go b/internal/application/service/memory_policy_standalone_actor_sql_actual_test.go
+new file mode 100644
+index 00000000..71ee524a
+--- /dev/null
++++ b/internal/application/service/memory_policy_standalone_actor_sql_actual_test.go
+@@ -0,0 +1,121 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"testing"
++)
++
++// Real canonical old-root fixture and settings producer. There is no model
++// context whose failure can incidentally cancel this standalone policy hold.
++func runMemoryPolicyStandaloneActorSQL(t *testing.T, pg bool) {
++	for _, mode := range []string{"current", "viewer_is_legal", "actor_disabled", "membership_removed", "caller_canceled", "missing_authority"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newJointOriginalUpgradeFixture(t, pg)
++			groups := NewGroupAccessService(repository.NewGroupAccessRepository(f.db))
++			tenant := repository.NewTenantRepository(f.db)
++			ConfigureTenantMemoryPolicyAuthority(tenant, f.store, groups, nil)
++			writer, ok := tenant.(interfaces.MemoryPolicyOriginalWriter)
++			require.True(t, ok)
++			_, proof, err := writer.ReplaceMemoryPolicyOriginal(f.ctx, 7, types.MemoryConfig{Enabled: false, WriteMode: types.MemoryWriteAuto, ExtractInstructions: "Only retain explicitly stated preferences.", ExtractDelaySeconds: types.MinMemoryExtractDelaySeconds})
++			require.NoError(t, err)
++			require.NotNil(t, proof)
++			require.True(t, proof.Valid())
++			if mode == "missing_authority" {
++				unconfigured := repository.NewTenantRepository(f.db).(interfaces.MemoryPolicyOriginalLifetimeReader)
++				read, err := unconfigured.BeginMemoryPolicyOriginalRead(f.ctx, 7, *proof)
++				require.Error(t, err)
++				require.Nil(t, read)
++				jointOriginalLeaseState(t, f, false)
++				return
++			}
++			if mode == "viewer_is_legal" {
++				write := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.TenantMember{}).Where("tenant_id=? AND user_id=? AND status=?", 7, f.userID, types.TenantMemberStatusActive).Update("role", types.TenantRoleViewer)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var actual types.TenantMember
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Where("tenant_id=? AND user_id=?", 7, f.userID).Take(&actual).Error)
++				require.Equal(t, types.TenantRoleViewer, actual.Role)
++			}
++			ctx, cancel := context.WithCancel(f.ctx)
++			t.Cleanup(cancel)
++			reader := tenant.(interfaces.MemoryPolicyOriginalLifetimeReader)
++			read, err := reader.BeginMemoryPolicyOriginalRead(ctx, 7, *proof)
++			require.NoError(t, err)
++			require.NotNil(t, read)
++			closed := false
++			t.Cleanup(func() {
++				if !closed {
++					if err := read.Close(); err != nil {
++						t.Error("close genuine standalone policy hold failed")
++					}
++				}
++			})
++			cfg, bound, err := read.Policy()
++			require.NoError(t, err)
++			require.NotNil(t, cfg)
++			require.Equal(t, *proof, *bound)
++			jointOriginalLeaseState(t, f, true)
++			refuse := false
++			switch mode {
++			case "actor_disabled":
++				write := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.User{}).Where("id=? AND is_active=?", f.userID, true).Update("is_active", false)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var actual types.User
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Where("id=?", f.userID).Take(&actual).Error)
++				require.False(t, actual.IsActive)
++				refuse = true
++			case "membership_removed":
++				write := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Where("tenant_id=? AND user_id=?", 7, f.userID).Delete(&types.TenantMember{})
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var remaining int64
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Model(&types.TenantMember{}).Where("tenant_id=? AND user_id=?", 7, f.userID).Count(&remaining).Error)
++				require.Zero(t, remaining)
++				refuse = true
++			case "caller_canceled":
++				cancel()
++				refuse = true
++			}
++			var refusal error
++			if refuse {
++				refusal = read.Recheck()
++				require.Error(t, refusal)
++				cfg, bound, err = read.Policy()
++				require.Error(t, err)
++				require.True(t, errors.Is(err, refusal))
++				require.Nil(t, cfg)
++				require.Nil(t, bound)
++			} else {
++				require.NoError(t, read.Recheck())
++				cfg, bound, err = read.Policy()
++				require.NoError(t, err)
++				require.NotNil(t, cfg)
++				require.Equal(t, *proof, *bound)
++			}
++			firstClose := read.Close()
++			closed = true
++			require.NoError(t, firstClose)
++			jointOriginalLeaseState(t, f, false)
++			secondClose := read.Close()
++			if refuse {
++				require.Error(t, secondClose)
++				require.True(t, errors.Is(secondClose, refusal))
++			} else {
++				require.NoError(t, secondClose)
++			}
++		})
++	}
++}
++func TestMemoryPolicyStandaloneCurrentActorActualSQLite(t *testing.T) {
++	runMemoryPolicyStandaloneActorSQL(t, false)
++}
++func TestPostgresMemoryPolicyStandaloneCurrentActorActual(t *testing.T) {
++	runMemoryPolicyStandaloneActorSQL(t, true)
++}
