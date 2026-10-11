@@ -1,5 +1,5 @@
 diff --git a/internal/container/container.go b/internal/container/container.go
-index 37c7b1e9..2fae10d2 100644
+index 37c7b1e91f2889992f9a62865b53ce6ed711b6c9..2fae10d2f5dbe2e8c56a2f8006f38a6290f1ba39 100644
 --- a/internal/container/container.go
 +++ b/internal/container/container.go
 @@ -985,6 +985,17 @@ func initRedisClient() (*redis.Client, error) {
@@ -145,7 +145,7 @@ index 37c7b1e9..2fae10d2 100644
  	// Get underlying SQL DB object
 diff --git a/internal/container/database_schema_initial_ping_cleanup_test.go b/internal/container/database_schema_initial_ping_cleanup_test.go
 new file mode 100644
-index 00000000..6b7e5615
+index 0000000000000000000000000000000000000000..6b7e5615630ece0f03a075e3b5d90fe98682ec19
 --- /dev/null
 +++ b/internal/container/database_schema_initial_ping_cleanup_test.go
 @@ -0,0 +1,75 @@
@@ -226,7 +226,7 @@ index 00000000..6b7e5615
 +}
 diff --git a/internal/container/database_schema_ready.go b/internal/container/database_schema_ready.go
 new file mode 100644
-index 00000000..693df4a1
+index 0000000000000000000000000000000000000000..693df4a18c95326bea4e821e6db0bad45106ae12
 --- /dev/null
 +++ b/internal/container/database_schema_ready.go
 @@ -0,0 +1,42 @@
@@ -274,10 +274,10 @@ index 00000000..693df4a1
 +}
 diff --git a/internal/container/database_schema_ready_sql_actual_test.go b/internal/container/database_schema_ready_sql_actual_test.go
 new file mode 100644
-index 00000000..c281465b
+index 0000000000000000000000000000000000000000..ac492a3530acb37fc2695ad8e70d7aa278811dd6
 --- /dev/null
 +++ b/internal/container/database_schema_ready_sql_actual_test.go
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,333 @@
 +package container
 +
 +import (
@@ -295,6 +295,7 @@ index 00000000..c281465b
 +	"github.com/Tencent/WeKnora/internal/config"
 +	"github.com/Tencent/WeKnora/internal/database"
 +	"github.com/golang-migrate/migrate/v4"
++	sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
 +	"github.com/stretchr/testify/require"
 +	"go.uber.org/dig"
 +	"gorm.io/driver/sqlite"
@@ -371,6 +372,53 @@ index 00000000..c281465b
 +	return []string{fmt.Sprint(version), fmt.Sprint(dirty)}
 +}
 +
++// Direct fixture migration uses the same escaped actual filename as the
++// production runtime. sqlite3 URL parsing is not a second filesystem identity.
++func startupSchemaOwnedMigrationDriver(t *testing.T, source, path string) (*migrate.Migrate, func() (error, error)) {
++	t.Helper()
++	raw, err := database.SQLiteRuntimeDSN(path)
++	require.NoError(t, err)
++	ownedURI, err := url.Parse(raw)
++	require.NoError(t, err)
++	query := ownedURI.Query()
++	query.Set("mode", "rwc")
++	ownedURI.RawQuery = query.Encode()
++	pool, err := sql.Open("sqlite3", ownedURI.String())
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		if err := pool.Close(); err != nil {
++			t.Errorf("close owned direct fixture pool: %v", err)
++		}
++	})
++	driver, err := sqlite3migrate.WithInstance(pool, &sqlite3migrate.Config{})
++	require.NoError(t, err)
++	m, err := migrate.NewWithDatabaseInstance("file://"+filepath.Join(source, "migrations", "sqlite"), "sqlite3", driver)
++	require.NoError(t, err)
++	closed := false
++	closeMigration := func() (error, error) {
++		if closed {
++			return nil, nil
++		}
++		closed = true
++		return m.Close()
++	}
++	t.Cleanup(func() {
++		se, de := closeMigration()
++		if se != nil {
++			t.Errorf("close owned fixture source: %v", se)
++		}
++		if de != nil {
++			t.Errorf("close owned fixture driver: %v", de)
++		}
++	})
++	var seq int
++	var name, actualPath string
++	require.NoError(t, pool.QueryRow("PRAGMA database_list").Scan(&seq, &name, &actualPath))
++	require.Equal(t, "main", name)
++	require.Equal(t, path, actualPath, "the real fixture migrate driver must share the requested actual database")
++	return m, closeMigration
++}
++
 +func TestDatabaseStartupRejectsBeforePostMigrationActualSQLite(t *testing.T) {
 +	for _, mode := range []string{"full_clean_auto", "full_clean_external", "unknown_historyless_auto", "dirty_auto", "clean_prefix_external", "missing_module_auto", "changed_source_external", "canceled_before_open", "missing_storage_external"} {
 +		t.Run(mode, func(t *testing.T) {
@@ -416,10 +464,9 @@ index 00000000..c281465b
 +			}
 +			if mode == "clean_prefix_external" {
 +				copied := startupSchemaSource(t, root, 75)
-+				m, err := migrate.New("file://"+filepath.Join(copied, "migrations", "sqlite"), dsn)
-+				require.NoError(t, err)
++				m, closeMigration := startupSchemaOwnedMigrationDriver(t, copied, path)
 +				require.NoError(t, m.Up(), "direct canonical prefix fixture, not a fake complete schema")
-+				se, de := m.Close()
++				se, de := closeMigration()
 +				require.NoError(t, se)
 +				require.NoError(t, de)
 +			} else if mode != "unknown_historyless_auto" {
@@ -473,10 +520,9 @@ index 00000000..c281465b
 +			if mode == "dirty_auto" {
 +				copied := startupSchemaSource(t, root, 87)
 +				require.NoError(t, os.WriteFile(filepath.Join(copied, "migrations", "sqlite", "000088_owned_startup_failure.up.sql"), []byte("SELECT * FROM owned_missing_startup_failure;\n"), 0600))
-+				m, err := migrate.New("file://"+filepath.Join(copied, "migrations", "sqlite"), dsn)
-+				require.NoError(t, err)
++				m, closeMigration := startupSchemaOwnedMigrationDriver(t, copied, path)
 +				require.Error(t, m.Up(), "real failing migration, no ledger rewrite")
-+				se, de := m.Close()
++				se, de := closeMigration()
 +				require.NoError(t, se)
 +				require.NoError(t, de)
 +				require.Equal(t, []string{"88", "true"}, startupSchemaLedger(t, inspectDB))
@@ -501,7 +547,13 @@ index 00000000..c281465b
 +			// Real dig error propagation: a downstream constructor cannot run
 +			// without the database provider, so no router/worker consumer runs.
 +			container := dig.New()
-+			require.NoError(t, container.Provide(func() (*gorm.DB, error) { return initDatabaseWithContext(context.Background(), &config.Config{}) }))
++			startupCtx := context.Background()
++			if os.Getenv("WEKNORA_JOINT_SCHEMA_CATALOGUE_PHASE_DIAGNOSTIC") == "1" {
++				startupCtx = database.WithJointSchemaCataloguePhaseObserver(startupCtx, func(value database.JointSchemaCataloguePhaseObservation) {
++					t.Logf("joint_schema_catalogue_phase phase=%s object=%s failed=%t", value.Phase, value.Object, value.Failed)
++				})
++			}
++			require.NoError(t, container.Provide(func() (*gorm.DB, error) { return initDatabaseWithContext(startupCtx, &config.Config{}) }))
 +			type readyConsumer struct{ db *gorm.DB }
 +			consumerCalls := 0
 +			require.NoError(t, container.Provide(func(db *gorm.DB) *readyConsumer { consumerCalls++; return &readyConsumer{db: db} }))
@@ -560,7 +612,7 @@ index 00000000..c281465b
 +	}
 +}
 diff --git a/internal/database/migration.go b/internal/database/migration.go
-index 86e76ee0..8e12c125 100644
+index 86e76ee06eb29b0b07e0fdb516f488e9bf298570..8e12c125cf98a425d81138cd3541e4f48a21b284 100644
 --- a/internal/database/migration.go
 +++ b/internal/database/migration.go
 @@ -95,11 +95,27 @@ type MigrationOptions struct {
@@ -620,8 +672,137 @@ index 86e76ee0..8e12c125 100644
  		if err != nil {
  			return captureMigrationFailure(m, fmt.Errorf("open SQLite decommission preflight: %w", err))
  		}
+diff --git a/internal/database/migration_joint_catalogue.go b/internal/database/migration_joint_catalogue.go
+index c44a4bb8cee4177a4684c2192499b6dc4b4e83a9..7755fe988e5a4e1dc93e27c2d142b158eb69cbea 100644
+--- a/internal/database/migration_joint_catalogue.go
++++ b/internal/database/migration_joint_catalogue.go
+@@ -1118,24 +1118,30 @@ func jointVerifySentinelObjectKinds(objects map[string]bool, sentinels jointLine
+ 	return nil
+ }
+ 
+-func verifyJointRootCatalogue(ctx context.Context, db *sql.DB, dialect string, version uint) error {
++func verifyJointRootCatalogue(ctx context.Context, db *sql.DB, dialect string, version uint) (catalogueErr error) {
++	phase, object := "expected_catalogue", ""
++	defer func() { observeJointSchemaCataloguePhase(ctx, phase, object, catalogueErr != nil) }()
+ 	expected, err := jointExpectedCatalogue(dialect, version)
+ 	if err != nil {
+ 		return err
+ 	}
++	phase, object = "source_witness", ""
+ 	witness, err := jointLineageWitnessesFromSource()
+ 	if err != nil {
+ 		return err
+ 	}
++	phase, object = "objects", ""
+ 	objects, _, err := jointLineageObjectSets(ctx, db, dialect)
+ 	if err != nil {
+ 		return err
+ 	}
++	phase, object = "sentinel_kinds", ""
+ 	if err = jointVerifySentinelObjectKinds(objects, witness.Sentinels, expected); err != nil {
+ 		return err
+ 	}
+ 	for table, columns := range witness.Sentinels.Columns {
+ 		for _, name := range columns {
++			phase, object = "sentinel_column", table+"."+name
+ 			present, err := jointLineageIntroducedColumn(ctx, db, dialect, table, name)
+ 			if err != nil {
+ 				return err
+@@ -1148,24 +1154,29 @@ func verifyJointRootCatalogue(ctx context.Context, db *sql.DB, dialect string, v
+ 		}
+ 	}
+ 	for table, definition := range expected.Tables {
++		phase, object = "table", table
+ 		if err = jointVerifyTable(ctx, db, dialect, table, definition); err != nil {
+ 			return err
+ 		}
+ 	}
+ 	if dialect == "versioned" {
++		phase, object = "withdrawal_kind", "nextcloud_indexed_withdrawal_items"
+ 		if err = jointVerifyWithdrawalKindConstraint(ctx, db, expected.RegistryConstraint); err != nil {
+ 			return err
+ 		}
+ 	}
++	phase, object = "columns", ""
+ 	if err = jointVerifyExistingColumns(ctx, db, dialect, expected); err != nil {
+ 		return err
+ 	}
+ 	if dialect == "versioned" {
++		phase, object = "functions", ""
+ 		if err = jointVerifyFunctions(ctx, db, expected); err != nil {
+ 			return err
+ 		}
+ 	}
+ 	for name, definition := range expected.Triggers {
++		phase, object = "trigger", name
+ 		if err = jointVerifyTrigger(ctx, db, dialect, name, definition, expected); err != nil {
+ 			return err
+ 		}
+@@ -1177,11 +1188,13 @@ func verifyJointRootCatalogue(ctx context.Context, db *sql.DB, dialect string, v
+ 		}
+ 		if objects["embeddings"] {
+ 			definition := "CREATE TRIGGER nextcloud_indexed_embedding_guard BEFORE INSERT OR UPDATE OR DELETE ON embeddings FOR EACH ROW EXECUTE FUNCTION nextcloud_indexed_withdrawal_write_guard();"
++			phase, object = "optional_embedding_trigger", "nextcloud_indexed_embedding_guard"
+ 			if err = jointVerifyTrigger(ctx, db, dialect, "nextcloud_indexed_embedding_guard", definition, expected); err != nil {
+ 				return err
+ 			}
+ 		}
+ 	}
++	phase, object = "indexes", ""
+ 	if err = jointVerifyIndexes(ctx, db, dialect, expected); err != nil {
+ 		return err
+ 	}
+diff --git a/internal/database/migration_joint_catalogue_diagnostic.go b/internal/database/migration_joint_catalogue_diagnostic.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..322035f4d6d689f1af43c195ae2f926ee00c19c0
+--- /dev/null
++++ b/internal/database/migration_joint_catalogue_diagnostic.go
+@@ -0,0 +1,43 @@
++package database
++
++import (
++	"context"
++	"regexp"
++)
++
++// Metadata only: the phase and object come from the compiled catalogue/witness,
++// never actual source SQL/arguments/rows/trigger bodies or credential material.
++type JointSchemaCataloguePhaseObservation struct {
++	Phase  string
++	Object string
++	Failed bool
++}
++type jointSchemaCataloguePhaseObserverKey struct{}
++type jointSchemaCataloguePhaseObserver func(JointSchemaCataloguePhaseObservation)
++
++var jointSchemaCatalogueDiagnosticObject = regexp.MustCompile(`^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$`)
++
++func WithJointSchemaCataloguePhaseObserver(ctx context.Context, observer func(JointSchemaCataloguePhaseObservation)) context.Context {
++	if ctx == nil || observer == nil {
++		return ctx
++	}
++	return context.WithValue(ctx, jointSchemaCataloguePhaseObserverKey{}, jointSchemaCataloguePhaseObserver(observer))
++}
++func observeJointSchemaCataloguePhase(ctx context.Context, phase, object string, failed bool) {
++	if ctx == nil {
++		return
++	}
++	observer, _ := ctx.Value(jointSchemaCataloguePhaseObserverKey{}).(jointSchemaCataloguePhaseObserver)
++	if observer == nil {
++		return
++	}
++	switch phase {
++	case "expected_catalogue", "source_witness", "objects", "sentinel_kinds", "sentinel_column", "table", "withdrawal_kind", "columns", "functions", "trigger", "optional_embedding_trigger", "indexes":
++	default:
++		return
++	}
++	if object != "" && !jointSchemaCatalogueDiagnosticObject.MatchString(object) {
++		return
++	}
++	observer(JointSchemaCataloguePhaseObservation{Phase: phase, Object: object, Failed: failed})
++}
 diff --git a/internal/database/migration_joint_lineage.go b/internal/database/migration_joint_lineage.go
-index 5b2fa33a..ac408e13 100644
+index 5b2fa33a48eb93082787531e3e493e34f4ebc7da..ac408e130f70de388e96ac301165bd0ef2a77da2 100644
 --- a/internal/database/migration_joint_lineage.go
 +++ b/internal/database/migration_joint_lineage.go
 @@ -115,6 +115,16 @@ func openJointLineageDB(dsn string, options MigrationOptions) (*sql.DB, string,
@@ -654,7 +835,7 @@ index 5b2fa33a..ac408e13 100644
  		return 0, false, false, err
 diff --git a/internal/database/migration_joint_ready.go b/internal/database/migration_joint_ready.go
 new file mode 100644
-index 00000000..5e044eeb
+index 0000000000000000000000000000000000000000..5e044eebea255b01e070693055603175bea94fab
 --- /dev/null
 +++ b/internal/database/migration_joint_ready.go
 @@ -0,0 +1,89 @@
@@ -749,7 +930,7 @@ index 00000000..5e044eeb
 +}
 diff --git a/internal/database/migration_joint_ready_sql_actual_test.go b/internal/database/migration_joint_ready_sql_actual_test.go
 new file mode 100644
-index 00000000..6b4dbad4
+index 0000000000000000000000000000000000000000..6b4dbad44c861329298187c5424fb616b835556c
 --- /dev/null
 +++ b/internal/database/migration_joint_ready_sql_actual_test.go
 @@ -0,0 +1,198 @@
@@ -953,7 +1134,7 @@ index 00000000..6b4dbad4
 +}
 diff --git a/internal/database/migration_sqlite_filename.go b/internal/database/migration_sqlite_filename.go
 new file mode 100644
-index 00000000..99abfcde
+index 0000000000000000000000000000000000000000..99abfcdef1aca1cc8600a7a82517a8c5ff4515a5
 --- /dev/null
 +++ b/internal/database/migration_sqlite_filename.go
 @@ -0,0 +1,45 @@
@@ -1004,7 +1185,7 @@ index 00000000..99abfcde
 +}
 diff --git a/internal/database/migration_sqlite_legacy42_filename_sql_actual_test.go b/internal/database/migration_sqlite_legacy42_filename_sql_actual_test.go
 new file mode 100644
-index 00000000..056f04b4
+index 0000000000000000000000000000000000000000..056f04b4b93907917e55a46567de9fdc5683565a
 --- /dev/null
 +++ b/internal/database/migration_sqlite_legacy42_filename_sql_actual_test.go
 @@ -0,0 +1,107 @@

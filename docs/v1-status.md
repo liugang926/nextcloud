@@ -622,6 +622,23 @@ constructor and HTTP observer remain. SQLite still fails ordinary HTTP prelude,
 so WAL has not accepted that lane. Sourcepath final transaction/directory33
 remain pending. See the [fixedphase failure](evidence/joint-sourcepath6-WAL-fixedphase-PG-reader-wrapper-failure-20261011.json).
 
+
+The reviewed real-message backing testbridge `ab3b1193` compiles service/server
+and passes the genuine PostgreSQL/current sourcepath leaf. The matched6 window
+has1PASS/5FAIL: SQLite/current still fails ordinary HTTP; both publication-after-
+model leaves reach real original admission but fail the required post-SDK final
+transaction source query. The6-node gate and directory33 remain unaccepted.
+See [actual sourcepath progress](evidence/joint-sourcepath-real-message-backing-PG-current1-GREEN-remaining5-20261011.json)
+and [reviewable testbridge](../integration/proposals/weknora-real-message-backing-testbridge-20261011.json).
+
+Startup `7e4cb6b5` compiles database/container/server and now passes31 of34
+actual nodes: all database21 and container10. Real direct escaped SQLite drivers
+repair the dirty88 and prefix75 preludes; both full-clean startup positives
+still refuse at `nextcloud_onboarding_touch_wiki_pages_update`. The default-off
+fixed-phase diagnostic identifies that exact trigger without changing readiness.
+No unknown-schema refusal is relaxed. See [actual31 and remaining3](evidence/joint-startup-real-SQLite-driver31-GREEN-Wiki-trigger3-failure-20261011.json)
+and [current source proposal](../integration/proposals/weknora-startup-readonly-schema-qualification-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.

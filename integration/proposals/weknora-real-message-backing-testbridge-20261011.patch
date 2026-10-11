@@ -1,0 +1,25 @@
+diff --git a/internal/application/service/joint_memory_source_path_test_bridge_test.go b/internal/application/service/joint_memory_source_path_test_bridge_test.go
+index 35dee6f3e451f47b22bea896e7274b2db24615bf..710f51b25cc6a34ba36e6bfdf5b30ae4dcc55ccc 100644
+--- a/internal/application/service/joint_memory_source_path_test_bridge_test.go
++++ b/internal/application/service/joint_memory_source_path_test_bridge_test.go
+@@ -66,7 +66,19 @@ func NewJointMemorySourcePathWorkerForTest(t *testing.T, f *JointMemorySourcePat
+ 	ConfigureMemoryOriginalAtomicAuthority(admissions, f.Store, groups, nil)
+ 	queue := &memAtomicSQLQueue{}
+ 	memoryRepo := repository.NewMemoryRepository(f.DB)
+-	mem := memoryservice.NewOriginalBoundMemoryService(memoryRepo, tenants, repository.NewMessageRepository(f.DB), f.models, queue, nil, NewMemoryOriginalSourceReader(f.Messages, admissions), admissions)
++	// HTTP keeps its completion observer. The original source ctor receives
++	// the exact production concrete service already backing that observer.
++	observed, ok := f.Messages.(*normalReferencesObservedMessagesForTest)
++	require.True(t, ok)
++	require.NotNil(t, observed.messageService)
++	require.Same(t, f.Store, observed.materialStore)
++	require.NotNil(t, observed.sourceLineageGuard)
++	sessionObserver, ok := f.Sessions.(normalReferencesSessionForTest)
++	require.True(t, ok)
++	actualSession, ok := sessionObserver.SessionService.(*sessionService)
++	require.True(t, ok)
++	require.Same(t, actualSession.sourceLineageGuard, observed.sourceLineageGuard, "same guard as the real HTTP session and source pipeline")
++	mem := memoryservice.NewOriginalBoundMemoryService(memoryRepo, tenants, repository.NewMessageRepository(f.DB), f.models, queue, nil, NewMemoryOriginalSourceReader(observed.messageService, admissions), admissions)
+ 	outbox := repository.NewMemoryOriginalOutboxRepository(f.DB, admissions)
+ 	memoryservice.ConfigureOriginalMemoryOutbox(mem, outbox)
+ 	relay := NewMemoryOriginalOutboxRunner(outbox, queue)
