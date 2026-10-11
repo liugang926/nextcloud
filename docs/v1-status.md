@@ -363,6 +363,16 @@ is frozen; PostgreSQL trigger-context and predicate normalization fixes are
 being implemented with changed-condition negatives. See the [actual diagnostic
 record](evidence/joint-complete-restart-object-diagnostic2-failure-20261011.json).
 
+The `4a7d62e1` repair parses441 Go files and fully compiles157 packages in
+134.176s, zero business RUN. Actual strict79 then produces65PASS/14FAIL/0SKIP/OOM
+in61.301s. All PostgreSQL installed-prefix restarts and new WHEN/index fault
+gates pass; all failures are SQLite complete-restart cases. Individual SQLite
+object verifiers now pass, but the untyped object-name set mistakes11 legitimate
+SQLite triggers for PostgreSQL function sentinels. Object-kind/dialect separation
+is being repaired with trigger integrity checks retained. The full79 gate
+remains unaccepted and business45 has not run. See the [compile record](evidence/joint-restart-representation-repair-full-compile-GREEN-20261011.json)
+and [actual79 failure](evidence/joint-repaired79-PG-GREEN-SQLite-object-kind-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
