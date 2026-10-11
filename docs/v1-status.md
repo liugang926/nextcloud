@@ -719,9 +719,30 @@ and [sourcepath4/2](evidence/joint-sourcepath-PG3-SQLite-current1-GREEN-SQLiteHT
 The complete unified-source policy58 and query/vector/RecallSQL58 regressions
 now pass on `cab8df4e` in independent210.717s and136.798s windows. Every selected
 parent/leaf has exact once RUN/PASS, nofail/skip/OOM, and9+9 owned resources are
-independently absent. Native/productive79 is still running and195 has not yet
-been accepted. See [policy58](evidence/joint-current-full-schema-policy58-GREEN-20261011.json)
+independently absent. Native55 subsequently runs50PASS/5FAIL and productive24 is0RUN after
+failfast;195 remains unaccepted. See [policy58](evidence/joint-current-full-schema-policy58-GREEN-20261011.json)
 and [query/vector/Recall58](evidence/joint-current-full-schema-query-vector-Recall58-GREEN-20261011.json).
+
+
+Unified native55 now has a complete50PASS/5FAIL actual result on `cab8df4e`.
+Both healthy outbox transport and first cross-input checkpoint Handles fail in
+both databases, plus PG commit/public-writer serialization. The original10s
+success assertions are retained and source causes are under investigation.
+Productive24 has0RUN in that failed window; an independent run later fails24
+nodes at the initial genuine Handle prelude;
+mandatory195 is not accepted. Go is absent, SQL stopped and failed data retained.
+See [native55 failure](evidence/joint-current-native55-50pass5fail-productive24-notrun-20261011.json).
+
+
+Independent productive24 subsequently runs0PASS/24FAIL in162.199s, all22 leaves
+stopping at the initial genuine Handle success prelude. Mandatory195 now has
+all195 actual nodes across4windows:166PASS/29FAIL, zeroSKIP/OOM. The successful
+policy58/query-vector-Recall58 remain separate accepted regressions; native55
+and productive24 remainRED. Source review identifies real testDI omissions
+(unconfigured fresh tenant policy authority and a wrapper hiding the actual
+postSDK verifier); no production guard or original10s/NoError is relaxed.
+All Go actors are absent, SQL stopped and failed data retained. See [productive
+prelude24](evidence/joint-current-productive24-real-Handle-prelude-failure-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
