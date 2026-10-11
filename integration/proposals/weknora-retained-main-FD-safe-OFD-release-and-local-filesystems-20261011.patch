@@ -1,0 +1,1027 @@
+diff --git a/internal/database/migration_peer_sqlite_descriptor_registry.go b/internal/database/migration_peer_sqlite_descriptor_registry.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1dc9376ef4aa2d2a1623bb2e80395fcf85fb892
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_descriptor_registry.go
+@@ -0,0 +1,255 @@
++package database
++
++import (
++	"context"
++	"errors"
++	"os"
++	"sync"
++	"time"
++
++	"github.com/golang-migrate/migrate/v4"
++)
++
++var ErrJointSchemaDescriptorCapacity = errors.New("joint_schema_retained_descriptor_capacity_closed")
++var ErrJointSchemaDescriptorPoisoned = errors.New("joint_schema_retained_descriptor_unlock_failed_closed")
++
++// Every successfully opened main FD has a process-lifetime strong reference.
++// Closing any additional same-inode FD would clear this process's SQLite POSIX
++// locks, even though the separate OFD byte-zero lock has different ownership.
++// The bounded registry never closes, duplicates, evicts or recycles such FDs.
++// This is resource ownership only; actual catalogue/body/actor checks still run.
++type peerSQLiteDescriptorRegistry struct {
++	mu           sync.Mutex
++	entries      map[string]*peerSQLiteRetainedDescriptor
++	retained     []*peerSQLiteRetainedDescriptor
++	reservations int
++}
++type peerSQLiteRetainedDescriptor struct {
++	file                     *os.File
++	rawFD                    uintptr
++	identity                 os.FileInfo
++	resolvedPath, filesystem string
++	gate                     chan struct{}
++	poisoned                 chan struct{}
++	mu                       sync.Mutex
++	nextOwner, owner         uint64
++	kernelHeld               bool
++	waiters                  int
++	poisonErr                error
++	changeLock               func(*os.File, bool) error
++}
++
++var peerSQLiteMigrationDescriptors = peerSQLiteDescriptorRegistry{entries: map[string]*peerSQLiteRetainedDescriptor{}}
++
++func (r *peerSQLiteDescriptorRegistry) descriptor(ctx context.Context, resolvedPath string) (*peerSQLiteRetainedDescriptor, error) {
++	if r != &peerSQLiteMigrationDescriptors {
++		return nil, ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	before, err := os.Stat(resolvedPath)
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	if err = validatePeerSQLiteMigrationFile(before); err != nil {
++		return nil, err
++	}
++	key, err := peerSQLiteDescriptorKey(before)
++	if err != nil {
++		return nil, err
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if err = ctx.Err(); err != nil {
++		return nil, err
++	}
++	if existing := r.entries[key]; existing != nil {
++		info, e := existing.file.Stat()
++		if e != nil || !os.SameFile(info, before) || existing.resolvedPath != resolvedPath {
++			return nil, ErrJointSchemaUnknown
++		}
++		if e = validatePeerSQLiteMigrationFile(info); e != nil {
++			return nil, e
++		}
++		filesystem, e := peerSQLiteDescriptorFilesystem(existing.file)
++		if e != nil || filesystem != existing.filesystem {
++			return nil, ErrJointSchemaUnknown
++		}
++		return existing, nil
++	}
++	capacity, err := peerSQLiteDescriptorCapacity()
++	if err != nil {
++		return nil, err
++	}
++	if len(r.retained)+r.reservations >= capacity {
++		return nil, ErrJointSchemaDescriptorCapacity
++	}
++	// Reserve before Open while the registry mutex excludes every other opener.
++	// Even a validation/cancellation/quarantine failure retains a successful FD.
++	r.reservations++
++	opened, openErr := peerSQLiteOpenRetainedDescriptor(resolvedPath)
++	if opened != nil {
++		r.retained = append(r.retained, opened)
++	}
++	r.reservations--
++	if openErr != nil {
++		return nil, openErr
++	}
++	if opened == nil || opened.file == nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	opened.resolvedPath = resolvedPath
++	opened.changeLock = peerSQLiteChangeOFD
++	opened.gate = make(chan struct{}, 1)
++	opened.gate <- struct{}{}
++	opened.poisoned = make(chan struct{})
++	info, err := opened.file.Stat()
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	opened.identity = info
++	actualKey, err := peerSQLiteDescriptorKey(info)
++	if err != nil || actualKey != key || !os.SameFile(info, before) {
++		return nil, ErrJointSchemaUnknown
++	}
++	if err = validatePeerSQLiteMigrationFile(info); err != nil {
++		return nil, err
++	}
++	opened.filesystem, err = peerSQLiteDescriptorFilesystem(opened.file)
++	if err != nil {
++		return nil, err
++	}
++	again, err := os.Stat(resolvedPath)
++	if err != nil || !os.SameFile(info, again) {
++		return nil, ErrJointSchemaUnknown
++	}
++	r.entries[key] = opened
++	if err = ctx.Err(); err != nil {
++		return nil, err
++	}
++	return opened, nil
++}
++func (e *peerSQLiteRetainedDescriptor) claim(ctx context.Context) (uint64, error) {
++	e.mu.Lock()
++	if e.poisonErr != nil {
++		err := e.poisonErr
++		e.mu.Unlock()
++		return 0, err
++	}
++	e.waiters++
++	e.mu.Unlock()
++	defer func() { e.mu.Lock(); e.waiters--; e.mu.Unlock() }()
++	select {
++	case <-ctx.Done():
++		return 0, ctx.Err()
++	case <-e.poisoned:
++		e.mu.Lock()
++		err := e.poisonErr
++		e.mu.Unlock()
++		return 0, err
++	case <-e.gate:
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	if e.poisonErr != nil {
++		return 0, e.poisonErr
++	}
++	if e.nextOwner == ^uint64(0) {
++		e.poisonErr = ErrJointSchemaDescriptorPoisoned
++		close(e.poisoned)
++		return 0, e.poisonErr
++	}
++	e.nextOwner++
++	e.owner = e.nextOwner
++	return e.owner, nil
++}
++func (e *peerSQLiteRetainedDescriptor) owns(owner uint64) bool {
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	return owner != 0 && e.owner == owner && e.kernelHeld && e.poisonErr == nil
++}
++func (e *peerSQLiteRetainedDescriptor) kernelLock(owner uint64) error {
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	if owner == 0 || e.owner != owner || e.poisonErr != nil || e.changeLock == nil {
++		return ErrJointSchemaUnavailable
++	}
++	err := e.changeLock(e.file, true)
++	if err == nil {
++		e.kernelHeld = true
++	}
++	return err
++}
++func (e *peerSQLiteRetainedDescriptor) release(owner uint64) error {
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	if owner == 0 || e.owner != owner {
++		return ErrJointSchemaUnavailable
++	}
++	if e.poisonErr != nil {
++		return e.poisonErr
++	}
++	if e.kernelHeld {
++		if e.changeLock == nil {
++			return e.poison(errors.New("joint_schema_descriptor_unlock_missing"))
++		}
++		if err := e.changeLock(e.file, false); err != nil {
++			return e.poison(err)
++		}
++	}
++	e.kernelHeld = false
++	e.owner = 0
++	// Only actual successful F_UNLCK (or never acquiring the kernel lock) lets
++	// the next same-process caller use this shared open file description.
++	e.gate <- struct{}{}
++	return nil
++}
++func (e *peerSQLiteRetainedDescriptor) poison(err error) error {
++	e.poisonErr = errors.Join(ErrJointSchemaDescriptorPoisoned, err)
++	close(e.poisoned)
++	// Keep both the gate and FD; a failed unlock is never inferred to release.
++	return e.poisonErr
++}
++func (r *peerSQLiteDescriptorRegistry) lock(ctx context.Context, mainPath, resolvedPath string) (*jointPeerSQLiteMigrationExclusion, error) {
++	if ctx == nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	descriptor, err := r.descriptor(ctx, resolvedPath)
++	if err != nil {
++		return nil, err
++	}
++	// One unchanged default lock timeout covers local ownership AND kernel wait.
++	wait, cancel := context.WithTimeout(ctx, migrate.DefaultLockTimeout)
++	defer cancel()
++	owner, err := descriptor.claim(wait)
++	if err != nil {
++		return nil, err
++	}
++	held := &jointPeerSQLiteMigrationExclusion{file: descriptor.file, identity: descriptor.identity, mainPath: mainPath, resolvedPath: resolvedPath, entry: descriptor, owner: owner}
++	fail := func(err error) (*jointPeerSQLiteMigrationExclusion, error) {
++		return nil, errors.Join(err, held.Close())
++	}
++	for {
++		if err = wait.Err(); err != nil {
++			return fail(err)
++		}
++		err = descriptor.kernelLock(owner)
++		if err == nil {
++			if err = wait.Err(); err != nil {
++				return fail(err)
++			}
++			return held, nil
++		}
++		if !peerSQLiteKernelLockBusy(err) {
++			return fail(errors.Join(ErrJointSchemaUnavailable, err))
++		}
++		timer := time.NewTimer(20 * time.Millisecond)
++		select {
++		case <-wait.Done():
++			timer.Stop()
++			return fail(wait.Err())
++		case <-timer.C:
++		}
++	}
++}
+diff --git a/internal/database/migration_peer_sqlite_descriptor_unix.go b/internal/database/migration_peer_sqlite_descriptor_unix.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a614c1c295814620c7ca0865e1cba9d82890736
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_descriptor_unix.go
+@@ -0,0 +1,49 @@
++//go:build linux || darwin
++
++package database
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"syscall"
++
++	"golang.org/x/sys/unix"
++)
++
++func peerSQLiteDescriptorKey(info os.FileInfo) (string, error) {
++	stat, ok := info.Sys().(*syscall.Stat_t)
++	if !ok {
++		return "", ErrJointSchemaUnknown
++	}
++	return fmt.Sprint(stat.Dev) + "/" + fmt.Sprint(stat.Ino), nil
++}
++func peerSQLiteOpenRetainedDescriptor(path string) (*peerSQLiteRetainedDescriptor, error) {
++	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	// No validation may Close this successful FD. The registry receives the
++	// strong record before any Fstat/FS/path/cancel validation can return.
++	return &peerSQLiteRetainedDescriptor{file: os.NewFile(uintptr(fd), path), rawFD: uintptr(fd)}, nil
++}
++func peerSQLiteDescriptorCapacity() (int, error) {
++	var limit unix.Rlimit
++	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
++		return 0, ErrJointSchemaUnavailable
++	}
++	// Preserve at least64 slots plus half of the remaining soft limit for real
++	// SQLite pools/HTTP/runtime. Normal singleDB reuse consumes only one slot;
++	// even an unlimited OS limit permits at most256 retained main descriptors.
++	if limit.Cur <= 64 {
++		return 0, ErrJointSchemaDescriptorCapacity
++	}
++	available := (limit.Cur - 64) / 2
++	if available > 256 {
++		available = 256
++	}
++	return int(available), nil
++}
++func peerSQLiteKernelLockBusy(err error) bool {
++	return errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.EINTR)
++}
+diff --git a/internal/database/migration_peer_sqlite_descriptor_unix_actual_test.go b/internal/database/migration_peer_sqlite_descriptor_unix_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..880619f135f33d7f0fb006ffbacea409e1aef4e1
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_descriptor_unix_actual_test.go
+@@ -0,0 +1,346 @@
++//go:build linux || darwin
++
++package database
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// This independent executable only probes real locks or invokes public Up.
++// It cannot infer a successful migration from a token or fabricate a ledger.
++func TestPeerSQLiteRetainedDescriptorProcessHelper(t *testing.T) {
++	if os.Getenv("WEKNORA_PEER_RETAINED_FD_HELPER") != "1" {
++		return
++	}
++	mode := os.Getenv("WEKNORA_PEER_RETAINED_FD_MODE")
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	if mode == "quota" {
++		var limit unix.Rlimit
++		require.NoError(t, unix.Getrlimit(unix.RLIMIT_NOFILE, &limit))
++		require.GreaterOrEqual(t, limit.Max, uint64(100))
++		limit.Cur = 100
++		require.NoError(t, unix.Setrlimit(unix.RLIMIT_NOFILE, &limit))
++		var actual unix.Rlimit
++		require.NoError(t, unix.Getrlimit(unix.RLIMIT_NOFILE, &actual))
++		require.EqualValues(t, 100, actual.Cur)
++		capacity, err := peerSQLiteDescriptorCapacity()
++		require.NoError(t, err)
++		require.Equal(t, 18, capacity)
++		root := t.TempDir()
++		first := ""
++		for i := 0; i <= capacity; i++ {
++			path := filepath.Join(root, fmt.Sprintf("quota-%d.sqlite", i))
++			db, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++			require.NoError(t, err)
++			_, err = db.Exec("CREATE TABLE descriptor_quota_sentinel(value INTEGER NOT NULL)")
++			require.NoError(t, err)
++			require.NoError(t, db.Close())
++			before := len(peerSQLiteMigrationDescriptors.retained)
++			held, err := lockPeerSQLiteMigrationInode(ctx, path, path)
++			if i == capacity {
++				require.ErrorIs(t, err, ErrJointSchemaDescriptorCapacity)
++				require.Nil(t, held)
++				require.Len(t, peerSQLiteMigrationDescriptors.retained, before)
++				break
++			}
++			require.NoError(t, err)
++			require.NoError(t, held.Close())
++			if first == "" {
++				first = path
++			}
++		}
++		before := len(peerSQLiteMigrationDescriptors.retained)
++		for i := 0; i < 10; i++ {
++			held, err := lockPeerSQLiteMigrationInode(ctx, first, first)
++			require.NoError(t, err)
++			require.NoError(t, held.Close())
++		}
++		require.Len(t, peerSQLiteMigrationDescriptors.retained, before, "full bound still permits this actual retained inode")
++		for _, entry := range peerSQLiteMigrationDescriptors.retained {
++			_, err := entry.file.Stat()
++			require.NoError(t, err, "no failed/bounded branch closed an already successful FD")
++		}
++		fmt.Println("PEER_DESCRIPTOR_QUOTA_CLOSED")
++		return
++	}
++	path := os.Getenv("WEKNORA_PEER_RETAINED_FD_DB")
++	require.NotEmpty(t, path)
++	if mode == "posix" {
++		parent, err := strconv.Atoi(os.Getenv("WEKNORA_PEER_RETAINED_FD_PARENT"))
++		require.NoError(t, err)
++		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++		require.NoError(t, err)
++		lock := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0x40000002, Len: 510}
++		probeErr := unix.FcntlFlock(uintptr(fd), unix.F_GETLK, &lock)
++		closeErr := unix.Close(fd)
++		require.NoError(t, probeErr)
++		require.NoError(t, closeErr)
++		require.Equal(t, int16(unix.F_RDLCK), lock.Type)
++		require.Equal(t, parent, int(lock.Pid))
++		fmt.Println("PEER_POSIX_PARENT_SHARED")
++		return
++	}
++	require.Equal(t, "up", mode)
++	options := MigrationOptions{SQLiteDBPath: path, AutoRecoverDirty: false}
++	require.NoError(t, RunMigrationsWithContext(ctx, "sqlite3://unused", options))
++	require.NoError(t, VerifyJointSchemaReady(ctx, "sqlite3://unused", options))
++	read, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path, jointReadOnly: true})
++	require.NoError(t, err)
++	version, dirty := jointLineageMigrationState(t, read)
++	require.EqualValues(t, 89, version)
++	require.False(t, dirty)
++	require.NoError(t, VerifyJointSchemaReadyOnDB(ctx, read, "sqlite"))
++	require.NoError(t, read.Close())
++	fmt.Println("PEER_RETAINED_UP_COMPLETE")
++}
++func runPeerSQLiteRetainedProcess(t *testing.T, path, mode, want string) {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPeerSQLiteRetainedDescriptorProcessHelper$", "-test.count=1")
++	cmd.Env = append(os.Environ(), "WEKNORA_PEER_RETAINED_FD_HELPER=1", "WEKNORA_PEER_RETAINED_FD_MODE="+mode, "WEKNORA_PEER_RETAINED_FD_DB="+path, "WEKNORA_PEER_RETAINED_FD_PARENT="+strconv.Itoa(os.Getpid()))
++	var stdout bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stdout
++	require.NoError(t, cmd.Run(), "actual owned helper must terminate and join")
++	seen := 0
++	for _, line := range strings.Split(stdout.String(), "\n") {
++		if line == want {
++			seen++
++		}
++	}
++	require.Equal(t, 1, seen, "static phase follows real kernel/SQL assertions and actual Cmd.Wait")
++}
++func peerSQLiteDescriptorWaiter(t *testing.T, held *jointPeerSQLiteMigrationExclusion) {
++	t.Helper()
++	require.Eventually(t, func() bool { held.entry.mu.Lock(); defer held.entry.mu.Unlock(); return held.entry.waiters > 0 }, 3*time.Second, time.Millisecond, "real local owner wait must be observed")
++}
++func TestPeerSQLiteDescriptorRetentionActual(t *testing.T) {
++	t.Run("retained_inode_reuses_fd_and_closed_context_refuses", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		first, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		t.Cleanup(func() {
++			if err := first.Close(); err != nil {
++				t.Error("first retained owner release failed")
++			}
++		})
++		actualFD := first.file.Fd()
++		entry := first.entry
++		ctx := context.WithValue(context.Background(), jointPeerSQLiteMigrationContextKey{}, first)
++		require.NoError(t, first.Close())
++		require.ErrorIs(t, checkPeerSQLiteMigrationExclusion(ctx), ErrJointSchemaUnavailable)
++		_, err = first.file.Stat()
++		require.NoError(t, err, "logical release never closes SQLite's main inode")
++		for i := 0; i < 10; i++ {
++			current, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++			require.NoError(t, err)
++			owned := current
++			t.Cleanup(func() {
++				if err := owned.Close(); err != nil {
++					t.Error("repeated retained owner cleanup failed")
++				}
++			})
++			require.Same(t, entry, current.entry)
++			require.Equal(t, actualFD, current.file.Fd())
++			require.NoError(t, first.Close(), "old Close cannot release a successor owner")
++			require.NoError(t, current.check(context.Background()))
++			require.ErrorIs(t, first.check(context.Background()), ErrJointSchemaUnavailable)
++			require.NoError(t, current.Close())
++		}
++	})
++	t.Run("same_process_waits_for_actual_owner_release", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		done := make(chan struct {
++			held *jointPeerSQLiteMigrationExclusion
++			err  error
++		}, 1)
++		go func() {
++			next, err := acquirePeerSQLiteMigrationExclusion(ctx, dsn, options)
++			done <- struct {
++				held *jointPeerSQLiteMigrationExclusion
++				err  error
++			}{next, err}
++		}()
++		joined := false
++		t.Cleanup(func() {
++			cancel()
++			if err := held.Close(); err != nil {
++				t.Error("first queued owner release failed")
++			}
++			if !joined {
++				select {
++				case result := <-done:
++					if result.held != nil {
++						if err := result.held.Close(); err != nil {
++							t.Error("queued owner release failed")
++						}
++					}
++				case <-time.After(3 * time.Second):
++					t.Error("real queued acquisition did not join")
++				}
++			}
++		})
++		peerSQLiteDescriptorWaiter(t, held)
++		select {
++		case result := <-done:
++			joined = true
++			if result.held != nil {
++				_ = result.held.Close()
++			}
++			t.Fatal("shared open description bypassed the first same-process owner")
++		default:
++		}
++		require.NoError(t, held.Close())
++		select {
++		case result := <-done:
++			joined = true
++			if result.held != nil {
++				owned := result.held
++				t.Cleanup(func() {
++					if err := owned.Close(); err != nil {
++						t.Error("actual successor cleanup failed")
++					}
++				})
++			}
++			require.NoError(t, result.err)
++			require.NotNil(t, result.held)
++			require.Same(t, held.entry, result.held.entry)
++			require.NoError(t, result.held.check(ctx))
++			require.NoError(t, result.held.Close())
++		case <-time.After(3 * time.Second):
++			t.Fatal("actual successor did not acquire after kernel unlock")
++		}
++	})
++	t.Run("cancelled_local_waiter_cannot_unlock_live_owner", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		ctx, cancel := context.WithCancel(context.Background())
++		done := make(chan error, 1)
++		joined := false
++		go func() {
++			next, err := acquirePeerSQLiteMigrationExclusion(ctx, dsn, options)
++			if next != nil {
++				err = next.Close()
++			}
++			done <- err
++		}()
++		t.Cleanup(func() {
++			cancel()
++			if err := held.Close(); err != nil {
++				t.Error("cancel test live owner release failed")
++			}
++			if !joined {
++				select {
++				case <-done:
++				case <-time.After(3 * time.Second):
++					t.Error("cancelled local waiter did not join")
++				}
++			}
++		})
++		peerSQLiteDescriptorWaiter(t, held)
++		cancel()
++		select {
++		case err := <-done:
++			joined = true
++			require.ErrorIs(t, err, context.Canceled)
++		case <-time.After(3 * time.Second):
++			t.Fatal("actual cancellation did not terminate local wait")
++		}
++		require.NoError(t, held.check(context.Background()))
++		require.NoError(t, held.Close())
++	})
++	t.Run("explicit_unlock_preserves_parent_posix_and_live_wal_view", func(t *testing.T) {
++		pool, dsn, options := peerPartialUnixProcessFixture(t, 74)
++		pool.SetMaxOpenConns(2)
++		connection, err := pool.Conn(context.Background())
++		require.NoError(t, err)
++		t.Cleanup(func() {
++			if err := connection.Close(); err != nil {
++				t.Error("actual retained SQLite connection close failed")
++			}
++		})
++		var before uint
++		var dirty bool
++		require.NoError(t, connection.QueryRowContext(context.Background(), "SELECT version,dirty FROM schema_migrations").Scan(&before, &dirty))
++		require.EqualValues(t, 74, before)
++		require.False(t, dirty)
++		dataBefore := peerPartialUnixProcessData(t, pool)
++		runPeerSQLiteRetainedProcess(t, options.SQLiteDBPath, "posix", "PEER_POSIX_PARENT_SHARED")
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		t.Cleanup(func() {
++			if err := held.Close(); err != nil {
++				t.Error("live-WAL owner release failed")
++			}
++		})
++		require.NoError(t, held.Close())
++		runPeerSQLiteRetainedProcess(t, options.SQLiteDBPath, "posix", "PEER_POSIX_PARENT_SHARED")
++		alias := filepath.Join(t.TempDir(), "retained-live-wal-alias.sqlite")
++		require.NoError(t, os.Symlink(options.SQLiteDBPath, alias))
++		runPeerSQLiteRetainedProcess(t, alias, "up", "PEER_RETAINED_UP_COMPLETE")
++		var after uint
++		require.NoError(t, connection.QueryRowContext(context.Background(), "SELECT version,dirty FROM schema_migrations").Scan(&after, &dirty))
++		require.EqualValues(t, 89, after)
++		require.False(t, dirty)
++		require.Equal(t, dataBefore, peerPartialUnixProcessData(t, pool))
++		require.NoError(t, VerifyJointSchemaReadyOnDB(context.Background(), pool, "sqlite"))
++	})
++	t.Run("actual_kernel_unlock_error_poisons_owner_and_retains_fd", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		entry := held.entry
++		// Fault only this actual owned entry's transport. The real kernel rejects
++		// command -1; no test AddError/pretended release or global unlock override.
++		entry.mu.Lock()
++		entry.changeLock = func(file *os.File, locked bool) error {
++			if locked {
++				return peerSQLiteChangeOFD(file, true)
++			}
++			lock := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 1}
++			return unix.FcntlFlock(file.Fd(), -1, &lock)
++		}
++		entry.mu.Unlock()
++		t.Cleanup(func() {
++			if err := peerSQLiteChangeOFD(held.file, false); err != nil {
++				t.Error("actual poisoned test kernel lock cleanup failed")
++			}
++		})
++		releaseErr := held.Close()
++		require.ErrorIs(t, releaseErr, ErrJointSchemaDescriptorPoisoned)
++		require.ErrorIs(t, held.Close(), ErrJointSchemaDescriptorPoisoned)
++		require.ErrorIs(t, held.check(context.Background()), ErrJointSchemaUnavailable)
++		_, err = held.file.Stat()
++		require.NoError(t, err)
++		next, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.Nil(t, next)
++		require.ErrorIs(t, err, ErrJointSchemaDescriptorPoisoned)
++		entry.mu.Lock()
++		owner, kernelHeld, available := entry.owner, entry.kernelHeld, len(entry.gate)
++		entry.mu.Unlock()
++		require.Equal(t, held.owner, owner)
++		require.True(t, kernelHeld)
++		require.Zero(t, available)
++	})
++	t.Run("actual_process_rlimit_bound_refuses_before_open_and_allows_reuse", func(t *testing.T) {
++		runPeerSQLiteRetainedProcess(t, "", "quota", "PEER_DESCRIPTOR_QUOTA_CLOSED")
++	})
++}
+diff --git a/internal/database/migration_peer_sqlite_exclusive.go b/internal/database/migration_peer_sqlite_exclusive.go
+index 7be4e9477a045fef209f29a248ffc5fce6f98932..7b689e7220b2a057fd6c10f19543bc0124c303e3 100644
+--- a/internal/database/migration_peer_sqlite_exclusive.go
++++ b/internal/database/migration_peer_sqlite_exclusive.go
+@@ -13,22 +13,45 @@ type jointPeerSQLiteMigrationContextKey struct{}
+ 
+ // This file descriptor is a migration exclusion, never an original/role grant.
+ // It owns the real existing main DB inode, not a derived lock-file pathname.
+-// It is kept until the migration driver's Close has actually returned.
++// The exclusion lasts until the migration driver closes. Its real main FD is
++// strongly retained for process lifetime: closing it bypasses SQLite VFS and
++// would release unrelated POSIX locks held by other SQLite pools in this process.
+ type jointPeerSQLiteMigrationExclusion struct {
+ 	file          *os.File
+ 	identity      os.FileInfo
+ 	mainPath      string
+ 	requestedPath string
+ 	resolvedPath  string
++	entry         *peerSQLiteRetainedDescriptor
++	owner         uint64
++	mu            sync.Mutex
++	closed        bool
+ 	once          sync.Once
+ 	closeErr      error
+ }
+ 
+ func (x *jointPeerSQLiteMigrationExclusion) Close() error {
+-	x.once.Do(func() { x.closeErr = x.file.Close() })
++	x.once.Do(func() {
++		x.mu.Lock()
++		defer x.mu.Unlock()
++		x.closed = true
++		if x.entry == nil {
++			x.closeErr = ErrJointSchemaUnavailable
++			return
++		}
++		x.closeErr = x.entry.release(x.owner)
++	})
+ 	return x.closeErr
+ }
+ func (x *jointPeerSQLiteMigrationExclusion) check(ctx context.Context) error {
++	if x == nil {
++		return ErrJointSchemaUnavailable
++	}
++	x.mu.Lock()
++	defer x.mu.Unlock()
++	if x.closed || x.entry == nil || !x.entry.owns(x.owner) {
++		return ErrJointSchemaUnavailable
++	}
+ 	if ctx == nil {
+ 		return ErrJointSchemaUnavailable
+ 	}
+@@ -51,7 +74,14 @@ func (x *jointPeerSQLiteMigrationExclusion) check(ctx context.Context) error {
+ 	if err != nil || !os.SameFile(resolved, x.identity) {
+ 		return ErrJointSchemaUnknown
+ 	}
+-	return validatePeerSQLiteMigrationFile(descriptor)
++	if err = validatePeerSQLiteMigrationFile(descriptor); err != nil {
++		return err
++	}
++	filesystem, err := peerSQLiteDescriptorFilesystem(x.file)
++	if err != nil || filesystem != x.entry.filesystem {
++		return ErrJointSchemaUnknown
++	}
++	return ctx.Err()
+ }
+ func peerSQLiteMigrationExclusionFromContext(ctx context.Context) (*jointPeerSQLiteMigrationExclusion, error) {
+ 	if ctx == nil {
+diff --git a/internal/database/migration_peer_sqlite_exclusive_darwin.go b/internal/database/migration_peer_sqlite_exclusive_darwin.go
+index 0007c61acb306987da95f1a70fd42eda27f70518..aa822a68a01be76d4b0d67c98a972114cfaf2b27 100644
+--- a/internal/database/migration_peer_sqlite_exclusive_darwin.go
++++ b/internal/database/migration_peer_sqlite_exclusive_darwin.go
+@@ -4,13 +4,11 @@ package database
+ 
+ import (
+ 	"context"
+-	"errors"
++	"fmt"
+ 	"os"
+ 	"strings"
+ 	"syscall"
+-	"time"
+ 
+-	"github.com/golang-migrate/migrate/v4"
+ 	"golang.org/x/sys/unix"
+ )
+ 
+@@ -32,65 +30,24 @@ func validatePeerSQLiteMigrationFile(info os.FileInfo) error {
+ 	return nil
+ }
+ func lockPeerSQLiteMigrationInode(ctx context.Context, mainPath, resolvedPath string) (*jointPeerSQLiteMigrationExclusion, error) {
+-	fd, err := unix.Open(resolvedPath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+-	if err != nil {
+-		return nil, ErrJointSchemaUnavailable
+-	}
+-	file := os.NewFile(uintptr(fd), resolvedPath)
+-	if file == nil {
+-		_ = unix.Close(fd)
+-		return nil, ErrJointSchemaUnavailable
++	return peerSQLiteMigrationDescriptors.lock(ctx, mainPath, resolvedPath)
++}
++func peerSQLiteChangeOFD(file *os.File, locked bool) error {
++	kind := int16(unix.F_UNLCK)
++	if locked {
++		kind = unix.F_WRLCK
+ 	}
+-	// The default pinned SQLite Darwin finder uses POSIX locks on these local
+-	// filesystems (APFS through its successful F_GETLK path). Remote/proxy/flock
+-	// variants remain unsupported, never inferred from an arbitrary VFS.
++	lock := unix.Flock_t{Type: kind, Whence: 0, Start: 0, Len: 1}
++	return unix.FcntlFlock(file.Fd(), darwinPeerOFDSetLK, &lock)
++}
++func peerSQLiteDescriptorFilesystem(file *os.File) (string, error) {
+ 	var filesystem unix.Statfs_t
+-	if err = unix.Fstatfs(fd, &filesystem); err != nil {
+-		_ = file.Close()
+-		return nil, ErrJointSchemaUnavailable
++	if err := unix.Fstatfs(int(file.Fd()), &filesystem); err != nil {
++		return "", ErrJointSchemaUnavailable
+ 	}
+ 	fstype := strings.TrimRight(string(filesystem.Fstypename[:]), "\x00")
+ 	if (fstype != "apfs" && fstype != "hfs" && fstype != "ufs") || filesystem.Flags&unix.MNT_RDONLY != 0 {
+-		_ = file.Close()
+-		return nil, ErrJointSchemaUnavailable
+-	}
+-	identity, err := file.Stat()
+-	if err != nil {
+-		_ = file.Close()
+-		return nil, ErrJointSchemaUnavailable
+-	}
+-	if err = validatePeerSQLiteMigrationFile(identity); err != nil {
+-		_ = file.Close()
+-		return nil, err
+-	}
+-	held := &jointPeerSQLiteMigrationExclusion{file: file, identity: identity, mainPath: mainPath, resolvedPath: resolvedPath}
+-	// OFD locks remain owned by this open file description, including after
+-	// SQLite closes another fd for this inode. No blocking lock goroutine exists.
+-	// Byte0 is outside pinned SQLite's POSIX PENDING/RESERVED/SHARED ranges
+-	// starting at0x40000000; no DB byte, SQL writer or ledger row is changed.
+-	wait, cancel := context.WithTimeout(ctx, migrate.DefaultLockTimeout)
+-	defer cancel()
+-	for {
+-		if err = wait.Err(); err != nil {
+-			_ = held.Close()
+-			return nil, err
+-		}
+-		lock := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 1}
+-		err = unix.FcntlFlock(file.Fd(), darwinPeerOFDSetLK, &lock)
+-		if err == nil {
+-			return held, nil
+-		}
+-		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EINTR) {
+-			_ = held.Close()
+-			return nil, ErrJointSchemaUnavailable
+-		}
+-		timer := time.NewTimer(20 * time.Millisecond)
+-		select {
+-		case <-wait.Done():
+-			timer.Stop()
+-			_ = held.Close()
+-			return nil, wait.Err()
+-		case <-timer.C:
+-		}
++		return "", ErrJointSchemaUnavailable
+ 	}
++	return fmt.Sprintf("%s/%v", fstype, filesystem.Fsid), nil
+ }
+diff --git a/internal/database/migration_peer_sqlite_exclusive_linux.go b/internal/database/migration_peer_sqlite_exclusive_linux.go
+index d24deff73ead4f73096bf9e56e9adc9561c5da7a..c19219015a2f775e9f0df04fceed8ea6e91a4f27 100644
+--- a/internal/database/migration_peer_sqlite_exclusive_linux.go
++++ b/internal/database/migration_peer_sqlite_exclusive_linux.go
+@@ -4,12 +4,10 @@ package database
+ 
+ import (
+ 	"context"
+-	"errors"
++	"fmt"
+ 	"os"
+ 	"syscall"
+-	"time"
+ 
+-	"github.com/golang-migrate/migrate/v4"
+ 	"golang.org/x/sys/unix"
+ )
+ 
+@@ -26,52 +24,47 @@ func validatePeerSQLiteMigrationFile(info os.FileInfo) error {
+ 	return nil
+ }
+ func lockPeerSQLiteMigrationInode(ctx context.Context, mainPath, resolvedPath string) (*jointPeerSQLiteMigrationExclusion, error) {
+-	fd, err := unix.Open(resolvedPath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+-	if err != nil {
+-		return nil, ErrJointSchemaUnavailable
++	return peerSQLiteMigrationDescriptors.lock(ctx, mainPath, resolvedPath)
++}
++func peerSQLiteChangeOFD(file *os.File, locked bool) error {
++	kind := int16(unix.F_UNLCK)
++	if locked {
++		kind = unix.F_WRLCK
+ 	}
+-	file := os.NewFile(uintptr(fd), resolvedPath)
+-	if file == nil {
+-		_ = unix.Close(fd)
+-		return nil, ErrJointSchemaUnavailable
++	lock := unix.Flock_t{Type: kind, Whence: 0, Start: 0, Len: 1}
++	return unix.FcntlFlock(file.Fd(), unix.F_OFD_SETLK, &lock)
++}
++func peerSQLiteDescriptorFilesystem(file *os.File) (string, error) {
++	var filesystem unix.Statfs_t
++	if err := unix.Fstatfs(int(file.Fd()), &filesystem); err != nil {
++		return "", ErrJointSchemaUnavailable
+ 	}
+-	identity, err := file.Stat()
+-	if err != nil {
+-		_ = file.Close()
+-		return nil, ErrJointSchemaUnavailable
++	class := peerSQLiteLinuxFilesystemClass(uint32(filesystem.Type), uint64(filesystem.Flags))
++	if class == "" {
++		return "", ErrJointSchemaUnavailable
+ 	}
+-	if err = validatePeerSQLiteMigrationFile(identity); err != nil {
+-		_ = file.Close()
+-		return nil, err
++	return fmt.Sprintf("%s/%d/%v", class, filesystem.Type, filesystem.Fsid), nil
++}
++
++// Explicit local contracts only, using this repository's pinned x/sys kernel
++// constants. Successful fcntl alone does not admit network, FUSE or unknown FS.
++// These are source-supported classes, not a claim each has runtime acceptance.
++func peerSQLiteLinuxFilesystemClass(kind uint32, flags uint64) string {
++	if flags&unix.ST_RDONLY != 0 {
++		return ""
+ 	}
+-	held := &jointPeerSQLiteMigrationExclusion{file: file, identity: identity, mainPath: mainPath, resolvedPath: resolvedPath}
+-	// OFD locks remain owned by this open file description, including after
+-	// SQLite closes another fd for this inode. No blocking lock goroutine exists.
+-	// Byte0 is outside pinned SQLite's POSIX PENDING/RESERVED/SHARED ranges
+-	// starting at0x40000000; no DB byte, SQL writer or ledger row is changed.
+-	wait, cancel := context.WithTimeout(ctx, migrate.DefaultLockTimeout)
+-	defer cancel()
+-	for {
+-		if err = wait.Err(); err != nil {
+-			_ = held.Close()
+-			return nil, err
+-		}
+-		lock := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 1}
+-		err = unix.FcntlFlock(file.Fd(), unix.F_OFD_SETLK, &lock)
+-		if err == nil {
+-			return held, nil
+-		}
+-		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EINTR) {
+-			_ = held.Close()
+-			return nil, ErrJointSchemaUnavailable
+-		}
+-		timer := time.NewTimer(20 * time.Millisecond)
+-		select {
+-		case <-wait.Done():
+-			timer.Stop()
+-			_ = held.Close()
+-			return nil, wait.Err()
+-		case <-timer.C:
+-		}
++	switch kind {
++	case unix.EXT4_SUPER_MAGIC:
++		return "ext4"
++	case unix.OVERLAYFS_SUPER_MAGIC:
++		return "overlay"
++	case unix.XFS_SUPER_MAGIC:
++		return "xfs"
++	case unix.BTRFS_SUPER_MAGIC:
++		return "btrfs"
++	case unix.TMPFS_MAGIC:
++		return "tmpfs"
++	default:
++		return ""
+ 	}
+ }
+diff --git a/internal/database/migration_peer_sqlite_exclusive_unsupported.go b/internal/database/migration_peer_sqlite_exclusive_unsupported.go
+index c2cb4679e9e9366d4a672ff914e20cd2ad2e6542..c271a434adfab2d8b438845fbde4528c0694ab24 100644
+--- a/internal/database/migration_peer_sqlite_exclusive_unsupported.go
++++ b/internal/database/migration_peer_sqlite_exclusive_unsupported.go
+@@ -13,3 +13,12 @@ func validatePeerSQLiteMigrationFile(os.FileInfo) error { return ErrJointSchemaU
+ func lockPeerSQLiteMigrationInode(context.Context, string, string) (*jointPeerSQLiteMigrationExclusion, error) {
+ 	return nil, ErrJointSchemaUnavailable
+ }
++
++func peerSQLiteDescriptorKey(os.FileInfo) (string, error) { return "", ErrJointSchemaUnavailable }
++func peerSQLiteOpenRetainedDescriptor(string) (*peerSQLiteRetainedDescriptor, error) {
++	return nil, ErrJointSchemaUnavailable
++}
++func peerSQLiteDescriptorCapacity() (int, error)              { return 0, ErrJointSchemaUnavailable }
++func peerSQLiteChangeOFD(*os.File, bool) error                { return ErrJointSchemaUnavailable }
++func peerSQLiteDescriptorFilesystem(*os.File) (string, error) { return "", ErrJointSchemaUnavailable }
++func peerSQLiteKernelLockBusy(error) bool                     { return false }
+diff --git a/internal/database/migration_peer_sqlite_filesystem_linux_test.go b/internal/database/migration_peer_sqlite_filesystem_linux_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..271a623f252dbfe69b2a43997de3cbd56c935426
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_filesystem_linux_test.go
+@@ -0,0 +1,60 @@
++//go:build linux
++
++package database
++
++import (
++	"os"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// Pure classification has no DB/permission/route capabilities. Actual Fstatfs
++// is independently checked on every retained descriptor acquisition/recheck.
++func TestPeerSQLiteLinuxFilesystemClasses(t *testing.T) {
++	cases := []struct {
++		name  string
++		kind  uint32
++		flags uint64
++		class string
++	}{
++		{"ext4", unix.EXT4_SUPER_MAGIC, 0, "ext4"},
++		{"overlay", unix.OVERLAYFS_SUPER_MAGIC, 0, "overlay"},
++		{"xfs", unix.XFS_SUPER_MAGIC, 0, "xfs"},
++		{"btrfs", unix.BTRFS_SUPER_MAGIC, 0, "btrfs"},
++		{"tmpfs", unix.TMPFS_MAGIC, 0, "tmpfs"},
++		{"nfs_closed", unix.NFS_SUPER_MAGIC, 0, ""},
++		{"cifs_closed", unix.CIFS_SUPER_MAGIC, 0, ""},
++		{"fuse_closed", unix.FUSE_SUPER_MAGIC, 0, ""},
++		{"unknown_closed", 0xffffffff, 0, ""},
++		{"readonly_local_closed", unix.EXT4_SUPER_MAGIC, unix.ST_RDONLY, ""},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) { require.Equal(t, c.class, peerSQLiteLinuxFilesystemClass(c.kind, c.flags)) })
++	}
++}
++func TestPeerSQLiteActualFilesystemContract(t *testing.T) {
++	dsn, options := peerSQLiteActual80(t)
++	held, err := acquirePeerSQLiteMigrationExclusion(t.Context(), dsn, options)
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		if err := held.Close(); err != nil {
++			t.Error("actual FS owner unlock failed")
++		}
++	})
++	var actual unix.Statfs_t
++	require.NoError(t, unix.Fstatfs(int(held.file.Fd()), &actual))
++	class := peerSQLiteLinuxFilesystemClass(uint32(actual.Type), uint64(actual.Flags))
++	require.NotEmpty(t, class)
++	stamp, err := peerSQLiteDescriptorFilesystem(held.file)
++	require.NoError(t, err)
++	require.Equal(t, held.entry.filesystem, stamp)
++	info, err := held.file.Stat()
++	require.NoError(t, err)
++	current, err := os.Stat(options.SQLiteDBPath)
++	require.NoError(t, err)
++	require.True(t, os.SameFile(info, current))
++	require.NoError(t, held.check(t.Context()))
++	t.Logf("actual_retained_linux_filesystem_class=%s", class)
++}
