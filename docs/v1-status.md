@@ -602,6 +602,26 @@ default-off fixedphase/errorclass capture observation. Original guard, return
 paths, business bytes and8s/20s/10s bounds remain. Its matched6 diagnostic
 remains pending; see the [diagnostic compile](evidence/joint-WAL-capture-fixedphase-diagnostic-compile-GREEN-20261011.json).
 
+The URI-corrected startup34 run on `e552aa62` passes all real database21
+qualification nodes and8 container nodes, with5 container failures (29PASS/
+5FAIL overall). Full-auto/external positives refuse unknown lineage, and
+clean-prefix/dirty direct migrate fixtures use raw filenames with spaces that
+do not match the escaped runtime inspector. The latter prelude failures occur
+before initDatabase assertions; they must use the genuine escaped WithInstance
+driver, never synthetic ledgers. Startup34 remains unaccepted. Two Go actors
+are absent and both SQL actors are independently stopped. See the [actual29
+and remaining5](evidence/joint-startup-database21-GREEN-container8-GREEN-5-failure-20261011.json).
+
+The real WAL/fixedphase sourcepath6 diagnostic on `e57f5713` still fails all6
+nodes in92.698s. PG actual prepare and model begin pass; capture_request
+refuses before model capability/admission. Source inspection confirms the
+testbridge passes an observed wrapper to a constructor requiring the genuine
+`*messageService`, leaving the backing reader unavailable. The fix is only
+testbridge unwrapping the same real store/guard/service; the closed production
+constructor and HTTP observer remain. SQLite still fails ordinary HTTP prelude,
+so WAL has not accepted that lane. Sourcepath final transaction/directory33
+remain pending. See the [fixedphase failure](evidence/joint-sourcepath6-WAL-fixedphase-PG-reader-wrapper-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
