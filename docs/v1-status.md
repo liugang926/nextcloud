@@ -234,6 +234,16 @@ union, and named history still rejects nonempty sources. Pending90/91 require
 the complete startup catalogue/source-route qualification. These dependencies
 must close before the original adapter replaces the normal registry.
 
+The first private personal-completion bridge `094b7ddd` is source-only and
+unaccepted. It joins actual source lineage and completion source leases, but
+independent review finds two remaining paths: coupled consumer recheck still
+omits source leases/fences, and terminal completion lacks current local
+actor/source/grant/epoch revalidation after final physical/journal IO. The next
+repair must preserve the original user query, actual private vector evidence
+and the final model/native/head/payload order. A held lease is not current
+permission. The initial real WebAdmin lane also does not prove the PRD's
+source-only nonmember isolation matrix. See the [source gap audit](evidence/personal-original-query-completion-source-gap-audit-20261012.json).
+
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
 pool on74/75 while fresh readers saw89. The fixed `7cb5c6ce` explicitly unlocks
