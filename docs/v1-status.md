@@ -585,6 +585,23 @@ owned volume are absent. This is model opaque-space lifecycle acceptance;
 old embedding wire/vector/output/rank facts remain pending. See the [real
 embedding pair](evidence/two-source-SQLite-embedding-opaque-space2-GREEN-20261011.json).
 
+Startup qualification candidate `e552aa62` now parses464 changed Go files and
+compiles all157 packages with0 business RUN; three owned resources are
+independently absent. It aborts migration failures before application writers,
+qualifies disabled-auto startup through full readonly catalogue/source checks,
+and verifies the actual opened SQLite pool with escaped filenames and proper
+initial/late pool cleanup. Actual34 first runs database21 as13PASS/8FAIL: all
+SQLite nodes pass, PG fails preparation because the fixture requires a URI
+and runner supplies a keyword DSN. Container13 has0 RUN. The next fresh
+runner changes only the migration-test key to the same owned-service URI;
+source/bounds remain unchanged. See [full compile](evidence/joint-startup-readonly-qualification-full-compile-GREEN-20261011.json) and [URI preparation failure](evidence/joint-startup-SQLite13-GREEN-PG-URI-preparation-failure-20261011.json).
+
+The separate `e57f5713` source compiles service/server and459 changed Go files
+with0 business RUN, combining genuine joint SQLite WAL PRAGMA assertions and
+default-off fixedphase/errorclass capture observation. Original guard, return
+paths, business bytes and8s/20s/10s bounds remain. Its matched6 diagnostic
+remains pending; see the [diagnostic compile](evidence/joint-WAL-capture-fixedphase-diagnostic-compile-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
