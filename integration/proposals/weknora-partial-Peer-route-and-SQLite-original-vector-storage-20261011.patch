@@ -1,0 +1,3337 @@
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_input.go b/internal/application/repository/knowledge_sqlite_embedding_input.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..270332d63f79bbd15cde562ff2666084f111c546
+--- /dev/null
++++ b/internal/application/repository/knowledge_sqlite_embedding_input.go
+@@ -0,0 +1,596 @@
++package repository
++
++import (
++	"context"
++	"encoding/binary"
++	"encoding/json"
++	"errors"
++	"math"
++	"reflect"
++	"sort"
++	"strings"
++	"sync"
++	"time"
++	"unicode/utf8"
++
++	modelembedding "github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++var ErrKnowledgeSQLiteEmbeddingUnknown = errors.New("knowledge_sqlite_embedding_original_unavailable")
++
++type knowledgeSQLiteEmbeddingKey struct{}
++type knowledgeSQLiteEmbeddingInputBody struct {
++	Info     types.IndexInfo
++	WireText string
++	Proof    types.KnowledgeBuildInputProof
++}
++type knowledgeSQLiteEmbeddingControl struct {
++	RowID    uint64 `gorm:"primaryKey"`
++	Revision int64
++	Present  bool
++}
++
++func (knowledgeSQLiteEmbeddingControl) TableName() string {
++	return "knowledge_sqlite_embedding_controls"
++}
++
++// This private operation owns input bodies. The model reader is borrowed from
++// the actual constructor and remains owned by its original operation carrier.
++type KnowledgeSQLiteEmbeddingInputRead struct {
++	db        *gorm.DB
++	model     *modelOriginalRead
++	proof     types.ModelOriginalProof
++	ctx       context.Context
++	cancel    context.CancelFunc
++	inputs    map[string]types.KnowledgeSQLiteEmbeddingInput
++	bodies    map[string]knowledgeSQLiteEmbeddingInputBody
++	heads     []originalBodyFieldHead
++	rows      []originalBodyAvailabilityRow
++	leases    map[string]originalBodyLease
++	outputs   map[string][]float32
++	base      map[string]*knowledgeSQLiteEmbeddingControl
++	order     []string
++	payloads  map[string]originalBodyPayload
++	committed map[string]originalBodyLease
++	mu        sync.Mutex
++	closed    bool
++	failed    error
++	checks    sync.WaitGroup
++	joined    chan struct{}
++}
++
++func knowledgeSQLiteEmbeddingInputDigest(v types.KnowledgeSQLiteEmbeddingInput) (string, error) {
++	v.Digest = ""
++	v.InputJSON = ""
++	data, err := json.Marshal(v)
++	return bodySHA(data), err
++}
++func knowledgeSQLiteEmbeddingReceiptDigest(v types.KnowledgeSQLiteEmbeddingReceipt) (string, error) {
++	v.Digest = ""
++	v.VectorJSON = ""
++	data, err := json.Marshal(v)
++	return bodySHA(data), err
++}
++func knowledgeSQLiteVectorBytes(v []float32) ([]byte, error) {
++	if len(v) == 0 || len(v) > 65536 {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	data := make([]byte, 4*len(v))
++	for i, n := range v {
++		if math.IsNaN(float64(n)) || math.IsInf(float64(n), 0) {
++			return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(n))
++	}
++	return data, nil
++}
++func knowledgeSQLiteEmbeddingSchema(tx *gorm.DB) error {
++	if tx.Dialector.Name() != "sqlite" || !originalBodySchemaPresent(tx) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	for _, table := range []string{"knowledge_sqlite_embedding_inputs", "knowledge_sqlite_embedding_receipts", "knowledge_sqlite_embedding_controls", "knowledge_sqlite_embedding_vectors", "lite_embeddings"} {
++		if !tx.Migrator().HasTable(table) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++	}
++	return checkKnowledgeSQLiteMutationGuards(tx)
++}
++func knowledgeSQLiteEmbeddingAuthority(tx *gorm.DB, source *KnowledgeInputProvenanceStore) (*KnowledgeInputProvenanceStore, error) {
++	if source == nil || source.displayAuthorityFactory == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	actual := source.displayAuthorityFactory(tx.Session(&gorm.Session{NewDB: true}))
++	if actual == nil || actual.db.Statement.ConnPool != tx.Statement.ConnPool {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return actual, nil
++}
++
++// Begin accepts only the actual private current model reader and original build
++// context. A model DTO, a digest, or a raw chunk cannot author an input receipt.
++// The first slice is genuine independent human knowledge. Nonempty inherited
++// source graphs require the forthcoming build/content-lease union implementation.
++func BeginKnowledgeSQLiteEmbeddingInputs(ctx context.Context, reader interfaces.ModelOriginalRead, infos []*types.IndexInfo, wire []string) (*KnowledgeSQLiteEmbeddingInputRead, error) {
++	model, ok := reader.(*modelOriginalRead)
++	if !ok || model == nil || model.download || len(infos) == 0 || len(infos) > 4096 || len(infos) != len(wire) {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if !sameOriginalModelCallerInRepository(ctx, model.ctx) {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	snapshot, proof, err := model.Snapshot()
++	if err != nil {
++		return nil, err
++	}
++	recipe := snapshot.Parameters.OriginalEmbedding
++	if snapshot.Type != types.ModelTypeEmbedding || recipe == nil || modelembedding.ValidateOriginalEmbeddingDefinition(recipe) != nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	guard, ok := ctx.Value(knowledgeBuildInputKey{}).(knowledgeBuildInputContext)
++	source, actual := guard.reader.(*KnowledgeInputProvenanceStore)
++	if !ok || !actual || guard.proof == nil || guard.admission == nil || guard.proof.SourceLineage == nil || guard.proof.SourceLineage.RequireComplete() != nil || len(guard.proof.SourceLineage.Sources) != 0 {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	h := &KnowledgeSQLiteEmbeddingInputRead{db: model.db, model: model, proof: *proof, inputs: map[string]types.KnowledgeSQLiteEmbeddingInput{}, bodies: map[string]knowledgeSQLiteEmbeddingInputBody{}, leases: map[string]originalBodyLease{}, outputs: map[string][]float32{}, base: map[string]*knowledgeSQLiteEmbeddingControl{}, payloads: map[string]originalBodyPayload{}, committed: map[string]originalBodyLease{}, joined: make(chan struct{})}
++	h.ctx, h.cancel = context.WithCancel(ctx)
++	ids := []string{}
++	for _, info := range infos {
++		if info == nil || info.SourceType != types.ChunkSourceType || info.SourceID != info.ChunkID || info.ChunkID == "" || info.KnowledgeID != guard.proof.KnowledgeID || info.KnowledgeBaseID != guard.proof.KnowledgeBaseID || !utf8.ValidString(info.Content) {
++			h.cancel()
++			return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		ids = append(ids, info.ChunkID)
++	}
++	err = h.db.WithContext(h.ctx).Transaction(func(tx *gorm.DB) error {
++		if err := knowledgeSQLiteEmbeddingSchema(tx); err != nil {
++			return err
++		}
++		authority, err := knowledgeSQLiteEmbeddingAuthority(tx, source)
++		if err != nil {
++			return err
++		}
++		captured, err := authority.captureKnowledgeBuildSnapshotInTx(tx, types.KnowledgeBuildInputCaptureRequest{TenantID: guard.proof.TenantID, KnowledgeBaseID: guard.proof.KnowledgeBaseID, KnowledgeID: guard.proof.KnowledgeID, ChunkIDs: ids, Expected: guard.proof}, false)
++		if err != nil {
++			return err
++		}
++		admission, _, _, err := authority.admissionInTx(tx, captured.Knowledge, captured.Proof)
++		if err != nil {
++			return err
++		}
++		if admission.OriginKind != "human" {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		fresh, err := authority.AuthorizeCurrentKnowledgeInputWrite(h.ctx, captured.KnowledgeBase)
++		if err != nil {
++			return err
++		}
++		if !sameOriginalModelCallerInRepository(fresh, model.ctx) || captured.KnowledgeBase.EmbeddingModelID != proof.ModelID {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err = authority.recheckKnowledgeWorkerActor(h.ctx, captured.Proof); err != nil {
++			return err
++		}
++		h.ctx = WithKnowledgeBuildInputProof(h.ctx, source, captured.Proof)
++		chunks := map[string]*types.Chunk{}
++		for _, c := range captured.Chunks {
++			chunks[c.ID] = c
++		}
++		h.rows = append(h.rows, originalBodyAvailabilityRow{"knowledges", captured.Knowledge.ID})
++		h.rows = append(h.rows, originalBodyAvailabilityRow{"model_definition_originals", h.proof.DefinitionID}, originalBodyAvailabilityRow{"model_credential_originals", h.proof.CredentialID})
++		now, err := nextcloudLeaseNowMS(tx)
++		if err != nil {
++			return err
++		}
++		for i, info := range infos {
++			c := chunks[info.ChunkID]
++			if c == nil || !info.IsEnabled {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			expected := c.EmbeddingContent()
++			title := strings.TrimSpace(captured.Knowledge.Title)
++			if title != "" {
++				expected = title + "\n" + expected
++			}
++			if expected != info.Content || modelembedding.OriginalIndexText(expected) != wire[i] {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if _, seen := h.inputs[info.SourceID]; seen {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			h.rows = append(h.rows, originalBodyAvailabilityRow{"chunks", c.ID})
++			body := knowledgeSQLiteEmbeddingInputBody{Info: *info, WireText: wire[i], Proof: *captured.Proof}
++			data, err := json.Marshal(body)
++			if err != nil {
++				return err
++			}
++			fact := types.KnowledgeSQLiteEmbeddingInput{ID: uuid.NewString(), TenantID: captured.Proof.TenantID, KnowledgeBaseID: info.KnowledgeBaseID, KnowledgeID: info.KnowledgeID, ChunkID: c.ID, AdmissionID: captured.Proof.AdmissionID, ModelID: proof.ModelID, SpaceDigest: recipe.SpaceDigest, ExpectedDimensions: recipe.ExpectedDimensions, InputJSON: string(data), InputSHA256: bodySHA(data), CreatedAtMS: now}
++			proofJSON, err := json.Marshal(proof)
++			if err != nil {
++				return err
++			}
++			fact.ModelProofJSON = string(proofJSON)
++			fact.Digest, err = knowledgeSQLiteEmbeddingInputDigest(fact)
++			if err != nil {
++				return err
++			}
++			var existing struct{ ID uint64 }
++			q := tx.Table("lite_embeddings").Select("id").Where("source_id=? AND source_type=?", info.SourceID, int(info.SourceType)).Take(&existing)
++			if q.Error != nil && !errors.Is(q.Error, gorm.ErrRecordNotFound) {
++				return q.Error
++			}
++			// Old indexed rows are UNKNOWN, never recovered by signing their vectors.
++			if q.Error == nil {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if err = tx.Create(&fact).Error; err != nil {
++				return err
++			}
++			h.inputs[info.SourceID] = fact
++			h.bodies[info.SourceID] = body
++			h.base[info.SourceID] = nil
++			h.order = append(h.order, info.SourceID)
++			h.rows = append(h.rows, originalBodyAvailabilityRow{fact.TableName(), fact.ID})
++		}
++		if err = checkOriginalBodyAvailableBatchInTx(h.ctx, tx, h.rows); err != nil {
++			return err
++		}
++		h.heads, err = originalBodyBatchHeads(tx, h.rows)
++		if err != nil {
++			return err
++		}
++		if len(h.heads) == 0 {
++			return ErrOriginalBodyUnavailable
++		}
++		owner := "knowledge-sqlite-embedding/" + uuid.NewString()
++		retention := NewOriginalBodyRetentionStore(tx)
++		for _, head := range h.heads {
++			if _, borrowed := h.model.hold.Leases[head.BodyID]; borrowed {
++				continue
++			}
++			if _, seen := h.leases[head.BodyID]; seen {
++				continue
++			}
++			id, err := retention.acquireLeaseInTx(tx, head.BodyID, "read", owner, 15*time.Minute)
++			if err != nil {
++				return err
++			}
++			var lease originalBodyLease
++			if err = bodyInternal(tx).Where("lease_id=?", id).Take(&lease).Error; err != nil {
++				return err
++			}
++			h.leases[head.BodyID] = lease
++		}
++		for bodyID := range h.leases {
++			var payload originalBodyPayload
++			if err = bodyInternal(tx).Where("id=?", bodyID).Take(&payload).Error; err != nil {
++				return err
++			}
++			h.payloads[bodyID] = payload
++		}
++		for bodyID := range h.model.hold.Leases {
++			var payload originalBodyPayload
++			if err = bodyInternal(tx).Where("id=?", bodyID).Take(&payload).Error; err != nil {
++				return err
++			}
++			h.payloads[bodyID] = payload
++		}
++		return h.checkInTx(tx, false)
++	}, memoryWriteOptions(h.db))
++	if err != nil {
++		h.cancel()
++		return nil, err
++	}
++	return h, nil
++}
++func (h *KnowledgeSQLiteEmbeddingInputRead) Context() context.Context {
++	return context.WithValue(h.ctx, knowledgeSQLiteEmbeddingKey{}, h)
++}
++func (h *KnowledgeSQLiteEmbeddingInputRead) start() error {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	if h.closed {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if h.failed != nil {
++		return h.failed
++	}
++	if err := h.ctx.Err(); err != nil {
++		return err
++	}
++	h.checks.Add(1)
++	return nil
++}
++func (h *KnowledgeSQLiteEmbeddingInputRead) finish(err error) error {
++	h.mu.Lock()
++	if err == nil {
++		err = h.ctx.Err()
++	}
++	if err != nil && h.failed == nil {
++		h.failed = err
++		h.cancel()
++	}
++	h.mu.Unlock()
++	h.checks.Done()
++	return err
++}
++
++// Bind is invoked by the private model operation only after comparing these
++// bytes with its own successful SDK result, not by the storage params decoder.
++func (h *KnowledgeSQLiteEmbeddingInputRead) Bind(texts []string, vectors [][]float32) (context.Context, error) {
++	if err := h.start(); err != nil {
++		return h.ctx, err
++	}
++	var err error
++	h.mu.Lock()
++	if len(texts) != len(h.inputs) || len(vectors) != len(texts) || len(h.outputs) != 0 {
++		err = ErrKnowledgeSQLiteEmbeddingUnknown
++	} else {
++		for i, text := range texts {
++			id := h.order[i]
++			if h.bodies[id].WireText != text || len(vectors[i]) != h.inputs[id].ExpectedDimensions {
++				err = ErrKnowledgeSQLiteEmbeddingUnknown
++				break
++			}
++			if _, e := knowledgeSQLiteVectorBytes(vectors[i]); e != nil {
++				err = e
++				break
++			}
++			h.outputs[id] = append([]float32(nil), vectors[i]...)
++		}
++	}
++	h.mu.Unlock()
++	err = h.finish(err)
++	if err != nil {
++		return h.ctx, err
++	}
++	return h.Context(), nil
++}
++func (h *KnowledgeSQLiteEmbeddingInputRead) checkInTx(tx *gorm.DB, outputs bool) error {
++	if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	pool, err := tx.DB()
++	if err != nil {
++		return err
++	}
++	original, err := h.db.DB()
++	if err != nil || pool != original || !sameOriginalModelCallerInRepository(tx.Statement.Context, h.ctx) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	guard, _ := h.ctx.Value(knowledgeBuildInputKey{}).(knowledgeBuildInputContext)
++	source, _ := guard.reader.(*KnowledgeInputProvenanceStore)
++	authority, err := knowledgeSQLiteEmbeddingAuthority(tx, source)
++	if err != nil {
++		return err
++	}
++	for id, fact := range h.inputs {
++		var actual types.KnowledgeSQLiteEmbeddingInput
++		if err = tx.Where("id=?", fact.ID).Take(&actual).Error; err != nil {
++			return err
++		}
++		if !reflect.DeepEqual(actual, fact) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		body := h.bodies[id]
++		admission, err := validateKnowledgeInputWrite(h.ctx, tx, fact.TenantID, fact.KnowledgeBaseID, fact.KnowledgeID)
++		if err != nil {
++			return err
++		}
++		if admission == nil || admission.AdmissionID != fact.AdmissionID || admission.OriginKind != "human" {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		snap, err := authority.captureKnowledgeBuildSnapshotInTx(tx, types.KnowledgeBuildInputCaptureRequest{TenantID: fact.TenantID, KnowledgeBaseID: fact.KnowledgeBaseID, KnowledgeID: fact.KnowledgeID, ChunkIDs: body.Proof.ChunkIDs, Expected: &body.Proof}, true)
++		if err != nil {
++			return err
++		}
++		if _, err = authority.AuthorizeCurrentKnowledgeInputWrite(h.ctx, snap.KnowledgeBase); err != nil {
++			return err
++		}
++		if outputs {
++			h.mu.Lock()
++			vector, ok := h.outputs[id]
++			h.mu.Unlock()
++			if !ok || len(vector) != fact.ExpectedDimensions {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++		}
++	}
++	if err = h.model.startCheck(); err != nil {
++		return err
++	}
++	err = h.model.checkInTx(tx.Session(&gorm.Session{NewDB: true}).WithContext(h.model.ctx))
++	if err = h.model.finishCheck(err); err != nil {
++		return err
++	}
++	if err = checkOriginalBodyAvailableBatchForCapturedInTx(h.ctx, tx, h.rows, h.heads); err != nil {
++		return err
++	}
++	return h.finalClockInTx(tx, nil)
++}
++func (h *KnowledgeSQLiteEmbeddingInputRead) finalClockInTx(tx *gorm.DB, extra []originalBodyLease) error {
++	guard, _ := h.ctx.Value(knowledgeBuildInputKey{}).(knowledgeBuildInputContext)
++	source, _ := guard.reader.(*KnowledgeInputProvenanceStore)
++	authority, err := knowledgeSQLiteEmbeddingAuthority(tx, source)
++	if err != nil {
++		return err
++	}
++	for _, fact := range h.inputs {
++		var kb types.KnowledgeBase
++		if err = tx.Where("id=? AND tenant_id=?", fact.KnowledgeBaseID, fact.TenantID).Take(&kb).Error; err != nil {
++			return err
++		}
++		if _, err = authority.AuthorizeCurrentKnowledgeInputWrite(h.ctx, &kb); err != nil {
++			return err
++		}
++	}
++	controls, err := modelControls(tx, h.proof.ModelID)
++	if err != nil {
++		return err
++	}
++	if controls.DefinitionRevision != h.proof.DefinitionRevision || controls.CredentialRevision != h.proof.CredentialRevision || controls.StateEpoch != h.proof.StateEpoch {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	stage, _ := tx.Statement.Context.Value(knowledgeSQLiteEmbeddingSaveKey{}).(*knowledgeSQLiteEmbeddingSave)
++	if len(extra) > 0 && stage != nil {
++		for id, info := range stage.infos {
++			var receipt types.KnowledgeSQLiteEmbeddingReceipt
++			if err = tx.Where("input_id=?", h.inputs[id].ID).Take(&receipt).Error; err != nil {
++				return err
++			}
++			if err = checkKnowledgeSQLiteVectorCurrentInTx(tx, receipt.RowID, receipt.Revision, receipt.Dimension, info, h.outputs[id]); err != nil {
++				return err
++			}
++		}
++	}
++	// All concrete source/model/body checks precede this fresh binding batch.
++	expected := map[string]originalBodyLease{}
++	for _, l := range h.leases {
++		expected[l.LeaseID] = l
++	}
++	for _, l := range h.model.hold.Leases {
++		expected[l.LeaseID] = l
++	}
++	for _, l := range extra {
++		expected[l.LeaseID] = l
++	}
++	keys := []string{}
++	for id := range expected {
++		keys = append(keys, id)
++	}
++	sort.Strings(keys)
++	var leases []originalBodyLease
++	if err := bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("lease_id IN ?", keys).Order("lease_id").Find(&leases).Error; err != nil {
++		return err
++	}
++	if len(leases) != len(keys) {
++		return ErrOriginalBodyUnavailable
++	}
++	bodyIDs := []string{}
++	seen := map[string]bool{}
++	for _, l := range leases {
++		want := expected[l.LeaseID]
++		if l.BodyID != want.BodyID || l.OwnerID != want.OwnerID || l.Kind != "read" || l.Kind != want.Kind || l.Epoch != want.Epoch || l.ReleasedAtMS != nil {
++			return ErrOriginalBodyUnavailable
++		}
++		if !seen[l.BodyID] {
++			seen[l.BodyID] = true
++			bodyIDs = append(bodyIDs, l.BodyID)
++		}
++	}
++	sort.Strings(bodyIDs)
++	var bodies []originalBodyPayload
++	if err := bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("id IN ?", bodyIDs).Order("id").Find(&bodies).Error; err != nil {
++		return err
++	}
++	if len(bodies) != len(bodyIDs) {
++		return ErrOriginalBodyUnavailable
++	}
++	actual := map[string]originalBodyPayload{}
++	for _, b := range bodies {
++		actual[b.ID] = b
++	}
++	for _, l := range leases {
++		b := actual[l.BodyID]
++		want, ok := h.payloads[l.BodyID]
++		if !ok && stage != nil {
++			want, ok = stage.payloads[l.BodyID]
++		}
++		if !ok || b.ID != l.BodyID || b.State != "live" || b.PurgeEpoch != l.Epoch || !reflect.DeepEqual(b, want) {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	rows := append([]originalBodyAvailabilityRow(nil), h.rows...)
++	wanted := append([]originalBodyFieldHead(nil), h.heads...)
++	if len(extra) > 0 && stage != nil {
++		rows = append(rows, stage.rows...)
++		wanted = append(wanted, stage.heads...)
++	}
++	heads, err := originalBodyBatchHeads(tx, rows)
++	if err != nil {
++		return err
++	}
++	if !sameOriginalBodyHeads(wanted, heads) {
++		return ErrOriginalBodyUnavailable
++	}
++	if err = knowledgeSQLiteFinalLeaseClockInTx(tx, expected); err != nil {
++		return err
++	}
++	if err = h.model.ctx.Err(); err != nil {
++		return err
++	}
++	return h.ctx.Err()
++}
++
++// One last actual SQL statement reloads every captured tuple and its expiry
++// together with the database clock, after all entity/body/native-index IO.
++func knowledgeSQLiteFinalLeaseClockInTx(tx *gorm.DB, expected map[string]originalBodyLease) error {
++	keys := []string{}
++	for id := range expected {
++		keys = append(keys, id)
++	}
++	sort.Strings(keys)
++	if len(keys) == 0 {
++		return ErrOriginalBodyUnavailable
++	}
++	type finalRow struct {
++		LeaseID, BodyID, Kind, OwnerID   string
++		Epoch, ExpiresAtMS, FinalClockMS int64
++		ReleasedAtMS                     *int64
++	}
++	var rows []finalRow
++	if err := bodyInternal(tx).Table("original_body_leases").Select("lease_id,body_id,kind,owner_id,epoch,expires_at_ms,released_at_ms,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) AS final_clock_ms").Where("lease_id IN ?", keys).Order("lease_id").Find(&rows).Error; err != nil {
++		return err
++	}
++	if len(rows) != len(keys) {
++		return ErrOriginalBodyUnavailable
++	}
++	for _, row := range rows {
++		want, ok := expected[row.LeaseID]
++		if !ok || row.BodyID != want.BodyID || row.OwnerID != want.OwnerID || row.Kind != want.Kind || row.Kind != "read" || row.Epoch != want.Epoch || row.ReleasedAtMS != nil || row.ExpiresAtMS <= row.FinalClockMS {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	return tx.Statement.Context.Err()
++}
++func (h *KnowledgeSQLiteEmbeddingInputRead) Close() error {
++	h.mu.Lock()
++	if h.closed {
++		joined := h.joined
++		h.mu.Unlock()
++		<-joined
++		h.mu.Lock()
++		err := h.failed
++		h.mu.Unlock()
++		return err
++	}
++	h.closed = true
++	h.cancel()
++	h.mu.Unlock()
++	h.checks.Wait()
++	cleanup, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), 5*time.Second)
++	defer cancel()
++	var err error
++	all := map[string]originalBodyLease{}
++	for _, l := range h.leases {
++		all[l.LeaseID] = l
++	}
++	for id, l := range h.committed {
++		all[id] = l
++	}
++	for _, l := range all {
++		result := bodyInternal(h.db.WithContext(cleanup)).Model(&originalBodyLease{}).Where("lease_id=? AND body_id=? AND owner_id=? AND kind=? AND epoch=? AND released_at_ms IS NULL", l.LeaseID, l.BodyID, l.OwnerID, l.Kind, l.Epoch).Update("released_at_ms", time.Now().UnixMilli())
++		err = errors.Join(err, result.Error)
++	}
++	h.mu.Lock()
++	if h.failed == nil {
++		h.failed = err
++	}
++	close(h.joined)
++	h.mu.Unlock()
++	return err
++}
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_read.go b/internal/application/repository/knowledge_sqlite_embedding_read.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe4480abd5ffd83a8f91ba1def8ca85ea746cf5f
+--- /dev/null
++++ b/internal/application/repository/knowledge_sqlite_embedding_read.go
+@@ -0,0 +1,709 @@
++package repository
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"reflect"
++	"sort"
++	"sync"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	modelembedding "github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++)
++
++type KnowledgeSQLiteEmbeddingStore struct {
++	db       *gorm.DB
++	material *KnowledgeInputProvenanceStore
++	models   *modelRepository
++}
++
++func NewKnowledgeSQLiteEmbeddingStore(db *gorm.DB, material *KnowledgeInputProvenanceStore, models interfaces.ModelRepository) *KnowledgeSQLiteEmbeddingStore {
++	actual, ok := models.(*modelRepository)
++	if !ok || material == nil {
++		return nil
++	}
++	pool, e := db.DB()
++	mp, e2 := actual.db.DB()
++	sp, e3 := material.db.DB()
++	if e != nil || e2 != nil || e3 != nil || pool != mp || pool != sp {
++		return nil
++	}
++	return &KnowledgeSQLiteEmbeddingStore{db, material, actual}
++}
++func (s *KnowledgeSQLiteEmbeddingStore) CheckSchema() error {
++	return knowledgeSQLiteEmbeddingSchema(s.db)
++}
++
++type KnowledgeSQLiteEmbeddingVectorRead struct {
++	store     *KnowledgeSQLiteEmbeddingStore
++	ctx       context.Context
++	cancel    context.CancelFunc
++	originals map[uint64]types.KnowledgeSQLiteEmbeddingInput
++	receipts  map[uint64]types.KnowledgeSQLiteEmbeddingReceipt
++	body      map[uint64]knowledgeSQLiteEmbeddingInputBody
++	vectors   map[uint64][]float32
++	models    map[string]*historicalModelRead
++	heads     []originalBodyFieldHead
++	rows      []originalBodyAvailabilityRow
++	leases    map[string]originalBodyLease
++	payloads  map[string]originalBodyPayload
++	mu        sync.Mutex
++	closed    bool
++	failed    error
++	checks    sync.WaitGroup
++	joined    chan struct{}
++}
++
++// Only metadata is read before authorization/leases. Bodies are hydrated below
++// from the exact immutable input/output rows under their genuine historical
++// model provider. No old model is constructed and no credential is decrypted.
++func (s *KnowledgeSQLiteEmbeddingStore) BeginVectorRead(ctx context.Context, ids []uint64) (*KnowledgeSQLiteEmbeddingVectorRead, error) {
++	if s == nil || ctx == nil || len(ids) == 0 || len(ids) > 4096 {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	r := &KnowledgeSQLiteEmbeddingVectorRead{store: s, originals: map[uint64]types.KnowledgeSQLiteEmbeddingInput{}, receipts: map[uint64]types.KnowledgeSQLiteEmbeddingReceipt{}, body: map[uint64]knowledgeSQLiteEmbeddingInputBody{}, vectors: map[uint64][]float32{}, models: map[string]*historicalModelRead{}, leases: map[string]originalBodyLease{}, payloads: map[string]originalBodyPayload{}, joined: make(chan struct{})}
++	r.ctx, r.cancel = context.WithCancel(ctx)
++	fail := func(err error) (*KnowledgeSQLiteEmbeddingVectorRead, error) { return nil, errors.Join(err, r.Close()) }
++	for _, id := range ids {
++		if id == 0 {
++			return fail(ErrKnowledgeSQLiteEmbeddingUnknown)
++		}
++		if _, seen := r.receipts[id]; seen {
++			return fail(ErrKnowledgeSQLiteEmbeddingUnknown)
++		}
++		var receipt types.KnowledgeSQLiteEmbeddingReceipt
++		if err := s.db.WithContext(r.ctx).Select("id,tenant_id,knowledge_base_id,knowledge_id,chunk_id,input_id,input_digest,row_id,revision,dimension,vector_sha256,digest,created_at_ms").Where("row_id=?", id).Take(&receipt).Error; err != nil {
++			return fail(err)
++		}
++		var input types.KnowledgeSQLiteEmbeddingInput
++		if err := s.db.WithContext(r.ctx).Select("id,tenant_id,knowledge_base_id,knowledge_id,chunk_id,admission_id,model_id,model_proof_json,space_digest,expected_dimensions,input_sha256,digest,created_at_ms").Where("id=?", receipt.InputID).Take(&input).Error; err != nil {
++			return fail(err)
++		}
++		var proof types.ModelOriginalProof
++		if json.Unmarshal([]byte(input.ModelProofJSON), &proof) != nil || !proof.Valid() || proof.ModelID != input.ModelID {
++			return fail(ErrKnowledgeSQLiteEmbeddingUnknown)
++		}
++		if _, found := r.models[proof.Digest]; !found {
++			model, err := s.models.BeginHistoricalModelOriginalRead(r.ctx, proof)
++			if err != nil {
++				return fail(err)
++			}
++			held, ok := model.(*historicalModelRead)
++			if !ok {
++				_ = model.Close()
++				return fail(ErrKnowledgeSQLiteEmbeddingUnknown)
++			}
++			r.models[proof.Digest] = held
++		}
++		r.originals[id] = input
++		r.receipts[id] = receipt
++	}
++	err := s.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
++		if err := knowledgeSQLiteEmbeddingSchema(tx); err != nil {
++			return err
++		}
++		authority, err := knowledgeSQLiteEmbeddingAuthority(tx, s.material)
++		if err != nil {
++			return err
++		}
++		fresh, err := authority.RefreshCurrentReadActor(r.ctx)
++		if err != nil {
++			return err
++		}
++		for _, model := range r.models {
++			for _, lease := range model.hold.Hold.Leases {
++				r.leases[lease.LeaseID] = lease
++			}
++		}
++		owner := "knowledge-sqlite-vector-read/" + uuid.NewString()
++		// Rebind and authorize metadata in this transaction. No application body
++		// field is selected until its exact head has a real owned read lease.
++		initial := []originalBodyAvailabilityRow{}
++		for _, id := range ids {
++			expectedInput, expectedReceipt := r.originals[id], r.receipts[id]
++			var input types.KnowledgeSQLiteEmbeddingInput
++			var receipt types.KnowledgeSQLiteEmbeddingReceipt
++			if err = tx.Select("id,tenant_id,knowledge_base_id,knowledge_id,chunk_id,admission_id,model_id,model_proof_json,space_digest,expected_dimensions,input_sha256,digest,created_at_ms").Where("id=?", expectedInput.ID).Take(&input).Error; err != nil {
++				return err
++			}
++			if err = tx.Select("id,tenant_id,knowledge_base_id,knowledge_id,chunk_id,input_id,input_digest,row_id,revision,dimension,vector_sha256,digest,created_at_ms").Where("id=?", expectedReceipt.ID).Take(&receipt).Error; err != nil {
++				return err
++			}
++			if !reflect.DeepEqual(input, expectedInput) || !reflect.DeepEqual(receipt, expectedReceipt) {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if digest, e := knowledgeSQLiteEmbeddingInputDigest(input); e != nil || digest != input.Digest {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if digest, e := knowledgeSQLiteEmbeddingReceiptDigest(receipt); e != nil || digest != receipt.Digest {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if receipt.RowID != id || receipt.InputID != input.ID || receipt.InputDigest != input.Digest || receipt.TenantID != input.TenantID || receipt.KnowledgeBaseID != input.KnowledgeBaseID || receipt.KnowledgeID != input.KnowledgeID || receipt.ChunkID != input.ChunkID || receipt.Dimension != input.ExpectedDimensions {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			var kb types.KnowledgeBase
++			if err = tx.Where("id=? AND tenant_id=?", input.KnowledgeBaseID, input.TenantID).Take(&kb).Error; err != nil {
++				return err
++			}
++			if err = r.authorizeKB(authority, fresh, &kb); err != nil {
++				return err
++			}
++			if err = r.checkSourceBodyRoutingInTx(tx, input, []string{input.ChunkID}); err != nil {
++				return err
++			}
++			initial = append(initial, originalBodyAvailabilityRow{input.TableName(), input.ID}, originalBodyAvailabilityRow{receipt.TableName(), receipt.ID}, originalBodyAvailabilityRow{"knowledges", input.KnowledgeID}, originalBodyAvailabilityRow{"chunks", input.ChunkID})
++		}
++		for _, model := range r.models {
++			initial = append(initial, originalBodyAvailabilityRow{"model_definition_originals", model.hold.Hold.Proof.DefinitionID}, originalBodyAvailabilityRow{"model_credential_originals", model.hold.Hold.Proof.CredentialID})
++		}
++		if err = r.claimBodyRowsInTx(tx, initial, owner); err != nil {
++			return err
++		}
++		for _, id := range ids {
++			input := r.originals[id]
++			receipt := r.receipts[id]
++			var kb types.KnowledgeBase
++			if err = tx.Where("id=? AND tenant_id=?", input.KnowledgeBaseID, input.TenantID).Take(&kb).Error; err != nil {
++				return err
++			}
++			if err = r.authorizeKB(authority, fresh, &kb); err != nil {
++				return err
++			}
++			if err = tx.Where("id=?", input.ID).Take(&input).Error; err != nil {
++				return err
++			}
++			if err = tx.Where("id=?", receipt.ID).Take(&receipt).Error; err != nil {
++				return err
++			}
++			inputMetadata, receiptMetadata := input, receipt
++			inputMetadata.InputJSON = ""
++			receiptMetadata.VectorJSON = ""
++			if !reflect.DeepEqual(inputMetadata, r.originals[id]) || !reflect.DeepEqual(receiptMetadata, r.receipts[id]) {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if digest, e := knowledgeSQLiteEmbeddingInputDigest(input); e != nil || digest != input.Digest || input.InputSHA256 != bodySHA([]byte(input.InputJSON)) {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if digest, e := knowledgeSQLiteEmbeddingReceiptDigest(receipt); e != nil || digest != receipt.Digest {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			var body knowledgeSQLiteEmbeddingInputBody
++			if json.Unmarshal([]byte(input.InputJSON), &body) != nil || body.Proof.SourceLineage == nil || body.Proof.SourceLineage.RequireComplete() != nil || len(body.Proof.SourceLineage.Sources) != 0 {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if body.Proof.AdmissionID != input.AdmissionID || body.Info.ChunkID != input.ChunkID || body.Info.KnowledgeID != input.KnowledgeID || body.Info.KnowledgeBaseID != input.KnowledgeBaseID || body.Info.SourceID != input.ChunkID || body.Info.SourceType != types.ChunkSourceType || modelembedding.OriginalIndexText(body.Info.Content) != body.WireText {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			var vector []float32
++			if json.Unmarshal([]byte(receipt.VectorJSON), &vector) != nil {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			if receipt.InputID != input.ID || receipt.InputDigest != input.Digest || receipt.TenantID != input.TenantID || receipt.KnowledgeBaseID != input.KnowledgeBaseID || receipt.KnowledgeID != input.KnowledgeID || receipt.ChunkID != input.ChunkID || receipt.Dimension != input.ExpectedDimensions {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			data, e := knowledgeSQLiteVectorBytes(vector)
++			if e != nil || len(vector) != receipt.Dimension || bodySHA(data) != receipt.VectorSHA256 {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			r.originals[id] = input
++			r.receipts[id] = receipt
++			r.body[id] = body
++			r.vectors[id] = vector
++			r.rows = append(r.rows, originalBodyAvailabilityRow{input.TableName(), input.ID}, originalBodyAvailabilityRow{receipt.TableName(), receipt.ID}, originalBodyAvailabilityRow{"knowledges", input.KnowledgeID})
++			for _, chunk := range body.Proof.ChunkIDs {
++				r.rows = append(r.rows, originalBodyAvailabilityRow{"chunks", chunk})
++			}
++		}
++		// The now-held input JSON supplies the remaining exact influence set.
++		// Claim every additional source body before its snapshot can hydrate it.
++		for _, id := range ids {
++			if err = r.checkSourceBodyRoutingInTx(tx, r.originals[id], r.body[id].Proof.ChunkIDs); err != nil {
++				return err
++			}
++		}
++		if err = r.claimBodyRowsInTx(tx, r.rows, owner); err != nil {
++			return err
++		}
++		return r.checkInTx(tx)
++	}, memoryWriteOptions(s.db))
++	if err != nil {
++		return fail(err)
++	}
++	return r, nil
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) checkSourceBodyRoutingInTx(tx *gorm.DB, input types.KnowledgeSQLiteEmbeddingInput, chunkIDs []string) error {
++	var knowledge struct {
++		ID              string
++		TenantID        uint64
++		KnowledgeBaseID string
++	}
++	if err := tx.Table("knowledges").Select("id,tenant_id,knowledge_base_id").Where("id=? AND tenant_id=? AND knowledge_base_id=?", input.KnowledgeID, input.TenantID, input.KnowledgeBaseID).Take(&knowledge).Error; err != nil {
++		return err
++	}
++	for _, id := range chunkIDs {
++		var chunk struct {
++			ID                           string
++			TenantID                     uint64
++			KnowledgeBaseID, KnowledgeID string
++		}
++		if id == "" {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err := tx.Table("chunks").Select("id,tenant_id,knowledge_base_id,knowledge_id").Where("id=? AND tenant_id=? AND knowledge_base_id=? AND knowledge_id=?", id, input.TenantID, input.KnowledgeBaseID, input.KnowledgeID).Take(&chunk).Error; err != nil {
++			return err
++		}
++	}
++	return tx.Statement.Context.Err()
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) claimBodyRowsInTx(tx *gorm.DB, rows []originalBodyAvailabilityRow, owner string) error {
++	rows = knowledgeSQLiteUniqueBodyRows(rows)
++	if err := checkOriginalBodyAvailableBatchInTx(r.ctx, tx, rows); err != nil {
++		return err
++	}
++	heads, err := originalBodyBatchHeads(tx, rows)
++	if err != nil {
++		return err
++	}
++	byRow := map[originalBodyAvailabilityRow][]originalBodyFieldHead{}
++	for _, head := range heads {
++		key := originalBodyAvailabilityRow{head.SourceTable, head.RowKey}
++		byRow[key] = append(byRow[key], head)
++	}
++	for _, input := range r.originals {
++		row := originalBodyAvailabilityRow{input.TableName(), input.ID}
++		list, needed := byRow[row]
++		if needed {
++			scope := originalBodyScope{Tenant: input.TenantID, KB: input.KnowledgeBaseID, Knowledge: input.KnowledgeID, OwnerKind: input.TableName(), OwnerID: input.ID, AdmissionID: input.AdmissionID}
++			if len(list) != 1 || list[0].ColumnName != "input_json" || list[0].SourceIdentitySHA256 != bodyIdentity(input.TableName(), input.ID, "input_json", scope) {
++				return ErrOriginalBodyUnavailable
++			}
++			var payload originalBodyPayload
++			if err = bodyInternal(tx).Select("id,body_sha256").Where("id=?", list[0].BodyID).Take(&payload).Error; err != nil {
++				return err
++			}
++			if payload.BodySHA256 != input.InputSHA256 {
++				return ErrOriginalBodyUnavailable
++			}
++		}
++	}
++	for _, receipt := range r.receipts {
++		row := originalBodyAvailabilityRow{receipt.TableName(), receipt.ID}
++		list, needed := byRow[row]
++		if needed {
++			scope := originalBodyScope{Tenant: receipt.TenantID, KB: receipt.KnowledgeBaseID, Knowledge: receipt.KnowledgeID, OwnerKind: receipt.TableName(), OwnerID: receipt.ID}
++			if len(list) != 1 || list[0].ColumnName != "vector_json" || list[0].SourceIdentitySHA256 != bodyIdentity(receipt.TableName(), receipt.ID, "vector_json", scope) {
++				return ErrOriginalBodyUnavailable
++			}
++		}
++	}
++	for _, row := range rows {
++		if (row.Table == "knowledge_sqlite_embedding_inputs" || row.Table == "knowledge_sqlite_embedding_receipts") && len(byRow[row]) != 1 {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	acquired := map[string]bool{}
++	for _, lease := range r.leases {
++		acquired[lease.BodyID] = true
++	}
++	retention := NewOriginalBodyRetentionStore(tx)
++	for _, head := range heads {
++		if acquired[head.BodyID] {
++			continue
++		}
++		id, e := retention.acquireLeaseInTx(tx, head.BodyID, "read", owner, 15*time.Minute)
++		if e != nil {
++			return e
++		}
++		var lease originalBodyLease
++		if e = bodyInternal(tx).Where("lease_id=?", id).Take(&lease).Error; e != nil {
++			return e
++		}
++		r.leases[lease.LeaseID] = lease
++		acquired[head.BodyID] = true
++	}
++	for _, lease := range r.leases {
++		if _, seen := r.payloads[lease.BodyID]; seen {
++			continue
++		}
++		var payload originalBodyPayload
++		if err = bodyInternal(tx).Where("id=?", lease.BodyID).Take(&payload).Error; err != nil {
++			return err
++		}
++		r.payloads[lease.BodyID] = payload
++	}
++	existing := map[string]originalBodyFieldHead{}
++	for _, head := range r.heads {
++		existing[head.SlotID] = head
++	}
++	for _, head := range heads {
++		if previous, ok := existing[head.SlotID]; ok {
++			if previous != head {
++				return ErrOriginalBodyUnavailable
++			}
++		} else {
++			r.heads = append(r.heads, head)
++			existing[head.SlotID] = head
++		}
++	}
++	r.rows = knowledgeSQLiteUniqueBodyRows(append(r.rows, rows...))
++	return tx.Statement.Context.Err()
++}
++func knowledgeSQLiteUniqueBodyRows(rows []originalBodyAvailabilityRow) []originalBodyAvailabilityRow {
++	seen := map[originalBodyAvailabilityRow]bool{}
++	out := []originalBodyAvailabilityRow{}
++	for _, row := range rows {
++		if !seen[row] {
++			seen[row] = true
++			out = append(out, row)
++		}
++	}
++	sort.Slice(out, func(i, j int) bool {
++		if out[i].Table == out[j].Table {
++			return out[i].ID < out[j].ID
++		}
++		return out[i].Table < out[j].Table
++	})
++	return out
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) authorizeKB(s *KnowledgeInputProvenanceStore, ctx context.Context, kb *types.KnowledgeBase) error {
++	if s.actorGroups == nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if _, err := access.ResolveKB(ctx, access.KBRequest{Caller: types.CallerFromContext(ctx)}, kb, types.OrgRoleViewer, s.actorShares, s.messageActorAgents); err != nil {
++		return err
++	}
++	permission, err := s.actorGroups.EffectivePermission(ctx, kb.TenantID, types.GroupResourceTypeKnowledgeBase, kb.ID, types.ResourceActionRead, time.Now().UTC())
++	if err != nil {
++		return err
++	}
++	if !permission.Allowed {
++		return access.ErrForbidden
++	}
++	return ctx.Err()
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) checkInTx(tx *gorm.DB) error {
++	if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := knowledgeSQLiteEmbeddingSchema(tx); err != nil {
++		return err
++	}
++	pool, e := tx.DB()
++	if e != nil {
++		return e
++	}
++	actual, e := r.store.db.DB()
++	if e != nil || actual != pool || !sameOriginalModelCallerInRepository(tx.Statement.Context, r.ctx) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	authority, e := knowledgeSQLiteEmbeddingAuthority(tx, r.store.material)
++	if e != nil {
++		return e
++	}
++	fresh, e := authority.RefreshCurrentReadActor(r.ctx)
++	if e != nil {
++		return e
++	}
++	controls := map[string]modelOriginalControl{}
++	for id, input := range r.originals {
++		var actualInput types.KnowledgeSQLiteEmbeddingInput
++		var receipt types.KnowledgeSQLiteEmbeddingReceipt
++		if e = tx.Where("id=?", input.ID).Take(&actualInput).Error; e != nil {
++			return e
++		}
++		if e = tx.Where("id=?", r.receipts[id].ID).Take(&receipt).Error; e != nil {
++			return e
++		}
++		if !reflect.DeepEqual(input, actualInput) || !reflect.DeepEqual(receipt, r.receipts[id]) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		body := r.body[id]
++		snap, e := authority.captureKnowledgeBuildSnapshotInTx(tx, types.KnowledgeBuildInputCaptureRequest{TenantID: input.TenantID, KnowledgeBaseID: input.KnowledgeBaseID, KnowledgeID: input.KnowledgeID, ChunkIDs: body.Proof.ChunkIDs, Expected: &body.Proof}, true)
++		if e != nil {
++			return e
++		}
++		if e = r.authorizeKB(authority, fresh, snap.KnowledgeBase); e != nil {
++			return e
++		}
++		var proof types.ModelOriginalProof
++		if json.Unmarshal([]byte(input.ModelProofJSON), &proof) != nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		model := r.models[proof.Digest]
++		if model == nil || model.ctx.Err() != nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if e = CheckHistoricalModelOriginalHolds(model.ctx, tx.Session(&gorm.Session{NewDB: true}).WithContext(model.ctx), proof); e != nil {
++			return e
++		}
++		current, e := modelControls(tx, proof.ModelID)
++		if e != nil {
++			return e
++		}
++		controls[proof.ModelID] = current
++		facts, e := loadHistoricalModelFacts(tx.Session(&gorm.Session{NewDB: true}).WithContext(model.ctx), proof)
++		if e != nil {
++			return e
++		}
++		var definition types.ModelOriginalDefinition
++		if json.Unmarshal([]byte(facts.Definition.DefinitionJSON), &definition) != nil || definition.Type != types.ModelTypeEmbedding || definition.Parameters.OriginalEmbedding == nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		recipe := definition.Parameters.OriginalEmbedding
++		if modelembedding.ValidateOriginalEmbeddingDefinition(recipe) != nil || recipe.SpaceDigest != input.SpaceDigest || recipe.ExpectedDimensions != input.ExpectedDimensions {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		var control knowledgeSQLiteEmbeddingControl
++		var canonical knowledgeSQLiteEmbeddingVectorRow
++		if e = tx.Where("row_id=?", id).Take(&control).Error; e != nil {
++			return e
++		}
++		if e = tx.Where("row_id=?", id).Take(&canonical).Error; e != nil {
++			return e
++		}
++		bytes, e := knowledgeSQLiteVectorBytes(r.vectors[id])
++		if e != nil {
++			return e
++		}
++		if !control.Present || control.Revision != receipt.Revision || canonical.Dimension != receipt.Dimension || !reflect.DeepEqual(canonical.Vector, bytes) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		var row struct {
++			SourceID                                              string
++			SourceType                                            int
++			ChunkID, KnowledgeID, KnowledgeBaseID, TagID, Content string
++			Dimension                                             int
++			IsEnabled                                             *bool
++		}
++		if e = tx.Table("lite_embeddings").Where("id=?", id).Take(&row).Error; e != nil {
++			return e
++		}
++		info := body.Info
++		if row.SourceID != info.SourceID || row.SourceType != int(info.SourceType) || row.ChunkID != info.ChunkID || row.KnowledgeID != info.KnowledgeID || row.KnowledgeBaseID != info.KnowledgeBaseID || row.TagID != info.TagID || row.Content != info.Content || row.Dimension != input.ExpectedDimensions || row.IsEnabled == nil || *row.IsEnabled != info.IsEnabled {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		var native struct{ Embedding []byte }
++		table := fmt.Sprintf("vec_embeddings_%d", input.ExpectedDimensions)
++		if e = tx.Raw("SELECT embedding FROM "+table+" WHERE rowid=?", id).Take(&native).Error; e != nil {
++			return e
++		}
++		if !reflect.DeepEqual(native.Embedding, bytes) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++	}
++	if e = checkOriginalBodyAvailableBatchForCapturedInTx(r.ctx, tx, r.rows, r.heads); e != nil {
++		return e
++	}
++	// Reauthenticate after physical/journal IO, then reload the actual union and
++	// compare its one final SQL clock. Historical contexts never authorize calls.
++	fresh, e = authority.RefreshCurrentReadActor(r.ctx)
++	if e != nil {
++		return e
++	}
++	for _, input := range r.originals {
++		var kb types.KnowledgeBase
++		if e = tx.Where("id=? AND tenant_id=?", input.KnowledgeBaseID, input.TenantID).Take(&kb).Error; e != nil {
++			return e
++		}
++		if e = r.authorizeKB(authority, fresh, &kb); e != nil {
++			return e
++		}
++	}
++	return r.finalClockInTx(tx, controls)
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) finalClockInTx(tx *gorm.DB, controls map[string]modelOriginalControl) error {
++	for id, want := range controls {
++		actual, err := modelControls(tx, id)
++		if err != nil {
++			return err
++		}
++		if actual != want {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++	}
++	for id, receipt := range r.receipts {
++		if err := checkKnowledgeSQLiteVectorCurrentInTx(tx, id, receipt.Revision, receipt.Dimension, r.body[id].Info, r.vectors[id]); err != nil {
++			return err
++		}
++	}
++	keys := []string{}
++	expected := map[string]originalBodyLease{}
++	for _, l := range r.leases {
++		keys = append(keys, l.LeaseID)
++		expected[l.LeaseID] = l
++	}
++	sort.Strings(keys)
++	var leases []originalBodyLease
++	if e := bodyInternal(tx).Where("lease_id IN ?", keys).Order("lease_id").Find(&leases).Error; e != nil {
++		return e
++	}
++	if len(leases) != len(keys) {
++		return ErrOriginalBodyUnavailable
++	}
++	for _, l := range leases {
++		want := expected[l.LeaseID]
++		if l.BodyID != want.BodyID || l.OwnerID != want.OwnerID || l.Kind != want.Kind || l.Kind != "read" || l.Epoch != want.Epoch || l.ReleasedAtMS != nil {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	heads, e := originalBodyBatchHeads(tx, r.rows)
++	if e != nil {
++		return e
++	}
++	if !sameOriginalBodyHeads(r.heads, heads) {
++		return ErrOriginalBodyUnavailable
++	}
++	ids := []string{}
++	for id := range r.payloads {
++		ids = append(ids, id)
++	}
++	sort.Strings(ids)
++	var payloads []originalBodyPayload
++	if e = bodyInternal(tx).Where("id IN ?", ids).Order("id").Find(&payloads).Error; e != nil {
++		return e
++	}
++	if len(payloads) != len(ids) {
++		return ErrOriginalBodyUnavailable
++	}
++	for _, b := range payloads {
++		want := r.payloads[b.ID]
++		if b.State != "live" || !reflect.DeepEqual(want, b) {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	if e = knowledgeSQLiteFinalLeaseClockInTx(tx, expected); e != nil {
++		return e
++	}
++	for _, m := range r.models {
++		if e = m.ctx.Err(); e != nil {
++			return e
++		}
++	}
++	return r.ctx.Err()
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) start() error {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.closed {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if r.failed != nil {
++		return r.failed
++	}
++	if e := r.ctx.Err(); e != nil {
++		return e
++	}
++	r.checks.Add(1)
++	return nil
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) finish(e error) error {
++	r.mu.Lock()
++	if e == nil {
++		e = r.ctx.Err()
++	}
++	if e != nil && r.failed == nil {
++		r.failed = e
++		r.cancel()
++	}
++	r.mu.Unlock()
++	r.checks.Done()
++	return e
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) Context() context.Context { return r.ctx }
++func (r *KnowledgeSQLiteEmbeddingVectorRead) Recheck() error {
++	if e := r.start(); e != nil {
++		return e
++	}
++	e := r.store.db.WithContext(r.ctx).Transaction(r.checkInTx, memoryWriteOptions(r.store.db))
++	return r.finish(e)
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) Snapshot() ([]types.KnowledgeSQLiteEmbeddingVector, error) {
++	if e := r.start(); e != nil {
++		return nil, e
++	}
++	out := []types.KnowledgeSQLiteEmbeddingVector{}
++	e := r.store.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
++		if e := r.checkInTx(tx); e != nil {
++			return e
++		}
++		ids := []uint64{}
++		for id := range r.originals {
++			ids = append(ids, id)
++		}
++		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
++		for _, id := range ids {
++			out = append(out, types.KnowledgeSQLiteEmbeddingVector{RowID: id, Info: r.body[id].Info, Vector: append([]float32(nil), r.vectors[id]...), SpaceDigest: r.originals[id].SpaceDigest})
++		}
++		return r.ctx.Err()
++	}, memoryWriteOptions(r.store.db))
++	if e = r.finish(e); e != nil {
++		return nil, e
++	}
++	return out, nil
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) CheckInTx(ctx context.Context, tx *gorm.DB) error {
++	if e := r.start(); e != nil {
++		return e
++	}
++	if !sameOriginalModelCallerInRepository(ctx, r.ctx) {
++		return r.finish(ErrKnowledgeSQLiteEmbeddingUnknown)
++	}
++	return r.finish(r.checkInTx(tx.WithContext(ctx)))
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) Close() error {
++	r.mu.Lock()
++	if r.closed {
++		joined := r.joined
++		r.mu.Unlock()
++		<-joined
++		r.mu.Lock()
++		e := r.failed
++		r.mu.Unlock()
++		return e
++	}
++	r.closed = true
++	r.cancel()
++	r.mu.Unlock()
++	r.checks.Wait()
++	cleanup, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 5*time.Second)
++	defer cancel()
++	var err error
++	modelLeases := map[string]bool{}
++	for _, m := range r.models {
++		for _, l := range m.hold.Hold.Leases {
++			modelLeases[l.LeaseID] = true
++		}
++	}
++	for _, l := range r.leases {
++		if modelLeases[l.LeaseID] {
++			continue
++		}
++		q := bodyInternal(r.store.db.WithContext(cleanup)).Model(&originalBodyLease{}).Where("lease_id=? AND body_id=? AND owner_id=? AND epoch=? AND kind=? AND released_at_ms IS NULL", l.LeaseID, l.BodyID, l.OwnerID, l.Epoch, l.Kind).Update("released_at_ms", time.Now().UnixMilli())
++		err = errors.Join(err, q.Error)
++	}
++	for _, m := range r.models {
++		err = errors.Join(err, m.Close())
++	}
++	r.mu.Lock()
++	if r.failed == nil {
++		r.failed = err
++	}
++	close(r.joined)
++	r.mu.Unlock()
++	return err
++}
++
++// Used by a native rank verifier after real vec0 access, never as a new grant.
++func KnowledgeSQLiteVectorsEqual(a, b []float32) bool {
++	left, e := knowledgeSQLiteVectorBytes(a)
++	right, e2 := knowledgeSQLiteVectorBytes(b)
++	return e == nil && e2 == nil && bytes.Equal(left, right)
++}
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_save.go b/internal/application/repository/knowledge_sqlite_embedding_save.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3af97582e8afa73bf3005df6b752b7a0c3b8a2a
+--- /dev/null
++++ b/internal/application/repository/knowledge_sqlite_embedding_save.go
+@@ -0,0 +1,275 @@
++package repository
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"reflect"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++)
++
++type knowledgeSQLiteEmbeddingSaveKey struct{}
++type knowledgeSQLiteEmbeddingSave struct {
++	input    *KnowledgeSQLiteEmbeddingInputRead
++	infos    map[string]types.IndexInfo
++	leases   []originalBodyLease
++	payloads map[string]originalBodyPayload
++	written  map[string]bool
++	rows     []originalBodyAvailabilityRow
++	heads    []originalBodyFieldHead
++}
++
++// Called around the actual SQL transaction, so Close joins the full transaction
++// and committed result-body leases become visible only after a successful commit.
++func BeginKnowledgeSQLiteEmbeddingSave(ctx context.Context, db *gorm.DB, infos []*types.IndexInfo, vectors [][]float32) (context.Context, func(error) error, error) {
++	h, _ := ctx.Value(knowledgeSQLiteEmbeddingKey{}).(*KnowledgeSQLiteEmbeddingInputRead)
++	if h == nil || len(infos) == 0 || len(infos) != len(vectors) || !sameOriginalModelCallerInRepository(ctx, h.ctx) {
++		return ctx, nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	pool, err := db.DB()
++	if err != nil {
++		return ctx, nil, err
++	}
++	actual, err := h.db.DB()
++	if err != nil || pool != actual {
++		return ctx, nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err = h.start(); err != nil {
++		return ctx, nil, err
++	}
++	stage := &knowledgeSQLiteEmbeddingSave{input: h, infos: map[string]types.IndexInfo{}, payloads: map[string]originalBodyPayload{}, written: map[string]bool{}}
++	h.mu.Lock()
++	for i, info := range infos {
++		if info == nil || !reflect.DeepEqual(h.bodies[info.SourceID].Info, *info) || !reflect.DeepEqual(h.outputs[info.SourceID], vectors[i]) {
++			err = ErrKnowledgeSQLiteEmbeddingUnknown
++			break
++		}
++		if _, seen := stage.infos[info.SourceID]; seen {
++			err = ErrKnowledgeSQLiteEmbeddingUnknown
++			break
++		}
++		stage.infos[info.SourceID] = *info
++	}
++	h.mu.Unlock()
++	if err != nil {
++		return ctx, nil, h.finish(err)
++	}
++	finish := func(err error) error {
++		if err == nil {
++			h.mu.Lock()
++			for _, l := range stage.leases {
++				h.committed[l.LeaseID] = l
++			}
++			h.mu.Unlock()
++		}
++		return h.finish(err)
++	}
++	return context.WithValue(ctx, knowledgeSQLiteEmbeddingSaveKey{}, stage), finish, nil
++}
++
++func CheckKnowledgeSQLiteEmbeddingSaveInTx(ctx context.Context, tx *gorm.DB) error {
++	stage, _ := ctx.Value(knowledgeSQLiteEmbeddingSaveKey{}).(*knowledgeSQLiteEmbeddingSave)
++	if stage == nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return stage.input.checkInTx(tx, true)
++}
++
++type knowledgeSQLiteEmbeddingVectorRow struct {
++	RowID     uint64 `gorm:"primaryKey"`
++	Dimension int
++	Vector    []byte
++}
++
++func (knowledgeSQLiteEmbeddingVectorRow) TableName() string {
++	return "knowledge_sqlite_embedding_vectors"
++}
++
++func RecordKnowledgeSQLiteEmbeddingVectorInTx(ctx context.Context, tx *gorm.DB, info *types.IndexInfo, rowID uint64, vector []float32) error {
++	stage, _ := ctx.Value(knowledgeSQLiteEmbeddingSaveKey{}).(*knowledgeSQLiteEmbeddingSave)
++	if stage == nil || info == nil || rowID == 0 || stage.written[info.SourceID] || !reflect.DeepEqual(stage.infos[info.SourceID], *info) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	h := stage.input
++	fact := h.inputs[info.SourceID]
++	expected, err := knowledgeSQLiteVectorBytes(vector)
++	if err != nil {
++		return err
++	}
++	h.mu.Lock()
++	equal := reflect.DeepEqual(h.outputs[info.SourceID], vector)
++	h.mu.Unlock()
++	if !equal || len(vector) != fact.ExpectedDimensions {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err = tx.Create(&knowledgeSQLiteEmbeddingVectorRow{RowID: rowID, Dimension: len(vector), Vector: expected}).Error; err != nil {
++		return err
++	}
++	var control knowledgeSQLiteEmbeddingControl
++	if err = tx.Where("row_id=?", rowID).Take(&control).Error; err != nil {
++		return err
++	}
++	// Fresh metadata insert then the one canonical vector insert. Any unexpected raw
++	// write, including restore-to-old-bytes, advances the control and is refused.
++	if control.Revision != 2 || !control.Present {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	// vec0 remains an actual native search index, not the authoritative receipt.
++	table := fmt.Sprintf("vec_embeddings_%d", len(vector))
++	var raw struct{ Embedding []byte }
++	if err = tx.Raw("SELECT embedding FROM "+table+" WHERE rowid=?", rowID).Take(&raw).Error; err != nil {
++		return err
++	}
++	if !bytes.Equal(expected, raw.Embedding) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	var row struct {
++		SourceID                                              string
++		SourceType                                            int
++		ChunkID, KnowledgeID, KnowledgeBaseID, TagID, Content string
++		Dimension                                             int
++		IsEnabled                                             *bool
++	}
++	if err = tx.Table("lite_embeddings").Where("id=?", rowID).Take(&row).Error; err != nil {
++		return err
++	}
++	if row.SourceID != info.SourceID || row.SourceType != int(info.SourceType) || row.ChunkID != info.ChunkID || row.KnowledgeID != info.KnowledgeID || row.KnowledgeBaseID != info.KnowledgeBaseID || row.TagID != info.TagID || row.Content != info.Content || row.Dimension != len(vector) || row.IsEnabled == nil || *row.IsEnabled != info.IsEnabled {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	now, err := nextcloudLeaseNowMS(tx)
++	if err != nil {
++		return err
++	}
++	data, err := json.Marshal(vector)
++	if err != nil {
++		return err
++	}
++	receipt := types.KnowledgeSQLiteEmbeddingReceipt{ID: uuid.NewString(), TenantID: fact.TenantID, KnowledgeBaseID: fact.KnowledgeBaseID, KnowledgeID: fact.KnowledgeID, ChunkID: fact.ChunkID, InputID: fact.ID, InputDigest: fact.Digest, RowID: rowID, Revision: control.Revision, Dimension: len(vector), VectorJSON: string(data), VectorSHA256: bodySHA(expected), CreatedAtMS: now}
++	receipt.Digest, err = knowledgeSQLiteEmbeddingReceiptDigest(receipt)
++	if err != nil {
++		return err
++	}
++	if err = tx.Create(&receipt).Error; err != nil {
++		return err
++	}
++	if err = CheckOriginalBodyAvailableInTx(ctx, tx, receipt.TableName(), receipt.ID); err != nil {
++		return err
++	}
++	heads, err := originalBodyBatchHeads(tx, []originalBodyAvailabilityRow{{receipt.TableName(), receipt.ID}})
++	if err != nil {
++		return err
++	}
++	if len(heads) != 1 {
++		return ErrOriginalBodyUnavailable
++	}
++	stage.rows = append(stage.rows, originalBodyAvailabilityRow{receipt.TableName(), receipt.ID})
++	stage.heads = append(stage.heads, heads...)
++	leaseID, err := NewOriginalBodyRetentionStore(tx).acquireLeaseInTx(tx, heads[0].BodyID, "read", "knowledge-sqlite-result/"+receipt.ID, 15*time.Minute)
++	if err != nil {
++		return err
++	}
++	var lease originalBodyLease
++	if err = bodyInternal(tx).Where("lease_id=?", leaseID).Take(&lease).Error; err != nil {
++		return err
++	}
++	var payload originalBodyPayload
++	if err = bodyInternal(tx).Where("id=?", heads[0].BodyID).Take(&payload).Error; err != nil {
++		return err
++	}
++	stage.leases = append(stage.leases, lease)
++	stage.payloads[payload.ID] = payload
++	stage.written[info.SourceID] = true
++	return nil
++}
++
++func CheckKnowledgeSQLiteEmbeddingSavedFinalInTx(ctx context.Context, tx *gorm.DB) error {
++	stage, _ := ctx.Value(knowledgeSQLiteEmbeddingSaveKey{}).(*knowledgeSQLiteEmbeddingSave)
++	if stage == nil || len(stage.written) != len(stage.infos) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := CheckKnowledgeSQLiteEmbeddingSaveInTx(ctx, tx); err != nil {
++		return err
++	}
++	for id, info := range stage.infos {
++		var receipt types.KnowledgeSQLiteEmbeddingReceipt
++		if err := tx.Where("input_id=?", stage.input.inputs[id].ID).Take(&receipt).Error; err != nil {
++			return err
++		}
++		var control knowledgeSQLiteEmbeddingControl
++		if err := tx.Where("row_id=?", receipt.RowID).Take(&control).Error; err != nil {
++			return err
++		}
++		if !control.Present || control.Revision != receipt.Revision {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		var canonical knowledgeSQLiteEmbeddingVectorRow
++		if err := tx.Where("row_id=?", receipt.RowID).Take(&canonical).Error; err != nil {
++			return err
++		}
++		if bodySHA(canonical.Vector) != receipt.VectorSHA256 || canonical.Dimension != receipt.Dimension || info.SourceID != stage.input.bodies[id].Info.SourceID {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		var cache struct{ Embedding []byte }
++		table := fmt.Sprintf("vec_embeddings_%d", receipt.Dimension)
++		if err := tx.Raw("SELECT embedding FROM "+table+" WHERE rowid=?", receipt.RowID).Take(&cache).Error; err != nil {
++			return err
++		}
++		if !bytes.Equal(cache.Embedding, canonical.Vector) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err := CheckOriginalBodyAvailableInTx(ctx, tx, receipt.TableName(), receipt.ID); err != nil {
++			return err
++		}
++	}
++	// finalClockInTx reloads the same actual lease/body bindings after all source,
++	// model, journal and result-body IO. No entity/body IO follows this clock.
++	return stage.input.finalClockInTx(tx, stage.leases)
++}
++
++func checkKnowledgeSQLiteVectorCurrentInTx(tx *gorm.DB, id uint64, revision int64, dimension int, info types.IndexInfo, vector []float32) error {
++	var control knowledgeSQLiteEmbeddingControl
++	var canonical knowledgeSQLiteEmbeddingVectorRow
++	if err := tx.Where("row_id=?", id).Take(&control).Error; err != nil {
++		return err
++	}
++	if err := tx.Where("row_id=?", id).Take(&canonical).Error; err != nil {
++		return err
++	}
++	expected, err := knowledgeSQLiteVectorBytes(vector)
++	if err != nil {
++		return err
++	}
++	if !control.Present || control.Revision != revision || canonical.Dimension != dimension || !bytes.Equal(canonical.Vector, expected) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	var row struct {
++		SourceID                                              string
++		SourceType                                            int
++		ChunkID, KnowledgeID, KnowledgeBaseID, TagID, Content string
++		Dimension                                             int
++		IsEnabled                                             *bool
++	}
++	if err = tx.Table("lite_embeddings").Where("id=?", id).Take(&row).Error; err != nil {
++		return err
++	}
++	if row.SourceID != info.SourceID || row.SourceType != int(info.SourceType) || row.ChunkID != info.ChunkID || row.KnowledgeID != info.KnowledgeID || row.KnowledgeBaseID != info.KnowledgeBaseID || row.TagID != info.TagID || row.Content != info.Content || row.Dimension != dimension || row.IsEnabled == nil || *row.IsEnabled != info.IsEnabled {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	var native struct{ Embedding []byte }
++	table := fmt.Sprintf("vec_embeddings_%d", dimension)
++	if err = tx.Raw("SELECT embedding FROM "+table+" WHERE rowid=?", id).Take(&native).Error; err != nil {
++		return err
++	}
++	if !bytes.Equal(native.Embedding, expected) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return tx.Statement.Context.Err()
++}
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_schema.go b/internal/application/repository/knowledge_sqlite_embedding_schema.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbfc18cbe3cbd71bd56a52ffd538844c2b88b023
+--- /dev/null
++++ b/internal/application/repository/knowledge_sqlite_embedding_schema.go
+@@ -0,0 +1,49 @@
++package repository
++
++import (
++	"gorm.io/gorm"
++	"strings"
++)
++
++// Ordinary table mutation guards are exact known statements. vec0 is a virtual
++// table and cannot supply these triggers; its bytes/hits are checked separately.
++var knowledgeSQLiteMutationGuards = []string{
++	`CREATE TRIGGER knowledge_lite_embedding_insert AFTER INSERT ON lite_embeddings BEGIN
++ INSERT INTO knowledge_sqlite_embedding_controls(row_id,revision,present) VALUES(NEW.id,1,0);
++END;`,
++	`CREATE TRIGGER knowledge_lite_embedding_update AFTER UPDATE ON lite_embeddings BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1 WHERE row_id=NEW.id;
++END;`,
++	`CREATE TRIGGER knowledge_lite_embedding_delete AFTER DELETE ON lite_embeddings BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1,present=0 WHERE row_id=OLD.id;
++END;`,
++	`CREATE TRIGGER knowledge_sqlite_vector_insert AFTER INSERT ON knowledge_sqlite_embedding_vectors BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1,present=1 WHERE row_id=NEW.row_id;
++END;`,
++	`CREATE TRIGGER knowledge_sqlite_vector_update AFTER UPDATE ON knowledge_sqlite_embedding_vectors BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1 WHERE row_id=NEW.row_id;
++END;`,
++	`CREATE TRIGGER knowledge_sqlite_vector_delete AFTER DELETE ON knowledge_sqlite_embedding_vectors BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1,present=0 WHERE row_id=OLD.row_id;
++END;`,
++}
++
++func checkKnowledgeSQLiteMutationGuards(tx *gorm.DB) error {
++	for _, expected := range knowledgeSQLiteMutationGuards {
++		parts := strings.Fields(expected)
++		if len(parts) < 3 {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		var row struct{ SQL string }
++		if err := tx.Raw("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", parts[2]).Take(&row).Error; err != nil {
++			return err
++		}
++		normalize := func(v string) string {
++			return strings.Join(strings.Fields(strings.TrimSuffix(strings.TrimSpace(v), ";")), " ")
++		}
++		if normalize(row.SQL) != normalize(expected) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++	}
++	return tx.Statement.Context.Err()
++}
+diff --git a/internal/application/repository/original_body_fields.go b/internal/application/repository/original_body_fields.go
+index 3fecc53e523cdf862f8f158c8165332180f56125..dd185107a85c348ef2461b8cad16c04a84475ed7 100644
+--- a/internal/application/repository/original_body_fields.go
++++ b/internal/application/repository/original_body_fields.go
+@@ -21,6 +21,8 @@ type originalBodyFieldDescriptor struct {
+ }
+ 
+ var originalBodyFields = []originalBodyFieldDescriptor{
++	{"knowledge_sqlite_embedding_inputs", "id", "inline", []string{"input_json"}},
++	{"knowledge_sqlite_embedding_receipts", "id", "inline", []string{"vector_json"}},
+ 	{"memory_query_embedding_originals", "id", "inline", []string{"input_json"}},
+ 	{"memory_query_embedding_receipts", "id", "inline", []string{"vector_json"}},
+ 	{"memory_embedding_originals", "id", "inline", []string{"input_json"}},
+diff --git a/internal/application/repository/retriever/sqlite/nextcloud_atomic_write.go b/internal/application/repository/retriever/sqlite/nextcloud_atomic_write.go
+index e24d4905366e301e9544521d5f4cbe9362346294..85c736d1c56d784f73e1b3eee5bb2857fdd837cb 100644
+--- a/internal/application/repository/retriever/sqlite/nextcloud_atomic_write.go
++++ b/internal/application/repository/retriever/sqlite/nextcloud_atomic_write.go
+@@ -15,10 +15,29 @@ func (r *sqliteRepository) saveRowsAtomic(ctx context.Context, infos []*types.In
+ 	if r.initErr != nil {
+ 		return r.initErr
+ 	}
++	var finish func(error) error
++	hasVector := false
++	for _, row := range rows {
++		if row.Dimension > 0 {
++			hasVector = true
++		}
++	}
++	if r.originals != nil && hasVector {
++		var e error
++		ctx, finish, e = apprepo.BeginKnowledgeSQLiteEmbeddingSave(ctx, r.db, infos, embeddings)
++		if e != nil {
++			return e
++		}
++	}
+ 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+ 		if e := apprepo.GuardNextcloudLocalIndexWrites(ctx, tx, infos); e != nil {
+ 			return e
+ 		}
++		if finish != nil {
++			if e := apprepo.CheckKnowledgeSQLiteEmbeddingSaveInTx(ctx, tx); e != nil {
++				return e
++			}
++		}
+ 		for i, row := range rows {
+ 			if e := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error; e != nil {
+ 				return e
+@@ -59,10 +78,21 @@ func (r *sqliteRepository) saveRowsAtomic(ctx context.Context, infos []*types.In
+ 				if e = tx.Exec(fmt.Sprintf("INSERT INTO %s(rowid,embedding) VALUES(?,?)", table), row.ID, blob).Error; e != nil {
+ 					return e
+ 				}
++				if finish != nil {
++					if e := apprepo.RecordKnowledgeSQLiteEmbeddingVectorInTx(ctx, tx, infos[i], uint64(row.ID), embeddings[i]); e != nil {
++						return e
++					}
++				}
+ 			}
+ 		}
++		if finish != nil {
++			return apprepo.CheckKnowledgeSQLiteEmbeddingSavedFinalInTx(ctx, tx)
++		}
+ 		return nil
+ 	})
++	if finish != nil {
++		err = finish(err)
++	}
+ 	if err == nil {
+ 		r.vecMutex.Lock()
+ 		for _, row := range rows {
+diff --git a/internal/application/repository/retriever/sqlite/original_vector_retrieve.go b/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec6dcc88081f69e0da4307bad0d58f6170e92c42
+--- /dev/null
++++ b/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
+@@ -0,0 +1,165 @@
++package sqlite
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"math"
++	"sort"
++
++	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	"gorm.io/gorm"
++)
++
++// vec0 remains the native index. The canonical vectors provide an integrity
++// reference for bytes, candidate completeness and scores, not a replacement
++// indexed backend or a performance/SLO claim.
++func (r *sqliteRepository) originalVectorRetrieve(ctx context.Context, params types.RetrieveParams) (result []*types.RetrieveResult, resultErr error) {
++	if r.initErr != nil {
++		return nil, r.initErr
++	}
++	if len(params.Embedding) == 0 {
++		return nil, nil
++	}
++	space, ok := params.AdditionalParams["embedding_space_digest"].(string)
++	// This is a space selection, not a caller authority token. Every original,
++	// current permission and held historical model is checked independently.
++	if !ok || len(space) != 64 || params.TopK <= 0 || params.TopK > 4096 || len(params.KnowledgeBaseIDs) == 0 {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	queryBlob, err := sqlite_vec.SerializeFloat32(params.Embedding)
++	if err != nil {
++		return nil, err
++	}
++	where := "(e.is_enabled IS NULL OR e.is_enabled=1) AND e.dimension=?"
++	args := []interface{}{len(params.Embedding)}
++	for _, filter := range buildFilterWhere(params, "e") {
++		where += " AND " + filter.clause
++		args = append(args, filter.args...)
++	}
++	var ids []uint64
++	if err = r.db.WithContext(ctx).Table("lite_embeddings AS e").Select("e.id").Where(where, args...).Order("e.id").Limit(4097).Scan(&ids).Error; err != nil {
++		return nil, err
++	}
++	if len(ids) == 0 {
++		return nil, nil
++	}
++	if len(ids) > 4096 {
++		return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	held, err := r.originals.BeginVectorRead(ctx, ids)
++	if err != nil {
++		return nil, err
++	}
++	defer func() {
++		resultErr = errors.Join(resultErr, held.Close())
++		if resultErr != nil {
++			result = nil
++		}
++	}()
++	vectors, err := held.Snapshot()
++	if err != nil {
++		return nil, err
++	}
++	references := map[uint64]types.KnowledgeSQLiteEmbeddingVector{}
++	distances := map[uint64]float64{}
++	ordered := []float64{}
++	for _, v := range vectors {
++		if v.SpaceDigest != space {
++			return nil, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		distance, e := originalCosineDistance(params.Embedding, v.Vector)
++		if e != nil {
++			return nil, e
++		}
++		references[v.RowID] = v
++		distances[v.RowID] = distance
++		ordered = append(ordered, distance)
++	}
++	sort.Float64s(ordered)
++	expected := params.TopK
++	if expected > len(ids) {
++		expected = len(ids)
++	}
++	cutoff := ordered[expected-1]
++	type nativeRow struct {
++		Rowid    uint64
++		Distance float64
++	}
++	var native []nativeRow
++	err = r.db.WithContext(held.Context()).Transaction(func(tx *gorm.DB) error {
++		var currentIDs []uint64
++		if e := tx.Table("lite_embeddings AS e").Select("e.id").Where(where, args...).Order("e.id").Limit(4097).Scan(&currentIDs).Error; e != nil {
++			return e
++		}
++		if len(currentIDs) != len(ids) {
++			return apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		for i, id := range ids {
++			if currentIDs[i] != id {
++				return apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++		}
++		table := vecTableName(len(params.Embedding))
++		sql := fmt.Sprintf("SELECT v.rowid,v.distance FROM %s v WHERE v.embedding MATCH ? AND k=? AND v.rowid IN (SELECT e.id FROM lite_embeddings e WHERE %s) ORDER BY v.distance ASC", table, where)
++		nativeArgs := []interface{}{queryBlob, params.TopK}
++		nativeArgs = append(nativeArgs, args...)
++		if e := tx.Raw(sql, nativeArgs...).Scan(&native).Error; e != nil {
++			return e
++		}
++		if len(native) != expected {
++			return apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		seen := map[uint64]bool{}
++		const tolerance = 0.0001
++		for _, n := range native {
++			reference, exists := distances[n.Rowid]
++			if !exists || seen[n.Rowid] || math.IsNaN(n.Distance) || math.IsInf(n.Distance, 0) || math.Abs(reference-n.Distance) > tolerance || reference > cutoff+tolerance {
++				return apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			seen[n.Rowid] = true
++		}
++		for id, distance := range distances {
++			if distance < cutoff-tolerance && !seen[id] {
++				return apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++		}
++		// All native/cache IO precedes the complete source/body/model final check.
++		return held.CheckInTx(held.Context(), tx)
++	})
++	if err != nil {
++		return nil, err
++	}
++	items := []*types.IndexWithScore{}
++	for _, n := range native {
++		v := references[n.Rowid]
++		score := 1 - n.Distance
++		if params.Threshold > 0 && score < params.Threshold {
++			continue
++		}
++		info := v.Info
++		items = append(items, &types.IndexWithScore{ID: fmt.Sprintf("%d", v.RowID), SourceID: info.SourceID, SourceType: info.SourceType, ChunkID: info.ChunkID, KnowledgeID: info.KnowledgeID, KnowledgeBaseID: info.KnowledgeBaseID, TagID: info.TagID, Content: info.Content, Score: score, MatchType: types.MatchTypeEmbedding, IsEnabled: info.IsEnabled})
++	}
++	return []*types.RetrieveResult{{Results: items, RetrieverEngineType: types.SQLiteRetrieverEngineType, RetrieverType: types.VectorRetrieverType}}, nil
++}
++func originalCosineDistance(a, b []float32) (float64, error) {
++	if len(a) == 0 || len(a) != len(b) {
++		return 0, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	var dot, aa, bb float64
++	for i, n := range a {
++		m := b[i]
++		if math.IsNaN(float64(n)) || math.IsInf(float64(n), 0) || math.IsNaN(float64(m)) || math.IsInf(float64(m), 0) {
++			return 0, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		dot += float64(n) * float64(m)
++		aa += float64(n) * float64(n)
++		bb += float64(m) * float64(m)
++	}
++	if aa == 0 || bb == 0 {
++		return 0, apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return 1 - dot/math.Sqrt(aa*bb), nil
++}
+diff --git a/internal/application/repository/retriever/sqlite/repository.go b/internal/application/repository/retriever/sqlite/repository.go
+index 89d4ed9d7fa7fa8caaa4739af6bb852e6b5ecffd..91cb00f6e0379f7e49c81d98b8a5f2e3edbaa7a7 100644
+--- a/internal/application/repository/retriever/sqlite/repository.go
++++ b/internal/application/repository/retriever/sqlite/repository.go
+@@ -8,6 +8,7 @@ import (
+ 	"time"
+ 	"unicode"
+ 
++	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/common"
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/types"
+@@ -39,6 +40,24 @@ type sqliteRepository struct {
+ 	initErr   error
+ 	vecMutex  sync.Mutex
+ 	vecTables map[int]bool // tracks which vec0 tables have been created (keyed by dimension)
++	originals *apprepo.KnowledgeSQLiteEmbeddingStore
++}
++
++// Production original storage consumes the formal SQLite90 schema. The legacy
++// constructor remains an explicit unproved adapter; it cannot populate this
++// original store or make its old indexed rows readable under new receipts.
++func NewOriginalSQLiteRetrieveEngineRepository(db *gorm.DB, material *apprepo.KnowledgeInputProvenanceStore, models interfaces.ModelRepository) interfaces.RetrieveEngineRepository {
++	store := apprepo.NewKnowledgeSQLiteEmbeddingStore(db, material, models)
++	repo := &sqliteRepository{db: db, originals: store, vecTables: map[int]bool{}}
++	if store == nil {
++		repo.initErr = apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++		return repo
++	}
++	repo.initErr = store.CheckSchema()
++	if repo.initErr == nil {
++		repo.initErr = initFTS5(db)
++	}
++	return repo
+ }
+ 
+ func NewSQLiteRetrieveEngineRepository(db *gorm.DB) interfaces.RetrieveEngineRepository {
+@@ -138,6 +157,7 @@ func (r *sqliteRepository) ensureExistingVecTables() {
+ func (r *sqliteRepository) EngineType() types.RetrieverEngineType {
+ 	return types.SQLiteRetrieverEngineType
+ }
++func (r *sqliteRepository) OriginalKnowledgeEmbeddingStorage() bool { return r.originals != nil }
+ 
+ func (r *sqliteRepository) Support() []types.RetrieverType {
+ 	return []types.RetrieverType{types.KeywordsRetrieverType, types.VectorRetrieverType}
+@@ -317,6 +337,9 @@ func (r *sqliteRepository) keywordsRetrieve(ctx context.Context, params types.Re
+ 	}}, nil
+ }
+ func (r *sqliteRepository) vectorRetrieve(ctx context.Context, params types.RetrieveParams) ([]*types.RetrieveResult, error) {
++	if r.originals != nil {
++		return r.originalVectorRetrieve(ctx, params)
++	}
+ 	if len(params.Embedding) == 0 {
+ 		return nil, nil
+ 	}
+diff --git a/internal/application/service/knowledge_sqlite_embedding_original_sql_http_actual_test.go b/internal/application/service/knowledge_sqlite_embedding_original_sql_http_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5a7900c060330657078c899b51c48ebe78265ce
+--- /dev/null
++++ b/internal/application/service/knowledge_sqlite_embedding_original_sql_http_actual_test.go
+@@ -0,0 +1,402 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"reflect"
++	"runtime"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	"github.com/golang-migrate/migrate/v4"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++var knowledgeSQLiteOriginalVecAuto sync.Once
++
++// The pending90 payload is applied by a real migrate driver after production
++// full87. Its future startup/catalogue routing is deliberately a separate gate.
++// No AutoMigrate, fabricated receipt, force or ledger rewrite occurs here.
++func installKnowledgeSQLiteOriginal90ForTest(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	var path string
++	require.NoError(t, db.Raw("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path).Error)
++	require.NotEmpty(t, path)
++	root, e := filepath.Abs("../../..")
++	require.NoError(t, e)
++	m, e := migrate.New("file://"+filepath.Join(root, "migrations/pending/knowledge-sqlite-embedding-originals-000090"), "sqlite3://"+path)
++	require.NoError(t, e)
++	require.NoError(t, m.Migrate(90))
++	sourceClose, databaseClose := m.Close()
++	require.NoError(t, sourceClose)
++	require.NoError(t, databaseClose)
++	var version struct {
++		Version uint
++		Dirty   bool
++	}
++	require.NoError(t, db.Table("schema_migrations").Take(&version).Error)
++	require.EqualValues(t, 90, version.Version)
++	require.False(t, version.Dirty)
++	require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(db))
++	require.NoError(t, repository.InstallOriginalBodyRetentionCallbacks(db))
++}
++func knowledgeSQLiteOriginalLeaseIdsForTest(tx *gorm.DB) []string {
++	where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
++	if !ok {
++		return nil
++	}
++	for _, expr := range where.Exprs {
++		if e, ok := expr.(clause.Expr); ok && strings.TrimSpace(e.SQL) == "lease_id IN ?" && len(e.Vars) == 1 {
++			ids, _ := e.Vars[0].([]string)
++			return ids
++		}
++	}
++	return nil
++}
++func knowledgeSQLiteOriginalLastSaveForTest() bool {
++	pc := make([]uintptr, 48)
++	n := runtime.Callers(2, pc)
++	frames := runtime.CallersFrames(pc[:n])
++	save, clock := false, false
++	for {
++		f, more := frames.Next()
++		if strings.HasSuffix(f.Function, ".CheckKnowledgeSQLiteEmbeddingSavedFinalInTx") {
++			save = true
++		}
++		if strings.HasSuffix(f.Function, ".(*KnowledgeSQLiteEmbeddingInputRead).finalClockInTx") {
++			clock = true
++		}
++		if !more {
++			break
++		}
++	}
++	return save && clock
++}
++
++func TestKnowledgeSQLiteEmbeddingOriginalActualHTTP(t *testing.T) {
++	modes := []string{"genuine_SQL_save_native_retrieve", "canonical_vector_ABA", "native_cache_missing", "native_cache_changed", "actor_disabled_held_read", "credential_successor_metadata_only", "late_SQL_clock", "unknown_existing_index", "lease_before_application_hydration"}
++	for _, mode := range modes {
++		t.Run(mode, func(t *testing.T) {
++			knowledgeSQLiteOriginalVecAuto.Do(sqlite_vec.Auto)
++			store, db, ctx := jointFullSchemaBusinessFixture(t, false)
++			installKnowledgeSQLiteOriginal90ForTest(t, db)
++			modelRepo := repository.NewModelRepository(db)
++			ConfigureModelOriginalAuthority(modelRepo, store, NewGroupAccessService(repository.NewGroupAccessRepository(db)), nil)
++			models := NewModelService(modelRepo, nil, nil, nil, nil, nil)
++			var calls atomic.Int64
++			var observerMu sync.Mutex
++			var observerErr error
++			var consumed [][]string
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				calls.Add(1)
++				var body struct {
++					Input      []string `json:"input"`
++					Dimensions int      `json:"dimensions"`
++				}
++				e := json.NewDecoder(r.Body).Decode(&body)
++				if e == nil && (r.URL.Path != "/embeddings" || r.Header.Get("Authorization") != "Bearer actual-local-index-key" || body.Dimensions != 2) {
++					e = errors.New("proved SDK endpoint/auth/dimensions mismatch")
++				}
++				observerMu.Lock()
++				if e != nil {
++					observerErr = errors.Join(observerErr, e)
++				}
++				consumed = append(consumed, append([]string(nil), body.Input...))
++				observerMu.Unlock()
++				if e != nil {
++					w.WriteHeader(400)
++					return
++				}
++				data := []map[string]any{}
++				for i, text := range body.Input {
++					v := []float32{0, 1}
++					if strings.Contains(text, "first-body") {
++						v = []float32{1, 0}
++					}
++					data = append(data, map[string]any{"index": i, "embedding": v})
++				}
++				w.Header().Set("Content-Type", "application/json")
++				_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			model := &types.Model{ID: "actual-knowledge-SQLite-embedding", TenantID: 7, Name: "actual-knowledge-embedding-wire", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "actual-local-index-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++			require.NoError(t, models.CreateModel(ctx, model))
++			require.NotNil(t, model.OriginalProof)
++			require.True(t, model.OriginalProof.Valid())
++			kb := &types.KnowledgeBase{ID: "actual-local-index-kb", TenantID: 7, Name: "actual original index KB", EmbeddingModelID: model.ID, ChunkingConfig: types.ChunkingConfig{ChunkSize: 512}, IndexingStrategy: types.IndexingStrategy{VectorEnabled: true}}
++			require.NoError(t, store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(ctx), kb))
++			knowledge := &types.Knowledge{ID: "actual-local-index-knowledge", TenantID: 7, KnowledgeBaseID: kb.ID, Type: types.KnowledgeTypeManual, Title: "actual-title", ParseStatus: types.ParseStatusCompleted, EnableStatus: "enabled"}
++			text := "first-body\nsecond-body"
++			require.NoError(t, knowledge.SetManualMetadata(types.NewManualKnowledgeMetadata(text, types.ManualKnowledgeStatusPublish, 1)))
++			proof, e := store.CreateKnowledgeWithInput(repository.WithIndependentKnowledgeInput(ctx), knowledge, text)
++			require.NoError(t, e)
++			require.NotNil(t, proof)
++			build, e := store.RestoreKnowledgeBuildActor(ctx, proof)
++			require.NoError(t, e)
++			build = repository.WithKnowledgeBuildInputProof(build, store, proof)
++			chunks := []*types.Chunk{{ID: "actual-local-index-first", TenantID: 7, KnowledgeBaseID: kb.ID, KnowledgeID: knowledge.ID, Content: "first-body <img src='data:image/png;base64," + strings.Repeat("a", 250) + "'>", ContextHeader: "actual-heading", ChunkType: types.ChunkTypeText, IsEnabled: true}, {ID: "actual-local-index-second", TenantID: 7, KnowledgeBaseID: kb.ID, KnowledgeID: knowledge.ID, Content: "second-body", ChunkType: types.ChunkTypeText, IsEnabled: true}}
++			require.NoError(t, repository.NewChunkRepository(db).CreateChunks(build, chunks))
++			infos := []*types.IndexInfo{}
++			wire := []string{}
++			for _, chunk := range chunks {
++				content := buildKnowledgeIndexContent(knowledge, chunk.EmbeddingContent())
++				infos = append(infos, &types.IndexInfo{Content: content, SourceID: chunk.ID, SourceType: types.ChunkSourceType, ChunkID: chunk.ID, KnowledgeID: knowledge.ID, KnowledgeBaseID: kb.ID, IsEnabled: true})
++				wire = append(wire, embedding.OriginalIndexText(content))
++			}
++			originalStore := repository.NewKnowledgeSQLiteEmbeddingStore(db, store, modelRepo)
++			require.NotNil(t, originalStore)
++			index := sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(db, store, modelRepo)
++			engine := retriever.NewKVHybridRetrieveEngine(index, types.SQLiteRetrieverEngineType)
++			operation, cancel := context.WithTimeout(build, 10*time.Second)
++			defer cancel()
++			sdk, e := models.GetEmbeddingModel(operation, model.ID)
++			require.NoError(t, e)
++			var crossed atomic.Bool
++			var reachedActualExpiry atomic.Bool
++			callbackName := "owned-local-original-final-clock"
++			if mode == "late_SQL_clock" {
++				require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
++					if tx.Statement.Table != "original_body_leases" || !knowledgeSQLiteOriginalLastSaveForTest() {
++						return
++					}
++					requested := knowledgeSQLiteOriginalLeaseIdsForTest(tx)
++					if len(requested) == 0 || crossed.Load() {
++						return
++					}
++					local := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context})
++					var own struct {
++						LeaseID, BodyID, OwnerID, Kind string
++						Epoch                          int64
++						ExpiresAtMS                    int64
++					}
++					q := local.Raw("SELECT l.lease_id,l.body_id,l.owner_id,l.kind,l.epoch,l.expires_at_ms FROM original_body_leases l JOIN original_body_field_heads h ON h.body_id=l.body_id JOIN knowledge_sqlite_embedding_receipts r ON r.id=h.row_key WHERE h.source_table='knowledge_sqlite_embedding_receipts' AND l.owner_id='knowledge-sqlite-result/'||r.id AND l.kind='read' AND l.released_at_ms IS NULL AND l.lease_id IN ? LIMIT 1", requested).Take(&own)
++					if errors.Is(q.Error, gorm.ErrRecordNotFound) {
++						return
++					}
++					fail := func(e error) { observerMu.Lock(); observerErr = errors.Join(observerErr, e); observerMu.Unlock() }
++					if q.Error != nil {
++						fail(errors.New("actual output lease discovery failed"))
++						return
++					}
++					if !crossed.CompareAndSwap(false, true) {
++						return
++					}
++					var now int64
++					if local.Session(&gorm.Session{NewDB: true}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error != nil {
++						fail(errors.New("actual initial SQL clock failed"))
++						return
++					}
++					expiry := now + 60
++					update := local.Session(&gorm.Session{NewDB: true}).Table("original_body_leases").Where("lease_id=? AND body_id=? AND owner_id=? AND kind=? AND epoch=? AND released_at_ms IS NULL", own.LeaseID, own.BodyID, own.OwnerID, own.Kind, own.Epoch).Update("expires_at_ms", expiry)
++					if update.Error != nil || update.RowsAffected != 1 {
++						fail(errors.New("owned actual expiry CAS failed"))
++						return
++					}
++					var after struct {
++						LeaseID, BodyID, OwnerID, Kind string
++						Epoch, ExpiresAtMS             int64
++					}
++					if local.Session(&gorm.Session{NewDB: true}).Table("original_body_leases").Where("lease_id=?", own.LeaseID).Take(&after).Error != nil || after.LeaseID != own.LeaseID || after.BodyID != own.BodyID || after.OwnerID != own.OwnerID || after.Kind != own.Kind || after.Epoch != own.Epoch || after.ExpiresAtMS != expiry {
++						fail(errors.New("actual expiry independent readback failed"))
++						return
++					}
++					time.Sleep(120 * time.Millisecond)
++					if local.Session(&gorm.Session{NewDB: true}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error != nil || now < expiry {
++						fail(errors.New("actual final SQL clock did not reach expiry"))
++						return
++					}
++					reachedActualExpiry.Store(true)
++				}))
++				t.Cleanup(func() { require.NoError(t, db.Callback().Query().Remove(callbackName)) })
++			}
++			if mode == "unknown_existing_index" {
++				legacy := sqliteindex.NewSQLiteRetrieveEngineRepository(db)
++				require.NoError(t, legacy.Save(ctx, infos[0], map[string]any{"embedding": map[string][]float32{infos[0].SourceID: {1, 0}}}))
++				require.Error(t, engine.BatchIndex(operation, sdk, infos, []types.RetrieverType{types.VectorRetrieverType}))
++				require.Zero(t, calls.Load())
++			} else {
++				e = engine.BatchIndex(operation, sdk, infos, []types.RetrieverType{types.VectorRetrieverType})
++				if mode == "late_SQL_clock" {
++					require.Error(t, e)
++					require.True(t, crossed.Load())
++					require.True(t, reachedActualExpiry.Load())
++				} else {
++					require.NoError(t, e)
++				}
++				require.EqualValues(t, 1, calls.Load())
++			}
++			observerMu.Lock()
++			actualErr := observerErr
++			actualConsumed := append([][]string(nil), consumed...)
++			observerMu.Unlock()
++			require.NoError(t, actualErr)
++			if mode != "unknown_existing_index" {
++				require.True(t, len(actualConsumed) == 1 && reflect.DeepEqual(actualConsumed[0], wire), "actual SDK consumed the proved sanitized inputs")
++			}
++			var receipts []types.KnowledgeSQLiteEmbeddingReceipt
++			require.NoError(t, db.Order("row_id").Find(&receipts).Error)
++			if mode == "late_SQL_clock" || mode == "unknown_existing_index" {
++				require.Empty(t, receipts)
++				var canonical int64
++				require.NoError(t, db.Table("knowledge_sqlite_embedding_vectors").Count(&canonical).Error)
++				require.Zero(t, canonical)
++			} else {
++				require.Len(t, receipts, 2)
++				var inputHydrations, outputHydrations atomic.Int64
++				if mode == "lease_before_application_hydration" {
++					const observerName = "owned-original-lease-before-hydrate"
++					require.NoError(t, db.Callback().Query().Before("gorm:query").Register(observerName, func(tx *gorm.DB) {
++						table := tx.Statement.Table
++						column := ""
++						if table == "knowledge_sqlite_embedding_inputs" {
++							column = "input_json"
++						} else if table == "knowledge_sqlite_embedding_receipts" {
++							column = "vector_json"
++						} else {
++							return
++						}
++						selected := len(tx.Statement.Selects) == 0
++						for _, list := range tx.Statement.Selects {
++							for _, part := range strings.Split(list, ",") {
++								if strings.TrimSpace(part) == column || strings.TrimSpace(part) == "*" {
++									selected = true
++								}
++							}
++						}
++						if !selected {
++							return
++						}
++						where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
++						if !ok {
++							return
++						}
++						id := ""
++						for _, expr := range where.Exprs {
++							if e, ok := expr.(clause.Expr); ok && strings.TrimSpace(e.SQL) == "id=?" && len(e.Vars) == 1 {
++								id, _ = e.Vars[0].(string)
++							}
++						}
++						if id == "" {
++							observerMu.Lock()
++							observerErr = errors.Join(observerErr, errors.New("application body query lacks exact row selector"))
++							observerMu.Unlock()
++							return
++						}
++						local := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context})
++						var total, leased int64
++						e := local.Table("original_body_field_heads").Where("source_table=? AND row_key=? AND column_name=?", table, id, column).Count(&total).Error
++						if e == nil {
++							e = local.Session(&gorm.Session{NewDB: true}).Table("original_body_field_heads AS h").Joins("JOIN original_body_payloads p ON p.id=h.body_id").Joins("JOIN original_body_leases l ON l.body_id=h.body_id AND l.epoch=p.purge_epoch").Where("h.source_table=? AND h.row_key=? AND h.column_name=? AND p.state='live' AND l.kind='read' AND l.released_at_ms IS NULL AND l.owner_id LIKE 'knowledge-sqlite-vector-read/%' AND l.expires_at_ms>CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)", table, id, column).Count(&leased).Error
++						}
++						if e != nil || total != 1 || leased < 1 {
++							observerMu.Lock()
++							observerErr = errors.Join(observerErr, errors.New("application hydrated an original without its actual live private lease"))
++							observerMu.Unlock()
++							return
++						}
++						if column == "input_json" {
++							inputHydrations.Add(1)
++						} else {
++							outputHydrations.Add(1)
++						}
++					}))
++					t.Cleanup(func() { require.NoError(t, db.Callback().Query().Remove(observerName)) })
++				}
++				held, e := originalStore.BeginVectorRead(ctx, []uint64{receipts[0].RowID, receipts[1].RowID})
++				require.NoError(t, e)
++				heldClosed := false
++				t.Cleanup(func() {
++					if !heldClosed {
++						_ = held.Close()
++					}
++				})
++				snapshot, e := held.Snapshot()
++				require.NoError(t, e)
++				require.Len(t, snapshot, 2)
++				if mode == "lease_before_application_hydration" {
++					require.Positive(t, inputHydrations.Load())
++					require.Positive(t, outputHydrations.Load())
++					observerMu.Lock()
++					e = observerErr
++					observerMu.Unlock()
++					require.NoError(t, e)
++				}
++				params := types.RetrieveParams{Embedding: []float32{1, 0}, KnowledgeBaseIDs: []string{kb.ID}, TopK: 1, RetrieverType: types.VectorRetrieverType, AdditionalParams: map[string]interface{}{"embedding_space_digest": snapshot[0].SpaceDigest}}
++				switch mode {
++				case "canonical_vector_ABA":
++					var original struct{ Vector []byte }
++					require.NoError(t, db.Table("knowledge_sqlite_embedding_vectors").Select("vector").Where("row_id=?", receipts[0].RowID).Take(&original).Error)
++					changed, _ := sqlite_vec.SerializeFloat32([]float32{0, 1})
++					a := db.Table("knowledge_sqlite_embedding_vectors").Where("row_id=?", receipts[0].RowID).Update("vector", changed)
++					require.NoError(t, a.Error)
++					require.EqualValues(t, 1, a.RowsAffected)
++					b := db.Table("knowledge_sqlite_embedding_vectors").Where("row_id=?", receipts[0].RowID).Update("vector", original.Vector)
++					require.NoError(t, b.Error)
++					require.EqualValues(t, 1, b.RowsAffected)
++					var after struct{ Vector []byte }
++					require.NoError(t, db.Table("knowledge_sqlite_embedding_vectors").Select("vector").Where("row_id=?", receipts[0].RowID).Take(&after).Error)
++					require.True(t, reflect.DeepEqual(original.Vector, after.Vector))
++					require.Error(t, held.Recheck())
++				case "native_cache_missing":
++					a := db.Exec("DELETE FROM vec_embeddings_2 WHERE rowid=?", receipts[0].RowID)
++					require.NoError(t, a.Error)
++					require.EqualValues(t, 1, a.RowsAffected)
++					require.Error(t, held.Recheck())
++				case "native_cache_changed":
++					changed, _ := sqlite_vec.SerializeFloat32([]float32{0, 1})
++					a := db.Exec("UPDATE vec_embeddings_2 SET embedding=? WHERE rowid=?", changed, receipts[0].RowID)
++					require.NoError(t, a.Error)
++					require.EqualValues(t, 1, a.RowsAffected)
++					require.Error(t, held.Recheck())
++				case "actor_disabled_held_read":
++					uid := types.CallerFromContext(ctx).UserID
++					a := db.Table("users").Where("id=? AND is_active=?", uid, true).Update("is_active", false)
++					require.NoError(t, a.Error)
++					require.EqualValues(t, 1, a.RowsAffected)
++					var active bool
++					require.NoError(t, db.Table("users").Select("is_active").Where("id=?", uid).Scan(&active).Error)
++					require.False(t, active)
++					require.Error(t, held.Recheck())
++				case "credential_successor_metadata_only":
++					current, e := models.GetModelByID(ctx, model.ID)
++					require.NoError(t, e)
++					current.Parameters.APIKey = "genuine-new-key"
++					require.NoError(t, models.UpdateModel(ctx, current))
++					require.NoError(t, held.Recheck())
++					require.EqualValues(t, 1, calls.Load(), "historical verification makes no second provider call")
++				}
++				if mode == "genuine_SQL_save_native_retrieve" || mode == "credential_successor_metadata_only" || mode == "lease_before_application_hydration" {
++					result, e := index.Retrieve(ctx, params)
++					require.NoError(t, e)
++					require.Len(t, result, 1)
++					require.Len(t, result[0].Results, 1)
++					require.Equal(t, chunks[0].ID, result[0].Results[0].ChunkID)
++				}
++				require.NoError(t, held.Close())
++				heldClosed = true
++			}
++			var live int64
++			require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++			require.Zero(t, live)
++			t.Logf("actual_local_original mode=%s SDK_calls=%d leases_closed=true", mode, calls.Load())
++		})
++	}
++}
+diff --git a/internal/application/service/model_original_embedding_operation.go b/internal/application/service/model_original_embedding_operation.go
+index d051d22f916f6549d73faac9cef3cf3b16b6e4fa..4848dc874b0eecbe3eb3483efdcccc0cb5f82cf4 100644
+--- a/internal/application/service/model_original_embedding_operation.go
++++ b/internal/application/service/model_original_embedding_operation.go
+@@ -3,8 +3,10 @@ package service
+ import (
+ 	"context"
+ 	"errors"
++	"reflect"
+ 	"sync"
+ 
++	"github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/models/embedding"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ )
+@@ -12,14 +14,18 @@ import (
+ // An operation uses the very same immutable model/credential reader and carrier
+ // as its constructor. No current-row reconstruction or new authoring occurs.
+ type modelOriginalEmbeddingOperation struct {
+-	parent   *modelOriginalEmbeddingClient
+-	ctx      context.Context
+-	finish   func()
+-	mu       sync.Mutex
+-	closed   bool
+-	closeErr error
+-	joined   chan struct{}
+-	calls    sync.WaitGroup
++	parent            *modelOriginalEmbeddingClient
++	ctx               context.Context
++	finish            func()
++	mu                sync.Mutex
++	closed            bool
++	closeErr          error
++	joined            chan struct{}
++	calls             sync.WaitGroup
++	index             *repository.KnowledgeSQLiteEmbeddingInputRead
++	indexInitializing bool
++	returnedTexts     []string
++	returnedVectors   [][]float32
+ }
+ 
+ func (w *modelOriginalEmbeddingClient) claimOriginalEmbeddingCall() (func(), error) {
+@@ -102,6 +108,7 @@ func (o *modelOriginalEmbeddingOperation) Embed(ctx context.Context, text string
+ 	if err = o.parent.life.read.Recheck(); err != nil {
+ 		return nil, err
+ 	}
++	o.recordOriginalIndexReturn([]string{text}, [][]float32{vector})
+ 	return vector, nil
+ }
+ 
+@@ -118,6 +125,7 @@ func (o *modelOriginalEmbeddingOperation) BatchEmbed(ctx context.Context, texts
+ 	if err = o.parent.life.read.Recheck(); err != nil {
+ 		return nil, err
+ 	}
++	o.recordOriginalIndexReturn(texts, vectors)
+ 	return vectors, nil
+ }
+ 
+@@ -143,6 +151,9 @@ func (o *modelOriginalEmbeddingOperation) CloseOriginal() error {
+ 	o.finish()
+ 	o.calls.Wait()
+ 	err := o.parent.life.RecheckOriginal()
++	if o.index != nil {
++		err = errors.Join(err, o.index.Close())
++	}
+ 	if o.parent.life.owner {
+ 		err = errors.Join(err, o.parent.CloseOriginal())
+ 	}
+@@ -155,3 +166,59 @@ func (o *modelOriginalEmbeddingOperation) CloseOriginal() error {
+ 
+ var _ embedding.OriginalOperationFactory = (*modelOriginalEmbeddingClient)(nil)
+ var _ embedding.Embedder = (*modelOriginalEmbeddingOperation)(nil)
++
++func (o *modelOriginalEmbeddingOperation) BeginOriginalIndexInputs(ctx context.Context, infos []*types.IndexInfo, wire []string) (context.Context, error) {
++	o.mu.Lock()
++	if o.closed || o.index != nil || o.indexInitializing || o.ctx.Err() != nil {
++		o.mu.Unlock()
++		return ctx, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	o.indexInitializing = true
++	o.calls.Add(1)
++	o.mu.Unlock()
++	input, err := repository.BeginKnowledgeSQLiteEmbeddingInputs(ctx, o.parent.life.read, infos, wire)
++	o.mu.Lock()
++	o.indexInitializing = false
++	if err == nil && (o.closed || o.ctx.Err() != nil) {
++		err = repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err == nil {
++		o.index = input
++	}
++	o.mu.Unlock()
++	if err != nil && input != nil {
++		err = errors.Join(err, input.Close())
++	}
++	o.calls.Done()
++	if err != nil {
++		return ctx, err
++	}
++	return input.Context(), nil
++}
++func (o *modelOriginalEmbeddingOperation) recordOriginalIndexReturn(texts []string, vectors [][]float32) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.index == nil || o.closed {
++		return
++	}
++	o.returnedTexts = append([]string(nil), texts...)
++	o.returnedVectors = make([][]float32, len(vectors))
++	for i, v := range vectors {
++		o.returnedVectors[i] = append([]float32(nil), v...)
++	}
++}
++func (o *modelOriginalEmbeddingOperation) BindOriginalIndexOutputs(ctx context.Context, texts []string, vectors [][]float32) (context.Context, error) {
++	o.mu.Lock()
++	if o.closed || o.index == nil || !reflect.DeepEqual(texts, o.returnedTexts) || !reflect.DeepEqual(vectors, o.returnedVectors) {
++		o.mu.Unlock()
++		return ctx, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	input := o.index
++	o.calls.Add(1)
++	o.mu.Unlock()
++	bound, err := input.Bind(texts, vectors)
++	o.calls.Done()
++	return bound, err
++}
++
++var _ embedding.OriginalIndexOperation = (*modelOriginalEmbeddingOperation)(nil)
+diff --git a/internal/application/service/retriever/keywords_vector_hybrid_indexer.go b/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
+index beb2ee5b287799f25dc715dabaf64a3bb6d5eb51..608809a752dd8a864689f0afb33d75377ac1d5f7 100644
+--- a/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
++++ b/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
+@@ -71,15 +71,35 @@ func (v *KeywordsVectorHybridRetrieveEngineService) Retrieve(ctx context.Context
+ // if vector retrieval is enabled in the retriever types
+ func (v *KeywordsVectorHybridRetrieveEngineService) Index(ctx context.Context,
+ 	embedder embedding.Embedder, indexInfo *types.IndexInfo, retrieverTypes []types.RetrieverType,
+-) error {
++) (resultErr error) {
+ 	params := make(map[string]any)
+ 	embeddingMap := make(map[string][]float32)
+ 	if slices.Contains(retrieverTypes, types.VectorRetrieverType) {
+-		embedding, err := embedder.Embed(ctx, sanitizeForEmbedding(ctx, indexInfo.Content))
++		var end func() error
++		var err error
++		ctx, embedder, end, err = embedding.BeginOperation(ctx, embedder)
++		if err != nil {
++			return err
++		}
++		defer func() { resultErr = errors.Join(resultErr, end()) }()
++		wire := []string{sanitizeForEmbedding(ctx, indexInfo.Content)}
++		if original, ok := embedder.(embedding.OriginalIndexOperation); ok && v.originalIndexStorage() {
++			ctx, err = original.BeginOriginalIndexInputs(ctx, []*types.IndexInfo{indexInfo}, wire)
++			if err != nil {
++				return err
++			}
++		}
++		vector, err := embedder.Embed(ctx, wire[0])
+ 		if err != nil {
+ 			return err
+ 		}
+-		embeddingMap[indexInfo.SourceID] = embedding
++		if original, ok := embedder.(embedding.OriginalIndexOperation); ok && v.originalIndexStorage() {
++			ctx, err = original.BindOriginalIndexOutputs(ctx, wire, [][]float32{vector})
++			if err != nil {
++				return err
++			}
++		}
++		embeddingMap[indexInfo.SourceID] = vector
+ 	}
+ 	params["embedding"] = embeddingMap
+ 	return v.indexRepository.Save(ctx, indexInfo, params)
+@@ -114,10 +134,22 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
+ 		for _, indexInfo := range indexInfoList {
+ 			contentList = append(contentList, sanitizeForEmbedding(ctx, indexInfo.Content))
+ 		}
++		if original, ok := embedder.(embedding.OriginalIndexOperation); ok && v.originalIndexStorage() {
++			ctx, err = original.BeginOriginalIndexInputs(ctx, indexInfoList, contentList)
++			if err != nil {
++				return err
++			}
++		}
+ 		embeddings, err := batchEmbedWithBackoff(ctx, embedder, contentList)
+ 		if err != nil {
+ 			return err
+ 		}
++		if original, ok := embedder.(embedding.OriginalIndexOperation); ok && v.originalIndexStorage() {
++			ctx, err = original.BindOriginalIndexOutputs(ctx, contentList, embeddings)
++			if err != nil {
++				return err
++			}
++		}
+ 
+ 		batchSize := 40
+ 		chunks := utils.ChunkSlice(indexInfoList, batchSize)
+@@ -143,6 +175,11 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
+ 	return v.boundedConcurrentBatchSaveNoEmbedding(ctx, chunks, maxConcurrency)
+ }
+ 
++func (v *KeywordsVectorHybridRetrieveEngineService) originalIndexStorage() bool {
++	storage, ok := v.indexRepository.(embedding.OriginalIndexStorage)
++	return ok && v.engineType == types.SQLiteRetrieverEngineType && storage.OriginalKnowledgeEmbeddingStorage()
++}
++
+ // batchEmbedWithBackoff calls BatchEmbedWithPool with exponential backoff on
+ // transient failures (200 / 400 / 800 / 1600 / 3200 ms). It returns the last
+ // embedding result on success or the last error if every attempt failed.
+diff --git a/internal/database/migration.go b/internal/database/migration.go
+index aef3c997113cfce85ea8cfc39b8675009502f68b..3ffe2a11ae96eaae2ec3278d5f22baeeecd602aa 100644
+--- a/internal/database/migration.go
++++ b/internal/database/migration.go
+@@ -127,10 +127,17 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 		setMigrationState(observedVersion, observedDirty, err.Error(), observedKnown)
+ 		return err
+ 	}
++	// This first route classification is read-only. Ambiguous historical
++	// versions must not impose a Peer-only inode lock on a genuine Root DB.
++	route, err := selectJointMigrationRoute(ctx, dsn, opts, observedVersion, observedDirty, observedKnown)
++	if err != nil {
++		setMigrationState(observedVersion, observedDirty, err.Error(), observedKnown)
++		return err
++	}
+ 	// Peer SQLite startup is serialized on the actual existing DB inode before
+ 	// its decisive ledger/catalogue/source observations. The first read merely
+ 	// detects a supported candidate; it cannot authorize any driver write.
+-	if jointLineageDialect(dsn, opts) == "sqlite" && observedKnown && !observedDirty && jointPeerForwardVersion("sqlite", observedVersion) {
++	if jointLineageDialect(dsn, opts) == "sqlite" && observedKnown && !observedDirty && route.lineage == jointHistoricalPeerForwardSource {
+ 		held, lockErr := acquirePeerSQLiteMigrationExclusion(ctx, dsn, opts)
+ 		if lockErr != nil {
+ 			setMigrationState(observedVersion, observedDirty, lockErr.Error(), observedKnown)
+@@ -151,7 +158,7 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 			return err
+ 		}
+ 	}
+-	route, err := selectJointMigrationRoute(ctx, dsn, opts, observedVersion, observedDirty, observedKnown)
++	route, err = selectJointMigrationRoute(ctx, dsn, opts, observedVersion, observedDirty, observedKnown)
+ 	if err != nil {
+ 		setMigrationState(observedVersion, observedDirty, err.Error(), observedKnown)
+ 		return err
+diff --git a/internal/database/migration_joint_lineage_sql_actual_test.go b/internal/database/migration_joint_lineage_sql_actual_test.go
+index 9650f30b039345be4c64aec20d1a12caf501c005..d2832cc155db59beec43e175f8049808e4d47506 100644
+--- a/internal/database/migration_joint_lineage_sql_actual_test.go
++++ b/internal/database/migration_joint_lineage_sql_actual_test.go
+@@ -180,7 +180,14 @@ func runJointLineageSQL(t *testing.T, pg bool) {
+ 			require.Equal(t, first+1, beforeVersion)
+ 			require.Equal(t, mode == "ambiguous_dirty_no_force", beforeDirty)
+ 			before := memoryFullSchemaSnapshot(t, db, dialect)
+-			err = RunMigrationsWithOptions(dsn, opts)
++			if mode == "peer_applied_wrong_directory" {
++				// The explicit canonical directory still cannot qualify a Peer
++				// ledger. The public router now has a separate genuine historical
++				// prefix route, covered for every prefix by its actual SQL gate.
++				err = preflightJointSchemaLineage(context.Background(), dsn, opts, beforeVersion, beforeDirty, true)
++			} else {
++				err = RunMigrationsWithOptions(dsn, opts)
++			}
+ 			switch mode {
+ 			case "peer_applied_wrong_directory":
+ 				require.ErrorIs(t, err, ErrJointSchemaPeerForwardBridge)
+diff --git a/internal/database/migration_peer_partial.go b/internal/database/migration_peer_partial.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7fb7006e06a7f9c76419b44db9bb3d6830aa198c
+--- /dev/null
++++ b/internal/database/migration_peer_partial.go
+@@ -0,0 +1,147 @@
++package database
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	_ "embed"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++type jointPeerPartialCommonWitness struct {
++	Path, SHA256, Table, SourceTable, DDL, Create, Rename string
++	Version, BeforeModuleVersion                          uint
++}
++
++//go:embed migration_peer_partial_common.json
++var jointPeerPartialCommonJSON []byte
++
++func jointPeerPartialCommonWitnessFromSource() (jointPeerPartialCommonWitness, error) {
++	var value jointPeerPartialCommonWitness
++	if json.Unmarshal(jointPeerPartialCommonJSON, &value) != nil || value.Version != 41 || value.BeforeModuleVersion != 75 || value.Table != "nextcloud_gc_items" || value.SourceTable != "nextcloud_gc_items_new" || value.Path != "migrations/peer-forward/sqlite/000041_nextcloud_gc_derived_inventory.up.sql" || fmt.Sprintf("%x", sha256.Sum256([]byte(value.DDL))) != value.SHA256 {
++		return value, ErrJointSchemaSourceIdentity
++	}
++	if !strings.HasPrefix(value.Create, "CREATE TABLE "+value.SourceTable+" (") || strings.Count(value.DDL, value.Create) != 1 || value.Rename != "ALTER TABLE nextcloud_gc_items_new RENAME TO nextcloud_gc_items;" || strings.Count(value.DDL, value.Rename) != 1 {
++		return value, ErrJointSchemaSourceIdentity
++	}
++	return value, nil
++}
++
++func verifyJointPeerPartialCommonProjection(root, dialect string) error {
++	if dialect != "sqlite" {
++		return nil
++	}
++	value, err := jointPeerPartialCommonWitnessFromSource()
++	if err != nil {
++		return err
++	}
++	var manifest jointPeerForwardAssetManifest
++	if json.Unmarshal(jointPeerForwardSourceAssetJSON, &manifest) != nil {
++		return ErrJointSchemaSourceIdentity
++	}
++	matches := 0
++	for _, file := range manifest.Routes[dialect].Files {
++		if file.Version == value.Version && file.Direction == "up" && file.Path == value.Path && file.SHA256 == value.SHA256 {
++			matches++
++		}
++	}
++	actual, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(value.Path)))
++	if matches != 1 || err != nil || string(actual) != value.DDL {
++		return ErrJointSchemaSourceIdentity
++	}
++	return nil
++}
++
++// SQLite75 rebuilds a table which already existed at common41. At partial74
++// it must retain that complete old shape, rather than look like an absent future
++// table or accept the later scoped_sql_graph kind before its real migration.
++func applyJointPeerPartialCommonCatalogue(dialect string, version uint, expected jointCatalogueExpected) error {
++	if dialect != "sqlite" || version != 74 {
++		return nil
++	}
++	value, err := jointPeerPartialCommonWitnessFromSource()
++	if err != nil {
++		return err
++	}
++	expected.Tables[value.Table] = "CREATE TABLE " + value.Table + strings.TrimPrefix(value.Create, "CREATE TABLE "+value.SourceTable)
++	return nil
++}
++
++// These are physical historical module identities, not aliases of Root
++// migrations or permission/body originals. Catalogue qualification remains
++// mandatory before this candidate list can choose a source directory.
++func jointPeerHistoricalPrefixVersion(dialect string, version uint) bool {
++	var blueprint jointPeerPrefixBlueprint
++	if json.Unmarshal(jointPeerPrefixCatalogueJSON, &blueprint) != nil {
++		return false
++	}
++	versions := []uint{155, 156, 157, 158, 159, 160, 161}
++	if dialect == "sqlite" {
++		versions = []uint{74, 75, 76, 77, 78, 79, 80}
++	} else if dialect != "versioned" {
++		return false
++	}
++	modules := blueprint.Modules[dialect]
++	if len(modules) != len(versions)+1 || modules[0].Version != 0 {
++		return false
++	}
++	found := false
++	for i, expected := range versions {
++		if modules[i+1].Version != expected {
++			return false
++		}
++		if version == expected {
++			found = true
++		}
++	}
++	return found
++}
++
++// A partial prefix must lack every later Peer/Root module object, not merely
++// happen to contain one marker table. This complete typed universe includes
++// common125/44, its authentic129/48 evolution and all future bridge objects.
++func verifyJointPeerIntroducedAbsence(ctx context.Context, tx *sql.Tx, dialect string, objects map[string]bool, expected jointCatalogueExpected) error {
++	final := uint(171)
++	if dialect == "sqlite" {
++		final = 89
++	}
++	universe, err := jointExpectedPeerForwardCatalogue(dialect, final)
++	if err != nil {
++		return err
++	}
++	names := map[string]bool{}
++	for _, objects := range []map[string]string{universe.Tables, universe.Triggers, universe.Functions, universe.Indexes} {
++		for name := range objects {
++			names[name] = true
++		}
++	}
++	kinds := map[string]map[string]string{"table": expected.Tables, "trigger": expected.Triggers, "function": expected.Functions, "index": expected.Indexes, "view": nil, "relation": nil}
++	for name := range names {
++		for kind, permitted := range kinds {
++			if objects[kind+"/"+name] {
++				if _, present := permitted[name]; !present {
++					return ErrJointSchemaUnknown
++				}
++			}
++		}
++	}
++	for table, columns := range universe.Columns {
++		for column := range columns {
++			if _, already := expected.Columns[table][column]; already {
++				continue
++			}
++			present, err := peerPrefixIntroducedColumn(ctx, tx, dialect, table, column)
++			if err != nil {
++				return err
++			}
++			if present {
++				return ErrJointSchemaUnknown
++			}
++		}
++	}
++	return ctx.Err()
++}
+diff --git a/internal/database/migration_peer_partial_common.json b/internal/database/migration_peer_partial_common.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d55f768950f23408656998a42f4c7a3729c9416
+--- /dev/null
++++ b/internal/database/migration_peer_partial_common.json
+@@ -0,0 +1,11 @@
++{
++  "Path": "migrations/peer-forward/sqlite/000041_nextcloud_gc_derived_inventory.up.sql",
++  "SHA256": "b177f39ad79e247dad596fe92832611e98217c9c3cf42c81def1238dc1e7b1ec",
++  "Version": 41,
++  "BeforeModuleVersion": 75,
++  "Table": "nextcloud_gc_items",
++  "SourceTable": "nextcloud_gc_items_new",
++  "DDL": "-- SQLite rebuilds the child table to expand its kind CHECK without dropping\n-- existing inventories or object-deletion claims.\nCREATE TABLE nextcloud_gc_items_new (\n    job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,\n    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index',\n                                      'derived_chunk', 'postgres_embedding', 'sqlite_embedding')),\n    object_ref TEXT NOT NULL,\n    state TEXT NOT NULL CHECK (state IN ('pending', 'blocked', 'deleting', 'collected')),\n    estimated_bytes INTEGER NOT NULL DEFAULT 0,\n    confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,\n    lease_token TEXT NOT NULL DEFAULT '',\n    lease_until DATETIME,\n    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    PRIMARY KEY (job_id, kind, object_ref)\n);\n\nINSERT INTO nextcloud_gc_items_new\n    (job_id, kind, object_ref, state, estimated_bytes, confirmed_released_bytes,\n     lease_token, lease_until, created_at, updated_at)\nSELECT job_id, kind, object_ref, state, estimated_bytes, confirmed_released_bytes,\n       lease_token, lease_until, created_at, updated_at\nFROM nextcloud_gc_items;\n\nDROP TABLE nextcloud_gc_items;\nALTER TABLE nextcloud_gc_items_new RENAME TO nextcloud_gc_items;\n\nINSERT OR IGNORE INTO nextcloud_gc_items (job_id, kind, object_ref, state)\nSELECT id, 'derived_index', knowledge_id, 'blocked'\nFROM nextcloud_gc_jobs;\n\nUPDATE nextcloud_gc_jobs\nSET state = 'blocked', completed_at = NULL,\n    last_error_code = 'derived_provenance_unverified',\n    next_attempt_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP\nWHERE state = 'collected';\n",
++  "Create": "CREATE TABLE nextcloud_gc_items_new (\n    job_id TEXT NOT NULL REFERENCES nextcloud_gc_jobs(id) ON DELETE CASCADE,\n    kind TEXT NOT NULL CHECK (kind IN ('knowledge', 'source_file', 'extracted_image', 'derived_index',\n                                      'derived_chunk', 'postgres_embedding', 'sqlite_embedding')),\n    object_ref TEXT NOT NULL,\n    state TEXT NOT NULL CHECK (state IN ('pending', 'blocked', 'deleting', 'collected')),\n    estimated_bytes INTEGER NOT NULL DEFAULT 0,\n    confirmed_released_bytes INTEGER NOT NULL DEFAULT 0,\n    lease_token TEXT NOT NULL DEFAULT '',\n    lease_until DATETIME,\n    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    PRIMARY KEY (job_id, kind, object_ref)\n);",
++  "Rename": "ALTER TABLE nextcloud_gc_items_new RENAME TO nextcloud_gc_items;"
++}
+diff --git a/internal/database/migration_peer_partial_route_sql_actual_test.go b/internal/database/migration_peer_partial_route_sql_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a458c2c0d806b8cfacf1efcf9637524469dcf50
+--- /dev/null
++++ b/internal/database/migration_peer_partial_route_sql_actual_test.go
+@@ -0,0 +1,258 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	gormlogger "gorm.io/gorm/logger"
++)
++
++func peerPartialUpFile(t *testing.T, root, dialect string, version uint) string {
++	t.Helper()
++	var manifest jointPeerForwardAssetManifest
++	require.NoError(t, json.Unmarshal(jointPeerForwardSourceAssetJSON, &manifest))
++	path := ""
++	for _, file := range manifest.Routes[dialect].Files {
++		if file.Version == version && file.Direction == "up" {
++			require.Empty(t, path)
++			path = filepath.Join(root, filepath.FromSlash(file.Path))
++		}
++	}
++	require.NotEmpty(t, path)
++	return path
++}
++
++func peerPartialInstallWrappers(t *testing.T, db *sql.DB, pg bool) {
++	t.Helper()
++	var owned *gorm.DB
++	var err error
++	if pg {
++		owned, err = gorm.Open(postgres.New(postgres.Config{DriverName: "postgres", Conn: db}), &gorm.Config{DisableAutomaticPing: true, Logger: gormlogger.Discard})
++	} else {
++		owned, err = gorm.Open(sqlite.New(sqlite.Config{Conn: db}), &gorm.Config{DisableAutomaticPing: true, Logger: gormlogger.Discard})
++	}
++	require.NoError(t, err)
++	require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(owned), "actual common-body installer, never fake original/permission facts")
++}
++
++func runPeerPartialForwardActual(t *testing.T, pg bool) {
++	prefixes := []uint{74, 75, 76, 77, 78, 79}
++	if pg {
++		prefixes = []uint{155, 156, 157, 158, 159, 160}
++	}
++	for _, prefix := range prefixes {
++		t.Run(fmtJointVersion(prefix), func(t *testing.T) {
++			modes := []string{"nonempty_upgrade_restart", "known_wrappers_upgrade_restart", "source_changed_no_mutation", "future_module_no_mutation", "mixed_root_no_mutation", "genuine_dirty_no_force", "late_footprint_before_driver_write"}
++			if pg {
++				modes = append(modes, "known_missing_local_guard_repaired", "optional_embedding_absent_upgrade")
++			}
++			for _, mode := range modes {
++				t.Run(mode, func(t *testing.T) {
++					root := sqliteRepoRoot(t)
++					chdirAndRestore(t, root)
++					if pg {
++						require.NotEmpty(t, os.Getenv("WEKNORA_MIGRATION_TEST_POSTGRES_DSN"), "actual full-feature owned PostgreSQL required; no skip")
++					}
++					pool, dsn, options := jointLineageFixture(t, pg)
++					dialect, common, final := "sqlite", uint(73), uint(89)
++					if pg {
++						dialect, common, final = "versioned", 154, 171
++						parsed, err := url.Parse(dsn)
++						require.NoError(t, err)
++						q := parsed.Query()
++						settings := strings.TrimSpace(strings.ReplaceAll(q.Get("options"), "-c app.skip_embedding=true", ""))
++						if mode == "optional_embedding_absent_upgrade" {
++							settings += " -c app.skip_embedding=true"
++						} else {
++							settings += " -c app.skip_embedding=false"
++						}
++						q.Set("options", settings)
++						parsed.RawQuery = q.Encode()
++						dsn = parsed.String()
++					}
++					setupSource := root
++					if mode == "genuine_dirty_no_force" {
++						setupSource = peerRouteCopiedRoot(t, root, dialect)
++						file := peerPartialUpFile(t, setupSource, dialect, prefix+1)
++						actual, err := os.ReadFile(file)
++						require.NoError(t, err)
++						require.NoError(t, os.WriteFile(file, append(actual, []byte("\nSELECT * FROM owned_partial_peer_failure;\n")...), 0600))
++					}
++					old := peerPrefixActualDriver(t, setupSource, dialect, dsn, options)
++					closed := false
++					closeOld := func() {
++						if closed {
++							return
++						}
++						closed = true
++						se, de := old.Close()
++						require.NoError(t, se)
++						require.NoError(t, de)
++					}
++					t.Cleanup(closeOld)
++					// Real historical common schema and migrations author this actual
++					// ledger; these retained legacy rows are not body/auth originals.
++					require.NoError(t, old.Migrate(common))
++					require.NoError(t, memoryFullExec(pool, dialect, "INSERT INTO tenants(id,name,business) VALUES(7,'partial-peer-owned','retained actual partial peer data')"))
++					if !pg {
++						_, err := pool.Exec("INSERT INTO nextcloud_gc_jobs(id,tenant_id,knowledge_base_id,datasource_id,external_id,knowledge_id,reason,state,not_before,original_not_before,next_attempt_at) VALUES('owned-partial-gc',7,'legacy-kb','legacy-source','legacy-file','legacy-knowledge','retired','blocked',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
++						require.NoError(t, err)
++						_, err = pool.Exec("INSERT INTO nextcloud_gc_items(job_id,kind,object_ref,state,estimated_bytes,confirmed_released_bytes,lease_token) VALUES('owned-partial-gc','source_file','retained legacy object','blocked',27,3,'')")
++						require.NoError(t, err)
++					}
++					if pg && mode != "optional_embedding_absent_upgrade" {
++						_, err := pool.Exec("INSERT INTO embeddings(source_id,source_type,knowledge_base_id,dimension,content) VALUES('owned-partial-peer',1,NULL,2,'retained actual partial embedding')")
++						require.NoError(t, err)
++					}
++					require.NoError(t, old.Migrate(prefix), "genuine partial historical source, never synthetic ledger or final80 catalogue")
++					if mode == "genuine_dirty_no_force" {
++						require.Error(t, old.Migrate(prefix+1), "real failed next historical SQL creates honest dirty state")
++					}
++					closeOld()
++					if mode == "known_wrappers_upgrade_restart" {
++						peerPartialInstallWrappers(t, pool, pg)
++					}
++					if mode == "known_missing_local_guard_repaired" {
++						_, err := pool.Exec("DROP TRIGGER nextcloud_indexed_embedding_guard ON embeddings")
++						require.NoError(t, err)
++						core, err := inspectJoint125LocalRepair(context.Background(), pool)
++						require.NoError(t, err)
++						require.Equal(t, joint125GuardMissing, core.state)
++					}
++					if mode == "mixed_root_no_mutation" {
++						file := "000074_nextcloud_withdrawal_local_registry.up.sql"
++						if pg {
++							file = "000155_nextcloud_withdrawal_local_registry.up.sql"
++						}
++						actual, err := os.ReadFile(filepath.Join(root, "migrations", dialect, file))
++						require.NoError(t, err)
++						_, err = pool.Exec(string(actual))
++						require.NoError(t, err)
++					}
++					if mode == "future_module_no_mutation" {
++						actual, err := os.ReadFile(peerPartialUpFile(t, root, dialect, prefix+1))
++						require.NoError(t, err)
++						_, err = pool.Exec(string(actual))
++						require.NoError(t, err, "actual next module introduces its real future tables/columns/functions/indexes/triggers without changing the ledger")
++					}
++					if mode == "source_changed_no_mutation" {
++						copy := peerRouteCopiedRoot(t, root, dialect)
++						file := peerPartialUpFile(t, copy, dialect, prefix+1)
++						actual, err := os.ReadFile(file)
++						require.NoError(t, err)
++						require.NoError(t, os.WriteFile(file, append(actual, []byte("\n-- changed actual future source identity\n")...), 0600))
++						chdirAndRestore(t, copy)
++					}
++					beforeVersion, beforeDirty := jointLineageMigrationState(t, pool)
++					before := memoryFullSchemaSnapshot(t, pool, dialect)
++					var tenantBefore string
++					require.NoError(t, pool.QueryRow("SELECT business FROM tenants WHERE id=7").Scan(&tenantBefore))
++					var embeddingBefore string
++					if pg && mode != "optional_embedding_absent_upgrade" {
++						require.NoError(t, pool.QueryRow("SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e").Scan(&embeddingBefore))
++					}
++					var gcBefore string
++					if !pg {
++						require.NoError(t, pool.QueryRow("SELECT kind||'/'||object_ref||'/'||state||'/'||estimated_bytes||'/'||confirmed_released_bytes||'/'||lease_token FROM nextcloud_gc_items WHERE job_id='owned-partial-gc'").Scan(&gcBefore))
++					}
++					var runErr error
++					if mode == "late_footprint_before_driver_write" {
++						ctx := context.Background()
++						if !pg {
++							held, err := acquirePeerSQLiteMigrationExclusion(ctx, dsn, options)
++							require.NoError(t, err)
++							t.Cleanup(func() { require.NoError(t, held.Close()) })
++							ctx = context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++						}
++						captured, err := selectJointMigrationRoute(ctx, dsn, options, prefix, false, true)
++						require.NoError(t, err)
++						require.Equal(t, jointHistoricalPeerForwardSource, captured.lineage)
++						guarded, err := newJointPeerRouteMigrate(ctx, "file://"+filepath.ToSlash(captured.directory), dsn, options, prefix, captured)
++						require.NoError(t, err)
++						actual, err := os.ReadFile(peerPartialUpFile(t, root, dialect, prefix+1))
++						require.NoError(t, err)
++						_, err = pool.Exec(string(actual))
++						require.NoError(t, err)
++						before = memoryFullSchemaSnapshot(t, pool, dialect)
++						runErr = guarded.Up()
++						se, de := guarded.Close()
++						require.NoError(t, se)
++						require.NoError(t, de)
++					} else {
++						runErr = RunMigrationsWithOptions(dsn, options)
++					}
++					negative := mode == "source_changed_no_mutation" || mode == "future_module_no_mutation" || mode == "mixed_root_no_mutation" || mode == "genuine_dirty_no_force" || mode == "late_footprint_before_driver_write"
++					if negative {
++						cause := ErrJointSchemaUnknown
++						if mode == "source_changed_no_mutation" {
++							cause = ErrJointSchemaSourceIdentity
++						}
++						if mode == "genuine_dirty_no_force" {
++							cause = ErrJointSchemaAmbiguousDirty
++						}
++						require.ErrorIs(t, runErr, cause)
++						require.Equal(t, before, memoryFullSchemaSnapshot(t, pool, dialect), "refusal precedes actual SetVersion/Run; fault state is not repaired")
++						version, dirty := jointLineageMigrationState(t, pool)
++						require.Equal(t, beforeVersion, version)
++						require.Equal(t, beforeDirty, dirty)
++					} else {
++						require.NoError(t, runErr, "exact cumulative catalogue runs genuine remaining historical SQL then honest bridge")
++						version, dirty := jointLineageMigrationState(t, pool)
++						require.Equal(t, final, version)
++						require.False(t, dirty)
++						require.NoError(t, VerifyJointSchemaReady(context.Background(), dsn, options))
++						require.NoError(t, VerifyJointSchemaReadyOnDB(context.Background(), pool, dialect))
++						readyBefore := memoryFullSchemaSnapshot(t, pool, dialect)
++						require.NoError(t, RunMigrationsWithOptions(dsn, options), "same honest final lineage restart")
++						require.Equal(t, readyBefore, memoryFullSchemaSnapshot(t, pool, dialect))
++						var originals int
++						require.NoError(t, pool.QueryRow("SELECT count(*) FROM memory_original_admissions").Scan(&originals))
++						require.Zero(t, originals)
++						require.NoError(t, pool.QueryRow("SELECT count(*) FROM model_definition_originals").Scan(&originals))
++						require.Zero(t, originals)
++						if pg {
++							core, err := inspectJoint125LocalRepair(context.Background(), pool)
++							require.NoError(t, err)
++							if mode == "optional_embedding_absent_upgrade" {
++								require.Equal(t, joint125OptionalAbsent, core.state)
++							} else {
++								require.Equal(t, joint125GuardCurrent, core.state)
++							}
++						}
++					}
++					var tenantAfter string
++					require.NoError(t, pool.QueryRow("SELECT business FROM tenants WHERE id=7").Scan(&tenantAfter))
++					require.Equal(t, tenantBefore, tenantAfter)
++					if pg && mode != "optional_embedding_absent_upgrade" {
++						var after string
++						require.NoError(t, pool.QueryRow("SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e").Scan(&after))
++						require.Equal(t, embeddingBefore, after)
++					}
++					if !pg {
++						var after string
++						require.NoError(t, pool.QueryRow("SELECT kind||'/'||object_ref||'/'||state||'/'||estimated_bytes||'/'||confirmed_released_bytes||'/'||lease_token FROM nextcloud_gc_items WHERE job_id='owned-partial-gc'").Scan(&after))
++						require.Equal(t, gcBefore, after)
++					}
++				})
++			}
++		})
++	}
++}
++
++func TestPeerPartialForwardEveryPrefixActualSQLite(t *testing.T) {
++	runPeerPartialForwardActual(t, false)
++}
++func TestPostgresPeerPartialForwardEveryPrefixActual(t *testing.T) {
++	runPeerPartialForwardActual(t, true)
++}
+diff --git a/internal/database/migration_peer_route.go b/internal/database/migration_peer_route.go
+index 538e9c428c7d0d8bb76a89c1911a407b9ebc8c95..fce255c83c1ea8adcb79e952b75f1505b7a51890 100644
+--- a/internal/database/migration_peer_route.go
++++ b/internal/database/migration_peer_route.go
+@@ -5,6 +5,7 @@ import (
+ 	"crypto/sha256"
+ 	"database/sql"
+ 	"encoding/json"
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
+@@ -22,10 +23,13 @@ type jointMigrationRoute struct {
+ }
+ 
+ func jointPeerForwardVersion(dialect string, version uint) bool {
++	if jointPeerHistoricalPrefixVersion(dialect, version) {
++		return true
++	}
+ 	if dialect == "versioned" {
+-		return version == 161 || version == 169 || version == 170 || version == 171
++		return version == 169 || version == 170 || version == 171
+ 	}
+-	return dialect == "sqlite" && (version == 80 || version == 88 || version == 89)
++	return dialect == "sqlite" && (version == 88 || version == 89)
+ }
+ 
+ func jointCanonicalMigrationRoute(dialect string) (jointMigrationRoute, error) {
+@@ -64,8 +68,16 @@ func selectJointMigrationRoute(ctx context.Context, dsn string, options Migratio
+ 	if !jointPeerForwardVersion(dialect, version) || !known || dirty {
+ 		return canonical, preflightJointSchemaLineage(ctx, dsn, options, version, dirty, known)
+ 	}
+-	// The final canonical versions differ from all supported peer versions.
+-	// A peer version can only choose this route after its complete catalogue.
++	// Historical155/156 and74/75 overlap lawful Root physical versions.
++	// A genuine Root catalogue keeps the canonical route; only an exact
++	// historical Peer catalogue may choose the old source and remaining SQL.
++	if jointPeerHistoricalPrefixVersion(dialect, version) {
++		if rootErr := preflightJointSchemaLineage(ctx, dsn, options, version, dirty, known); rootErr == nil {
++			return canonical, nil
++		} else if !errors.Is(rootErr, ErrJointSchemaPeerForwardBridge) && !errors.Is(rootErr, ErrJointSchemaUnknown) && !errors.Is(rootErr, ErrJointSchemaRootWitness) {
++			return jointMigrationRoute{}, rootErr
++		}
++	}
+ 	readOptions := options
+ 	readOptions.jointReadOnly = true
+ 	db, _, err := openJointLineageDB(dsn, readOptions)
+@@ -100,10 +112,17 @@ func jointExpectedPeerForwardCatalogue(dialect string, version uint) (jointCatal
+ 	if !jointPeerForwardVersion(dialect, version) {
+ 		return jointCatalogueExpected{}, ErrJointSchemaUnknown
+ 	}
+-	expected, err := jointExpectedPeerPrefixCatalogue(dialect, latest)
++	prefix := latest
++	if jointPeerHistoricalPrefixVersion(dialect, version) {
++		prefix = version
++	}
++	expected, err := jointExpectedPeerPrefixCatalogue(dialect, prefix)
+ 	if err != nil {
+ 		return expected, err
+ 	}
++	if err = applyJointPeerPartialCommonCatalogue(dialect, prefix, expected); err != nil {
++		return expected, err
++	}
+ 	var root jointCatalogueBlueprint
+ 	if json.Unmarshal(jointCatalogueJSON, &root) != nil {
+ 		return expected, ErrJointSchemaSourceIdentity
+@@ -199,6 +218,9 @@ func inspectJointPeerForwardRoute(ctx context.Context, db *sql.DB, canonicalDire
+ 	if err != nil {
+ 		return none, err
+ 	}
++	if err = verifyJointPeerPartialCommonProjection(root, dialect); err != nil {
++		return none, err
++	}
+ 	if err = verifyJointPeerPrefixProjection(dialect); err != nil {
+ 		return none, err
+ 	}
+@@ -258,6 +280,9 @@ func inspectJointPeerForwardRoute(ctx context.Context, db *sql.DB, canonicalDire
+ 	if err = jointVerifySentinelObjectKinds(objects, witness.Sentinels, expected); err != nil {
+ 		return none, err
+ 	}
++	if err = verifyJointPeerIntroducedAbsence(ctx, tx, dialect, objects, expected); err != nil {
++		return none, err
++	}
+ 	for table, columns := range witness.Sentinels.Columns {
+ 		for _, column := range columns {
+ 			present, err := peerPrefixIntroducedColumn(ctx, tx, dialect, table, column)
+@@ -286,7 +311,7 @@ func inspectJointPeerForwardRoute(ctx context.Context, db *sql.DB, canonicalDire
+ 		}
+ 		// Only a verified pre169 local binding can be missing.169 repeats the
+ 		// complete check under its actual local table lock before repairing it.
+-		if core.state != joint125GuardCurrent && core.state != joint125OptionalAbsent && !(version == 161 && core.state == joint125GuardMissing) {
++		if core.state != joint125GuardCurrent && core.state != joint125OptionalAbsent && !(jointPeerHistoricalPrefixVersion(dialect, version) && core.state == joint125GuardMissing) {
+ 			return none, ErrJointSchemaUnknown
+ 		}
+ 	}
+diff --git a/internal/models/embedding/original_index_input.go b/internal/models/embedding/original_index_input.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0b616f1ef498e6dfce9c5d1e49af59817e6d05d
+--- /dev/null
++++ b/internal/models/embedding/original_index_input.go
+@@ -0,0 +1,39 @@
++package embedding
++
++import (
++	"context"
++	"regexp"
++	"strings"
++	"unicode/utf8"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// OriginalIndexOperation binds the input before the SDK call and only exposes
++// outputs actually returned by that operation. It is not a caller proof DTO.
++type OriginalIndexOperation interface {
++	BeginOriginalIndexInputs(context.Context, []*types.IndexInfo, []string) (context.Context, error)
++	BindOriginalIndexOutputs(context.Context, []string, [][]float32) (context.Context, error)
++}
++type OriginalIndexStorage interface{ OriginalKnowledgeEmbeddingStorage() bool }
++
++var originalIndexImagePatterns = []*regexp.Regexp{
++	regexp.MustCompile(`(?is)<img\b[^>]*\bsrc=["']\s*data:image/[a-z0-9.+-]+;base64,[^"']+["'][^>]*>`),
++	regexp.MustCompile(`(?is)!\[[^\]]*\]\(\s*data:image/[a-z0-9.+-]+;base64,[^)]+\)`),
++	regexp.MustCompile(`(?i)data:image/[a-z0-9.+-]+;base64,[a-z0-9+/=]{200,}`),
++	regexp.MustCompile(`(?i)data:[a-z0-9.+/-]+;base64,[a-z0-9+/=]{200,}`),
++}
++
++// OriginalIndexText is the exact existing wire transform. Both the genuine
++// producer and its repository verifier use it; raw chunk text is not the wire.
++func OriginalIndexText(content string) string {
++	if strings.Contains(content, "base64,") {
++		for _, pattern := range originalIndexImagePatterns {
++			content = pattern.ReplaceAllString(content, "[image]")
++		}
++	}
++	if utf8.RuneCountInString(content) > 20000 {
++		content = string([]rune(content)[:20000])
++	}
++	return content
++}
+diff --git a/internal/types/knowledge_sqlite_embedding_original.go b/internal/types/knowledge_sqlite_embedding_original.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9503703280751675cf42c00a2783ee3aa6eb945
+--- /dev/null
++++ b/internal/types/knowledge_sqlite_embedding_original.go
+@@ -0,0 +1,37 @@
++package types
++
++// Metadata identifying a genuine SDK computation. Bodies remain in the
++// immutable original tables and under original-body retention controls.
++type KnowledgeSQLiteEmbeddingInput struct {
++	ID                                                 string `gorm:"primaryKey"`
++	TenantID                                           uint64
++	KnowledgeBaseID, KnowledgeID, ChunkID, AdmissionID string
++	ModelID, ModelProofJSON, SpaceDigest               string
++	ExpectedDimensions                                 int
++	InputJSON, InputSHA256, Digest                     string
++	CreatedAtMS                                        int64
++}
++
++func (KnowledgeSQLiteEmbeddingInput) TableName() string { return "knowledge_sqlite_embedding_inputs" }
++
++type KnowledgeSQLiteEmbeddingReceipt struct {
++	ID                                                          string `gorm:"primaryKey"`
++	TenantID                                                    uint64
++	KnowledgeBaseID, KnowledgeID, ChunkID, InputID, InputDigest string
++	RowID                                                       uint64
++	Revision                                                    int64
++	Dimension                                                   int
++	VectorJSON, VectorSHA256, Digest                            string
++	CreatedAtMS                                                 int64
++}
++
++func (KnowledgeSQLiteEmbeddingReceipt) TableName() string {
++	return "knowledge_sqlite_embedding_receipts"
++}
++
++type KnowledgeSQLiteEmbeddingVector struct {
++	RowID       uint64
++	Info        IndexInfo
++	Vector      []float32
++	SpaceDigest string
++}
+diff --git a/migrations/pending/knowledge-sqlite-embedding-originals-000090/000090_knowledge_sqlite_embedding_originals.down.sql b/migrations/pending/knowledge-sqlite-embedding-originals-000090/000090_knowledge_sqlite_embedding_originals.down.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..d624a04409680d973727073e50b403b39b1ca072
+--- /dev/null
++++ b/migrations/pending/knowledge-sqlite-embedding-originals-000090/000090_knowledge_sqlite_embedding_originals.down.sql
+@@ -0,0 +1,26 @@
++-- Protect every fact/control before the first DROP; do not erase UNKNOWN inventory.
++CREATE TEMP TABLE knowledge_sqlite_embedding_down_guard(ok INTEGER);
++CREATE TEMP TRIGGER knowledge_sqlite_embedding_down_refuse BEFORE INSERT ON knowledge_sqlite_embedding_down_guard
++WHEN EXISTS(SELECT 1 FROM knowledge_sqlite_embedding_inputs)
++ OR EXISTS(SELECT 1 FROM knowledge_sqlite_embedding_receipts)
++ OR EXISTS(SELECT 1 FROM knowledge_sqlite_embedding_vectors)
++ OR EXISTS(SELECT 1 FROM knowledge_sqlite_embedding_controls)
++BEGIN SELECT RAISE(ABORT,'knowledge_sqlite_embedding_originals_retained'); END;
++INSERT INTO knowledge_sqlite_embedding_down_guard VALUES(1);
++DROP TRIGGER knowledge_sqlite_embedding_receipt_delete_guard;
++DROP TRIGGER knowledge_sqlite_embedding_receipt_guard;
++DROP TRIGGER knowledge_sqlite_embedding_input_delete_guard;
++DROP TRIGGER knowledge_sqlite_embedding_input_guard;
++DROP TRIGGER knowledge_sqlite_vector_delete;
++DROP TRIGGER knowledge_sqlite_vector_update;
++DROP TRIGGER knowledge_sqlite_vector_insert;
++DROP TRIGGER knowledge_lite_embedding_delete;
++DROP TRIGGER knowledge_lite_embedding_update;
++DROP TRIGGER knowledge_lite_embedding_insert;
++DROP TABLE knowledge_sqlite_embedding_receipts;
++DROP TABLE knowledge_sqlite_embedding_vectors;
++DROP TABLE knowledge_sqlite_embedding_controls;
++DROP TABLE knowledge_sqlite_embedding_inputs;
++DROP TRIGGER knowledge_sqlite_embedding_down_refuse;
++DROP TABLE knowledge_sqlite_embedding_down_guard;
++-- lite_embeddings predates this protocol and is deliberately retained.
+diff --git a/migrations/pending/knowledge-sqlite-embedding-originals-000090/000090_knowledge_sqlite_embedding_originals.up.sql b/migrations/pending/knowledge-sqlite-embedding-originals-000090/000090_knowledge_sqlite_embedding_originals.up.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..30338b39a190d8c6575ce49676c3537a0b1ce364
+--- /dev/null
++++ b/migrations/pending/knowledge-sqlite-embedding-originals-000090/000090_knowledge_sqlite_embedding_originals.up.sql
+@@ -0,0 +1,68 @@
++-- Independent SQLite90 payload shared by future canonical87 and peer89 routes.
++-- This file is not yet attached to either startup route or its source witness.
++CREATE TABLE IF NOT EXISTS lite_embeddings (
++ id INTEGER PRIMARY KEY AUTOINCREMENT, created_at DATETIME, updated_at DATETIME,
++ source_id TEXT NOT NULL, source_type INTEGER NOT NULL, chunk_id TEXT,
++ knowledge_id TEXT, knowledge_base_id TEXT, tag_id TEXT, content TEXT NOT NULL,
++ dimension INTEGER NOT NULL, is_enabled NUMERIC DEFAULT true
++);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_sqlite_emb_source ON lite_embeddings(source_id,source_type);
++CREATE TABLE knowledge_sqlite_embedding_inputs (
++ id TEXT PRIMARY KEY NOT NULL, tenant_id INTEGER NOT NULL CHECK(tenant_id>0),
++ knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL, chunk_id TEXT NOT NULL,
++ admission_id TEXT NOT NULL REFERENCES knowledge_input_admissions(admission_id),
++ model_id TEXT NOT NULL, model_proof_json TEXT NOT NULL, space_digest TEXT NOT NULL CHECK(length(space_digest)=64),
++ expected_dimensions INTEGER NOT NULL CHECK(expected_dimensions BETWEEN 1 AND 65536),
++ input_json TEXT NOT NULL, input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
++ digest TEXT NOT NULL UNIQUE CHECK(length(digest)=64), created_at_ms INTEGER NOT NULL
++);
++CREATE TABLE knowledge_sqlite_embedding_controls (
++ row_id INTEGER PRIMARY KEY NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), present INTEGER NOT NULL CHECK(present IN(0,1))
++);
++CREATE TABLE knowledge_sqlite_embedding_vectors (
++ row_id INTEGER PRIMARY KEY NOT NULL REFERENCES lite_embeddings(id) ON DELETE CASCADE,
++ dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 65536),
++ vector BLOB NOT NULL CHECK(length(vector)=dimension*4)
++);
++CREATE TABLE knowledge_sqlite_embedding_receipts (
++ id TEXT PRIMARY KEY NOT NULL, tenant_id INTEGER NOT NULL CHECK(tenant_id>0),
++ knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL, chunk_id TEXT NOT NULL,
++ input_id TEXT NOT NULL UNIQUE REFERENCES knowledge_sqlite_embedding_inputs(id),
++ input_digest TEXT NOT NULL CHECK(length(input_digest)=64), row_id INTEGER NOT NULL UNIQUE,
++ revision INTEGER NOT NULL CHECK(revision>0), dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 65536),
++ vector_json TEXT NOT NULL, vector_sha256 TEXT NOT NULL CHECK(length(vector_sha256)=64),
++ digest TEXT NOT NULL UNIQUE CHECK(length(digest)=64), created_at_ms INTEGER NOT NULL
++);
++-- Existing metadata is UNKNOWN: controls record presence/observed revision, but
++-- no vector blob, input original or SDK output receipt is invented for it.
++INSERT INTO knowledge_sqlite_embedding_controls(row_id,revision,present) SELECT id,1,0 FROM lite_embeddings;
++CREATE TRIGGER knowledge_lite_embedding_insert AFTER INSERT ON lite_embeddings BEGIN
++ INSERT INTO knowledge_sqlite_embedding_controls(row_id,revision,present) VALUES(NEW.id,1,0);
++END;
++CREATE TRIGGER knowledge_lite_embedding_update AFTER UPDATE ON lite_embeddings BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1 WHERE row_id=NEW.id;
++END;
++CREATE TRIGGER knowledge_lite_embedding_delete AFTER DELETE ON lite_embeddings BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1,present=0 WHERE row_id=OLD.id;
++END;
++CREATE TRIGGER knowledge_sqlite_vector_insert AFTER INSERT ON knowledge_sqlite_embedding_vectors BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1,present=1 WHERE row_id=NEW.row_id;
++END;
++CREATE TRIGGER knowledge_sqlite_vector_update AFTER UPDATE ON knowledge_sqlite_embedding_vectors BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1 WHERE row_id=NEW.row_id;
++END;
++CREATE TRIGGER knowledge_sqlite_vector_delete AFTER DELETE ON knowledge_sqlite_embedding_vectors BEGIN
++ UPDATE knowledge_sqlite_embedding_controls SET revision=revision+1,present=0 WHERE row_id=OLD.row_id;
++END;
++CREATE TRIGGER knowledge_sqlite_embedding_input_guard BEFORE UPDATE ON knowledge_sqlite_embedding_inputs BEGIN
++ SELECT RAISE(ABORT,'knowledge_sqlite_embedding_input_immutable');
++END;
++CREATE TRIGGER knowledge_sqlite_embedding_input_delete_guard BEFORE DELETE ON knowledge_sqlite_embedding_inputs BEGIN
++ SELECT RAISE(ABORT,'knowledge_sqlite_embedding_input_immutable');
++END;
++CREATE TRIGGER knowledge_sqlite_embedding_receipt_guard BEFORE UPDATE ON knowledge_sqlite_embedding_receipts BEGIN
++ SELECT RAISE(ABORT,'knowledge_sqlite_embedding_receipt_immutable');
++END;
++CREATE TRIGGER knowledge_sqlite_embedding_receipt_delete_guard BEFORE DELETE ON knowledge_sqlite_embedding_receipts BEGIN
++ SELECT RAISE(ABORT,'knowledge_sqlite_embedding_receipt_immutable');
++END;
