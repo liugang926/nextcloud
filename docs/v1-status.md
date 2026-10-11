@@ -17,6 +17,8 @@ older component snapshots below retain their separate scope and failure history.
 | Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
 | Historical PeerApplied forward upgrade | `be76d2d6`: partial SQL110, preupgrade Ready/DOWN38 and original route20/Root91/startup34/Linux process6 all pass in separate windows; exact resources absent; earlier Darwin process6 passes on `1f185e4d` | Darwin partial74/75 and full application upgrade/restore |
 | SQLite original vector storage | `be76d2d6`: actual SDK/storage/native-read10 PASS10/FAIL0/SKIP0, including genuine credential successor, original lease-before-hydration and final lease expiry | Nextcloud input/query/HTTP completion owner union, production migration/registry and exact durable cleanup remain open |
+| Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
+| Partial Unix process upgrade | `190c1da0` and diagnostic `0ea85f63`: actual2PASS/5FAIL; fresh process reads89 while original parent reads74/75, with parent POSIX shared lock lost after custom FD Close | Production descriptor release fix, unchanged parent-pool7, original process6 and real Darwin7 validation |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
@@ -36,6 +38,24 @@ genuine successor with stable definition/space and no extra SDK call. Earlier
 prelude and generic-model-update failures remain recorded. The production
 registry and normal Nextcloud/query/HTTP completion owner chain are not bound;
 full vector functionality and V1 remain unaccepted. See the [vector10 record](evidence/SQLite-original-vector10-actual-SQL-HTTP-native-GREEN-20261011.json).
+
+The newer explicit HTTP carrier retains genuine knowledge/model/input/result
+reads through the last HTTP reference. Its5 nodes and the unchanged vector10
+and ordinary modelHTTP10 pass together on `0ea85f63`. The owner-cancel check
+waits for the actual reader cancellation within the original8s deadline, and
+the ordinary fixture now starts from real fulljoint87/168 rather than a partial
+schema missing current maintenance controls. Production guards are unchanged.
+The new provider-done leaf uses producer-context cancellation; it does not
+establish normal knowledge QA streaming/completion. See the [actual25 record](evidence/HTTP-knowledge-owner5-vector10-ordinary-model10-actual25-GREEN-20261011.json).
+
+New independent-process tests expose a production migration-lock release
+defect that the older gates did not cover. Closing the custom main-inode file
+descriptor clears the parent process's SQLite POSIX locks. A real independent
+probe reads final89 while the unchanged parent remains on74/75; the lock probe
+changes from parent SHARED to successful F_UNLCK. The parent pool is kept open
+and its original89 assertion remains. An explicit OFD unlock with safely
+retained descriptors is being implemented; the Unix7 gate remains failed and
+nativeDarwin7 is deferred. See the [actual diagnostic](evidence/Unix-partial7-actual-POSIX-lock-loss-stale-WAL-diagnostic-20261011.json).
 
 Ordinary original-model HTTP now passes10 selected nodes after fixing the
 constructor-to-HTTP owner lifetime. Four remote embedding protocols pass80
