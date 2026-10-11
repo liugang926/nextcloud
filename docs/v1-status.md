@@ -406,6 +406,18 @@ records only compiled stages/booleans. New14 test cleanup must first preserve
 the existing sticky operation error on repeated Close; no runtime acceptance
 is claimed yet. See the [compile record](evidence/joint-policy-actor-model-diagnostic-full-compile-GREEN-20261011.json).
 
+The production-identical oracle child `8cd300f5` passes service/server selected
+compile in37.578s and actual standalone policy14/14 in61.360s, with genuine
+current/viewer positives, user/membership/cancel/missing-authority negatives
+and real lease release/sticky-close identity. Its subsequent PG model diagnostic
+remains1FAIL: real Create passes authorization/write/reload, but authored and
+reloaded definition bytes differ while decoded structure and credentials match;
+only nested settings bytes differ after JSONB representation. The original
+Create success assertion remains. A stable serialization repair is required;
+no original hash or source check is relaxed. The78.850s combined window is
+failed overall, with both Go actors absent and owned PG/Redis stopped. See the
+[policy14 and actual model diagnostic](evidence/joint-policy-actor14-GREEN-PG-model-JSONB-diagnostic-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
