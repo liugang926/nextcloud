@@ -476,6 +476,20 @@ embedding RawSettings/SpaceDigest fix. No target late-path fault or directory33
 stage runs. Owned Go is absent, PG/Redis stopped, failed logs/network/volumes
 retained. See the [sourcepath preparation failure](evidence/joint-sourcepath6-SQLite-sync-PG-embedding-preparation-failure-20261011.json).
 
+A test-only real embedding producer diagnostic then runs1FAIL/0SKIP/OOM on
+production-identical `0d5dabfd`. Authorization/write/reload succeeds; decoded
+definition, credentials and dimensions match, while RawSettings bytes differ
+after JSONB. Stored SpaceDigest still equals the authored value, but digest
+recomputation from the reloaded recipe differs. The actual failure is recorded
+without Settings/credential output; source repair must preserve authenticated
+old SpaceDigest/vector identity rather than re-signing it. See the [embedding
+space diagnostic](evidence/joint-embedding-ModelCreate-JSONB-space-diagnostic-failure-20261011.json).
+Independent SQLite source review also identifies post-seal metadata mutation:
+streaming Emit adds publication_epoch after connector original-artifact sealing,
+so subsequent exact ItemDigest verification rejects the real fetched item.
+Epoch capture before seal plus unchanged consumer consistency checks is being
+implemented; no reseal or weaker original verification is accepted.
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
