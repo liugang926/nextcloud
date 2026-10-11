@@ -1,0 +1,107 @@
+diff --git a/internal/application/service/knowledge_query_owned_context.go b/internal/application/service/knowledge_query_owned_context.go
+new file mode 100644
+index 000000000..3b5a7db99
+--- /dev/null
++++ b/internal/application/service/knowledge_query_owned_context.go
+@@ -0,0 +1,101 @@
++package service
++
++import (
++	"context"
++	"reflect"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// knowledgeQueryOwnedContext projects only a real query already retained by
++// this live message owner. Selectors constrain its captured result; they do
++// not create a query, SDK receipt, body lease or read grant.
++func knowledgeQueryOwnedContext(ctx context.Context, kbID, modelID string) (context.Context, *types.KnowledgeQueryEmbeddingVectorSnapshot, error) {
++	if ctx == nil || kbID == "" || modelID == "" {
++		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, nil, err
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	slot.mu.Lock()
++	owner, closed, failed := slot.OwnerContext, slot.Closed, slot.Failed
++	var selected *knowledgeQueryBoundaryResource
++	count := 0
++	for _, resource := range slot.Models {
++		if actual, ok := resource.(*knowledgeQueryBoundaryResource); ok {
++			selected = actual
++			count++
++		}
++	}
++	slot.mu.Unlock()
++	if failed != nil {
++		return nil, nil, failed
++	}
++	if closed || owner == nil || count != 1 || selected == nil || selected.read == nil || !selected.retained.Load() {
++		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := owner.Err(); err != nil {
++		return nil, nil, err
++	}
++	readCtx := selected.Context()
++	if readCtx == nil || readCtx.Value(messageMaterialOutputKey{}) != slot || !sameKnowledgeQueryOwnedCaller(ctx, readCtx) || !sameKnowledgeQueryOwnedCaller(ctx, owner) {
++		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := selected.Recheck(); err != nil {
++		return nil, nil, err
++	}
++	actual, err := repository.KnowledgeQueryEmbeddingResultFromContext(readCtx)
++	if err != nil {
++		return nil, nil, err
++	}
++	if actual == nil {
++		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	snapshot, err := selected.Snapshot()
++	if err != nil {
++		return nil, nil, err
++	}
++	if snapshot == nil || snapshot.KnowledgeBaseID != kbID || snapshot.ModelID != modelID {
++		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	// Close or another query adoption may have raced the actual SQL rechecks.
++	// Reinspect the owner after IO without holding its mutex across any query.
++	slot.mu.Lock()
++	closed, failed = slot.Closed, slot.Failed
++	count = 0
++	for _, resource := range slot.Models {
++		if current, ok := resource.(*knowledgeQueryBoundaryResource); ok {
++			if current != selected {
++				closed = true
++			}
++			count++
++		}
++	}
++	slot.mu.Unlock()
++	if failed != nil {
++		return nil, nil, failed
++	}
++	if closed || count != 1 {
++		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	for _, current := range []context.Context{ctx, owner, readCtx} {
++		if err := current.Err(); err != nil {
++			return nil, nil, err
++		}
++	}
++	return readCtx, snapshot, nil
++}
++
++func sameKnowledgeQueryOwnedCaller(left, right context.Context) bool {
++	if left == nil || right == nil || !sameOriginalModelCaller(left, right) || types.CallerFromContext(left) != types.CallerFromContext(right) {
++		return false
++	}
++	leftKey, leftPresent := types.TenantAPIKeyScopeFromContext(left)
++	rightKey, rightPresent := types.TenantAPIKeyScopeFromContext(right)
++	return leftPresent == rightPresent && (!leftPresent || reflect.DeepEqual(leftKey, rightKey))
++}
