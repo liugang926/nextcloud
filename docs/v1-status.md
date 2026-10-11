@@ -24,6 +24,7 @@ older component snapshots below retain their separate scope and failure history.
 | Actual backend selection and owned model release | `e75d0b7e`:547 files format/full157 compile; concurrent release3 + query/history20 PASS23; ordinary HTTP25 PASS25; machine12 7PASS/5FAIL | Machine save caller adapter, genuine current epoch fault and final-clock positive remain; source-only human/ancestor/personal drafts require further repairs and actual validation |
 | Event-managed machine original save and current epoch | `eac6b136`:549 files format/full157 compile; actual machine12, arithmetic6/schema1, HTTP25 and release/history23 all PASS67;24 runtime resources and3 compiler resources independently absent | General no-event manual sync, cross-app onboarding readiness, legal root successor, normal application publication/QA, personal and inherited-source gates remain incomplete |
 | Typed derived template and nonempty ancestor | `9d9280a5`:551 files format/full157 compile; existing67 regressions pass; new ancestor8 all fail at sourceA published precondition | Fixture omits the production indexed-success enabled transition; test-only repair pending, no inherited-source acceptance |
+| Nonempty ancestor indexed-success fixture | `2023169f`:551 files format/full157 compile; ancestor8 6PASS/2FAIL including parent, existing67 regressions pass | Positive inheritance/native save and five fault leaves pass; last-clock fault probe has a wrong lease-table column reference and remains unaccepted |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -199,6 +200,17 @@ the next test-only child uses the production helper and protected update after
 actual index success. No raw published-state write or weakened assertion is
 accepted. See the [proposal](../integration/proposals/weknora-Nextcloud-typed-derived-template-and-nonempty-ancestor-20261012.json)
 and [actual first failure](evidence/Nextcloud-typed-ancestor8-first-publication-prelude-failure-old67-GREEN-20261012.json).
+
+The test-only indexed-success correction now passes the true A publication,
+typed template and B headless SDK/native save flow on `2023169f`. Grant, epoch,
+source, body and final-actor rollback leaves also pass. The last-clock leaf still
+fails its required faultApplied assertion, so the parent fails and the full
+ancestor8 remains unaccepted. Its source probe incorrectly selects datasource
+and external IDs from the lease table; those fields belong to the fence table.
+Raw evidence proves the fault was not applied, without proving this probe was
+reached. A real scoped fence join is required; the expiry/clock assertions and
+budgets remain intact. All157 packages compile and the unchanged67 regressions
+pass on this source. See the [current partial result](evidence/Nextcloud-ancestor8-indexed-stage-positive6-late-clock-failure-20261012.json).
 
 Normal personal QA activation still requires the original user query capability
 to survive embedding and retrieval fan-out; the current float-only interface

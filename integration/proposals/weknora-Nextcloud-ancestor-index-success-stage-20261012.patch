@@ -1,0 +1,69 @@
+diff --git a/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go b/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go
+index 127958441..46d28293d 100644
+--- a/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go
++++ b/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go
+@@ -37,19 +37,20 @@ import (
+ 
+ type ownedAncestorOperationKey struct{}
+ type ownedAncestorBuild struct {
+-	knowledge *types.Knowledge
+-	payload   types.DocumentProcessPayload
+-	scope     repository.NextcloudContentScope
+-	lease     repository.NextcloudContentLease
+-	read      interfaces.NextcloudOriginalUploadRead
+-	ctx       context.Context
+-	proof     *types.KnowledgeBuildInputProof
+-	chunks    []*types.Chunk
+-	engine    *retriever.CompositeRetrieveEngine
+-	infos     []*types.IndexInfo
+-	wire      []string
+-	bytes     []byte
+-	closed    bool
++	knowledge   *types.Knowledge
++	payload     types.DocumentProcessPayload
++	scope       repository.NextcloudContentScope
++	lease       repository.NextcloudContentLease
++	read        interfaces.NextcloudOriginalUploadRead
++	ctx         context.Context
++	proof       *types.KnowledgeBuildInputProof
++	chunks      []*types.Chunk
++	storageSize int64
++	engine      *retriever.CompositeRetrieveEngine
++	infos       []*types.IndexInfo
++	wire        []string
++	bytes       []byte
++	closed      bool
+ }
+ 
+ // Actual source A is originally uploaded, parsed, indexed and published before
+@@ -232,8 +233,19 @@ func TestOwnedNextcloudMachineNonemptyAncestorActualSQLiteHTTP(t *testing.T) {
+ 			// normal status/completion/publication producers. No raw completed/head edit.
+ 			current, err := f.s.repo.GetKnowledgeByID(a.ctx, 7, aKnowledge.ID)
+ 			require.NoError(t, err)
+-			current.ParseStatus = types.ParseStatusProcessing
+-			require.NoError(t, f.s.repo.UpdateKnowledge(a.ctx, current))
++			// Match the successful processChunks stage only after the genuine native
++			// index returned success. Completion alone never enables a staged row.
++			finalizeIndexedKnowledgeState(current, a.storageSize, len(a.chunks), false, time.Now())
++			require.NoError(t, f.s.updateKnowledgeUnlessSourceReplaced(a.ctx, current))
++			var indexed types.Knowledge
++			require.NoError(t, f.db.Where("id=?", current.ID).Take(&indexed).Error)
++			require.Equal(t, types.ParseStatusProcessing, indexed.ParseStatus)
++			require.Equal(t, "enabled", indexed.EnableStatus)
++			require.Equal(t, a.storageSize, indexed.StorageSize)
++			require.NotNil(t, indexed.ProcessedAt)
++			var readyChunks int64
++			require.NoError(t, f.db.Model(&types.Chunk{}).Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND chunk_type=? AND is_enabled=? AND index_status=?", 7, a.scope.KnowledgeBaseID, current.ID, types.ChunkTypeText, true, "ready").Count(&readyChunks).Error)
++			require.EqualValues(t, len(a.chunks), readyChunks)
+ 			completed, err := f.s.repo.CompleteProcessingWithoutSubtasks(a.ctx, current.ID)
+ 			require.NoError(t, err)
+ 			require.True(t, completed)
+@@ -699,6 +711,8 @@ func ownedAncestorWriteIndex(t *testing.T, m *machinePipelineFixture, held *owne
+ 	result := held.engine.BatchIndex(modelRead.Context(), sdk, held.infos)
+ 	if negative == nil || !*negative {
+ 		require.NoError(t, result)
++		held.storageSize = held.engine.EstimateStorageSize(modelRead.Context(), sdk, held.infos)
++		require.Positive(t, held.storageSize)
+ 	}
+ 	require.NoError(t, client.CloseOriginal())
+ 	clientClosed = true
