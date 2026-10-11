@@ -1,0 +1,1133 @@
+diff --git a/internal/application/service/chat_pipeline/merge.go b/internal/application/service/chat_pipeline/merge.go
+index 59070b504..4bab4967f 100644
+--- a/internal/application/service/chat_pipeline/merge.go
++++ b/internal/application/service/chat_pipeline/merge.go
+@@ -51,6 +51,16 @@ func (p *PluginMerge) ActivationEvents() []types.EventType {
+ func (p *PluginMerge) OnEvent(ctx context.Context,
+ 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
+ ) *PluginError {
++	if original, ok := p.ragChunks.(interface {
++		OriginalKnowledgeQueryMerge(context.Context, *types.ChatManage) (bool, error)
++	}); ok {
++		if handled, err := original.OriginalKnowledgeQueryMerge(ctx, chatManage); handled {
++			if err != nil {
++				return sourceLineagePluginError(err)
++			}
++			return next()
++		}
++	}
+ 	if !chatManage.NeedsRetrieval() {
+ 		return next()
+ 	}
+diff --git a/internal/application/service/chat_pipeline/search.go b/internal/application/service/chat_pipeline/search.go
+index 277b1addb..03062e5ae 100644
+--- a/internal/application/service/chat_pipeline/search.go
++++ b/internal/application/service/chat_pipeline/search.go
+@@ -349,6 +349,13 @@ func (p *PluginSearch) searchByTargets(
+ 	ctx context.Context,
+ 	chatManage *types.ChatManage,
+ ) ([]*types.SearchResult, error) {
++	if original, ok := p.knowledgeBaseService.(interface {
++		OriginalKnowledgeQuerySearch(context.Context, *types.ChatManage) ([]*types.SearchResult, bool, error)
++	}); ok {
++		if results, handled, err := original.OriginalKnowledgeQuerySearch(ctx, chatManage); handled {
++			return results, err
++		}
++	}
+ 	if len(chatManage.SearchTargets) == 0 {
+ 		return nil, nil
+ 	}
+diff --git a/internal/application/service/knowledge_query_normal_qa.go b/internal/application/service/knowledge_query_normal_qa.go
+new file mode 100644
+index 000000000..2a90826c0
+--- /dev/null
++++ b/internal/application/service/knowledge_query_normal_qa.go
+@@ -0,0 +1,428 @@
++package service
++
++import (
++	"context"
++	"math"
++	"reflect"
++	"sync"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++type knowledgeOriginalQueryDependencies struct {
++	material         *repository.KnowledgeInputProvenanceStore
++	models           interfaces.ModelRepository
++	configuredEngine *repository.KnowledgeSQLiteEmbeddingStore
++}
++
++// ConfigureKnowledgeBaseOriginalQueryEngine is the separate composition step
++// for a real original backend. The legacy default registry is not adopted by
++// injecting dependencies alone. Production calls this only after that backend's
++// startup qualification; explicit original fixtures use the actual engine.
++func ConfigureKnowledgeBaseOriginalQueryEngine(base interfaces.KnowledgeBaseService, engine *retriever.CompositeRetrieveEngine) error {
++	s, ok := base.(*knowledgeBaseService)
++	if !ok || s == nil || engine == nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	deps := s.originalQueryDependencies()
++	if deps == nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	store, err := engine.OriginalKnowledgeQueryStore(context.Background(), deps.material, deps.models)
++	if err != nil {
++		return err
++	}
++	s.originalQueryMu.Lock()
++	defer s.originalQueryMu.Unlock()
++	if s.originalQueryDeps != deps || deps.configuredEngine != nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	s.originalQueryDeps = &knowledgeOriginalQueryDependencies{material: deps.material, models: deps.models, configuredEngine: store}
++	return nil
++}
++
++// ConfigureKnowledgeBaseOriginalQueries binds composition-root dependencies.
++// The actual engine getter checks all three SQL pools before returning its
++// existing original store. Neither these dependencies nor a query selector
++// supply a read grant.
++func ConfigureKnowledgeBaseOriginalQueries(base interfaces.KnowledgeBaseService, material *repository.KnowledgeInputProvenanceStore, models interfaces.ModelRepository) error {
++	s, ok := base.(*knowledgeBaseService)
++	if !ok || s == nil || material == nil || models == nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	s.originalQueryMu.Lock()
++	defer s.originalQueryMu.Unlock()
++	if s.originalQueryDeps != nil {
++		if s.originalQueryDeps.material != material || s.originalQueryDeps.models != models {
++			return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		return nil
++	}
++	s.originalQueryDeps = &knowledgeOriginalQueryDependencies{material: material, models: models}
++	return nil
++}
++
++func (s *knowledgeBaseService) originalQueryDependencies() *knowledgeOriginalQueryDependencies {
++	if s == nil {
++		return nil
++	}
++	s.originalQueryMu.RLock()
++	deps := s.originalQueryDeps
++	s.originalQueryMu.RUnlock()
++	return deps
++}
++
++type normalKnowledgeQueryTurnKey struct{}
++type normalKnowledgeQueryTurn struct {
++	base             *knowledgeBaseService
++	session, message string
++	kb, text         string
++	caller           types.Caller
++	owner            context.Context
++	answerSelector   string
++	mu               sync.Mutex
++	nativeResults    map[string]types.SearchResult
++}
++
++func normalKnowledgeQueryTurnFromContext(ctx context.Context) *normalKnowledgeQueryTurn {
++	if ctx == nil {
++		return nil
++	}
++	turn, _ := ctx.Value(normalKnowledgeQueryTurnKey{}).(*normalKnowledgeQueryTurn)
++	return turn
++}
++
++func (s *sessionService) bindNormalKnowledgeQueryTurn(ctx context.Context, req *types.QARequest, kbIDs, knowledgeIDs []string) (context.Context, bool, error) {
++	base, ok := s.knowledgeBaseService.(*knowledgeBaseService)
++	if !ok || base.originalQueryDependencies() == nil || base.originalQueryDependencies().configuredEngine == nil {
++		return ctx, false, nil
++	}
++	if ctx == nil || ctx.Err() != nil || req == nil || req.Session == nil || len(kbIDs) != 1 || len(knowledgeIDs) != 0 || req.UserMessageID == "" || req.CustomAgent != nil || req.SharedAgentReadOnly || len(req.TagScopes) != 0 || len(req.Attachments) != 0 || len(req.ImageURLs) != 0 || req.ImageDescription != "" || req.QuotedContext != "" {
++		return ctx, true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	caller := types.CallerFromContext(ctx)
++	principal, present := types.PrincipalFromContext(ctx)
++	if !present || principal.Type != types.PrincipalWebUser || principal.ID != caller.UserID || caller.UserID == "" || caller.TenantID == 0 || req.Session.TenantID != caller.TenantID || req.Session.UserID != caller.UserID {
++		return ctx, true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	parents, err := messageMaterialBoundarySnapshots(ctx)
++	if err != nil {
++		return ctx, true, err
++	}
++	if len(parents) != 1 || len(parents[0].Messages) != 1 || len(parents[0].Proofs) != 1 || parents[0].Messages[0] == nil || parents[0].Proofs[0] == nil {
++		return ctx, true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	m, proof := parents[0].Messages[0], parents[0].Proofs[0]
++	if m.ID != req.UserMessageID || m.SessionID != req.Session.ID || m.Role != "user" || !m.IsCompleted || m.Content == "" || req.Query != m.Content || proof.MessageID != m.ID || proof.SessionID != req.Session.ID || proof.TenantID != caller.TenantID || proof.AdmissionID == "" || proof.GenerationID == "" || proof.BodyDigest == "" || proof.SourceLineage == nil || proof.SourceLineage.RequireComplete() != nil || len(proof.SourceLineage.Sources) != 0 {
++		return ctx, true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	bound, err := bindKnowledgeQueryMessageOriginal(ctx, req.Session.ID, req.UserMessageID)
++	if err != nil {
++		return ctx, true, err
++	}
++	turn := &normalKnowledgeQueryTurn{base: base, session: req.Session.ID, message: req.UserMessageID, kb: kbIDs[0], text: m.Content, caller: caller, owner: ctx, answerSelector: req.SummaryModelID}
++	return context.WithValue(bound, normalKnowledgeQueryTurnKey{}, turn), true, nil
++}
++
++func checkNormalKnowledgeQueryTurn(ctx context.Context, turn *normalKnowledgeQueryTurn) error {
++	if turn == nil || turn.base == nil || turn.owner == nil || ctx == nil || ctx.Err() != nil || turn.owner.Err() != nil || types.CallerFromContext(ctx) != turn.caller || !sameKnowledgeQueryOwnedCaller(ctx, turn.owner) {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return CheckMessageMaterialOutputBoundary(ctx)
++}
++
++// OriginalKnowledgeQuerySearch is an optional concrete service boundary used by
++// the actual event plugin. Its bool reports whether an existing private turn is
++// present; it never grants access. Unsupported shapes in that turn stay closed.
++func (s *knowledgeBaseService) OriginalKnowledgeQuerySearch(ctx context.Context, cm *types.ChatManage) ([]*types.SearchResult, bool, error) {
++	turn := normalKnowledgeQueryTurnFromContext(ctx)
++	if turn == nil {
++		return nil, false, nil
++	}
++	if turn.base != s || cm == nil || cm.Query != turn.text || cm.RewriteQuery != turn.text || len(cm.SearchTargets) != 1 || cm.SearchTargets[0] == nil || cm.SearchTargets[0].Type != types.SearchTargetTypeKnowledgeBase || cm.SearchTargets[0].KnowledgeBaseID != turn.kb || cm.SearchTargets[0].TenantID != turn.caller.TenantID || len(cm.SearchTargets[0].KnowledgeIDs) != 0 || len(cm.SearchTargets[0].TagIDs) != 0 || len(cm.SearchTargets[0].ScopeTagIDs) != 0 {
++		return nil, true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := validateNormalKnowledgeQueryPipeline(ctx, cm); err != nil {
++		return nil, true, err
++	}
++	results, err := s.HybridSearch(ctx, turn.kb, types.SearchParams{QueryText: turn.text, KnowledgeBaseIDs: []string{turn.kb}, MatchCount: cm.EmbeddingTopK, VectorThreshold: cm.VectorThreshold, DisableKeywordsMatch: true, SkipContextEnrichment: true})
++	return results, true, err
++}
++
++func validateNormalKnowledgeQueryPipeline(ctx context.Context, cm *types.ChatManage) error {
++	turn := normalKnowledgeQueryTurnFromContext(ctx)
++	if turn == nil {
++		return nil
++	}
++	if err := checkNormalKnowledgeQueryTurn(ctx, turn); err != nil {
++		return err
++	}
++	if cm == nil || cm.Query != turn.text || cm.RewriteQuery != turn.text || cm.SessionID != turn.session || cm.UserMessageID != turn.message || cm.MaxRounds != 0 || len(cm.History) != 0 || cm.EnableRewrite || cm.EnableQueryExpansion || cm.WebSearchEnabled || cm.WebFetchEnabled || cm.DataAnalysisEnabled || len(cm.Images) != 0 || len(cm.Attachments) != 0 || cm.ImageDescription != "" || cm.QuotedContext != "" || len(cm.Entity) != 0 || cm.GraphResult != nil || cm.MemoryReadContext != nil || cm.MemoryPrompt != "" || len(cm.UsedMemories) != 0 || cm.RerankModelID != "" {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return nil
++}
++
++func (s *knowledgeBaseService) originalKnowledgeQuery(ctx context.Context, kb *types.KnowledgeBase, text string) (context.Context, *types.KnowledgeQueryEmbeddingVectorSnapshot, *retriever.CompositeRetrieveEngine, error) {
++	turn := normalKnowledgeQueryTurnFromContext(ctx)
++	deps := s.originalQueryDependencies()
++	if turn == nil || turn.base != s || deps == nil || kb == nil || kb.ID != turn.kb || kb.TenantID != turn.caller.TenantID || text != turn.text || !kb.IsVectorEnabled() || kb.EmbeddingModelID == "" || kb.Type == types.KnowledgeBaseTypeFAQ || kb.IndexingStrategy.GraphEnabled || kb.IndexingStrategy.GraphRequired || kb.IndexingStrategy.WikiEnabled {
++		return nil, nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := checkNormalKnowledgeQueryTurn(ctx, turn); err != nil {
++		return nil, nil, nil, err
++	}
++	if err := s.authorizeKBAccess(ctx, []*types.KnowledgeBase{kb}); err != nil {
++		return nil, nil, nil, err
++	}
++	if err := s.checkSearchGroupAccess(ctx, []*types.KnowledgeBase{kb}); err != nil {
++		return nil, nil, nil, err
++	}
++	resolve, cancel := context.WithTimeout(ctx, storeResolveBudget)
++	engine, err := retriever.CreateRetrieveEngineForKB(resolve, s.retrieveEngine, s.ownership, kb.TenantID, kb.VectorStoreID)
++	cancel()
++	if err != nil {
++		return nil, nil, nil, err
++	}
++	store, err := engine.OriginalKnowledgeQueryStore(ctx, deps.material, deps.models)
++	if err != nil {
++		return nil, nil, nil, err
++	}
++	// A precomputed float slice cannot install or replace this private result.
++	if _, _, err := knowledgeQueryOwnedContext(ctx, kb.ID, kb.EmbeddingModelID); err != nil {
++		if err = ensureNormalKnowledgeQueryUnopened(ctx); err != nil {
++			return nil, nil, nil, err
++		}
++		if _, err = EmbedOriginalKnowledgeQuery(ctx, store, s.modelService, kb.ID, kb.EmbeddingModelID); err != nil {
++			return nil, nil, nil, err
++		}
++	}
++	owned, snapshot, err := knowledgeQueryOwnedContext(ctx, kb.ID, kb.EmbeddingModelID)
++	return owned, snapshot, engine, err
++}
++
++func ensureNormalKnowledgeQueryUnopened(ctx context.Context) error {
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	slot.mu.Lock()
++	defer slot.mu.Unlock()
++	if slot.Closed || slot.Failed != nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	for _, resource := range slot.Models {
++		if _, present := resource.(*knowledgeQueryBoundaryResource); present {
++			return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++	}
++	return nil
++}
++
++func (s *knowledgeBaseService) originalHybridSearch(ctx context.Context, kb *types.KnowledgeBase, kbs []*types.KnowledgeBase, params types.SearchParams, matchCount int) ([]*types.SearchResult, error) {
++	turn := normalKnowledgeQueryTurnFromContext(ctx)
++	if turn == nil || len(kbs) != 1 || len(params.KnowledgeIDs) != 0 || len(params.TagIDs) != 0 || len(params.ScopeTagIDs) != 0 || params.OnlyRecommended || params.DisableVectorMatch || !params.DisableKeywordsMatch || !params.SkipContextEnrichment {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if len(params.QueryEmbedding) != 0 {
++		_, existing, err := knowledgeQueryOwnedContext(ctx, kb.ID, kb.EmbeddingModelID)
++		if err != nil {
++			return nil, err
++		}
++		if len(params.QueryEmbedding) != len(existing.Vector) {
++			return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		for i, value := range params.QueryEmbedding {
++			if math.Float32bits(value) != math.Float32bits(existing.Vector[i]) {
++				return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++		}
++	}
++	owned, snapshot, engine, err := s.originalKnowledgeQuery(ctx, kb, params.QueryText)
++	if err != nil {
++		return nil, err
++	}
++	// Only the actual private result supplies the native vector and space.
++	native, err := engine.Retrieve(owned, []types.RetrieveParams{{Query: turn.text, Embedding: append([]float32(nil), snapshot.Vector...), KnowledgeBaseIDs: []string{kb.ID}, TopK: matchCount, Threshold: params.VectorThreshold, RetrieverType: types.VectorRetrieverType, AdditionalParams: map[string]interface{}{"embedding_space_digest": snapshot.SpaceDigest}}})
++	if err != nil {
++		return nil, err
++	}
++	lineage, err := normalKnowledgeNativeLineage(owned)
++	if err != nil {
++		return nil, err
++	}
++	results := []*types.SearchResult{}
++	seen := map[string]bool{}
++	for _, group := range native {
++		if group == nil || group.Error != nil || group.RetrieverEngineType != types.SQLiteRetrieverEngineType || group.RetrieverType != types.VectorRetrieverType {
++			return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		for _, item := range group.Results {
++			if item == nil || item.ChunkID == "" || item.KnowledgeID == "" || item.KnowledgeBaseID != kb.ID || item.Content == "" || seen[item.ChunkID] || item.MatchType != types.MatchTypeEmbedding {
++				return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			seen[item.ChunkID] = true
++			// Plaintext is taken from the checked native reader's original input,
++			// not hydrated a second time from an unbound current chunk/DTO.
++			results = append(results, &types.SearchResult{ID: item.ChunkID, Content: item.Content, KnowledgeID: item.KnowledgeID, KnowledgeBaseID: item.KnowledgeBaseID, Score: item.Score, MatchType: item.MatchType, ChunkType: string(types.ChunkTypeText), ContentRewritten: true, SourceLineage: lineage})
++		}
++	}
++	if len(results) == 0 {
++		// Immutable absence is a different protocol; no chat fallback borrows
++		// this query receipt when the native candidate/output set is empty.
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if len(results) > params.MatchCount {
++		results = results[:params.MatchCount]
++	}
++	if _, _, err = knowledgeQueryOwnedContext(owned, kb.ID, kb.EmbeddingModelID); err != nil {
++		return nil, err
++	}
++	if err = s.authorizeKBAccess(owned, kbs); err != nil {
++		return nil, err
++	}
++	if err = s.checkSearchGroupAccess(owned, kbs); err != nil {
++		return nil, err
++	}
++	captured := map[string]types.SearchResult{}
++	for _, result := range results {
++		copy := *result
++		copy.SourceLineage, err = types.UnionSourceLineage(result.SourceLineage)
++		if err != nil {
++			return nil, err
++		}
++		captured[result.ID] = copy
++	}
++	turn.mu.Lock()
++	if turn.nativeResults != nil {
++		turn.mu.Unlock()
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	turn.nativeResults = captured
++	turn.mu.Unlock()
++	return results, nil
++}
++
++// The first event slice permits filtering/ordering of genuine native text,
++// but cannot add neighbor/history/rewritten content as a new input influence.
++func checkNormalKnowledgeQueryResults(ctx context.Context, cm *types.ChatManage) error {
++	turn := normalKnowledgeQueryTurnFromContext(ctx)
++	if turn == nil {
++		return nil
++	}
++	turn.mu.Lock()
++	captured := make(map[string]types.SearchResult, len(turn.nativeResults))
++	for id, result := range turn.nativeResults {
++		captured[id] = result
++	}
++	turn.mu.Unlock()
++	for _, results := range [][]*types.SearchResult{cm.SearchResult, cm.RerankResult, cm.MergeResult} {
++		seen := map[string]bool{}
++		for _, result := range results {
++			if result == nil || seen[result.ID] {
++				return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			want, exists := captured[result.ID]
++			if !exists || !reflect.DeepEqual(want, *result) {
++				return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++			seen[result.ID] = true
++		}
++	}
++	return nil
++}
++
++// OriginalKnowledgeQueryMerge selects only the already checked native output.
++// It deliberately cannot refresh a parent/neighbor body or replay history.
++func (s *knowledgeBaseService) OriginalKnowledgeQueryMerge(ctx context.Context, cm *types.ChatManage) (bool, error) {
++	turn := normalKnowledgeQueryTurnFromContext(ctx)
++	if turn == nil {
++		return false, nil
++	}
++	if turn.base != s {
++		return true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := validateNormalKnowledgeQueryPipeline(ctx, cm); err != nil {
++		return true, err
++	}
++	if err := checkNormalKnowledgeQueryResults(ctx, cm); err != nil {
++		return true, err
++	}
++	if _, err := normalKnowledgeQueryResultsContext(ctx, cm); err != nil {
++		return true, err
++	}
++	if _, err := normalKnowledgeNativeLineage(ctx); err != nil {
++		return true, err
++	}
++	if len(cm.SearchResult) == 0 || len(cm.RerankResult) != 0 {
++		return true, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	cm.MergeResult = append([]*types.SearchResult(nil), cm.SearchResult...)
++	return true, nil
++}
++
++func normalKnowledgeNativeLineage(ctx context.Context) (*types.SourceLineage, error) {
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	queries := []*repository.KnowledgeQueryEmbeddingResultRead{}
++	vectors := []*repository.KnowledgeSQLiteEmbeddingVectorRead{}
++	slot.mu.Lock()
++	closed, failed := slot.Closed, slot.Failed
++	for _, resource := range slot.Models {
++		switch actual := resource.(type) {
++		case *knowledgeQueryBoundaryResource:
++			if actual != nil && actual.read != nil && actual.retained.Load() {
++				queries = append(queries, actual.read)
++			}
++		case *knowledgeEmbeddingBoundaryResource:
++			if actual != nil && actual.read != nil && actual.query != nil {
++				vectors = append(vectors, actual.read)
++			}
++		}
++	}
++	slot.mu.Unlock()
++	if closed || failed != nil || len(queries) != 1 || len(vectors) != 1 {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	_, consumptions, err := repository.WithActualKnowledgeCompletionReads(ctx, queries, vectors)
++	if err != nil || len(consumptions) != 1 {
++		if err != nil {
++			return nil, err
++		}
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return types.UnionSourceLineage(consumptions[0].SourceLineage)
++}
++
++func (s *sessionService) originalKnowledgeScopedCaller(ctx context.Context) (bool, error) {
++	if normalKnowledgeQueryTurnFromContext(ctx) == nil || s.groupAccess == nil {
++		return false, nil
++	}
++	caller := types.CallerFromContext(ctx)
++	role, err := s.groupAccess.EffectiveTenantRole(ctx, caller.UserID, caller.TenantID, time.Now().UTC())
++	return err == nil && role.ScopedOnly, err
++}
++
++func normalKnowledgeQueryResultsContext(ctx context.Context, cm *types.ChatManage) (context.Context, error) {
++	turn := normalKnowledgeQueryTurnFromContext(ctx)
++	if turn == nil {
++		return ctx, nil
++	}
++	if err := validateNormalKnowledgeQueryPipeline(ctx, cm); err != nil {
++		return nil, err
++	}
++	// The actual KB model selector is loaded again, not taken from a model string
++	// in the request or from returned vector metadata.
++	kb, err := turn.base.repo.GetKnowledgeBaseByID(ctx, turn.kb)
++	if err != nil {
++		return nil, err
++	}
++	bound, _, err := knowledgeQueryOwnedContext(ctx, kb.ID, kb.EmbeddingModelID)
++	return bound, err
++}
+diff --git a/internal/application/service/knowledgebase.go b/internal/application/service/knowledgebase.go
+index 2f4a80ec9..1471ca1e9 100644
+--- a/internal/application/service/knowledgebase.go
++++ b/internal/application/service/knowledgebase.go
+@@ -7,6 +7,7 @@ import (
+ 	"fmt"
+ 	"sort"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/Tencent/WeKnora/internal/application/access"
+@@ -31,6 +32,8 @@ const kbTaskCleanupTimeout = 5 * time.Second
+ 
+ // knowledgeBaseService implements the knowledge base service interface
+ type knowledgeBaseService struct {
++	originalQueryMu        sync.RWMutex
++	originalQueryDeps      *knowledgeOriginalQueryDependencies
+ 	knowledgeInputWriter   interfaces.KnowledgeBaseInputWriter
+ 	graphLineageReader     *KnowledgeGraphLineageReader
+ 	repo                   interfaces.KnowledgeBaseRepository
+diff --git a/internal/application/service/knowledgebase_search.go b/internal/application/service/knowledgebase_search.go
+index db60496ae..76bc77b86 100644
+--- a/internal/application/service/knowledgebase_search.go
++++ b/internal/application/service/knowledgebase_search.go
+@@ -30,6 +30,13 @@ func (s *knowledgeBaseService) GetQueryEmbedding(ctx context.Context, kbID strin
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if normalKnowledgeQueryTurnFromContext(ctx) != nil {
++		_, snapshot, _, err := s.originalKnowledgeQuery(ctx, kb, queryText)
++		if err != nil {
++			return nil, err
++		}
++		return append([]float32(nil), snapshot.Vector...), nil
++	}
+ 
+ 	currentTenantID := types.MustTenantIDFromContext(ctx)
+ 	var embeddingModel embedding.Embedder
+@@ -238,6 +245,9 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
+ 	if matchCount > maxRetrievalPoolSize {
+ 		matchCount = maxRetrievalPoolSize
+ 	}
++	if normalKnowledgeQueryTurnFromContext(ctx) != nil {
++		return s.originalHybridSearch(ctx, kb, kbs, params, matchCount)
++	}
+ 
+ 	// Compute the query embedding once before fan-out and propagate via
+ 	// params.QueryEmbedding. Without this, each storeGroup's
+diff --git a/internal/application/service/normal_event_original_query_sql_http_actual_test.go b/internal/application/service/normal_event_original_query_sql_http_actual_test.go
+new file mode 100644
+index 000000000..3269ba143
+--- /dev/null
++++ b/internal/application/service/normal_event_original_query_sql_http_actual_test.go
+@@ -0,0 +1,506 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"reflect"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++const normalOriginalEventAnswer = "Actual normal original event answer."
++
++// Real normal service/event technical slice with the existing current linked
++// WebAdmin producer. It is not JWT/scoped-only/default-registry adoption. A10's
++// dedicated actual JWT gate is separate; normal scoped deferred/bound-answer
++// propagation needs a further real JWT event gate after this baseline works.
++func TestNormalSingleKBOriginalEventActualSQLiteHTTP(t *testing.T) {
++	for _, mode := range []string{
++		"published_source_event_answer_completion",
++		"original_text_mismatch_before_SDK",
++		"cross_session_selector_before_SDK",
++		"missing_owned_result_context",
++		"foreign_original_engine_before_SDK",
++		"actor_after_query_SDK",
++		"cancel_after_query_SDK",
++		"source_grant_after_last_journal_IO",
++		"source_content_last_SQL_clock",
++	} {
++		t.Run(mode, func(t *testing.T) {
++			f := NewScopedKnowledgePurposeFixtureForTest(t)
++			baseline := f.SDKCalls()
++			require.EqualValues(t, 1, baseline)
++			caller := types.CallerFromContext(f.Creator)
++			principal, present := types.PrincipalFromContext(f.Creator)
++			require.True(t, present)
++			require.Equal(t, types.PrincipalWebUser, principal.Type)
++			require.Equal(t, caller.UserID, principal.ID)
++			role, err := f.Groups.EffectiveTenantRole(f.Creator, caller.UserID, 7, time.Now().UTC())
++			require.NoError(t, err)
++			require.False(t, role.ScopedOnly)
++			require.True(t, role.Role.HasPermission(types.TenantRoleAdmin))
++			var answers atomic.Int64
++			var mu sync.Mutex
++			var observedErr error
++			report := func(err error) { mu.Lock(); observedErr = errors.Join(observedErr, err); mu.Unlock() }
++			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				answers.Add(1)
++				var wire struct {
++					Stream   bool
++					Messages []struct{ Role, Content string }
++				}
++				if json.NewDecoder(r.Body).Decode(&wire) != nil || r.URL.Path != "/chat/completions" || !wire.Stream || r.Header.Get("Authorization") != "Bearer owned-ancestor-embedding" {
++					report(errors.New("actual normal answer SSE request mismatch"))
++					w.WriteHeader(400)
++					return
++				}
++				text := ""
++				for _, m := range wire.Messages {
++					text += m.Content
++				}
++				if !strings.Contains(text, personalQueryText) || !strings.Contains(text, "Original configuration influence") {
++					report(errors.New("actual normal answer lost leased human/source input"))
++					w.WriteHeader(400)
++					return
++				}
++				w.Header().Set("Content-Type", "text/event-stream")
++				chunk := map[string]any{"id": "owned-normal-event-answer", "object": "chat.completion.chunk", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": normalOriginalEventAnswer}, "finish_reason": nil}}}
++				data, e := json.Marshal(chunk)
++				if e != nil {
++					report(e)
++					return
++				}
++				if _, e = fmt.Fprintf(w, "data: %s\n\n", data); e != nil {
++					report(e)
++					return
++				}
++				if flush, ok := w.(http.Flusher); ok {
++					flush.Flush()
++				}
++				if _, e = fmt.Fprint(w, "data: {\"id\":\"owned-normal-event-answer\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"); e != nil {
++					report(e)
++				}
++			}))
++			t.Cleanup(provider.Close)
++			// A new current answer definition is authored through the normal original
++			// model writer. KB SummaryModelID stays exactly the genuinely authored ID;
++			// no original A/vector model Space or receipt is resigned or replaced.
++			answer := *f.Answer
++			answer.Parameters.BaseURL = provider.URL
++			answer.Parameters.OriginalChat = nil
++			require.NoError(t, f.Models.UpdateModel(f.Creator, &answer))
++			require.NotNil(t, answer.OriginalProof)
++			require.Equal(t, f.Answer.ID, answer.ID)
++			var kb types.KnowledgeBase
++			require.NoError(t, f.DB.Where("id=? AND tenant_id=?", f.KB, 7).Take(&kb).Error)
++			require.Equal(t, answer.ID, kb.SummaryModelID)
++			require.False(t, kb.IndexingStrategy.GraphRequired)
++			require.False(t, kb.IndexingStrategy.GraphEnabled)
++			require.True(t, kb.IndexingStrategy.VectorEnabled)
++			registry := retriever.NewRetrieveEngineRegistry(nil, nil)
++			native := retriever.NewKVHybridRetrieveEngine(f.index, types.SQLiteRetrieverEngineType)
++			require.NoError(t, registry.Register(native))
++			knowRepo := repository.NewKnowledgeRepository(f.DB)
++			repository.ConfigureKnowledgeCurrentReadActor(knowRepo, f.Store)
++			chunkRepo := repository.NewChunkRepository(f.DB)
++			publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(f.DB), repository.NewDataSourceRepository(f.DB))
++			publication.ConfigureSourcePathResolver(repository.NewNextcloudOnboardingStore(f.DB))
++			guard, ok := f.messages.sourceLineageGuard.(*access.NextcloudSourceLineageGuard)
++			require.True(t, ok)
++			require.NotNil(t, guard)
++			kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(f.DB), kgRepo: knowRepo, chunkRepo: chunkRepo, modelService: f.Models, retrieveEngine: registry, tenantRepo: repository.NewTenantRepository(f.DB), contentLeases: f.Store.ContentLeaseStore(), ragChunkSnapshots: repository.NewRAGChunkSnapshotReader(f.DB, f.Store), ragChunkLineageGuard: guard, groupAccess: f.Groups, publicationGuard: publication}
++			ConfigureKnowledgeBaseRAGChunkHydration(kbs, repository.NewRAGChunkSnapshotReader(f.DB, f.Store), guard)
++			require.NoError(t, ConfigureKnowledgeBaseOriginalQueries(kbs, f.Store, f.ModelRepository))
++			var tenant types.Tenant
++			require.NoError(t, f.DB.Where("id=?", 7).Take(&tenant).Error)
++			owner := context.WithValue(f.Creator, types.TenantInfoContextKey, &tenant)
++			owner = context.WithValue(owner, types.UserIDContextKey, caller.UserID)
++			composite, err := retriever.CreateRetrieveEngineForKB(owner, registry, nil, 7, kb.VectorStoreID)
++			require.NoError(t, err)
++			if mode == "foreign_original_engine_before_SDK" {
++				other := NewScopedKnowledgePurposeFixtureForTest(t)
++				foreignRegistry := retriever.NewRetrieveEngineRegistry(nil, nil)
++				require.NoError(t, foreignRegistry.Register(retriever.NewKVHybridRetrieveEngine(other.index, types.SQLiteRetrieverEngineType)))
++				foreign, err := retriever.CreateRetrieveEngineForKB(context.WithValue(other.Creator, types.TenantInfoContextKey, &tenant), foreignRegistry, nil, 7, nil)
++				require.NoError(t, err)
++				require.Error(t, ConfigureKnowledgeBaseOriginalQueryEngine(kbs, foreign))
++				require.Equal(t, baseline, f.SDKCalls())
++				f.AssertNoLiveLeases(t)
++				return
++			}
++			require.NoError(t, ConfigureKnowledgeBaseOriginalQueryEngine(kbs, composite))
++			if mode == "missing_owned_result_context" {
++				ctx, snapshot, err := knowledgeQueryOwnedContext(owner, f.KB, f.Embedding.ID)
++				require.Error(t, err)
++				require.Nil(t, snapshot)
++				if ctx != nil {
++					actual, lookupErr := repository.KnowledgeQueryEmbeddingResultFromContext(ctx)
++					require.NoError(t, lookupErr)
++					require.Nil(t, actual)
++				}
++				require.Equal(t, baseline, f.SDKCalls())
++				f.AssertNoLiveLeases(t)
++				return
++			}
++			cfg := &config.Config{Conversation: &config.ConversationConfig{MaxRounds: 0, EmbeddingTopK: 1, RerankTopK: 1, EnableRewrite: false, EnableQueryExpansion: false, FallbackStrategy: "fixed", FallbackResponse: "CURRENT FIXED SAFE FALLBACK", Summary: &config.SummaryConfig{Prompt: "Answer using the admitted original source", ContextTemplate: "{{query}}\n{{contexts}}"}}}
++			chunks := NewChunkService(chunkRepo, knowRepo, kbs.repo, f.Models, registry, nil, nil, nil)
++			tenants := NewTenantService(repository.NewTenantRepository(f.DB), repository.NewStorageBackendRepository(f.DB))
++			knowledge := &knowledgeService{config: cfg, repo: knowRepo, kbService: kbs, tenantRepo: repository.NewTenantRepository(f.DB), tenantService: tenants, chunkService: chunks, chunkRepo: chunkRepo, modelService: f.Models, retrieveEngine: registry, groupAccess: f.Groups, publicationGuard: publication, contentLeases: f.Store.ContentLeaseStore(), knowledgeInputs: f.Store}
++			messages := f.messages
++			messages.kbService = kbs
++			messages.knowService = knowledge
++			messages.modelService = f.Models
++			manager := chatpipeline.NewEventManager()
++			sessions := &sessionService{cfg: cfg, sessionRepo: repository.NewSessionRepository(f.DB), messageRepo: repository.NewMessageRepository(f.DB), knowledgeBaseService: kbs, knowledgeService: knowledge, chunkService: chunks, modelService: f.Models, tenantService: tenants, eventManager: manager, busyGate: NewSessionBusyGate(), groupAccess: f.Groups}
++			ConfigureMessageSourceLineage(messages, sessions, &SessionForkService{}, manager, guard)
++			chatpipeline.NewPluginLoadHistory(manager, messages, cfg)
++			chatpipeline.NewPluginMemoryRecall(manager, nil)
++			chatpipeline.NewPluginQueryUnderstand(manager, f.Models, messages, nil, cfg)
++			chatpipeline.NewPluginSearchParallel(manager, kbs, knowledge, chunks, cfg, nil, tenants, sessions, nil, nil, nil, chunkRepo, knowRepo)
++			chatpipeline.NewPluginRerank(manager, f.Models)
++			chatpipeline.NewPluginMerge(manager, chunkRepo, chunks)
++			chatpipeline.ConfigureRAGChunkMergeHydration(manager, kbs)
++			chatpipeline.NewPluginFilterTopK(manager)
++			chatpipeline.NewPluginIntoChatMessage(manager, messages, knowledge)
++			observedModels := &normalEventOriginalModelsObserver{ModelService: f.Models, expected: owner, kb: f.KB, model: f.Embedding.ID, answer: answer.ID, report: report}
++			chatpipeline.NewPluginChatCompletionStream(manager, observedModels)
++			session := &types.Session{ID: uuid.NewString(), TenantID: 7, UserID: caller.UserID}
++			_, err = sessions.sessionRepo.Create(owner, session)
++			require.NoError(t, err)
++			user, err := messages.CreateMessage(owner, &types.Message{SessionID: session.ID, RequestID: uuid.NewString(), Role: "user", Content: personalQueryText, IsCompleted: true})
++			require.NoError(t, err)
++			assistant, err := messages.CreateMessage(owner, &types.Message{SessionID: session.ID, RequestID: user.RequestID, Role: "assistant"})
++			require.NoError(t, err)
++			deadline, cancelDeadline := context.WithTimeout(owner, 8*time.Second)
++			httpctx, attach, check, releaseHTTP := BeginMessageMaterialHTTPBoundary(deadline)
++			call, cancelCall := context.WithCancel(attach(httpctx))
++			releaseProducer := RetainMessageMaterialHTTPProducer(call)
++			observedModels.expected = call
++			var started atomic.Bool
++			producerDone := make(chan struct{})
++			result := make(chan error, 1)
++			const observer = "normal-event-original-late-owned-fault"
++			observerInstalled := false
++			cleanup := func() {
++				cancelCall()
++				cancelDeadline()
++				if started.Load() {
++					select {
++					case <-producerDone:
++					case <-time.After(3 * time.Second):
++						t.Error("actual normal producer did not join within existing cleanup bound")
++					}
++				}
++				f.SetQueryHook(nil)
++				if observerInstalled {
++					f.DB.Callback().Row().Remove(observer)
++				}
++				releaseProducer()
++				releaseHTTP()
++				f.AssertNoLiveLeases(t)
++				mu.Lock()
++				e := observedErr
++				mu.Unlock()
++				if e != nil {
++					t.Error(e)
++				}
++				if e = f.CallbackError(); e != nil {
++					t.Error(e)
++				}
++				if e = f.sourceError(); e != nil {
++					t.Error(e)
++				}
++			}
++			var faultApplied, crossedExpiry, saveAttempted atomic.Bool
++			saved := make(chan error, 1)
++			bus := event.NewEventBus()
++			// Actual producer event context supplies the current owned result/caller.
++			// No test invokes PrepareScoped.../Embed or constructs a private purpose.
++			bus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
++				data, ok := evt.Data.(event.AgentFinalAnswerData)
++				if !ok {
++					return errors.New("actual normal answer event type mismatch")
++				}
++				lineage, ok := evt.SourceLineage.(*types.SourceLineage)
++				if !ok || lineage.RequireComplete() != nil || len(lineage.Sources) != 1 || lineage.Sources[0].KnowledgeID != f.Knowledge {
++					return errors.New("actual normal answer lost published dependency")
++				}
++				assistant.Content += data.Content
++				assistant.SourceLineage = lineage
++				if !data.Done {
++					return nil
++				}
++				if !saveAttempted.CompareAndSwap(false, true) {
++					return errors.New("actual normal duplicate final answer")
++				}
++				if err := normalEventOriginalContextCheck(ctx, call, f.KB, f.Embedding.ID); err != nil {
++					saved <- err
++					return err
++				}
++				markMessageMaterialReady(httpctx)
++				assistant.IsCompleted = true
++				err := messages.UpdateMessage(context.WithoutCancel(ctx), assistant)
++				saved <- err
++				return err
++			})
++			if mode == "source_grant_after_last_journal_IO" || mode == "source_content_last_SQL_clock" {
++				require.NoError(t, f.DB.Callback().Row().Before("gorm:row").Register(observer, func(tx *gorm.DB) {
++					localPhase := mode == "source_grant_after_last_journal_IO" && repository.KnowledgeCompletionLocalAuthorityObserved(tx.Statement.Context, tx)
++					clockPhase := mode == "source_content_last_SQL_clock" && repository.KnowledgeCompletionSQLClockObserved(tx.Statement.Context, tx) && strings.Contains(tx.Statement.SQL.String(), "AS clock_ms")
++					if (!localPhase && !clockPhase) || !faultApplied.CompareAndSwap(false, true) {
++						return
++					}
++					clean := personalCompletionMutationProducerDB(tx)
++					var pending int64
++					if e := clean.Table("message_completion_input_manifests").Count(&pending).Error; e != nil || pending != 1 {
++						report(errors.New("actual pending normal completion effect absent"))
++						return
++					}
++					if localPhase {
++						e := repository.NewNextcloudOnboardingStore(personalCompletionMutationProducerDB(tx)).ApplyGrantSnapshot(tx.Statement.Context, f.op, types.NextcloudGrantSnapshot{Complete: true, PermissionVersion: 2, PublicationEpoch: 1, Subjects: []types.NextcloudGrantSubject{}})
++						if e != nil {
++							report(e)
++							return
++						}
++						var remaining int64
++						if e = clean.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Model(&types.NextcloudSourceGrant{}).Where("operation_id=?", f.op.OperationID).Count(&remaining).Error; e != nil || remaining != 0 {
++							report(errors.New("actual source grant withdrawal readback failed"))
++						}
++						return
++					}
++					var held struct {
++						LeaseID, OwnerID, Kind, KnowledgeBaseID, KnowledgeID string
++						TenantID                                             uint64
++						Epoch, ExpiresAtMS                                   int64
++					}
++					e := clean.Raw("SELECT l.lease_id,l.owner_id,l.kind,l.tenant_id,l.knowledge_base_id,l.knowledge_id,l.epoch,l.expires_at_ms FROM nextcloud_content_leases l JOIN nextcloud_content_fences f ON f.tenant_id=l.tenant_id AND f.knowledge_base_id=l.knowledge_base_id AND f.knowledge_id=l.knowledge_id AND f.epoch=l.epoch AND f.state='open' WHERE l.tenant_id=? AND l.knowledge_base_id=? AND l.knowledge_id=? AND l.kind='read' AND l.released_at_ms IS NULL", 7, f.KB, f.Knowledge).Take(&held).Error
++					if e != nil || held.LeaseID == "" {
++						report(errors.New("actual held normal source lease absent"))
++						return
++					}
++					requested := false
++					for _, id := range ownedAncestorRequestedLeaseIDs(tx.Statement.Vars) {
++						if id == held.LeaseID {
++							requested = true
++						}
++					}
++					if !requested {
++						report(errors.New("normal source lease absent from actual last union"))
++						return
++					}
++					var now int64
++					if e = clean.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error; e != nil {
++						report(e)
++						return
++					}
++					expiry := now + 60
++					update := clean.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_leases").Where("lease_id=? AND owner_id=? AND kind=? AND tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND epoch=? AND expires_at_ms=? AND released_at_ms IS NULL", held.LeaseID, held.OwnerID, held.Kind, held.TenantID, held.KnowledgeBaseID, held.KnowledgeID, held.Epoch, held.ExpiresAtMS).Update("expires_at_ms", expiry)
++					if update.Error != nil || update.RowsAffected != 1 {
++						report(errors.New("actual normal lease expiry CAS failed"))
++						return
++					}
++					var after struct {
++						LeaseID, OwnerID, Kind, KnowledgeBaseID, KnowledgeID string
++						TenantID                                             uint64
++						Epoch, ExpiresAtMS                                   int64
++					}
++					if e = clean.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_leases").Where("lease_id=?", held.LeaseID).Take(&after).Error; e != nil || after.LeaseID != held.LeaseID || after.OwnerID != held.OwnerID || after.Kind != held.Kind || after.TenantID != held.TenantID || after.KnowledgeBaseID != held.KnowledgeBaseID || after.KnowledgeID != held.KnowledgeID || after.Epoch != held.Epoch || after.ExpiresAtMS != expiry {
++						report(errors.New("actual normal expiry readback failed"))
++						return
++					}
++					tick := time.NewTicker(5 * time.Millisecond)
++					defer tick.Stop()
++					for {
++						if e = clean.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error; e != nil {
++							report(e)
++							return
++						}
++						if now >= expiry {
++							crossedExpiry.Store(true)
++							return
++						}
++						select {
++						case <-tx.Statement.Context.Done():
++							report(tx.Statement.Context.Err())
++							return
++						case <-tick.C:
++						}
++					}
++				}))
++				observerInstalled = true
++			}
++			if mode == "actor_after_query_SDK" || mode == "cancel_after_query_SDK" {
++				f.SetQueryHook(func() error {
++					faultApplied.Store(true)
++					if mode == "cancel_after_query_SDK" {
++						cancelCall()
++						return nil
++					}
++					update := f.DB.Session(&gorm.Session{NewDB: true}).Model(&types.User{}).Where("id=? AND is_active=?", caller.UserID, true).Update("is_active", false)
++					if update.Error != nil {
++						return update.Error
++					}
++					if update.RowsAffected != 1 {
++						return errors.New("actual normal actor withdrawal CAS failed")
++					}
++					var user types.User
++					if e := f.DB.Session(&gorm.Session{NewDB: true}).Where("id=?", caller.UserID).Take(&user).Error; e != nil {
++						return e
++					}
++					if user.IsActive {
++						return errors.New("actual normal actor withdrawal readback failed")
++					}
++					return nil
++				})
++			}
++			req := &types.QARequest{Session: session, Query: personalQueryText, KnowledgeBaseIDs: []string{f.KB}, UserMessageID: user.ID, AssistantMessageID: assistant.ID, SummaryModelID: answer.ID}
++			if mode == "original_text_mismatch_before_SDK" {
++				req.Query = "altered requested text"
++			}
++			if mode == "cross_session_selector_before_SDK" {
++				other := &types.Session{ID: uuid.NewString(), TenantID: 7, UserID: caller.UserID}
++				_, e := sessions.sessionRepo.Create(owner, other)
++				require.NoError(t, e)
++				req.Session = other
++			}
++			before := personalCompletionFactsForTest(t, f.DB, f.Knowledge, assistant.ID)
++			// LIFO: cancel/join precedes observer/hook removal, server and DB cleanup.
++			t.Cleanup(cleanup)
++			started.Store(true)
++			go func() { defer close(producerDone); result <- sessions.KnowledgeQA(call, req, bus) }()
++			var qaErr error
++			select {
++			case qaErr = <-result:
++			case <-deadline.Done():
++				t.Fatal("actual normal event producer exceeded original HTTP8s")
++			}
++			<-producerDone
++			early := mode == "original_text_mismatch_before_SDK" || mode == "cross_session_selector_before_SDK"
++			afterQuery := mode == "actor_after_query_SDK" || mode == "cancel_after_query_SDK"
++			late := mode == "source_grant_after_last_journal_IO" || mode == "source_content_last_SQL_clock"
++			if early {
++				require.Error(t, qaErr)
++				require.Equal(t, baseline, f.SDKCalls())
++				require.Zero(t, answers.Load())
++				require.False(t, saveAttempted.Load())
++			}
++			if afterQuery {
++				require.Error(t, qaErr)
++				require.True(t, faultApplied.Load())
++				require.Equal(t, baseline+1, f.SDKCalls())
++				require.Zero(t, answers.Load())
++				require.False(t, saveAttempted.Load())
++			}
++			if late {
++				require.Error(t, qaErr)
++				require.True(t, saveAttempted.Load())
++				require.True(t, faultApplied.Load())
++				if mode == "source_content_last_SQL_clock" {
++					require.True(t, crossedExpiry.Load())
++				}
++				require.Equal(t, baseline+1, f.SDKCalls())
++				require.EqualValues(t, 1, answers.Load())
++				select {
++				case e := <-saved:
++					require.Error(t, e)
++				default:
++					t.Fatal("actual normal save refusal was not observed")
++				}
++			}
++			if mode == "published_source_event_answer_completion" {
++				require.NoError(t, qaErr)
++				require.True(t, saveAttempted.Load())
++				require.Equal(t, baseline+1, f.SDKCalls())
++				require.EqualValues(t, 1, answers.Load())
++				select {
++				case e := <-saved:
++					require.NoError(t, e)
++				default:
++					t.Fatal("actual normal answer save missing")
++				}
++				var stored types.Message
++				require.NoError(t, f.DB.Where("id=? AND session_id=?", assistant.ID, session.ID).Take(&stored).Error)
++				require.True(t, stored.IsCompleted)
++				require.Equal(t, normalOriginalEventAnswer, stored.Content)
++				require.NotNil(t, stored.SourceLineage)
++				require.NoError(t, stored.SourceLineage.RequireComplete())
++				require.Len(t, stored.SourceLineage.Sources, 1)
++				require.Equal(t, f.Knowledge, stored.SourceLineage.Sources[0].KnowledgeID)
++				var manifest struct{ ManifestDigest string }
++				require.NoError(t, f.DB.Table("message_completion_input_manifests m").Select("m.manifest_digest").Joins("JOIN message_material_admissions a ON a.id=m.assistant_admission_id").Where("a.message_id=? AND a.session_id=?", assistant.ID, session.ID).Take(&manifest).Error)
++				require.NotEmpty(t, manifest.ManifestDigest)
++				require.NoError(t, check())
++				var live int64
++				require.NoError(t, f.DB.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++				require.Positive(t, live, "provider Done/producer returned must not drop the live HTTP owner")
++			} else {
++				require.Equal(t, before, personalCompletionFactsForTest(t, f.DB, f.Knowledge, assistant.ID))
++			}
++		})
++	}
++}
++
++// Read-only observer delegates to the real original client and fails if the
++// true retained query/HTTP owner/caller/RAG scope did not reach answer creation.
++type normalEventOriginalModelsObserver struct {
++	interfaces.ModelService
++	expected          context.Context
++	kb, model, answer string
++	report            func(error)
++}
++
++func (m normalEventOriginalModelsObserver) GetChatModel(ctx context.Context, id string) (chat.Chat, error) {
++	if id != m.answer {
++		return nil, errors.New("normal answer selector changed")
++	}
++	if err := normalEventOriginalContextCheck(ctx, m.expected, m.kb, m.model); err != nil {
++		m.report(err)
++		return nil, err
++	}
++	return m.ModelService.GetChatModel(ctx, id)
++}
++func normalEventOriginalContextCheck(ctx, owner context.Context, kb, model string) error {
++	if ctx == nil || owner == nil || ctx.Err() != nil || types.CallerFromContext(ctx) != types.CallerFromContext(owner) {
++		return errors.New("normal original caller context changed")
++	}
++	actual, ok := types.PrincipalFromContext(ctx)
++	wanted, wantOK := types.PrincipalFromContext(owner)
++	if !ok || !wantOK || !reflect.DeepEqual(actual, wanted) || ctx.Value(messageMaterialOutputKey{}) == nil || ctx.Value(messageMaterialOutputKey{}) != owner.Value(messageMaterialOutputKey{}) {
++		return errors.New("normal original principal/owner absent")
++	}
++	if types.RAGSourceLineageFromContext(ctx) == nil {
++		return errors.New("normal source turn context absent")
++	}
++	query, err := repository.KnowledgeQueryEmbeddingResultFromContext(ctx)
++	if err != nil || query == nil {
++		return errors.New("normal actual query result context missing")
++	}
++	snapshot, err := query.Snapshot()
++	if err != nil {
++		return err
++	}
++	if snapshot.KnowledgeBaseID != kb || snapshot.ModelID != model || snapshot.SpaceDigest == "" || len(snapshot.Vector) != 2 {
++		return errors.New("normal actual query binding changed")
++	}
++	return nil
++}
+diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
+index 3b5dfd5bf..d889fed72 100644
+--- a/internal/application/service/session_knowledge_qa.go
++++ b/internal/application/service/session_knowledge_qa.go
+@@ -106,10 +106,24 @@ func (s *sessionService) KnowledgeQA(
+ 	}
+ 
+ 	// Resolve chat model ID using shared helper
+-	chatModelID, err := s.resolveChatModelID(ctx, req, knowledgeBaseIDs, knowledgeIDs)
++	ctx, _, err = s.bindNormalKnowledgeQueryTurn(ctx, req, knowledgeBaseIDs, knowledgeIDs)
+ 	if err != nil {
+ 		return err
+ 	}
++	scopedOriginal, err := s.originalKnowledgeScopedCaller(ctx)
++	if err != nil {
++		return err
++	}
++	chatModelID := ""
++	if scopedOriginal {
++		// This caller has not yet acquired a query/vector purpose. Select its
++		// actual configured answer model only after real native retrieval.
++	} else {
++		chatModelID, err = s.resolveChatModelID(ctx, req, knowledgeBaseIDs, knowledgeIDs)
++		if err != nil {
++			return err
++		}
++	}
+ 
+ 	// Initialize ChatManage defaults from config.yaml
+ 	summaryConfig := types.SummaryConfig{
+@@ -288,6 +302,9 @@ func (s *sessionService) KnowledgeQA(
+ 	if err != nil {
+ 		return err
+ 	}
++	if err = validateNormalKnowledgeQueryPipeline(ctx, chatManage); err != nil {
++		return err
++	}
+ 	logger.Info(ctx, "Triggering question answering event")
+ 	setupSpan.Finish(map[string]interface{}{
+ 		"stages":             len(pipeline),
+@@ -851,6 +868,26 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+ 	var understandProgress *chatpipeline.StageProgress
+ 	var understandStart time.Time
+ 	for _, eventType := range eventList {
++		if err := validateNormalKnowledgeQueryPipeline(ctx, chatManage); err != nil {
++			return err
++		}
++		if err := checkNormalKnowledgeQueryResults(ctx, chatManage); err != nil {
++			return err
++		}
++		if eventType == types.CHAT_COMPLETION_STREAM && normalKnowledgeQueryTurnFromContext(ctx) != nil {
++			bound, model, scoped, err := PrepareScopedKnowledgeAnswerModel(ctx, s.groupAccess)
++			if err != nil {
++				return err
++			}
++			if scoped {
++				turn := normalKnowledgeQueryTurnFromContext(ctx)
++				if turn.answerSelector != "" && turn.answerSelector != model {
++					return fmt.Errorf("scoped source model selection refused")
++				}
++				ctx = bound
++				chatManage.ChatModelID = model
++			}
++		}
+ 		if err := chatpipeline.CheckSourceLineageInputs(ctx, chatManage); err != nil {
+ 			return err
+ 		}
+@@ -908,6 +945,19 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+ 			}
+ 		}
+ 		err := s.eventManager.Trigger(stageCtx, eventType, chatManage)
++		if err == nil && normalKnowledgeQueryTurnFromContext(ctx) != nil && (eventType == types.CHUNK_SEARCH || eventType == types.CHUNK_SEARCH_PARALLEL) {
++			owned, ownedErr := normalKnowledgeQueryResultsContext(ctx, chatManage)
++			if ownedErr != nil {
++				return ownedErr
++			}
++			ctx = owned
++			stageCtx = owned
++		}
++		if err == nil {
++			if inputErr := checkNormalKnowledgeQueryResults(ctx, chatManage); inputErr != nil {
++				return inputErr
++			}
++		}
+ 		if err == nil || err == chatpipeline.ErrSearchNothing {
+ 			for _, outputs := range [][]*types.SearchResult{chatManage.SearchResult, chatManage.RerankResult, chatManage.MergeResult} {
+ 				if inputErr := chatpipeline.AccountResults(stageCtx, outputs); inputErr != nil {
+diff --git a/internal/container/container.go b/internal/container/container.go
+index d545450e0..91537acf4 100644
+--- a/internal/container/container.go
++++ b/internal/container/container.go
+@@ -661,6 +661,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
+ 	logger.Debugf(ctx, "[Container] MCP group-access overlay registered")
+ 	must(container.Invoke(service.ConfigureKnowledgeGroupAccess))
+ 	must(container.Invoke(service.ConfigureKnowledgeBaseGroupAccess))
++	must(container.Invoke(service.ConfigureKnowledgeBaseOriginalQueries))
+ 	logger.Debugf(ctx, "[Container] Knowledge group-access overlay registered")
+ 	must(container.Invoke(service.ConfigureGroupAccessDirectoryRuntime))
+ 	must(container.Invoke(func(groups interfaces.GroupAccessService, scopes *repository.NextcloudOnboardingStore) {
