@@ -454,6 +454,18 @@ Close misclassifies sticky policy/derived operation errors as release failures;
 two leaves and their parents remain failed until the test oracle is corrected.
 No production Close behavior changes. See the [actual17 record](evidence/joint-model-JSONB13-GREEN-nonempty-duplicate-close-failure-20261011.json).
 
+The test-only Close oracle child `3cf07c3f` now passes the complete17-node
+model/nonempty window in79.619s, exact RUN/PASS once and0FAIL/SKIP/OOM; all10
+owned resources are independently absent. It is production-identical to full
+compiled `1f7d6c87`. Real PG creation now succeeds after actual JSONB reload,
+equivalent settings representation preserves proof and meaningful changes
+refuse. Both database nonempty model/policy/native originals and held leases
+survive actual standard migration/restart with unchanged body/fact/keypin
+fingerprints; actor revocation and exact Close error semantics pass. Pure6
+legacy serialization cases do not replace the separate actual old-producer
+compatibility gate. Source-path HTTP6 and directory33 are next. See the
+[actual17 record](evidence/joint-PG-chat-JSONB-nonempty-upgrade17-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
