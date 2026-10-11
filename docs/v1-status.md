@@ -574,6 +574,17 @@ Go actors and the owned volume are independently absent. This closes the
 chat SQLite old-source compatibility lane only; PG, embedding/vector/rank
 outputs and fullapp remain separate. See the [real two-source pair](evidence/two-source-SQLite-chat-legacy2-GREEN-20261011.json).
 
+The separate genuine old8cd→current-reader SQLite embedding pair also passes
+2/2 in25.590s on the same two compiled source snapshots. Old Model.Create
+produces the original opaque Settings/Space/dimensions on75; the new reader
+upgrades the same owned SQL/journal to87, retains raw definition/control/body
+fingerprints through credential rotation and current/historical reads, and
+refuses actual actor disable with leases0. Both selector transfer files have
+identical SHA before/after the new process; both Go actors and the independent
+owned volume are absent. This is model opaque-space lifecycle acceptance;
+old embedding wire/vector/output/rank facts remain pending. See the [real
+embedding pair](evidence/two-source-SQLite-embedding-opaque-space2-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
