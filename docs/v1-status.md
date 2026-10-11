@@ -26,6 +26,7 @@ older component snapshots below retain their separate scope and failure history.
 | Typed derived template and nonempty ancestor | `9d9280a5`:551 files format/full157 compile; existing67 regressions pass; new ancestor8 all fail at sourceA published precondition | Fixture omits the production indexed-success enabled transition; test-only repair pending, no inherited-source acceptance |
 | Nonempty ancestor indexed-success fixture | `2023169f`:551 files format/full157 compile; ancestor8 6PASS/2FAIL including parent, existing67 regressions pass | Positive inheritance/native save and five fault leaves pass; last-clock fault probe has a wrong lease-table column reference and remains unaccepted |
 | Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
+| Explicit no-event current epoch originals | `ccf2d330`:559 files format/full157 compile; existing75 regressions pass; new SQLite13 all fail initialization, PG4 not run | AfterCreate actor query reuses a live producer statement; minimal clean-statement correction awaiting fresh runtime; pending93/172 unadopted |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -243,6 +244,21 @@ repair must preserve the original user query, actual private vector evidence
 and the final model/native/head/payload order. A held lease is not current
 permission. The initial real WebAdmin lane also does not prove the PRD's
 source-only nonmember isolation matrix. See the [source gap audit](evidence/personal-original-query-completion-source-gap-audit-20261012.json).
+
+The explicit no-event candidate adds genuine signed observations, immutable
+epoch readers and pending SQLite93/PostgreSQL172 with real catalogue checks.
+Its exact current-source fusion preserves strict inherited-body and cleanup
+logic. All157 packages compile on `ccf2d330`, and the existing75 regressions pass.
+The first Root plan was refused before Go because stage keys contained uppercase
+letters; a fresh owner corrects only those names. Actual SQLite13 then fails
+generation initialization with a unique-key error; PG4 is not dispatched.
+Independent source analysis traces a live AfterCreate statement reused by actor
+queries, and a minimal same-pool/context clean-statement child is awaiting fresh
+verification. No constraint, original body or permission check is weakened.
+Schema cookies/OIDs cover only scoped table replacement checks; coordinated
+database/external-journal restore and normal parallel availability remain
+unproven. See the [source proposal](../integration/proposals/weknora-noevent-current-publication-epoch-originals-20261012.json)
+and [actual first failure](evidence/NoEvent-current-epoch-first-initialization-failure-old75-GREEN-20261012.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
