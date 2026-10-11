@@ -564,6 +564,16 @@ Directory33 and final source-path transaction assertions have0 RUN; original
 8s/20s/10s bounds remain. Both SQL actors are independently stopped and Go
 is absent. See the [fixture compile](evidence/joint-real-graph-ledger-fixture-compile-GREEN-20261011.json) and [actual failure](evidence/joint-sourcepath6-real-ledger-SQLite-lock-PG-admission-failure-20261011.json).
 
+The genuine old8cd producer-to-current-reader SQLite chat compatibility pair
+now passes both required nodes in82.181s on `d6e49743`/`d59de336`. Separate
+processes share one owned SQL file/journal/keypin; transfer SHA is unchanged
+before/after the new reader. Production75→87 upgrade preserves original
+definition/control/body fingerprints through genuine credential rotation,
+historical/current reading and actual actor disable; leases return to0. Both
+Go actors and the owned volume are independently absent. This closes the
+chat SQLite old-source compatibility lane only; PG, embedding/vector/rank
+outputs and fullapp remain separate. See the [real two-source pair](evidence/two-source-SQLite-chat-legacy2-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
