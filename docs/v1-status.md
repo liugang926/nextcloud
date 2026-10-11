@@ -544,6 +544,15 @@ have0 RUN. The exact-byte embedding/seal proposals now carry this component
 validation; old-producer compatibility and fulljoint regressions remain pending.
 See the [actual22 and controller failure](evidence/joint-embedding12-seal10-GREEN-controller-nonce-failure-20261011.json).
 
+The bounded identity controller now enters the remaining39 business window
+on unchanged `afd1c6c8`. Sourcepath6 runs0PASS/6FAIL at the genuine postprocess
+prelude: the manual joint fixture omits `ConfigureNextcloudPostProcessLedger`,
+which production DI binds to the real full-schema processing state store.
+The repair must call that formal binder without weakening the graph guard or
+seeding ledger rows. HTTP8s assertions and directory33 are not reached.
+Both SQL actors are independently stopped, the Go actor is absent, and failed
+owned data/logs remain retained. See the [graph-ledger fixture failure](evidence/joint-sourcepath6-real-graph-ledger-fixture-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
