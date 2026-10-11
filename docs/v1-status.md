@@ -715,6 +715,14 @@ incorrectly accepts the mixedtable. It is unwired; Root startup/access remains
 closed to that route. See [postSDK10](evidence/joint-postSDK-sameTX-authority-real-expiry10-GREEN-20261011.json)
 and [sourcepath4/2](evidence/joint-sourcepath-PG3-SQLite-current1-GREEN-SQLiteHTTP2-failure-20261011.json).
 
+
+The complete unified-source policy58 and query/vector/RecallSQL58 regressions
+now pass on `cab8df4e` in independent210.717s and136.798s windows. Every selected
+parent/leaf has exact once RUN/PASS, nofail/skip/OOM, and9+9 owned resources are
+independently absent. Native/productive79 is still running and195 has not yet
+been accepted. See [policy58](evidence/joint-current-full-schema-policy58-GREEN-20261011.json)
+and [query/vector/Recall58](evidence/joint-current-full-schema-query-vector-Recall58-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
