@@ -15,7 +15,7 @@ older component snapshots below retain their separate scope and failure history.
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `0621bef7`: real Parade17 pending16921 all pass | Historical upgrade/restart and startup route binding |
 | Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
-| Historical PeerApplied forward upgrade | `0e56af90`: private historical prefix14 and source projection6 all pass in separate windows; original Root PeerForwardBridge refusal preserved | Production clean161/80 route, allpartialprefixes,169→171/88→89, final startup routing |
+| Historical PeerApplied forward upgrade | `1f185e4d`: genuine nonempty production route20 and Linux cross-processOFD6 pass; original Root91/startup34 pass separately; UP/DOWN bytes preserved | NativeDarwin gate, partial155–160/74–79 and full normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
@@ -902,6 +902,38 @@ See [fullcompile](evidence/model-Recheck-embedding-operation-full157-compile-GRE
 [writer7](evidence/model-original-Recheck-writer-WAL7-GREEN-20261011.json),
 [original80](evidence/model-Recheck-embedding-original-four-protocols80-GREEN-20261011.json)
 and [exactreviewable source](../integration/proposals/weknora-model-recheck-writer-and-embedding-operation-20261011.json).
+
+Production PeerApplied routing now passes genuine nonempty161→169→171 and
+80→88→89 upgrade/restart/read-onlyReady/actualopenedpool checks on `1f185e4d`.
+All20 selected nodes pass in38.721s. Source/mixed/dirty/staleledger and DOWN
+refusals remain intact, and real local PostgreSQL guard repair runs onParade17.
+SQL UP/DOWN bytes and historical source identities remain unchanged.
+
+SQLite exclusion now uses the real existing database inode and OFD byte0,
+covering decisive ledger/catalogue/source selection through actualm.Close.
+Linux process6 passes in12.244s: actual independentprocess andsymlink exclusion,
+context timeout, closingotherFD withoutlosingthelock, normalSQLwriter operation,
+SIGKILL release, genuine migration thensecondprocesshonestrestart, andhardlink/
+replacedinode refusal. Readiness remains read-only; m.Close errors propagate.
+The earlier per-instance SQLite migrate.Lock was rejected by independent
+source review and is not accepted as cross-process exclusion.
+
+Original Rootlineage91 and startup qualification34 remain unchanged and pass
+completely onthe samecandidate in104.073s and71.120s separate windows. Their
+7 and8 resources, plus7 forroute20 and7 forOFD6, are independently absent.
+An independent raw audit verifies all151 distinctselected RUN/PASS pairs once,
+zero failures/skips/unexpected nodes and originalmigration bytes unchanged.
+This is fourcomponent windows, not one151-node or fullapplication acceptance.
+
+Darwin source/ABI was reviewed and a private official Go1.26.8 toolchain matches
+the pinnedDocker release; nativecompile/process6 is still pending. Other
+platforms/filesystems, noncooperativeoldmigrators, partialpeer155–160/74–79,
+normalparse/embedding/graph/status/QA, coordinatedrestore andphysicalGC remain
+open. See [route20](evidence/peer-forward-nonempty-honest-route20-GREEN-20261011.json),
+[Linuxprocess6](evidence/peer-SQLite-Linux-same-inode-OFD-process6-GREEN-20261011.json),
+[original91](evidence/peer-route-original-Rootlineage91-GREEN-20261011.json),
+[original34](evidence/peer-route-original-startup-ready34-GREEN-20261011.json)
+and [exactreviewable source](../integration/proposals/weknora-peer-forward-route-and-inode-migration-exclusion-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 

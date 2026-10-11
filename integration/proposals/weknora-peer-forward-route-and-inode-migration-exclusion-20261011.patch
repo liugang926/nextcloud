@@ -1,0 +1,1641 @@
+diff --git a/internal/database/migration.go b/internal/database/migration.go
+index 8e12c125c..aef3c9971 100644
+--- a/internal/database/migration.go
++++ b/internal/database/migration.go
+@@ -3,9 +3,10 @@ package database
+ import (
+ 	"context"
+ 	"database/sql"
++	"errors"
+ 	"fmt"
+ 	"os"
+-	"strings"
++	"path/filepath"
+ 	"sync"
+ 
+ 	"github.com/Tencent/WeKnora/internal/logger"
+@@ -109,7 +110,7 @@ func RunMigrationsWithOptions(dsn string, opts MigrationOptions) error {
+ // RunMigrationsWithContext keeps the existing driver operation/timeouts while
+ // using the supplied startup context for all read-only preflight phases.
+ // An already-running migrate Up still follows its existing driver semantics.
+-func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOptions) error {
++func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOptions) (runErr error) {
+ 	if ctx == nil {
+ 		return ErrJointSchemaUnavailable
+ 	}
+@@ -119,11 +120,6 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 
+ 	logger.Infof(ctx, "Starting database migration...")
+ 
+-	migrationsPath := "file://migrations/versioned"
+-	if strings.HasPrefix(dsn, "sqlite3://") {
+-		migrationsPath = "file://migrations/sqlite"
+-	}
+-
+ 	// SQL catalogue inspection must precede migrate driver initialization:
+ 	// ensureVersionTable itself writes even when migration history is absent.
+ 	observedVersion, observedDirty, observedKnown, err := observeJointSchemaHistoryBeforeDriver(ctx, dsn, opts)
+@@ -131,13 +127,45 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 		setMigrationState(observedVersion, observedDirty, err.Error(), observedKnown)
+ 		return err
+ 	}
+-	if err := preflightJointSchemaLineage(ctx, dsn, opts, observedVersion, observedDirty, observedKnown); err != nil {
++	// Peer SQLite startup is serialized on the actual existing DB inode before
++	// its decisive ledger/catalogue/source observations. The first read merely
++	// detects a supported candidate; it cannot authorize any driver write.
++	if jointLineageDialect(dsn, opts) == "sqlite" && observedKnown && !observedDirty && jointPeerForwardVersion("sqlite", observedVersion) {
++		held, lockErr := acquirePeerSQLiteMigrationExclusion(ctx, dsn, opts)
++		if lockErr != nil {
++			setMigrationState(observedVersion, observedDirty, lockErr.Error(), observedKnown)
++			return lockErr
++		}
++		defer func() { runErr = errors.Join(runErr, held.Close()) }()
++		ctx = context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++		// Private migrator connections use the real filename just locked. The
++		// original input alias is separately rechecked against the held inode.
++		opts.SQLiteDBPath = held.resolvedPath
++		readOptions := opts
++		readOptions.jointReadOnly = true
++		observedVersion, observedDirty, observedKnown, err = observeJointSchemaHistoryBeforeDriver(ctx, dsn, readOptions)
++		if err != nil {
++			return err
++		}
++		if err = held.check(ctx); err != nil {
++			return err
++		}
++	}
++	route, err := selectJointMigrationRoute(ctx, dsn, opts, observedVersion, observedDirty, observedKnown)
++	if err != nil {
+ 		setMigrationState(observedVersion, observedDirty, err.Error(), observedKnown)
+ 		return err
+ 	}
+ 
++	migrationsPath := "file://" + filepath.ToSlash(route.directory)
+ 	var m *migrate.Migrate
+-	if opts.SQLiteDBPath != "" {
++	if route.lineage == jointHistoricalPeerForwardSource {
++		m, err = newJointPeerRouteMigrate(ctx, migrationsPath, dsn, opts, observedVersion, route)
++		if err != nil {
++			setMigrationState(observedVersion, observedDirty, err.Error(), observedKnown)
++			return err
++		}
++	} else if opts.SQLiteDBPath != "" {
+ 		// Preserve writable fresh bootstrap while treating the complete
+ 		// filename as URI data, including spaces, ?, # and percent signs.
+ 		raw, err := jointSQLiteFilenameDSN(opts.SQLiteDBPath, "rwc")
+@@ -176,7 +204,13 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 			return wrapped
+ 		}
+ 	}
+-	defer m.Close()
++	defer func() {
++		sourceClose, databaseClose := m.Close()
++		runErr = errors.Join(runErr, sourceClose, databaseClose)
++		if sourceClose != nil || databaseClose != nil {
++			setMigrationState(0, false, runErr.Error(), false)
++		}
++	}()
+ 
+ 	// Check current version and dirty state before migration
+ 	oldVersion, oldDirty, versionErr := m.Version()
+@@ -191,10 +225,16 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 		logger.Infof(ctx, "Current migration version: %d, dirty: %v", oldVersion, oldDirty)
+ 	}
+ 
+-	// Resolve conflicting joint module lineage before Up or any Force-based
+-	// recovery. This initial gate accepts only proven fresh/common absence;
+-	// existing root modules need the separate full catalogue witness child.
+-	if err := preflightJointSchemaLineage(ctx, dsn, opts, oldVersion, oldDirty, versionErr == nil); err != nil {
++	// Driver initialization must observe the exact ledger captured before it.
++	// A concurrently advanced or backwards-edited ledger cannot borrow the
++	// earlier catalogue/source selection, even on the same source route.
++	if oldVersion != observedVersion || oldDirty != observedDirty || (versionErr == nil) != observedKnown {
++		return captureMigrationFailure(m, ErrJointSchemaUnknown)
++	}
++
++	// Revalidate the captured source route before Up or legacy recovery.
++	// Peer dirty/module states never enter Force-based recovery.
++	if err := recheckJointMigrationRoute(ctx, dsn, opts, oldVersion, oldDirty, versionErr == nil, route); err != nil {
+ 		return captureMigrationFailure(m, err)
+ 	}
+ 
+@@ -261,7 +301,7 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 	if checkedErr != nil && checkedErr != migrate.ErrNilVersion {
+ 		return captureMigrationFailure(m, ErrJointSchemaUnavailable)
+ 	}
+-	if err := preflightJointSchemaLineage(ctx, dsn, opts, checkedVersion, checkedDirty, checkedErr == nil); err != nil {
++	if err := recheckJointMigrationRoute(ctx, dsn, opts, checkedVersion, checkedDirty, checkedErr == nil, route); err != nil {
+ 		return captureMigrationFailure(m, err)
+ 	}
+ 
+@@ -273,7 +313,7 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 		currentVersion, currentDirty, versionCheckErr := m.Version()
+ 		if versionCheckErr == nil && currentDirty {
+ 			logger.Warnf(ctx, "Migration caused dirty state at version %d", currentVersion)
+-			if gateErr := preflightJointSchemaLineage(ctx, dsn, opts, currentVersion, currentDirty, true); gateErr != nil {
++			if gateErr := recheckJointMigrationRoute(ctx, dsn, opts, currentVersion, currentDirty, true, route); gateErr != nil {
+ 				return captureMigrationFailure(m, gateErr)
+ 			}
+ 			if opts.AutoRecoverDirty {
+@@ -286,7 +326,7 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 				if retryVersionErr != nil && retryVersionErr != migrate.ErrNilVersion {
+ 					return captureMigrationFailure(m, ErrJointSchemaUnavailable)
+ 				}
+-				if gateErr := preflightJointSchemaLineage(ctx, dsn, opts, retryVersion, retryDirty, retryVersionErr == nil); gateErr != nil {
++				if gateErr := recheckJointMigrationRoute(ctx, dsn, opts, retryVersion, retryDirty, retryVersionErr == nil, route); gateErr != nil {
+ 					return captureMigrationFailure(m, gateErr)
+ 				}
+ 				// Retry migration after recovery
+@@ -327,6 +367,14 @@ func RunMigrationsWithContext(ctx context.Context, dsn string, opts MigrationOpt
+ 		return captureMigrationFailure(m, fmt.Errorf("failed to get migration version: %w", err))
+ 	}
+ 
++	// A successful Up is not a startup grant. Recheck actual final catalogue,
++	// source identity and honest physical version before reporting success.
++	if err := recheckJointMigrationRoute(ctx, dsn, opts, version, dirty, err == nil, route); err != nil {
++		return captureMigrationFailure(m, err)
++	}
++	if dirty || version != route.finalVersion {
++		return captureMigrationFailure(m, ErrJointSchemaNotReady)
++	}
+ 	setMigrationState(version, dirty, "", true)
+ 
+ 	if oldVersion != version {
+diff --git a/internal/database/migration_joint_ready.go b/internal/database/migration_joint_ready.go
+index 5e044eebe..8383099e9 100644
+--- a/internal/database/migration_joint_ready.go
++++ b/internal/database/migration_joint_ready.go
+@@ -25,20 +25,11 @@ func VerifyJointSchemaReady(ctx context.Context, dsn string, opts MigrationOptio
+ 	if err != nil {
+ 		return err
+ 	}
+-	if err := preflightJointSchemaLineage(ctx, dsn, opts, version, dirty, known); err != nil {
+-		return err
+-	}
+-	witness, err := jointLineageWitnessesFromSource()
++	route, err := selectJointMigrationRoute(ctx, dsn, opts, version, dirty, known)
+ 	if err != nil {
+ 		return err
+ 	}
+-	var latest uint
+-	for _, module := range witness.Modules[jointLineageDialect(dsn, opts)] {
+-		if module.Version > latest {
+-			latest = module.Version
+-		}
+-	}
+-	if latest == 0 || !known || dirty || version != latest {
++	if !known || dirty || version != route.finalVersion {
+ 		return ErrJointSchemaNotReady
+ 	}
+ 	return ctx.Err()
+@@ -59,31 +50,5 @@ func VerifyJointSchemaReadyOnDB(ctx context.Context, db *sql.DB, dialect string)
+ 	if dialect != "versioned" && dialect != "sqlite" {
+ 		return ErrJointSchemaUnavailable
+ 	}
+-	witness, err := jointLineageWitnessesFromSource()
+-	if err != nil {
+-		return err
+-	}
+-	if err := jointLineageVerifyAvailableSources(dialect, witness); err != nil {
+-		return err
+-	}
+-	version, dirty, known, err := observeJointSchemaHistoryOnDB(ctx, db, dialect)
+-	if err != nil {
+-		return err
+-	}
+-	if dirty && version >= jointLineageFirstVersion(dialect) {
+-		return ErrJointSchemaAmbiguousDirty
+-	}
+-	var latest uint
+-	for _, module := range witness.Modules[dialect] {
+-		if module.Version > latest {
+-			latest = module.Version
+-		}
+-	}
+-	if latest == 0 || !known || dirty || version != latest {
+-		return ErrJointSchemaNotReady
+-	}
+-	if err := verifyJointRootCatalogue(ctx, db, dialect, version); err != nil {
+-		return err
+-	}
+-	return ctx.Err()
++	return verifyJointReadyRouteOnDB(ctx, db, dialect)
+ }
+diff --git a/internal/database/migration_peer_route.go b/internal/database/migration_peer_route.go
+new file mode 100644
+index 000000000..538e9c428
+--- /dev/null
++++ b/internal/database/migration_peer_route.go
+@@ -0,0 +1,431 @@
++package database
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++)
++
++// A route is derived from the actual ledger, catalogue and immutable source
++// files. It is never caller configured, a body original or an access grant.
++type jointMigrationRoute struct {
++	lineage      jointMigrationSourceLineage
++	directory    string
++	sourceDigest string
++	finalVersion uint
++}
++
++func jointPeerForwardVersion(dialect string, version uint) bool {
++	if dialect == "versioned" {
++		return version == 161 || version == 169 || version == 170 || version == 171
++	}
++	return dialect == "sqlite" && (version == 80 || version == 88 || version == 89)
++}
++
++func jointCanonicalMigrationRoute(dialect string) (jointMigrationRoute, error) {
++	witness, err := jointLineageWitnessesFromSource()
++	if err != nil {
++		return jointMigrationRoute{}, err
++	}
++	if err = jointLineageVerifyAvailableSources(dialect, witness); err != nil {
++		return jointMigrationRoute{}, err
++	}
++	root, err := os.Getwd()
++	if err != nil {
++		return jointMigrationRoute{}, ErrJointSchemaSourceIdentity
++	}
++	var latest uint
++	for _, module := range witness.Modules[dialect] {
++		if module.Version > latest {
++			latest = module.Version
++		}
++	}
++	if latest == 0 {
++		return jointMigrationRoute{}, ErrJointSchemaSourceIdentity
++	}
++	return jointMigrationRoute{jointCanonicalRootSource, filepath.Join(root, "migrations", dialect), fmt.Sprintf("%x", sha256.Sum256(jointLineageWitnessJSON)), latest}, nil
++}
++
++func selectJointMigrationRoute(ctx context.Context, dsn string, options MigrationOptions, version uint, dirty, known bool) (jointMigrationRoute, error) {
++	dialect := jointLineageDialect(dsn, options)
++	if err := checkPeerSQLiteMigrationExclusion(ctx); err != nil {
++		return jointMigrationRoute{}, err
++	}
++	canonical, err := jointCanonicalMigrationRoute(dialect)
++	if err != nil {
++		return jointMigrationRoute{}, err
++	}
++	if !jointPeerForwardVersion(dialect, version) || !known || dirty {
++		return canonical, preflightJointSchemaLineage(ctx, dsn, options, version, dirty, known)
++	}
++	// The final canonical versions differ from all supported peer versions.
++	// A peer version can only choose this route after its complete catalogue.
++	readOptions := options
++	readOptions.jointReadOnly = true
++	db, _, err := openJointLineageDB(dsn, readOptions)
++	if err != nil {
++		return jointMigrationRoute{}, err
++	}
++	defer db.Close()
++	return inspectJointPeerForwardRoute(ctx, db, canonical.directory, dialect, version)
++}
++
++func recheckJointMigrationRoute(ctx context.Context, dsn string, options MigrationOptions, version uint, dirty, known bool, captured jointMigrationRoute) error {
++	current, err := selectJointMigrationRoute(ctx, dsn, options, version, dirty, known)
++	if err != nil {
++		return err
++	}
++	if current != captured {
++		return ErrJointSchemaSourceIdentity
++	}
++	return ctx.Err()
++}
++
++// These are source projections of the actual Root payloads copied into the
++// peer tail, not a physical ledger alias. Root155/156 execute as170/171 and
++// SQLite74/75 execute as88/89; schema_migrations retains those real versions.
++func jointExpectedPeerForwardCatalogue(dialect string, version uint) (jointCatalogueExpected, error) {
++	latest, withdrawal, memory := uint(161), uint(170), uint(171)
++	rootWithdrawal, rootMemory := uint(155), uint(156)
++	if dialect == "sqlite" {
++		latest, withdrawal, memory = 80, 88, 89
++		rootWithdrawal, rootMemory = 74, 75
++	}
++	if !jointPeerForwardVersion(dialect, version) {
++		return jointCatalogueExpected{}, ErrJointSchemaUnknown
++	}
++	expected, err := jointExpectedPeerPrefixCatalogue(dialect, latest)
++	if err != nil {
++		return expected, err
++	}
++	var root jointCatalogueBlueprint
++	if json.Unmarshal(jointCatalogueJSON, &root) != nil {
++		return expected, ErrJointSchemaSourceIdentity
++	}
++	for _, module := range root.Modules[dialect] {
++		if (module.Version == rootWithdrawal && version >= withdrawal) || (module.Version == rootMemory && version >= memory) {
++			if err = applyJointPeerForwardModule(expected, module); err != nil {
++				return expected, err
++			}
++			if module.RegistryConstraint != "" {
++				expected.RegistryConstraint = module.RegistryConstraint
++			}
++		}
++	}
++	return expected, nil
++}
++
++func applyJointPeerForwardModule(expected jointCatalogueExpected, module jointCatalogueModule) error {
++	for name, definition := range module.Tables {
++		expected.Tables[name] = definition
++	}
++	for _, definition := range module.Triggers {
++		tokens := jointSQLTokens(definition)
++		if len(tokens) < 4 {
++			return ErrJointSchemaSourceIdentity
++		}
++		expected.Triggers[tokens[2]] = definition
++	}
++	for _, definition := range module.Functions {
++		// The final catalogue still verifies full function bodies and metadata.
++		name, err := jointPeerForwardDefinitionName(definition, "function")
++		if err != nil {
++			return err
++		}
++		expected.Functions[name] = definition
++	}
++	for _, definition := range module.Indexes {
++		name, err := jointPeerForwardDefinitionName(definition, "index")
++		if err != nil {
++			return err
++		}
++		expected.Indexes[name] = definition
++	}
++	for _, definition := range module.Alters {
++		tokens := jointSQLTokens(definition)
++		if len(tokens) < 7 || tokens[0] != "alter" || tokens[1] != "table" || tokens[3] != "add" || tokens[4] != "column" || !jointIdentifier.MatchString(tokens[2]) || !jointIdentifier.MatchString(tokens[5]) {
++			return ErrJointSchemaSourceIdentity
++		}
++		table, column := tokens[2], tokens[5]
++		// Preserve the actual definition's literal bytes, including defaults.
++		columnStart := jointPeerForwardColumnDefinition(definition, column)
++		if columnStart == "" {
++			return ErrJointSchemaSourceIdentity
++		}
++		if expected.Columns[table] == nil {
++			expected.Columns[table] = map[string]string{}
++		}
++		expected.Columns[table][column] = columnStart
++		if tableSQL, ok := expected.Tables[table]; ok {
++			parts, err := jointColumnParts(tableSQL)
++			if err != nil {
++				return err
++			}
++			already := false
++			for _, part := range parts {
++				fields := jointSQLTokens(part)
++				if len(fields) > 0 && fields[0] == column {
++					already = true
++				}
++			}
++			if !already {
++				last := len(tableSQL) - 1
++				for last >= 0 && tableSQL[last] != ')' {
++					last--
++				}
++				if last < 0 {
++					return ErrJointSchemaSourceIdentity
++				}
++				expected.Tables[table] = tableSQL[:last] + "," + columnStart + tableSQL[last:]
++			}
++		}
++	}
++	return nil
++}
++
++func inspectJointPeerForwardRoute(ctx context.Context, db *sql.DB, canonicalDirectory, dialect string, version uint) (jointMigrationRoute, error) {
++	var none jointMigrationRoute
++	if ctx == nil || db == nil || !jointPeerForwardVersion(dialect, version) {
++		return none, ErrJointSchemaUnknown
++	}
++	root := filepath.Dir(filepath.Dir(canonicalDirectory))
++	assets, err := verifyJointPeerForwardSourceAssets(root, dialect)
++	if err != nil {
++		return none, err
++	}
++	if err = verifyJointPeerPrefixProjection(dialect); err != nil {
++		return none, err
++	}
++	if err = verifyJointPeerTailProjection(root, dialect); err != nil {
++		return none, err
++	}
++	expected, err := jointExpectedPeerForwardCatalogue(dialect, version)
++	if err != nil {
++		return none, err
++	}
++	txOptions := &sql.TxOptions{ReadOnly: true}
++	if dialect == "versioned" {
++		txOptions.Isolation = sql.LevelRepeatableRead
++	}
++	tx, err := db.BeginTx(ctx, txOptions)
++	if err != nil {
++		return none, ErrJointSchemaUnavailable
++	}
++	defer tx.Rollback()
++	rows, err := tx.QueryContext(ctx, "SELECT version,dirty FROM schema_migrations")
++	if err != nil {
++		return none, ErrJointSchemaUnknown
++	}
++	count := 0
++	for rows.Next() {
++		var got uint
++		var dirty bool
++		if rows.Scan(&got, &dirty) != nil {
++			rows.Close()
++			return none, ErrJointSchemaUnknown
++		}
++		count++
++		if dirty {
++			rows.Close()
++			return none, ErrJointSchemaAmbiguousDirty
++		}
++		if got != version {
++			rows.Close()
++			return none, ErrJointSchemaUnknown
++		}
++	}
++	readErr, closeErr := rows.Err(), rows.Close()
++	if readErr != nil || closeErr != nil {
++		return none, ErrJointSchemaUnavailable
++	}
++	if count != 1 {
++		return none, ErrJointSchemaUnknown
++	}
++	objects, _, err := peerPrefixObjectSets(ctx, tx, dialect)
++	if err != nil {
++		return none, err
++	}
++	witness, err := jointLineageWitnessesFromSource()
++	if err != nil {
++		return none, err
++	}
++	if err = jointVerifySentinelObjectKinds(objects, witness.Sentinels, expected); err != nil {
++		return none, err
++	}
++	for table, columns := range witness.Sentinels.Columns {
++		for _, column := range columns {
++			present, err := peerPrefixIntroducedColumn(ctx, tx, dialect, table, column)
++			if err != nil {
++				return none, err
++			}
++			if present {
++				if _, ok := expected.Columns[table][column]; !ok {
++					return none, ErrJointSchemaUnknown
++				}
++			}
++		}
++	}
++	if err = verifyPeerPrefixCatalogueInTx(ctx, tx, dialect, expected); err != nil {
++		return none, err
++	}
++	if dialect == "versioned" {
++		if version >= 170 {
++			if err = jointVerifyWithdrawalKindConstraint(ctx, tx, expected.RegistryConstraint); err != nil {
++				return none, err
++			}
++		}
++		core, err := inspectJoint125LocalRepair(ctx, tx)
++		if err != nil {
++			return none, err
++		}
++		// Only a verified pre169 local binding can be missing.169 repeats the
++		// complete check under its actual local table lock before repairing it.
++		if core.state != joint125GuardCurrent && core.state != joint125OptionalAbsent && !(version == 161 && core.state == joint125GuardMissing) {
++			return none, ErrJointSchemaUnknown
++		}
++	}
++	again, err := verifyJointPeerForwardSourceAssets(root, dialect)
++	if err != nil || again != assets {
++		return none, ErrJointSchemaSourceIdentity
++	}
++	if err = verifyJointPeerTailProjection(root, dialect); err != nil {
++		return none, err
++	}
++	if err = ctx.Err(); err != nil {
++		return none, err
++	}
++	if err = checkPeerSQLiteMigrationExclusion(ctx); err != nil {
++		return none, err
++	}
++	if err = tx.Commit(); err != nil {
++		return none, ErrJointSchemaUnavailable
++	}
++	return jointMigrationRoute{jointHistoricalPeerForwardSource, filepath.Join(root, "migrations", "peer-forward", dialect), assets.SourceDigest, assets.PhysicalLatest}, nil
++}
++
++func verifyJointPeerTailProjection(root, dialect string) error {
++	var blueprint jointCatalogueBlueprint
++	var manifest jointPeerForwardAssetManifest
++	if json.Unmarshal(jointCatalogueJSON, &blueprint) != nil || json.Unmarshal(jointPeerForwardSourceAssetJSON, &manifest) != nil {
++		return ErrJointSchemaSourceIdentity
++	}
++	versions := map[uint]uint{155: 170, 156: 171}
++	if dialect == "sqlite" {
++		versions = map[uint]uint{74: 88, 75: 89}
++	}
++	for sourceVersion, targetVersion := range versions {
++		var module *jointCatalogueModule
++		for i := range blueprint.Modules[dialect] {
++			if blueprint.Modules[dialect][i].Version == sourceVersion {
++				module = &blueprint.Modules[dialect][i]
++			}
++		}
++		if module == nil {
++			return ErrJointSchemaSourceIdentity
++		}
++		matches := 0
++		for _, file := range manifest.Routes[dialect].Files {
++			if file.Version == targetVersion && file.Direction == "up" {
++				matches++
++				a, e1 := os.ReadFile(filepath.Join(root, module.Path))
++				b, e2 := os.ReadFile(filepath.Join(root, file.Path))
++				if e1 != nil || e2 != nil || string(a) != string(b) || fmt.Sprintf("%x", sha256.Sum256(a)) != module.SHA256 || module.SHA256 != file.SHA256 {
++					return ErrJointSchemaSourceIdentity
++				}
++			}
++		}
++		if matches != 1 {
++			return ErrJointSchemaSourceIdentity
++		}
++	}
++	return nil
++}
++
++func verifyJointReadyRouteOnDB(ctx context.Context, db *sql.DB, dialect string) error {
++	canonical, err := jointCanonicalMigrationRoute(dialect)
++	if err != nil {
++		return err
++	}
++	version, dirty, known, err := observeJointSchemaHistoryOnDB(ctx, db, dialect)
++	if err != nil {
++		return err
++	}
++	if dirty && version >= jointLineageFirstVersion(dialect) {
++		return ErrJointSchemaAmbiguousDirty
++	}
++	if !known || dirty {
++		return ErrJointSchemaNotReady
++	}
++	if version == canonical.finalVersion {
++		return verifyJointRootCatalogue(ctx, db, dialect, version)
++	}
++	if !jointPeerForwardVersion(dialect, version) {
++		return ErrJointSchemaNotReady
++	}
++	peer, err := inspectJointPeerForwardRoute(ctx, db, canonical.directory, dialect, version)
++	if err != nil {
++		return err
++	}
++	if version != peer.finalVersion {
++		return ErrJointSchemaNotReady
++	}
++	return ctx.Err()
++}
++
++func jointPeerForwardDefinitionName(definition, kind string) (string, error) {
++	pattern := `(?is)^CREATE(?: OR REPLACE)? FUNCTION\s+([a-z_0-9]+)`
++	if kind == "index" {
++		pattern = `(?is)^CREATE(?: UNIQUE)? INDEX(?: IF NOT EXISTS)?\s+([a-z_0-9]+)`
++	}
++	match := regexp.MustCompile(pattern).FindStringSubmatch(definition)
++	if len(match) != 2 || !jointIdentifier.MatchString(match[1]) {
++		return "", ErrJointSchemaSourceIdentity
++	}
++	return match[1], nil
++}
++func jointPeerForwardColumnDefinition(definition, column string) string {
++	match := regexp.MustCompile(`(?is)^ALTER TABLE\s+[a-z_0-9]+\s+ADD COLUMN\s+([a-z_0-9]+)\s+(.+?);?$`).FindStringSubmatch(definition)
++	if len(match) != 3 || match[1] != column {
++		return ""
++	}
++	return column + " " + strings.TrimSuffix(match[2], ";")
++}
++func verifyJointPeerPrefixProjection(dialect string) error {
++	var blueprint jointPeerPrefixBlueprint
++	var manifest jointPeerForwardAssetManifest
++	if json.Unmarshal(jointPeerPrefixCatalogueJSON, &blueprint) != nil || json.Unmarshal(jointPeerForwardSourceAssetJSON, &manifest) != nil {
++		return ErrJointSchemaSourceIdentity
++	}
++	route, ok := manifest.Routes[dialect]
++	if !ok || len(blueprint.Modules[dialect]) != 8 {
++		return ErrJointSchemaSourceIdentity
++	}
++	for _, module := range blueprint.Modules[dialect] {
++		count := 0
++		for _, file := range route.Files {
++			if file.Direction == "up" && file.Path == module.Path && file.SHA256 == module.SHA256 {
++				count++
++			}
++		}
++		if count != 1 {
++			return ErrJointSchemaSourceIdentity
++		}
++	}
++	evolution := blueprint.CommonEvolution[dialect]
++	count := 0
++	for _, file := range route.Files {
++		if file.Direction == "up" && file.Version == evolution.Version && file.Path == evolution.Path && file.SHA256 == evolution.SHA256 {
++			count++
++		}
++	}
++	if count != 1 {
++		return ErrJointSchemaSourceIdentity
++	}
++	return nil
++}
+diff --git a/internal/database/migration_peer_route_driver.go b/internal/database/migration_peer_route_driver.go
+new file mode 100644
+index 000000000..d85c116aa
+--- /dev/null
++++ b/internal/database/migration_peer_route_driver.go
+@@ -0,0 +1,81 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++
++	"github.com/golang-migrate/migrate/v4"
++	migratedatabase "github.com/golang-migrate/migrate/v4/database"
++	sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
++)
++
++// Up acquires this real driver lock before reading its ledger or SetVersion.
++// Revalidate the exact captured tuple there, not only on an earlier pool.
++// The wrapper forwards Run/SetVersion unchanged and never implements Force.
++type jointPeerRouteMigrationDriver struct {
++	migratedatabase.Driver
++	ctx     context.Context
++	dsn     string
++	options MigrationOptions
++	version uint
++	route   jointMigrationRoute
++}
++
++func (d *jointPeerRouteMigrationDriver) Lock() error {
++	if err := d.Driver.Lock(); err != nil {
++		return err
++	}
++	fail := func(err error) error { return errors.Join(err, d.Driver.Unlock()) }
++	version, dirty, err := d.Driver.Version()
++	if err != nil {
++		return fail(ErrJointSchemaUnavailable)
++	}
++	if version < 0 || uint(version) != d.version || dirty {
++		return fail(ErrJointSchemaUnknown)
++	}
++	if err := recheckJointMigrationRoute(d.ctx, d.dsn, d.options, uint(version), dirty, true, d.route); err != nil {
++		return fail(err)
++	}
++	return nil
++}
++
++func newJointPeerRouteMigrate(ctx context.Context, sourceURL, dsn string, options MigrationOptions, version uint, route jointMigrationRoute) (*migrate.Migrate, error) {
++	if jointLineageDialect(dsn, options) == "sqlite" {
++		if _, err := peerSQLiteMigrationExclusionFromContext(ctx); err != nil {
++			return nil, err
++		}
++	}
++	var driver migratedatabase.Driver
++	var err error
++	name := "postgres"
++	if options.SQLiteDBPath != "" {
++		name = "sqlite3"
++		raw, err := jointSQLiteFilenameDSN(options.SQLiteDBPath, "rwc")
++		if err != nil {
++			return nil, err
++		}
++		pool, err := sql.Open("sqlite3", raw)
++		if err != nil {
++			return nil, err
++		}
++		driver, err = sqlite3migrate.WithInstance(pool, &sqlite3migrate.Config{})
++		if err != nil {
++			return nil, errors.Join(err, pool.Close())
++		}
++	} else {
++		if jointLineageDialect(dsn, options) == "sqlite" {
++			name = "sqlite3"
++		}
++		driver, err = migratedatabase.Open(dsn)
++		if err != nil {
++			return nil, err
++		}
++	}
++	guarded := &jointPeerRouteMigrationDriver{Driver: driver, ctx: ctx, dsn: dsn, options: options, version: version, route: route}
++	m, err := migrate.NewWithDatabaseInstance(sourceURL, name, guarded)
++	if err != nil {
++		return nil, errors.Join(err, guarded.Close())
++	}
++	return m, nil
++}
+diff --git a/internal/database/migration_peer_route_source_test.go b/internal/database/migration_peer_route_source_test.go
+new file mode 100644
+index 000000000..e30f77f66
+--- /dev/null
++++ b/internal/database/migration_peer_route_source_test.go
+@@ -0,0 +1,25 @@
++package database
++
++import (
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++func TestPeerForwardFinalCatalogueSourceProjection(t *testing.T) {
++	root := sqliteRepoRoot(t)
++	for _, dialect := range []string{"sqlite", "versioned"} {
++		t.Run(dialect, func(t *testing.T) {
++			require.NoError(t, verifyJointPeerPrefixProjection(dialect))
++			require.NoError(t, verifyJointPeerTailProjection(root, dialect))
++			physical, canonical := uint(89), uint(87)
++			if dialect == "versioned" {
++				physical, canonical = 171, 168
++			}
++			peer, err := jointExpectedPeerForwardCatalogue(dialect, physical)
++			require.NoError(t, err)
++			current, err := jointExpectedCatalogue(dialect, canonical)
++			require.NoError(t, err)
++			require.Equal(t, current, peer, "only actual full forward payloads produce the equivalent final catalogue; physical ledger is still89/171")
++		})
++	}
++}
+diff --git a/internal/database/migration_peer_route_sql_actual_test.go b/internal/database/migration_peer_route_sql_actual_test.go
+new file mode 100644
+index 000000000..ebc692e71
+--- /dev/null
++++ b/internal/database/migration_peer_route_sql_actual_test.go
+@@ -0,0 +1,234 @@
++package database
++
++import (
++	"context"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/lib/pq"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	gormlogger "gorm.io/gorm/logger"
++)
++
++func peerRouteCopiedRoot(t *testing.T, root, dialect string) string {
++	t.Helper()
++	copyRoot := peerPrefixCopiedAssets(t, root, dialect)
++	target := filepath.Join(copyRoot, "migrations", dialect)
++	require.NoError(t, os.MkdirAll(target, 0700))
++	entries, err := os.ReadDir(filepath.Join(root, "migrations", dialect))
++	require.NoError(t, err)
++	for _, entry := range entries {
++		require.False(t, entry.IsDir())
++		body, err := os.ReadFile(filepath.Join(root, "migrations", dialect, entry.Name()))
++		require.NoError(t, err)
++		require.NoError(t, os.WriteFile(filepath.Join(target, entry.Name()), body, 0600))
++	}
++	return copyRoot
++}
++
++func runPeerForwardRouteActual(t *testing.T, pg bool) {
++	root := sqliteRepoRoot(t)
++	modes := []string{"nonempty_upgrade_restart", "known_wrappers_upgrade_restart", "source_changed_no_mutation", "mixed_root_no_mutation", "genuine_dirty_no_force", "ledger_advanced_after_selection", "down_refused"}
++	if pg {
++		modes = append(modes, "actual_local_guard_repair")
++	}
++	for _, mode := range modes {
++		t.Run(mode, func(t *testing.T) {
++			chdirAndRestore(t, root)
++			if pg {
++				require.NotEmpty(t, os.Getenv("WEKNORA_MIGRATION_TEST_POSTGRES_DSN"), "fresh full-feature owned PostgreSQL required; no skip")
++			}
++			db, dsn, opts := jointLineageFixture(t, pg)
++			dialect, common, initial, final := "sqlite", uint(73), uint(80), uint(89)
++			if pg {
++				dialect, common, initial, final = "versioned", 154, 161, 171
++				parsed, err := url.Parse(dsn)
++				require.NoError(t, err)
++				q := parsed.Query()
++				q.Set("options", strings.TrimSpace(strings.ReplaceAll(q.Get("options"), "-c app.skip_embedding=true", ""))+" -c app.skip_embedding=false")
++				parsed.RawQuery = q.Encode()
++				dsn = parsed.String()
++			}
++			actualSource := root
++			if mode == "genuine_dirty_no_force" {
++				actualSource = peerPrefixCopiedAssets(t, root, dialect)
++				next := "000081_owned_peer_route_failure.up.sql"
++				if pg {
++					next = "000162_owned_peer_route_failure.up.sql"
++				}
++				require.NoError(t, os.WriteFile(filepath.Join(actualSource, "migrations", "peer-forward", dialect, next), []byte("SELECT * FROM owned_peer_route_missing_relation;\n"), 0600))
++			}
++			m := peerPrefixActualDriver(t, actualSource, dialect, dsn, opts)
++			closed := false
++			closeM := func() {
++				if closed {
++					return
++				}
++				closed = true
++				se, de := m.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++			}
++			t.Cleanup(closeM)
++			require.NoError(t, m.Migrate(common), "actual historical full chain, never a synthetic version row")
++			require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO tenants(id,name,business) VALUES(7,'peer-forward-owned','retained actual historical tenant')"))
++			if pg {
++				_, err := db.Exec("INSERT INTO embeddings(source_id,source_type,knowledge_base_id,dimension,content) VALUES('peer-forward-owned',1,NULL,2,'retained actual historical embedding')")
++				require.NoError(t, err)
++			}
++			require.NoError(t, m.Migrate(initial), "nonempty old source produces honest161/80")
++			if mode == "genuine_dirty_no_force" {
++				require.Error(t, m.Migrate(initial+1), "real old driver failure records dirty; no Force")
++			}
++			closeM()
++			if mode == "known_wrappers_upgrade_restart" {
++				var owned *gorm.DB
++				var err error
++				if pg {
++					require.IsType(t, &pq.Driver{}, db.Driver())
++					owned, err = gorm.Open(postgres.New(postgres.Config{DriverName: "postgres", Conn: db}), &gorm.Config{DisableAutomaticPing: true, Logger: gormlogger.Discard})
++				} else {
++					owned, err = gorm.Open(sqlite.New(sqlite.Config{Conn: db}), &gorm.Config{DisableAutomaticPing: true, Logger: gormlogger.Discard})
++				}
++				require.NoError(t, err)
++				require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(owned), "genuine issued wrappers, no body original or grant seeded")
++			}
++			if mode == "actual_local_guard_repair" {
++				_, err := db.Exec("DROP TRIGGER nextcloud_indexed_embedding_guard ON embeddings")
++				require.NoError(t, err)
++			}
++			if mode == "mixed_root_no_mutation" {
++				name := "000074_nextcloud_withdrawal_local_registry.up.sql"
++				if pg {
++					name = "000155_nextcloud_withdrawal_local_registry.up.sql"
++				}
++				body, err := os.ReadFile(filepath.Join(root, "migrations", dialect, name))
++				require.NoError(t, err)
++				_, err = db.Exec(string(body))
++				require.NoError(t, err, "actual conflicting Root module")
++			}
++			if mode == "source_changed_no_mutation" {
++				copied := peerRouteCopiedRoot(t, root, dialect)
++				entries, err := os.ReadDir(filepath.Join(copied, "migrations", "peer-forward", dialect))
++				require.NoError(t, err)
++				file := filepath.Join(copied, "migrations", "peer-forward", dialect, entries[0].Name())
++				body, err := os.ReadFile(file)
++				require.NoError(t, err)
++				require.NoError(t, os.WriteFile(file, append(body, []byte("\n-- actual owned source identity fault\n")...), 0600))
++				chdirAndRestore(t, copied)
++			}
++			if mode == "ledger_advanced_after_selection" {
++				captured, err := selectJointMigrationRoute(context.Background(), dsn, opts, initial, false, true)
++				require.NoError(t, err)
++				staleContext := context.Background()
++				var staleHold *jointPeerSQLiteMigrationExclusion
++				if !pg {
++					held, err := acquirePeerSQLiteMigrationExclusion(staleContext, dsn, opts)
++					require.NoError(t, err)
++					staleHold = held
++					t.Cleanup(func() { require.NoError(t, held.Close()) })
++					staleContext = context.WithValue(staleContext, jointPeerSQLiteMigrationContextKey{}, held)
++				}
++				guarded, err := newJointPeerRouteMigrate(staleContext, "file://"+filepath.ToSlash(captured.directory), dsn, opts, initial, captured)
++				require.NoError(t, err)
++				next := uint(88)
++				if pg {
++					next = 169
++				}
++				advancing := peerPrefixActualDriver(t, root, dialect, dsn, opts)
++				require.NoError(t, advancing.Migrate(next), "another genuine migrator advances the ledger after selection; no Force/UPDATE")
++				se, de := advancing.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++				staleBefore := memoryFullSchemaSnapshot(t, db, dialect)
++				require.ErrorIs(t, guarded.Up(), ErrJointSchemaUnknown, "real Lock/Version rejects stale selection before SetVersion/Run")
++				se, de = guarded.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++				if staleHold != nil {
++					require.NoError(t, staleHold.Close())
++				}
++				require.Equal(t, staleBefore, memoryFullSchemaSnapshot(t, db, dialect))
++				version, dirty := jointLineageMigrationState(t, db)
++				require.Equal(t, next, version)
++				require.False(t, dirty)
++			}
++			before := memoryFullSchemaSnapshot(t, db, dialect)
++			beforeVersion, beforeDirty := jointLineageMigrationState(t, db)
++			var tenantBefore string
++			require.NoError(t, db.QueryRow("SELECT business FROM tenants WHERE id=7").Scan(&tenantBefore))
++			require.Equal(t, "retained actual historical tenant", tenantBefore)
++			var embeddingBefore string
++			if pg {
++				require.NoError(t, db.QueryRow("SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e").Scan(&embeddingBefore))
++			}
++			runErr := RunMigrationsWithOptions(dsn, opts)
++			switch mode {
++			case "source_changed_no_mutation":
++				require.ErrorIs(t, runErr, ErrJointSchemaSourceIdentity)
++			case "mixed_root_no_mutation":
++				require.ErrorIs(t, runErr, ErrJointSchemaUnknown)
++			case "genuine_dirty_no_force":
++				require.ErrorIs(t, runErr, ErrJointSchemaAmbiguousDirty)
++			default:
++				require.NoError(t, runErr, "actual production early selector chooses exact peer-forward source")
++				version, dirty := jointLineageMigrationState(t, db)
++				require.Equal(t, final, version)
++				require.False(t, dirty)
++				require.NoError(t, VerifyJointSchemaReady(context.Background(), dsn, opts))
++				require.NoError(t, VerifyJointSchemaReadyOnDB(context.Background(), db, dialect), "qualify this actual pool, not a replacement DSN")
++				readyBefore := memoryFullSchemaSnapshot(t, db, dialect)
++				require.NoError(t, RunMigrationsWithOptions(dsn, opts), "honest171/89 restart uses same route; never alias168/87")
++				require.Equal(t, readyBefore, memoryFullSchemaSnapshot(t, db, dialect))
++				version, dirty = jointLineageMigrationState(t, db)
++				require.Equal(t, final, version)
++				require.False(t, dirty)
++				if pg {
++					core, err := inspectJoint125LocalRepair(context.Background(), db)
++					require.NoError(t, err)
++					require.Equal(t, joint125GuardCurrent, core.state)
++				}
++				var originals int
++				require.NoError(t, db.QueryRow("SELECT count(*) FROM memory_original_admissions").Scan(&originals))
++				require.Zero(t, originals, "migration cannot adopt legacy data as a body original")
++				require.NoError(t, db.QueryRow("SELECT count(*) FROM model_definition_originals").Scan(&originals))
++				require.Zero(t, originals)
++				if mode == "down_refused" {
++					downgrade := peerPrefixActualDriver(t, root, dialect, dsn, opts)
++					require.Error(t, downgrade.Down(), "actual forward DOWN refuses before persistent drop")
++					se, de := downgrade.Close()
++					require.NoError(t, se)
++					require.NoError(t, de)
++					require.Equal(t, readyBefore, memoryFullSchemaSnapshot(t, db, dialect))
++					_, actualDirty := jointLineageMigrationState(t, db)
++					require.True(t, actualDirty, "driver honestly marks failed Down dirty; never repair ledger")
++					require.ErrorIs(t, VerifyJointSchemaReadyOnDB(context.Background(), db, dialect), ErrJointSchemaAmbiguousDirty)
++				}
++			}
++			if runErr != nil {
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect))
++				afterVersion, afterDirty := jointLineageMigrationState(t, db)
++				require.Equal(t, beforeVersion, afterVersion)
++				require.Equal(t, beforeDirty, afterDirty)
++			}
++			var tenantAfter string
++			require.NoError(t, db.QueryRow("SELECT business FROM tenants WHERE id=7").Scan(&tenantAfter))
++			require.Equal(t, tenantBefore, tenantAfter)
++			if pg {
++				var after string
++				require.NoError(t, db.QueryRow("SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e").Scan(&after))
++				require.Equal(t, embeddingBefore, after)
++			}
++		})
++	}
++}
++
++func TestPeerForwardProductionRouteActualSQLite(t *testing.T)   { runPeerForwardRouteActual(t, false) }
++func TestPostgresPeerForwardProductionRouteActual(t *testing.T) { runPeerForwardRouteActual(t, true) }
+diff --git a/internal/database/migration_peer_sqlite_exclusive.go b/internal/database/migration_peer_sqlite_exclusive.go
+new file mode 100644
+index 000000000..7be4e9477
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_exclusive.go
+@@ -0,0 +1,143 @@
++package database
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++)
++
++type jointPeerSQLiteMigrationContextKey struct{}
++
++// This file descriptor is a migration exclusion, never an original/role grant.
++// It owns the real existing main DB inode, not a derived lock-file pathname.
++// It is kept until the migration driver's Close has actually returned.
++type jointPeerSQLiteMigrationExclusion struct {
++	file          *os.File
++	identity      os.FileInfo
++	mainPath      string
++	requestedPath string
++	resolvedPath  string
++	once          sync.Once
++	closeErr      error
++}
++
++func (x *jointPeerSQLiteMigrationExclusion) Close() error {
++	x.once.Do(func() { x.closeErr = x.file.Close() })
++	return x.closeErr
++}
++func (x *jointPeerSQLiteMigrationExclusion) check(ctx context.Context) error {
++	if ctx == nil {
++		return ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	descriptor, err := x.file.Stat()
++	if err != nil || !os.SameFile(descriptor, x.identity) {
++		return ErrJointSchemaUnknown
++	}
++	requested, err := os.Stat(x.requestedPath)
++	if err != nil || !os.SameFile(requested, x.identity) {
++		return ErrJointSchemaUnknown
++	}
++	main, err := os.Stat(x.mainPath)
++	if err != nil || !os.SameFile(main, x.identity) {
++		return ErrJointSchemaUnknown
++	}
++	resolved, err := os.Stat(x.resolvedPath)
++	if err != nil || !os.SameFile(resolved, x.identity) {
++		return ErrJointSchemaUnknown
++	}
++	return validatePeerSQLiteMigrationFile(descriptor)
++}
++func peerSQLiteMigrationExclusionFromContext(ctx context.Context) (*jointPeerSQLiteMigrationExclusion, error) {
++	if ctx == nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	held, ok := ctx.Value(jointPeerSQLiteMigrationContextKey{}).(*jointPeerSQLiteMigrationExclusion)
++	if !ok || held == nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	return held, held.check(ctx)
++}
++func checkPeerSQLiteMigrationExclusion(ctx context.Context) error {
++	if ctx == nil {
++		return ErrJointSchemaUnavailable
++	}
++	if ctx.Value(jointPeerSQLiteMigrationContextKey{}) == nil {
++		return nil
++	}
++	_, err := peerSQLiteMigrationExclusionFromContext(ctx)
++	return err
++}
++
++// Derive the filename from this actual read-only SQLite connection. The input
++// path is not a filename guess or an externally chosen migration lock key.
++func acquirePeerSQLiteMigrationExclusion(ctx context.Context, dsn string, options MigrationOptions) (*jointPeerSQLiteMigrationExclusion, error) {
++	if ctx == nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	options.jointReadOnly = true
++	db, dialect, err := openJointLineageDB(dsn, options)
++	if err != nil {
++		return nil, err
++	}
++	if dialect != "sqlite" {
++		_ = db.Close()
++		return nil, ErrJointSchemaUnavailable
++	}
++	rows, err := db.QueryContext(ctx, "PRAGMA database_list")
++	if err != nil {
++		_ = db.Close()
++		return nil, ErrJointSchemaUnavailable
++	}
++	mainPath := ""
++	count := 0
++	for rows.Next() {
++		var sequence int
++		var name, filename string
++		if rows.Scan(&sequence, &name, &filename) != nil {
++			_ = rows.Close()
++			_ = db.Close()
++			return nil, ErrJointSchemaUnavailable
++		}
++		if name == "main" {
++			mainPath = filename
++			count++
++		}
++	}
++	err = errors.Join(rows.Err(), rows.Close(), db.Close())
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	if count != 1 || mainPath == "" || !filepath.IsAbs(mainPath) {
++		return nil, ErrJointSchemaUnknown
++	}
++	resolvedPath, err := filepath.EvalSymlinks(mainPath)
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	requestedPath := options.SQLiteDBPath
++	if requestedPath == "" {
++		requestedPath = strings.TrimPrefix(dsn, "sqlite3://")
++	}
++	requestedPath, err = filepath.Abs(requestedPath)
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	held, err := lockPeerSQLiteMigrationInode(ctx, mainPath, resolvedPath)
++	if err != nil {
++		return nil, err
++	}
++	held.requestedPath = requestedPath
++	if err = held.check(ctx); err != nil {
++		return nil, errors.Join(err, held.Close())
++	}
++	return held, nil
++}
+diff --git a/internal/database/migration_peer_sqlite_exclusive_darwin.go b/internal/database/migration_peer_sqlite_exclusive_darwin.go
+new file mode 100644
+index 000000000..0007c61ac
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_exclusive_darwin.go
+@@ -0,0 +1,96 @@
++//go:build darwin
++
++package database
++
++import (
++	"context"
++	"errors"
++	"os"
++	"strings"
++	"syscall"
++	"time"
++
++	"github.com/golang-migrate/migrate/v4"
++	"golang.org/x/sys/unix"
++)
++
++// Verified from Apple's SDK sys/fcntl.h. The pinned x/sys Darwin generated
++// constants omit OFD commands, so use this OS ABI constant without a POSIX
++// F_SETLK/flock fallback. An older/unsupported kernel returns an error closed.
++const darwinPeerOFDSetLK = 90
++
++func validatePeerSQLiteMigrationFile(info os.FileInfo) error {
++	st, ok := info.Sys().(*syscall.Stat_t)
++	if !ok || !info.Mode().IsRegular() || st.Nlink != 1 {
++		return ErrJointSchemaUnknown
++	}
++	// Multiple hardlink names can have different WAL sidecars. Mandatory file
++	// locking modes cannot borrow the advisory noninterference guarantee either.
++	if info.Mode()&os.ModeSetgid != 0 && info.Mode().Perm()&0010 == 0 {
++		return ErrJointSchemaUnknown
++	}
++	return nil
++}
++func lockPeerSQLiteMigrationInode(ctx context.Context, mainPath, resolvedPath string) (*jointPeerSQLiteMigrationExclusion, error) {
++	fd, err := unix.Open(resolvedPath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	file := os.NewFile(uintptr(fd), resolvedPath)
++	if file == nil {
++		_ = unix.Close(fd)
++		return nil, ErrJointSchemaUnavailable
++	}
++	// The default pinned SQLite Darwin finder uses POSIX locks on these local
++	// filesystems (APFS through its successful F_GETLK path). Remote/proxy/flock
++	// variants remain unsupported, never inferred from an arbitrary VFS.
++	var filesystem unix.Statfs_t
++	if err = unix.Fstatfs(fd, &filesystem); err != nil {
++		_ = file.Close()
++		return nil, ErrJointSchemaUnavailable
++	}
++	fstype := strings.TrimRight(string(filesystem.Fstypename[:]), "\x00")
++	if (fstype != "apfs" && fstype != "hfs" && fstype != "ufs") || filesystem.Flags&unix.MNT_RDONLY != 0 {
++		_ = file.Close()
++		return nil, ErrJointSchemaUnavailable
++	}
++	identity, err := file.Stat()
++	if err != nil {
++		_ = file.Close()
++		return nil, ErrJointSchemaUnavailable
++	}
++	if err = validatePeerSQLiteMigrationFile(identity); err != nil {
++		_ = file.Close()
++		return nil, err
++	}
++	held := &jointPeerSQLiteMigrationExclusion{file: file, identity: identity, mainPath: mainPath, resolvedPath: resolvedPath}
++	// OFD locks remain owned by this open file description, including after
++	// SQLite closes another fd for this inode. No blocking lock goroutine exists.
++	// Byte0 is outside pinned SQLite's POSIX PENDING/RESERVED/SHARED ranges
++	// starting at0x40000000; no DB byte, SQL writer or ledger row is changed.
++	wait, cancel := context.WithTimeout(ctx, migrate.DefaultLockTimeout)
++	defer cancel()
++	for {
++		if err = wait.Err(); err != nil {
++			_ = held.Close()
++			return nil, err
++		}
++		lock := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 1}
++		err = unix.FcntlFlock(file.Fd(), darwinPeerOFDSetLK, &lock)
++		if err == nil {
++			return held, nil
++		}
++		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EINTR) {
++			_ = held.Close()
++			return nil, ErrJointSchemaUnavailable
++		}
++		timer := time.NewTimer(20 * time.Millisecond)
++		select {
++		case <-wait.Done():
++			timer.Stop()
++			_ = held.Close()
++			return nil, wait.Err()
++		case <-timer.C:
++		}
++	}
++}
+diff --git a/internal/database/migration_peer_sqlite_exclusive_linux.go b/internal/database/migration_peer_sqlite_exclusive_linux.go
+new file mode 100644
+index 000000000..d24deff73
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_exclusive_linux.go
+@@ -0,0 +1,77 @@
++//go:build linux
++
++package database
++
++import (
++	"context"
++	"errors"
++	"os"
++	"syscall"
++	"time"
++
++	"github.com/golang-migrate/migrate/v4"
++	"golang.org/x/sys/unix"
++)
++
++func validatePeerSQLiteMigrationFile(info os.FileInfo) error {
++	st, ok := info.Sys().(*syscall.Stat_t)
++	if !ok || !info.Mode().IsRegular() || st.Nlink != 1 {
++		return ErrJointSchemaUnknown
++	}
++	// Multiple hardlink names can have different WAL sidecars. Mandatory file
++	// locking modes cannot borrow the advisory noninterference guarantee either.
++	if info.Mode()&os.ModeSetgid != 0 && info.Mode().Perm()&0010 == 0 {
++		return ErrJointSchemaUnknown
++	}
++	return nil
++}
++func lockPeerSQLiteMigrationInode(ctx context.Context, mainPath, resolvedPath string) (*jointPeerSQLiteMigrationExclusion, error) {
++	fd, err := unix.Open(resolvedPath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	file := os.NewFile(uintptr(fd), resolvedPath)
++	if file == nil {
++		_ = unix.Close(fd)
++		return nil, ErrJointSchemaUnavailable
++	}
++	identity, err := file.Stat()
++	if err != nil {
++		_ = file.Close()
++		return nil, ErrJointSchemaUnavailable
++	}
++	if err = validatePeerSQLiteMigrationFile(identity); err != nil {
++		_ = file.Close()
++		return nil, err
++	}
++	held := &jointPeerSQLiteMigrationExclusion{file: file, identity: identity, mainPath: mainPath, resolvedPath: resolvedPath}
++	// OFD locks remain owned by this open file description, including after
++	// SQLite closes another fd for this inode. No blocking lock goroutine exists.
++	// Byte0 is outside pinned SQLite's POSIX PENDING/RESERVED/SHARED ranges
++	// starting at0x40000000; no DB byte, SQL writer or ledger row is changed.
++	wait, cancel := context.WithTimeout(ctx, migrate.DefaultLockTimeout)
++	defer cancel()
++	for {
++		if err = wait.Err(); err != nil {
++			_ = held.Close()
++			return nil, err
++		}
++		lock := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 1}
++		err = unix.FcntlFlock(file.Fd(), unix.F_OFD_SETLK, &lock)
++		if err == nil {
++			return held, nil
++		}
++		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EINTR) {
++			_ = held.Close()
++			return nil, ErrJointSchemaUnavailable
++		}
++		timer := time.NewTimer(20 * time.Millisecond)
++		select {
++		case <-wait.Done():
++			timer.Stop()
++			_ = held.Close()
++			return nil, wait.Err()
++		case <-timer.C:
++		}
++	}
++}
+diff --git a/internal/database/migration_peer_sqlite_exclusive_unix_actual_test.go b/internal/database/migration_peer_sqlite_exclusive_unix_actual_test.go
+new file mode 100644
+index 000000000..cf37861c2
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_exclusive_unix_actual_test.go
+@@ -0,0 +1,262 @@
++//go:build linux || darwin
++
++package database
++
++import (
++	"bufio"
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++// A real independent process owns the kernel lock. Its stdout carries only
++// static phase tokens, never DB body/proof/credential values or a guessed PID.
++func TestPeerSQLiteMigrationProcessHelper(t *testing.T) {
++	if os.Getenv("WEKNORA_PEER_SQLITE_KERNEL_HELPER") != "1" {
++		return
++	}
++	path := os.Getenv("WEKNORA_PEER_SQLITE_KERNEL_DB")
++	require.NotEmpty(t, path)
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	options := MigrationOptions{SQLiteDBPath: path, AutoRecoverDirty: false}
++	if os.Getenv("WEKNORA_PEER_SQLITE_KERNEL_MODE") == "up" {
++		probe, stop := context.WithTimeout(ctx, 60*time.Millisecond)
++		_, err := acquirePeerSQLiteMigrationExclusion(probe, "sqlite3://unused", options)
++		stop()
++		require.ErrorIs(t, err, context.DeadlineExceeded, "parent must really own the OFD lock")
++		fmt.Println("PEER_OFD_BLOCKED")
++		require.NoError(t, RunMigrationsWithContext(ctx, "sqlite3://unused", options))
++		fmt.Println("PEER_UP_COMPLETE")
++		return
++	}
++	held, err := acquirePeerSQLiteMigrationExclusion(ctx, "sqlite3://unused", options)
++	require.NoError(t, err)
++	defer func() { require.NoError(t, held.Close()) }()
++	fmt.Println("PEER_OFD_HELD")
++	done := make(chan error, 1)
++	go func() { var b [1]byte; _, err := os.Stdin.Read(b[:]); done <- err }()
++	select {
++	case err := <-done:
++		require.True(t, err == nil || errors.Is(err, io.EOF))
++	case <-ctx.Done():
++		t.Error("owned helper release did not arrive")
++	}
++}
++
++type peerSQLiteProcess struct {
++	cmd     *exec.Cmd
++	release io.WriteCloser
++	tokens  <-chan string
++	wait    <-chan error
++	joined  bool
++}
++
++func startPeerSQLiteProcess(t *testing.T, path, mode string) *peerSQLiteProcess {
++	t.Helper()
++	cmd := exec.Command(os.Args[0], "-test.run=^TestPeerSQLiteMigrationProcessHelper$", "-test.count=1")
++	cmd.Env = append(os.Environ(), "WEKNORA_PEER_SQLITE_KERNEL_HELPER=1", "WEKNORA_PEER_SQLITE_KERNEL_DB="+path, "WEKNORA_PEER_SQLITE_KERNEL_MODE="+mode)
++	stdout, err := cmd.StdoutPipe()
++	require.NoError(t, err)
++	release, err := cmd.StdinPipe()
++	require.NoError(t, err)
++	require.NoError(t, cmd.Start())
++	tokens := make(chan string, 4)
++	wait := make(chan error, 1)
++	go func() {
++		scanner := bufio.NewScanner(stdout)
++		for scanner.Scan() {
++			line := scanner.Text()
++			if strings.HasPrefix(line, "PEER_") {
++				tokens <- line
++			}
++		}
++		close(tokens)
++	}()
++	go func() { wait <- cmd.Wait() }()
++	process := &peerSQLiteProcess{cmd: cmd, release: release, tokens: tokens, wait: wait}
++	t.Cleanup(func() {
++		_ = release.Close()
++		if process.joined {
++			return
++		}
++		select {
++		case <-wait:
++			process.joined = true
++		case <-time.After(3 * time.Second):
++			_ = cmd.Process.Kill()
++			select {
++			case <-wait:
++				process.joined = true
++			case <-time.After(3 * time.Second):
++				t.Error("owned kernel helper did not actually join")
++			}
++		}
++	})
++	return process
++}
++func peerSQLiteToken(t *testing.T, p *peerSQLiteProcess, want string) {
++	t.Helper()
++	select {
++	case got, ok := <-p.tokens:
++		require.True(t, ok)
++		require.Equal(t, want, got)
++	case <-time.After(3 * time.Second):
++		t.Fatal("real independent kernel lock token not observed")
++	}
++}
++func peerSQLiteJoin(t *testing.T, p *peerSQLiteProcess, wantSuccess bool) {
++	t.Helper()
++	select {
++	case err := <-p.wait:
++		p.joined = true
++		if wantSuccess {
++			require.NoError(t, err)
++		} else {
++			require.Error(t, err)
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("real independent process did not terminate")
++	}
++}
++func peerSQLiteActual80(t *testing.T) (string, MigrationOptions) {
++	t.Helper()
++	root := sqliteRepoRoot(t)
++	chdirAndRestore(t, root)
++	db, dsn, options := jointLineageFixture(t, false)
++	m := peerPrefixActualDriver(t, root, "sqlite", dsn, options)
++	require.NoError(t, m.Migrate(73))
++	require.NoError(t, memoryFullExec(db, "sqlite", "INSERT INTO tenants(id,name,business) VALUES(7,'actual-kernel-owner','retained actual data')"))
++	require.NoError(t, m.Migrate(80))
++	se, de := m.Close()
++	require.NoError(t, se)
++	require.NoError(t, de)
++	var mode string
++	require.NoError(t, db.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode))
++	require.Equal(t, "wal", mode)
++	return dsn, options
++}
++
++func TestPeerSQLiteKernelMigrationExclusionActual(t *testing.T) {
++	t.Run("two_processes_symlink_cancel_and_release", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		alias := filepath.Join(t.TempDir(), "actual-peer-alias.sqlite")
++		require.NoError(t, os.Symlink(options.SQLiteDBPath, alias))
++		child := startPeerSQLiteProcess(t, options.SQLiteDBPath, "hold")
++		peerSQLiteToken(t, child, "PEER_OFD_HELD")
++		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
++		_, err := acquirePeerSQLiteMigrationExclusion(ctx, dsn, MigrationOptions{SQLiteDBPath: alias})
++		cancel()
++		require.ErrorIs(t, err, context.DeadlineExceeded)
++		require.NoError(t, child.release.Close())
++		peerSQLiteJoin(t, child, true)
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, MigrationOptions{SQLiteDBPath: alias})
++		require.NoError(t, err)
++		require.NoError(t, held.Close())
++	})
++	t.Run("close_other_fd_keeps_lock_and_sql_writer_works", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		t.Cleanup(func() { require.NoError(t, held.Close()) })
++		other, err := os.Open(options.SQLiteDBPath)
++		require.NoError(t, err)
++		require.NoError(t, other.Close())
++		writer, _, err := openJointLineageDB(dsn, options)
++		require.NoError(t, err)
++		defer writer.Close()
++		tx, err := writer.Begin()
++		require.NoError(t, err)
++		result, err := tx.Exec("UPDATE tenants SET business=business WHERE 1=0")
++		require.NoError(t, err)
++		rows, err := result.RowsAffected()
++		require.NoError(t, err)
++		require.Zero(t, rows)
++		require.NoError(t, tx.Rollback())
++		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
++		defer cancel()
++		_, err = acquirePeerSQLiteMigrationExclusion(ctx, dsn, options)
++		require.ErrorIs(t, err, context.DeadlineExceeded, "closing SQLite/other fd must not release OFD ownership")
++	})
++	t.Run("sigkill_releases_real_process_lock", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		child := startPeerSQLiteProcess(t, options.SQLiteDBPath, "hold")
++		peerSQLiteToken(t, child, "PEER_OFD_HELD")
++		require.NoError(t, child.cmd.Process.Kill())
++		peerSQLiteJoin(t, child, false)
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		require.NoError(t, held.Close())
++	})
++	t.Run("actual_up_serializes_second_process_restart", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		t.Cleanup(func() { require.NoError(t, held.Close()) })
++		ctx := context.WithValue(context.Background(), jointPeerSQLiteMigrationContextKey{}, held)
++		route, err := selectJointMigrationRoute(ctx, dsn, options, 80, false, true)
++		require.NoError(t, err)
++		m, err := newJointPeerRouteMigrate(ctx, "file://"+filepath.ToSlash(route.directory), dsn, options, 80, route)
++		require.NoError(t, err)
++		driverClosed := false
++		t.Cleanup(func() {
++			if !driverClosed {
++				se, de := m.Close()
++				if se != nil || de != nil {
++					t.Error("owned first migration driver close failed")
++				}
++				driverClosed = true
++			}
++		})
++		alias := filepath.Join(t.TempDir(), "actual-up-alias.sqlite")
++		require.NoError(t, os.Symlink(options.SQLiteDBPath, alias))
++		child := startPeerSQLiteProcess(t, alias, "up")
++		peerSQLiteToken(t, child, "PEER_OFD_BLOCKED")
++		require.NoError(t, m.Up(), "real first migrator preserves driver fileTX+dirty semantics")
++		se, de := m.Close()
++		driverClosed = true
++		require.NoError(t, se)
++		require.NoError(t, de)
++		require.NoError(t, held.Close())
++		peerSQLiteToken(t, child, "PEER_UP_COMPLETE")
++		peerSQLiteJoin(t, child, true)
++		read, _, err := openJointLineageDB(dsn, MigrationOptions{SQLiteDBPath: options.SQLiteDBPath, jointReadOnly: true})
++		require.NoError(t, err)
++		defer read.Close()
++		require.NoError(t, VerifyJointSchemaReadyOnDB(context.Background(), read, "sqlite"))
++		version, dirty, known, err := observeJointSchemaHistoryOnDB(context.Background(), read, "sqlite")
++		require.NoError(t, err)
++		require.True(t, known)
++		require.EqualValues(t, 89, version)
++		require.False(t, dirty)
++	})
++	t.Run("hardlink_wal_alias_and_replaced_inode_refuse", func(t *testing.T) {
++		dsn, options := peerSQLiteActual80(t)
++		hard := filepath.Join(t.TempDir(), "unsafe-hardlink.sqlite")
++		require.NoError(t, os.Link(options.SQLiteDBPath, hard))
++		_, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.ErrorIs(t, err, ErrJointSchemaUnknown)
++		require.NoError(t, os.Remove(hard))
++		held, err := acquirePeerSQLiteMigrationExclusion(context.Background(), dsn, options)
++		require.NoError(t, err)
++		defer held.Close()
++		moved := options.SQLiteDBPath + ".owned-original"
++		require.NoError(t, os.Rename(options.SQLiteDBPath, moved))
++		replacement, err := os.OpenFile(options.SQLiteDBPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++		require.NoError(t, err)
++		require.NoError(t, replacement.Close())
++		require.ErrorIs(t, held.check(context.Background()), ErrJointSchemaUnknown, "real inode replacement cannot borrow held DB identity")
++		require.NoError(t, os.Remove(options.SQLiteDBPath))
++		require.NoError(t, os.Rename(moved, options.SQLiteDBPath))
++		require.NoError(t, held.check(context.Background()), "restore this owned fault before ordinary pool cleanup")
++	})
++}
+diff --git a/internal/database/migration_peer_sqlite_exclusive_unsupported.go b/internal/database/migration_peer_sqlite_exclusive_unsupported.go
+new file mode 100644
+index 000000000..c2cb4679e
+--- /dev/null
++++ b/internal/database/migration_peer_sqlite_exclusive_unsupported.go
+@@ -0,0 +1,15 @@
++//go:build !linux && !darwin
++
++package database
++
++import (
++	"context"
++	"os"
++)
++
++// The Linux/Darwin OFD contracts is not projected onto another platform/VFS. Platform
++// support remains required; an unsupported peer migration stays closed.
++func validatePeerSQLiteMigrationFile(os.FileInfo) error { return ErrJointSchemaUnavailable }
++func lockPeerSQLiteMigrationInode(context.Context, string, string) (*jointPeerSQLiteMigrationExclusion, error) {
++	return nil, ErrJointSchemaUnavailable
++}
