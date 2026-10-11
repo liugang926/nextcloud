@@ -1,0 +1,74 @@
+diff --git a/internal/application/service/mem_original_cross_input_actual_test.go b/internal/application/service/mem_original_cross_input_actual_test.go
+index 36c1becb51d98ad88d3866eca4d05bdac4e386bd..16dbe28f1463c23de873095e17faa932771e2c80 100644
+--- a/internal/application/service/mem_original_cross_input_actual_test.go
++++ b/internal/application/service/mem_original_cross_input_actual_test.go
+@@ -158,7 +158,8 @@ func runMemCrossInputCheckpointSQL(t *testing.T, pg bool) {
+ 	queue := &memCrossInputSQLQueue{}
+ 	model := &memCrossInputSQLModel{modelID: f.model.GetModelID()}
+ 	models := memCrossInputSQLModels{actualMemoryModels: actualMemoryModels{model: f.model.actualMemoryModel, db: f.db, originals: f.admissions.(interfaces.ModelOriginalLifetimeReader)}, actual: model}
+-	worker := memoryservice.NewOriginalBoundMemoryService(f.repo, repository.NewTenantRepository(f.db), repository.NewMessageRepository(f.db), models, queue, nil, f.reader, f.admissions)
++	configuredTenants, _, _ := actualPolicyRepository(t, f)
++	worker := memoryservice.NewOriginalBoundMemoryService(f.repo, configuredTenants, repository.NewMessageRepository(f.db), models, queue, nil, f.reader, f.admissions)
+ 	memoryservice.ConfigureOriginalMemoryOutbox(worker, f.outbox)
+ 	runner := NewMemoryOriginalOutboxRunner(f.outbox, queue)
+ 	// No relay/executor background loop is started in this bounded component.
+diff --git a/internal/application/service/mem_original_outbox_sql_actual_test.go b/internal/application/service/mem_original_outbox_sql_actual_test.go
+index 73a34449d2fbca76ff945886f28c2cc3360ac950..60feb371fb1d424a1ccf50e3a7e6c3fc0f948cc8 100644
+--- a/internal/application/service/mem_original_outbox_sql_actual_test.go
++++ b/internal/application/service/mem_original_outbox_sql_actual_test.go
+@@ -83,7 +83,8 @@ func newMemOutboxSQLHealthySubject(t *testing.T, base *memAtomicSQLFixture) *mem
+ 	model := &memAtomicSQLModel{actualMemoryModel: &actualMemoryModel{}}
+ 	models := memAtomicSQLModels{actualMemoryModels: actualMemoryModels{model: model.actualMemoryModel, db: base.db, originals: base.admissions.(interfaces.ModelOriginalLifetimeReader)}, actual: model}
+ 	queue := &memAtomicSQLQueue{}
+-	worker := memoryservice.NewOriginalBoundMemoryService(base.repo, repository.NewTenantRepository(base.db), repository.NewMessageRepository(base.db), models, queue, nil, base.reader, base.admissions)
++	tenants, _, _ := actualPolicyRepository(t, base)
++	worker := memoryservice.NewOriginalBoundMemoryService(base.repo, tenants, repository.NewMessageRepository(base.db), models, queue, nil, base.reader, base.admissions)
+ 	memoryservice.ConfigureOriginalMemoryOutbox(worker, base.outbox)
+ 	scope, err := memoryservice.ResolveScope(ctx)
+ 	require.NoError(t, err)
+diff --git a/internal/application/service/mem_public_writer_concurrency_actual_test.go b/internal/application/service/mem_public_writer_concurrency_actual_test.go
+index aeef23005a8ba3a6c13341dfa6432459da4dd4b9..61aa2ebb1306e11d07504509a28a6b1c5e6c680c 100644
+--- a/internal/application/service/mem_public_writer_concurrency_actual_test.go
++++ b/internal/application/service/mem_public_writer_concurrency_actual_test.go
+@@ -44,6 +44,17 @@ func (r *memObservedCommitRepository) VerifyMemoryOriginalCompletion(ctx context
+ 	return verifier.VerifyMemoryOriginalCompletion(ctx, p)
+ }
+ 
++func (r *memObservedCommitRepository) VerifyMemoryOriginalPostModel(ctx context.Context, inputID, inputDigest, executionID, executionDigest, workerLeaseID string) error {
++	if r == nil || r.MemoryOriginalAdmissionRepository == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	verifier, ok := r.MemoryOriginalAdmissionRepository.(interfaces.MemoryOriginalPostModelVerifier)
++	if !ok {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	return verifier.VerifyMemoryOriginalPostModel(ctx, inputID, inputDigest, executionID, executionDigest, workerLeaseID)
++}
++
+ func (r *memObservedCommitRepository) BeginMemoryDerivedRead(ctx context.Context, scope interfaces.MemoryScope) (interfaces.MemoryDerivedRead, error) {
+ 	reader, ok := r.MemoryOriginalAdmissionRepository.(interfaces.MemoryDerivedLifetimeReader)
+ 	if !ok {
+@@ -195,6 +206,8 @@ func TestPostgresMemoryOriginalCommitSerializesPublicCreateItem(t *testing.T) {
+ 		})
+ 	}))
+ 	defer writerDB.Callback().Query().Remove(writerCallback)
++	_, actualPostModelVerifier := f.admissions.(interfaces.MemoryOriginalPostModelVerifier)
++	require.True(t, actualPostModelVerifier, "the observer must forward the actual configured backing verifier")
+ 	wrapped := &memObservedCommitRepository{MemoryOriginalAdmissionRepository: f.admissions, done: commitDone}
+ 	models := memAtomicSQLModels{actualMemoryModels: actualMemoryModels{model: f.model.actualMemoryModel, db: f.db, originals: f.admissions.(interfaces.ModelOriginalLifetimeReader)}, actual: f.model}
+ 	worker := memoryservice.NewOriginalBoundMemoryService(f.repo, tenants, repository.NewMessageRepository(f.db), models, f.queue, nil, f.reader, wrapped)
+diff --git a/internal/application/service/memory_derived_original_sql_actual_test.go b/internal/application/service/memory_derived_original_sql_actual_test.go
+index 70a19fb7e22ac5d764abd5c09c91d0d5664ea56f..4af78b2fa5ee26953b5911fc9e97bf01d20948fe 100644
+--- a/internal/application/service/memory_derived_original_sql_actual_test.go
++++ b/internal/application/service/memory_derived_original_sql_actual_test.go
+@@ -87,7 +87,9 @@ func (m memDerivedSQLModels) GetChatModel(ctx context.Context, id string) (chat.
+ func attachMemDerivedSQLTransport(f *memAtomicSQLFixture) *memDerivedSQLChat {
+ 	model := &memDerivedSQLChat{actualMemoryModel: f.model.actualMemoryModel}
+ 	models := memDerivedSQLModels{actualMemoryModels: actualMemoryModels{model: f.model.actualMemoryModel, db: f.db, originals: f.admissions.(interfaces.ModelOriginalLifetimeReader)}, transport: model}
+-	f.service = memoryservice.NewOriginalBoundMemoryService(f.repo, repository.NewTenantRepository(f.db), repository.NewMessageRepository(f.db), models, f.queue, nil, f.reader, f.admissions)
++	tenants := repository.NewTenantRepository(f.db)
++	ConfigureTenantMemoryPolicyAuthority(tenants, f.machine.f.store, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil)
++	f.service = memoryservice.NewOriginalBoundMemoryService(f.repo, tenants, repository.NewMessageRepository(f.db), models, f.queue, nil, f.reader, f.admissions)
+ 	memoryservice.ConfigureOriginalMemoryOutbox(f.service, f.outbox)
+ 	return model
+ }
