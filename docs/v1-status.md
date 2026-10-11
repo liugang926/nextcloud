@@ -10,10 +10,11 @@ older component snapshots below retain their separate scope and failure history.
 | Work item | Latest actual result | Remaining work |
 | --- | --- | --- |
 | Startup/schema qualification | `3707fce5`: full157-package compile; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup and PeerApplied forward route |
-| Original-memory source path | `cab8df4e`: PG parent+2leaves and SQLite/current pass;6 has4PASS/2FAIL | SQLite publication-withdrawal HTTP prelude; final unified regressions |
+| Original-memory source path | `e3ab8442`:4PASS/2FAIL; real HTTP session returns SQLite busy_snapshot | Diagnose exact read-to-write transaction; matched full6 and normal application |
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `0621bef7`: real Parade17 pending16921 all pass | Historical upgrade/restart and startup route binding |
-| Historical PeerApplied forward upgrade | Private nonempty161/80 observer14:6PASS/8FAIL | Resolve exact catalogue refusal, allpartialprefixes,169→171/88→89, final startup routing |
+| Native and productive memory | `e3ab8442`:55+24 all79 pass; earliercab8 policy58/QVR58 also pass separatewindows | Whole-result/remaining worker gates and matched final195/app acceptance |
+| Historical PeerApplied forward upgrade | Historical125/44 projection corrected; full157 compile on `e3ab8442` | Matched private14+source6, allpartialprefixes,169→171/88→89, final startup routing |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
@@ -752,6 +753,32 @@ owned resources absent. Matchednative79, peer-prefix/source-projection20 and
 sourcepath6 actuals are next; compilation does not accept those runtime gates.
 See [realDI source](evidence/joint-native-productive-real-DI-source-correction-20261011.json)
 and [current fullcompile](evidence/joint-real-DI-historical-HTTP-observer-full-compile-GREEN-20261011.json).
+
+
+The matched realDI/verifier child now passes the fullnative55+productive24
+79-node gate on `e3ab8442` in673.617s, zeroFAIL/SKIP/OOM, eachRUN/PASS once,
+with8owned resources independently absent. All5oldnative healthy/publicwriter
+failures and24productive initialHandle failures are closed by true fixture
+DI/backing forwarding; alloriginalsuccess/counter/10s/serialbarrier assertions
+remain. Policy58 andQVR58 passed on earliercab8 separatewindows; there is no
+single195/fullapplication acceptance. See [actual79](evidence/joint-real-DI-native55-productive24-79-GREEN-20261011.json).
+
+
+Private peer-prefix14 reruns after the exacthistorical table projection repair
+on `e3ab8442`:8PASS/6FAIL, with bothmixedRoot refusal cases nowPASS. Fourpurepeer
+nonempty/current-issuedwrapper positives still refuseUnknown; sourceassets3
+andprojection3 have0RUN afterfailfast. This remains an unwired/read-only
+observation, notforwardupgrade readiness. Goabsent/SQLstopped; faileddata retained.
+See [correctedprojection14](evidence/peer-historical-projection-corrected-prefix14-8pass6fail-20261011.json).
+
+
+The correctly boundHTTP producer sourcepath6 diagnostic on `e3ab8442` still
+runs4PASS/2FAIL, nowSQLite/current andparent fail while SQLitewithdrawal and
+allPG nodesPASS. ActualSessionreturn precisely captures sqlite3 busy/busy_snapshot;
+115publication rechecks and109bodyacquires pass beforethatreturn. The exact
+read-to-write transaction remains under diagnosis; neither retries nor8s/10s
+orpool limits changed. EachSQLiteleaf passed in separatewindows, never a full6.
+Goabsent/SQLstopped, failed data retained. See [actualBusySnapshot](evidence/joint-HTTP-producer-bound-sourcepath-SQLite-busy-snapshot-failure-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
