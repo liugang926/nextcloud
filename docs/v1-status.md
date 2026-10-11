@@ -499,6 +499,15 @@ missing metadata. Presence-aware response decoding must preserve explicit legacy
 and refuse absent/null before seal. The next child includes that correction and
 compiler import repair. See the [preserved compiler failure](evidence/joint-embedding-seal-full-compile-test-import-failure-20261011.json).
 
+The corrected unified `afd1c6c8` candidate now parses457 changed Go files and
+compiles all157 packages (117 test packages,40 without tests). Actual compiler
+and formatter terminal0, no business RUN/failure/OOM, and all three owned
+resources are independently absent. The source distinguishes missing/null
+binding epoch from explicit0 before all bindings consumers and records the
+authenticated source epoch before immutable sealing. The prior import failure
+and missing-epoch review remain preserved. Actual embedding/seal/path/directory
+acceptance is still pending; see the [full compile record](evidence/joint-embedding-epoch-presence-full-compile-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
