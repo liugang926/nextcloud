@@ -390,8 +390,8 @@ On the same `cf4d9887` source, the first actual business stage runs6 nodes:
 producer originals survive canonical75→87 production upgrade and restart,
 held leases and SQL/body/journal/keypin fingerprints remain exact, and current
 reads/Close pass. Its revocation leaf then fails: after actual user disable
-CAS/readback, held model Recheck unexpectedly returns nil; later policy/derived
-revocation assertions are not reached. Both PG leaves fail actual Model.Create
+CAS/readback, held model Recheck correctly refuses but independent policy
+Recheck unexpectedly returns nil; the later derived assertion is not reached. Both PG leaves fail actual Model.Create
 preparation before upgrade, with original-input unavailable/changed. The entire
 6-node gate remains failed, and HTTP6/directory33 do not run. Owned Go is absent,
 PG/Redis stopped, failed logs/network/volumes retained. See the [actual nonempty
