@@ -62,6 +62,39 @@ index 2a90826c0..342080d22 100644
  }
  
  // OriginalKnowledgeQuerySearch is an optional concrete service boundary used by
+diff --git a/internal/application/service/knowledge_query_owned_context.go b/internal/application/service/knowledge_query_owned_context.go
+index 3b5a7db99..99df19da8 100644
+--- a/internal/application/service/knowledge_query_owned_context.go
++++ b/internal/application/service/knowledge_query_owned_context.go
+@@ -46,9 +46,6 @@ func knowledgeQueryOwnedContext(ctx context.Context, kbID, modelID string) (cont
+ 	if readCtx == nil || readCtx.Value(messageMaterialOutputKey{}) != slot || !sameKnowledgeQueryOwnedCaller(ctx, readCtx) || !sameKnowledgeQueryOwnedCaller(ctx, owner) {
+ 		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
+ 	}
+-	if err := selected.Recheck(); err != nil {
+-		return nil, nil, err
+-	}
+ 	actual, err := repository.KnowledgeQueryEmbeddingResultFromContext(readCtx)
+ 	if err != nil {
+ 		return nil, nil, err
+@@ -56,6 +53,9 @@ func knowledgeQueryOwnedContext(ctx context.Context, kbID, modelID string) (cont
+ 	if actual == nil {
+ 		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
+ 	}
++	// The private getter performs no IO. Snapshot performs the full current
++	// transaction and latches failures, including the final body/content clock;
++	// keep that later check instead of a duplicate preceding transaction.
+ 	snapshot, err := selected.Snapshot()
+ 	if err != nil {
+ 		return nil, nil, err
+@@ -63,7 +63,7 @@ func knowledgeQueryOwnedContext(ctx context.Context, kbID, modelID string) (cont
+ 	if snapshot == nil || snapshot.KnowledgeBaseID != kbID || snapshot.ModelID != modelID {
+ 		return nil, nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
+ 	}
+-	// Close or another query adoption may have raced the actual SQL rechecks.
++	// Close or another query adoption may have raced the actual SQL check.
+ 	// Reinspect the owner after IO without holding its mutex across any query.
+ 	slot.mu.Lock()
+ 	closed, failed = slot.Closed, slot.Failed
 diff --git a/internal/application/service/normal_event_original_query_scoped_fixture_bridge_test.go b/internal/application/service/normal_event_original_query_scoped_fixture_bridge_test.go
 new file mode 100644
 index 000000000..d5e6c2749
