@@ -385,6 +385,18 @@ behavior. See [actual91](evidence/joint-full-lineage91-GREEN-20261011.json),
 [full compile](evidence/joint-typed-catalogue-full-compile-GREEN-20261011.json) and
 [exact reviewable source](../integration/proposals/weknora-joint-catalogue-restart-20261011.json).
 
+On the same `cf4d9887` source, the first actual business stage runs6 nodes:
+1PASS/5FAIL/0SKIP/OOM in60.759s. SQLite lawful nonempty model/policy/native
+producer originals survive canonical75→87 production upgrade and restart,
+held leases and SQL/body/journal/keypin fingerprints remain exact, and current
+reads/Close pass. Its revocation leaf then fails: after actual user disable
+CAS/readback, held model Recheck unexpectedly returns nil; later policy/derived
+revocation assertions are not reached. Both PG leaves fail actual Model.Create
+preparation before upgrade, with original-input unavailable/changed. The entire
+6-node gate remains failed, and HTTP6/directory33 do not run. Owned Go is absent,
+PG/Redis stopped, failed logs/network/volumes retained. See the [actual nonempty
+record](evidence/joint-nonempty-SQLite-live-upgrade-GREEN-revoke-PG-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
