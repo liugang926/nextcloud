@@ -660,6 +660,13 @@ cases execute. The pending21 component and PeerApplied upgrade remain
 unaccepted; all Go actors are absent and SQL actors stopped, failed data retained.
 See [actual15 and wrapper6 failure](evidence/pending169-Parade17-existing15-GREEN-wrapper6-prelude-failure-20261011.json).
 
+Independent directory33 now actually runs on `3707fce5`. Snapshot23 allPASS,
+including real concurrent point-in-time/phantom/cancel cases; periodic10 fails
+the real graph-ledger fixture prelude before directory assertions. That startup
+branch did not yet contain the earlier proven four-line actual store binding.
+All Go actors are absent, SQL stopped, failed data retained; sourcepath6 and
+whole33 remain unaccepted. See [snapshot23 and periodic10 failure](evidence/joint-directory-snapshot23-GREEN-periodic10-real-ledger-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
