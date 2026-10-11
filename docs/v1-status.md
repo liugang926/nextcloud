@@ -15,7 +15,7 @@ older component snapshots below retain their separate scope and failure history.
 | Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
 | Pending169 guard repair | `0621bef7`: real Parade17 pending16921 all pass | Historical upgrade/restart and startup route binding |
 | Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
-| Historical PeerApplied forward upgrade | `1f185e4d`: genuine nonempty production route20 and Linux cross-processOFD6 pass; original Root91/startup34 pass separately; UP/DOWN bytes preserved | NativeDarwin gate, partial155–160/74–79 and full normal application upgrade/restore |
+| Historical PeerApplied forward upgrade | `1f185e4d`: genuine nonempty production route20 and Linux cross-processOFD6 pass; original Root91/startup34 pass separately; UP/DOWN bytes preserved | Darwin nativecompile/OFD6 alsoPASS; partial155–160/74–79, otherplatforms and full normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
 AD pilot, model/capacity measurements, coordinated restore and physical GC are
@@ -934,6 +934,24 @@ open. See [route20](evidence/peer-forward-nonempty-honest-route20-GREEN-20261011
 [original91](evidence/peer-route-original-Rootlineage91-GREEN-20261011.json),
 [original34](evidence/peer-route-original-startup-ready34-GREEN-20261011.json)
 and [exactreviewable source](../integration/proposals/weknora-peer-forward-route-and-inode-migration-exclusion-20261011.json).
+
+Darwin/arm64 native validation is now actual: privateofficial Go1.26.8 matches
+the pinnedDocker release/hash, the exactdatabase package compiles natively,
+and all6 sameinode/OFD processnodes pass onthishost in7.416s. RealCGO/SDK,
+actualindependentprocess/alias/ctx/SIGKILL/SQLwriter/migration-restart assertions
+execute; nativeGo/helper groups are independently absent after actualwait.
+The code/source tree remains exactly `1f185e4d` usedbyLinux componentwindows.
+
+The first cold nativecompiler exits0/packagePASS/0business butitscontroller
+rejects transientps argumentdisplay changes. That receipt is retained. A fresh
+status-aware runner treats unchangedbirthidentity OS-zombies as terminal,
+never signals them, keeps otheridentitychanges closed, and passes the actual
+warmcompiler andprocess6 underunchanged480/1200 budgets. Targetmetadata
+closure309packages/25externalmodules matchesgo.sum; thisdoesnot claimall348
+modules orfullnativeapp compilation. No globaltools/sharedcaches were changed.
+Unknownplatforms/filesystems/VFS andnoncooperative oldmigrators remainopen.
+See [nativecompile/process6](evidence/peer-Darwin-native-compile-OFD-process6-GREEN-20261011.json)
+and [retainedcontroller refusal](evidence/peer-Darwin-native-compiler-PASS-runner-identity-refusal-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
