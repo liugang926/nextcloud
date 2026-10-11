@@ -508,6 +508,14 @@ authenticated source epoch before immutable sealing. The prior import failure
 and missing-epoch review remain preserved. Actual embedding/seal/path/directory
 acceptance is still pending; see the [full compile record](evidence/joint-embedding-epoch-presence-full-compile-GREEN-20261011.json). Reviewable [embedding settings](../integration/proposals/weknora-embedding-original-settings-JSONB-20261011.json) and [epoch sealing](../integration/proposals/weknora-publication-epoch-before-seal-20261011.json) proposals contain exact actual candidate file bytes and forward/reverse tree proofs; neither is adopted.
 
+The next actual business controllers require a shared `CLOCK_MONOTONIC` origin:
+an actual host probe confirms Python3.9 macOS `time.monotonic()` values have
+process-relative origins while `clock_gettime(CLOCK_MONOTONIC)` agrees across
+parent/child. Parent-only compiler watchdogs remain valid. Future business
+drivers also join actual owned child/attach processes and require both final
+clocks before success; fixed1200s and10s cleanup reserve are retained.
+See the [readonly clock probe](evidence/host-cross-process-monotonic-origin-probe-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
