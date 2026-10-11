@@ -532,6 +532,18 @@ metadata cannot identify the failed assertion, so a fresh-owner diagnostic
 adds only code basename/function/line, preserving all assertions and bounds.
 See the [controller failure](evidence/joint61-controller-preflight-after-pure1-failure-20261011.json).
 
+The fresh diagnostic window on the same `afd1c6c8` candidate passes22/22
+actual component nodes: embedding12 (four remote protocol Model.Create and
+Space identity/successor cases) plus authenticated source epoch/sealing10.
+All RUN/PASS pairs occur once,0 failure/skip/OOM; four Go actors are independently
+absent. The window then stops at the parent's nonce-in-argv process capture
+assertion before waiting the next stage; owned cleanup stops both SQL actors,
+and child preflight observes stopped Redis. This is a controller failure,
+not a spontaneous Redis failure or full61 acceptance. The later path6/directory33
+have0 RUN. The exact-byte embedding/seal proposals now carry this component
+validation; old-producer compatibility and fulljoint regressions remain pending.
+See the [actual22 and controller failure](evidence/joint-embedding12-seal10-GREEN-controller-nonce-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
