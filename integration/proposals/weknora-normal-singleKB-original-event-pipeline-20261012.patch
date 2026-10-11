@@ -1131,3 +1131,30 @@ index d545450e0..91537acf4 100644
  	logger.Debugf(ctx, "[Container] Knowledge group-access overlay registered")
  	must(container.Invoke(service.ConfigureGroupAccessDirectoryRuntime))
  	must(container.Invoke(func(groups interfaces.GroupAccessService, scopes *repository.NextcloudOnboardingStore) {
+diff --git a/internal/types/chat_manage.go b/internal/types/chat_manage.go
+index f2a8aa25d..d716a1b10 100644
+--- a/internal/types/chat_manage.go
++++ b/internal/types/chat_manage.go
+@@ -176,8 +176,9 @@ func (c *ChatManage) NeedsRetrieval() bool {
+ }
+ 
+ // Clone creates a deep copy of the ChatManage object.
+-// PipelineContext fields (EventBus, MessageID, etc.) are NOT copied because they
+-// are per-execution handles that should not be shared across clones.
++// Message selectors remain bound to the same original turn across search
++// clones. Execution handles (EventBus, stream result and cancel) stay with
++// their original owner and are not copied.
+ func (c *ChatManage) Clone() *ChatManage {
+ 	knowledgeBaseIDs := make([]string, len(c.KnowledgeBaseIDs))
+ 	copy(knowledgeBaseIDs, c.KnowledgeBaseIDs)
+@@ -274,6 +275,10 @@ func (c *ChatManage) Clone() *ChatManage {
+ 			EntityKBIDs:          entityKBIDs,
+ 			EntityKnowledge:      entityKnowledge,
+ 		},
++		PipelineContext: PipelineContext{
++			MessageID:     c.MessageID,
++			UserMessageID: c.UserMessageID,
++		},
+ 	}
+ }
+ 
