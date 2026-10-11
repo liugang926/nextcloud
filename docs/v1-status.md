@@ -25,6 +25,7 @@ older component snapshots below retain their separate scope and failure history.
 | Event-managed machine original save and current epoch | `eac6b136`:549 files format/full157 compile; actual machine12, arithmetic6/schema1, HTTP25 and release/history23 all PASS67;24 runtime resources and3 compiler resources independently absent | General no-event manual sync, cross-app onboarding readiness, legal root successor, normal application publication/QA, personal and inherited-source gates remain incomplete |
 | Typed derived template and nonempty ancestor | `9d9280a5`:551 files format/full157 compile; existing67 regressions pass; new ancestor8 all fail at sourceA published precondition | Fixture omits the production indexed-success enabled transition; test-only repair pending, no inherited-source acceptance |
 | Nonempty ancestor indexed-success fixture | `2023169f`:551 files format/full157 compile; ancestor8 6PASS/2FAIL including parent, existing67 regressions pass | Positive inheritance/native save and five fault leaves pass; last-clock fault probe has a wrong lease-table column reference and remains unaccepted |
+| Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -211,6 +212,20 @@ Raw evidence proves the fault was not applied, without proving this probe was
 reached. A real scoped fence join is required; the expiry/clock assertions and
 budgets remain intact. All157 packages compile and the unchanged67 regressions
 pass on this source. See the [current partial result](evidence/Nextcloud-ancestor8-indexed-stage-positive6-late-clock-failure-20261012.json).
+
+The corrected lease/fence probe reaches the actual output transaction and
+verifies the captured ancestor tuple, exact expiry CAS/readback and natural SQL
+clock crossing. All8 ancestor nodes pass on `d1a88771`, together with the old67
+regressions; all157 packages compile and31 runtime plus3 compiler resources are
+independently absent. Independent raw/source review confirms the positive A
+publication→typed template→B no-login SDK/native save and withdrawal gates.
+The actor rollback leaf uses only A and the typed configuration transaction;
+six other leaves exercise A+B SDK. All seven leaves assert global original-body
+read leases zero; content release uses bounded cleanup, without a whole-content
+or arbitrary-goroutine join claim. This accepts the explicit primitive component
+chain, not B's normal application publication or public QA. See the [final probe
+proposal](../integration/proposals/weknora-Nextcloud-ancestor-final-fence-probe-20261012.json)
+and [actual75 evidence](evidence/Nextcloud-nonempty-ancestor8-machine19-HTTP25-history23-actual75-GREEN-20261012.json).
 
 Normal personal QA activation still requires the original user query capability
 to survive embedding and retrieval fan-out; the current float-only interface
