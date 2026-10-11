@@ -553,6 +553,17 @@ seeding ledger rows. HTTP8s assertions and directory33 are not reached.
 Both SQL actors are independently stopped, the Go actor is absent, and failed
 owned data/logs remain retained. See the [graph-ledger fixture failure](evidence/joint-sourcepath6-real-graph-ledger-fixture-failure-20261011.json).
 
+The four-line real graph-ledger fixture child `fda2db49` compiles service/server
+with0 business RUN and unchanged production bytes; three owned compile resources
+are independently absent. The matched39 window then runs sourcepath6 with
+0PASS/6FAIL in68.107s. Actual ingestion/postprocess advances: SQLite fails during
+ordinary HTTP output with database-lock errors, while PG passes real answer/
+complete/producer-return/assistant-complete assertions and then fails original
+Memory admission (no progress row). That admission reason is still unclassified.
+Directory33 and final source-path transaction assertions have0 RUN; original
+8s/20s/10s bounds remain. Both SQL actors are independently stopped and Go
+is absent. See the [fixture compile](evidence/joint-real-graph-ledger-fixture-compile-GREEN-20261011.json) and [actual failure](evidence/joint-sourcepath6-real-ledger-SQLite-lock-PG-admission-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
