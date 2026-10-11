@@ -506,7 +506,7 @@ resources are independently absent. The source distinguishes missing/null
 binding epoch from explicit0 before all bindings consumers and records the
 authenticated source epoch before immutable sealing. The prior import failure
 and missing-epoch review remain preserved. Actual embedding/seal/path/directory
-acceptance is still pending; see the [full compile record](evidence/joint-embedding-epoch-presence-full-compile-GREEN-20261011.json).
+acceptance is still pending; see the [full compile record](evidence/joint-embedding-epoch-presence-full-compile-GREEN-20261011.json). Reviewable [embedding settings](../integration/proposals/weknora-embedding-original-settings-JSONB-20261011.json) and [epoch sealing](../integration/proposals/weknora-publication-epoch-before-seal-20261011.json) proposals contain exact actual candidate file bytes and forward/reverse tree proofs; neither is adopted.
 
 ## Prior component checkpoints — 2026-10-10
 

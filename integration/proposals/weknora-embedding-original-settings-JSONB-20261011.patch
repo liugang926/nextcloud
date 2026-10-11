@@ -1,0 +1,405 @@
+diff --git a/internal/application/repository/model_original.go b/internal/application/repository/model_original.go
+index b92a1afb..7bf3d6f5 100644
+--- a/internal/application/repository/model_original.go
++++ b/internal/application/repository/model_original.go
+@@ -148,6 +148,9 @@ func readModelOriginalInTx(tx *gorm.DB, model *types.Model) (*modelOriginalFacts
+ 	if err = types.RestoreModelOriginalChatSettings(model, facts.Definition.DefinitionJSON); err != nil {
+ 		return nil, err
+ 	}
++	if err = types.RestoreModelOriginalEmbeddingSettings(model, facts.Definition.DefinitionJSON); err != nil {
++		return nil, err
++	}
+ 	facts.Proof = types.ModelOriginalProof{ModelID: model.ID, OwnerTenantID: model.TenantID, IsBuiltin: model.IsBuiltin, DefinitionID: facts.Definition.ID, DefinitionDigest: defDigest, DefinitionBodyReceiptDigest: defBody.Receipt.Digest, DefinitionRevision: control.DefinitionRevision, CredentialID: facts.Credential.ID, CredentialDigest: credDigest, CredentialBodyReceiptDigest: credBody.Receipt.Digest, CredentialRevision: control.CredentialRevision, StateID: facts.State.ID, StateDigest: stateDigest, StateEpoch: control.StateEpoch}
+ 	facts.Proof.Digest, err = modelProofDigest(facts.Proof)
+ 	return facts, err
+@@ -243,6 +246,19 @@ func (r *modelRepository) writeModelOriginalMutation(ctx context.Context, reques
+ 		} else {
+ 			copy.CreatedAt = memoryFactTime()
+ 		}
++		if old != nil && mode != "replace" && types.ModelOriginalEmbeddingStableSettingsSupported(copy.Parameters.OriginalEmbedding) {
++			unchanged, err := types.ModelDefinitionMatchesOriginal(&copy, old.Definition.DefinitionJSON)
++			if err != nil {
++				return err
++			}
++			if unchanged {
++				// Validate the authenticated original recipe/space, not a current
++				// JSONB spelling whose raw hash can no longer reproduce that space.
++				if err = types.RestoreModelOriginalEmbeddingSettings(&copy, old.Definition.DefinitionJSON); err != nil {
++					return err
++				}
++			}
++		}
+ 		// A partial edit of a legacy/unresolved embedding definition does not
+ 		// manufacture its missing provider recipe from a current row.
+ 		if mode == "update" && copy.Type == types.ModelTypeEmbedding && oldRow.Parameters.OriginalEmbedding == nil && copy.Parameters.OriginalEmbedding == nil {
+@@ -255,6 +271,37 @@ func (r *modelRepository) writeModelOriginalMutation(ctx context.Context, reques
+ 				return err
+ 			}
+ 		}
++		if types.ModelOriginalEmbeddingStableSettingsSupported(copy.Parameters.OriginalEmbedding) {
++			preserveOriginal := false
++			if old != nil && mode != "replace" {
++				preserveOriginal, err = types.ModelDefinitionMatchesOriginal(&copy, old.Definition.DefinitionJSON)
++				if err != nil {
++					return err
++				}
++			}
++			if preserveOriginal {
++				if err = types.RestoreModelOriginalEmbeddingSettings(&copy, old.Definition.DefinitionJSON); err != nil {
++					return err
++				}
++			} else {
++				recipe := *copy.Parameters.OriginalEmbedding
++				settings, err := types.ModelOriginalEmbeddingSettingsBytes(&recipe)
++				if err != nil {
++					return err
++				}
++				recipe.Settings = settings
++				// Only this genuine authorized authoring TX creates a NEW space.
++				// The existing raw recipe digest algorithm is deliberately unchanged.
++				recipe.SpaceDigest, err = types.ModelOriginalEmbeddingDigest(&recipe)
++				if err != nil {
++					return err
++				}
++				if err = modelembedding.ValidateOriginalEmbeddingDefinition(&recipe); err != nil {
++					return err
++				}
++				copy.Parameters.OriginalEmbedding = &recipe
++			}
++		}
+ 		if err = modelchat.NormalizeAuthoredChatDefinition(&copy); err != nil {
+ 			return err
+ 		}
+diff --git a/internal/application/service/joint_embedding_settings_jsonb_sql_actual_test.go b/internal/application/service/joint_embedding_settings_jsonb_sql_actual_test.go
+new file mode 100644
+index 00000000..0a2716a9
+--- /dev/null
++++ b/internal/application/service/joint_embedding_settings_jsonb_sql_actual_test.go
+@@ -0,0 +1,187 @@
++package service
++
++import (
++	"encoding/json"
++	"sort"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++)
++
++func jointEmbeddingStableFixture(t *testing.T, provider string) (*jointOriginalUpgradeFixture, interfaces.ModelRepository, interfaces.ModelService, *types.Model) {
++	t.Helper()
++	f := newJointOriginalUpgradeFixture(t, true)
++	runJointOriginalProductionUpgrade(t, f)
++	repo := repository.NewModelRepository(f.db)
++	ConfigureModelOriginalAuthority(repo, f.store, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil)
++	svc := NewModelService(repo, nil, nil, nil, nil, nil)
++	model := actualModelLiteral(uuid.NewString(), 7)
++	model.Type = types.ModelTypeEmbedding
++	model.Parameters.Provider = provider
++	model.Parameters.EmbeddingParameters = types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}
++	switch provider {
++	case "openai":
++		model.Name = "explicit embedding"
++	case "aliyun":
++		model.Name = "qwen3-vl-embedding"
++	case "volcengine":
++		model.Name = "doubao-embedding-vision-251215"
++	case "gemini":
++		model.Name = "gemini-embedding-001"
++	}
++	require.NoError(t, svc.CreateModel(f.ctx, model))
++	require.NotNil(t, model.OriginalProof)
++	require.True(t, model.OriginalProof.Valid())
++	return f, repo, svc, model
++}
++func TestPostgresJointStableEmbeddingFourProtocolsActual(t *testing.T) {
++	for _, provider := range []string{"openai", "aliyun", "volcengine", "gemini"} {
++		t.Run(provider, func(t *testing.T) {
++			f, repo, svc, model := jointEmbeddingStableFixture(t, provider)
++			read, err := svc.(interfaces.ModelOriginalLifetimeReader).BeginModelOriginalRead(f.ctx, model.ID, model.OriginalProof)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if err := read.Close(); err != nil {
++					t.Error("owned embedding read cleanup failed")
++				}
++			})
++			proved, proof, err := read.Snapshot()
++			require.NoError(t, err)
++			require.Equal(t, *model.OriginalProof, *proof)
++			require.NoError(t, embedding.ValidateOriginalEmbeddingDefinition(proved.Parameters.OriginalEmbedding))
++			digest, err := types.ModelOriginalEmbeddingDigest(proved.Parameters.OriginalEmbedding)
++			require.NoError(t, err)
++			require.Equal(t, proved.Parameters.OriginalEmbedding.SpaceDigest, digest)
++			client, err := svc.GetEmbeddingModel(read.Context(), model.ID)
++			require.NoError(t, err)
++			lifetime, ok := client.(interfaces.ModelOriginalClientLifetime)
++			require.True(t, ok)
++			require.NoError(t, lifetime.CloseOriginal())
++			history, err := repo.(interfaces.HistoricalModelOriginalReader).BeginHistoricalModelOriginalRead(f.ctx, *proof)
++			require.NoError(t, err)
++			require.NoError(t, history.Recheck())
++			require.NoError(t, history.Close())
++			require.NoError(t, read.Close())
++			jointOriginalLeaseState(t, f, false)
++		})
++	}
++}
++
++func TestPostgresJointEmbeddingSpaceIdentityActual(t *testing.T) {
++	for _, mode := range []string{"same_representation", "changed_space", "changed_settings", "authorized_successor"} {
++		t.Run(mode, func(t *testing.T) {
++			f, repo, svc, model := jointEmbeddingStableFixture(t, "openai")
++			read, err := svc.(interfaces.ModelOriginalLifetimeReader).BeginModelOriginalRead(f.ctx, model.ID, model.OriginalProof)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if err := read.Close(); err != nil {
++					t.Error("owned embedding hold cleanup failed")
++				}
++			})
++			original, proof, err := read.Snapshot()
++			require.NoError(t, err)
++			oldSpace := original.Parameters.OriginalEmbedding.SpaceDigest
++			var oldOrigin types.ModelDefinitionOriginal
++			require.NoError(t, f.db.Where("id=?", proof.DefinitionID).Take(&oldOrigin).Error)
++			if mode == "authorized_successor" {
++				replacement := *original
++				recipe := *original.Parameters.OriginalEmbedding
++				var fields map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(recipe.Settings, &fields))
++				var timeout int
++				require.NoError(t, json.Unmarshal(fields["RequestTimeout"], &timeout))
++				fields["RequestTimeout"], err = json.Marshal(timeout + 1)
++				require.NoError(t, err)
++				recipe.Settings, err = json.Marshal(fields)
++				require.NoError(t, err)
++				recipe.SpaceDigest, err = types.ModelOriginalEmbeddingDigest(&recipe)
++				require.NoError(t, err)
++				replacement.Parameters.OriginalEmbedding = &recipe
++				require.NoError(t, repo.(interfaces.ModelOriginalWriter).ReplaceModelOriginal(f.ctx, &replacement))
++				require.NotEqual(t, oldSpace, replacement.Parameters.OriginalEmbedding.SpaceDigest)
++				require.NotEqual(t, proof.DefinitionID, replacement.OriginalProof.DefinitionID)
++				history, err := repo.(interfaces.HistoricalModelOriginalReader).BeginHistoricalModelOriginalRead(f.ctx, *proof)
++				require.NoError(t, err)
++				require.NoError(t, history.Recheck())
++				require.NoError(t, history.Close())
++			} else {
++				var row struct{ Parameters string }
++				require.NoError(t, f.db.Table("models").Select("CAST(parameters AS TEXT) AS parameters").Where("id=?", model.ID).Take(&row).Error)
++				var params, recipe map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal([]byte(row.Parameters), &params))
++				require.NoError(t, json.Unmarshal(params["original_embedding"], &recipe))
++				var fields map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(recipe["Settings"], &fields))
++				if mode == "changed_settings" {
++					var timeout int
++					require.NoError(t, json.Unmarshal(fields["RequestTimeout"], &timeout))
++					fields["RequestTimeout"], err = json.Marshal(timeout + 1)
++					require.NoError(t, err)
++				}
++				if mode == "changed_space" {
++					recipe["SpaceDigest"], err = json.Marshal(strings.Repeat("0", 64))
++					require.NoError(t, err)
++					require.NotEqual(t, oldSpace, strings.Repeat("0", 64))
++				}
++				keys := []string{}
++				for key := range fields {
++					keys = append(keys, key)
++				}
++				sort.Sort(sort.Reverse(sort.StringSlice(keys)))
++				parts := []string{}
++				for _, key := range keys {
++					quoted, err := json.Marshal(key)
++					require.NoError(t, err)
++					parts = append(parts, string(quoted)+" : "+string(fields[key]))
++				}
++				recipe["Settings"] = json.RawMessage("{ " + strings.Join(parts, ", ") + " }")
++				params["original_embedding"], err = json.Marshal(recipe)
++				require.NoError(t, err)
++				wire, err := json.Marshal(params)
++				require.NoError(t, err)
++				write := f.db.Exec("UPDATE models SET parameters=CAST(? AS JSONB) WHERE id=?", string(wire), model.ID)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var actualRow struct{ Parameters string }
++				require.NoError(t, f.db.Table("models").Select("CAST(parameters AS TEXT) AS parameters").Where("id=?", model.ID).Take(&actualRow).Error)
++				var actualParams types.ModelParameters
++				require.NoError(t, json.Unmarshal([]byte(actualRow.Parameters), &actualParams))
++				require.NotNil(t, actualParams.OriginalEmbedding)
++				if mode == "changed_space" {
++					require.Equal(t, strings.Repeat("0", 64), actualParams.OriginalEmbedding.SpaceDigest)
++				} else {
++					require.Equal(t, oldSpace, actualParams.OriginalEmbedding.SpaceDigest)
++				}
++				var actualFields map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(actualParams.OriginalEmbedding.Settings, &actualFields))
++				require.JSONEq(t, string(fields["RequestTimeout"]), string(actualFields["RequestTimeout"]))
++				if mode == "same_representation" {
++					require.NoError(t, read.Recheck())
++					after, bound, err := read.Snapshot()
++					require.NoError(t, err)
++					require.Equal(t, *proof, *bound)
++					require.Equal(t, oldSpace, after.Parameters.OriginalEmbedding.SpaceDigest)
++					require.Equal(t, string(original.Parameters.OriginalEmbedding.Settings), string(after.Parameters.OriginalEmbedding.Settings))
++					require.NoError(t, embedding.ValidateOriginalEmbeddingDefinition(after.Parameters.OriginalEmbedding))
++				} else {
++					require.Error(t, read.Recheck())
++					after, bound, err := read.Snapshot()
++					require.Error(t, err)
++					require.Nil(t, after)
++					require.Nil(t, bound)
++				}
++			}
++			var retained types.ModelDefinitionOriginal
++			require.NoError(t, f.db.Where("id=?", proof.DefinitionID).Take(&retained).Error)
++			require.Equal(t, oldOrigin, retained, "old raw body/hash/space was not rewritten or resigned")
++			require.NoError(t, read.Close())
++			jointOriginalLeaseState(t, f, false)
++		})
++	}
++}
+diff --git a/internal/types/model_original.go b/internal/types/model_original.go
+index efcae13b..b2a15679 100644
+--- a/internal/types/model_original.go
++++ b/internal/types/model_original.go
+@@ -33,6 +33,16 @@ func ModelDefinitionBytes(model *Model) ([]byte, error) {
+ 		recipe.Settings = settings
+ 		params.OriginalChat = &recipe
+ 	}
++	if ModelOriginalEmbeddingStableSettingsSupported(params.OriginalEmbedding) {
++		recipe := *params.OriginalEmbedding
++		settings, err := ModelOriginalEmbeddingSettingsBytes(&recipe)
++		if err != nil {
++			return nil, err
++		}
++		recipe.Settings = settings
++		// This is mirror comparison, not authoring a new vector space.
++		params.OriginalEmbedding = &recipe
++	}
+ 	return json.Marshal(ModelOriginalDefinition{model.ID, model.TenantID, model.Name, model.DisplayName, model.Description, model.Type, model.Source, model.IsBuiltin, params})
+ }
+ 
+diff --git a/internal/types/model_original_embedding_settings_test.go b/internal/types/model_original_embedding_settings_test.go
+new file mode 100644
+index 00000000..66306bed
+--- /dev/null
++++ b/internal/types/model_original_embedding_settings_test.go
+@@ -0,0 +1,43 @@
++package types
++
++import (
++	"encoding/json"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++func TestEmbeddingSettingsLegacySpaceProjection(t *testing.T) {
++	recipe := &ModelOriginalEmbeddingDefinition{Version: 1, Recipe: "embedding/openai/full-v1", API: "openai-embeddings", Settings: json.RawMessage(`{"z":[1,2],"a":9007199254740993}`), ExpectedDimensions: 2}
++	space, err := ModelOriginalEmbeddingDigest(recipe)
++	require.NoError(t, err)
++	recipe.SpaceDigest = space
++	model := &Model{ID: "old-author-input", TenantID: 7, Name: "old authored embedding", Type: ModelTypeEmbedding, Source: ModelSourceRemote, Parameters: ModelParameters{OriginalEmbedding: recipe}}
++	legacy, err := json.Marshal(ModelOriginalDefinition{model.ID, model.TenantID, model.Name, model.DisplayName, model.Description, model.Type, model.Source, model.IsBuiltin, model.Parameters})
++	require.NoError(t, err)
++	current := *model
++	mirror := *recipe
++	mirror.Settings = json.RawMessage(`{"a":9007199254740993,"z":[1.0,2.0]}`)
++	current.Parameters.OriginalEmbedding = &mirror
++	match, err := ModelDefinitionMatchesOriginal(&current, string(legacy))
++	require.NoError(t, err)
++	require.True(t, match)
++	require.Equal(t, space, mirror.SpaceDigest)
++	require.NoError(t, RestoreModelOriginalEmbeddingSettings(&current, string(legacy)))
++	require.Equal(t, string(recipe.Settings), string(current.Parameters.OriginalEmbedding.Settings))
++	require.Equal(t, space, current.Parameters.OriginalEmbedding.SpaceDigest)
++	restored, err := ModelOriginalEmbeddingDigest(current.Parameters.OriginalEmbedding)
++	require.NoError(t, err)
++	require.Equal(t, space, restored)
++	mirror.SpaceDigest = "different-space"
++	current.Parameters.OriginalEmbedding = &mirror
++	match, err = ModelDefinitionMatchesOriginal(&current, string(legacy))
++	require.NoError(t, err)
++	require.False(t, match)
++	mirror.SpaceDigest = space
++	mirror.Settings = json.RawMessage(`{"a":9007199254740992,"z":[1,2]}`)
++	match, err = ModelDefinitionMatchesOriginal(&current, string(legacy))
++	require.NoError(t, err)
++	require.False(t, match)
++	_, err = ModelOriginalEmbeddingSettingsBytes(&ModelOriginalEmbeddingDefinition{Version: 1, Recipe: "unknown", API: "openai-embeddings", Settings: json.RawMessage(`{}`)})
++	require.Error(t, err)
++}
+diff --git a/internal/types/model_original_settings.go b/internal/types/model_original_settings.go
+index 68455d0d..96a239fd 100644
+--- a/internal/types/model_original_settings.go
++++ b/internal/types/model_original_settings.go
+@@ -22,10 +22,38 @@ func ModelOriginalChatSettingsBytes(recipe *ModelOriginalChatDefinition) (json.R
+ 	default:
+ 		return nil, ErrMemoryOriginalUnavailable
+ 	}
+-	if !validModelSettingsStrings(recipe.Settings) {
++	return modelOriginalSettingsBytes(recipe.Settings)
++}
++
++// Unknown/local/cloud recipes are not granted representation equivalence by
++// this remote-only slice. Their prior exact-byte/SDK validation stays intact.
++func ModelOriginalEmbeddingStableSettingsSupported(recipe *ModelOriginalEmbeddingDefinition) bool {
++	if recipe == nil || recipe.Version != 1 {
++		return false
++	}
++	switch recipe.Recipe {
++	case "embedding/openai/full-v1":
++		return recipe.API == "openai-embeddings"
++	case "embedding/dashscope/full-v1":
++		return recipe.API == "dashscope-embeddings"
++	case "embedding/ark/full-v1":
++		return recipe.API == "ark-embeddings"
++	case "embedding/google/full-v1":
++		return recipe.API == "google-embeddings"
++	}
++	return false
++}
++func ModelOriginalEmbeddingSettingsBytes(recipe *ModelOriginalEmbeddingDefinition) (json.RawMessage, error) {
++	if !ModelOriginalEmbeddingStableSettingsSupported(recipe) {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	return modelOriginalSettingsBytes(recipe.Settings)
++}
++func modelOriginalSettingsBytes(raw json.RawMessage) (json.RawMessage, error) {
++	if !validModelSettingsStrings(raw) {
+ 		return nil, ErrMemoryOriginalUnavailable
+ 	}
+-	d := json.NewDecoder(bytes.NewReader(recipe.Settings))
++	d := json.NewDecoder(bytes.NewReader(raw))
+ 	d.UseNumber()
+ 	numberBudget := 1 << 20 // Bound total decimal expansion; no precision rounding.
+ 	value, err := readModelSettingsJSON(d, 0, &numberBudget)
+@@ -270,3 +298,24 @@ func RestoreModelOriginalChatSettings(model *Model, raw string) error {
+ 	model.Parameters.OriginalChat = &recipe
+ 	return nil
+ }
++
++// This restores original opaque definition material only after the repository
++// verified its raw digest/head/body receipt. SpaceDigest is copied verbatim,
++// never recomputed from a current JSONB mirror or relabelled on an old output.
++func RestoreModelOriginalEmbeddingSettings(model *Model, raw string) error {
++	definition, err := decodeModelDefinitionOriginal(raw)
++	if err != nil {
++		return err
++	}
++	if definition.Parameters.OriginalEmbedding == nil {
++		return nil
++	}
++	if model == nil || model.Parameters.OriginalEmbedding == nil {
++		return ErrMemoryOriginalUnavailable
++	}
++	recipe := *model.Parameters.OriginalEmbedding
++	recipe.Settings = append(json.RawMessage(nil), definition.Parameters.OriginalEmbedding.Settings...)
++	recipe.SpaceDigest = definition.Parameters.OriginalEmbedding.SpaceDigest
++	model.Parameters.OriginalEmbedding = &recipe
++	return nil
++}

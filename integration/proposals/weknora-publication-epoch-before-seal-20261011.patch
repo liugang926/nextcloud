@@ -1,0 +1,415 @@
+diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
+index 2f954940..57eae3d7 100644
+--- a/internal/application/service/datasource_service.go
++++ b/internal/application/service/datasource_service.go
+@@ -17,6 +17,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/application/access"
+ 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/datasource"
++	nextcloudconnector "github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
+ 	"github.com/Tencent/WeKnora/internal/types"
+@@ -1594,8 +1595,17 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+ 		return err
+ 	}
+ 	if h.ds.Type == types.ConnectorTypeNextcloud {
+-		if h.nextcloudPublicationEpoch != nil {
+-			item.Metadata["nextcloud_publication_epoch"] = strconv.FormatInt(*h.nextcloudPublicationEpoch, 10)
++		if h.nextcloudPublicationEpoch == nil || item.Metadata["nextcloud_publication_epoch"] != strconv.FormatInt(*h.nextcloudPublicationEpoch, 10) {
++			return fmt.Errorf("Nextcloud streamed item publication epoch differs from observed source")
++		}
++		if !item.IsDeleted {
++			artifact, err := nextcloudconnector.VerifyOriginalFetchedArtifact(&item)
++			if err != nil {
++				return err
++			}
++			if artifact.PublicationEpoch != strconv.FormatInt(*h.nextcloudPublicationEpoch, 10) {
++				return fmt.Errorf("Nextcloud original publication epoch differs from observed source")
++			}
+ 		}
+ 		fileID := item.Metadata["nextcloud_file_id"]
+ 		if fileID == "" || item.Metadata["nextcloud_instance_id"] != h.nextcloudInstanceID ||
+diff --git a/internal/application/service/nextcloud_publication_epoch_seal_sql_actual_test.go b/internal/application/service/nextcloud_publication_epoch_seal_sql_actual_test.go
+new file mode 100644
+index 00000000..804032c4
+--- /dev/null
++++ b/internal/application/service/nextcloud_publication_epoch_seal_sql_actual_test.go
+@@ -0,0 +1,120 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/Tencent/WeKnora/internal/datasource"
++	"github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++	"testing"
++	"time"
++)
++
++type epochSealActualConnector struct {
++	*nextcloud.Connector
++	t                                                              *testing.T
++	mode                                                           string
++	seen, validBefore, validAfter, metadataUnchanged, faultApplied bool
++	epoch                                                          string
++}
++
++func (c *epochSealActualConnector) FetchStream(ctx context.Context, cfg *types.DataSourceConfig, cursor *types.SyncCursor, h datasource.StreamHandler) (*types.SyncCursor, error) {
++	actual, ok := h.(*streamSyncHandler)
++	require.True(c.t, ok, "the actual production Sync handler must own ingestion")
++	return c.Connector.FetchStream(ctx, cfg, cursor, &epochSealActualStream{streamSyncHandler: actual, owner: c, cfg: cfg})
++}
++func (c *epochSealActualConnector) FetchFullStream(ctx context.Context, cfg *types.DataSourceConfig, cursor *types.SyncCursor, h datasource.StreamHandler) (*types.SyncCursor, error) {
++	actual, ok := h.(*streamSyncHandler)
++	require.True(c.t, ok, "the actual production Sync handler must own ingestion")
++	return c.Connector.FetchFullStream(ctx, cfg, cursor, &epochSealActualStream{streamSyncHandler: actual, owner: c, cfg: cfg})
++}
++
++type epochSealActualStream struct {
++	*streamSyncHandler
++	owner *epochSealActualConnector
++	cfg   *types.DataSourceConfig
++}
++
++func (s *epochSealActualStream) Emit(ctx context.Context, item types.FetchedItem) error {
++	t := s.owner.t
++	s.owner.seen = true
++	artifact, err := nextcloud.VerifyOriginalFetchedArtifact(&item)
++	require.NoError(t, err, "only the real connector may issue this artifact")
++	require.NoError(t, nextcloud.VerifyOriginalArtifactConfiguration(s.cfg, artifact))
++	require.Equal(t, "1", artifact.PublicationEpoch)
++	require.Equal(t, "1", item.Metadata["nextcloud_publication_epoch"])
++	require.Equal(t, "actual-etag", artifact.ETag)
++	require.Equal(t, "source.md", artifact.Path)
++	s.owner.validBefore = true
++	s.owner.epoch = artifact.PublicationEpoch
++	if s.owner.mode == "observed_epoch_mismatch" {
++		epoch := *s.nextcloudPublicationEpoch + 1
++		s.nextcloudPublicationEpoch = &epoch
++		s.owner.faultApplied = true
++	}
++	if s.owner.mode == "sealed_metadata_mutation" {
++		item.Metadata["nextcloud_publication_epoch"] = "2"
++		s.owner.faultApplied = true
++	}
++	if s.owner.mode == "missing_sealed_epoch" {
++		delete(item.Metadata, "nextcloud_publication_epoch")
++		s.owner.faultApplied = true
++	}
++	before, err := json.Marshal(item.Metadata)
++	require.NoError(t, err)
++	emitErr := s.streamSyncHandler.Emit(ctx, item)
++	after, err := json.Marshal(item.Metadata)
++	require.NoError(t, err)
++	s.owner.metadataUnchanged = string(before) == string(after)
++	require.Equal(t, string(before), string(after), "Emit must not alter/reseal source metadata")
++	_, verifyErr := nextcloud.VerifyOriginalFetchedArtifact(&item)
++	s.owner.validAfter = verifyErr == nil
++	if s.owner.mode == "current" {
++		require.NoError(t, emitErr)
++		require.NoError(t, verifyErr)
++	} else {
++		require.Error(t, emitErr)
++		if s.owner.mode == "observed_epoch_mismatch" {
++			require.NoError(t, verifyErr)
++		} else {
++			require.Error(t, verifyErr)
++		}
++	}
++	return emitErr
++}
++func TestNextcloudPublicationEpochBeforeSealActualSQLite(t *testing.T) {
++	for _, mode := range []string{"current", "observed_epoch_mismatch", "sealed_metadata_mutation", "missing_sealed_epoch"} {
++		t.Run(mode, func(t *testing.T) {
++			// Complete migration87 + actual signed source HTTP fixture, real paired
++			// source/config/model/KB producers. The connector and actual Emit remain
++			// production methods; the wrapper only applies declared negative faults.
++			m := newMachinePipelineFixtureWithDocument(t, false, "Actual source epoch document", true, true, true)
++			connector := &epochSealActualConnector{Connector: nextcloud.NewConnector(), t: t, mode: mode}
++			registry := datasource.NewConnectorRegistry()
++			require.NoError(t, registry.Register(connector))
++			m.source.connectorRegistry = registry
++			log := &types.SyncLog{ID: "actual-sealed-epoch-sync", DataSourceID: m.ds.ID, TenantID: 7, Status: types.SyncLogStatusRunning, StartedAt: time.Now().UTC()}
++			require.NoError(t, m.source.syncLogRepo.Create(context.Background(), log))
++			operation, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++			defer cancel()
++			err := m.source.ProcessSync(operation, enrichmentTask(t, types.TypeDataSourceSync, types.DataSourceSyncPayload{DataSourceID: m.ds.ID, TenantID: 7, SyncLogID: log.ID, ForceFull: true}))
++			require.True(t, connector.seen)
++			require.True(t, connector.validBefore)
++			require.True(t, connector.metadataUnchanged)
++			require.Equal(t, "1", connector.epoch)
++			var rows int64
++			require.NoError(t, m.f.db.Model(&types.Knowledge{}).Where("channel=?", types.ConnectorTypeNextcloud).Count(&rows).Error)
++			if mode == "current" {
++				require.NoError(t, err)
++				require.EqualValues(t, 1, rows)
++				require.True(t, connector.validAfter)
++				require.False(t, connector.faultApplied)
++			} else {
++				require.Error(t, err)
++				require.Zero(t, rows)
++				require.True(t, connector.faultApplied)
++			}
++		})
++	}
++}
+diff --git a/internal/datasource/connector/nextcloud/client.go b/internal/datasource/connector/nextcloud/client.go
+index 0530b193..1ca0272c 100644
+--- a/internal/datasource/connector/nextcloud/client.go
++++ b/internal/datasource/connector/nextcloud/client.go
+@@ -306,7 +306,7 @@ func (c *client) bindings(ctx context.Context) ([]binding, error) {
+ 	}
+ 	seen := make(map[string]bool, len(result.Bindings))
+ 	for _, b := range result.Bindings {
+-		if !validBindingID(b.ID) || strings.TrimSpace(b.Name) == "" || b.RootFileID <= 0 || seen[b.ID] {
++		if !validBindingID(b.ID) || strings.TrimSpace(b.Name) == "" || b.RootFileID <= 0 || seen[b.ID] || !b.publicationEpochPresent || !b.publicationEpochValid {
+ 			return nil, fmt.Errorf("invalid or duplicate Nextcloud binding")
+ 		}
+ 		seen[b.ID] = true
+diff --git a/internal/datasource/connector/nextcloud/connector.go b/internal/datasource/connector/nextcloud/connector.go
+index 45b1c76f..3e82637a 100644
+--- a/internal/datasource/connector/nextcloud/connector.go
++++ b/internal/datasource/connector/nextcloud/connector.go
+@@ -258,6 +258,7 @@ func (c *Connector) walk(
+ 			}
+ 		}
+ 	}
++	publicationEpochs := map[string]int64{}
+ 	if h != nil {
+ 		// A selected binding that has been withdrawn must stop the stream
+ 		// before it stages any source version or deletion.
+@@ -268,6 +269,11 @@ func (c *Connector) walk(
+ 		found := false
+ 		for _, binding := range bindings {
+ 			if binding.ID == selected[0] {
++				if !binding.publicationEpochPresent || !binding.publicationEpochValid || binding.PublicationEpoch < 0 {
++					return nil, nil, datasource.ErrInvalidConfig
++				}
++				// Only this signed bindings response supplies the source epoch.
++				publicationEpochs[binding.ID] = binding.PublicationEpoch
+ 				found = true
+ 				if observer, ok := h.(publicationEpochStreamHandler); ok {
+ 					if err := observer.ObserveNextcloudPublicationEpoch(ctx, cap.InstanceID, binding.ID, binding.PublicationEpoch); err != nil {
+@@ -383,6 +389,16 @@ func (c *Connector) walk(
+ 	}
+ 	var out []types.FetchedItem
+ 	emit := func(item types.FetchedItem) error {
++		if epoch, observed := publicationEpochs[item.SourceResourceID]; observed {
++			item.Metadata["nextcloud_publication_epoch"] = strconv.FormatInt(epoch, 10)
++		}
++		// The connector owns this newly fetched item. Bind all final source
++		// metadata exactly once, before handing it to a streaming consumer.
++		// Tombstones retain the complete-manifest deletion protocol, not a
++		// fabricated content body or an empty original-artifact capability.
++		if !item.IsDeleted {
++			sealFetchedArtifact(&item, cfg)
++		}
+ 		if retryExternalID != "" && item.ExternalID != retryExternalID {
+ 			return nil
+ 		}
+@@ -423,7 +439,7 @@ func (c *Connector) walk(
+ 			if err != nil {
+ 				return nil, nil, err
+ 			}
+-			if err := emit(fetchedItem(cap.InstanceID, bindingID, generations[bindingID], file, content, contentType, cfg)); err != nil {
++			if err := emit(fetchedItem(cap.InstanceID, bindingID, generations[bindingID], file, content, contentType)); err != nil {
+ 				return nil, nil, err
+ 			}
+ 			current[id] = state
+diff --git a/internal/datasource/connector/nextcloud/original_artifact.go b/internal/datasource/connector/nextcloud/original_artifact.go
+index d2ea2460..4984342b 100644
+--- a/internal/datasource/connector/nextcloud/original_artifact.go
++++ b/internal/datasource/connector/nextcloud/original_artifact.go
+@@ -20,6 +20,7 @@ type originalFetchedArtifact struct {
+ type OriginalFetchedArtifactInput struct {
+ 	ExternalID, BindingID, InstanceID, FileID, ETag, Path, FileName string
+ 	ContentRevision                                                 string `json:"content_revision,omitempty"`
++	PublicationEpoch                                                string `json:"publication_epoch,omitempty"`
+ 	ArtifactSHA256, ItemDigest                                      string
+ 	SourceConfigDigest                                              string
+ }
+@@ -28,7 +29,7 @@ func fetchedArtifactInput(item *types.FetchedItem) OriginalFetchedArtifactInput
+ 	hash := sha256.Sum256(item.Content)
+ 	encoded, _ := json.Marshal(item)
+ 	all := sha256.Sum256(encoded)
+-	return OriginalFetchedArtifactInput{ContentRevision: types.NextcloudLineageContentRevision(item.Metadata["nextcloud_content_revision"]), ExternalID: item.ExternalID, BindingID: item.SourceResourceID, InstanceID: item.Metadata["nextcloud_instance_id"], FileID: item.Metadata["nextcloud_file_id"], ETag: item.Metadata["nextcloud_etag"], Path: item.Metadata["nextcloud_path"], FileName: item.FileName, ArtifactSHA256: hex.EncodeToString(hash[:]), ItemDigest: hex.EncodeToString(all[:])}
++	return OriginalFetchedArtifactInput{PublicationEpoch: item.Metadata["nextcloud_publication_epoch"], ContentRevision: types.NextcloudLineageContentRevision(item.Metadata["nextcloud_content_revision"]), ExternalID: item.ExternalID, BindingID: item.SourceResourceID, InstanceID: item.Metadata["nextcloud_instance_id"], FileID: item.Metadata["nextcloud_file_id"], ETag: item.Metadata["nextcloud_etag"], Path: item.Metadata["nextcloud_path"], FileName: item.FileName, ArtifactSHA256: hex.EncodeToString(hash[:]), ItemDigest: hex.EncodeToString(all[:])}
+ }
+ func originalArtifactConfigDigest(cfg config) string {
+ 	key := sha256.Sum256([]byte(cfg.token))
+diff --git a/internal/datasource/connector/nextcloud/publication_epoch_seal_test.go b/internal/datasource/connector/nextcloud/publication_epoch_seal_test.go
+new file mode 100644
+index 00000000..182340a2
+--- /dev/null
++++ b/internal/datasource/connector/nextcloud/publication_epoch_seal_test.go
+@@ -0,0 +1,124 @@
++package nextcloud
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"github.com/stretchr/testify/require"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++type epochSealedCapture struct {
++	nextcloudCaptureStream
++	epoch    int64
++	observed bool
++}
++
++func (h *epochSealedCapture) ObserveNextcloudPublicationEpoch(_ context.Context, instance, binding string, epoch int64) error {
++	h.epoch = epoch
++	h.observed = true
++	return nil
++}
++
++// A genuine HTTP connector response and real request HMAC produce the private
++// artifact. Explicit signed protocol-v1 epoch0 is retained; no nil metadata
++// becomes a substitute epoch or a permission/provenance capability.
++func TestNextcloudPublicationEpochSealedFromSignedBindings(t *testing.T) {
++	for _, name := range []string{"current_epoch", "explicit_signed_legacy_zero", "missing_source_epoch", "null_source_epoch"} {
++		epoch := int64(1)
++		if name == "explicit_signed_legacy_zero" {
++			epoch = 0
++		}
++		t.Run(name, func(t *testing.T) {
++			var actualCfg config
++			var signedRequests int
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				raw, err := io.ReadAll(r.Body)
++				require.NoError(t, err)
++				canonical, err := machineCanonicalRequest(r.Method, r.URL.EscapedPath(), r.URL.RawQuery, raw, r.Header.Get("X-WeKnora-Timestamp"), r.Header.Get("X-WeKnora-Nonce"), r.Header.Get("X-WeKnora-Key-Id"))
++				require.NoError(t, err)
++				key := sha256.Sum256([]byte(actualCfg.token))
++				mac := hmac.New(sha256.New, key[:])
++				_, err = mac.Write([]byte(canonical))
++				require.NoError(t, err)
++				require.Equal(t, "Bearer "+actualCfg.token, r.Header.Get("Authorization"))
++				require.Equal(t, actualCfg.keyID, r.Header.Get("X-WeKnora-Key-Id"))
++				require.Equal(t, hex.EncodeToString(mac.Sum(nil)), r.Header.Get("X-WeKnora-Signature"))
++				signedRequests++
++				switch r.URL.Path {
++				case apiPath + "/capabilities":
++					writeJSON(w, map[string]string{"protocol_version": "1", "instance_id": "instance-1"})
++				case apiPath + "/bindings":
++					entry := map[string]interface{}{"id": "dev-published", "name": "Published", "root_file_id": 7, "publication_state": "active", "publication_epoch": epoch}
++					if name == "missing_source_epoch" {
++						delete(entry, "publication_epoch")
++					}
++					if name == "null_source_epoch" {
++						entry["publication_epoch"] = nil
++					}
++					writeJSON(w, map[string]interface{}{"bindings": []map[string]interface{}{entry}})
++				case apiPath + "/bindings/dev-published/changes":
++					http.NotFound(w, r)
++				case apiPath + "/bindings/dev-published/manifest":
++					writeJSON(w, testManifest("epoch-etag"))
++				case apiPath + "/bindings/dev-published/files/41/content":
++					w.Header().Set("ETag", "epoch-etag")
++					_, err = w.Write([]byte("hello"))
++					require.NoError(t, err)
++				default:
++					http.NotFound(w, r)
++				}
++			}))
++			defer server.Close()
++			source := testConfig(t, server.URL)
++			var err error
++			actualCfg, err = parseConfig(source)
++			require.NoError(t, err)
++			handler := &epochSealedCapture{}
++			_, err = NewConnector().FetchFullStream(context.Background(), source, nil, handler)
++			if name == "missing_source_epoch" || name == "null_source_epoch" {
++				require.Error(t, err)
++				require.False(t, handler.observed)
++				require.Empty(t, handler.items)
++				require.Equal(t, 2, signedRequests, "source must close after actual capabilities/bindings before fetching a body or sealing an artifact")
++				return
++			}
++			require.NoError(t, err)
++			require.True(t, handler.observed)
++			require.Equal(t, epoch, handler.epoch)
++			require.Len(t, handler.items, 1)
++			require.GreaterOrEqual(t, signedRequests, 4)
++			item := handler.items[0]
++			artifact, err := VerifyOriginalFetchedArtifact(&item)
++			require.NoError(t, err)
++			require.NoError(t, VerifyOriginalArtifactConfiguration(source, artifact))
++			expected := "1"
++			if epoch == 0 {
++				expected = "0"
++			}
++			require.Equal(t, expected, item.Metadata["nextcloud_publication_epoch"])
++			require.Equal(t, expected, artifact.PublicationEpoch)
++			before, err := json.Marshal(item.Metadata)
++			require.NoError(t, err)
++			require.NotEmpty(t, before)
++			item.Metadata["nextcloud_publication_epoch"] = "2"
++			_, err = VerifyOriginalFetchedArtifact(&item)
++			require.Error(t, err, "observed source epoch is part of the complete immutable artifact")
++			// Restore-only ABA is not a grant: it merely confirms that no verifier
++			// secretly rewrote the opaque original when the earlier check refused.
++			item.Metadata["nextcloud_publication_epoch"] = expected
++			_, err = VerifyOriginalFetchedArtifact(&item)
++			require.NoError(t, err)
++			delete(item.Metadata, "nextcloud_publication_epoch")
++			_, err = VerifyOriginalFetchedArtifact(&item)
++			require.Error(t, err, "missing metadata never manufactures legacy zero")
++			require.True(t, strings.HasPrefix(item.ExternalID, "nextcloud:instance-1:"))
++		})
++	}
++}
+diff --git a/internal/datasource/connector/nextcloud/types.go b/internal/datasource/connector/nextcloud/types.go
+index 5da21082..ca0ee743 100644
+--- a/internal/datasource/connector/nextcloud/types.go
++++ b/internal/datasource/connector/nextcloud/types.go
+@@ -175,11 +175,33 @@ type capabilities struct {
+ }
+ 
+ type binding struct {
+-	ID               string `json:"id"`
+-	Name             string `json:"name"`
+-	RootFileID       int64  `json:"root_file_id"`
+-	PublicationState string `json:"publication_state"`
+-	PublicationEpoch int64  `json:"publication_epoch"`
++	ID                      string `json:"id"`
++	Name                    string `json:"name"`
++	RootFileID              int64  `json:"root_file_id"`
++	PublicationState        string `json:"publication_state"`
++	PublicationEpoch        int64  `json:"publication_epoch"`
++	publicationEpochPresent bool
++	publicationEpochValid   bool
++}
++
++// Presence is source metadata, not a default or grant. Keep the public
++// integer wire shape for all binding consumers while distinguishing explicit
++// zero from an absent/null/invalid signed response field.
++func (b *binding) UnmarshalJSON(raw []byte) error {
++	type wireBinding binding
++	var wire wireBinding
++	if err := json.Unmarshal(raw, &wire); err != nil {
++		return err
++	}
++	var fields map[string]json.RawMessage
++	if err := json.Unmarshal(raw, &fields); err != nil {
++		return err
++	}
++	value, present := fields["publication_epoch"]
++	wire.publicationEpochPresent = present
++	wire.publicationEpochValid = present && strings.TrimSpace(string(value)) != "null" && json.Unmarshal(value, &wire.PublicationEpoch) == nil && wire.PublicationEpoch >= 0
++	*b = binding(wire)
++	return nil
+ }
+ 
+ type bindingsResponse struct {
