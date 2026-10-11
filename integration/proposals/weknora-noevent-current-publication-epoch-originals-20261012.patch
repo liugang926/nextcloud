@@ -1,5 +1,5 @@
 diff --git a/internal/application/repository/knowledge_sqlite_nextcloud_union.go b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
-index 7f6b5aea7..cbb62b92d 100644
+index 7f6b5aea7944dbf6fa66398bda51476011b95db7..cbb62b92d4580f06416adb0beeb9e5679dd3f5e4 100644
 --- a/internal/application/repository/knowledge_sqlite_nextcloud_union.go
 +++ b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
 @@ -119,8 +119,6 @@ func (r *nextcloudOriginalUploadRead) finalClockInTx(tx *gorm.DB, extra map[stri
@@ -44,7 +44,7 @@ index 7f6b5aea7..cbb62b92d 100644
  				// domain/scope, storage, SHA, purge state/epoch and the actual read lease.
 diff --git a/internal/application/repository/nextcloud_noevent_epoch_clock.go b/internal/application/repository/nextcloud_noevent_epoch_clock.go
 new file mode 100644
-index 000000000..0ff9b5f98
+index 0000000000000000000000000000000000000000..0ff9b5f989287720c4c64befdc769b2154516690
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_noevent_epoch_clock.go
 @@ -0,0 +1,27 @@
@@ -77,7 +77,7 @@ index 000000000..0ff9b5f98
 +}
 diff --git a/internal/application/repository/nextcloud_noevent_epoch_generation.go b/internal/application/repository/nextcloud_noevent_epoch_generation.go
 new file mode 100644
-index 000000000..a3a564ec9
+index 0000000000000000000000000000000000000000..a3a564ec9fc724d6abc48b4e9a9ced5046fe40b6
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_noevent_epoch_generation.go
 @@ -0,0 +1,109 @@
@@ -192,10 +192,10 @@ index 000000000..a3a564ec9
 +}
 diff --git a/internal/application/repository/nextcloud_noevent_epoch_original.go b/internal/application/repository/nextcloud_noevent_epoch_original.go
 new file mode 100644
-index 000000000..345700bf6
+index 0000000000000000000000000000000000000000..ff3d449ab0b1ce58213bcb77ee5db2014762bb15
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_noevent_epoch_original.go
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,259 @@
 +package repository
 +
 +import (
@@ -267,7 +267,12 @@ index 000000000..345700bf6
 +	if err := p.Read.samePool(tx); err != nil {
 +		return err
 +	}
-+	if err := p.Read.checkActorInTx(tx); err != nil {
++	// This is an AfterCreate/AfterUpdate callback: the producer INSERT/UPDATE
++	// SQL and model remain live until GORM's processor tail resets them. Never
++	// pass that statement to authority queries. NewDB and Context in ONE Session
++	// keep the same owning ConnPool/caller while the next query resets SQL/model.
++	actorTX := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context})
++	if err := p.Read.checkActorInTx(actorTX); err != nil {
 +		return err
 +	}
 +	row, err := bodySourceRow(tx, d, p.ID)
@@ -452,7 +457,7 @@ index 000000000..345700bf6
 +}
 diff --git a/internal/application/repository/nextcloud_noevent_epoch_pg_catalogue.go b/internal/application/repository/nextcloud_noevent_epoch_pg_catalogue.go
 new file mode 100644
-index 000000000..bc26d1e80
+index 0000000000000000000000000000000000000000..bc26d1e8006f50c0d9ba02dd45bd1db91d9caffc
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_noevent_epoch_pg_catalogue.go
 @@ -0,0 +1,365 @@
@@ -823,7 +828,7 @@ index 000000000..bc26d1e80
 +}
 diff --git a/internal/application/repository/nextcloud_noevent_epoch_read.go b/internal/application/repository/nextcloud_noevent_epoch_read.go
 new file mode 100644
-index 000000000..73517c8e7
+index 0000000000000000000000000000000000000000..73517c8e7a6b934221a73abda0d60ed05dcf5e17
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_noevent_epoch_read.go
 @@ -0,0 +1,280 @@
@@ -1109,7 +1114,7 @@ index 000000000..73517c8e7
 +}
 diff --git a/internal/application/repository/nextcloud_noevent_epoch_schema.go b/internal/application/repository/nextcloud_noevent_epoch_schema.go
 new file mode 100644
-index 000000000..7a22f3b8b
+index 0000000000000000000000000000000000000000..7a22f3b8b24d37c82604dbfd39e15e8a7d347d97
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_noevent_epoch_schema.go
 @@ -0,0 +1,184 @@
@@ -1299,7 +1304,7 @@ index 000000000..7a22f3b8b
 +}
 diff --git a/internal/application/repository/nextcloud_noevent_epoch_schema_specs.json b/internal/application/repository/nextcloud_noevent_epoch_schema_specs.json
 new file mode 100644
-index 000000000..d4ff3d61f
+index 0000000000000000000000000000000000000000..d4ff3d61f7ae2a09b7db9c5ec7bc2ee1af3f8459
 --- /dev/null
 +++ b/internal/application/repository/nextcloud_noevent_epoch_schema_specs.json
 @@ -0,0 +1,15 @@
@@ -1319,7 +1324,7 @@ index 000000000..d4ff3d61f
 +  }
 +}
 diff --git a/internal/application/repository/nextcloud_original_upload_epoch.go b/internal/application/repository/nextcloud_original_upload_epoch.go
-index 30b483f3a..563f1a06d 100644
+index 30b483f3a02f687827fdf5042b280813ace2e659..563f1a06d1ff6b06c30e80e19367f9558634aac7 100644
 --- a/internal/application/repository/nextcloud_original_upload_epoch.go
 +++ b/internal/application/repository/nextcloud_original_upload_epoch.go
 @@ -51,6 +51,12 @@ func (r *nextcloudOriginalUploadRead) capturePublicationEpochInTx(tx *gorm.DB) e
@@ -1356,7 +1361,7 @@ index 30b483f3a..563f1a06d 100644
  		return ErrNextcloudOnboardingDenied
  	}
 diff --git a/internal/application/repository/nextcloud_original_upload_read.go b/internal/application/repository/nextcloud_original_upload_read.go
-index f788d2f04..a6b903597 100644
+index f788d2f04cbcdd78c335d24e5c66e949c6582896..a6b9035979b77995c8168e8c625fc21e68b5ccfa 100644
 --- a/internal/application/repository/nextcloud_original_upload_read.go
 +++ b/internal/application/repository/nextcloud_original_upload_read.go
 @@ -47,6 +47,7 @@ type nextcloudOriginalUploadRead struct {
@@ -1464,7 +1469,7 @@ index f788d2f04..a6b903597 100644
  	r.closeErr = err
  	close(r.joined)
 diff --git a/internal/application/repository/original_body_fields.go b/internal/application/repository/original_body_fields.go
-index 5f85b38d3..7fb69f78c 100644
+index 5f85b38d3d6e6285b00c6e1615d3ad0b632b8db9..7fb69f78c750712b611e4f60b50de9707d27f7e0 100644
 --- a/internal/application/repository/original_body_fields.go
 +++ b/internal/application/repository/original_body_fields.go
 @@ -21,6 +21,9 @@ type originalBodyFieldDescriptor struct {
@@ -1490,7 +1495,7 @@ index 5f85b38d3..7fb69f78c 100644
  		}
 diff --git a/internal/application/service/noevent_nextcloud_current_epoch_fixture_test.go b/internal/application/service/noevent_nextcloud_current_epoch_fixture_test.go
 new file mode 100644
-index 000000000..cadf53640
+index 0000000000000000000000000000000000000000..cadf536401a6a4ce6bd8507f90cf8af77e276eaf
 --- /dev/null
 +++ b/internal/application/service/noevent_nextcloud_current_epoch_fixture_test.go
 @@ -0,0 +1,111 @@
@@ -1607,10 +1612,10 @@ index 000000000..cadf53640
 +}
 diff --git a/internal/application/service/noevent_nextcloud_current_epoch_sql_http_actual_test.go b/internal/application/service/noevent_nextcloud_current_epoch_sql_http_actual_test.go
 new file mode 100644
-index 000000000..ec7191f49
+index 0000000000000000000000000000000000000000..f2815492788870f8f9a7ccbc2174fe6c1542358d
 --- /dev/null
 +++ b/internal/application/service/noevent_nextcloud_current_epoch_sql_http_actual_test.go
-@@ -0,0 +1,849 @@
+@@ -0,0 +1,889 @@
 +package service
 +
 +import (
@@ -2039,8 +2044,48 @@ index 000000000..ec7191f49
 +					t.Error(e)
 +				}
 +			})
++			var generationInserts, generationCallbackCompletions atomic.Int64
++			const generationBefore = "noevent-actual-generation-create-count"
++			const generationAfter = "noevent-actual-generation-statement-preserved"
++			require.NoError(t, f.db.Callback().Create().After("gorm:create").Before("original_body:capture").Register(generationBefore, func(tx *gorm.DB) {
++				if tx.Statement.Context.Value(ownedMachineBuildTestKey{}) != marker || tx.Statement.Table != "nextcloud_epoch_protocol_origins" {
++					return
++				}
++				if tx.RowsAffected != 1 || tx.Error != nil {
++					fail(errors.New("actual generation insert did not write exactly one row"))
++					return
++				}
++				generationInserts.Add(1)
++			}))
++			require.NoError(t, f.db.Callback().Create().After("original_body:capture").Before("gorm:save_after_associations").Register(generationAfter, func(tx *gorm.DB) {
++				if tx.Statement.Context.Value(ownedMachineBuildTestKey{}) != marker || tx.Statement.Table != "nextcloud_epoch_protocol_origins" {
++					return
++				}
++				if tx.Statement.Schema == nil || tx.Statement.Schema.Table != "nextcloud_epoch_protocol_origins" || tx.RowsAffected != 1 || tx.Error != nil || !strings.HasPrefix(tx.Statement.SQL.String(), "INSERT INTO ") {
++					fail(errors.New("actual epoch producer statement changed during authority callback"))
++					return
++				}
++				generationCallbackCompletions.Add(1)
++			}))
++			t.Cleanup(func() {
++				if err := f.db.Callback().Create().Remove(generationAfter); err != nil {
++					t.Error(err)
++				}
++				if err := f.db.Callback().Create().Remove(generationBefore); err != nil {
++					t.Error(err)
++				}
++			})
 +			held, err := f.store.BeginNextcloudNoEventOriginalUploadRead(parent, payload)
 +			require.NoError(t, err)
++			require.EqualValues(t, 1, generationInserts.Load())
++			require.EqualValues(t, 1, generationCallbackCompletions.Load())
++			var actualGenerationRows int64
++			require.NoError(t, f.db.Table("nextcloud_epoch_protocol_origins").Where("id=? AND tenant_id=? AND knowledge_base_id=?", m.ds.ID, 7, operation.KnowledgeBaseID).Count(&actualGenerationRows).Error)
++			require.EqualValues(t, 1, actualGenerationRows)
++			mu.Lock()
++			generationObservedErr := callbackErr
++			mu.Unlock()
++			require.NoError(t, generationObservedErr)
 +			closed := false
 +			t.Cleanup(func() {
 +				if !closed {
@@ -2462,7 +2507,7 @@ index 000000000..ec7191f49
 +}
 diff --git a/migrations/pending/nextcloud-current-publication-epoch-originals/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql b/migrations/pending/nextcloud-current-publication-epoch-originals/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql
 new file mode 100644
-index 000000000..4479b11f8
+index 0000000000000000000000000000000000000000..4479b11f884ae2d44f5f874d875a6aa775b7ece2
 --- /dev/null
 +++ b/migrations/pending/nextcloud-current-publication-epoch-originals/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql
 @@ -0,0 +1,7 @@
@@ -2475,7 +2520,7 @@ index 000000000..4479b11f8
 +DROP TABLE nextcloud_epoch_protocol_origins;
 diff --git a/migrations/pending/nextcloud-current-publication-epoch-originals/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql b/migrations/pending/nextcloud-current-publication-epoch-originals/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql
 new file mode 100644
-index 000000000..af7579477
+index 0000000000000000000000000000000000000000..af757947780d275351d0fec071d1728b172f72b1
 --- /dev/null
 +++ b/migrations/pending/nextcloud-current-publication-epoch-originals/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql
 @@ -0,0 +1,32 @@
@@ -2513,7 +2558,7 @@ index 000000000..af7579477
 +CREATE TRIGGER nextcloud_epoch_control_delete BEFORE DELETE ON nextcloud_epoch_current_controls BEGIN SELECT RAISE(ABORT,'nextcloud_epoch_control_changed'); END;
 diff --git a/migrations/pending/nextcloud-current-publication-epoch-originals/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql b/migrations/pending/nextcloud-current-publication-epoch-originals/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql
 new file mode 100644
-index 000000000..a4df8dced
+index 0000000000000000000000000000000000000000..a4df8dcedc7e121f90732fea6abdb3137ad62188
 --- /dev/null
 +++ b/migrations/pending/nextcloud-current-publication-epoch-originals/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql
 @@ -0,0 +1,6 @@
@@ -2525,7 +2570,7 @@ index 000000000..a4df8dced
 +DROP FUNCTION nextcloud_epoch_original_immutable();
 diff --git a/migrations/pending/nextcloud-current-publication-epoch-originals/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql b/migrations/pending/nextcloud-current-publication-epoch-originals/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql
 new file mode 100644
-index 000000000..18e9dce06
+index 0000000000000000000000000000000000000000..18e9dce06a9b7719a3b2da9509d8bec8a386a13a
 --- /dev/null
 +++ b/migrations/pending/nextcloud-current-publication-epoch-originals/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql
 @@ -0,0 +1,31 @@

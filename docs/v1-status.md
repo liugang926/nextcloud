@@ -26,7 +26,8 @@ older component snapshots below retain their separate scope and failure history.
 | Typed derived template and nonempty ancestor | `9d9280a5`:551 files format/full157 compile; existing67 regressions pass; new ancestor8 all fail at sourceA published precondition | Fixture omits the production indexed-success enabled transition; test-only repair pending, no inherited-source acceptance |
 | Nonempty ancestor indexed-success fixture | `2023169f`:551 files format/full157 compile; ancestor8 6PASS/2FAIL including parent, existing67 regressions pass | Positive inheritance/native save and five fault leaves pass; last-clock fault probe has a wrong lease-table column reference and remains unaccepted |
 | Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
-| Explicit no-event current epoch originals | `ccf2d330`:559 files format/full157 compile; existing75 regressions pass; new SQLite13 all fail initialization, PG4 not run | AfterCreate actor query reuses a live producer statement; minimal clean-statement correction awaiting fresh runtime; pending93/172 unadopted |
+| Explicit no-event current epoch originals | `5eaa2498`:559 files format/full157 compile; SQLite13 + PG4 + existing75 all PASS92/FAIL0/SKIP0;39 runtime and3 compiler resources absent | Explicit component only; normal registry/startup93/172, concurrent availability, whole restore and personal sourced QA remain open |
+| Personal source query and completion | `78232977` source repair fused byte-exactly onto `5eaa2498` as `e2567217`; final local authority, original upload body and exact source fence union prepared | Independent source audit and actual validation pending; source-only nonmember KB/Agent/model boundary, graph-required sources and normal registry still open |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -3685,3 +3686,23 @@ with an attached tag lacking display origin; this is a retained failed probe,
 not a release acceptance. All owned resources were cleaned. The new machine
 image is being built for the repaired personal positive. Original body152 and
 complete Agent/Continue/partial-field lifetimes remain in independent worktrees.
+
+
+## 2026-10-12 no-event original epoch validation
+
+The clean callback statement repair on `5eaa2498` passes the new SQLite13
+and PostgreSQL4 nodes plus the existing75 regressions on the same exact source.
+All157 packages compile, with zero business RUN in the compiler. Root verifies
+39 runtime and3 compiler resource absences. The original setup rejection and
+13 initialization failures remain in the evidence; no constraints or deadlines
+were weakened. The callback oracle proves one actual generation insert with
+the original producer statement preserved. See the [actual92 record](evidence/NoEvent-current-epoch-callback-fixed-actual17-old75-GREEN-20261012.json)
+and [source proposal](../integration/proposals/weknora-noevent-current-publication-epoch-originals-20261012.json).
+
+SQLite verifies the explicit signed no-event SDK/native-save component.
+PostgreSQL verifies original epoch/body/catalogue gates; it does not qualify
+PostgreSQL vector SDK/save. Normal registry and pending93/172 startup adoption,
+whole coordinated restore and normal concurrent availability remain open.
+Personal sourced query/completion is a separate source candidate under review,
+including immutable upload input and a final local authority/fence union.
+Its admin fixture cannot establish the PRD source-only nonmember access matrix.
