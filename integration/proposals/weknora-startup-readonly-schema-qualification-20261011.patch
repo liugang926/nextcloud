@@ -801,6 +801,32 @@ index 0000000000000000000000000000000000000000..322035f4d6d689f1af43c195ae2f926e
 +	}
 +	observer(JointSchemaCataloguePhaseObservation{Phase: phase, Object: object, Failed: failed})
 +}
+diff --git a/internal/database/migration_joint_catalogue_specs.json b/internal/database/migration_joint_catalogue_specs.json
+index 3ca984945303cdb7b93cb465779a088775c1fb87..54a559b7cefa302b66e1ea2054fdae65adee801f 100644
+--- a/internal/database/migration_joint_catalogue_specs.json
++++ b/internal/database/migration_joint_catalogue_specs.json
+@@ -917,6 +917,21 @@
+         "title",
+         "description"
+       ]
++    },
++    "wiki_pages": {
++      "Key": "id",
++      "Columns": [
++        "content",
++        "summary",
++        "page_metadata"
++      ]
++    },
++    "wiki_page_revisions": {
++      "Key": "id",
++      "Columns": [
++        "content",
++        "summary"
++      ]
+     }
+   }
+ }
 diff --git a/internal/database/migration_joint_lineage.go b/internal/database/migration_joint_lineage.go
 index 5b2fa33a48eb93082787531e3e493e34f4ebc7da..ac408e130f70de388e96ac301165bd0ef2a77da2 100644
 --- a/internal/database/migration_joint_lineage.go

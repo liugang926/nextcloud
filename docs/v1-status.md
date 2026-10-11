@@ -639,6 +639,27 @@ fixed-phase diagnostic identifies that exact trigger without changing readiness.
 No unknown-schema refusal is relaxed. See [actual31 and remaining3](evidence/joint-startup-real-SQLite-driver31-GREEN-Wiki-trigger3-failure-20261011.json)
 and [current source proposal](../integration/proposals/weknora-startup-readonly-schema-qualification-20261011.json).
 
+
+The exact Wiki wrapper repair now passes the complete unchanged startup34 on
+`3707fce5`: database21 and container13, zero failures/skips/OOM, exact RUN/PASS
+once, all8 owned resources independently absent in55.340s. All35 descriptor
+Key/Columns match the actual issuer; Wiki body lifecycle remains unsupported.
+The same candidate parses470 Go files and compiles all157 packages, integrating
+unwired169/peer-forward source components. See [full compilation](evidence/joint-Wiki-wrapper-pending169-assets-full-compile-GREEN-20261011.json),
+[actual startup34](evidence/joint-Wiki-exact-wrapper-startup34-GREEN-20261011.json)
+and [exact startup proposal](../integration/proposals/weknora-startup-readonly-schema-qualification-20261011.json).
+Peer forward171/89 assets retain historical SQL and remain source-integrity
+only; they grant no startup eligibility. See [source boundary](evidence/peer-forward-bare-embedding-source-assets-unwired-20261011.json).
+
+
+Real Parade17 vector/pg_search pending169 runs21 nodes on `3707fce5`: existing
+absent/local15 allPASS, while the wrapper-coexist parent and5 leaves fail at the
+actual production trigger-installer prelude. The canonical168 schema is genuine,
+Root125 SQL is unchanged and all unknown local/foreign/column/index/sequence
+cases execute. The pending21 component and PeerApplied upgrade remain
+unaccepted; all Go actors are absent and SQL actors stopped, failed data retained.
+See [actual15 and wrapper6 failure](evidence/pending169-Parade17-existing15-GREEN-wrapper6-prelude-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
