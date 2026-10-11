@@ -18,7 +18,7 @@ older component snapshots below retain their separate scope and failure history.
 | Historical PeerApplied forward upgrade | `7cb5c6ce`: partial SQL110, preupgrade Ready/DOWN38 and original route20/Root91/startup34 pass; Linux32 and nativeDarwin20 include original6, genuinepartial7 and retainedFD7 | Other platforms/filesystems and full application upgrade/restore |
 | SQLite original vector storage | `be76d2d6`: actual SDK/storage/native-read10 PASS10/FAIL0/SKIP0, including genuine credential successor, original lease-before-hydration and final lease expiry | Nextcloud input/query/HTTP completion owner union, production migration/registry and exact durable cleanup remain open |
 | Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
-| Knowledge query SDK/completion | `f6b4ea8a`: full157 compile and actual query13 PASS13/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, saved history, empty/multi-KB/rewrite and Nextcloud final union |
+| Knowledge query SDK/completion and named history | `17d75ff3`: full157 compile and actual query13+named history7 PASS20/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, sourced history, different-output vector succession, empty/multi-KB/rewrite and Nextcloud final union |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -79,6 +79,19 @@ and [content-lease failure](evidence/knowledge-query13-content-lease-TTL-failure
 and [held-lineage compile](evidence/knowledge-query-held-lineage-full157-compile-PASS-20261011.json).
 See the [actual13 record](evidence/knowledge-query13-actual-SDK-native-completion-GREEN-20261011.json)
 and [reviewable source proposal](../integration/proposals/weknora-knowledge-query-SDK-result-and-typed-completion-20261011.json).
+
+The saved named-history child now passes together with the unchanged query13
+on `17d75ff3`: all20 exact nodes pass in82.555s, zero failures/skips/OOM, with
+seven owned resources independently absent. Its534 files format and all157
+packages compile with zero business RUN. Genuine credential and definition
+successors preserve the old saved answer without a second embedding/chat SDK
+call; current actor revocation, query-parent body unavailability and real vector
+ABA refuse. The reader reopens the named immutable query/input/vector/model
+graph, uses opaque historical model reads, and joins all original leases at
+the final SQL clock. This covers the explicit manual single-KB path; sourced
+history and different-output vector succession remain open. See the [actual20
+record](evidence/knowledge-query13-named-history7-actual20-GREEN-20261011.json)
+and [named-history proposal](../integration/proposals/weknora-knowledge-named-history-original-reopening-20261011.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
