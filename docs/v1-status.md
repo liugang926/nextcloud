@@ -490,6 +490,15 @@ so subsequent exact ItemDigest verification rejects the real fetched item.
 Epoch capture before seal plus unchanged consumer consistency checks is being
 implemented; no reseal or weaker original verification is accepted.
 
+The unified embedding/epoch source `97e739e0` parses457 Go files and compiles
+116 test-bearing/40 no-test packages in338.437s, but its new connector test has
+one unused types import;0 business RUN occurs. Failed compiler/temp is retained.
+Independent review also identifies a producer input boundary: absent/null binding
+epoch deserializes as0 and becomes sealed metadata, despite Emit itself refusing
+missing metadata. Presence-aware response decoding must preserve explicit legacy0
+and refuse absent/null before seal. The next child includes that correction and
+compiler import repair. See the [preserved compiler failure](evidence/joint-embedding-seal-full-compile-test-import-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
