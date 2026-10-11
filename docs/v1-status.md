@@ -465,6 +465,16 @@ fingerprints; actor revocation and exact Close error semantics pass. Pure6
 legacy serialization cases do not replace the separate actual old-producer
 compatibility gate. Source-path HTTP6 and directory33 are next. See the
 [actual17 record](evidence/joint-PG-chat-JSONB-nonempty-upgrade17-GREEN-20261011.json).
+The [reviewable chat Settings repair](../integration/proposals/weknora-chat-original-settings-JSONB-20261011.json) reproduces the tested source files with exact tree
+roundtrip proof; actual old-producer/new-reader compatibility stays required.
+
+The subsequent source-path HTTP6 stage on the same3cf source runs6FAIL/0PASS
+with0SKIP/OOM in19.058s. SQLite rejects actual Nextcloud sync-item processing
+before the normal HTTP/path assertion; PostgreSQL rejects genuine embedding
+model creation in complete-schema setup. The chat Settings fix is not an
+embedding RawSettings/SpaceDigest fix. No target late-path fault or directory33
+stage runs. Owned Go is absent, PG/Redis stopped, failed logs/network/volumes
+retained. See the [sourcepath preparation failure](evidence/joint-sourcepath6-SQLite-sync-PG-embedding-preparation-failure-20261011.json).
 
 ## Prior component checkpoints — 2026-10-10
 
