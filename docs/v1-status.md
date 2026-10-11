@@ -516,6 +516,14 @@ drivers also join actual owned child/attach processes and require both final
 clocks before success; fixed1200s and10s cleanup reserve are retained.
 See the [readonly clock probe](evidence/host-cross-process-monotonic-origin-probe-20261011.json).
 
+The true old8cd producer and current joint reader compatibility helpers now
+compile independently on `d6e49743` and `d59de336`, respectively. Both service
+and server compile with0 business RUN; the two formatted helper files are
+identical across sources, all production bytes match their respective bases,
+and six owned resources are independently absent. The two-process same-volume
+SQLite chat/embedding opaque-space lifecycle tests are prepared but not run;
+see the [two-source compile record](evidence/two-source-model-compat-test-compile-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
