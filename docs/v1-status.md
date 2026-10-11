@@ -28,7 +28,7 @@ older component snapshots below retain their separate scope and failure history.
 | Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
 | Explicit no-event current epoch originals | `5eaa2498`:559 files format/full157 compile; SQLite13 + PG4 + existing75 all PASS92/FAIL0/SKIP0;39 runtime and3 compiler resources absent | Explicit component only; normal registry/startup93/172, concurrent availability, whole restore and personal sourced QA remain open |
 | Personal source query and completion | `5ac10a32`:565 files format/full157 compile; actual8 PASS8/FAIL0/SKIP0 and7 runtime+3 compiler resources absent; production/SQL/old92 exact to parent559, whose existing92 regressions pass | Explicit WebAdmin/GraphRequired=false pipeline only; source-only nonmember KB/Agent/model boundary, normal QA/registry, graph-required inputs and sourced history remain open |
-| Source-only nonmember model isolation | `c6747061`:571 files format/full157 compile; first realJWT13 has7PASS/6FAIL and oldpersonal8 has0PASS/8FAIL; failedGo absent/ownedSQL stopped retained | Query model lease payload capture ordering regressed beforeSDK; minimal production repair underreview. A10 functional matrix and normal QA remain unaccepted |
+| Source-only nonmember model isolation | `e2274d13`:571 files format/full157 compile; repaired realJWT13 + oldpersonal8 allPASS21/FAIL0/SKIP0;14 runtime and3 compiler resources absent | Explicit current/query/native/answer model scope; remaining92 same-source regressions all pass,113 total component nodes. Normal QA/registry, sourced inheritance/history and graph-required inputs remain open |
 | Actual original-query store access | `1bff7738`:566 files format/all157 packages compile, zero business RUN; actual SQLite→KV→unique vector Composite getter and safe nil ctor verified by source audit;3 compiler resources absent | Normal DI/typed query context propagation and startup qualification remain open; getter grants no caller permission |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
@@ -3799,3 +3799,24 @@ producer clock. A minimal same-TX capture correction is under review, preserving
 all leases/proofs/clock predicates. Failed owners are stopped with Go absent
 and original data/raw evidence retained. See the [first runtime record](evidence/A10-JWT13-first7PASS6FAIL-personal8-allFAIL-model-payload-order-20261012.json)
 and [unaccepted source proposal](../integration/proposals/weknora-scoped-knowledge-model-purpose-JWT-matrix-20261012.json).
+
+
+## 2026-10-12 A10 held-model payload ordering repair
+
+`e2274d13` captures the already held model lease payload baselines in the query
+input transaction before the original joined clock. It creates no new lease or
+proof and leaves every current/model/body/epoch/expiry predicate intact. All571
+files format and157 packages compile. The realJWT13 and existingpersonal8 now
+pass21 exact nodes with zero failures/skips;14 runtime and3 compiler resources
+are independently absent. Earlier13/8 failures remain recorded. See the
+[actual21 record](evidence/A10-JWT13-model-held-payload-fixed-personal8-actual21-GREEN-20261012.json).
+The remaining92 same-source regressions are being run separately; no outcome
+is inferred before their terminal checks. True normal QA context propagation,
+registry/startup, sourced history/inheritance and graph-required inputs remain
+open.
+
+The same `e2274d13` source also passes all remaining92 regression nodes with
+39 additional runtime resources absent. Together withJWT13/personal8,113 exact
+selected nodes pass across7 serial owned component windows atone frozen source;
+53 runtime and3 compiler resources are independently absent. These are not a
+whole application or V1 acceptance. See the [matched113 record](evidence/A10-held-model-payload-fix-JWT13-personal8-old92-sameHEAD113-GREEN-20261012.json).

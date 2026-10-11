@@ -18,7 +18,7 @@ index 21097ad7cf8fd5b0ebb6fd20403d791964cb7415..fea0eb604174d651342c21958fc41e06
  	// journal operations return; it changes no authority, timeout or result.
  	tx = tx.Session(&gorm.Session{NewDB: true, Context: context.WithValue(tx.Statement.Context, knowledgeCompletionLocalPhaseKey{}, true)})
 diff --git a/internal/application/repository/knowledge_query_embedding_original.go b/internal/application/repository/knowledge_query_embedding_original.go
-index 4b9319124218e00b0d0a68614c4352d6588e0249..d98c99f771e6278a0ea38d758429a978c00521a5 100644
+index 4b9319124218e00b0d0a68614c4352d6588e0249..501045829345e61244a6c4914510ba0e07832014 100644
 --- a/internal/application/repository/knowledge_query_embedding_original.go
 +++ b/internal/application/repository/knowledge_query_embedding_original.go
 @@ -55,6 +55,7 @@ type KnowledgeQueryEmbeddingRead struct {
@@ -160,6 +160,19 @@ index 4b9319124218e00b0d0a68614c4352d6588e0249..d98c99f771e6278a0ea38d758429a978
  	err = s.db.WithContext(q.ctx).Transaction(func(tx *gorm.DB) error {
  		// Existing configuration originals are immutable metadata (their exact
  		// current revision/digest is checked below). No nonexistent KB body head is
+@@ -338,6 +392,12 @@ func (s *KnowledgeSQLiteEmbeddingStore) BeginKnowledgeQueryEmbedding(ctx context
+ 		if e != nil {
+ 			return e
+ 		}
++		// The model was opened after the initial message payload capture. Its
++		// genuinely held leases need matching payload baselines before this
++		// first joined clock; the new query body is not produced yet.
++		if e = q.capturePayloads(tx); e != nil {
++			return e
++		}
+ 		if e = q.clock(tx, nil); e != nil {
+ 			return e
+ 		}
 diff --git a/internal/application/repository/knowledge_scoped_model_read_purpose.go b/internal/application/repository/knowledge_scoped_model_read_purpose.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..c2dfa84e8ef7a36c31d01b057b3e00b2c31e6a44
