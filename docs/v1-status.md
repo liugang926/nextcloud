@@ -441,6 +441,19 @@ the unchanged producer diagnostic and nonempty upgrade/revocation6. True
 old-producer/new-reader compatibility remains a separate required two-process
 gate. See the [compile record](evidence/joint-chat-JSONB-legacy-preserve-full-compile-GREEN-20261011.json).
 
+The first actual17 controller stops after6purePASS because a copied uppercase
+`settings-PG` stage violates its lowercase validation before creating an actor.
+PG/nonempty0RUN; this preparation error is preserved and the fresh corrected
+window uses new owned resources. See the [stage preflight record](evidence/joint-model17-stage-label-preflight-failure-20261011.json).
+That corrected window on `1f7d6c87` runs17 exactly once:13PASS/4FAIL/0SKIP/OOM
+in54.479s. Pure6 and actual PG JSONB/model creation/representation/mutation plus
+unchanged diagnostic5 pass. Both databases lawful nonempty held-original
+upgrade/restart live leaves pass. Both actor-disabled leaves reach real
+model/policy/derived refusal and main release/lease-zero, but repeated cleanup
+Close misclassifies sticky policy/derived operation errors as release failures;
+two leaves and their parents remain failed until the test oracle is corrected.
+No production Close behavior changes. See the [actual17 record](evidence/joint-model-JSONB13-GREEN-nonempty-duplicate-close-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
