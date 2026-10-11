@@ -1,0 +1,517 @@
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_save.go b/internal/application/repository/knowledge_sqlite_embedding_save.go
+index e3af97582..54dc4364d 100644
+--- a/internal/application/repository/knowledge_sqlite_embedding_save.go
++++ b/internal/application/repository/knowledge_sqlite_embedding_save.go
+@@ -28,7 +28,7 @@ type knowledgeSQLiteEmbeddingSave struct {
+ // and committed result-body leases become visible only after a successful commit.
+ func BeginKnowledgeSQLiteEmbeddingSave(ctx context.Context, db *gorm.DB, infos []*types.IndexInfo, vectors [][]float32) (context.Context, func(error) error, error) {
+ 	h, _ := ctx.Value(knowledgeSQLiteEmbeddingKey{}).(*KnowledgeSQLiteEmbeddingInputRead)
+-	if h == nil || len(infos) == 0 || len(infos) != len(vectors) || !sameOriginalModelCallerInRepository(ctx, h.ctx) {
++	if h == nil || len(infos) == 0 || len(infos) != len(vectors) || !sameKnowledgeSQLiteEmbeddingCaller(ctx, h.ctx) {
+ 		return ctx, nil, ErrKnowledgeSQLiteEmbeddingUnknown
+ 	}
+ 	pool, err := db.DB()
+diff --git a/internal/application/repository/knowledge_sqlite_nextcloud_union.go b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
+index 19af6883e..136b538a9 100644
+--- a/internal/application/repository/knowledge_sqlite_nextcloud_union.go
++++ b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
+@@ -105,6 +105,10 @@ type nextcloudOriginalFinalRow struct {
+ 	DirectoryEnabled                 bool
+ 	DirectoryLastSyncMS              *int64
+ 	DirectoryLastSyncError           string
++	PublicationConnectionID          string              `gorm:"column:publication_connection_id"`
++	PublicationPairOperationID       string              `gorm:"column:publication_pair_operation_id"`
++	PublicationEpoch                 int64               `gorm:"column:publication_epoch"`
++	PublicationVerifiedAt            int64               `gorm:"column:publication_verified_at"`
+ 	Body                             originalBodyPayload `gorm:"embedded;embeddedPrefix:body_"`
+ }
+ 
+@@ -115,6 +119,11 @@ func (r *nextcloudOriginalUploadRead) finalClockInTx(tx *gorm.DB, extra map[stri
+ 	if err := r.samePool(tx); err != nil {
+ 		return err
+ 	}
++	observedPublication, err := r.checkPublicationEpochInTx(tx)
++	if err != nil {
++		return err
++	}
++	publicationSQL, publicationArgs := r.publicationFinalSQL(observedPublication)
+ 	expected := map[string]originalBodyLease{}
+ 	for _, l := range r.leases {
+ 		expected[l.LeaseID] = l
+@@ -146,20 +155,23 @@ func (r *nextcloudOriginalUploadRead) finalClockInTx(tx *gorm.DB, extra map[stri
+ 	if tx.Dialector.Name() == "postgres" {
+ 		directoryClock = "CAST(EXTRACT(EPOCH FROM last_successful_sync_at)*1000 AS BIGINT)"
+ 	}
+-	query := `WITH tick AS MATERIALIZED (SELECT ` + clock + ` AS now_ms), actor AS MATERIALIZED (SELECT enabled,` + directoryClock + ` AS synced_ms,COALESCE(last_sync_error,'') AS sync_error FROM directories WHERE id=?)
++	query := `WITH tick AS MATERIALIZED (SELECT ` + clock + ` AS now_ms), actor AS MATERIALIZED (SELECT enabled,` + directoryClock + ` AS synced_ms,COALESCE(last_sync_error,'') AS sync_error FROM directories WHERE id=?), publication AS MATERIALIZED (` + publicationSQL + `)
+  SELECT 'body' AS category,l.lease_id,l.body_id AS lease_body_id,l.kind,l.owner_id,l.epoch,l.expires_at_ms,l.released_at_ms,t.now_ms AS final_clock_ms,
+  0 AS tenant_id,'' AS knowledge_base_id,'' AS knowledge_id,0 AS fence_epoch,0 AS kb_epoch,'' AS fence_state,'' AS kb_state,'' AS datasource_id,'' AS external_id,
+- p.id AS body_id,p.tenant_id AS body_tenant_id,p.body_sha256 AS body_body_sha256,p.origin_domain_sha256 AS body_origin_domain_sha256,p.payload AS body_payload,p.body_bytes AS body_body_bytes,p.storage_kind AS body_storage_kind,p.state AS body_state,p.created_at_ms AS body_created_at_ms,p.last_checked_at_ms AS body_last_checked_at_ms,p.retired_at_ms AS body_retired_at_ms,p.body_deadline_ms AS body_body_deadline_ms,p.metadata_deadline_ms AS body_metadata_deadline_ms,p.purge_token AS body_purge_token,p.purge_epoch AS body_purge_epoch,a.enabled AS directory_enabled,a.synced_ms AS directory_last_sync_ms,a.sync_error AS directory_last_sync_error
+- FROM original_body_leases l JOIN original_body_payloads p ON p.id=l.body_id CROSS JOIN tick t CROSS JOIN actor a WHERE l.lease_id IN ?
++ p.id AS body_id,p.tenant_id AS body_tenant_id,p.body_sha256 AS body_body_sha256,p.origin_domain_sha256 AS body_origin_domain_sha256,p.payload AS body_payload,p.body_bytes AS body_body_bytes,p.storage_kind AS body_storage_kind,p.state AS body_state,p.created_at_ms AS body_created_at_ms,p.last_checked_at_ms AS body_last_checked_at_ms,p.retired_at_ms AS body_retired_at_ms,p.body_deadline_ms AS body_body_deadline_ms,p.metadata_deadline_ms AS body_metadata_deadline_ms,p.purge_token AS body_purge_token,p.purge_epoch AS body_purge_epoch,a.enabled AS directory_enabled,a.synced_ms AS directory_last_sync_ms,a.sync_error AS directory_last_sync_error,e.publication_connection_id,e.publication_pair_operation_id,e.publication_epoch,e.publication_verified_at
++ FROM original_body_leases l JOIN original_body_payloads p ON p.id=l.body_id CROSS JOIN tick t CROSS JOIN actor a CROSS JOIN publication e WHERE l.lease_id IN ?
+  UNION ALL
+  SELECT 'content',l.lease_id,'',l.kind,l.owner_id,l.epoch,l.expires_at_ms,l.released_at_ms,t.now_ms,l.tenant_id,l.knowledge_base_id,l.knowledge_id,f.epoch,k.epoch,f.state,k.state,f.datasource_id,f.external_id,
+- '',0,'','',NULL,0,'','',0,0,NULL,NULL,NULL,'',0,a.enabled,a.synced_ms,a.sync_error
++ '',0,'','',NULL,0,'','',0,0,NULL,NULL,NULL,'',0,a.enabled,a.synced_ms,a.sync_error,e.publication_connection_id,e.publication_pair_operation_id,e.publication_epoch,e.publication_verified_at
+  FROM nextcloud_content_leases l JOIN nextcloud_content_fences f ON f.tenant_id=l.tenant_id AND f.knowledge_base_id=l.knowledge_base_id AND f.knowledge_id=l.knowledge_id
+- JOIN nextcloud_content_fences k ON k.tenant_id=l.tenant_id AND k.knowledge_base_id=l.knowledge_base_id AND k.knowledge_id='' CROSS JOIN tick t CROSS JOIN actor a WHERE l.lease_id IN ?`
++ JOIN nextcloud_content_fences k ON k.tenant_id=l.tenant_id AND k.knowledge_base_id=l.knowledge_base_id AND k.knowledge_id='' CROSS JOIN tick t CROSS JOIN actor a CROSS JOIN publication e WHERE l.lease_id IN ?`
+ 	// Payload columns use their exact embedded prefix; lease_body_id cannot
+ 	// collide with the payload primary key in GORM's row scanner.
+ 	var rows []nextcloudOriginalFinalRow
+-	if err := bodyInternal(tx).Raw(query, r.sourceDirectoryID(), bodyIDs, contentIDs).Scan(&rows).Error; err != nil {
++	args := []interface{}{r.sourceDirectoryID()}
++	args = append(args, publicationArgs...)
++	args = append(args, bodyIDs, contentIDs)
++	if err := bodyInternal(tx).Raw(query, args...).Scan(&rows).Error; err != nil {
+ 		return err
+ 	}
+ 	if len(rows) != len(bodyIDs)+len(contentIDs) {
+@@ -167,6 +179,9 @@ func (r *nextcloudOriginalUploadRead) finalClockInTx(tx *gorm.DB, extra map[stri
+ 	}
+ 	seen := map[string]bool{}
+ 	for _, row := range rows {
++		if err := r.checkPublicationFinalRow(row, observedPublication); err != nil {
++			return err
++		}
+ 		if !row.DirectoryEnabled || row.DirectoryLastSyncMS == nil || row.DirectoryLastSyncError != "" || *row.DirectoryLastSyncMS > row.FinalClockMS || row.FinalClockMS-*row.DirectoryLastSyncMS > 300000 {
+ 			return ErrNextcloudOnboardingDenied
+ 		}
+diff --git a/internal/application/repository/nextcloud_embedding_purpose.go b/internal/application/repository/nextcloud_embedding_purpose.go
+index 0bfd9ce11..39f7d65af 100644
+--- a/internal/application/repository/nextcloud_embedding_purpose.go
++++ b/internal/application/repository/nextcloud_embedding_purpose.go
+@@ -147,6 +147,9 @@ func (r *nextcloudOriginalUploadRead) checkLocalInTx(tx *gorm.DB) error {
+ 	if err := r.checkActorInTx(tx); err != nil {
+ 		return err
+ 	}
++	if _, err := r.checkPublicationEpochInTx(tx); err != nil {
++		return err
++	}
+ 	if err := r.bodyReadPreflightInTx(tx); err != nil {
+ 		return err
+ 	}
+@@ -356,6 +359,19 @@ func (r *nextcloudOriginalUploadRead) checkRemoteSourceInTx(tx *gorm.DB, ds *typ
+ 		return err
+ 	}
+ 	ctx := types.WithNextcloudContentRevision(r.ctx, revision)
++	if ds.ID == r.receipt.DataSourceID && k.ID == r.payload.KnowledgeID {
++		observed, err := r.checkPublicationEpochInTx(tx)
++		if err != nil {
++			return err
++		}
++		identity, err := nextcloud.InspectPairing(ctx, cfg)
++		if err != nil {
++			return err
++		}
++		if identity.InstanceID != instance || identity.BindingID != binding || identity.BaseURL != r.actual.BaseURL || !(identity.PublicationState == "active" || (observed.Legacy && r.publicationEpoch == 0 && identity.PublicationEpoch == 0 && identity.PublicationState == "legacy")) || identity.PublicationEpoch != observed.PublicationEpoch {
++			return ErrNextcloudOnboardingDenied
++		}
++	}
+ 	decision, err := nextcloud.AuthorizeCurrentFile(ctx, cfg, instance, binding, r.sourceDirectoryID(), r.sourceObjectGUID(), id)
+ 	if err != nil {
+ 		return err
+diff --git a/internal/application/repository/nextcloud_original_final_row_schema_test.go b/internal/application/repository/nextcloud_original_final_row_schema_test.go
+index b9a268d0d..dd04161e5 100644
+--- a/internal/application/repository/nextcloud_original_final_row_schema_test.go
++++ b/internal/application/repository/nextcloud_original_final_row_schema_test.go
+@@ -14,7 +14,7 @@ func TestNextcloudOriginalFinalRowUsesExactSQLColumns(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	expected := map[string]string{"DataSourceID": "datasource_id", "BodyID": "lease_body_id", "KBEpoch": "kb_epoch", "KBState": "kb_state", "FenceEpoch": "fence_epoch", "FenceState": "fence_state", "KnowledgeBaseID": "knowledge_base_id", "FinalClockMS": "final_clock_ms"}
++	expected := map[string]string{"DataSourceID": "datasource_id", "BodyID": "lease_body_id", "KBEpoch": "kb_epoch", "KBState": "kb_state", "FenceEpoch": "fence_epoch", "FenceState": "fence_state", "KnowledgeBaseID": "knowledge_base_id", "FinalClockMS": "final_clock_ms", "PublicationConnectionID": "publication_connection_id", "PublicationPairOperationID": "publication_pair_operation_id", "PublicationEpoch": "publication_epoch", "PublicationVerifiedAt": "publication_verified_at"}
+ 	for field, column := range expected {
+ 		actual := parsed.FieldsByName[field]
+ 		if actual == nil || actual.DBName != column {
+diff --git a/internal/application/repository/nextcloud_original_publication_epoch_freshness_test.go b/internal/application/repository/nextcloud_original_publication_epoch_freshness_test.go
+new file mode 100644
+index 000000000..2ed777924
+--- /dev/null
++++ b/internal/application/repository/nextcloud_original_publication_epoch_freshness_test.go
+@@ -0,0 +1,37 @@
++package repository
++
++import (
++	"errors"
++	"math"
++	"testing"
++)
++
++// This pure arithmetic oracle invokes the actual final-row validator. It does
++// not construct a read grant, status producer, SQL clock or original body.
++func TestNextcloudPublicationEpochFinalFreshnessDoesNotOverflow(t *testing.T) {
++	const clock = int64(1900000000123)
++	reader := &nextcloudOriginalUploadRead{actual: nextcloudOriginalUploadActual{PairOperation: "arithmetic-pair"}}
++	for _, test := range []struct {
++		name     string
++		verified int64
++		allowed  bool
++	}{
++		{"current", clock / 1000, true},
++		{"stale", clock/1000 - 301, false},
++		{"future", clock/1000 + 1, false},
++		{"overflow", math.MaxInt64/1000 + 1, false},
++		{"max_int64", math.MaxInt64, false},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			observed := nextcloudOriginalPublicationEpoch{ConnectionID: "arithmetic-connection", PairOperationID: "arithmetic-pair", PublicationEpoch: 1, VerifiedAt: test.verified}
++			actual := nextcloudOriginalFinalRow{PublicationConnectionID: observed.ConnectionID, PublicationPairOperationID: observed.PairOperationID, PublicationEpoch: observed.PublicationEpoch, PublicationVerifiedAt: observed.VerifiedAt, FinalClockMS: clock}
++			err := reader.checkPublicationFinalRow(actual, observed)
++			if test.allowed && err != nil {
++				t.Fatal("current arithmetic timestamp refused")
++			}
++			if !test.allowed && !errors.Is(err, ErrNextcloudOnboardingDenied) {
++				t.Fatal("invalid arithmetic timestamp was not denied")
++			}
++		})
++	}
++}
+diff --git a/internal/application/repository/nextcloud_original_upload_epoch.go b/internal/application/repository/nextcloud_original_upload_epoch.go
+new file mode 100644
+index 000000000..30b483f3a
+--- /dev/null
++++ b/internal/application/repository/nextcloud_original_upload_epoch.go
+@@ -0,0 +1,138 @@
++package repository
++
++import (
++	"strconv"
++
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++type nextcloudOriginalPublicationEpoch struct {
++	ConnectionID     string
++	PairOperationID  string
++	PublicationEpoch int64
++	VerifiedAt       int64
++	Legacy           bool
++}
++
++// The artifact is already authenticated and leased before this method. This
++// captures its original epoch, never normalizes or re-signs the stored body.
++func (r *nextcloudOriginalUploadRead) capturePublicationEpochInTx(tx *gorm.DB) error {
++	var pair NextcloudSourcePairing
++	if err := tx.Where("operation_id=? AND tenant_id=? AND knowledge_base_id=? AND datasource_id=? AND state='active'", r.actual.PairOperation, r.payload.TenantID, r.payload.KnowledgeBaseID, r.receipt.DataSourceID).Take(&pair).Error; err != nil {
++		return err
++	}
++	raw := r.actual.Artifact.PublicationEpoch
++	if raw == "" {
++		// The old authenticated human protocol has the actual immutable pairing
++		// agreement. A headless purpose cannot infer a missing original epoch.
++		if r.purposeMode != "human" || pair.PublicationEpoch < 0 {
++			return ErrNextcloudOnboardingDenied
++		}
++		r.publicationEpoch = pair.PublicationEpoch
++	} else {
++		epoch, err := strconv.ParseInt(raw, 10, 64)
++		if err != nil || epoch < 0 || strconv.FormatInt(epoch, 10) != raw {
++			return ErrNextcloudOnboardingDenied
++		}
++		r.publicationEpoch = epoch
++	}
++	observed, err := r.observePublicationEpochInTx(tx)
++	if err != nil {
++		return err
++	}
++	r.publicationConnection = observed.ConnectionID
++	r.publicationLegacy = observed.Legacy
++	r.publicationCaptured = true
++	_, err = r.checkPublicationEpochInTx(tx)
++	return err
++}
++
++// Only metadata is selected. Both the active connection and the current epoch
++// belong to the exact paired source; an absent status is not a current grant.
++func (r *nextcloudOriginalUploadRead) observePublicationEpochInTx(tx *gorm.DB) (nextcloudOriginalPublicationEpoch, error) {
++	var pair NextcloudSourcePairing
++	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("operation_id=? AND tenant_id=? AND knowledge_base_id=? AND datasource_id=? AND state='active'", r.actual.PairOperation, r.payload.TenantID, r.payload.KnowledgeBaseID, r.receipt.DataSourceID).Take(&pair).Error; err != nil {
++		return nextcloudOriginalPublicationEpoch{}, err
++	}
++	if pair.InstanceID != r.actual.Artifact.InstanceID || pair.BindingID != r.actual.Artifact.BindingID || pair.BaseURL != r.actual.BaseURL || pair.ConfigSHA != r.actual.ConfigSHA {
++		return nextcloudOriginalPublicationEpoch{}, ErrKnowledgeInputChanged
++	}
++	var connections []struct {
++		ConnectionID                                                              string
++		TenantID                                                                  uint64
++		KnowledgeBaseID                                                           string
++		DataSourceID                                                              string `gorm:"column:datasource_id"`
++		NextcloudInstanceID, BindingID, DatasourceBaseURL, DatasourceConfigSHA256 string
++	}
++	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Table("nextcloud_event_connections").Select("connection_id,tenant_id,knowledge_base_id,datasource_id,nextcloud_instance_id,binding_id,datasource_base_url,datasource_config_sha256").Where("datasource_id=? AND status='active'", r.receipt.DataSourceID).Find(&connections).Error; err != nil {
++		return nextcloudOriginalPublicationEpoch{}, err
++	}
++	if len(connections) == 0 {
++		if r.purposeMode != "human" {
++			return nextcloudOriginalPublicationEpoch{}, ErrNextcloudOnboardingDenied
++		}
++		return nextcloudOriginalPublicationEpoch{PairOperationID: pair.OperationID, PublicationEpoch: pair.PublicationEpoch, Legacy: true}, nil
++	}
++	if len(connections) != 1 {
++		return nextcloudOriginalPublicationEpoch{}, ErrNextcloudOnboardingDenied
++	}
++	c := connections[0]
++	if c.ConnectionID == "" || c.TenantID != pair.TenantID || c.KnowledgeBaseID != pair.KnowledgeBaseID || c.DataSourceID != pair.DataSourceID || c.NextcloudInstanceID != pair.InstanceID || c.BindingID != pair.BindingID || c.DatasourceBaseURL != pair.BaseURL || c.DatasourceConfigSHA256 != pair.ConfigSHA {
++		return nextcloudOriginalPublicationEpoch{}, ErrNextcloudOnboardingDenied
++	}
++	var epoch nextcloudOriginalPublicationEpoch
++	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Table("nextcloud_source_status_epochs").Where("connection_id=?", c.ConnectionID).Take(&epoch).Error; err != nil {
++		return nextcloudOriginalPublicationEpoch{}, err
++	}
++	now, err := nextcloudLeaseNowMS(tx)
++	if err != nil {
++		return nextcloudOriginalPublicationEpoch{}, err
++	}
++	if epoch.PairOperationID != pair.OperationID || epoch.PublicationEpoch < 0 || epoch.VerifiedAt <= 0 || epoch.VerifiedAt > now/1000 || epoch.VerifiedAt*1000 > now || now-epoch.VerifiedAt*1000 > 300000 {
++		return nextcloudOriginalPublicationEpoch{}, ErrNextcloudOnboardingDenied
++	}
++	return epoch, nil
++}
++
++func (r *nextcloudOriginalUploadRead) checkPublicationEpochInTx(tx *gorm.DB) (nextcloudOriginalPublicationEpoch, error) {
++	if !r.publicationCaptured {
++		return nextcloudOriginalPublicationEpoch{}, ErrNextcloudOnboardingDenied
++	}
++	current, err := r.observePublicationEpochInTx(tx)
++	if err != nil {
++		return current, err
++	}
++	if current.ConnectionID != r.publicationConnection || current.Legacy != r.publicationLegacy {
++		return current, ErrNextcloudOnboardingDenied
++	}
++	if current.PublicationEpoch != r.publicationEpoch {
++		allowed, err := NewNextcloudOnboardingStore(tx).RootMigrationAuthorizesEpoch(r.ctx, r.payload.TenantID, r.payload.KnowledgeBaseID, r.receipt.DataSourceID, r.actual.Artifact.Path, r.publicationEpoch, current.PublicationEpoch)
++		if err != nil {
++			return current, err
++		}
++		if !allowed {
++			return current, ErrNextcloudOnboardingDenied
++		}
++	}
++	return current, r.ctx.Err()
++}
++
++// The final SQL statement repeats these exact metadata predicates with the
++// same clock as every body/content lease. Nothing here creates an epoch row.
++func (r *nextcloudOriginalUploadRead) publicationFinalSQL(observed nextcloudOriginalPublicationEpoch) (string, []interface{}) {
++	if observed.Legacy {
++		return `SELECT '' AS publication_connection_id,p.operation_id AS publication_pair_operation_id,p.publication_epoch AS publication_epoch,0 AS publication_verified_at FROM nextcloud_source_pairings p JOIN data_sources d ON d.id=p.datasource_id AND d.tenant_id=p.tenant_id AND d.knowledge_base_id=p.knowledge_base_id AND d.type='nextcloud' AND d.status='active' AND d.deleted_at IS NULL WHERE p.operation_id=? AND p.tenant_id=? AND p.knowledge_base_id=? AND p.datasource_id=? AND p.state='active' AND NOT EXISTS(SELECT 1 FROM nextcloud_event_connections c WHERE c.datasource_id=p.datasource_id AND c.status='active')`, []interface{}{r.actual.PairOperation, r.payload.TenantID, r.payload.KnowledgeBaseID, r.receipt.DataSourceID}
++	}
++	return `SELECT c.connection_id AS publication_connection_id,p.operation_id AS publication_pair_operation_id,e.publication_epoch AS publication_epoch,e.verified_at AS publication_verified_at FROM nextcloud_event_connections c JOIN nextcloud_source_status_epochs e ON e.connection_id=c.connection_id JOIN nextcloud_source_pairings p ON p.operation_id=e.pair_operation_id JOIN data_sources d ON d.id=c.datasource_id AND d.tenant_id=c.tenant_id AND d.knowledge_base_id=c.knowledge_base_id AND d.type='nextcloud' AND d.status='active' AND d.deleted_at IS NULL WHERE c.connection_id=? AND c.status='active' AND c.tenant_id=? AND c.knowledge_base_id=? AND c.datasource_id=? AND p.tenant_id=c.tenant_id AND p.knowledge_base_id=c.knowledge_base_id AND p.datasource_id=c.datasource_id AND p.state='active' AND p.nextcloud_instance_id=c.nextcloud_instance_id AND p.binding_id=c.binding_id AND p.datasource_base_url=c.datasource_base_url AND p.datasource_config_sha256=c.datasource_config_sha256`, []interface{}{observed.ConnectionID, r.payload.TenantID, r.payload.KnowledgeBaseID, r.receipt.DataSourceID}
++}
++
++func (r *nextcloudOriginalUploadRead) checkPublicationFinalRow(row nextcloudOriginalFinalRow, observed nextcloudOriginalPublicationEpoch) error {
++	if row.PublicationConnectionID != observed.ConnectionID || row.PublicationPairOperationID != r.actual.PairOperation || row.PublicationEpoch != observed.PublicationEpoch || row.PublicationVerifiedAt != observed.VerifiedAt {
++		return ErrNextcloudOnboardingDenied
++	}
++	if !observed.Legacy && (row.PublicationVerifiedAt <= 0 || row.PublicationVerifiedAt > row.FinalClockMS/1000 || row.PublicationVerifiedAt*1000 > row.FinalClockMS || row.FinalClockMS-row.PublicationVerifiedAt*1000 > 300000) {
++		return ErrNextcloudOnboardingDenied
++	}
++	return nil
++}
+diff --git a/internal/application/repository/nextcloud_original_upload_read.go b/internal/application/repository/nextcloud_original_upload_read.go
+index 5b289b415..3096b8155 100644
+--- a/internal/application/repository/nextcloud_original_upload_read.go
++++ b/internal/application/repository/nextcloud_original_upload_read.go
+@@ -26,38 +26,42 @@ type nextcloudOriginalContentBinding struct {
+ // Only Begin constructs this capability. The router's build lease is borrowed;
+ // read/body leases are owned, and Close never releases the router's build token.
+ type nextcloudOriginalUploadRead struct {
+-	db                  *gorm.DB
+-	pool                *sql.DB
+-	store               *KnowledgeInputProvenanceStore
+-	content             *NextcloudContentLeaseStore
+-	ctx                 context.Context
+-	cancel              context.CancelFunc
+-	build               nextcloudBuildContext
+-	payload             types.DocumentProcessPayload
+-	receipt             nextcloudOriginalUploadInput
+-	actual              nextcloudOriginalUploadActual
+-	operation           types.NextcloudOnboardingOperation
+-	credential          types.NextcloudOnboardingCredential
+-	purposeMode         string
+-	humanDirectoryID    string
+-	humanObjectGUID     string
+-	authenticatedCaller bool
+-	configuredModel     string
+-	needsEmbedding      bool
+-	lineage             *types.SourceLineage
+-	rows                []originalBodyAvailabilityRow
+-	heads               []originalBodyFieldHead
+-	bodies              map[string]originalBodyPayload
+-	predecessors        map[string]bool
+-	leases              map[string]originalBodyLease
+-	contentBindings     map[string]nextcloudOriginalContentBinding
+-	kbFences            map[string]nextcloudContentFence
+-	mu                  sync.Mutex
+-	checks              sync.WaitGroup
+-	closed              bool
+-	failed              error
+-	closeErr            error
+-	joined              chan struct{}
++	db                    *gorm.DB
++	pool                  *sql.DB
++	store                 *KnowledgeInputProvenanceStore
++	content               *NextcloudContentLeaseStore
++	ctx                   context.Context
++	cancel                context.CancelFunc
++	build                 nextcloudBuildContext
++	payload               types.DocumentProcessPayload
++	receipt               nextcloudOriginalUploadInput
++	actual                nextcloudOriginalUploadActual
++	operation             types.NextcloudOnboardingOperation
++	credential            types.NextcloudOnboardingCredential
++	purposeMode           string
++	humanDirectoryID      string
++	humanObjectGUID       string
++	authenticatedCaller   bool
++	configuredModel       string
++	publicationEpoch      int64
++	publicationConnection string
++	publicationLegacy     bool
++	publicationCaptured   bool
++	needsEmbedding        bool
++	lineage               *types.SourceLineage
++	rows                  []originalBodyAvailabilityRow
++	heads                 []originalBodyFieldHead
++	bodies                map[string]originalBodyPayload
++	predecessors          map[string]bool
++	leases                map[string]originalBodyLease
++	contentBindings       map[string]nextcloudOriginalContentBinding
++	kbFences              map[string]nextcloudContentFence
++	mu                    sync.Mutex
++	checks                sync.WaitGroup
++	closed                bool
++	failed                error
++	closeErr              error
++	joined                chan struct{}
+ }
+ 
+ func (s *KnowledgeInputProvenanceStore) BeginNextcloudOriginalUploadRead(ctx context.Context, p types.DocumentProcessPayload) (interfaces.NextcloudOriginalUploadRead, error) {
+@@ -240,6 +244,9 @@ func (s *KnowledgeInputProvenanceStore) BeginNextcloudOriginalUploadRead(ctx con
+ 		if err = r.capturePurposeInTx(tx); err != nil {
+ 			return err
+ 		}
++		if err = r.capturePublicationEpochInTx(tx); err != nil {
++			return err
++		}
+ 		if err = checkOriginalBodyAvailableBatchForCapturedInTx(r.ctx, tx, []originalBodyAvailabilityRow{{"knowledges", p.KnowledgeID}}, ownHeads); err != nil {
+ 			return err
+ 		}
+diff --git a/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go b/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
+index 5176ea263..fffa9bf4e 100644
+--- a/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
++++ b/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
+@@ -24,6 +24,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/application/repository"
+ 	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
+ 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	nextcloudconnector "github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
+ 	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
+ 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
+ 	"github.com/Tencent/WeKnora/internal/models/embedding"
+@@ -52,7 +53,9 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			f := m.f
+ 			installKnowledgeSQLiteOriginal90ForTest(t, f.db)
+ 			artifact := strings.Repeat("# Actual source\n\nOriginal delegated document input. ", 8)
+-			sourceHTTP, sourceAllowed, signedRequests, sourceError := ownedMachineSourceTransport(t, artifact)
++			sourceEpoch := &atomic.Int64{}
++			sourceEpoch.Store(1)
++			sourceHTTP, sourceAllowed, signedRequests, sourceError := ownedMachineSourceTransport(t, artifact, sourceEpoch)
+ 			t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", sourceHTTP.URL)
+ 			var calls atomic.Int64
+ 			var faultApplied atomic.Bool
+@@ -62,6 +65,8 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			var transmitted [][]string
+ 			fail := func(err error) { mu.Lock(); callbackErr = errors.Join(callbackErr, err); mu.Unlock() }
+ 			var operation types.NextcloudOnboardingOperation
++			var epochStore *repository.NextcloudOnboardingStore
++			var epochConnection string
+ 			var actualModels interfaces.ModelService
+ 			var actualModelID, actualKnowledgeID string
+ 			var clockInstalled bool
+@@ -109,12 +114,22 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 					faultApplied.Store(true)
+ 				}
+ 				if mode == "epoch_after_SDK" {
+-					write := f.db.Session(&gorm.Session{NewDB: true}).Table("nextcloud_source_pairings").Where("operation_id=? AND publication_epoch=?", operation.OperationID, 1).Update("publication_epoch", 2)
+-					var epoch int64
+-					if write.Error != nil || write.RowsAffected != 1 || f.db.Session(&gorm.Session{NewDB: true}).Table("nextcloud_source_pairings").Select("publication_epoch").Where("operation_id=?", operation.OperationID).Scan(&epoch).Error != nil || epoch != 2 {
+-						fail(errors.New("actual publication epoch CAS/readback failed"))
++					sourceEpoch.Store(2)
++					if epochStore == nil || epochConnection == "" || epochStore.RefreshGrantEpoch(f.ctx, operation) != nil {
++						fail(errors.New("actual signed publication epoch producer failed"))
+ 					} else {
+-						faultApplied.Store(true)
++						var observed struct {
++							ConnectionID, PairOperationID string
++							PublicationEpoch, VerifiedAt  int64
++						}
++						read := f.db.Session(&gorm.Session{NewDB: true}).Table("nextcloud_source_status_epochs").Where("connection_id=? AND pair_operation_id=?", epochConnection, operation.OperationID).Take(&observed)
++						var immutable repository.NextcloudSourcePairing
++						pairRead := f.db.Session(&gorm.Session{NewDB: true}).Where("operation_id=?", operation.OperationID).Take(&immutable)
++						if read.Error != nil || observed.ConnectionID != epochConnection || observed.PairOperationID != operation.OperationID || observed.PublicationEpoch != 2 || observed.VerifiedAt <= 0 || pairRead.Error != nil || immutable.PublicationEpoch != 1 {
++							fail(errors.New("actual current epoch and immutable pair readback failed"))
++						} else {
++							faultApplied.Store(true)
++						}
+ 					}
+ 				}
+ 				if mode == "directory_after_SDK" {
+@@ -242,6 +257,31 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			m.ds, err = sources.FindByID(f.ctx, pair.DataSourceID)
+ 			require.NoError(t, err)
+ 			m.source.nextcloudSourcePairings = pairs
++			// Genuine signed initial current-epoch observation and real connection
++			// producer precede this upload. No current status row is seeded.
++			config, err := m.ds.ParseConfig()
++			require.NoError(t, err)
++			config.Type = m.ds.Type
++			identity, err := nextcloudconnector.InspectPairing(f.ctx, config)
++			require.NoError(t, err)
++			require.Equal(t, pair.InstanceID, identity.InstanceID)
++			require.Equal(t, pair.BindingID, identity.BindingID)
++			require.Equal(t, pair.BaseURL, identity.BaseURL)
++			require.EqualValues(t, 1, identity.PublicationEpoch)
++			require.Equal(t, "active", identity.PublicationState)
++			connection, err := repository.NewNextcloudEventInboxRepository(f.db).Pair(f.ctx, repository.NextcloudEventPairingIdentity{TenantID: pair.TenantID, KnowledgeBaseID: pair.KnowledgeBaseID, DatasourceID: pair.DataSourceID, NextcloudInstanceID: identity.InstanceID, BindingID: identity.BindingID, DatasourceBaseURL: identity.BaseURL, DatasourceConfigSHA: pair.ConfigSHA, PublicationEpoch: identity.PublicationEpoch, PublicationState: identity.PublicationState})
++			require.NoError(t, err)
++			epochStore = onboarding
++			epochConnection = connection.ConnectionID
++			require.NoError(t, onboarding.RefreshGrantEpoch(f.ctx, operation))
++			var initialEpoch struct {
++				ConnectionID, PairOperationID string
++				PublicationEpoch, VerifiedAt  int64
++			}
++			require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Table("nextcloud_source_status_epochs").Where("connection_id=? AND pair_operation_id=?", epochConnection, operation.OperationID).Take(&initialEpoch).Error)
++			require.Equal(t, epochConnection, initialEpoch.ConnectionID)
++			require.EqualValues(t, 1, initialEpoch.PublicationEpoch)
++			require.Positive(t, initialEpoch.VerifiedAt)
+ 			var runtimeTenant types.Tenant
+ 			require.NoError(t, f.db.Where("id=?", 7).Take(&runtimeTenant).Error)
+ 			runtimeTenant.RetrieverEngines = types.RetrieverEngines{Engines: []types.RetrieverEngineParams{{RetrieverType: types.VectorRetrieverType, RetrieverEngineType: types.SQLiteRetrieverEngineType}}}
+@@ -619,7 +659,7 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 
+ // Test transport runs the actual HMAC protocol and a fixed provisioned source
+ // ACL/publication state. It is not injected as a repository authorizer callback.
+-func ownedMachineSourceTransport(t *testing.T, artifact string) (*httptest.Server, *atomic.Bool, *atomic.Int64, func() error) {
++func ownedMachineSourceTransport(t *testing.T, artifact string, epochs ...*atomic.Int64) (*httptest.Server, *atomic.Bool, *atomic.Int64, func() error) {
+ 	t.Helper()
+ 	allow := &atomic.Bool{}
+ 	allow.Store(true)
+@@ -685,7 +725,11 @@ func ownedMachineSourceTransport(t *testing.T, artifact string) (*httptest.Serve
+ 		case strings.HasSuffix(r.URL.Path, "/capabilities"):
+ 			fmt.Fprint(w, `{"protocol_version":"1","instance_id":"owned-machine-instance"}`)
+ 		case strings.HasSuffix(r.URL.Path, "/bindings"):
+-			fmt.Fprint(w, `{"bindings":[{"id":"owned-machine-binding","name":"owned delegated source","root_file_id":107,"publication_state":"active","publication_epoch":1}]}`)
++			epoch := int64(1)
++			if len(epochs) == 1 && epochs[0] != nil {
++				epoch = epochs[0].Load()
++			}
++			fmt.Fprintf(w, `{"bindings":[{"id":"owned-machine-binding","name":"owned delegated source","root_file_id":107,"publication_state":"active","publication_epoch":%d}]}`, epoch)
+ 		case strings.HasSuffix(r.URL.Path, "/manifest"):
+ 			fmt.Fprintf(w, `{"generation":"owned-generation","complete":true,"next_cursor":null,"items":[{"file_id":177,"etag":"actual-etag","name":"source.md","path":"source.md","mime_type":"text/markdown","size":%d,"mtime":1700000000}]}`, len(artifact))
+ 		case strings.HasSuffix(r.URL.Path, "/changes"):

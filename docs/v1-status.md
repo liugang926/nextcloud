@@ -22,6 +22,7 @@ older component snapshots below retain their separate scope and failure history.
 | Nextcloud original upload / machine index purpose | `f1e85131`:544 files format, all157 packages compile; existing query/history20 pass on this source; new machine12 fails fixture identity preparation and old HTTP25 has15PASS/10FAIL before ordinary SDK | Genuine isolated fixture, authenticated-human lifetime vs scoped machine purpose, nonempty ancestor and personal native consumption; candidate remains unadopted |
 | Nextcloud authenticated upload compatibility | `2461bdfa`:545 files format/full157 compile; actual GORM mapping1 and ordinary HTTP25 pass; machine12 fails at chunk-write backend-coverage precheck; failed owners stopped, successful resources absent | Machine backend-selection fixture/SDK/publication, recurrent model-definition lease cleanup, human classification5, nonempty ancestor and personal native consumption still open |
 | Actual backend selection and owned model release | `e75d0b7e`:547 files format/full157 compile; concurrent release3 + query/history20 PASS23; ordinary HTTP25 PASS25; machine12 7PASS/5FAIL | Machine save caller adapter, genuine current epoch fault and final-clock positive remain; source-only human/ancestor/personal drafts require further repairs and actual validation |
+| Event-managed machine original save and current epoch | `eac6b136`:549 files format/full157 compile; actual machine12, arithmetic6/schema1, HTTP25 and release/history23 all PASS67;24 runtime resources and3 compiler resources independently absent | General no-event manual sync, cross-app onboarding readiness, legal root successor, normal application publication/QA, personal and inherited-source gates remain incomplete |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
 The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
@@ -167,6 +168,24 @@ rejected by its trigger; the final-clock hook is blocked by save admission.
 These are required remaining fixes, not accepted machine publication. See the
 [reviewable proposal](../integration/proposals/weknora-model-original-owned-release-and-actual-backend-selection-20261011.json)
 and [current actual record](evidence/model-owned-release3-query-history20-HTTP25-PASS-machine12-partial-20261011.json).
+
+The saved original input now uses the existing strict private-upload caller
+comparison. Event-managed builds capture the authentic publication epoch and
+recheck the actual active connection/current status, signed source inspection
+and same final body/content/epoch SQL clock. Seconds are range-checked before
+millisecond conversion. On `eac6b136`, all157 packages compile, and all67 selected
+nodes pass: original machine12, arithmetic6/schema1, ordinary HTTP25 and
+release3/query-history20. Twenty-four runtime resources and three compiler
+resources are independently absent. The machine fixture uses actual full87
+plus pending90; it does not install pending91. Its main lease-zero assertions
+cover the upload owner's namespace, while bare/substitution leaves check all
+original read leases. Native vector inspection proves local storage behavior,
+not public personal retrieval or application publication/QA. The slice requires
+a real event-managed current epoch; general no-event manual sync still needs
+an independent signed-current observation protocol. Source inspection proves
+the normal new-onboarding Pair/Grants/Refresh chain, but cross-app runtime and
+its readiness gap remain unverified. See the [source proposal](../integration/proposals/weknora-Nextcloud-machine-save-current-epoch-20261012.json)
+and [actual67 evidence](evidence/Nextcloud-machine12-current-epoch-schema7-HTTP25-history23-actual67-GREEN-20261012.json).
 
 Independent process tests exposed a migration-lock release defect: closing the
 extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
