@@ -744,6 +744,15 @@ postSDK verifier); no production guard or original10s/NoError is relaxed.
 All Go actors are absent, SQL stopped and failed data retained. See [productive
 prelude24](evidence/joint-current-productive24-real-Handle-prelude-failure-20261011.json).
 
+
+The real fixtureDI correction, exact historical125/44 metadata projection and
+HTTP producer observer/cleanup now compile together on `e3ab8442`:481 changed
+Go files parsed and all157 packages pass with0businessRUN, noOOM and3 exact
+owned resources absent. Matchednative79, peer-prefix/source-projection20 and
+sourcepath6 actuals are next; compilation does not accept those runtime gates.
+See [realDI source](evidence/joint-native-productive-real-DI-source-correction-20261011.json)
+and [current fullcompile](evidence/joint-real-DI-historical-HTTP-observer-full-compile-GREEN-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
