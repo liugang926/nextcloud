@@ -269,10 +269,10 @@ index 000000000..c3a441f39
 +}
 diff --git a/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
 new file mode 100644
-index 000000000..dbfb98fad
+index 000000000..c27828d5d
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,361 @@
 +package service_test
 +
 +import (
@@ -388,6 +388,7 @@ index 000000000..dbfb98fad
 +			h := sessionhandler.NewHandler(f.Sessions, f.Messages, nil, redis, f.Config, f.KBs, nil, f.Tenants, nil, nil, nil, nil, nil, f.Models, nil, nil, nil, nil, nil, nil, nil, f.Users, f.Members, nil, nil, nil, nil, nil, nil, nil, nil, f.Groups)
 +			gin.SetMode(gin.TestMode)
 +			router := gin.New()
++			router.Use(middleware.RequestID())
 +			router.Use(middleware.ErrorHandler())
 +			router.Use(middleware.Auth(f.Tenants, f.Users, f.Members, nil, f.Config, f.Groups))
 +			var authObserved atomic.Bool
@@ -409,10 +410,12 @@ index 000000000..dbfb98fad
 +			router.POST("/api/v1/sessions", h.CreateSession)
 +			router.POST("/api/v1/knowledge-chat/:session_id", h.KnowledgeQA)
 +			router.POST("/api/v1/sessions/:session_id/stop", h.StopSession)
++			HTTPstarted := make(chan struct{})
 +			var HTTPreturned chan struct{} = make(chan struct{})
-+			var serverOnce sync.Once
++			var serverBeginOnce, serverOnce sync.Once
 +			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +				if strings.Contains(r.URL.Path, "/knowledge-chat/") {
++					serverBeginOnce.Do(func() { close(HTTPstarted) })
 +					defer serverOnce.Do(func() { close(HTTPreturned) })
 +				}
 +				router.ServeHTTP(w, r)
@@ -441,11 +444,13 @@ index 000000000..dbfb98fad
 +			require.NotEmpty(t, sessionBody.Data.ID)
 +			require.Equal(t, user.ID, sessionBody.Data.UserID)
 +			require.EqualValues(t, 7, sessionBody.Data.TenantID)
-+			var started atomic.Bool
 +			t.Cleanup(func() {
 +				cleanup, done := context.WithTimeout(context.Background(), 3*time.Second)
 +				defer done()
-+				if started.Load() {
++				// Only the real delegate can report producer start; the real HTTP
++				// wrapper independently reports entry and return, including early 500.
++				producerStart := f.ProducerStarted
++				joinProducer := func() {
 +					select {
 +					case <-f.ProducerDone:
 +					default:
@@ -480,10 +485,42 @@ index 000000000..dbfb98fad
 +					case <-cleanup.Done():
 +						t.Error("actual public producer did not join after real StopSession")
 +					}
++				}
++				select {
++				case <-producerStart:
++					producerStart = nil
++					joinProducer()
++				default:
++				}
++				httpStarted := false
++				select {
++				case <-HTTPstarted:
++					httpStarted = true
++				default:
++				}
++				if httpStarted {
++					waitingHTTP := true
++					for waitingHTTP {
++						select {
++						case <-HTTPreturned:
++							waitingHTTP = false
++						case <-producerStart:
++							producerStart = nil
++							joinProducer()
++						case <-cleanup.Done():
++							t.Error("actual public HTTP handler did not return within the shared cleanup deadline")
++							waitingHTTP = false
++						}
++					}
++				}
++				// HTTP return does not itself prove a detached producer joined.
++				// Reinspect its actual start after the independently joined HTTP.
++				if producerStart != nil {
 +					select {
-+					case <-HTTPreturned:
-+					case <-cleanup.Done():
-+						t.Error("actual public HTTP handler did not return after real StopSession")
++					case <-producerStart:
++						producerStart = nil
++						joinProducer()
++					default:
 +					}
 +				}
 +				f.SetQueryHook(nil)
@@ -514,12 +551,12 @@ index 000000000..dbfb98fad
 +			if mode == "unrelated_summary_public_handler_denied" {
 +				answerID = f.Source.Unrelated.ID
 +			}
-+			started.Store(true)
 +			response, e := post("/api/v1/knowledge-chat/"+sessionBody.Data.ID, map[string]any{"query": f.QueryText, "knowledge_base_ids": []string{f.KBID}, "summary_model_id": answerID, "disable_title": true})
 +			require.NoError(t, e)
 +			raw, e := io.ReadAll(response.Body)
 +			response.Body.Close()
 +			require.NoError(t, e)
++			require.NotEmpty(t, response.Header.Get("X-Request-ID"), "real RequestID middleware must produce the handler request identity")
 +			require.Equal(t, http.StatusOK, response.StatusCode)
 +			require.True(t, authObserved.Load())
 +			select {
