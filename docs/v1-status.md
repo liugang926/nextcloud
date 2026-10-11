@@ -780,6 +780,29 @@ read-to-write transaction remains under diagnosis; neither retries nor8s/10s
 orpool limits changed. EachSQLiteleaf passed in separatewindows, never a full6.
 Goabsent/SQLstopped, failed data retained. See [actualBusySnapshot](evidence/joint-HTTP-producer-bound-sourcepath-SQLite-busy-snapshot-failure-20261011.json).
 
+
+The default-offpeer phase/remainingworker testDI fusion passes selecteddatabase,
+service andserver compilation on `0aa89caf`,0businessRUN/3ownedresourcesabsent.
+Its test-onlyactualSQLite errorobserver child `c5e9a07f` also compiles thosepackages.
+Matchedprivateprefix14 again runs8PASS/6FAIL: allpurepeer legalcases fail typed
+`nextcloud_indexed_withdrawal_items` beforemissing-trigger predicates. An
+independent sourcepure6 window nowpasses all6 in15.236s, exactpairs, nofail/skip/OOM
+and8resourcesabsent; it proves assets/projections only, no runtimeupgrade/Ready.
+See [selectedcompile](evidence/peerprefix-diagnostic-remaining-worker-selected-compile-GREEN-20261011.json),
+[tablephase](evidence/peerprefix-fixedphase-core-withdrawal-table-refusal-20261011.json)
+and [sourcepure6](evidence/peer-forward-assets-historical-projection-pure6-GREEN-20261011.json).
+
+
+The actualSQL-error sourcepath6 observer on `c5e9a07f` runs4PASS/2FAIL in83.407s.
+It pins SQLite/current failure to `original_body_leases` CREATE inside a real
+transaction, with fixed callsites `body_lease_acquire,message_body_scope_acquire`
+and actual SQLite busy/busy (distinct from earlierbusy_snapshot return). BothPG
+andSQLitewithdrawal cases PASS. The read-before-write body-scope transaction and
+concurrent renewal now have a concrete target; no retry/timeout/pool/authority
+change has been applied. Goabsent/SQLstopped and faileddata retained.
+See [SQLobserver compile](evidence/actual-SQLite-operation-observer-selected-compile-GREEN-20261011.json)
+and [actual lease-create busy](evidence/joint-SQLite-message-body-scope-lease-create-busy-failure-20261011.json).
+
 ## Prior component checkpoints — 2026-10-10
 
 These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
