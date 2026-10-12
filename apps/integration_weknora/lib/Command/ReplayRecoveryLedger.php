@@ -12,7 +12,7 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 final class ReplayRecoveryLedger extends Command {
-    public function __construct(private PublicationRecoveryReplay $replay, private ControlRecoveryReconciler $controls) { parent::__construct(); }
+    public function __construct(private PublicationRecoveryReplay $replay, private ControlRecoveryReconciler $controls, private \OCA\IntegrationWeknora\Service\PublicationRecoveryLedger $ledger) { parent::__construct(); }
     protected function configure(): void {
         $this->setName('integration_weknora:replay-recovery-ledger')
             ->setDescription('Apply a verified external recovery closure plan in maintenance')
@@ -22,6 +22,7 @@ final class ReplayRecoveryLedger extends Command {
             ->addOption('control-plan-sha256', null, InputOption::VALUE_REQUIRED, 'Original closed control plan SHA256')
             ->addOption('control-inventory-sha256', null, InputOption::VALUE_REQUIRED, 'Independently pinned current control inventory SHA256')
             ->addOption('actor', null, InputOption::VALUE_REQUIRED, 'Current live LDAP administrator UID')
+            ->addOption('export-after', null, InputOption::VALUE_REQUIRED, 'Export the post-closure journal tail in maintenance')
             ->addOption('inspect-state', null, InputOption::VALUE_NONE, 'Read current receipt and source state without replay');
     }
     private function readPrivateFile(mixed $file, int $maxBytes): string {
@@ -67,6 +68,12 @@ final class ReplayRecoveryLedger extends Command {
             throw new \DomainException('Recovery plan authentication failed');
         }
         $plan = json_decode($envelope['plan'], true, 32, JSON_THROW_ON_ERROR);
+        if ($input->getOption('export-after') !== null) {
+            $after = filter_var($input->getOption('export-after'), FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
+            if ($after === false) { throw new \InvalidArgumentException('Invalid journal cursor'); }
+            $output->writeln(json_encode($this->ledger->page($after), JSON_THROW_ON_ERROR));
+            return Command::SUCCESS;
+        }
         if ($input->getOption('reconcile-controls')) {
             $value=$this->controls->reconcile($plan,(string)$input->getOption('control-plan-sha256'),(string)$input->getOption('control-inventory-sha256'),(string)$input->getOption('actor'));
             $output->writeln(json_encode($value,JSON_THROW_ON_ERROR));return Command::SUCCESS;

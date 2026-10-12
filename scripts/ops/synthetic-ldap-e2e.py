@@ -109,7 +109,7 @@ def install_groupfolders(directory, state):
         raise RuntimeError("disposable Team Folders app did not enable at the pinned version")
 
 
-def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False):
+def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False, ldap_settings=None, publisher=None):
     for app in ("user_ldap", "integration_weknora"):
         occ(state, "app:enable", app)
     if team_folder:
@@ -137,6 +137,8 @@ def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False):
         "ldapExpertUUIDUserAttr": "objectGUID", "ldapExpertUUIDGroupAttr": "objectGUID",
         "ldapExpertUsernameAttr": "sAMAccountName", "ldapCacheTTL": "30",
     }
+    if ldap_settings is not None:
+        settings.update(ldap_settings)
     for key, value in settings.items():
         occ(state, "ldap:set-config", config_id, key, value)
     occ(state, config_id, password_stdin=passwords["ldap_bind"])
@@ -154,11 +156,15 @@ def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False):
     occ(state, "config:app:set", "integration_weknora", "ad_directory_id",
         "--value=" + state["directory_id"])
 
-    admin, csrf = login(nc_base, "devadmin", passwords["nc_admin"])
+    publisher_uid = publisher or "devadmin"
+    publisher_password = passwords[publisher] if publisher else passwords["nc_admin"]
+    if publisher:
+        occ(state, "group:adduser", "admin", publisher_uid)
+    admin, csrf = login(nc_base, publisher_uid, publisher_password)
     api = nc_base + "/index.php/apps/integration_weknora/api/v1"
-    folder = nc_base + "/remote.php/dav/files/devadmin/Published"
+    folder = nc_base + "/remote.php/dav/files/" + publisher_uid + "/Published"
     document = folder + "/acl-note.txt"
-    auth = base64.b64encode(("devadmin:" + passwords["nc_admin"]).encode()).decode()
+    auth = base64.b64encode((publisher_uid + ":" + publisher_password).encode()).decode()
     dav_headers = {"Authorization": "Basic " + auth}
     team_folder_id = None
     if team_folder:
@@ -216,7 +222,7 @@ def nextcloud_setup(directory, state, passwords, nc_base, team_folder=False):
         time.sleep(2)
     binding = "synthetic-published"
     status, body = nc_request(admin, csrf, api + "/admin/bindings", "POST", {
-        "id": binding, "name": binding, "owner_uid": "devadmin", "root_file_id": root_id})
+        "id": binding, "name": binding, "owner_uid": publisher_uid, "root_file_id": root_id})
     need(status, {201}, "create synthetic binding")
     if body.get("binding", {}).get("id") != binding:
         raise RuntimeError("synthetic binding identity mismatch")

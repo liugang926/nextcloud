@@ -131,6 +131,64 @@ final class PublicationRecoveryLedger {
         }
     }
 
+    /** Reinstall only authenticated journal metadata lost in a database rollback. */
+    public function restoreTail(array $plan): void {
+        if (!$this->config->getSystemValueBool('maintenance', false) ||
+            ($plan['instance_id'] ?? null) !== $this->config->getSystemValueString('instanceid')) {
+            throw new \DomainException('Journal restoration requires matching closed maintenance');
+        }
+        $this->db->beginTransaction();
+        try {
+            $head = self::lockHead($this->db);
+            $start = (int)$plan['checkpoint_sequence'];
+            $end = (int)$plan['through_sequence'];
+            if ($head['stream_id'] !== $plan['stream_id'] || $head['sequence'] < $start || $head['sequence'] > $end ||
+                !hash_equals($head['chain_sha256'], (string)($plan['database_prefix_hashes'][(string)$head['sequence']] ?? ''))) {
+                throw new \DomainException('Journal restoration prefix mismatch');
+            }
+            // Legacy closure plans may only be applied when no history was lost.
+            $events = $plan['journal_events'] ?? [];
+            if (!is_array($events) || count($events) !== $end - $start) {
+                if ($head['sequence'] === $end && !array_key_exists('journal_events', $plan)) {
+                    $this->db->commit(); return;
+                }
+                throw new \DomainException('Authenticated journal events are required after rollback');
+            }
+            $sequence = $start;
+            $chain = $plan['checkpoint_database_chain_sha256'];
+            foreach ($events as $event) {
+                if (!is_array($event) || count($event) !== 6 ||
+                    ($event['sequence'] ?? null) !== (string)(++$sequence) ||
+                    !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $event['binding_id'] ?? '') ||
+                    !array_key_exists('file_id', $event) ||
+                    ($event['file_id'] !== null && (!is_string($event['file_id']) || !ctype_digit($event['file_id']) || (int)$event['file_id'] < 1)) ||
+                    !in_array($event['kind'] ?? null, self::KINDS, true) ||
+                    !is_string($event['source_revision'] ?? null) || !ctype_digit($event['source_revision']) ||
+                    !is_int($event['created_at'] ?? null) || $event['created_at'] < 0) {
+                    throw new \DomainException('Invalid authenticated journal event');
+                }
+                $chain = self::eventHash($chain, $event);
+                if (!hash_equals($chain, (string)($plan['database_prefix_hashes'][(string)$sequence] ?? ''))) {
+                    throw new \DomainException('Authenticated journal event chain mismatch');
+                }
+                if ($sequence <= $head['sequence']) { continue; }
+                $q = $this->db->getQueryBuilder();
+                $values = [];
+                foreach ($event as $name => $value) { $values[$name] = $q->createNamedParameter($value); }
+                $values['chain_sha256'] = $q->createNamedParameter($chain);
+                $q->insert('weknora_recovery_log')->values($values)->executeStatement();
+            }
+            if (!hash_equals($chain, $plan['through_database_chain_sha256'])) {
+                throw new \DomainException('Authenticated journal terminal hash mismatch');
+            }
+            $q = $this->db->getQueryBuilder();
+            $q->update('weknora_recovery_head')->set('sequence', $q->createNamedParameter($end))
+                ->set('chain_sha256', $q->createNamedParameter($chain))
+                ->where($q->expr()->eq('id', $q->createNamedParameter(1)))->executeStatement();
+            $this->db->commit();
+        } catch (\Throwable $error) { $this->db->rollBack(); throw $error; }
+    }
+
     public static function eventHash(string $previous, array $item): string {
         if (!preg_match('/\A[a-f0-9]{64}\z/D', $previous)) {
             throw new \UnexpectedValueException('Invalid recovery prefix hash');

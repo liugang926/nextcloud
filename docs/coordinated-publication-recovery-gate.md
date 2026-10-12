@@ -82,3 +82,43 @@ CLI Capture/Apply/Reconcile/Snapshot, actual repository/source guards and
 `pg_dump`/`pg_restore` on both databases. Its WeKnora parser/index outputs are
 controlled fixture rows and are explicitly scoped to that boundary; it does
 not accept a complete deployed shared-stack restore.
+
+## Current disposable Samba AD fixture
+
+The current source identity verifier requires real AD `objectClass=user`, binary
+`objectGUID`, account state and effective group membership. The coordinated
+recovery runner now provisions an isolated Samba AD instance instead of relying
+on OpenLDAP `adTestUser` mappings. It keeps identity bypass disabled, trusts only
+the generated fixture CA, and reads Alice/Bob GUIDs from that actual directory.
+Its nested Engineering/Platform group share is still exercised through normal
+Nextcloud Files access before pairing.
+
+Build the dedicated test image once; this does not replace the existing AD image:
+
+```sh
+docker build -t weknora-auto-space-ad-test:recovery-20261012 scripts/ops/fixtures/ldaps
+python3 scripts/ops/isolated-coordinated-recovery-smoke.py \
+  --weknora-source /path/to/current/WeKnora \
+  --evidence /path/to/new-recovery-result.json
+```
+
+`--ad-image` selects another already-built local image. The runner resolves it to
+an immutable image ID. Each fresh AD container refuses to overwrite an existing
+`sam.ldb`; only its distribution-provided `smb.conf` is removed before provisioning.
+No AD host ports are published. The two fixture networks use non-overlapping
+`/28` subnets from the benchmark range, selected against current Docker networks;
+Docker also rejects an allocation collision. Existing networks are never pruned.
+
+This remains CLI/repository recovery evidence with controlled relational indexed
+rows, not full-app/vector/model recovery acceptance. A failed preflight, process
+or gate is a failed run; it cannot generate a successful result receipt. Partial
+startup logs are retained privately with fixture passwords redacted before the
+exact nonce-labelled temporary resources are removed.
+
+### 回滚后的日志连续性
+
+新的外部签名计划包含检查点之后的 `journal_events` 元数据。NC 在维护模式中验证实例、stream、恢复库前缀、逐事件哈希及终点，原子补回丢失的日志后才执行关闭操作；不会借此恢复正文或重新授权。旧版未含事件的计划在数据库确实丢失日志时拒绝执行，需要从保留的外部 journal 重新生成计划。
+
+关闭操作也产生日志，原恢复计划的尾部因此不再是最新值。维护期间使用 `recovery-console.php --plan=<原计划> --key-file=<密钥> --export-after=<外部游标>` 导出新增页，交由外部 collector 逐页校验并追加到原 journal；保留新的独立终点 pin，再生成新的签名尾部计划。执行 `--reconcile-controls` 时传入新尾部计划，而 `--control-plan-sha256` 仍指向原关闭计划；`--control-inventory-sha256` 必须来自当前独立检查。不得用新尾部计划重新执行关闭步骤代替控制对账。
+
+控制对账要求实际 LDAP 管理员，因此专用维护入口仅在显式 `--reconcile-controls` 时加载 `user_ldap`。所有来源继续 stopped，普通显式 resume 及 WK 新代次对账仍须独立完成。

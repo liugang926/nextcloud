@@ -109,6 +109,11 @@ final class PublicationRecoveryReplay {
         // File storage and ACL changes are not guaranteed to emit every hint.
         // All restored active bindings stay closed until authoritative scanning.
         foreach (array_keys($current) as $id) { $bindingIds[$id] = true; }
+        // Restore authenticated metadata history before closure appends new events.
+        // This never restores publication state or source content.
+        if ($receipt === false) {
+            (new PublicationRecoveryLedger($this->db, $this->config))->restoreTail($plan);
+        }
         $this->db->insertIgnoreConflict('weknora_recovery_apply', [
             'recovery_sha256' => $plan['recovery_record_sha256'],
             'checkpoint_sha256' => $plan['checkpoint_record_sha256'], 'plan_sha256' => $planDigest,

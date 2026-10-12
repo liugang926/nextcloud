@@ -25,6 +25,12 @@ spl_autoload_register(static function (string $class): void {
     }
 });
 try {
+    // Maintenance suppresses ordinary app loading. Control reconciliation
+    // still needs the real LDAP backend to resolve and revalidate its actor
+    // and source owners; loading only the custom command leaves them missing.
+    if (in_array('--reconcile-controls', $_SERVER['argv'] ?? [], true)) {
+        \OC_App::loadApp('user_ldap');
+    }
     $app = new \Symfony\Component\Console\Application('WeKnora closed recovery');
     $app->add(\OCP\Server::get(\OCA\IntegrationWeknora\Command\ReplayRecoveryLedger::class));
     $app->setDefaultCommand('integration_weknora:replay-recovery-ledger', true);

@@ -234,6 +234,7 @@ def replay_plan(path,keyfile,anchor,through):
             'through_sequence':last['next_sequence'],'through_database_chain_sha256':last['next_chain_sha256'],
             'close_bindings':[{'binding_id':b,'last_sequence':seq} for b,seq in sorted(bindings.items())],
             'withdraw_files':[{'binding_id':b,'file_id':f,'last_sequence':seq} for (b,f),seq in sorted(files.items())],
+            'journal_events':[event for record in records[start+1:end+1] for event in record['body']['page']['items']],
             'database_prefix_hashes':prefix_hashes,'latest_content_revisions':[content[k] for k in sorted(content)],
             'authoritative_reconciliation_required':True,'ingress_reopen_permitted':False}
 
