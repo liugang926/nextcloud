@@ -1,3 +1,347 @@
+diff --git a/internal/database/migration_joint_catalogue.go b/internal/database/migration_joint_catalogue.go
+index c5634509b46f6e9aafb7742fd73d7f538d5c3624..b24f8909374645d0c5299fb203ffac1f52173c33 100644
+--- a/internal/database/migration_joint_catalogue.go
++++ b/internal/database/migration_joint_catalogue.go
+@@ -662,10 +662,16 @@ func jointVerifyTable(ctx context.Context, db jointCatalogueReadConnection, dial
+ 		}
+ 	}
+ 	textColumns := map[string]bool{}
++	verifiedBigintColumns := map[string]bool{}
+ 	for _, column := range wanted {
+ 		if strings.HasPrefix(column.Type, "varchar") {
+ 			textColumns[column.Name] = true
+ 		}
++		// Reached only after every actual column/type/default/not-null value
++		// exactly matched the corresponding trusted declaration above.
++		if column.Type == "bigint" {
++			verifiedBigintColumns[column.Name] = true
++		}
+ 	}
+ 	var namespace string
+ 	if db.QueryRowContext(ctx, "SELECT current_schema()").Scan(&namespace) != nil {
+@@ -686,14 +692,14 @@ func jointVerifyTable(ctx context.Context, db jointCatalogueReadConnection, dial
+ 		if !valid || deferrable {
+ 			return ErrJointSchemaUnknown
+ 		}
+-		got = append(got, jointCanonicalConstraint(text, namespace, textColumns))
++		got = append(got, jointCanonicalConstraintWithVerifiedBigintIN(text, namespace, textColumns, verifiedBigintColumns))
+ 	}
+ 	if rows.Err() != nil {
+ 		return ErrJointSchemaUnavailable
+ 	}
+ 	want := []string{}
+ 	for _, text := range constraints {
+-		want = append(want, jointCanonicalConstraint(text, namespace, textColumns))
++		want = append(want, jointCanonicalConstraintWithVerifiedBigintIN(text, namespace, textColumns, verifiedBigintColumns))
+ 	}
+ 	sort.Strings(got)
+ 	sort.Strings(want)
+diff --git a/internal/database/migration_joint_verified_bigint_in.go b/internal/database/migration_joint_verified_bigint_in.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f876d5f128122e3ce1fe148a16dc0db9dc5c804
+--- /dev/null
++++ b/internal/database/migration_joint_verified_bigint_in.go
+@@ -0,0 +1,167 @@
++package database
++
++import (
++	"regexp"
++	"strconv"
++	"strings"
++)
++
++var jointUnsignedIntegerLiteral = regexp.MustCompile(`^[0-9]+$`)
++var jointBigintINDollarQuote = regexp.MustCompile(`^\$(?:[a-zA-Z_][a-zA-Z_0-9]*)?\$`)
++
++// PostgreSQL turns BIGINT-column IN integer constants into a BIGINT array;
++// its deparser prints those constants as quoted literals with ::bigint.
++// Only actual columns already matched to their trusted full declarations may
++// use this equivalence. Column/function/arithmetic/narrowing casts remain exact.
++func jointCanonicalConstraintWithVerifiedBigintIN(text, namespace string, safeTextColumns, verifiedBigintColumns map[string]bool) string {
++	original := jointCanonicalConstraint(text, namespace, safeTextColumns)
++	tokens := jointSQLTokens(text)
++	if len(tokens) < 2 || tokens[0] != "check" {
++		return original
++	}
++	// jointSQLTokens intentionally normalizes identifier quotation for the
++	// old verifier. This new equivalence must retain the lexical distinction
++	// between native ANY/ARRAY/bigint and user-defined quoted identifiers.
++	// The old expression tree also loses quoted ANY for bare ARRAY literals,
++	// so falling back to it here would still overmatch. Quoted CHECK syntax
++	// retains exact lexical identity outside the native equivalence domain.
++	if jointBigintINHasIdentifierQuote(text) {
++		return "quoted-check-identity:" + strings.TrimSpace(text)
++	}
++	expression := jointTrimParens(tokens[1:])
++	if len(expression) < 9 || !jointIdentifier.MatchString(expression[0]) || !verifiedBigintColumns[expression[0]] ||
++		expression[1] != "=" || expression[2] != "any" || expression[3] != "(" || expression[4] != "array" || expression[5] != "[" ||
++		expression[len(expression)-2] != "]" || expression[len(expression)-1] != ")" {
++		return original
++	}
++	items := expression[6 : len(expression)-2]
++	values := []string{}
++	start, depth := 0, 0
++	for i := 0; i <= len(items); i++ {
++		if i < len(items) {
++			switch items[i] {
++			case "(":
++				depth++
++			case ")":
++				depth--
++				if depth < 0 {
++					return original
++				}
++			}
++			if items[i] != "," || depth != 0 {
++				continue
++			}
++		} else if depth != 0 {
++			return original
++		}
++		value, ok := jointVerifiedBigintArrayLiteral(items[start:i])
++		if !ok {
++			return original
++		}
++		values = append(values, value)
++		start = i + 1
++	}
++	if len(values) < 2 {
++		return original
++	}
++	return jointCanonicalConstraint("CHECK ("+expression[0]+" IN ("+strings.Join(values, ",")+"))", namespace, safeTextColumns)
++}
++
++func jointVerifiedBigintArrayLiteral(tokens []string) (string, bool) {
++	tokens = jointTrimParens(tokens)
++	literal := ""
++	if len(tokens) == 1 {
++		literal = tokens[0]
++	} else if len(tokens) == 3 && tokens[1] == "::" && tokens[2] == "bigint" {
++		operand := jointTrimParens(tokens[:1])
++		if len(operand) != 1 || len(operand[0]) < 3 || operand[0][0] != '\'' || operand[0][len(operand[0])-1] != '\'' {
++			return "", false
++		}
++		literal = operand[0][1 : len(operand[0])-1]
++	} else {
++		return "", false
++	}
++	if !jointUnsignedIntegerLiteral.MatchString(literal) {
++		return "", false
++	}
++	value, err := strconv.ParseInt(literal, 10, 64)
++	if err != nil {
++		return "", false
++	}
++	return strconv.FormatInt(value, 10), true
++}
++
++// Track quote provenance outside SQL literal/comment regions. Rejecting every
++// quoted identifier is conservative; quotes inside a string are data and must
++// not be confused with identifier syntax. This does not rewrite SQL tokens.
++func jointBigintINHasIdentifierQuote(text string) bool {
++	for i := 0; i < len(text); {
++		switch {
++		case text[i] == '"':
++			return true
++		case text[i] == '\'':
++			escapes := i > 0 && (text[i-1] == 'e' || text[i-1] == 'E') &&
++				(i < 2 || !jointBigintINIdentifierByte(text[i-2]))
++			i++
++			closed := false
++			for i < len(text) {
++				if escapes && text[i] == '\\' {
++					i += 2
++					continue
++				}
++				if text[i] == '\'' {
++					if i+1 < len(text) && text[i+1] == '\'' {
++						i += 2
++						continue
++					}
++					i++
++					closed = true
++					break
++				}
++				i++
++			}
++			if !closed {
++				return true
++			}
++		case i+1 < len(text) && text[i:i+2] == "--":
++			for i < len(text) && text[i] != '\n' {
++				i++
++			}
++		case i+1 < len(text) && text[i:i+2] == "/*":
++			depth := 1
++			i += 2
++			for i+1 < len(text) && depth > 0 {
++				if text[i:i+2] == "/*" {
++					depth++
++					i += 2
++				} else if text[i:i+2] == "*/" {
++					depth--
++					i += 2
++				} else {
++					i++
++				}
++			}
++			if depth != 0 {
++				return true
++			}
++		case text[i] == '$':
++			delimiter := jointBigintINDollarQuote.FindString(text[i:])
++			if delimiter == "" {
++				i++
++				continue
++			}
++			end := strings.Index(text[i+len(delimiter):], delimiter)
++			if end < 0 {
++				return true
++			}
++			i += len(delimiter)*2 + end
++		default:
++			i++
++		}
++	}
++	return false
++}
++
++func jointBigintINIdentifierByte(value byte) bool {
++	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_' || value == '$'
++}
+diff --git a/internal/database/migration_joint_verified_bigint_in_test.go b/internal/database/migration_joint_verified_bigint_in_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b825a6fc3a0459ced9fce5ca47dbdc5b2c5df3b
+--- /dev/null
++++ b/internal/database/migration_joint_verified_bigint_in_test.go
+@@ -0,0 +1,127 @@
++package database
++
++import (
++	"context"
++	"testing"
++	"time"
++)
++
++func TestJointVerifiedBigintINKeepsNarrowingFunctionsAndChangedValues(t *testing.T) {
++	wanted := jointCanonicalConstraint("CHECK (present IN (0,1))", "")
++	verified := map[string]bool{"present": true}
++	for _, actual := range []string{
++		"CHECK ((present::integer = ANY (ARRAY['0'::bigint,'1'::bigint])))",
++		"CHECK ((abs(present) = ANY (ARRAY['0'::bigint,'1'::bigint])))",
++		"CHECK ((present+1 = ANY (ARRAY['0'::bigint,'1'::bigint])))",
++		"CHECK ((present = ANY (ARRAY['0'::integer,'1'::integer])))",
++		"CHECK ((present = ANY (ARRAY['0'::bigint,'2'::bigint])))",
++		"CHECK ((present = ANY (ARRAY['0'::bigint,abs('1'::bigint)])))",
++		"CHECK ((present = ANY (ARRAY['0'::bigint,'9223372036854775808'::bigint])))",
++		"CHECK ((present = ANY (ARRAY['0.0'::bigint,'1'::bigint])))",
++		"CHECK ((present = ANY (ARRAY['0'::bigint,'1'::bigint]::integer[])))",
++		"CHECK ((present <> ANY (ARRAY['0'::bigint,'1'::bigint])))",
++		"CHECK ((other = ANY (ARRAY['0'::bigint,'1'::bigint])))",
++		"CHECK ((1 = ANY (ARRAY['0'::bigint,'1'::bigint])))",
++		`CHECK ((present = "any"(ARRAY['0'::bigint,'1'::bigint])))`,
++		`CHECK ((present = "any"(ARRAY[0,1])))`,
++		`CHECK ((present = ANY("array"['0'::bigint,'1'::bigint])))`,
++		`CHECK ((present = ANY(ARRAY['0'::"bigint",'1'::"bigint"])))`,
++		`CHECK ((present = custom."any"(ARRAY['0'::bigint,'1'::bigint])))`,
++		`CHECK ((present = ANY(ARRAY['0'::custom.bigint,'1'::custom.bigint])))`,
++	} {
++		if jointCanonicalConstraintWithVerifiedBigintIN(actual, "", nil, verified) == wanted {
++			t.Fatal("typed-literal equivalence accepted a changed predicate, value or nonliteral/narrowing cast")
++		}
++	}
++}
++
++func TestJointVerifiedBigintINRequiresIndependentlyVerifiedColumn(t *testing.T) {
++	actual := "CHECK ((present = ANY (ARRAY['0'::bigint,'1'::bigint])))"
++	for _, unverified := range []map[string]bool{nil, {}, {"other": true}, {"present": false}} {
++		if jointCanonicalConstraintWithVerifiedBigintIN(actual, "", nil, unverified) != jointCanonicalConstraint(actual, "") {
++			t.Fatal("unverified column acquired a typed-literal normalization")
++		}
++	}
++	for _, identifierQuote := range []string{`"any"(ARRAY['0'::bigint,'1'::bigint])`, `ANY(ARRAY['0'::"bigint",'1'::"bigint"])`, `custom."any"(ARRAY[0,1])`} {
++		if !jointBigintINHasIdentifierQuote(identifierQuote) {
++			t.Fatal("quoted identifier provenance was lost")
++		}
++	}
++	for _, literalQuote := range []string{`'literal "bytes"'`, `'escaped '' literal "bytes"'`, `$tag$literal "bytes"$tag$`, `/* comment "bytes" /* nested */ */ ANY(ARRAY['0'::bigint,'1'::bigint])`, "-- comment \"bytes\"\nANY(ARRAY['0'::bigint,'1'::bigint])"} {
++		if jointBigintINHasIdentifierQuote(literalQuote) {
++			t.Fatal("literal or comment bytes were mistaken for an identifier quote")
++		}
++	}
++}
++
++// This positive is derived from the actual PostgreSQL catalogue, never a
++// fabricated pg_get_constraintdef string. Mutations must remain full-table
++// failures even when the source's integer constants have typed deparser forms.
++func TestJointVerifiedBigintINActualPostgresTable(t *testing.T) {
++	for _, mode := range []string{"native_original", "altered_value", "narrowed_column_cast", "function_operand", "integer_column"} {
++		t.Run(mode, func(t *testing.T) {
++			db, _, _ := jointLineageFixture(t, true)
++			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++			defer cancel()
++			const table = "verified_bigint_in_fixture"
++			const definition = "CREATE TABLE verified_bigint_in_fixture (present BIGINT NOT NULL CHECK(present IN(0,1)));"
++			if _, err := db.ExecContext(ctx, definition); err != nil {
++				t.Fatal("actual PostgreSQL BIGINT IN fixture could not be created")
++			}
++			var native string
++			if err := db.QueryRowContext(ctx, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='verified_bigint_in_fixture'::regclass AND contype='c'").Scan(&native); err != nil {
++				t.Fatal("actual native constraint definition could not be read")
++			}
++			columns, err := jointCatalogueColumns(ctx, db, "versioned", table)
++			if err != nil || len(columns) != 1 || columns[0] != (jointColumnIdentity{Name: "present", Type: "bigint", NotNull: true}) {
++				t.Fatal("native BIGINT column did not match its complete trusted declaration")
++			}
++			wanted := jointCanonicalConstraint("CHECK (present IN (0,1))", "")
++			if jointCanonicalConstraint(native, "") == wanted {
++				t.Fatal("actual provider did not exhibit the typed-constant deparser discrepancy under diagnosis")
++			}
++			if jointCanonicalConstraintWithVerifiedBigintIN(native, "", nil, map[string]bool{columns[0].Name: columns[0].Type == "bigint"}) != wanted {
++				t.Fatal("actual native typed constants did not preserve the original integer IN meaning")
++			}
++			if err := jointVerifyTable(ctx, db, "versioned", table, definition); err != nil {
++				t.Fatal("full actual column and constraint identity refused the unchanged BIGINT IN table")
++			}
++			mutation := ""
++			switch mode {
++			case "native_original":
++				return
++			case "altered_value":
++				mutation = "ALTER TABLE verified_bigint_in_fixture DROP CONSTRAINT verified_bigint_in_fixture_present_check, ADD CHECK(present IN(0,2))"
++			case "narrowed_column_cast":
++				mutation = "ALTER TABLE verified_bigint_in_fixture DROP CONSTRAINT verified_bigint_in_fixture_present_check, ADD CHECK(present::integer IN(0,1))"
++			case "function_operand":
++				// The quoted user function is scalar and permits only2, unlike
++				// native ANY/IN0,1. Quotation loss must not recertify this CHECK.
++				if _, err := db.ExecContext(ctx, `CREATE FUNCTION "any"(bigint[]) RETURNS bigint LANGUAGE SQL IMMUTABLE AS 'SELECT 2::bigint'`); err != nil {
++					t.Fatal("actual quoted scalar function could not be created")
++				}
++				var scalar int64
++				if err := db.QueryRowContext(ctx, `SELECT "any"(ARRAY['0'::bigint,'1'::bigint])`).Scan(&scalar); err != nil || scalar != 2 {
++					t.Fatal("actual quoted function did not exhibit its distinct scalar behavior")
++				}
++				mutation = `ALTER TABLE verified_bigint_in_fixture DROP CONSTRAINT verified_bigint_in_fixture_present_check, ADD CHECK(present = "any"(ARRAY['0'::bigint,'1'::bigint]))`
++			case "integer_column":
++				mutation = "ALTER TABLE verified_bigint_in_fixture ALTER COLUMN present TYPE INTEGER"
++			}
++			if _, err := db.ExecContext(ctx, mutation); err != nil {
++				t.Fatal("actual negative schema mutation could not be installed")
++			}
++			if mode == "function_operand" {
++				if err := db.QueryRowContext(ctx, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='verified_bigint_in_fixture'::regclass AND contype='c'").Scan(&native); err != nil || !jointBigintINHasIdentifierQuote(native) {
++					t.Fatal("actual scalar-function constraint did not retain quoted identifier evidence")
++				}
++				if _, err := db.ExecContext(ctx, "INSERT INTO verified_bigint_in_fixture(present) VALUES(2)"); err != nil {
++					t.Fatal("actual scalar CHECK did not demonstrate its different permitted value")
++				}
++			}
++			if err := jointVerifyTable(ctx, db, "versioned", table, definition); err != ErrJointSchemaUnknown {
++				t.Fatal("changed actual schema did not retain the full unknown-lineage refusal")
++			}
++		})
++	}
++}
 diff --git a/internal/database/migration_original_pending_tail_source.go b/internal/database/migration_original_pending_tail_source.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..bc666d8c924acb45a8e0211a15154b361911d0ae
