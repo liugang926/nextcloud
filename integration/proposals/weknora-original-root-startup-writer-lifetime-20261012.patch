@@ -1,9 +1,9 @@
 diff --git a/internal/database/migration_original_pending_tail_source.go b/internal/database/migration_original_pending_tail_source.go
 new file mode 100644
-index 000000000..c8be7a0f2
+index 000000000..bc666d8c9
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_source.go
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,270 @@
 +package database
 +
 +import (
@@ -29,23 +29,23 @@ index 000000000..c8be7a0f2
 +var jointOriginalPendingTailJSON []byte
 +
 +type jointOriginalPendingTailModule struct {
-+	Version uint
++	Version                                uint
 +	UpPath, DownPath, UpSHA256, DownSHA256 string
-+	Statements []string
-+	Catalogue jointCatalogueModule
-+	Effects []string
++	Statements                             []string
++	Catalogue                              jointCatalogueModule
++	Effects                                []string
 +}
 +type jointOriginalPendingTailDefinition struct {
 +	Format, Activation, PG169 string
-+	RouteConverged bool
-+	Modules map[string][]jointOriginalPendingTailModule
-+	BodyDescriptors map[string]jointBodyDescriptor
-+	BodyDescriptorSource struct { Path, SHA256 string }
++	RouteConverged            bool
++	Modules                   map[string][]jointOriginalPendingTailModule
++	BodyDescriptors           map[string]jointBodyDescriptor
++	BodyDescriptorSource      struct{ Path, SHA256 string }
 +}
 +type jointOriginalPendingTailSourceAdmission struct {
 +	dialect, sourceDigest string
-+	modules []jointOriginalPendingTailModule
-+	descriptors map[string]jointBodyDescriptor
++	modules               []jointOriginalPendingTailModule
++	descriptors           map[string]jointBodyDescriptor
 +}
 +
 +func originalPendingTailFile(root, name, want string) ([]byte, error) {
@@ -71,55 +71,101 @@ index 000000000..c8be7a0f2
 +	if ctx == nil || !filepath.IsAbs(root) || (dialect != "sqlite" && dialect != "versioned") {
 +		return nil, ErrJointSchemaSourceIdentity
 +	}
-+	if err := ctx.Err(); err != nil { return nil, err }
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
 +	var definition jointOriginalPendingTailDefinition
 +	if json.Unmarshal(jointOriginalPendingTailJSON, &definition) != nil || definition.Format != "joint-original-pending-tail-source-v1" || definition.Activation != "unwired_pending_sources_only" || definition.RouteConverged || definition.PG169 != "reserved_pending_not_executed_or_implied" {
 +		return nil, ErrJointSchemaSourceIdentity
 +	}
 +	versions := []uint{90, 91, 93}
-+	if dialect == "versioned" { versions = []uint{172} }
++	if dialect == "versioned" {
++		versions = []uint{172}
++	}
 +	modules := definition.Modules[dialect]
 +	if len(modules) != len(versions) || len(definition.BodyDescriptors) != 7 || definition.BodyDescriptorSource.Path != "internal/application/repository/original_body_fields.go" {
 +		return nil, ErrJointSchemaSourceIdentity
 +	}
 +	witness, err := jointLineageWitnessesFromSource()
-+	if err != nil { return nil, err }
++	if err != nil {
++		return nil, err
++	}
 +	known := map[string]bool{}
 +	for _, module := range witness.Modules[dialect] {
-+		if _, err = originalPendingTailFile(root, module.Path, module.SHA256); err != nil { return nil, err }
++		if _, err = originalPendingTailFile(root, module.Path, module.SHA256); err != nil {
++			return nil, err
++		}
 +		known[filepath.Base(module.Path)] = true
 +	}
 +	entries, err := os.ReadDir(filepath.Join(root, "migrations", dialect))
-+	if err != nil { return nil, ErrJointSchemaSourceIdentity }
++	if err != nil {
++		return nil, ErrJointSchemaSourceIdentity
++	}
 +	for _, entry := range entries {
-+		if !strings.HasSuffix(entry.Name(), ".up.sql") { continue }
++		if !strings.HasSuffix(entry.Name(), ".up.sql") {
++			continue
++		}
 +		var version uint
-+		if _, err = fmt.Sscanf(entry.Name(), "%d_", &version); err != nil { return nil, ErrJointSchemaSourceIdentity }
-+		if version >= jointLineageFirstVersion(dialect) && !known[entry.Name()] { return nil, ErrJointSchemaSourceIdentity }
++		if _, err = fmt.Sscanf(entry.Name(), "%d_", &version); err != nil {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		if version >= jointLineageFirstVersion(dialect) && !known[entry.Name()] {
++			return nil, ErrJointSchemaSourceIdentity
++		}
 +	}
-+	if _, err = verifyJointPeerForwardSourceAssets(root, dialect); err != nil { return nil, err }
++	if _, err = verifyJointPeerForwardSourceAssets(root, dialect); err != nil {
++		return nil, err
++	}
 +	bodySource, err := originalPendingTailFile(root, definition.BodyDescriptorSource.Path, definition.BodyDescriptorSource.SHA256)
-+	if err != nil { return nil, err }
-+	if err = verifyJointOriginalPendingBodyDescriptors(bodySource, definition.BodyDescriptors); err != nil { return nil, err }
-+	for i, module := range modules {
-+		if module.Version != versions[i] || !strings.HasPrefix(module.UpPath, "migrations/pending/") || module.DownPath != strings.TrimSuffix(module.UpPath, ".up.sql")+".down.sql" || module.Catalogue.Version != module.Version || module.Catalogue.Path != module.UpPath || module.Catalogue.SHA256 != module.UpSHA256 { return nil, ErrJointSchemaSourceIdentity }
-+		up, e := originalPendingTailFile(root, module.UpPath, module.UpSHA256)
-+		if e != nil { return nil, e }
-+		if _, e = originalPendingTailFile(root, module.DownPath, module.DownSHA256); e != nil { return nil, e }
-+		names, e := os.ReadDir(filepath.Join(root, filepath.Dir(module.UpPath)))
-+		if e != nil || len(names) != 2 { return nil, ErrJointSchemaSourceIdentity }
-+		for _, name := range names { if name.IsDir() || name.Name() != filepath.Base(module.UpPath) && name.Name() != filepath.Base(module.DownPath) { return nil, ErrJointSchemaSourceIdentity } }
-+		statements, e := jointOriginalPendingTailStatements(string(up))
-+		if e != nil || !reflect.DeepEqual(statements, module.Statements) { return nil, ErrJointSchemaSourceIdentity }
-+		projected, effects, e := projectJointOriginalPendingTailModule(module, statements)
-+		if e != nil || !reflect.DeepEqual(projected, module.Catalogue) || !reflect.DeepEqual(effects, module.Effects) { return nil, ErrJointSchemaSourceIdentity }
++	if err != nil {
++		return nil, err
 +	}
-+	if err = ctx.Err(); err != nil { return nil, err }
++	if err = verifyJointOriginalPendingBodyDescriptors(bodySource, definition.BodyDescriptors); err != nil {
++		return nil, err
++	}
++	for i, module := range modules {
++		if module.Version != versions[i] || !strings.HasPrefix(module.UpPath, "migrations/pending/") || module.DownPath != strings.TrimSuffix(module.UpPath, ".up.sql")+".down.sql" || module.Catalogue.Version != module.Version || module.Catalogue.Path != module.UpPath || module.Catalogue.SHA256 != module.UpSHA256 {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		up, e := originalPendingTailFile(root, module.UpPath, module.UpSHA256)
++		if e != nil {
++			return nil, e
++		}
++		if _, e = originalPendingTailFile(root, module.DownPath, module.DownSHA256); e != nil {
++			return nil, e
++		}
++		names, e := os.ReadDir(filepath.Join(root, filepath.Dir(module.UpPath)))
++		if e != nil || len(names) != 2 {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		for _, name := range names {
++			if name.IsDir() || name.Name() != filepath.Base(module.UpPath) && name.Name() != filepath.Base(module.DownPath) {
++				return nil, ErrJointSchemaSourceIdentity
++			}
++		}
++		statements, e := jointOriginalPendingTailStatements(string(up))
++		if e != nil || !reflect.DeepEqual(statements, module.Statements) {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		projected, effects, e := projectJointOriginalPendingTailModule(module, statements)
++		if e != nil || !reflect.DeepEqual(projected, module.Catalogue) || !reflect.DeepEqual(effects, module.Effects) {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++	}
++	if err = ctx.Err(); err != nil {
++		return nil, err
++	}
 +	// Repeat source checks before publishing this source-only observation.
-+	if _, err = verifyJointPeerForwardSourceAssets(root, dialect); err != nil { return nil, err }
++	if _, err = verifyJointPeerForwardSourceAssets(root, dialect); err != nil {
++		return nil, err
++	}
 +	for _, module := range modules {
-+		if _, err = originalPendingTailFile(root, module.UpPath, module.UpSHA256); err != nil { return nil, err }
-+		if _, err = originalPendingTailFile(root, module.DownPath, module.DownSHA256); err != nil { return nil, err }
++		if _, err = originalPendingTailFile(root, module.UpPath, module.UpSHA256); err != nil {
++			return nil, err
++		}
++		if _, err = originalPendingTailFile(root, module.DownPath, module.DownSHA256); err != nil {
++			return nil, err
++		}
 +	}
 +	return &jointOriginalPendingTailSourceAdmission{dialect, fmt.Sprintf("%x", sha256.Sum256(jointOriginalPendingTailJSON)), modules, definition.BodyDescriptors}, nil
 +}
@@ -129,14 +175,24 @@ index 000000000..c8be7a0f2
 +	columns := regexp.MustCompile(`"([a-z_0-9]+)"`)
 +	actual := map[string]jointBodyDescriptor{}
 +	for _, match := range pattern.FindAllStringSubmatch(string(source), -1) {
-+		if _, wanted := expected[match[1]]; !wanted { continue }
-+		if match[3] != "inline" { return ErrJointSchemaSourceIdentity }
-+		if _, duplicate := actual[match[1]]; duplicate { return ErrJointSchemaSourceIdentity }
++		if _, wanted := expected[match[1]]; !wanted {
++			continue
++		}
++		if match[3] != "inline" {
++			return ErrJointSchemaSourceIdentity
++		}
++		if _, duplicate := actual[match[1]]; duplicate {
++			return ErrJointSchemaSourceIdentity
++		}
 +		descriptor := jointBodyDescriptor{Key: match[2], Columns: []string{}}
-+		for _, column := range columns.FindAllStringSubmatch(match[4], -1) { descriptor.Columns = append(descriptor.Columns, column[1]) }
++		for _, column := range columns.FindAllStringSubmatch(match[4], -1) {
++			descriptor.Columns = append(descriptor.Columns, column[1])
++		}
 +		actual[match[1]] = descriptor
 +	}
-+	if !reflect.DeepEqual(actual, expected) { return ErrJointSchemaSourceIdentity }
++	if !reflect.DeepEqual(actual, expected) {
++		return ErrJointSchemaSourceIdentity
++	}
 +	return nil
 +}
 +
@@ -146,22 +202,44 @@ index 000000000..c8be7a0f2
 +	seen := map[string]bool{}
 +	for _, statement := range statements {
 +		tokens := jointSQLTokens(statement)
-+		if len(tokens) < 3 { return out, nil, ErrJointSchemaSourceIdentity }
-+		if tokens[0] == "insert" { effects = append(effects, statement); continue }
-+		if tokens[0] != "create" { return out, nil, ErrJointSchemaSourceIdentity }
++		if len(tokens) < 3 {
++			return out, nil, ErrJointSchemaSourceIdentity
++		}
++		if tokens[0] == "insert" {
++			effects = append(effects, statement)
++			continue
++		}
++		if tokens[0] != "create" {
++			return out, nil, ErrJointSchemaSourceIdentity
++		}
 +		position := 1
-+		if tokens[position] == "unique" { position++ }
-+		kind := tokens[position]; position++
-+		if position+2 < len(tokens) && tokens[position] == "if" && tokens[position+1] == "not" && tokens[position+2] == "exists" { position += 3 }
-+		if position >= len(tokens) || !jointIdentifier.MatchString(tokens[position]) { return out, nil, ErrJointSchemaSourceIdentity }
++		if tokens[position] == "unique" {
++			position++
++		}
++		kind := tokens[position]
++		position++
++		if position+2 < len(tokens) && tokens[position] == "if" && tokens[position+1] == "not" && tokens[position+2] == "exists" {
++			position += 3
++		}
++		if position >= len(tokens) || !jointIdentifier.MatchString(tokens[position]) {
++			return out, nil, ErrJointSchemaSourceIdentity
++		}
 +		name := tokens[position]
-+		if seen[kind+":"+name] { return out, nil, ErrJointSchemaSourceIdentity }; seen[kind+":"+name] = true
++		if seen[kind+":"+name] {
++			return out, nil, ErrJointSchemaSourceIdentity
++		}
++		seen[kind+":"+name] = true
 +		switch kind {
-+		case "table": out.Tables[name] = statement
-+		case "trigger": out.Triggers = append(out.Triggers, statement)
-+		case "function": out.Functions = append(out.Functions, statement)
-+		case "index": out.Indexes = append(out.Indexes, statement)
-+		default: return out, nil, ErrJointSchemaSourceIdentity
++		case "table":
++			out.Tables[name] = statement
++		case "trigger":
++			out.Triggers = append(out.Triggers, statement)
++		case "function":
++			out.Functions = append(out.Functions, statement)
++		case "index":
++			out.Indexes = append(out.Indexes, statement)
++		default:
++			return out, nil, ErrJointSchemaSourceIdentity
 +		}
 +	}
 +	return out, effects, nil
@@ -170,14 +248,24 @@ index 000000000..c8be7a0f2
 +// A fixture and future route implementation can inspect the exact complete
 +// catalogue projection. This is not a live DB check, original or read grant.
 +func (a *jointOriginalPendingTailSourceAdmission) catalogue(version uint) (jointCatalogueExpected, error) {
-+	if a == nil { return jointCatalogueExpected{}, ErrJointSchemaSourceIdentity }
++	if a == nil {
++		return jointCatalogueExpected{}, ErrJointSchemaSourceIdentity
++	}
 +	expected := jointCatalogueExpected{Tables: map[string]string{}, Triggers: map[string]string{}, Functions: map[string]string{}, Columns: map[string]map[string]string{}, Indexes: map[string]string{}, BodyDescriptors: a.descriptors}
 +	known := false
 +	for _, module := range a.modules {
-+		if module.Version == version { known = true }
-+		if module.Version <= version { if err := applyJointPeerForwardModule(expected, module.Catalogue); err != nil { return expected, err } }
++		if module.Version == version {
++			known = true
++		}
++		if module.Version <= version {
++			if err := applyJointPeerForwardModule(expected, module.Catalogue); err != nil {
++				return expected, err
++			}
++		}
 +	}
-+	if !known { return expected, ErrJointSchemaUnknown }
++	if !known {
++		return expected, ErrJointSchemaUnknown
++	}
 +	return expected, nil
 +}
 +
@@ -188,10 +276,10 @@ index 000000000..c8be7a0f2
 +}
 diff --git a/internal/database/migration_original_pending_tail_source_test.go b/internal/database/migration_original_pending_tail_source_test.go
 new file mode 100644
-index 000000000..45fc4bdf6
+index 000000000..741b68b5d
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_source_test.go
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,119 @@
 +package database
 +
 +import (
@@ -207,21 +295,33 @@ index 000000000..45fc4bdf6
 +
 +func originalPendingTailSourceFixture(t *testing.T, dialect string) (string, jointOriginalPendingTailDefinition) {
 +	t.Helper()
-+	_, file, _, ok := runtime.Caller(0); require.True(t, ok)
++	_, file, _, ok := runtime.Caller(0)
++	require.True(t, ok)
 +	realRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 +	root := t.TempDir()
 +	var definition jointOriginalPendingTailDefinition
 +	require.NoError(t, json.Unmarshal(jointOriginalPendingTailJSON, &definition))
 +	copySource := func(name string) {
-+		body, err := os.ReadFile(filepath.Join(realRoot, filepath.FromSlash(name))); require.NoError(t, err)
-+		to := filepath.Join(root, filepath.FromSlash(name)); require.NoError(t, os.MkdirAll(filepath.Dir(to), 0700)); require.NoError(t, os.WriteFile(to, body, 0600))
++		body, err := os.ReadFile(filepath.Join(realRoot, filepath.FromSlash(name)))
++		require.NoError(t, err)
++		to := filepath.Join(root, filepath.FromSlash(name))
++		require.NoError(t, os.MkdirAll(filepath.Dir(to), 0700))
++		require.NoError(t, os.WriteFile(to, body, 0600))
 +	}
-+	witness, err := jointLineageWitnessesFromSource(); require.NoError(t, err)
-+	for _, module := range witness.Modules[dialect] { copySource(module.Path) }
++	witness, err := jointLineageWitnessesFromSource()
++	require.NoError(t, err)
++	for _, module := range witness.Modules[dialect] {
++		copySource(module.Path)
++	}
 +	var peer jointPeerForwardAssetManifest
 +	require.NoError(t, json.Unmarshal(jointPeerForwardSourceAssetJSON, &peer))
-+	for _, file := range peer.Routes[dialect].Files { copySource(file.Path) }
-+	for _, module := range definition.Modules[dialect] { copySource(module.UpPath); copySource(module.DownPath) }
++	for _, file := range peer.Routes[dialect].Files {
++		copySource(file.Path)
++	}
++	for _, module := range definition.Modules[dialect] {
++		copySource(module.UpPath)
++		copySource(module.DownPath)
++	}
 +	copySource(definition.BodyDescriptorSource.Path)
 +	return root, definition
 +}
@@ -235,32 +335,65 @@ index 000000000..45fc4bdf6
 +				t.Run(mode, func(t *testing.T) {
 +					root, definition := originalPendingTailSourceFixture(t, dialect)
 +					module := definition.Modules[dialect][0]
-+					appendFile := func(name string) { path := filepath.Join(root, name); body, err := os.ReadFile(path); require.NoError(t, err); require.NoError(t, os.WriteFile(path, append(body, []byte("\n-- changed full source bytes\n")...), 0600)) }
-+					ctx, cancel := context.WithCancel(context.Background()); defer cancel()
++					appendFile := func(name string) {
++						path := filepath.Join(root, name)
++						body, err := os.ReadFile(path)
++						require.NoError(t, err)
++						require.NoError(t, os.WriteFile(path, append(body, []byte("\n-- changed full source bytes\n")...), 0600))
++					}
++					ctx, cancel := context.WithCancel(context.Background())
++					defer cancel()
 +					switch mode {
-+					case "up_fullbyte_changed": appendFile(module.UpPath)
-+					case "guarded_down_changed": appendFile(module.DownPath)
-+					case "extra_pending_file": require.NoError(t, os.WriteFile(filepath.Join(root, filepath.Dir(module.UpPath), "000999_unknown.up.sql"), []byte("SELECT 1;"), 0600))
-+					case "unknown_canonical_tail": require.NoError(t, os.WriteFile(filepath.Join(root, "migrations", dialect, "000999_unknown.up.sql"), []byte("SELECT 1;"), 0600))
-+					case "extra_peer_file": require.NoError(t, os.WriteFile(filepath.Join(root, "migrations", "peer-forward", dialect, "000999_unknown.up.sql"), []byte("SELECT 1;"), 0600))
-+					case "actual_body_descriptor_source_changed": appendFile(definition.BodyDescriptorSource.Path)
++					case "up_fullbyte_changed":
++						appendFile(module.UpPath)
++					case "guarded_down_changed":
++						appendFile(module.DownPath)
++					case "extra_pending_file":
++						require.NoError(t, os.WriteFile(filepath.Join(root, filepath.Dir(module.UpPath), "000999_unknown.up.sql"), []byte("SELECT 1;"), 0600))
++					case "unknown_canonical_tail":
++						require.NoError(t, os.WriteFile(filepath.Join(root, "migrations", dialect, "000999_unknown.up.sql"), []byte("SELECT 1;"), 0600))
++					case "extra_peer_file":
++						require.NoError(t, os.WriteFile(filepath.Join(root, "migrations", "peer-forward", dialect, "000999_unknown.up.sql"), []byte("SELECT 1;"), 0600))
++					case "actual_body_descriptor_source_changed":
++						appendFile(definition.BodyDescriptorSource.Path)
 +					case "symlink_up":
-+						path := filepath.Join(root, module.UpPath); body, err := os.ReadFile(path); require.NoError(t, err)
-+						real := filepath.Join(t.TempDir(), "same-source.up.sql"); require.NoError(t, os.WriteFile(real, body, 0600))
-+						require.NoError(t, os.Remove(path)); require.NoError(t, os.Symlink(real, path))
-+					case "cancelled": cancel()
++						path := filepath.Join(root, module.UpPath)
++						body, err := os.ReadFile(path)
++						require.NoError(t, err)
++						real := filepath.Join(t.TempDir(), "same-source.up.sql")
++						require.NoError(t, os.WriteFile(real, body, 0600))
++						require.NoError(t, os.Remove(path))
++						require.NoError(t, os.Symlink(real, path))
++					case "cancelled":
++						cancel()
 +					}
 +					admission, err := admitJointOriginalPendingTailSources(ctx, root, dialect)
-+					if mode != "complete_source_projection_route_closed" { require.Error(t, err); require.Nil(t, admission); return }
-+					require.NoError(t, err); require.NotNil(t, admission); require.Len(t, admission.sourceDigest, 64)
++					if mode != "complete_source_projection_route_closed" {
++						require.Error(t, err)
++						require.Nil(t, admission)
++						return
++					}
++					require.NoError(t, err)
++					require.NotNil(t, admission)
++					require.Len(t, admission.sourceDigest, 64)
 +					for _, module := range definition.Modules[dialect] {
-+						catalogue, err := admission.catalogue(module.Version); require.NoError(t, err)
-+						for name, fullDDL := range module.Catalogue.Tables { require.Equal(t, fullDDL, catalogue.Tables[name]) }
-+						for _, fullDDL := range module.Catalogue.Triggers { tokens := jointSQLTokens(fullDDL); require.GreaterOrEqual(t, len(tokens), 3); require.Equal(t, fullDDL, catalogue.Triggers[tokens[2]]) }
++						catalogue, err := admission.catalogue(module.Version)
++						require.NoError(t, err)
++						for name, fullDDL := range module.Catalogue.Tables {
++							require.Equal(t, fullDDL, catalogue.Tables[name])
++						}
++						for _, fullDDL := range module.Catalogue.Triggers {
++							tokens := jointSQLTokens(fullDDL)
++							require.GreaterOrEqual(t, len(tokens), 3)
++							require.Equal(t, fullDDL, catalogue.Triggers[tokens[2]])
++						}
 +						require.Equal(t, definition.BodyDescriptors, catalogue.BodyDescriptors)
 +					}
-+					_, err = admission.catalogue(92); require.ErrorIs(t, err, ErrJointSchemaUnknown)
-+					route, err := admission.migrationRoute(); require.ErrorIs(t, err, ErrJointOriginalPendingTailRoute); require.Equal(t, jointMigrationRoute{}, route)
++					_, err = admission.catalogue(92)
++					require.ErrorIs(t, err, ErrJointSchemaUnknown)
++					route, err := admission.migrationRoute()
++					require.ErrorIs(t, err, ErrJointOriginalPendingTailRoute)
++					require.Equal(t, jointMigrationRoute{}, route)
 +				})
 +			}
 +		})
@@ -505,10 +638,10 @@ index 000000000..7fd591b61
 +}
 diff --git a/internal/database/migration_original_pending_tail_statements.go b/internal/database/migration_original_pending_tail_statements.go
 new file mode 100644
-index 000000000..4d542f92a
+index 000000000..ee890f7a6
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_statements.go
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,102 @@
 +package database
 +
 +import "strings"
@@ -524,58 +657,113 @@ index 000000000..4d542f92a
 +	words := []string{}
 +	for i < len(sql) {
 +		if dollar != "" {
-+			if strings.HasPrefix(sql[i:], dollar) { i += len(dollar); dollar = "" } else { i++ }; continue
++			if strings.HasPrefix(sql[i:], dollar) {
++				i += len(dollar)
++				dollar = ""
++			} else {
++				i++
++			}
++			continue
 +		}
 +		if quote != 0 {
-+			if sql[i] == quote { if i+1 < len(sql) && sql[i+1] == quote { i += 2; continue }; quote = 0 }; i++; continue
++			if sql[i] == quote {
++				if i+1 < len(sql) && sql[i+1] == quote {
++					i += 2
++					continue
++				}
++				quote = 0
++			}
++			i++
++			continue
 +		}
-+		if strings.HasPrefix(sql[i:], "--") { end := strings.IndexByte(sql[i:], '\n'); if end < 0 { i = len(sql) } else { i += end+1 }; continue }
-+		if strings.HasPrefix(sql[i:], "/*") { end := strings.Index(sql[i+2:], "*/"); if end < 0 { return nil, ErrJointSchemaSourceIdentity }; i += end+4; continue }
-+		if sql[i] == '\'' || sql[i] == '"' { quote = sql[i]; i++; continue }
++		if strings.HasPrefix(sql[i:], "--") {
++			end := strings.IndexByte(sql[i:], '\n')
++			if end < 0 {
++				i = len(sql)
++			} else {
++				i += end + 1
++			}
++			continue
++		}
++		if strings.HasPrefix(sql[i:], "/*") {
++			end := strings.Index(sql[i+2:], "*/")
++			if end < 0 {
++				return nil, ErrJointSchemaSourceIdentity
++			}
++			i += end + 4
++			continue
++		}
++		if sql[i] == '\'' || sql[i] == '"' {
++			quote = sql[i]
++			i++
++			continue
++		}
 +		if sql[i] == '$' {
-+			j := i+1
-+			for j < len(sql) && (sql[j] == '_' || sql[j] >= 'a' && sql[j] <= 'z' || sql[j] >= 'A' && sql[j] <= 'Z' || sql[j] >= '0' && sql[j] <= '9') { j++ }
-+			if j < len(sql) && sql[j] == '$' { dollar = sql[i:j+1]; i = j+1; continue }
++			j := i + 1
++			for j < len(sql) && (sql[j] == '_' || sql[j] >= 'a' && sql[j] <= 'z' || sql[j] >= 'A' && sql[j] <= 'Z' || sql[j] >= '0' && sql[j] <= '9') {
++				j++
++			}
++			if j < len(sql) && sql[j] == '$' {
++				dollar = sql[i : j+1]
++				i = j + 1
++				continue
++			}
 +		}
 +		if sql[i] == '_' || sql[i] >= 'a' && sql[i] <= 'z' || sql[i] >= 'A' && sql[i] <= 'Z' {
-+			j := i+1
-+			for j < len(sql) && (sql[j] == '_' || sql[j] >= 'a' && sql[j] <= 'z' || sql[j] >= 'A' && sql[j] <= 'Z' || sql[j] >= '0' && sql[j] <= '9') { j++ }
-+			word := strings.ToLower(sql[i:j]); words = append(words, word)
-+			if len(words) >= 2 && words[0] == "create" && words[1] == "trigger" {
-+				if word == "begin" || word == "case" { depth++ } else if word == "end" { depth--; if depth < 0 { return nil, ErrJointSchemaSourceIdentity } }
++			j := i + 1
++			for j < len(sql) && (sql[j] == '_' || sql[j] >= 'a' && sql[j] <= 'z' || sql[j] >= 'A' && sql[j] <= 'Z' || sql[j] >= '0' && sql[j] <= '9') {
++				j++
 +			}
-+			i = j; continue
++			word := strings.ToLower(sql[i:j])
++			words = append(words, word)
++			if len(words) >= 2 && words[0] == "create" && words[1] == "trigger" {
++				if word == "begin" || word == "case" {
++					depth++
++				} else if word == "end" {
++					depth--
++					if depth < 0 {
++						return nil, ErrJointSchemaSourceIdentity
++					}
++				}
++			}
++			i = j
++			continue
 +		}
 +		if sql[i] == ';' && depth == 0 {
-+			statement := strings.TrimSpace(sql[start:i+1])
-+			if statement != "" { result = append(result, statement) }
-+			start = i+1; words = []string{}
++			statement := strings.TrimSpace(sql[start : i+1])
++			if statement != "" {
++				result = append(result, statement)
++			}
++			start = i + 1
++			words = []string{}
 +		}
 +		i++
 +	}
-+	if quote != 0 || dollar != "" || depth != 0 || strings.TrimSpace(sql[start:]) != "" { return nil, ErrJointSchemaSourceIdentity }
++	if quote != 0 || dollar != "" || depth != 0 || strings.TrimSpace(sql[start:]) != "" {
++		return nil, ErrJointSchemaSourceIdentity
++	}
 +	return result, nil
 +}
 diff --git a/internal/database/migration_original_root.go b/internal/database/migration_original_root.go
 new file mode 100644
-index 000000000..4f2ebc236
+index 000000000..d8c313241
 --- /dev/null
 +++ b/internal/database/migration_original_root.go
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,227 @@
 +package database
 +
 +import (
-+ "context"
-+ "database/sql"
-+ "errors"
-+ "os"
++	"context"
++	"database/sql"
++	"errors"
++	"os"
 +
-+ "github.com/golang-migrate/migrate/v4"
++	"github.com/golang-migrate/migrate/v4"
 +)
 +
 +var (
-+ ErrOriginalRootPeerTail = errors.New("original_root_tail_needs_peer_common_append")
-+ ErrOriginalRootSchemaNotReady = errors.New("original_root_tail_not_ready")
++	ErrOriginalRootPeerTail       = errors.New("original_root_tail_needs_peer_common_append")
++	ErrOriginalRootSchemaNotReady = errors.New("original_root_tail_not_ready")
 +)
 +
 +// RunOriginalKnowledgeMigrations is an explicit startup migration entry. It
@@ -583,619 +771,1004 @@ index 000000000..4f2ebc236
 +// First bootstrap really executes the old canonical source to87/168. Only an
 +// exact Root catalogue may then create the immutable route checkpoint under
 +// the actual migrate lock and execute the independent unchanged tail.
-+func RunOriginalKnowledgeMigrations(ctx context.Context,dsn string,opts MigrationOptions) (runErr error) {
-+ if ctx == nil { return ErrJointSchemaUnavailable }
-+ if err := ctx.Err(); err != nil { return err }
-+ root,err := os.Getwd()
-+ if err != nil { return ErrJointSchemaSourceIdentity }
-+ dialect := jointLineageDialect(dsn,opts)
-+ source,err := admitJointOriginalRootSource(ctx,root,dialect)
-+ if err != nil { return err }
-+ // Own the actual main inode before any old canonical bootstrap SQL or
-+ // ledger observation. Tail must reuse this owner; recursive acquire is not
-+ // a substitute for exclusion of the whole explicit startup lifecycle.
-+ if dialect == "sqlite" {
-+  held,owned,err := acquireOriginalRootSQLiteBootstrap(ctx,dsn,opts)
-+  if err != nil { return err }
-+  if owned { defer func(){runErr=errors.Join(runErr,held.Close())}() }
-+  ctx=context.WithValue(ctx,jointPeerSQLiteMigrationContextKey{},held)
-+  opts.SQLiteDBPath=held.resolvedPath
-+  var use *originalRootSQLiteUse
-+  ctx,use,err=pinOriginalRootSQLiteUse(ctx)
-+  if err!=nil{return err}
-+  defer use.release()
-+ }
-+ version,dirty,known,err := observeJointSchemaHistoryBeforeDriver(ctx,dsn,opts)
-+ if err != nil { return err }
-+ if dirty { return ErrJointSchemaAmbiguousDirty }
-+ if !known || version < source.spec.OriginVersion {
-+  route,err := selectJointMigrationRoute(ctx,dsn,opts,version,dirty,known)
-+  if err != nil { return err }
-+  if route.lineage != jointCanonicalRootSource { return ErrOriginalRootPeerTail }
-+  if known {
-+   readOptions := opts
-+   readOptions.jointReadOnly = true
-+   db,_,err := openJointLineageDB(dsn,readOptions)
-+   if err != nil { return err }
-+   checkErr := originalRootFutureAbsence(ctx,db,source)
-+   if err = errors.Join(checkErr,db.Close()); err != nil { return err }
-+  }
-+  // Never use Force/automatic recovery in this explicit new route.
-+  canonicalOptions := opts
-+  canonicalOptions.AutoRecoverDirty = false
-+  if dialect=="sqlite" {
-+   err=runOriginalRootSQLiteCanonical(ctx,dsn,canonicalOptions,source,version,known)
-+  } else {err=RunMigrationsWithContext(ctx,dsn,canonicalOptions)}
-+  if err!=nil{return err}
-+  version,dirty,known,err = observeJointSchemaHistoryBeforeDriver(ctx,dsn,opts)
-+  if err != nil { return err }
-+ }
-+ if !known || dirty { return ErrJointSchemaAmbiguousDirty }
-+ if !source.knownVersion(version) {
-+  // Honest89/171 and other peer prefixes remain on their own old route.
-+  if jointPeerForwardVersion(dialect,version) { return ErrOriginalRootPeerTail }
-+  return ErrJointSchemaUnknown
-+ }
-+ readOptions := opts
-+ readOptions.jointReadOnly = true
-+ db,_,err := openJointLineageDB(dsn,readOptions)
-+ if err != nil { return err }
-+ checkErr := inspectOriginalRootRoute(ctx,db,source,version,true)
-+ if err = errors.Join(checkErr,db.Close()); err != nil { return err }
-+ if err = source.recheck(ctx); err != nil { return err }
-+ m,err := newOriginalRootMigrate(ctx,dsn,opts,source,version)
-+ if err != nil { return err }
-+ defer func(){
-+  actual,actualDirty,versionErr:=m.Version()
-+  sourceErr,driverErr:=m.Close()
-+  runErr=errors.Join(runErr,sourceErr,driverErr)
-+  fixedFailure:=""
-+  if runErr!=nil {fixedFailure=ErrOriginalRootSchemaNotReady.Error()}
-+  setMigrationState(actual,actualDirty,fixedFailure,versionErr==nil)
-+ }()
-+ if err = m.Up(); err != nil && err != migrate.ErrNoChange { return err }
-+ final,finalDirty,err := m.Version()
-+ if err != nil || finalDirty || final != source.spec.FinalVersion { return ErrOriginalRootSchemaNotReady }
-+ readOptions.jointReadOnly = true
-+ db,_,err = openJointLineageDB(dsn,readOptions)
-+ if err != nil { return err }
-+ return errors.Join(inspectOriginalRootRoute(ctx,db,source,final,false),db.Close())
++func RunOriginalKnowledgeMigrations(ctx context.Context, dsn string, opts MigrationOptions) (runErr error) {
++	if ctx == nil {
++		return ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	root, err := os.Getwd()
++	if err != nil {
++		return ErrJointSchemaSourceIdentity
++	}
++	dialect := jointLineageDialect(dsn, opts)
++	source, err := admitJointOriginalRootSource(ctx, root, dialect)
++	if err != nil {
++		return err
++	}
++	// Own the actual main inode before any old canonical bootstrap SQL or
++	// ledger observation. Tail must reuse this owner; recursive acquire is not
++	// a substitute for exclusion of the whole explicit startup lifecycle.
++	if dialect == "sqlite" {
++		held, owned, err := acquireOriginalRootSQLiteBootstrap(ctx, dsn, opts)
++		if err != nil {
++			return err
++		}
++		if owned {
++			defer func() { runErr = errors.Join(runErr, held.Close()) }()
++		}
++		ctx = context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++		opts.SQLiteDBPath = held.resolvedPath
++		var use *originalRootSQLiteUse
++		ctx, use, err = pinOriginalRootSQLiteUse(ctx)
++		if err != nil {
++			return err
++		}
++		defer use.release()
++	}
++	version, dirty, known, err := observeJointSchemaHistoryBeforeDriver(ctx, dsn, opts)
++	if err != nil {
++		return err
++	}
++	if dirty {
++		return ErrJointSchemaAmbiguousDirty
++	}
++	if !known || version < source.spec.OriginVersion {
++		route, err := selectJointMigrationRoute(ctx, dsn, opts, version, dirty, known)
++		if err != nil {
++			return err
++		}
++		if route.lineage != jointCanonicalRootSource {
++			return ErrOriginalRootPeerTail
++		}
++		if known {
++			readOptions := opts
++			readOptions.jointReadOnly = true
++			db, _, err := openJointLineageDB(dsn, readOptions)
++			if err != nil {
++				return err
++			}
++			checkErr := originalRootFutureAbsence(ctx, db, source)
++			if err = errors.Join(checkErr, db.Close()); err != nil {
++				return err
++			}
++		}
++		// Never use Force/automatic recovery in this explicit new route.
++		canonicalOptions := opts
++		canonicalOptions.AutoRecoverDirty = false
++		if dialect == "sqlite" {
++			err = runOriginalRootSQLiteCanonical(ctx, dsn, canonicalOptions, source, version, known)
++		} else {
++			err = RunMigrationsWithContext(ctx, dsn, canonicalOptions)
++		}
++		if err != nil {
++			return err
++		}
++		version, dirty, known, err = observeJointSchemaHistoryBeforeDriver(ctx, dsn, opts)
++		if err != nil {
++			return err
++		}
++	}
++	if !known || dirty {
++		return ErrJointSchemaAmbiguousDirty
++	}
++	if !source.knownVersion(version) {
++		// Honest89/171 and other peer prefixes remain on their own old route.
++		if jointPeerForwardVersion(dialect, version) {
++			return ErrOriginalRootPeerTail
++		}
++		return ErrJointSchemaUnknown
++	}
++	readOptions := opts
++	readOptions.jointReadOnly = true
++	db, _, err := openJointLineageDB(dsn, readOptions)
++	if err != nil {
++		return err
++	}
++	checkErr := inspectOriginalRootRoute(ctx, db, source, version, true)
++	if err = errors.Join(checkErr, db.Close()); err != nil {
++		return err
++	}
++	if err = source.recheck(ctx); err != nil {
++		return err
++	}
++	m, err := newOriginalRootMigrate(ctx, dsn, opts, source, version)
++	if err != nil {
++		return err
++	}
++	defer func() {
++		actual, actualDirty, versionErr := m.Version()
++		sourceErr, driverErr := m.Close()
++		runErr = errors.Join(runErr, sourceErr, driverErr)
++		fixedFailure := ""
++		if runErr != nil {
++			fixedFailure = ErrOriginalRootSchemaNotReady.Error()
++		}
++		setMigrationState(actual, actualDirty, fixedFailure, versionErr == nil)
++	}()
++	if err = m.Up(); err != nil && err != migrate.ErrNoChange {
++		return err
++	}
++	final, finalDirty, err := m.Version()
++	if err != nil || finalDirty || final != source.spec.FinalVersion {
++		return ErrOriginalRootSchemaNotReady
++	}
++	readOptions.jointReadOnly = true
++	db, _, err = openJointLineageDB(dsn, readOptions)
++	if err != nil {
++		return err
++	}
++	return errors.Join(inspectOriginalRootRoute(ctx, db, source, final, false), db.Close())
 +}
 +
-+func inspectOriginalRootRoute(ctx context.Context,db *sql.DB,source *jointOriginalRootSource,version uint,allowOrigin bool) (routeErr error) {
-+ if ctx == nil || db == nil || source == nil || !source.knownVersion(version) { return ErrJointSchemaUnknown }
-+ if err := source.recheck(ctx); err != nil { return err }
-+ options := &sql.TxOptions{ReadOnly:true}
-+ if source.dialect == "versioned" { options.Isolation = sql.LevelRepeatableRead }
-+ tx,err := db.BeginTx(ctx,options)
-+ if err != nil { return ErrJointSchemaUnavailable }
-+ defer func(){ if closeErr := tx.Rollback(); closeErr != nil && closeErr != sql.ErrTxDone { routeErr = errors.Join(routeErr,closeErr) } }()
-+ actual,dirty,err := originalRootLedger(ctx,tx)
-+ if err != nil { return err }
-+ if dirty { return ErrJointSchemaAmbiguousDirty }
-+ if actual != version { return ErrJointSchemaUnknown }
-+ objects,_,err := peerPrefixObjectSets(ctx,tx,source.dialect)
-+ if err != nil { return err }
-+ checkpoint := objects[originalRootRouteTable]
-+ if !checkpoint && (!allowOrigin || version != source.spec.OriginVersion) { return ErrJointSchemaUnknown }
-+ if err = verifyOriginalRootCatalogueInTx(ctx,tx,source,version,checkpoint); err != nil { return err }
-+ return checkPeerSQLiteMigrationExclusion(ctx)
++func inspectOriginalRootRoute(ctx context.Context, db *sql.DB, source *jointOriginalRootSource, version uint, allowOrigin bool) (routeErr error) {
++	if ctx == nil || db == nil || source == nil || !source.knownVersion(version) {
++		return ErrJointSchemaUnknown
++	}
++	if err := source.recheck(ctx); err != nil {
++		return err
++	}
++	options := &sql.TxOptions{ReadOnly: true}
++	if source.dialect == "versioned" {
++		options.Isolation = sql.LevelRepeatableRead
++	}
++	tx, err := db.BeginTx(ctx, options)
++	if err != nil {
++		return ErrJointSchemaUnavailable
++	}
++	defer func() {
++		if closeErr := tx.Rollback(); closeErr != nil && closeErr != sql.ErrTxDone {
++			routeErr = errors.Join(routeErr, closeErr)
++		}
++	}()
++	actual, dirty, err := originalRootLedger(ctx, tx)
++	if err != nil {
++		return err
++	}
++	if dirty {
++		return ErrJointSchemaAmbiguousDirty
++	}
++	if actual != version {
++		return ErrJointSchemaUnknown
++	}
++	objects, _, err := peerPrefixObjectSets(ctx, tx, source.dialect)
++	if err != nil {
++		return err
++	}
++	checkpoint := objects[originalRootRouteTable]
++	if !checkpoint && (!allowOrigin || version != source.spec.OriginVersion) {
++		return ErrJointSchemaUnknown
++	}
++	if err = verifyOriginalRootCatalogueInTx(ctx, tx, source, version, checkpoint); err != nil {
++		return err
++	}
++	return checkPeerSQLiteMigrationExclusion(ctx)
 +}
 +
 +// Actual application readiness uses its real pool and complete catalogue,
 +// exact checkpoint row/DDL/source,42 known body descriptors and final ledger.
 +// A same-number peer/manual tail cannot retroactively mint the Root marker.
-+func VerifyOriginalKnowledgeSchemaReadyOnDB(ctx context.Context,db *sql.DB,dialect string) error {
-+ if ctx == nil || db == nil { return ErrJointSchemaUnavailable }
-+ if dialect == "postgres" { dialect = "versioned" }
-+ root,err := os.Getwd()
-+ if err != nil { return ErrJointSchemaSourceIdentity }
-+ source,err := admitJointOriginalRootSource(ctx,root,dialect)
-+ if err != nil { return err }
-+ return inspectOriginalRootRoute(ctx,db,source,source.spec.FinalVersion,false)
++func VerifyOriginalKnowledgeSchemaReadyOnDB(ctx context.Context, db *sql.DB, dialect string) error {
++	if ctx == nil || db == nil {
++		return ErrJointSchemaUnavailable
++	}
++	if dialect == "postgres" {
++		dialect = "versioned"
++	}
++	root, err := os.Getwd()
++	if err != nil {
++		return ErrJointSchemaSourceIdentity
++	}
++	source, err := admitJointOriginalRootSource(ctx, root, dialect)
++	if err != nil {
++		return err
++	}
++	return inspectOriginalRootRoute(ctx, db, source, source.spec.FinalVersion, false)
 +}
-+func VerifyOriginalKnowledgeSchemaReady(ctx context.Context,dsn string,opts MigrationOptions) error {
-+ if ctx == nil { return ErrJointSchemaUnavailable }
-+ opts.jointReadOnly = true
-+ db,dialect,err := openJointLineageDB(dsn,opts)
-+ if err != nil { return err }
-+ return errors.Join(VerifyOriginalKnowledgeSchemaReadyOnDB(ctx,db,dialect),db.Close())
++func VerifyOriginalKnowledgeSchemaReady(ctx context.Context, dsn string, opts MigrationOptions) error {
++	if ctx == nil {
++		return ErrJointSchemaUnavailable
++	}
++	opts.jointReadOnly = true
++	db, dialect, err := openJointLineageDB(dsn, opts)
++	if err != nil {
++		return err
++	}
++	return errors.Join(VerifyOriginalKnowledgeSchemaReadyOnDB(ctx, db, dialect), db.Close())
 +}
 diff --git a/internal/database/migration_original_root_catalogue.go b/internal/database/migration_original_root_catalogue.go
 new file mode 100644
-index 000000000..b6e759eda
+index 000000000..7d8a605e1
 --- /dev/null
 +++ b/internal/database/migration_original_root_catalogue.go
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,189 @@
 +package database
 +
 +import (
-+ "context"
-+ "database/sql"
++	"context"
++	"database/sql"
 +)
 +
 +const originalRootRouteTable = "nextcloud_original_root_route_origin"
 +
-+func originalRootLedger(ctx context.Context, tx *sql.Tx) (uint,bool,error) {
-+ rows,err := tx.QueryContext(ctx,"SELECT version,dirty FROM schema_migrations")
-+ if err != nil { return 0,false,ErrJointSchemaUnknown }
-+ var version uint
-+ var dirty bool
-+ count := 0
-+ for rows.Next() {
-+  if rows.Scan(&version,&dirty) != nil { rows.Close(); return 0,false,ErrJointSchemaUnknown }
-+  count++
-+ }
-+ rowErr, closeErr := rows.Err(),rows.Close()
-+ if rowErr != nil || closeErr != nil || count != 1 { return 0,false,ErrJointSchemaUnknown }
-+ return version,dirty,ctx.Err()
++func originalRootLedger(ctx context.Context, tx *sql.Tx) (uint, bool, error) {
++	rows, err := tx.QueryContext(ctx, "SELECT version,dirty FROM schema_migrations")
++	if err != nil {
++		return 0, false, ErrJointSchemaUnknown
++	}
++	var version uint
++	var dirty bool
++	count := 0
++	for rows.Next() {
++		if rows.Scan(&version, &dirty) != nil {
++			rows.Close()
++			return 0, false, ErrJointSchemaUnknown
++		}
++		count++
++	}
++	rowErr, closeErr := rows.Err(), rows.Close()
++	if rowErr != nil || closeErr != nil || count != 1 {
++		return 0, false, ErrJointSchemaUnknown
++	}
++	return version, dirty, ctx.Err()
 +}
 +func originalRootRouteMarker(ctx context.Context, tx *sql.Tx, s *jointOriginalRootSource) error {
-+ rows,err := tx.QueryContext(ctx,"SELECT id,dialect,origin_version,source_sha256,catalogue_sha256,checkpoint_sha256 FROM "+originalRootRouteTable)
-+ if err != nil { return ErrJointSchemaUnknown }
-+ count := 0
-+ for rows.Next() {
-+  var id int
-+  var dialect,source,catalogue,checkpoint string
-+  var version uint
-+  if rows.Scan(&id,&dialect,&version,&source,&catalogue,&checkpoint) != nil || id != 1 || dialect != s.dialect || version != s.spec.OriginVersion || source != s.digest || catalogue != s.originCatalogueDigest || checkpoint != s.spec.CheckpointSHA256 { rows.Close(); return ErrJointSchemaUnknown }
-+  count++
-+ }
-+ rowErr,closeErr := rows.Err(),rows.Close()
-+ if rowErr != nil || closeErr != nil || count != 1 { return ErrJointSchemaUnknown }
-+ return ctx.Err()
++	rows, err := tx.QueryContext(ctx, "SELECT id,dialect,origin_version,source_sha256,catalogue_sha256,checkpoint_sha256 FROM "+originalRootRouteTable)
++	if err != nil {
++		return ErrJointSchemaUnknown
++	}
++	count := 0
++	for rows.Next() {
++		var id int
++		var dialect, source, catalogue, checkpoint string
++		var version uint
++		if rows.Scan(&id, &dialect, &version, &source, &catalogue, &checkpoint) != nil || id != 1 || dialect != s.dialect || version != s.spec.OriginVersion || source != s.digest || catalogue != s.originCatalogueDigest || checkpoint != s.spec.CheckpointSHA256 {
++			rows.Close()
++			return ErrJointSchemaUnknown
++		}
++		count++
++	}
++	rowErr, closeErr := rows.Err(), rows.Close()
++	if rowErr != nil || closeErr != nil || count != 1 {
++		return ErrJointSchemaUnknown
++	}
++	return ctx.Err()
 +}
 +
 +// Validate the complete old Root projection and the exact installed tail in
 +// one real transaction. Old/root and new/pending sentinels are typed together;
 +// a future object, wrong kind or partial checkpoint cannot borrow the route.
 +func verifyOriginalRootCatalogueInTx(ctx context.Context, tx *sql.Tx, s *jointOriginalRootSource, version uint, checkpoint bool) error {
-+ if s == nil || tx == nil || ctx == nil { return ErrJointSchemaUnavailable }
-+ expected,err := s.expected(version,checkpoint)
-+ if err != nil { return err }
-+ objects,_,err := peerPrefixObjectSets(ctx,tx,s.dialect)
-+ if err != nil { return err }
-+ witness,err := jointLineageWitnessesFromSource()
-+ if err != nil { return err }
-+ sentinel := witness.Sentinels
-+ // Appending creates fresh slices and leaves the embedded old witness intact.
-+ sentinel.Tables = append([]string{},sentinel.Tables...)
-+ sentinel.Triggers = append([]string{},sentinel.Triggers...)
-+ sentinel.Functions = append([]string{},sentinel.Functions...)
-+ sentinel.Indexes = append([]string{},sentinel.Indexes...)
-+ all,err := s.expected(s.spec.FinalVersion,true)
-+ if err != nil { return err }
-+ for name := range all.Tables { sentinel.Tables = append(sentinel.Tables,name) }
-+ for name := range all.Triggers { sentinel.Triggers = append(sentinel.Triggers,name) }
-+ for name := range all.Functions { sentinel.Functions = append(sentinel.Functions,name) }
-+ for name := range all.Indexes { sentinel.Indexes = append(sentinel.Indexes,name) }
-+ // The real local backend may have initialized this old scalar table before
-+ // 90. Require its exact shape, never invent vector/input/output receipts.
-+ if s.dialect == "sqlite" && version == s.spec.OriginVersion && objects["table/lite_embeddings"] {
-+  expected.Tables["lite_embeddings"] = all.Tables["lite_embeddings"]
-+  for name,definition := range all.Indexes {
-+   if objects["index/"+name] && name == "idx_sqlite_emb_source" { expected.Indexes[name] = definition }
-+  }
-+ }
-+ if err = jointVerifySentinelObjectKinds(objects,sentinel,expected); err != nil { return err }
-+ for table,columns := range witness.Sentinels.Columns {
-+  for _,column := range columns {
-+   present,err := peerPrefixIntroducedColumn(ctx,tx,s.dialect,table,column)
-+   if err != nil { return err }
-+   if present { if _,ok := expected.Columns[table][column]; !ok { return ErrJointSchemaUnknown } }
-+  }
-+ }
-+ if err = verifyPeerPrefixCatalogueInTx(ctx,tx,s.dialect,expected); err != nil { return err }
-+ if s.dialect == "versioned" {
-+  if err = jointVerifyWithdrawalKindConstraint(ctx,tx,expected.RegistryConstraint); err != nil { return err }
-+  core,err := inspectJoint125LocalRepair(ctx,tx)
-+  if err != nil { return err }
-+  if core.state != joint125GuardCurrent && core.state != joint125OptionalAbsent { return ErrJointSchemaRootWitness }
-+ }
-+ if checkpoint { if err = originalRootRouteMarker(ctx,tx,s); err != nil { return err } }
-+ return s.recheck(ctx)
++	if s == nil || tx == nil || ctx == nil {
++		return ErrJointSchemaUnavailable
++	}
++	expected, err := s.expected(version, checkpoint)
++	if err != nil {
++		return err
++	}
++	objects, _, err := peerPrefixObjectSets(ctx, tx, s.dialect)
++	if err != nil {
++		return err
++	}
++	witness, err := jointLineageWitnessesFromSource()
++	if err != nil {
++		return err
++	}
++	sentinel := witness.Sentinels
++	// Appending creates fresh slices and leaves the embedded old witness intact.
++	sentinel.Tables = append([]string{}, sentinel.Tables...)
++	sentinel.Triggers = append([]string{}, sentinel.Triggers...)
++	sentinel.Functions = append([]string{}, sentinel.Functions...)
++	sentinel.Indexes = append([]string{}, sentinel.Indexes...)
++	all, err := s.expected(s.spec.FinalVersion, true)
++	if err != nil {
++		return err
++	}
++	for name := range all.Tables {
++		sentinel.Tables = append(sentinel.Tables, name)
++	}
++	for name := range all.Triggers {
++		sentinel.Triggers = append(sentinel.Triggers, name)
++	}
++	for name := range all.Functions {
++		sentinel.Functions = append(sentinel.Functions, name)
++	}
++	for name := range all.Indexes {
++		sentinel.Indexes = append(sentinel.Indexes, name)
++	}
++	// The real local backend may have initialized this old scalar table before
++	// 90. Require its exact shape, never invent vector/input/output receipts.
++	if s.dialect == "sqlite" && version == s.spec.OriginVersion && objects["table/lite_embeddings"] {
++		expected.Tables["lite_embeddings"] = all.Tables["lite_embeddings"]
++		for name, definition := range all.Indexes {
++			if objects["index/"+name] && name == "idx_sqlite_emb_source" {
++				expected.Indexes[name] = definition
++			}
++		}
++	}
++	if err = jointVerifySentinelObjectKinds(objects, sentinel, expected); err != nil {
++		return err
++	}
++	for table, columns := range witness.Sentinels.Columns {
++		for _, column := range columns {
++			present, err := peerPrefixIntroducedColumn(ctx, tx, s.dialect, table, column)
++			if err != nil {
++				return err
++			}
++			if present {
++				if _, ok := expected.Columns[table][column]; !ok {
++					return ErrJointSchemaUnknown
++				}
++			}
++		}
++	}
++	if err = verifyPeerPrefixCatalogueInTx(ctx, tx, s.dialect, expected); err != nil {
++		return err
++	}
++	if s.dialect == "versioned" {
++		if err = jointVerifyWithdrawalKindConstraint(ctx, tx, expected.RegistryConstraint); err != nil {
++			return err
++		}
++		core, err := inspectJoint125LocalRepair(ctx, tx)
++		if err != nil {
++			return err
++		}
++		if core.state != joint125GuardCurrent && core.state != joint125OptionalAbsent {
++			return ErrJointSchemaRootWitness
++		}
++	}
++	if checkpoint {
++		if err = originalRootRouteMarker(ctx, tx, s); err != nil {
++			return err
++		}
++	}
++	return s.recheck(ctx)
 +}
 +
 +func originalRootFutureAbsence(ctx context.Context, db *sql.DB, s *jointOriginalRootSource) error {
-+ tx,err := db.BeginTx(ctx,&sql.TxOptions{ReadOnly:true})
-+ if err != nil { return ErrJointSchemaUnavailable }
-+ defer tx.Rollback()
-+ objects,_,err := peerPrefixObjectSets(ctx,tx,s.dialect)
-+ if err != nil { return err }
-+ all,err := s.expected(s.spec.FinalVersion,true)
-+ if err != nil { return err }
-+ old,err := jointExpectedCatalogue(s.dialect,s.spec.OriginVersion)
-+ if err != nil { return err }
-+ for name := range all.Tables {
-+  if name == "lite_embeddings" { continue }
-+  if _,exists := old.Tables[name]; !exists && objects[name] { return ErrJointSchemaUnknown }
-+ }
-+ for name := range all.Triggers { if _,exists := old.Triggers[name]; !exists && objects[name] { return ErrJointSchemaUnknown } }
-+ for name := range all.Functions { if _,exists := old.Functions[name]; !exists && objects[name] { return ErrJointSchemaUnknown } }
-+ for name := range all.Indexes { if name == "idx_sqlite_emb_source" { continue }; if _,exists := old.Indexes[name]; !exists && objects[name] { return ErrJointSchemaUnknown } }
-+ return ctx.Err()
++	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
++	if err != nil {
++		return ErrJointSchemaUnavailable
++	}
++	defer tx.Rollback()
++	objects, _, err := peerPrefixObjectSets(ctx, tx, s.dialect)
++	if err != nil {
++		return err
++	}
++	all, err := s.expected(s.spec.FinalVersion, true)
++	if err != nil {
++		return err
++	}
++	old, err := jointExpectedCatalogue(s.dialect, s.spec.OriginVersion)
++	if err != nil {
++		return err
++	}
++	for name := range all.Tables {
++		if name == "lite_embeddings" {
++			continue
++		}
++		if _, exists := old.Tables[name]; !exists && objects[name] {
++			return ErrJointSchemaUnknown
++		}
++	}
++	for name := range all.Triggers {
++		if _, exists := old.Triggers[name]; !exists && objects[name] {
++			return ErrJointSchemaUnknown
++		}
++	}
++	for name := range all.Functions {
++		if _, exists := old.Functions[name]; !exists && objects[name] {
++			return ErrJointSchemaUnknown
++		}
++	}
++	for name := range all.Indexes {
++		if name == "idx_sqlite_emb_source" {
++			continue
++		}
++		if _, exists := old.Indexes[name]; !exists && objects[name] {
++			return ErrJointSchemaUnknown
++		}
++	}
++	return ctx.Err()
 +}
 diff --git a/internal/database/migration_original_root_driver.go b/internal/database/migration_original_root_driver.go
 new file mode 100644
-index 000000000..d6ef32019
+index 000000000..54286e139
 --- /dev/null
 +++ b/internal/database/migration_original_root_driver.go
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,278 @@
 +package database
 +
 +import (
-+ "bytes"
-+ "context"
-+ "crypto/sha256"
-+ "database/sql"
-+ "errors"
-+ "fmt"
-+ "io"
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"errors"
++	"fmt"
++	"io"
 +
-+ "github.com/golang-migrate/migrate/v4"
-+ migratedatabase "github.com/golang-migrate/migrate/v4/database"
-+ postgresmigrate "github.com/golang-migrate/migrate/v4/database/postgres"
-+ sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
++	"github.com/golang-migrate/migrate/v4"
++	migratedatabase "github.com/golang-migrate/migrate/v4/database"
++	postgresmigrate "github.com/golang-migrate/migrate/v4/database/postgres"
++	sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
 +)
 +
 +var ErrOriginalRootTailDowngrade = errors.New("original_root_tail_downgrade_closed")
 +
 +type originalRootTransactionBeginner interface {
-+ BeginTx(context.Context,*sql.TxOptions) (*sql.Tx,error)
++	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 +}
 +
 +type originalRootMigrationDriver struct {
-+ migratedatabase.Driver
-+ ctx context.Context
-+ source *jointOriginalRootSource
-+ db *sql.DB
-+ actual originalRootTransactionBeginner
-+ version uint
-+ target uint
-+ locked, ran bool
-+ sqliteUse *originalRootSQLiteUse
-+ releaseUse func()
++	migratedatabase.Driver
++	ctx         context.Context
++	source      *jointOriginalRootSource
++	db          *sql.DB
++	actual      originalRootTransactionBeginner
++	version     uint
++	target      uint
++	locked, ran bool
++	sqliteUse   *originalRootSQLiteUse
++	releaseUse  func()
 +}
 +
-+func (d *originalRootMigrationDriver) verify(version uint,dirty,create bool) (verifyErr error) {
-+ if err := checkPeerSQLiteMigrationExclusion(d.ctx); err != nil { return err }
-+ if err := d.source.recheck(d.ctx); err != nil { return err }
-+ options := &sql.TxOptions{}
-+ if d.source.dialect == "versioned" { options.Isolation = sql.LevelSerializable }
-+ tx,err := d.actual.BeginTx(d.ctx,options)
-+ if err != nil { return ErrJointSchemaUnavailable }
-+ defer func(){ if closeErr := tx.Rollback(); closeErr != nil && closeErr != sql.ErrTxDone { verifyErr = errors.Join(verifyErr,closeErr) } }()
-+ got,gotDirty,err := originalRootLedger(d.ctx,tx)
-+ if err != nil { return err }
-+ ledger := version
-+ if dirty { ledger = d.target }
-+ if got != ledger || gotDirty != dirty { return ErrJointSchemaUnknown }
-+ objects,_,err := peerPrefixObjectSets(d.ctx,tx,d.source.dialect)
-+ if err != nil { return err }
-+ checkpoint := objects[originalRootRouteTable]
-+ if !checkpoint {
-+  if !create || dirty || version != d.source.spec.OriginVersion { return ErrJointSchemaUnknown }
-+  // An unrelated object with a compiled checkpoint name is not absence.
-+  if objects["nextcloud_original_root_route_immutable_update"] || objects["nextcloud_original_root_route_immutable_delete"] || objects["nextcloud_original_root_route_immutable"] { return ErrJointSchemaUnknown }
-+  if err = verifyOriginalRootCatalogueInTx(d.ctx,tx,d.source,version,false); err != nil { return err }
-+  for _,statement := range d.source.spec.CheckpointStatements {
-+   if _,err = tx.ExecContext(d.ctx,statement); err != nil { return ErrJointSchemaUnavailable }
-+  }
-+  query := "INSERT INTO "+originalRootRouteTable+"(id,dialect,origin_version,source_sha256,catalogue_sha256,checkpoint_sha256) VALUES(1,?,?,?,?,?)"
-+  if d.source.dialect == "versioned" { query = "INSERT INTO "+originalRootRouteTable+"(id,dialect,origin_version,source_sha256,catalogue_sha256,checkpoint_sha256) VALUES(1,$1,$2,$3,$4,$5)" }
-+  result,err := tx.ExecContext(d.ctx,query,d.source.dialect,d.source.spec.OriginVersion,d.source.digest,d.source.originCatalogueDigest,d.source.spec.CheckpointSHA256)
-+  if err != nil { return ErrJointSchemaUnavailable }
-+  count,err := result.RowsAffected()
-+  if err != nil || count != 1 { return ErrJointSchemaUnknown }
-+ }
-+ if err = verifyOriginalRootCatalogueInTx(d.ctx,tx,d.source,version,true); err != nil { return err }
-+ if err = checkPeerSQLiteMigrationExclusion(d.ctx); err != nil { return err }
-+ if err = tx.Commit(); err != nil { return ErrJointSchemaUnavailable }
-+ return nil
++func (d *originalRootMigrationDriver) verify(version uint, dirty, create bool) (verifyErr error) {
++	if err := checkPeerSQLiteMigrationExclusion(d.ctx); err != nil {
++		return err
++	}
++	if err := d.source.recheck(d.ctx); err != nil {
++		return err
++	}
++	options := &sql.TxOptions{}
++	if d.source.dialect == "versioned" {
++		options.Isolation = sql.LevelSerializable
++	}
++	tx, err := d.actual.BeginTx(d.ctx, options)
++	if err != nil {
++		return ErrJointSchemaUnavailable
++	}
++	defer func() {
++		if closeErr := tx.Rollback(); closeErr != nil && closeErr != sql.ErrTxDone {
++			verifyErr = errors.Join(verifyErr, closeErr)
++		}
++	}()
++	got, gotDirty, err := originalRootLedger(d.ctx, tx)
++	if err != nil {
++		return err
++	}
++	ledger := version
++	if dirty {
++		ledger = d.target
++	}
++	if got != ledger || gotDirty != dirty {
++		return ErrJointSchemaUnknown
++	}
++	objects, _, err := peerPrefixObjectSets(d.ctx, tx, d.source.dialect)
++	if err != nil {
++		return err
++	}
++	checkpoint := objects[originalRootRouteTable]
++	if !checkpoint {
++		if !create || dirty || version != d.source.spec.OriginVersion {
++			return ErrJointSchemaUnknown
++		}
++		// An unrelated object with a compiled checkpoint name is not absence.
++		if objects["nextcloud_original_root_route_immutable_update"] || objects["nextcloud_original_root_route_immutable_delete"] || objects["nextcloud_original_root_route_immutable"] {
++			return ErrJointSchemaUnknown
++		}
++		if err = verifyOriginalRootCatalogueInTx(d.ctx, tx, d.source, version, false); err != nil {
++			return err
++		}
++		for _, statement := range d.source.spec.CheckpointStatements {
++			if _, err = tx.ExecContext(d.ctx, statement); err != nil {
++				return ErrJointSchemaUnavailable
++			}
++		}
++		query := "INSERT INTO " + originalRootRouteTable + "(id,dialect,origin_version,source_sha256,catalogue_sha256,checkpoint_sha256) VALUES(1,?,?,?,?,?)"
++		if d.source.dialect == "versioned" {
++			query = "INSERT INTO " + originalRootRouteTable + "(id,dialect,origin_version,source_sha256,catalogue_sha256,checkpoint_sha256) VALUES(1,$1,$2,$3,$4,$5)"
++		}
++		result, err := tx.ExecContext(d.ctx, query, d.source.dialect, d.source.spec.OriginVersion, d.source.digest, d.source.originCatalogueDigest, d.source.spec.CheckpointSHA256)
++		if err != nil {
++			return ErrJointSchemaUnavailable
++		}
++		count, err := result.RowsAffected()
++		if err != nil || count != 1 {
++			return ErrJointSchemaUnknown
++		}
++	}
++	if err = verifyOriginalRootCatalogueInTx(d.ctx, tx, d.source, version, true); err != nil {
++		return err
++	}
++	if err = checkPeerSQLiteMigrationExclusion(d.ctx); err != nil {
++		return err
++	}
++	if err = tx.Commit(); err != nil {
++		return ErrJointSchemaUnavailable
++	}
++	return nil
 +}
 +
 +func (d *originalRootMigrationDriver) Lock() error {
-+ return d.write("tail_before_lock",d.lock)
++	return d.write("tail_before_lock", d.lock)
 +}
 +func (d *originalRootMigrationDriver) lock() error {
-+ if err := d.Driver.Lock(); err != nil { return err }
-+ if err := d.verify(d.version,false,true); err != nil { return errors.Join(err,d.Driver.Unlock()) }
-+ d.locked = true
-+ return nil
++	if err := d.Driver.Lock(); err != nil {
++		return err
++	}
++	if err := d.verify(d.version, false, true); err != nil {
++		return errors.Join(err, d.Driver.Unlock())
++	}
++	d.locked = true
++	return nil
 +}
 +func (d *originalRootMigrationDriver) Unlock() error {
-+ d.locked = false
-+ return d.Driver.Unlock()
++	d.locked = false
++	return d.Driver.Unlock()
 +}
-+func (d *originalRootMigrationDriver) SetVersion(version int,dirty bool) error {
-+ return d.write("tail_before_set_version",func()error{return d.setVersion(version,dirty)})
++func (d *originalRootMigrationDriver) SetVersion(version int, dirty bool) error {
++	return d.write("tail_before_set_version", func() error { return d.setVersion(version, dirty) })
 +}
-+func (d *originalRootMigrationDriver) setVersion(version int,dirty bool) error {
-+ if !d.locked || version < 0 { return ErrOriginalRootTailDowngrade }
-+ if dirty {
-+  next := uint(0)
-+  for _,module := range d.source.pending.modules { if module.Version > d.version { next = module.Version; break } }
-+  if uint(version) != next || next == 0 || d.target != 0 { return ErrOriginalRootTailDowngrade }
-+  if err := d.verify(d.version,false,false); err != nil { return err }
-+  if err := d.Driver.SetVersion(version,true); err != nil { return err }
-+  d.target,d.ran = uint(version),false
-+  return nil
-+ }
-+ if uint(version) != d.target || !d.ran { return ErrJointSchemaUnknown }
-+ // The new real schema must match before marking that actual version clean.
-+ if err := d.verify(d.target,true,false); err != nil { return err }
-+ if err := d.Driver.SetVersion(version,false); err != nil { return err }
-+ d.version,d.target,d.ran = uint(version),0,false
-+ return nil
++func (d *originalRootMigrationDriver) setVersion(version int, dirty bool) error {
++	if !d.locked || version < 0 {
++		return ErrOriginalRootTailDowngrade
++	}
++	if dirty {
++		next := uint(0)
++		for _, module := range d.source.pending.modules {
++			if module.Version > d.version {
++				next = module.Version
++				break
++			}
++		}
++		if uint(version) != next || next == 0 || d.target != 0 {
++			return ErrOriginalRootTailDowngrade
++		}
++		if err := d.verify(d.version, false, false); err != nil {
++			return err
++		}
++		if err := d.Driver.SetVersion(version, true); err != nil {
++			return err
++		}
++		d.target, d.ran = uint(version), false
++		return nil
++	}
++	if uint(version) != d.target || !d.ran {
++		return ErrJointSchemaUnknown
++	}
++	// The new real schema must match before marking that actual version clean.
++	if err := d.verify(d.target, true, false); err != nil {
++		return err
++	}
++	if err := d.Driver.SetVersion(version, false); err != nil {
++		return err
++	}
++	d.version, d.target, d.ran = uint(version), 0, false
++	return nil
 +}
 +func (d *originalRootMigrationDriver) Run(reader io.Reader) error {
-+ return d.write("tail_before_run",func()error{return d.run(reader)})
++	return d.write("tail_before_run", func() error { return d.run(reader) })
 +}
 +func (d *originalRootMigrationDriver) run(reader io.Reader) error {
-+ if !d.locked || d.target == 0 || d.ran { return ErrJointSchemaUnknown }
-+ raw,err := io.ReadAll(io.LimitReader(reader,(1<<20)+1))
-+ if err != nil || len(raw) > 1<<20 { return ErrJointSchemaSourceIdentity }
-+ wanted := ""
-+ for _,module := range d.source.pending.modules { if module.Version == d.target { wanted = module.UpSHA256 } }
-+ if wanted == "" || fmt.Sprintf("%x",sha256.Sum256(raw)) != wanted { return ErrJointSchemaSourceIdentity }
-+ if err = d.verify(d.version,true,false); err != nil { return err }
-+ // Keep each pinned driver's real SQL transaction/dirty semantics intact.
-+ if err = d.Driver.Run(bytes.NewReader(raw)); err != nil { return err }
-+ d.ran = true
-+ return nil
++	if !d.locked || d.target == 0 || d.ran {
++		return ErrJointSchemaUnknown
++	}
++	raw, err := io.ReadAll(io.LimitReader(reader, (1<<20)+1))
++	if err != nil || len(raw) > 1<<20 {
++		return ErrJointSchemaSourceIdentity
++	}
++	wanted := ""
++	for _, module := range d.source.pending.modules {
++		if module.Version == d.target {
++			wanted = module.UpSHA256
++		}
++	}
++	if wanted == "" || fmt.Sprintf("%x", sha256.Sum256(raw)) != wanted {
++		return ErrJointSchemaSourceIdentity
++	}
++	if err = d.verify(d.version, true, false); err != nil {
++		return err
++	}
++	// Keep each pinned driver's real SQL transaction/dirty semantics intact.
++	if err = d.Driver.Run(bytes.NewReader(raw)); err != nil {
++		return err
++	}
++	d.ran = true
++	return nil
 +}
-+func (d *originalRootMigrationDriver) write(phase string,run func()error)error{
-+ if d.sqliteUse!=nil{return d.sqliteUse.write(d.ctx,phase,run)}
-+ return run()
++func (d *originalRootMigrationDriver) write(phase string, run func() error) error {
++	if d.sqliteUse != nil {
++		return d.sqliteUse.write(d.ctx, phase, run)
++	}
++	return run()
 +}
 +func (d *originalRootMigrationDriver) Close() error {
-+ err:=errors.Join(d.Driver.Close(),d.db.Close())
-+ if d.releaseUse!=nil{d.releaseUse()}
-+ return err
++	err := errors.Join(d.Driver.Close(), d.db.Close())
++	if d.releaseUse != nil {
++		d.releaseUse()
++	}
++	return err
 +}
 +
-+func newOriginalRootMigrate(ctx context.Context,dsn string,opts MigrationOptions,source *jointOriginalRootSource,version uint) (*migrate.Migrate,error) {
-+ opts.jointReadOnly = false
-+ dialect:=jointLineageDialect(dsn,opts)
-+ var pool *sql.DB
-+ var use *originalRootSQLiteUse
-+ var releaseUse func()
-+ var err error
-+ if dialect=="sqlite"{
-+  use,err=originalRootSQLiteUseFromContext(ctx)
-+  if err!=nil{
-+   ctx,use,err=pinOriginalRootSQLiteUse(ctx)
-+   if err!=nil{return nil,err}
-+   releaseUse=use.release
-+  }
-+  pool,err=originalRootSQLiteWriterPool(ctx,use)
-+ }else{pool,_,err=openJointLineageDB(dsn,opts)}
-+ if err!=nil{if releaseUse!=nil{releaseUse()};return nil,err}
-+ var driver migratedatabase.Driver
-+ var actual originalRootTransactionBeginner = pool
-+ name := "sqlite3"
-+ if dialect == "sqlite" {
-+  err=use.write(ctx,"tail_before_initialization",func()error{
-+   if err:=source.recheck(ctx);err!=nil{return err}
-+   var err error;driver,err=sqlite3migrate.WithInstance(pool,&sqlite3migrate.Config{});return err
-+  }) } else {
-+  name = "postgres"
-+  var conn *sql.Conn
-+  conn,err = pool.Conn(ctx)
-+  if err == nil {
-+   actual = conn
-+   driver,err = postgresmigrate.WithConnection(ctx,conn,&postgresmigrate.Config{})
-+   if err != nil { err = errors.Join(err,conn.Close()) }
-+  }
-+ }
-+ if err != nil { closeErr:=pool.Close();if releaseUse!=nil{releaseUse()};return nil,errors.Join(ErrJointSchemaUnavailable,closeErr) }
-+ guarded := &originalRootMigrationDriver{Driver:driver,ctx:ctx,source:source,db:pool,actual:actual,version:version,sqliteUse:use,releaseUse:releaseUse}
-+ m,err := migrate.NewWithDatabaseInstance("file://"+source.root+"/"+source.spec.Directory,name,guarded)
-+ if err != nil { return nil,errors.Join(ErrJointSchemaSourceIdentity,guarded.Close()) }
-+ return m,nil
++func newOriginalRootMigrate(ctx context.Context, dsn string, opts MigrationOptions, source *jointOriginalRootSource, version uint) (*migrate.Migrate, error) {
++	opts.jointReadOnly = false
++	dialect := jointLineageDialect(dsn, opts)
++	var pool *sql.DB
++	var use *originalRootSQLiteUse
++	var releaseUse func()
++	var err error
++	if dialect == "sqlite" {
++		use, err = originalRootSQLiteUseFromContext(ctx)
++		if err != nil {
++			ctx, use, err = pinOriginalRootSQLiteUse(ctx)
++			if err != nil {
++				return nil, err
++			}
++			releaseUse = use.release
++		}
++		pool, err = originalRootSQLiteWriterPool(ctx, use)
++	} else {
++		pool, _, err = openJointLineageDB(dsn, opts)
++	}
++	if err != nil {
++		if releaseUse != nil {
++			releaseUse()
++		}
++		return nil, err
++	}
++	var driver migratedatabase.Driver
++	var actual originalRootTransactionBeginner = pool
++	name := "sqlite3"
++	if dialect == "sqlite" {
++		err = use.write(ctx, "tail_before_initialization", func() error {
++			if err := source.recheck(ctx); err != nil {
++				return err
++			}
++			var err error
++			driver, err = sqlite3migrate.WithInstance(pool, &sqlite3migrate.Config{})
++			return err
++		})
++	} else {
++		name = "postgres"
++		var conn *sql.Conn
++		conn, err = pool.Conn(ctx)
++		if err == nil {
++			actual = conn
++			driver, err = postgresmigrate.WithConnection(ctx, conn, &postgresmigrate.Config{})
++			if err != nil {
++				err = errors.Join(err, conn.Close())
++			}
++		}
++	}
++	if err != nil {
++		closeErr := pool.Close()
++		if releaseUse != nil {
++			releaseUse()
++		}
++		return nil, errors.Join(ErrJointSchemaUnavailable, closeErr)
++	}
++	guarded := &originalRootMigrationDriver{Driver: driver, ctx: ctx, source: source, db: pool, actual: actual, version: version, sqliteUse: use, releaseUse: releaseUse}
++	m, err := migrate.NewWithDatabaseInstance("file://"+source.root+"/"+source.spec.Directory, name, guarded)
++	if err != nil {
++		return nil, errors.Join(ErrJointSchemaSourceIdentity, guarded.Close())
++	}
++	return m, nil
 +}
 diff --git a/internal/database/migration_original_root_source.go b/internal/database/migration_original_root_source.go
 new file mode 100644
-index 000000000..de7bbe81a
+index 000000000..0f560351c
 --- /dev/null
 +++ b/internal/database/migration_original_root_source.go
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,211 @@
 +package database
 +
 +import (
-+ "context"
-+ "crypto/sha256"
-+ _ "embed"
-+ "encoding/json"
-+ "fmt"
-+ "os"
-+ "path/filepath"
-+ "reflect"
-+ "strings"
++	"context"
++	"crypto/sha256"
++	_ "embed"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
 +)
 +
 +//go:embed migration_original_root_sources.json
 +var jointOriginalRootSourceJSON []byte
 +
 +type jointOriginalRootSourceFile struct {
-+ Path, OriginalPath, SHA256, Direction string
-+ Version uint
++	Path, OriginalPath, SHA256, Direction string
++	Version                               uint
 +}
-+type jointOriginalRootCanonicalFile struct { Path, SHA256 string }
++type jointOriginalRootCanonicalFile struct{ Path, SHA256 string }
 +type jointOriginalRootSourceSpec struct {
-+ OriginVersion, FinalVersion uint
-+ Directory, CheckpointPath, CheckpointSHA256 string
-+ Files []jointOriginalRootSourceFile
-+ CanonicalFiles []jointOriginalRootCanonicalFile
-+ CheckpointStatements []string
++	OriginVersion, FinalVersion                 uint
++	Directory, CheckpointPath, CheckpointSHA256 string
++	Files                                       []jointOriginalRootSourceFile
++	CanonicalFiles                              []jointOriginalRootCanonicalFile
++	CheckpointStatements                        []string
 +}
 +type jointOriginalRootSourceManifest struct {
-+ Format, Activation, PeerAppend, PG169 string
-+ Routes map[string]jointOriginalRootSourceSpec
++	Format, Activation, PeerAppend, PG169 string
++	Routes                                map[string]jointOriginalRootSourceSpec
 +}
 +type jointOriginalRootSource struct {
-+ root, dialect, digest, originCatalogueDigest string
-+ spec jointOriginalRootSourceSpec
-+ pending *jointOriginalPendingTailSourceAdmission
-+ checkpoint jointCatalogueModule
++	root, dialect, digest, originCatalogueDigest string
++	spec                                         jointOriginalRootSourceSpec
++	pending                                      *jointOriginalPendingTailSourceAdmission
++	checkpoint                                   jointCatalogueModule
 +}
 +
 +// This independently named source contains the authentic last Root version
 +// plus unchanged pending payloads. It cannot bootstrap from an arbitrary
 +// ledger: only the explicit entry first establishes the genuine old Root.
 +func admitJointOriginalRootSource(ctx context.Context, root, dialect string) (*jointOriginalRootSource, error) {
-+ pending, err := admitJointOriginalPendingTailSources(ctx, root, dialect)
-+ if err != nil { return nil, err }
-+ var manifest jointOriginalRootSourceManifest
-+ if json.Unmarshal(jointOriginalRootSourceJSON, &manifest) != nil || manifest.Format != "joint-original-root-route-v1" || manifest.Activation != "explicit_root_only_entry" || manifest.PeerAppend != "refused_no_common_append_contract" || manifest.PG169 != "pending_not_executed_or_implied" || len(manifest.Routes) != 2 { return nil, ErrJointSchemaSourceIdentity }
-+ spec, ok := manifest.Routes[dialect]
-+ origin, final := uint(87), uint(93)
-+ if dialect == "versioned" { origin, final = 168, 172 }
-+ if !ok || spec.OriginVersion != origin || spec.FinalVersion != final || spec.Directory != "migrations/original-root/"+dialect || spec.CheckpointPath != "migrations/original-root/checkpoint/"+dialect+".sql" || len(spec.Files) != 2+len(pending.modules)*2 || len(spec.CanonicalFiles) == 0 { return nil, ErrJointSchemaSourceIdentity }
-+ knownCanonical := map[string]bool{}
-+ for _, file := range spec.CanonicalFiles {
-+  if filepath.Dir(file.Path) != "migrations/"+dialect || !strings.HasSuffix(file.Path,".sql") || knownCanonical[file.Path] { return nil, ErrJointSchemaSourceIdentity }
-+  if _, err = originalPendingTailFile(root, file.Path, file.SHA256); err != nil { return nil, err }
-+  knownCanonical[file.Path] = true
-+ }
-+ entries, err := os.ReadDir(filepath.Join(root,"migrations",dialect))
-+ if err != nil { return nil, ErrJointSchemaSourceIdentity }
-+ for _, entry := range entries {
-+  if strings.HasSuffix(entry.Name(),".sql") && !knownCanonical["migrations/"+dialect+"/"+entry.Name()] { return nil, ErrJointSchemaSourceIdentity }
-+ }
-+ if len(entries) != len(knownCanonical) { return nil, ErrJointSchemaSourceIdentity }
-+ files := map[string]bool{}
-+ for _, file := range spec.Files {
-+  if filepath.Dir(file.Path) != spec.Directory || file.Path != spec.Directory+"/"+filepath.Base(file.OriginalPath) || files[file.Path] || (file.Direction != "up" && file.Direction != "down") || !strings.HasSuffix(file.Path,"."+file.Direction+".sql") { return nil, ErrJointSchemaSourceIdentity }
-+  matches := 0
-+  if file.Version == origin && knownCanonical[file.OriginalPath] {
-+   for _, old := range spec.CanonicalFiles { if old.Path == file.OriginalPath && old.SHA256 == file.SHA256 { matches++ } }
-+  } else {
-+   for _, module := range pending.modules {
-+    if file.Version == module.Version && ((file.Direction == "up" && file.OriginalPath == module.UpPath && file.SHA256 == module.UpSHA256) || (file.Direction == "down" && file.OriginalPath == module.DownPath && file.SHA256 == module.DownSHA256)) { matches++ }
-+   }
-+  }
-+  if matches != 1 { return nil, ErrJointSchemaSourceIdentity }
-+  copied, err := originalPendingTailFile(root,file.Path,file.SHA256)
-+  if err != nil { return nil, err }
-+  original, err := originalPendingTailFile(root,file.OriginalPath,file.SHA256)
-+  if err != nil || string(copied) != string(original) { return nil, ErrJointSchemaSourceIdentity }
-+  files[file.Path] = true
-+ }
-+ entries, err = os.ReadDir(filepath.Join(root,spec.Directory))
-+ if err != nil || len(entries) != len(files) { return nil, ErrJointSchemaSourceIdentity }
-+ for _, entry := range entries { if entry.IsDir() || !files[spec.Directory+"/"+entry.Name()] { return nil, ErrJointSchemaSourceIdentity } }
-+ checkpointFiles,err := os.ReadDir(filepath.Join(root,"migrations/original-root/checkpoint"))
-+ if err != nil || len(checkpointFiles) != 2 { return nil,ErrJointSchemaSourceIdentity }
-+ for _,file := range checkpointFiles { if file.IsDir() || (file.Name() != "sqlite.sql" && file.Name() != "versioned.sql") { return nil,ErrJointSchemaSourceIdentity } }
-+ raw, err := originalPendingTailFile(root,spec.CheckpointPath,spec.CheckpointSHA256)
-+ if err != nil { return nil, err }
-+ statements, err := jointOriginalPendingTailStatements(string(raw))
-+ if err != nil || !reflect.DeepEqual(statements,spec.CheckpointStatements) { return nil, ErrJointSchemaSourceIdentity }
-+ checkpoint, effects, err := projectJointOriginalPendingTailModule(jointOriginalPendingTailModule{}, statements)
-+ if err != nil || len(effects) != 0 || len(checkpoint.Tables) != 1 || checkpoint.Tables["nextcloud_original_root_route_origin"] == "" { return nil, ErrJointSchemaSourceIdentity }
-+ expected, err := jointExpectedCatalogue(dialect,origin)
-+ if err != nil { return nil, err }
-+ rawExpected, err := json.Marshal(expected)
-+ if err != nil { return nil, ErrJointSchemaSourceIdentity }
-+ out := &jointOriginalRootSource{root:root,dialect:dialect,digest:fmt.Sprintf("%x",sha256.Sum256(jointOriginalRootSourceJSON)),originCatalogueDigest:fmt.Sprintf("%x",sha256.Sum256(rawExpected)),spec:spec,pending:pending,checkpoint:checkpoint}
-+ return out, ctx.Err()
++	pending, err := admitJointOriginalPendingTailSources(ctx, root, dialect)
++	if err != nil {
++		return nil, err
++	}
++	var manifest jointOriginalRootSourceManifest
++	if json.Unmarshal(jointOriginalRootSourceJSON, &manifest) != nil || manifest.Format != "joint-original-root-route-v1" || manifest.Activation != "explicit_root_only_entry" || manifest.PeerAppend != "refused_no_common_append_contract" || manifest.PG169 != "pending_not_executed_or_implied" || len(manifest.Routes) != 2 {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	spec, ok := manifest.Routes[dialect]
++	origin, final := uint(87), uint(93)
++	if dialect == "versioned" {
++		origin, final = 168, 172
++	}
++	if !ok || spec.OriginVersion != origin || spec.FinalVersion != final || spec.Directory != "migrations/original-root/"+dialect || spec.CheckpointPath != "migrations/original-root/checkpoint/"+dialect+".sql" || len(spec.Files) != 2+len(pending.modules)*2 || len(spec.CanonicalFiles) == 0 {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	knownCanonical := map[string]bool{}
++	for _, file := range spec.CanonicalFiles {
++		if filepath.Dir(file.Path) != "migrations/"+dialect || !strings.HasSuffix(file.Path, ".sql") || knownCanonical[file.Path] {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		if _, err = originalPendingTailFile(root, file.Path, file.SHA256); err != nil {
++			return nil, err
++		}
++		knownCanonical[file.Path] = true
++	}
++	entries, err := os.ReadDir(filepath.Join(root, "migrations", dialect))
++	if err != nil {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	for _, entry := range entries {
++		if strings.HasSuffix(entry.Name(), ".sql") && !knownCanonical["migrations/"+dialect+"/"+entry.Name()] {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++	}
++	if len(entries) != len(knownCanonical) {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	files := map[string]bool{}
++	for _, file := range spec.Files {
++		if filepath.Dir(file.Path) != spec.Directory || file.Path != spec.Directory+"/"+filepath.Base(file.OriginalPath) || files[file.Path] || (file.Direction != "up" && file.Direction != "down") || !strings.HasSuffix(file.Path, "."+file.Direction+".sql") {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		matches := 0
++		if file.Version == origin && knownCanonical[file.OriginalPath] {
++			for _, old := range spec.CanonicalFiles {
++				if old.Path == file.OriginalPath && old.SHA256 == file.SHA256 {
++					matches++
++				}
++			}
++		} else {
++			for _, module := range pending.modules {
++				if file.Version == module.Version && ((file.Direction == "up" && file.OriginalPath == module.UpPath && file.SHA256 == module.UpSHA256) || (file.Direction == "down" && file.OriginalPath == module.DownPath && file.SHA256 == module.DownSHA256)) {
++					matches++
++				}
++			}
++		}
++		if matches != 1 {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		copied, err := originalPendingTailFile(root, file.Path, file.SHA256)
++		if err != nil {
++			return nil, err
++		}
++		original, err := originalPendingTailFile(root, file.OriginalPath, file.SHA256)
++		if err != nil || string(copied) != string(original) {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++		files[file.Path] = true
++	}
++	entries, err = os.ReadDir(filepath.Join(root, spec.Directory))
++	if err != nil || len(entries) != len(files) {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	for _, entry := range entries {
++		if entry.IsDir() || !files[spec.Directory+"/"+entry.Name()] {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++	}
++	checkpointFiles, err := os.ReadDir(filepath.Join(root, "migrations/original-root/checkpoint"))
++	if err != nil || len(checkpointFiles) != 2 {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	for _, file := range checkpointFiles {
++		if file.IsDir() || (file.Name() != "sqlite.sql" && file.Name() != "versioned.sql") {
++			return nil, ErrJointSchemaSourceIdentity
++		}
++	}
++	raw, err := originalPendingTailFile(root, spec.CheckpointPath, spec.CheckpointSHA256)
++	if err != nil {
++		return nil, err
++	}
++	statements, err := jointOriginalPendingTailStatements(string(raw))
++	if err != nil || !reflect.DeepEqual(statements, spec.CheckpointStatements) {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	checkpoint, effects, err := projectJointOriginalPendingTailModule(jointOriginalPendingTailModule{}, statements)
++	if err != nil || len(effects) != 0 || len(checkpoint.Tables) != 1 || checkpoint.Tables["nextcloud_original_root_route_origin"] == "" {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	expected, err := jointExpectedCatalogue(dialect, origin)
++	if err != nil {
++		return nil, err
++	}
++	rawExpected, err := json.Marshal(expected)
++	if err != nil {
++		return nil, ErrJointSchemaSourceIdentity
++	}
++	out := &jointOriginalRootSource{root: root, dialect: dialect, digest: fmt.Sprintf("%x", sha256.Sum256(jointOriginalRootSourceJSON)), originCatalogueDigest: fmt.Sprintf("%x", sha256.Sum256(rawExpected)), spec: spec, pending: pending, checkpoint: checkpoint}
++	return out, ctx.Err()
 +}
 +func (s *jointOriginalRootSource) recheck(ctx context.Context) error {
-+ if s == nil { return ErrJointSchemaSourceIdentity }
-+ current, err := admitJointOriginalRootSource(ctx,s.root,s.dialect)
-+ if err != nil { return err }
-+ if current.digest != s.digest || current.originCatalogueDigest != s.originCatalogueDigest || !reflect.DeepEqual(current.spec,s.spec) { return ErrJointSchemaSourceIdentity }
-+ return ctx.Err()
++	if s == nil {
++		return ErrJointSchemaSourceIdentity
++	}
++	current, err := admitJointOriginalRootSource(ctx, s.root, s.dialect)
++	if err != nil {
++		return err
++	}
++	if current.digest != s.digest || current.originCatalogueDigest != s.originCatalogueDigest || !reflect.DeepEqual(current.spec, s.spec) {
++		return ErrJointSchemaSourceIdentity
++	}
++	return ctx.Err()
 +}
 +func (s *jointOriginalRootSource) knownVersion(version uint) bool {
-+ if s == nil { return false }
-+ if version == s.spec.OriginVersion { return true }
-+ for _, module := range s.pending.modules { if version == module.Version { return true } }
-+ return false
++	if s == nil {
++		return false
++	}
++	if version == s.spec.OriginVersion {
++		return true
++	}
++	for _, module := range s.pending.modules {
++		if version == module.Version {
++			return true
++		}
++	}
++	return false
 +}
-+func (s *jointOriginalRootSource) expected(version uint, checkpoint bool) (jointCatalogueExpected,error) {
-+ if !s.knownVersion(version) { return jointCatalogueExpected{}, ErrJointSchemaUnknown }
-+ expected, err := jointExpectedCatalogue(s.dialect,s.spec.OriginVersion)
-+ if err != nil { return expected,err }
-+ // Exact descriptors supplement the old 35, never replace their identities.
-+ for table, descriptor := range s.pending.descriptors { expected.BodyDescriptors[table] = descriptor }
-+ if len(expected.BodyDescriptors) != 42 { return expected,ErrJointSchemaSourceIdentity }
-+ for _, module := range s.pending.modules {
-+  if module.Version <= version { if err = applyJointPeerForwardModule(expected,module.Catalogue); err != nil { return expected,err } }
-+ }
-+ if checkpoint { if err = applyJointPeerForwardModule(expected,s.checkpoint); err != nil { return expected,err } }
-+ return expected,nil
++func (s *jointOriginalRootSource) expected(version uint, checkpoint bool) (jointCatalogueExpected, error) {
++	if !s.knownVersion(version) {
++		return jointCatalogueExpected{}, ErrJointSchemaUnknown
++	}
++	expected, err := jointExpectedCatalogue(s.dialect, s.spec.OriginVersion)
++	if err != nil {
++		return expected, err
++	}
++	// Exact descriptors supplement the old 35, never replace their identities.
++	for table, descriptor := range s.pending.descriptors {
++		expected.BodyDescriptors[table] = descriptor
++	}
++	if len(expected.BodyDescriptors) != 42 {
++		return expected, ErrJointSchemaSourceIdentity
++	}
++	for _, module := range s.pending.modules {
++		if module.Version <= version {
++			if err = applyJointPeerForwardModule(expected, module.Catalogue); err != nil {
++				return expected, err
++			}
++		}
++	}
++	if checkpoint {
++		if err = applyJointPeerForwardModule(expected, s.checkpoint); err != nil {
++			return expected, err
++		}
++	}
++	return expected, nil
 +}
 diff --git a/internal/database/migration_original_root_source_test.go b/internal/database/migration_original_root_source_test.go
 new file mode 100644
-index 000000000..3777fe7b8
+index 000000000..e6729860a
 --- /dev/null
 +++ b/internal/database/migration_original_root_source_test.go
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,91 @@
 +package database
 +
 +import (
-+ "context"
-+ "encoding/json"
-+ "os"
-+ "path/filepath"
-+ "testing"
++	"context"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
 +
-+ "github.com/stretchr/testify/require"
++	"github.com/stretchr/testify/require"
 +)
 +
-+func originalRootSourceFixture(t *testing.T,dialect string) string {
-+ t.Helper()
-+ root,_ := originalPendingTailSourceFixture(t,dialect)
-+ actual := sqliteRepoRoot(t)
-+ var manifest jointOriginalRootSourceManifest
-+ require.NoError(t,json.Unmarshal(jointOriginalRootSourceJSON,&manifest))
-+ spec := manifest.Routes[dialect]
-+ copyFile := func(name string) {
-+  data,err := os.ReadFile(filepath.Join(actual,name)); require.NoError(t,err)
-+  path := filepath.Join(root,name)
-+  require.NoError(t,os.MkdirAll(filepath.Dir(path),0700))
-+  require.NoError(t,os.WriteFile(path,data,0600))
-+ }
-+ for _,file := range spec.CanonicalFiles { copyFile(file.Path) }
-+ for _,file := range spec.Files { copyFile(file.Path) }
-+ copyFile("migrations/original-root/checkpoint/sqlite.sql")
-+ copyFile("migrations/original-root/checkpoint/versioned.sql")
-+ return root
++func originalRootSourceFixture(t *testing.T, dialect string) string {
++	t.Helper()
++	root, _ := originalPendingTailSourceFixture(t, dialect)
++	actual := sqliteRepoRoot(t)
++	var manifest jointOriginalRootSourceManifest
++	require.NoError(t, json.Unmarshal(jointOriginalRootSourceJSON, &manifest))
++	spec := manifest.Routes[dialect]
++	copyFile := func(name string) {
++		data, err := os.ReadFile(filepath.Join(actual, name))
++		require.NoError(t, err)
++		path := filepath.Join(root, name)
++		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
++		require.NoError(t, os.WriteFile(path, data, 0600))
++	}
++	for _, file := range spec.CanonicalFiles {
++		copyFile(file.Path)
++	}
++	for _, file := range spec.Files {
++		copyFile(file.Path)
++	}
++	copyFile("migrations/original-root/checkpoint/sqlite.sql")
++	copyFile("migrations/original-root/checkpoint/versioned.sql")
++	return root
 +}
 +func TestOriginalRootTailSourceQualification(t *testing.T) {
-+ for _,dialect := range []string{"sqlite","versioned"} {
-+  t.Run(dialect,func(t *testing.T){
-+   for _,mode := range []string{"exact_copied_route_and_42_descriptors","historical_down_changed","copied_up_changed","extra_route_file","checkpoint_changed","cancelled"} {
-+    t.Run(mode,func(t *testing.T){
-+     root := originalRootSourceFixture(t,dialect)
-+     var manifest jointOriginalRootSourceManifest
-+     require.NoError(t,json.Unmarshal(jointOriginalRootSourceJSON,&manifest))
-+     spec := manifest.Routes[dialect]
-+     change := func(name string){ path:=filepath.Join(root,name); data,err:=os.ReadFile(path);require.NoError(t,err);require.NoError(t,os.WriteFile(path,append(data,[]byte("\n-- actual source mutation\n")...),0600)) }
-+     ctx,cancel:=context.WithCancel(context.Background());defer cancel()
-+     switch mode {
-+     case "historical_down_changed":
-+      for _,file := range spec.CanonicalFiles { if filepath.Ext(file.Path)==".sql" && len(file.Path)>9 && file.Path[len(file.Path)-9:]==".down.sql" { change(file.Path);break } }
-+     case "copied_up_changed": change(spec.Files[len(spec.Files)-2].Path)
-+     case "extra_route_file": require.NoError(t,os.WriteFile(filepath.Join(root,spec.Directory,"000999_unknown.up.sql"),[]byte("SELECT 1;"),0600))
-+     case "checkpoint_changed": change(spec.CheckpointPath)
-+     case "cancelled": cancel()
-+     }
-+     source,err:=admitJointOriginalRootSource(ctx,root,dialect)
-+     if mode!="exact_copied_route_and_42_descriptors" {require.Error(t,err);require.Nil(t,source);return}
-+     require.NoError(t,err)
-+     expected,err:=source.expected(spec.FinalVersion,true);require.NoError(t,err)
-+     require.Len(t,expected.BodyDescriptors,42)
-+     require.NotEmpty(t,expected.Tables[originalRootRouteTable])
-+     require.NoError(t,source.recheck(ctx))
-+     require.False(t,source.knownVersion(92),"absence92 has no adopted root payload")
-+     if dialect=="versioned" {require.False(t,source.knownVersion(169),"172 never implies execution of169")}
-+    })
-+   }
-+  })
-+ }
++	for _, dialect := range []string{"sqlite", "versioned"} {
++		t.Run(dialect, func(t *testing.T) {
++			for _, mode := range []string{"exact_copied_route_and_42_descriptors", "historical_down_changed", "copied_up_changed", "extra_route_file", "checkpoint_changed", "cancelled"} {
++				t.Run(mode, func(t *testing.T) {
++					root := originalRootSourceFixture(t, dialect)
++					var manifest jointOriginalRootSourceManifest
++					require.NoError(t, json.Unmarshal(jointOriginalRootSourceJSON, &manifest))
++					spec := manifest.Routes[dialect]
++					change := func(name string) {
++						path := filepath.Join(root, name)
++						data, err := os.ReadFile(path)
++						require.NoError(t, err)
++						require.NoError(t, os.WriteFile(path, append(data, []byte("\n-- actual source mutation\n")...), 0600))
++					}
++					ctx, cancel := context.WithCancel(context.Background())
++					defer cancel()
++					switch mode {
++					case "historical_down_changed":
++						for _, file := range spec.CanonicalFiles {
++							if filepath.Ext(file.Path) == ".sql" && len(file.Path) > 9 && file.Path[len(file.Path)-9:] == ".down.sql" {
++								change(file.Path)
++								break
++							}
++						}
++					case "copied_up_changed":
++						change(spec.Files[len(spec.Files)-2].Path)
++					case "extra_route_file":
++						require.NoError(t, os.WriteFile(filepath.Join(root, spec.Directory, "000999_unknown.up.sql"), []byte("SELECT 1;"), 0600))
++					case "checkpoint_changed":
++						change(spec.CheckpointPath)
++					case "cancelled":
++						cancel()
++					}
++					source, err := admitJointOriginalRootSource(ctx, root, dialect)
++					if mode != "exact_copied_route_and_42_descriptors" {
++						require.Error(t, err)
++						require.Nil(t, source)
++						return
++					}
++					require.NoError(t, err)
++					expected, err := source.expected(spec.FinalVersion, true)
++					require.NoError(t, err)
++					require.Len(t, expected.BodyDescriptors, 42)
++					require.NotEmpty(t, expected.Tables[originalRootRouteTable])
++					require.NoError(t, source.recheck(ctx))
++					require.False(t, source.knownVersion(92), "absence92 has no adopted root payload")
++					if dialect == "versioned" {
++						require.False(t, source.knownVersion(169), "172 never implies execution of169")
++					}
++				})
++			}
++		})
++	}
 +}
 diff --git a/internal/database/migration_original_root_sources.json b/internal/database/migration_original_root_sources.json
 new file mode 100644
@@ -3290,480 +3863,741 @@ index 000000000..dd4fed381
 +}
 diff --git a/internal/database/migration_original_root_sql_actual_test.go b/internal/database/migration_original_root_sql_actual_test.go
 new file mode 100644
-index 000000000..dcfee69ff
+index 000000000..881a8e076
 --- /dev/null
 +++ b/internal/database/migration_original_root_sql_actual_test.go
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,210 @@
 +package database
 +
 +import (
-+ "context"
-+ "database/sql"
-+ "encoding/json"
-+ "os"
-+ "path/filepath"
-+ "strings"
-+ "testing"
++	"context"
++	"database/sql"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
 +
-+ "github.com/Tencent/WeKnora/internal/application/repository"
-+ "github.com/golang-migrate/migrate/v4"
-+ "github.com/lib/pq"
-+ "github.com/stretchr/testify/require"
-+ "gorm.io/driver/postgres"
-+ "gorm.io/driver/sqlite"
-+ "gorm.io/gorm"
-+ gormlogger "gorm.io/gorm/logger"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/golang-migrate/migrate/v4"
++	"github.com/lib/pq"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	gormlogger "gorm.io/gorm/logger"
 +)
 +
-+func originalRootActualInstallWrappers(t *testing.T,db *sql.DB,pg bool) {
-+ t.Helper()
-+ var dialector gorm.Dialector = sqlite.New(sqlite.Config{Conn:db})
-+ if pg {
-+  require.IsType(t,&pq.Driver{},db.Driver())
-+  dialector=postgres.New(postgres.Config{DriverName:"postgres",Conn:db})
-+ }
-+ actual,err:=gorm.Open(dialector,&gorm.Config{Logger:gormlogger.Discard,DisableAutomaticPing:true})
-+ require.NoError(t,err)
-+ require.NoError(t,repository.InstallOriginalBodyRetentionTriggers(actual),"only the true production42-descriptor installer creates wrappers")
++func originalRootActualInstallWrappers(t *testing.T, db *sql.DB, pg bool) {
++	t.Helper()
++	var dialector gorm.Dialector = sqlite.New(sqlite.Config{Conn: db})
++	if pg {
++		require.IsType(t, &pq.Driver{}, db.Driver())
++		dialector = postgres.New(postgres.Config{DriverName: "postgres", Conn: db})
++	}
++	actual, err := gorm.Open(dialector, &gorm.Config{Logger: gormlogger.Discard, DisableAutomaticPing: true})
++	require.NoError(t, err)
++	require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(actual), "only the true production42-descriptor installer creates wrappers")
 +}
-+func originalRootActualPeerTail(t *testing.T,root,dialect,dsn string,opts MigrationOptions,final uint,appendPending bool) {
-+ t.Helper()
-+ directory:=peerPrefixCopiedAssets(t,root,dialect)
-+ m:=peerPrefixActualDriver(t,directory,dialect,dsn,opts)
-+ require.NoError(t,m.Migrate(final),"authentic historical/forward SQL, no ledger rewrite")
-+ se,de:=m.Close();require.NoError(t,se);require.NoError(t,de)
-+ if !appendPending {return}
-+ var manifest jointOriginalRootSourceManifest
-+ // The actual payload is shared data schema, never shared migration origin.
-+ require.NoError(t,json.Unmarshal(jointOriginalRootSourceJSON,&manifest))
-+ for _,file:=range manifest.Routes[dialect].Files {
-+  if file.Version==manifest.Routes[dialect].OriginVersion {continue}
-+  raw,err:=os.ReadFile(filepath.Join(root,file.OriginalPath));require.NoError(t,err)
-+  require.NoError(t,os.WriteFile(filepath.Join(directory,"migrations","peer-forward",dialect,filepath.Base(file.Path)),raw,0600))
-+ }
-+ m=peerPrefixActualDriver(t,directory,dialect,dsn,opts)
-+ require.NoError(t,m.Up(),"real peer-origin shared payload executes with an honest physical ledger")
-+ se,de=m.Close();require.NoError(t,se);require.NoError(t,de)
++func originalRootActualPeerTail(t *testing.T, root, dialect, dsn string, opts MigrationOptions, final uint, appendPending bool) {
++	t.Helper()
++	directory := peerPrefixCopiedAssets(t, root, dialect)
++	m := peerPrefixActualDriver(t, directory, dialect, dsn, opts)
++	require.NoError(t, m.Migrate(final), "authentic historical/forward SQL, no ledger rewrite")
++	se, de := m.Close()
++	require.NoError(t, se)
++	require.NoError(t, de)
++	if !appendPending {
++		return
++	}
++	var manifest jointOriginalRootSourceManifest
++	// The actual payload is shared data schema, never shared migration origin.
++	require.NoError(t, json.Unmarshal(jointOriginalRootSourceJSON, &manifest))
++	for _, file := range manifest.Routes[dialect].Files {
++		if file.Version == manifest.Routes[dialect].OriginVersion {
++			continue
++		}
++		raw, err := os.ReadFile(filepath.Join(root, file.OriginalPath))
++		require.NoError(t, err)
++		require.NoError(t, os.WriteFile(filepath.Join(directory, "migrations", "peer-forward", dialect, filepath.Base(file.Path)), raw, 0600))
++	}
++	m = peerPrefixActualDriver(t, directory, dialect, dsn, opts)
++	require.NoError(t, m.Up(), "real peer-origin shared payload executes with an honest physical ledger")
++	se, de = m.Close()
++	require.NoError(t, se)
++	require.NoError(t, de)
 +}
-+func runOriginalRootTailActual(t *testing.T,pg bool) {
-+ for _,mode:=range []string{"fresh_actual_root_to_tail","real_root_memory_prefix_upgrade","nonempty_root_restart","issued_42_body_wrappers_restart","peer_final_refused","peer_same_number_tail_refused","dirty_tail_no_force","missing_checkpoint_refused","changed_checkpoint_refused","changed_source_before_driver","down_refused_before_ledger"} {
-+  t.Run(mode,func(t *testing.T){
-+   root:=sqliteRepoRoot(t)
-+   dialect,origin,final,peerFinal:="sqlite",uint(87),uint(93),uint(89)
-+   if pg {dialect,origin,final,peerFinal="versioned",168,172,171}
-+   db,dsn,opts:=jointLineageFixture(t,pg)
-+   chdirAndRestore(t,root)
-+   ctx:=context.Background()
-+   if mode=="peer_final_refused" || mode=="peer_same_number_tail_refused" {
-+    originalRootActualPeerTail(t,root,dialect,dsn,opts,peerFinal,mode=="peer_same_number_tail_refused")
-+    before:=memoryFullSchemaSnapshot(t,db,dialect)
-+    version,dirty:=jointLineageMigrationState(t,db);require.False(t,dirty)
-+    err:=RunOriginalKnowledgeMigrations(ctx,dsn,opts);require.Error(t,err)
-+    require.Equal(t,before,memoryFullSchemaSnapshot(t,db,dialect))
-+    after,afterDirty:=jointLineageMigrationState(t,db);require.Equal(t,version,after);require.False(t,afterDirty)
-+    require.Error(t,VerifyOriginalKnowledgeSchemaReadyOnDB(ctx,db,dialect))
-+    return
-+   }
-+   if mode=="real_root_memory_prefix_upgrade" {
-+    prefix:=uint(75);if pg {prefix=156}
-+    if pg {
-+     setup,err:=migrate.New("file://"+filepath.Join(root,"migrations",dialect),dsn);require.NoError(t,err)
-+     require.NoError(t,setup.Migrate(prefix));se,de:=setup.Close();require.NoError(t,se);require.NoError(t,de)
-+    } else {installSQLiteMigrationPrefixFixture(t,root,opts.SQLiteDBPath,prefix)}
-+    version,dirty:=jointLineageMigrationState(t,db);require.Equal(t,prefix,version);require.False(t,dirty)
-+   }
-+   if mode!="fresh_actual_root_to_tail" && mode!="real_root_memory_prefix_upgrade" {
-+    require.NoError(t,RunMigrationsWithContext(ctx,dsn,opts))
-+    version,dirty:=jointLineageMigrationState(t,db);require.Equal(t,origin,version);require.False(t,dirty)
-+    if mode=="nonempty_root_restart" {
-+     _,err:=db.Exec("INSERT INTO tenants(name,business) VALUES('actual root tenant','root-route-business')");require.NoError(t,err)
-+    }
-+   }
-+   if mode=="changed_source_before_driver" {
-+    copyRoot:=originalRootSourceFixture(t,dialect)
-+    source,err:=admitJointOriginalRootSource(ctx,copyRoot,dialect);require.NoError(t,err)
-+    path:=filepath.Join(copyRoot,source.spec.Files[len(source.spec.Files)-2].Path)
-+    raw,err:=os.ReadFile(path);require.NoError(t,err)
-+    require.NoError(t,os.WriteFile(path,append(raw,[]byte("\n-- changed before real driver\n")...),0600))
-+    before:=memoryFullSchemaSnapshot(t,db,dialect)
-+    chdirAndRestore(t,copyRoot)
-+    require.ErrorIs(t,RunOriginalKnowledgeMigrations(ctx,dsn,opts),ErrJointSchemaSourceIdentity)
-+    require.Equal(t,before,memoryFullSchemaSnapshot(t,db,dialect));return
-+   }
-+   require.NoError(t,RunOriginalKnowledgeMigrations(ctx,dsn,opts),"genuine explicit startup must execute the full Root path")
-+   version,dirty:=jointLineageMigrationState(t,db);require.Equal(t,final,version);require.False(t,dirty)
-+   var markers int
-+   require.NoError(t,db.QueryRow("SELECT count(*) FROM "+originalRootRouteTable).Scan(&markers));require.Equal(t,1,markers)
-+   if mode=="issued_42_body_wrappers_restart" {originalRootActualInstallWrappers(t,db,pg)}
-+   require.NoError(t,VerifyOriginalKnowledgeSchemaReady(ctx,dsn,opts))
-+   require.NoError(t,VerifyOriginalKnowledgeSchemaReadyOnDB(ctx,db,dialect))
-+   if mode=="nonempty_root_restart" {
-+    var preserved int;require.NoError(t,db.QueryRow("SELECT count(*) FROM tenants WHERE name='actual root tenant' AND business='root-route-business'").Scan(&preserved));require.Equal(t,1,preserved)
-+   }
-+   if mode=="dirty_tail_no_force" {
-+    _,err:=db.Exec("UPDATE schema_migrations SET dirty=true");require.NoError(t,err)
-+    before:=memoryFullSchemaSnapshot(t,db,dialect)
-+    require.ErrorIs(t,RunOriginalKnowledgeMigrations(ctx,dsn,opts),ErrJointSchemaAmbiguousDirty)
-+    require.Equal(t,before,memoryFullSchemaSnapshot(t,db,dialect))
-+    _,dirty=jointLineageMigrationState(t,db);require.True(t,dirty);return
-+   }
-+   if mode=="missing_checkpoint_refused" {
-+    _,err:=db.Exec("DROP TABLE "+originalRootRouteTable);require.NoError(t,err)
-+   }
-+   if mode=="changed_checkpoint_refused" {
-+    _,err:=db.Exec("UPDATE "+originalRootRouteTable+" SET source_sha256='"+strings.Repeat("0",64)+"'");require.Error(t,err,"real immutable guard refuses normal UPDATE")
-+    statement:="DROP TRIGGER nextcloud_original_root_route_immutable_update"
-+    if pg {statement+=" ON "+originalRootRouteTable}
-+    _,err=db.Exec(statement);require.NoError(t,err)
-+    _,err=db.Exec("UPDATE "+originalRootRouteTable+" SET source_sha256='"+strings.Repeat("0",64)+"'");require.NoError(t,err)
-+   }
-+   if mode=="missing_checkpoint_refused" || mode=="changed_checkpoint_refused" {
-+    before:=memoryFullSchemaSnapshot(t,db,dialect)
-+    require.Error(t,VerifyOriginalKnowledgeSchemaReadyOnDB(ctx,db,dialect))
-+    require.Error(t,RunOriginalKnowledgeMigrations(ctx,dsn,opts),"same-number tail cannot rebootstrap its missing/tampered Root origin")
-+    require.Equal(t,before,memoryFullSchemaSnapshot(t,db,dialect));return
-+   }
-+   if mode=="down_refused_before_ledger" {
-+    source,err:=admitJointOriginalRootSource(ctx,root,dialect);require.NoError(t,err)
-+    actualCtx:=ctx
-+    if !pg {
-+     held,err:=acquirePeerSQLiteMigrationExclusion(ctx,dsn,opts);require.NoError(t,err)
-+     defer func(){require.NoError(t,held.Close())}()
-+     actualCtx=context.WithValue(ctx,jointPeerSQLiteMigrationContextKey{},held);opts.SQLiteDBPath=held.resolvedPath
-+    }
-+    m,err:=newOriginalRootMigrate(actualCtx,dsn,opts,source,final);require.NoError(t,err)
-+    before:=memoryFullSchemaSnapshot(t,db,dialect)
-+    require.ErrorIs(t,m.Steps(-1),ErrOriginalRootTailDowngrade)
-+    se,de:=m.Close();require.NoError(t,se);require.NoError(t,de)
-+    require.Equal(t,before,memoryFullSchemaSnapshot(t,db,dialect))
-+    version,dirty=jointLineageMigrationState(t,db);require.Equal(t,final,version);require.False(t,dirty);return
-+   }
-+   before:=memoryFullSchemaSnapshot(t,db,dialect)
-+   require.NoError(t,RunOriginalKnowledgeMigrations(ctx,dsn,opts),"true restart rechecks original route and actual full catalogue")
-+   require.Equal(t,before,memoryFullSchemaSnapshot(t,db,dialect))
-+  })
-+ }
++func runOriginalRootTailActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"fresh_actual_root_to_tail", "real_root_memory_prefix_upgrade", "nonempty_root_restart", "issued_42_body_wrappers_restart", "peer_final_refused", "peer_same_number_tail_refused", "dirty_tail_no_force", "missing_checkpoint_refused", "changed_checkpoint_refused", "changed_source_before_driver", "down_refused_before_ledger"} {
++		t.Run(mode, func(t *testing.T) {
++			root := sqliteRepoRoot(t)
++			dialect, origin, final, peerFinal := "sqlite", uint(87), uint(93), uint(89)
++			if pg {
++				dialect, origin, final, peerFinal = "versioned", 168, 172, 171
++			}
++			db, dsn, opts := jointLineageFixture(t, pg)
++			chdirAndRestore(t, root)
++			ctx := context.Background()
++			if mode == "peer_final_refused" || mode == "peer_same_number_tail_refused" {
++				originalRootActualPeerTail(t, root, dialect, dsn, opts, peerFinal, mode == "peer_same_number_tail_refused")
++				before := memoryFullSchemaSnapshot(t, db, dialect)
++				version, dirty := jointLineageMigrationState(t, db)
++				require.False(t, dirty)
++				err := RunOriginalKnowledgeMigrations(ctx, dsn, opts)
++				require.Error(t, err)
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect))
++				after, afterDirty := jointLineageMigrationState(t, db)
++				require.Equal(t, version, after)
++				require.False(t, afterDirty)
++				require.Error(t, VerifyOriginalKnowledgeSchemaReadyOnDB(ctx, db, dialect))
++				return
++			}
++			if mode == "real_root_memory_prefix_upgrade" {
++				prefix := uint(75)
++				if pg {
++					prefix = 156
++				}
++				if pg {
++					setup, err := migrate.New("file://"+filepath.Join(root, "migrations", dialect), dsn)
++					require.NoError(t, err)
++					require.NoError(t, setup.Migrate(prefix))
++					se, de := setup.Close()
++					require.NoError(t, se)
++					require.NoError(t, de)
++				} else {
++					installSQLiteMigrationPrefixFixture(t, root, opts.SQLiteDBPath, prefix)
++				}
++				version, dirty := jointLineageMigrationState(t, db)
++				require.Equal(t, prefix, version)
++				require.False(t, dirty)
++			}
++			if mode != "fresh_actual_root_to_tail" && mode != "real_root_memory_prefix_upgrade" {
++				require.NoError(t, RunMigrationsWithContext(ctx, dsn, opts))
++				version, dirty := jointLineageMigrationState(t, db)
++				require.Equal(t, origin, version)
++				require.False(t, dirty)
++				if mode == "nonempty_root_restart" {
++					_, err := db.Exec("INSERT INTO tenants(name,business) VALUES('actual root tenant','root-route-business')")
++					require.NoError(t, err)
++				}
++			}
++			if mode == "changed_source_before_driver" {
++				copyRoot := originalRootSourceFixture(t, dialect)
++				source, err := admitJointOriginalRootSource(ctx, copyRoot, dialect)
++				require.NoError(t, err)
++				path := filepath.Join(copyRoot, source.spec.Files[len(source.spec.Files)-2].Path)
++				raw, err := os.ReadFile(path)
++				require.NoError(t, err)
++				require.NoError(t, os.WriteFile(path, append(raw, []byte("\n-- changed before real driver\n")...), 0600))
++				before := memoryFullSchemaSnapshot(t, db, dialect)
++				chdirAndRestore(t, copyRoot)
++				require.ErrorIs(t, RunOriginalKnowledgeMigrations(ctx, dsn, opts), ErrJointSchemaSourceIdentity)
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect))
++				return
++			}
++			require.NoError(t, RunOriginalKnowledgeMigrations(ctx, dsn, opts), "genuine explicit startup must execute the full Root path")
++			version, dirty := jointLineageMigrationState(t, db)
++			require.Equal(t, final, version)
++			require.False(t, dirty)
++			var markers int
++			require.NoError(t, db.QueryRow("SELECT count(*) FROM "+originalRootRouteTable).Scan(&markers))
++			require.Equal(t, 1, markers)
++			if mode == "issued_42_body_wrappers_restart" {
++				originalRootActualInstallWrappers(t, db, pg)
++			}
++			require.NoError(t, VerifyOriginalKnowledgeSchemaReady(ctx, dsn, opts))
++			require.NoError(t, VerifyOriginalKnowledgeSchemaReadyOnDB(ctx, db, dialect))
++			if mode == "nonempty_root_restart" {
++				var preserved int
++				require.NoError(t, db.QueryRow("SELECT count(*) FROM tenants WHERE name='actual root tenant' AND business='root-route-business'").Scan(&preserved))
++				require.Equal(t, 1, preserved)
++			}
++			if mode == "dirty_tail_no_force" {
++				_, err := db.Exec("UPDATE schema_migrations SET dirty=true")
++				require.NoError(t, err)
++				before := memoryFullSchemaSnapshot(t, db, dialect)
++				require.ErrorIs(t, RunOriginalKnowledgeMigrations(ctx, dsn, opts), ErrJointSchemaAmbiguousDirty)
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect))
++				_, dirty = jointLineageMigrationState(t, db)
++				require.True(t, dirty)
++				return
++			}
++			if mode == "missing_checkpoint_refused" {
++				_, err := db.Exec("DROP TABLE " + originalRootRouteTable)
++				require.NoError(t, err)
++			}
++			if mode == "changed_checkpoint_refused" {
++				_, err := db.Exec("UPDATE " + originalRootRouteTable + " SET source_sha256='" + strings.Repeat("0", 64) + "'")
++				require.Error(t, err, "real immutable guard refuses normal UPDATE")
++				statement := "DROP TRIGGER nextcloud_original_root_route_immutable_update"
++				if pg {
++					statement += " ON " + originalRootRouteTable
++				}
++				_, err = db.Exec(statement)
++				require.NoError(t, err)
++				_, err = db.Exec("UPDATE " + originalRootRouteTable + " SET source_sha256='" + strings.Repeat("0", 64) + "'")
++				require.NoError(t, err)
++			}
++			if mode == "missing_checkpoint_refused" || mode == "changed_checkpoint_refused" {
++				before := memoryFullSchemaSnapshot(t, db, dialect)
++				require.Error(t, VerifyOriginalKnowledgeSchemaReadyOnDB(ctx, db, dialect))
++				require.Error(t, RunOriginalKnowledgeMigrations(ctx, dsn, opts), "same-number tail cannot rebootstrap its missing/tampered Root origin")
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect))
++				return
++			}
++			if mode == "down_refused_before_ledger" {
++				source, err := admitJointOriginalRootSource(ctx, root, dialect)
++				require.NoError(t, err)
++				actualCtx := ctx
++				if !pg {
++					held, err := acquirePeerSQLiteMigrationExclusion(ctx, dsn, opts)
++					require.NoError(t, err)
++					defer func() { require.NoError(t, held.Close()) }()
++					actualCtx = context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++					opts.SQLiteDBPath = held.resolvedPath
++				}
++				m, err := newOriginalRootMigrate(actualCtx, dsn, opts, source, final)
++				require.NoError(t, err)
++				before := memoryFullSchemaSnapshot(t, db, dialect)
++				require.ErrorIs(t, m.Steps(-1), ErrOriginalRootTailDowngrade)
++				se, de := m.Close()
++				require.NoError(t, se)
++				require.NoError(t, de)
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect))
++				version, dirty = jointLineageMigrationState(t, db)
++				require.Equal(t, final, version)
++				require.False(t, dirty)
++				return
++			}
++			before := memoryFullSchemaSnapshot(t, db, dialect)
++			require.NoError(t, RunOriginalKnowledgeMigrations(ctx, dsn, opts), "true restart rechecks original route and actual full catalogue")
++			require.Equal(t, before, memoryFullSchemaSnapshot(t, db, dialect))
++		})
++	}
 +}
-+func TestSQLiteOriginalRootTailActual(t *testing.T){runOriginalRootTailActual(t,false)}
-+func TestPostgresOriginalRootTailActual(t *testing.T){runOriginalRootTailActual(t,true)}
++func TestSQLiteOriginalRootTailActual(t *testing.T)   { runOriginalRootTailActual(t, false) }
++func TestPostgresOriginalRootTailActual(t *testing.T) { runOriginalRootTailActual(t, true) }
 diff --git a/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
 new file mode 100644
-index 000000000..9b50bd3b3
+index 000000000..0f3016c0b
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,280 @@
 +//go:build linux || darwin
 +
 +package database
 +
 +import (
-+ "bufio"
-+ "context"
-+ "errors"
-+ "fmt"
-+ "io"
-+ "os"
-+ "os/exec"
-+ "path/filepath"
-+ "strings"
-+ "testing"
-+ "time"
++	"bufio"
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
 +
-+ "github.com/stretchr/testify/require"
++	"github.com/stretchr/testify/require"
 +)
 +
 +// A real child owns or attempts the actual main-file OFD exclusion. Tokens
 +// describe real lifecycle transitions; no actor/material/Ready fact is minted.
-+func TestOriginalRootWholeSQLiteProcessHelper(t *testing.T){
-+ if os.Getenv("WEKNORA_ORIGINAL_ROOT_KERNEL_HELPER")!="1"{return}
-+ path:=os.Getenv("WEKNORA_ORIGINAL_ROOT_KERNEL_DB")
-+ if path==""{t.Fatal("actual main filename missing")}
-+ ctx,cancel:=context.WithTimeout(context.Background(),10*time.Second);defer cancel()
-+ opts:=MigrationOptions{SQLiteDBPath:path,AutoRecoverDirty:false}
-+ mode:=os.Getenv("WEKNORA_ORIGINAL_ROOT_KERNEL_MODE")
-+ if mode=="hold"{
-+  held,owned,err:=acquireOriginalRootSQLiteBootstrap(ctx,"sqlite3://unused",opts)
-+  if err!=nil||!owned{t.Fatal("actual bootstrap owner unavailable")}
-+  defer func(){if held.Close()!=nil{t.Error("actual bootstrap owner release failed")}}()
-+  fmt.Println("ORIGINAL_ROOT_OFD_HELD")
-+  done:=make(chan error,1)
-+  go func(){var b [1]byte;_,err:=os.Stdin.Read(b[:]);done<-err}()
-+  select{case err:=<-done:if err!=nil&&!errors.Is(err,io.EOF){t.Error("actual release input failed")};case <-ctx.Done():t.Error("actual release did not arrive")}
-+  return
-+ }
-+ if mode!="probe_and_run"{t.Fatal("unknown actual helper mode")}
-+ probe,stop:=context.WithTimeout(ctx,60*time.Millisecond)
-+ _,_,err:=acquireOriginalRootSQLiteBootstrap(probe,"sqlite3://unused",opts)
-+ stop()
-+ if !errors.Is(err,context.DeadlineExceeded){t.Fatal("actual parent OFD exclusion did not block bootstrap")}
-+ fmt.Println("ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
-+ if RunOriginalKnowledgeMigrations(ctx,"sqlite3://unused",opts)!=nil{t.Fatal("actual complete Root bootstrap/tail failed")}
-+ if VerifyOriginalKnowledgeSchemaReady(ctx,"sqlite3://unused",opts)!=nil{t.Fatal("actual complete Root readiness failed")}
-+ fmt.Println("ORIGINAL_ROOT_READY")
++func TestOriginalRootWholeSQLiteProcessHelper(t *testing.T) {
++	if os.Getenv("WEKNORA_ORIGINAL_ROOT_KERNEL_HELPER") != "1" {
++		return
++	}
++	path := os.Getenv("WEKNORA_ORIGINAL_ROOT_KERNEL_DB")
++	if path == "" {
++		t.Fatal("actual main filename missing")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	opts := MigrationOptions{SQLiteDBPath: path, AutoRecoverDirty: false}
++	mode := os.Getenv("WEKNORA_ORIGINAL_ROOT_KERNEL_MODE")
++	if mode == "hold" {
++		held, owned, err := acquireOriginalRootSQLiteBootstrap(ctx, "sqlite3://unused", opts)
++		if err != nil || !owned {
++			t.Fatal("actual bootstrap owner unavailable")
++		}
++		defer func() {
++			if held.Close() != nil {
++				t.Error("actual bootstrap owner release failed")
++			}
++		}()
++		fmt.Println("ORIGINAL_ROOT_OFD_HELD")
++		done := make(chan error, 1)
++		go func() { var b [1]byte; _, err := os.Stdin.Read(b[:]); done <- err }()
++		select {
++		case err := <-done:
++			if err != nil && !errors.Is(err, io.EOF) {
++				t.Error("actual release input failed")
++			}
++		case <-ctx.Done():
++			t.Error("actual release did not arrive")
++		}
++		return
++	}
++	if mode != "probe_and_run" {
++		t.Fatal("unknown actual helper mode")
++	}
++	probe, stop := context.WithTimeout(ctx, 60*time.Millisecond)
++	_, _, err := acquireOriginalRootSQLiteBootstrap(probe, "sqlite3://unused", opts)
++	stop()
++	if !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatal("actual parent OFD exclusion did not block bootstrap")
++	}
++	fmt.Println("ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
++	if RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", opts) != nil {
++		t.Fatal("actual complete Root bootstrap/tail failed")
++	}
++	if VerifyOriginalKnowledgeSchemaReady(ctx, "sqlite3://unused", opts) != nil {
++		t.Fatal("actual complete Root readiness failed")
++	}
++	fmt.Println("ORIGINAL_ROOT_READY")
 +}
 +
-+type originalRootActualProcess struct{
-+ cmd *exec.Cmd
-+ release io.WriteCloser
-+ tokens <-chan string
-+ waited <-chan error
-+ scanned <-chan error
-+ joined bool
++type originalRootActualProcess struct {
++	cmd     *exec.Cmd
++	release io.WriteCloser
++	tokens  <-chan string
++	waited  <-chan error
++	scanned <-chan error
++	joined  bool
 +}
-+func startOriginalRootActualProcess(t *testing.T,root,path,mode string)*originalRootActualProcess{
-+ t.Helper()
-+ cmd:=exec.Command(os.Args[0],"-test.run=^TestOriginalRootWholeSQLiteProcessHelper$","-test.count=1")
-+ cmd.Dir=root
-+ env:=[]string{}
-+ for _,value:=range os.Environ(){if !strings.HasPrefix(value,"WEKNORA_ORIGINAL_ROOT_KERNEL_"){env=append(env,value)}}
-+ cmd.Env=append(env,"WEKNORA_ORIGINAL_ROOT_KERNEL_HELPER=1","WEKNORA_ORIGINAL_ROOT_KERNEL_DB="+path,"WEKNORA_ORIGINAL_ROOT_KERNEL_MODE="+mode)
-+ stdout,err:=cmd.StdoutPipe();require.NoError(t,err)
-+ release,err:=cmd.StdinPipe();require.NoError(t,err)
-+ require.NoError(t,cmd.Start())
-+ tokens:=make(chan string,4);waited:=make(chan error,1);scanned:=make(chan error,1)
-+ go func(){scanner:=bufio.NewScanner(stdout);for scanner.Scan(){line:=scanner.Text();if strings.HasPrefix(line,"ORIGINAL_ROOT_"){tokens<-line}};scanned<-scanner.Err();close(tokens);waited<-cmd.Wait()}()
-+ p:=&originalRootActualProcess{cmd:cmd,release:release,tokens:tokens,waited:waited,scanned:scanned}
-+ t.Cleanup(func(){
-+  _=release.Close()
-+  if !p.joined{
-+   select{case <-waited:p.joined=true;case <-time.After(3*time.Second):
-+    _=cmd.Process.Kill()
-+    select{case <-waited:p.joined=true;case <-time.After(3*time.Second):t.Error("actual owned bootstrap process did not join")}
-+   }
-+  }
-+  select{case err:=<-scanned:if err!=nil{t.Error("actual helper stdout did not finish cleanly")};case <-time.After(3*time.Second):t.Error("actual helper stdout scanner did not join")}
-+ })
-+ return p
++
++func startOriginalRootActualProcess(t *testing.T, root, path, mode string) *originalRootActualProcess {
++	t.Helper()
++	cmd := exec.Command(os.Args[0], "-test.run=^TestOriginalRootWholeSQLiteProcessHelper$", "-test.count=1")
++	cmd.Dir = root
++	env := []string{}
++	for _, value := range os.Environ() {
++		if !strings.HasPrefix(value, "WEKNORA_ORIGINAL_ROOT_KERNEL_") {
++			env = append(env, value)
++		}
++	}
++	cmd.Env = append(env, "WEKNORA_ORIGINAL_ROOT_KERNEL_HELPER=1", "WEKNORA_ORIGINAL_ROOT_KERNEL_DB="+path, "WEKNORA_ORIGINAL_ROOT_KERNEL_MODE="+mode)
++	stdout, err := cmd.StdoutPipe()
++	require.NoError(t, err)
++	release, err := cmd.StdinPipe()
++	require.NoError(t, err)
++	require.NoError(t, cmd.Start())
++	tokens := make(chan string, 4)
++	waited := make(chan error, 1)
++	scanned := make(chan error, 1)
++	go func() {
++		scanner := bufio.NewScanner(stdout)
++		for scanner.Scan() {
++			line := scanner.Text()
++			if strings.HasPrefix(line, "ORIGINAL_ROOT_") {
++				tokens <- line
++			}
++		}
++		scanned <- scanner.Err()
++		close(tokens)
++		waited <- cmd.Wait()
++	}()
++	p := &originalRootActualProcess{cmd: cmd, release: release, tokens: tokens, waited: waited, scanned: scanned}
++	t.Cleanup(func() {
++		_ = release.Close()
++		if !p.joined {
++			select {
++			case <-waited:
++				p.joined = true
++			case <-time.After(3 * time.Second):
++				_ = cmd.Process.Kill()
++				select {
++				case <-waited:
++					p.joined = true
++				case <-time.After(3 * time.Second):
++					t.Error("actual owned bootstrap process did not join")
++				}
++			}
++		}
++		select {
++		case err := <-scanned:
++			if err != nil {
++				t.Error("actual helper stdout did not finish cleanly")
++			}
++		case <-time.After(3 * time.Second):
++			t.Error("actual helper stdout scanner did not join")
++		}
++	})
++	return p
 +}
-+func originalRootActualToken(t *testing.T,p *originalRootActualProcess,want string){
-+ t.Helper()
-+ select{case got,ok:=<-p.tokens:require.True(t,ok);require.Equal(t,want,got);case <-time.After(3*time.Second):t.Fatal("actual bootstrap lifecycle token absent")}
++func originalRootActualToken(t *testing.T, p *originalRootActualProcess, want string) {
++	t.Helper()
++	select {
++	case got, ok := <-p.tokens:
++		require.True(t, ok)
++		require.Equal(t, want, got)
++	case <-time.After(3 * time.Second):
++		t.Fatal("actual bootstrap lifecycle token absent")
++	}
 +}
-+func joinOriginalRootActualProcess(t *testing.T,p *originalRootActualProcess){
-+ t.Helper()
-+ select{case err:=<-p.waited:p.joined=true;require.NoError(t,err);case <-time.After(3*time.Second):t.Fatal("actual bootstrap process did not terminate")}
++func joinOriginalRootActualProcess(t *testing.T, p *originalRootActualProcess) {
++	t.Helper()
++	select {
++	case err := <-p.waited:
++		p.joined = true
++		require.NoError(t, err)
++	case <-time.After(3 * time.Second):
++		t.Fatal("actual bootstrap process did not terminate")
++	}
 +}
-+func originalRootActualNoLedger(t *testing.T,path string){
-+ t.Helper()
-+ db,_,err:=openJointLineageDB("sqlite3://unused",MigrationOptions{SQLiteDBPath:path,jointReadOnly:true});require.NoError(t,err)
-+ defer func(){require.NoError(t,db.Close())}()
-+ var count int
-+ require.NoError(t,db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='schema_migrations' OR name='nextcloud_original_root_route_origin'").Scan(&count))
-+ require.Zero(t,count,"real blocked startup must not initialize ledger or Root marker")
++func originalRootActualNoLedger(t *testing.T, path string) {
++	t.Helper()
++	db, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path, jointReadOnly: true})
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++	var count int
++	require.NoError(t, db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='schema_migrations' OR name='nextcloud_original_root_route_origin'").Scan(&count))
++	require.Zero(t, count, "real blocked startup must not initialize ledger or Root marker")
 +}
-+func originalRootActualFinal(t *testing.T,path string){
-+ t.Helper()
-+ db,_,err:=openJointLineageDB("sqlite3://unused",MigrationOptions{SQLiteDBPath:path,jointReadOnly:true});require.NoError(t,err)
-+ defer func(){require.NoError(t,db.Close())}()
-+ version,dirty:=jointLineageMigrationState(t,db);require.Equal(t,uint(93),version);require.False(t,dirty)
-+ var markers int;require.NoError(t,db.QueryRow("SELECT count(*) FROM "+originalRootRouteTable).Scan(&markers));require.Equal(t,1,markers)
-+ require.NoError(t,VerifyOriginalKnowledgeSchemaReadyOnDB(context.Background(),db,"sqlite"))
++func originalRootActualFinal(t *testing.T, path string) {
++	t.Helper()
++	db, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path, jointReadOnly: true})
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++	version, dirty := jointLineageMigrationState(t, db)
++	require.Equal(t, uint(93), version)
++	require.False(t, dirty)
++	var markers int
++	require.NoError(t, db.QueryRow("SELECT count(*) FROM "+originalRootRouteTable).Scan(&markers))
++	require.Equal(t, 1, markers)
++	require.NoError(t, VerifyOriginalKnowledgeSchemaReadyOnDB(context.Background(), db, "sqlite"))
 +}
-+func TestOriginalRootWholeSQLiteBootstrapExclusionActual(t *testing.T){
-+ root:=sqliteRepoRoot(t);chdirAndRestore(t,root)
-+ t.Run("fresh_two_processes_no_ledger_before_release",func(t *testing.T){
-+  path:=filepath.Join(t.TempDir(),"actual fresh ?#% root.sqlite")
-+  holder:=startOriginalRootActualProcess(t,root,path,"hold");originalRootActualToken(t,holder,"ORIGINAL_ROOT_OFD_HELD")
-+  first:=startOriginalRootActualProcess(t,root,path,"probe_and_run")
-+  second:=startOriginalRootActualProcess(t,root,path,"probe_and_run")
-+  originalRootActualToken(t,first,"ORIGINAL_ROOT_BOOTSTRAP_BLOCKED");originalRootActualToken(t,second,"ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
-+  originalRootActualNoLedger(t,path)
-+  require.NoError(t,holder.release.Close());joinOriginalRootActualProcess(t,holder)
-+  originalRootActualToken(t,first,"ORIGINAL_ROOT_READY");originalRootActualToken(t,second,"ORIGINAL_ROOT_READY")
-+  joinOriginalRootActualProcess(t,first);joinOriginalRootActualProcess(t,second);originalRootActualFinal(t,path)
-+ })
-+ t.Run("real_root_prefix_alias_blocks_before_upgrade",func(t *testing.T){
-+  path:=filepath.Join(t.TempDir(),"actual root prefix.sqlite")
-+  installSQLiteMigrationPrefixFixture(t,root,path,75)
-+  alias:=filepath.Join(t.TempDir(),"actual root alias.sqlite");require.NoError(t,os.Symlink(path,alias))
-+  holder:=startOriginalRootActualProcess(t,root,path,"hold");originalRootActualToken(t,holder,"ORIGINAL_ROOT_OFD_HELD")
-+  child:=startOriginalRootActualProcess(t,root,alias,"probe_and_run");originalRootActualToken(t,child,"ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
-+  db,_,err:=openJointLineageDB("sqlite3://unused",MigrationOptions{SQLiteDBPath:path,jointReadOnly:true});require.NoError(t,err)
-+  version,dirty:=jointLineageMigrationState(t,db);require.Equal(t,uint(75),version);require.False(t,dirty);require.NoError(t,db.Close())
-+  require.NoError(t,holder.release.Close());joinOriginalRootActualProcess(t,holder)
-+  originalRootActualToken(t,child,"ORIGINAL_ROOT_READY");joinOriginalRootActualProcess(t,child);originalRootActualFinal(t,path)
-+ })
-+ t.Run("fresh_creation_identity_and_actual_main",func(t *testing.T){
-+  path:=filepath.Join(t.TempDir(),"actual ?#% empty.sqlite")
-+  held,owned,err:=acquireOriginalRootSQLiteBootstrap(context.Background(),"sqlite3://unused",MigrationOptions{SQLiteDBPath:path});require.NoError(t,err);require.True(t,owned)
-+  defer func(){require.NoError(t,held.Close())}()
-+  info,err:=os.Stat(path);require.NoError(t,err);require.True(t,os.SameFile(info,held.identity));require.Equal(t,os.FileMode(0600),info.Mode().Perm())
-+  require.NoError(t,originalRootSQLiteActualMain(context.Background(),held,path));originalRootActualNoLedger(t,path)
-+ })
-+ t.Run("cancelled_waiter_cannot_release_whole_owner",func(t *testing.T){
-+  path:=filepath.Join(t.TempDir(),"actual cancelled.sqlite")
-+  held,owned,err:=acquireOriginalRootSQLiteBootstrap(context.Background(),"sqlite3://unused",MigrationOptions{SQLiteDBPath:path});require.NoError(t,err);require.True(t,owned)
-+  defer func(){require.NoError(t,held.Close())}()
-+  ctx,cancel:=context.WithTimeout(context.Background(),60*time.Millisecond);defer cancel()
-+  require.ErrorIs(t,RunOriginalKnowledgeMigrations(ctx,"sqlite3://unused",MigrationOptions{SQLiteDBPath:path}),context.DeadlineExceeded)
-+  require.NoError(t,held.check(context.Background()));originalRootActualNoLedger(t,path)
-+ })
-+ t.Run("replacement_cannot_borrow_captured_owner",func(t *testing.T){
-+  path:=filepath.Join(t.TempDir(),"actual replaced.sqlite")
-+  held,owned,err:=acquireOriginalRootSQLiteBootstrap(context.Background(),"sqlite3://unused",MigrationOptions{SQLiteDBPath:path});require.NoError(t,err);require.True(t,owned)
-+  defer func(){require.NoError(t,held.Close())}()
-+  moved:=path+".retained";require.NoError(t,os.Rename(path,moved));require.NoError(t,os.WriteFile(path,nil,0600))
-+  ctx:=context.WithValue(context.Background(),jointPeerSQLiteMigrationContextKey{},held)
-+  require.ErrorIs(t,RunOriginalKnowledgeMigrations(ctx,"sqlite3://unused",MigrationOptions{SQLiteDBPath:path}),ErrJointSchemaUnknown)
-+  originalRootActualNoLedger(t,path);originalRootActualNoLedger(t,moved)
-+ })
-+ t.Run("borrowed_owner_covers_bootstrap_without_recursive_acquire",func(t *testing.T){
-+  path:=filepath.Join(t.TempDir(),"actual borrowed bootstrap.sqlite")
-+  held,owned,err:=acquireOriginalRootSQLiteBootstrap(context.Background(),"sqlite3://unused",MigrationOptions{SQLiteDBPath:path});require.NoError(t,err);require.True(t,owned)
-+  defer func(){require.NoError(t,held.Close())}()
-+  ctx,cancel:=context.WithTimeout(context.Background(),10*time.Second);defer cancel()
-+  ctx=context.WithValue(ctx,jointPeerSQLiteMigrationContextKey{},held)
-+  require.NoError(t,RunOriginalKnowledgeMigrations(ctx,"sqlite3://unused",MigrationOptions{SQLiteDBPath:path}))
-+  require.NoError(t,held.check(context.Background()),"borrower closes real migrator pools, not the outer owner")
-+  originalRootActualFinal(t,path)
-+ })
++func TestOriginalRootWholeSQLiteBootstrapExclusionActual(t *testing.T) {
++	root := sqliteRepoRoot(t)
++	chdirAndRestore(t, root)
++	t.Run("fresh_two_processes_no_ledger_before_release", func(t *testing.T) {
++		path := filepath.Join(t.TempDir(), "actual fresh ?#% root.sqlite")
++		holder := startOriginalRootActualProcess(t, root, path, "hold")
++		originalRootActualToken(t, holder, "ORIGINAL_ROOT_OFD_HELD")
++		first := startOriginalRootActualProcess(t, root, path, "probe_and_run")
++		second := startOriginalRootActualProcess(t, root, path, "probe_and_run")
++		originalRootActualToken(t, first, "ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
++		originalRootActualToken(t, second, "ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
++		originalRootActualNoLedger(t, path)
++		require.NoError(t, holder.release.Close())
++		joinOriginalRootActualProcess(t, holder)
++		originalRootActualToken(t, first, "ORIGINAL_ROOT_READY")
++		originalRootActualToken(t, second, "ORIGINAL_ROOT_READY")
++		joinOriginalRootActualProcess(t, first)
++		joinOriginalRootActualProcess(t, second)
++		originalRootActualFinal(t, path)
++	})
++	t.Run("real_root_prefix_alias_blocks_before_upgrade", func(t *testing.T) {
++		path := filepath.Join(t.TempDir(), "actual root prefix.sqlite")
++		installSQLiteMigrationPrefixFixture(t, root, path, 75)
++		alias := filepath.Join(t.TempDir(), "actual root alias.sqlite")
++		require.NoError(t, os.Symlink(path, alias))
++		holder := startOriginalRootActualProcess(t, root, path, "hold")
++		originalRootActualToken(t, holder, "ORIGINAL_ROOT_OFD_HELD")
++		child := startOriginalRootActualProcess(t, root, alias, "probe_and_run")
++		originalRootActualToken(t, child, "ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
++		db, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path, jointReadOnly: true})
++		require.NoError(t, err)
++		version, dirty := jointLineageMigrationState(t, db)
++		require.Equal(t, uint(75), version)
++		require.False(t, dirty)
++		require.NoError(t, db.Close())
++		require.NoError(t, holder.release.Close())
++		joinOriginalRootActualProcess(t, holder)
++		originalRootActualToken(t, child, "ORIGINAL_ROOT_READY")
++		joinOriginalRootActualProcess(t, child)
++		originalRootActualFinal(t, path)
++	})
++	t.Run("fresh_creation_identity_and_actual_main", func(t *testing.T) {
++		path := filepath.Join(t.TempDir(), "actual ?#% empty.sqlite")
++		held, owned, err := acquireOriginalRootSQLiteBootstrap(context.Background(), "sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++		require.NoError(t, err)
++		require.True(t, owned)
++		defer func() { require.NoError(t, held.Close()) }()
++		info, err := os.Stat(path)
++		require.NoError(t, err)
++		require.True(t, os.SameFile(info, held.identity))
++		require.Equal(t, os.FileMode(0600), info.Mode().Perm())
++		require.NoError(t, originalRootSQLiteActualMain(context.Background(), held, path))
++		originalRootActualNoLedger(t, path)
++	})
++	t.Run("cancelled_waiter_cannot_release_whole_owner", func(t *testing.T) {
++		path := filepath.Join(t.TempDir(), "actual cancelled.sqlite")
++		held, owned, err := acquireOriginalRootSQLiteBootstrap(context.Background(), "sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++		require.NoError(t, err)
++		require.True(t, owned)
++		defer func() { require.NoError(t, held.Close()) }()
++		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
++		defer cancel()
++		require.ErrorIs(t, RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", MigrationOptions{SQLiteDBPath: path}), context.DeadlineExceeded)
++		require.NoError(t, held.check(context.Background()))
++		originalRootActualNoLedger(t, path)
++	})
++	t.Run("replacement_cannot_borrow_captured_owner", func(t *testing.T) {
++		path := filepath.Join(t.TempDir(), "actual replaced.sqlite")
++		held, owned, err := acquireOriginalRootSQLiteBootstrap(context.Background(), "sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++		require.NoError(t, err)
++		require.True(t, owned)
++		defer func() { require.NoError(t, held.Close()) }()
++		moved := path + ".retained"
++		require.NoError(t, os.Rename(path, moved))
++		require.NoError(t, os.WriteFile(path, nil, 0600))
++		ctx := context.WithValue(context.Background(), jointPeerSQLiteMigrationContextKey{}, held)
++		require.ErrorIs(t, RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", MigrationOptions{SQLiteDBPath: path}), ErrJointSchemaUnknown)
++		originalRootActualNoLedger(t, path)
++		originalRootActualNoLedger(t, moved)
++	})
++	t.Run("borrowed_owner_covers_bootstrap_without_recursive_acquire", func(t *testing.T) {
++		path := filepath.Join(t.TempDir(), "actual borrowed bootstrap.sqlite")
++		held, owned, err := acquireOriginalRootSQLiteBootstrap(context.Background(), "sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++		require.NoError(t, err)
++		require.True(t, owned)
++		defer func() { require.NoError(t, held.Close()) }()
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		defer cancel()
++		ctx = context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++		require.NoError(t, RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", MigrationOptions{SQLiteDBPath: path}))
++		require.NoError(t, held.check(context.Background()), "borrower closes real migrator pools, not the outer owner")
++		originalRootActualFinal(t, path)
++	})
 +}
 diff --git a/internal/database/migration_original_root_sqlite_canonical.go b/internal/database/migration_original_root_sqlite_canonical.go
 new file mode 100644
-index 000000000..c5d55a466
+index 000000000..8dc941067
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_canonical.go
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,197 @@
 +package database
 +
 +import (
-+ "bytes"
-+ "context"
-+ "crypto/sha256"
-+ "errors"
-+ "fmt"
-+ "io"
-+ "path/filepath"
-+ "strconv"
-+ "strings"
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"errors"
++	"fmt"
++	"io"
++	"path/filepath"
++	"strconv"
++	"strings"
 +
-+ "github.com/golang-migrate/migrate/v4"
-+ migratedatabase "github.com/golang-migrate/migrate/v4/database"
-+ sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
++	"github.com/golang-migrate/migrate/v4"
++	migratedatabase "github.com/golang-migrate/migrate/v4/database"
++	sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
 +)
 +
-+type originalRootCanonicalDriver struct{
-+ migratedatabase.Driver
-+ ctx context.Context
-+ use *originalRootSQLiteUse
-+ source *jointOriginalRootSource
-+ dsn string
-+ options MigrationOptions
-+ version,target int
-+ locked,ran bool
++type originalRootCanonicalDriver struct {
++	migratedatabase.Driver
++	ctx             context.Context
++	use             *originalRootSQLiteUse
++	source          *jointOriginalRootSource
++	dsn             string
++	options         MigrationOptions
++	version, target int
++	locked, ran     bool
 +}
-+func (d *originalRootCanonicalDriver) current(expected int,dirty bool)error{
-+ version,actualDirty,err:=d.Driver.Version()
-+ if err!=nil||version!=expected||actualDirty!=dirty{return ErrJointSchemaUnknown}
-+ return d.source.recheck(d.ctx)
++
++func (d *originalRootCanonicalDriver) current(expected int, dirty bool) error {
++	version, actualDirty, err := d.Driver.Version()
++	if err != nil || version != expected || actualDirty != dirty {
++		return ErrJointSchemaUnknown
++	}
++	return d.source.recheck(d.ctx)
 +}
-+func (d *originalRootCanonicalDriver) Lock()error{
-+ return d.use.write(d.ctx,"canonical_before_lock",func()error{
-+  if err:=d.Driver.Lock();err!=nil{return err}
-+  fail:=func(err error)error{return errors.Join(err,d.Driver.Unlock())}
-+  if err:=d.current(d.version,false);err!=nil{return fail(err)}
-+  version,known:=uint(0),d.version>=0;if known{version=uint(d.version)}
-+  route,err:=selectJointMigrationRoute(d.ctx,d.dsn,d.options,version,false,known)
-+  if err!=nil{return fail(err)}
-+  if route.lineage!=jointCanonicalRootSource{return fail(ErrOriginalRootPeerTail)}
-+  d.locked=true
-+  return nil
-+ })
++func (d *originalRootCanonicalDriver) Lock() error {
++	return d.use.write(d.ctx, "canonical_before_lock", func() error {
++		if err := d.Driver.Lock(); err != nil {
++			return err
++		}
++		fail := func(err error) error { return errors.Join(err, d.Driver.Unlock()) }
++		if err := d.current(d.version, false); err != nil {
++			return fail(err)
++		}
++		version, known := uint(0), d.version >= 0
++		if known {
++			version = uint(d.version)
++		}
++		route, err := selectJointMigrationRoute(d.ctx, d.dsn, d.options, version, false, known)
++		if err != nil {
++			return fail(err)
++		}
++		if route.lineage != jointCanonicalRootSource {
++			return fail(ErrOriginalRootPeerTail)
++		}
++		d.locked = true
++		return nil
++	})
 +}
-+func (d *originalRootCanonicalDriver) Unlock()error{d.locked=false;return d.Driver.Unlock()}
-+func (d *originalRootCanonicalDriver) SetVersion(version int,dirty bool)error{
-+ return d.use.write(d.ctx,"canonical_before_set_version",func()error{
-+  if !d.locked{return ErrJointSchemaUnknown}
-+  if dirty{
-+   if version<0||version<=d.version||uint(version)>d.source.spec.OriginVersion||d.target!=-1{return ErrOriginalRootTailDowngrade}
-+   if err:=d.current(d.version,false);err!=nil{return err}
-+   if d.upSHA(version)==""{return ErrJointSchemaSourceIdentity}
-+   if err:=d.Driver.SetVersion(version,true);err!=nil{return err}
-+   d.target,d.ran=version,false;return nil
-+  }
-+  if version!=d.target||!d.ran{return ErrJointSchemaUnknown}
-+  if err:=d.current(d.target,true);err!=nil{return err}
-+  if err:=d.Driver.SetVersion(version,false);err!=nil{return err}
-+  d.version,d.target,d.ran=version,-1,false;return nil
-+ })
++func (d *originalRootCanonicalDriver) Unlock() error { d.locked = false; return d.Driver.Unlock() }
++func (d *originalRootCanonicalDriver) SetVersion(version int, dirty bool) error {
++	return d.use.write(d.ctx, "canonical_before_set_version", func() error {
++		if !d.locked {
++			return ErrJointSchemaUnknown
++		}
++		if dirty {
++			if version < 0 || version <= d.version || uint(version) > d.source.spec.OriginVersion || d.target != -1 {
++				return ErrOriginalRootTailDowngrade
++			}
++			if err := d.current(d.version, false); err != nil {
++				return err
++			}
++			if d.upSHA(version) == "" {
++				return ErrJointSchemaSourceIdentity
++			}
++			if err := d.Driver.SetVersion(version, true); err != nil {
++				return err
++			}
++			d.target, d.ran = version, false
++			return nil
++		}
++		if version != d.target || !d.ran {
++			return ErrJointSchemaUnknown
++		}
++		if err := d.current(d.target, true); err != nil {
++			return err
++		}
++		if err := d.Driver.SetVersion(version, false); err != nil {
++			return err
++		}
++		d.version, d.target, d.ran = version, -1, false
++		return nil
++	})
 +}
-+func (d *originalRootCanonicalDriver) upSHA(version int)string{
-+ matches,wanted:=0,""
-+ for _,file:=range d.source.spec.CanonicalFiles{
-+  if !strings.HasSuffix(file.Path,".up.sql"){continue}
-+  n,err:=strconv.Atoi(strings.SplitN(filepath.Base(file.Path),"_",2)[0])
-+  if err==nil&&n==version{matches++;wanted=file.SHA256}
-+ }
-+ if matches!=1{return ""};return wanted
++func (d *originalRootCanonicalDriver) upSHA(version int) string {
++	matches, wanted := 0, ""
++	for _, file := range d.source.spec.CanonicalFiles {
++		if !strings.HasSuffix(file.Path, ".up.sql") {
++			continue
++		}
++		n, err := strconv.Atoi(strings.SplitN(filepath.Base(file.Path), "_", 2)[0])
++		if err == nil && n == version {
++			matches++
++			wanted = file.SHA256
++		}
++	}
++	if matches != 1 {
++		return ""
++	}
++	return wanted
 +}
-+func (d *originalRootCanonicalDriver) Run(reader io.Reader)error{
-+ return d.use.write(d.ctx,"canonical_before_run",func()error{
-+  if !d.locked||d.target<0||d.ran{return ErrJointSchemaUnknown}
-+  if err:=d.current(d.target,true);err!=nil{return err}
-+  raw,err:=io.ReadAll(io.LimitReader(reader,(1<<20)+1));if err!=nil||len(raw)>1<<20{return ErrJointSchemaSourceIdentity}
-+  if wanted:=d.upSHA(d.target);wanted==""||fmt.Sprintf("%x",sha256.Sum256(raw))!=wanted{return ErrJointSchemaSourceIdentity}
-+  if err=d.Driver.Run(bytes.NewReader(raw));err!=nil{return err}
-+  d.ran=true;return nil
-+ })
++func (d *originalRootCanonicalDriver) Run(reader io.Reader) error {
++	return d.use.write(d.ctx, "canonical_before_run", func() error {
++		if !d.locked || d.target < 0 || d.ran {
++			return ErrJointSchemaUnknown
++		}
++		if err := d.current(d.target, true); err != nil {
++			return err
++		}
++		raw, err := io.ReadAll(io.LimitReader(reader, (1<<20)+1))
++		if err != nil || len(raw) > 1<<20 {
++			return ErrJointSchemaSourceIdentity
++		}
++		if wanted := d.upSHA(d.target); wanted == "" || fmt.Sprintf("%x", sha256.Sum256(raw)) != wanted {
++			return ErrJointSchemaSourceIdentity
++		}
++		if err = d.Driver.Run(bytes.NewReader(raw)); err != nil {
++			return err
++		}
++		d.ran = true
++		return nil
++	})
 +}
-+func runOriginalRootSQLiteCanonical(ctx context.Context,dsn string,opts MigrationOptions,source *jointOriginalRootSource,version uint,known bool)(runErr error){
-+ use,err:=originalRootSQLiteUseFromContext(ctx);if err!=nil{return err}
-+ pool,err:=originalRootSQLiteWriterPool(ctx,use);if err!=nil{return err}
-+ // This native initializer itself executes ensureVersionTable CREATE.
-+ // Hold the exact same owner/write gate around it, not just around later Up.
-+ var native migratedatabase.Driver
-+ err=use.write(ctx,"canonical_before_initialization",func()error{
-+  if err:=source.recheck(ctx);err!=nil{return err}
-+  var err error;native,err=sqlite3migrate.WithInstance(pool,&sqlite3migrate.Config{});return err
-+ })
-+ if err!=nil{return errors.Join(err,pool.Close())}
-+ captured:=-1;if known{captured=int(version)}
-+ guarded:=&originalRootCanonicalDriver{Driver:native,ctx:ctx,use:use,source:source,dsn:dsn,options:opts,version:captured,target:-1}
-+ m,err:=migrate.NewWithDatabaseInstance("file://"+filepath.ToSlash(filepath.Join(source.root,"migrations","sqlite")),"sqlite3",guarded)
-+ if err!=nil{return errors.Join(err,guarded.Close())}
-+ defer func(){actual,dirty,versionErr:=m.Version();se,de:=m.Close();runErr=errors.Join(runErr,se,de);failure:="";if runErr!=nil{failure=ErrOriginalRootSchemaNotReady.Error()};setMigrationState(actual,dirty,failure,versionErr==nil)}()
-+ // Preserve the old genuine42 decommission refusal before43 is made dirty.
-+ if known&&version==42{
-+  var existing int
-+  if err=pool.QueryRowContext(ctx,"SELECT EXISTS(SELECT 1 FROM nextcloud_source_decommissions)").Scan(&existing);err!=nil{return ErrJointSchemaUnavailable}
-+  if existing!=0{return ErrJointSchemaUnknown}
-+ }
-+ if err=m.Up();err!=nil&&err!=migrate.ErrNoChange{return err}
-+ final,dirty,err:=m.Version();if err!=nil||dirty||final!=source.spec.OriginVersion{return ErrJointSchemaUnknown}
-+ return use.write(ctx,"canonical_before_final_catalogue",func()error{
-+  return preflightJointSchemaLineage(ctx,dsn,opts,final,false,true)
-+ })
++func runOriginalRootSQLiteCanonical(ctx context.Context, dsn string, opts MigrationOptions, source *jointOriginalRootSource, version uint, known bool) (runErr error) {
++	use, err := originalRootSQLiteUseFromContext(ctx)
++	if err != nil {
++		return err
++	}
++	pool, err := originalRootSQLiteWriterPool(ctx, use)
++	if err != nil {
++		return err
++	}
++	// This native initializer itself executes ensureVersionTable CREATE.
++	// Hold the exact same owner/write gate around it, not just around later Up.
++	var native migratedatabase.Driver
++	err = use.write(ctx, "canonical_before_initialization", func() error {
++		if err := source.recheck(ctx); err != nil {
++			return err
++		}
++		var err error
++		native, err = sqlite3migrate.WithInstance(pool, &sqlite3migrate.Config{})
++		return err
++	})
++	if err != nil {
++		return errors.Join(err, pool.Close())
++	}
++	captured := -1
++	if known {
++		captured = int(version)
++	}
++	guarded := &originalRootCanonicalDriver{Driver: native, ctx: ctx, use: use, source: source, dsn: dsn, options: opts, version: captured, target: -1}
++	m, err := migrate.NewWithDatabaseInstance("file://"+filepath.ToSlash(filepath.Join(source.root, "migrations", "sqlite")), "sqlite3", guarded)
++	if err != nil {
++		return errors.Join(err, guarded.Close())
++	}
++	defer func() {
++		actual, dirty, versionErr := m.Version()
++		se, de := m.Close()
++		runErr = errors.Join(runErr, se, de)
++		failure := ""
++		if runErr != nil {
++			failure = ErrOriginalRootSchemaNotReady.Error()
++		}
++		setMigrationState(actual, dirty, failure, versionErr == nil)
++	}()
++	// Preserve the old genuine42 decommission refusal before43 is made dirty.
++	if known && version == 42 {
++		var existing int
++		if err = pool.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM nextcloud_source_decommissions)").Scan(&existing); err != nil {
++			return ErrJointSchemaUnavailable
++		}
++		if existing != 0 {
++			return ErrJointSchemaUnknown
++		}
++	}
++	if err = m.Up(); err != nil && err != migrate.ErrNoChange {
++		return err
++	}
++	final, dirty, err := m.Version()
++	if err != nil || dirty || final != source.spec.OriginVersion {
++		return ErrJointSchemaUnknown
++	}
++	return use.write(ctx, "canonical_before_final_catalogue", func() error {
++		return preflightJointSchemaLineage(ctx, dsn, opts, final, false, true)
++	})
 +}
 diff --git a/internal/database/migration_original_root_sqlite_create_unix.go b/internal/database/migration_original_root_sqlite_create_unix.go
 new file mode 100644
-index 000000000..e9684a5f8
+index 000000000..dde83c585
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_create_unix.go
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,23 @@
 +//go:build linux || darwin
 +
 +package database
 +
 +import (
-+ "errors"
-+ "os"
++	"errors"
++	"os"
 +
-+ "golang.org/x/sys/unix"
++	"golang.org/x/sys/unix"
 +)
 +
 +// O_EXCL never truncates/replaces an existing main file; O_NOFOLLOW refuses a
 +// late symlink. Return every successful FD to the registry without closing it.
-+func originalRootSQLiteCreateRetainedDescriptor(path string)(*peerSQLiteRetainedDescriptor,error){
-+ fd,err:=unix.Open(path,unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,0600)
-+ if err!=nil{
-+  if errors.Is(err,unix.EEXIST){return nil,os.ErrExist}
-+  return nil,ErrJointSchemaUnavailable
-+ }
-+ return &peerSQLiteRetainedDescriptor{file:os.NewFile(uintptr(fd),path),rawFD:uintptr(fd)},nil
++func originalRootSQLiteCreateRetainedDescriptor(path string) (*peerSQLiteRetainedDescriptor, error) {
++	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
++	if err != nil {
++		if errors.Is(err, unix.EEXIST) {
++			return nil, os.ErrExist
++		}
++		return nil, ErrJointSchemaUnavailable
++	}
++	return &peerSQLiteRetainedDescriptor{file: os.NewFile(uintptr(fd), path), rawFD: uintptr(fd)}, nil
 +}
 diff --git a/internal/database/migration_original_root_sqlite_create_unsupported.go b/internal/database/migration_original_root_sqlite_create_unsupported.go
 new file mode 100644
-index 000000000..ef74994bd
+index 000000000..18477523f
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_create_unsupported.go
 @@ -0,0 +1,7 @@
@@ -3771,324 +4605,571 @@ index 000000000..ef74994bd
 +
 +package database
 +
-+func originalRootSQLiteCreateRetainedDescriptor(string)(*peerSQLiteRetainedDescriptor,error){
-+ return nil,ErrJointSchemaUnavailable
++func originalRootSQLiteCreateRetainedDescriptor(string) (*peerSQLiteRetainedDescriptor, error) {
++	return nil, ErrJointSchemaUnavailable
 +}
 diff --git a/internal/database/migration_original_root_sqlite_exclusion.go b/internal/database/migration_original_root_sqlite_exclusion.go
 new file mode 100644
-index 000000000..bce7ba467
+index 000000000..55a8b0a75
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_exclusion.go
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,236 @@
 +package database
 +
 +import (
-+ "context"
-+ "errors"
-+ "os"
-+ "path/filepath"
-+ "strings"
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
 +)
 +
 +// Fresh-file creation shares the existing bounded process-lifetime registry.
 +// A successful plain FD is strongly retained before any validation error;
 +// closing it could clear unrelated same-process SQLite POSIX locks.
-+func (r *peerSQLiteDescriptorRegistry) ensureOriginalRootFile(ctx context.Context,path string)(os.FileInfo,error) {
-+ if ctx == nil || r != &peerSQLiteMigrationDescriptors {return nil,ErrJointSchemaUnavailable}
-+ if err:=ctx.Err();err!=nil{return nil,err}
-+ r.mu.Lock()
-+ defer r.mu.Unlock()
-+ if err:=ctx.Err();err!=nil{return nil,err}
-+ if _,err:=os.Lstat(path);err==nil{
-+  info,err:=os.Stat(path)
-+  if err!=nil{return nil,ErrJointSchemaUnavailable}
-+  if err=validatePeerSQLiteMigrationFile(info);err!=nil{return nil,err}
-+  return info,nil
-+ }else if !errors.Is(err,os.ErrNotExist){return nil,ErrJointSchemaUnavailable}
-+ capacity,err:=peerSQLiteDescriptorCapacity()
-+ if err!=nil{return nil,err}
-+ if len(r.retained)+r.reservations>=capacity{return nil,ErrJointSchemaDescriptorCapacity}
-+ r.reservations++
-+ opened,err:=originalRootSQLiteCreateRetainedDescriptor(path)
-+ if opened!=nil{r.retained=append(r.retained,opened)}
-+ r.reservations--
-+ if errors.Is(err,os.ErrExist){
-+  // Another real creator won; capture that file before descriptor()/claim.
-+  info,err:=os.Stat(path)
-+  if err!=nil{return nil,ErrJointSchemaUnavailable}
-+  if err=validatePeerSQLiteMigrationFile(info);err!=nil{return nil,err}
-+  return info,nil
-+ }
-+ if err!=nil{return nil,err}
-+ if opened==nil||opened.file==nil{return nil,ErrJointSchemaUnavailable}
-+ opened.resolvedPath=path
-+ opened.changeLock=peerSQLiteChangeOFD
-+ opened.gate=make(chan struct{},1);opened.gate<-struct{}{}
-+ opened.poisoned=make(chan struct{})
-+ info,err:=opened.file.Stat()
-+ if err!=nil{return nil,ErrJointSchemaUnavailable}
-+ opened.identity=info
-+ if err=validatePeerSQLiteMigrationFile(info);err!=nil{return nil,err}
-+ key,err:=peerSQLiteDescriptorKey(info)
-+ if err!=nil{return nil,err}
-+ opened.filesystem,err=peerSQLiteDescriptorFilesystem(opened.file)
-+ if err!=nil{return nil,err}
-+ again,err:=os.Stat(path)
-+ if err!=nil||!os.SameFile(info,again){return nil,ErrJointSchemaUnknown}
-+ // O_EXCL created a new inode. Never replace a live/quarantined registry owner.
-+ if r.entries[key]!=nil{return nil,ErrJointSchemaUnknown}
-+ r.entries[key]=opened
-+ if err=ctx.Err();err!=nil{return nil,err}
-+ return info,nil
++func (r *peerSQLiteDescriptorRegistry) ensureOriginalRootFile(ctx context.Context, path string) (os.FileInfo, error) {
++	if ctx == nil || r != &peerSQLiteMigrationDescriptors {
++		return nil, ErrJointSchemaUnavailable
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if _, err := os.Lstat(path); err == nil {
++		info, err := os.Stat(path)
++		if err != nil {
++			return nil, ErrJointSchemaUnavailable
++		}
++		if err = validatePeerSQLiteMigrationFile(info); err != nil {
++			return nil, err
++		}
++		return info, nil
++	} else if !errors.Is(err, os.ErrNotExist) {
++		return nil, ErrJointSchemaUnavailable
++	}
++	capacity, err := peerSQLiteDescriptorCapacity()
++	if err != nil {
++		return nil, err
++	}
++	if len(r.retained)+r.reservations >= capacity {
++		return nil, ErrJointSchemaDescriptorCapacity
++	}
++	r.reservations++
++	opened, err := originalRootSQLiteCreateRetainedDescriptor(path)
++	if opened != nil {
++		r.retained = append(r.retained, opened)
++	}
++	r.reservations--
++	if errors.Is(err, os.ErrExist) {
++		// Another real creator won; capture that file before descriptor()/claim.
++		info, err := os.Stat(path)
++		if err != nil {
++			return nil, ErrJointSchemaUnavailable
++		}
++		if err = validatePeerSQLiteMigrationFile(info); err != nil {
++			return nil, err
++		}
++		return info, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	if opened == nil || opened.file == nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	opened.resolvedPath = path
++	opened.changeLock = peerSQLiteChangeOFD
++	opened.gate = make(chan struct{}, 1)
++	opened.gate <- struct{}{}
++	opened.poisoned = make(chan struct{})
++	info, err := opened.file.Stat()
++	if err != nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	opened.identity = info
++	if err = validatePeerSQLiteMigrationFile(info); err != nil {
++		return nil, err
++	}
++	key, err := peerSQLiteDescriptorKey(info)
++	if err != nil {
++		return nil, err
++	}
++	opened.filesystem, err = peerSQLiteDescriptorFilesystem(opened.file)
++	if err != nil {
++		return nil, err
++	}
++	again, err := os.Stat(path)
++	if err != nil || !os.SameFile(info, again) {
++		return nil, ErrJointSchemaUnknown
++	}
++	// O_EXCL created a new inode. Never replace a live/quarantined registry owner.
++	if r.entries[key] != nil {
++		return nil, ErrJointSchemaUnknown
++	}
++	r.entries[key] = opened
++	if err = ctx.Err(); err != nil {
++		return nil, err
++	}
++	return info, nil
 +}
 +
-+func originalRootSQLiteFilename(dsn string,opts MigrationOptions)(string,string,error){
-+ path:=opts.SQLiteDBPath
-+ if path==""{path=strings.TrimPrefix(dsn,"sqlite3://")}
-+ if path==""||path==":memory:"{return "","",ErrJointSchemaUnavailable}
-+ requested,err:=filepath.Abs(path)
-+ if err!=nil{return "","",ErrJointSchemaUnavailable}
-+ _,err=os.Lstat(requested)
-+ if err==nil{
-+  resolved,err:=filepath.EvalSymlinks(requested)
-+  if err!=nil{return "","",ErrJointSchemaUnknown}
-+  return requested,resolved,nil
-+ }
-+ if !errors.Is(err,os.ErrNotExist){return "","",ErrJointSchemaUnavailable}
-+ parent,err:=filepath.EvalSymlinks(filepath.Dir(requested))
-+ if err!=nil{return "","",ErrJointSchemaUnavailable}
-+ return requested,filepath.Join(parent,filepath.Base(requested)),nil
++func originalRootSQLiteFilename(dsn string, opts MigrationOptions) (string, string, error) {
++	path := opts.SQLiteDBPath
++	if path == "" {
++		path = strings.TrimPrefix(dsn, "sqlite3://")
++	}
++	if path == "" || path == ":memory:" {
++		return "", "", ErrJointSchemaUnavailable
++	}
++	requested, err := filepath.Abs(path)
++	if err != nil {
++		return "", "", ErrJointSchemaUnavailable
++	}
++	_, err = os.Lstat(requested)
++	if err == nil {
++		resolved, err := filepath.EvalSymlinks(requested)
++		if err != nil {
++			return "", "", ErrJointSchemaUnknown
++		}
++		return requested, resolved, nil
++	}
++	if !errors.Is(err, os.ErrNotExist) {
++		return "", "", ErrJointSchemaUnavailable
++	}
++	parent, err := filepath.EvalSymlinks(filepath.Dir(requested))
++	if err != nil {
++		return "", "", ErrJointSchemaUnavailable
++	}
++	return requested, filepath.Join(parent, filepath.Base(requested)), nil
 +}
 +
 +// Observe SQLite's actual main filename only AFTER owning byte-zero OFD. Both
 +// aliases and the SQL connection's main relation must match the claimed inode.
 +// Empty fresh main files are legitimate bootstrap inputs, not Ready schemas.
-+func originalRootSQLiteActualMain(ctx context.Context,held *jointPeerSQLiteMigrationExclusion,requested string) error {
-+ if err:=held.check(ctx);err!=nil{return err}
-+ requestedInfo,err:=os.Stat(requested)
-+ if err!=nil||!os.SameFile(requestedInfo,held.identity){return ErrJointSchemaUnknown}
-+ opts:=MigrationOptions{SQLiteDBPath:held.resolvedPath,jointReadOnly:true}
-+ db,dialect,err:=openJointLineageDB("sqlite3://unused",opts)
-+ if err!=nil{return err}
-+ if dialect!="sqlite"{return errors.Join(ErrJointSchemaUnavailable,db.Close())}
-+ rows,err:=db.QueryContext(ctx,"PRAGMA database_list")
-+ if err!=nil{return errors.Join(ErrJointSchemaUnavailable,db.Close())}
-+ count:=0
-+ main:=""
-+ for rows.Next(){
-+  var sequence int;var name,filename string
-+  if rows.Scan(&sequence,&name,&filename)!=nil{rows.Close();db.Close();return ErrJointSchemaUnavailable}
-+  if name=="main"{count++;main=filename}
-+ }
-+ closeErr:=errors.Join(rows.Err(),rows.Close(),db.Close())
-+ if closeErr!=nil{return ErrJointSchemaUnavailable}
-+ if count!=1||main==""||!filepath.IsAbs(main){return ErrJointSchemaUnknown}
-+ info,err:=os.Stat(main)
-+ if err!=nil||!os.SameFile(info,held.identity){return ErrJointSchemaUnknown}
-+ if err=held.check(ctx);err!=nil{return err}
-+ requestedInfo,err=os.Stat(requested)
-+ if err!=nil||!os.SameFile(requestedInfo,held.identity){return ErrJointSchemaUnknown}
-+ return ctx.Err()
++func originalRootSQLiteActualMain(ctx context.Context, held *jointPeerSQLiteMigrationExclusion, requested string) error {
++	if err := held.check(ctx); err != nil {
++		return err
++	}
++	requestedInfo, err := os.Stat(requested)
++	if err != nil || !os.SameFile(requestedInfo, held.identity) {
++		return ErrJointSchemaUnknown
++	}
++	opts := MigrationOptions{SQLiteDBPath: held.resolvedPath, jointReadOnly: true}
++	db, dialect, err := openJointLineageDB("sqlite3://unused", opts)
++	if err != nil {
++		return err
++	}
++	if dialect != "sqlite" {
++		return errors.Join(ErrJointSchemaUnavailable, db.Close())
++	}
++	rows, err := db.QueryContext(ctx, "PRAGMA database_list")
++	if err != nil {
++		return errors.Join(ErrJointSchemaUnavailable, db.Close())
++	}
++	count := 0
++	main := ""
++	for rows.Next() {
++		var sequence int
++		var name, filename string
++		if rows.Scan(&sequence, &name, &filename) != nil {
++			rows.Close()
++			db.Close()
++			return ErrJointSchemaUnavailable
++		}
++		if name == "main" {
++			count++
++			main = filename
++		}
++	}
++	closeErr := errors.Join(rows.Err(), rows.Close(), db.Close())
++	if closeErr != nil {
++		return ErrJointSchemaUnavailable
++	}
++	if count != 1 || main == "" || !filepath.IsAbs(main) {
++		return ErrJointSchemaUnknown
++	}
++	info, err := os.Stat(main)
++	if err != nil || !os.SameFile(info, held.identity) {
++		return ErrJointSchemaUnknown
++	}
++	if err = held.check(ctx); err != nil {
++		return err
++	}
++	requestedInfo, err = os.Stat(requested)
++	if err != nil || !os.SameFile(requestedInfo, held.identity) {
++		return ErrJointSchemaUnknown
++	}
++	return ctx.Err()
 +}
 +
 +// The owner is acquired before the first ledger/catalogue read or migrator
 +// initialization, covering old canonical bootstrap, tail, Ready and all driver
 +// closes. An already held genuine same-file context is borrowed, never relocked.
-+func acquireOriginalRootSQLiteBootstrap(ctx context.Context,dsn string,opts MigrationOptions)(*jointPeerSQLiteMigrationExclusion,bool,error){
-+ if ctx==nil{return nil,false,ErrJointSchemaUnavailable}
-+ requested,resolved,err:=originalRootSQLiteFilename(dsn,opts)
-+ if err!=nil{return nil,false,err}
-+ if ctx.Value(jointPeerSQLiteMigrationContextKey{})!=nil{
-+  held,err:=peerSQLiteMigrationExclusionFromContext(ctx)
-+  if err!=nil{return nil,false,err}
-+  if err=originalRootSQLiteActualMain(ctx,held,requested);err!=nil{return nil,false,err}
-+  return held,false,nil
-+ }
-+ captured,err:=peerSQLiteMigrationDescriptors.ensureOriginalRootFile(ctx,resolved)
-+ if err!=nil{return nil,false,err}
-+ held,err:=lockPeerSQLiteMigrationInode(ctx,resolved,resolved)
-+ if err!=nil{return nil,false,err}
-+ held.requestedPath=requested
-+ fail:=func(err error)(*jointPeerSQLiteMigrationExclusion,bool,error){return nil,false,errors.Join(err,held.Close())}
-+ if captured==nil||!os.SameFile(captured,held.identity){return fail(ErrJointSchemaUnknown)}
-+ if err=held.check(ctx);err!=nil{return fail(err)}
-+ if err=originalRootSQLiteActualMain(ctx,held,requested);err!=nil{return fail(err)}
-+ return held,true,nil
++func acquireOriginalRootSQLiteBootstrap(ctx context.Context, dsn string, opts MigrationOptions) (*jointPeerSQLiteMigrationExclusion, bool, error) {
++	if ctx == nil {
++		return nil, false, ErrJointSchemaUnavailable
++	}
++	requested, resolved, err := originalRootSQLiteFilename(dsn, opts)
++	if err != nil {
++		return nil, false, err
++	}
++	if ctx.Value(jointPeerSQLiteMigrationContextKey{}) != nil {
++		held, err := peerSQLiteMigrationExclusionFromContext(ctx)
++		if err != nil {
++			return nil, false, err
++		}
++		if err = originalRootSQLiteActualMain(ctx, held, requested); err != nil {
++			return nil, false, err
++		}
++		return held, false, nil
++	}
++	captured, err := peerSQLiteMigrationDescriptors.ensureOriginalRootFile(ctx, resolved)
++	if err != nil {
++		return nil, false, err
++	}
++	held, err := lockPeerSQLiteMigrationInode(ctx, resolved, resolved)
++	if err != nil {
++		return nil, false, err
++	}
++	held.requestedPath = requested
++	fail := func(err error) (*jointPeerSQLiteMigrationExclusion, bool, error) {
++		return nil, false, errors.Join(err, held.Close())
++	}
++	if captured == nil || !os.SameFile(captured, held.identity) {
++		return fail(ErrJointSchemaUnknown)
++	}
++	if err = held.check(ctx); err != nil {
++		return fail(err)
++	}
++	if err = originalRootSQLiteActualMain(ctx, held, requested); err != nil {
++		return fail(err)
++	}
++	return held, true, nil
 +}
 diff --git a/internal/database/migration_original_root_sqlite_writer.go b/internal/database/migration_original_root_sqlite_writer.go
 new file mode 100644
-index 000000000..78318b53e
+index 000000000..d0278b7c5
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_writer.go
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,138 @@
 +package database
 +
 +import (
-+ "context"
-+ "database/sql"
-+ "errors"
-+ "os"
-+ "path/filepath"
-+ "sync"
++	"context"
++	"database/sql"
++	"errors"
++	"os"
++	"path/filepath"
++	"sync"
 +)
 +
 +type originalRootSQLiteUseKey struct{}
-+type originalRootSQLiteUse struct{held *jointPeerSQLiteMigrationExclusion;once sync.Once;released bool}
-+
-+func pinOriginalRootSQLiteUse(ctx context.Context)(context.Context,*originalRootSQLiteUse,error){
-+ held,err:=peerSQLiteMigrationExclusionFromContext(ctx)
-+ if err!=nil{return nil,nil,err}
-+ held.lifeMu.Lock();defer held.lifeMu.Unlock()
-+ if held.closing{return nil,nil,ErrJointSchemaUnavailable}
-+ if err=held.check(ctx);err!=nil{return nil,nil,err}
-+ held.uses.Add(1)
-+ use:=&originalRootSQLiteUse{held:held}
-+ return context.WithValue(ctx,originalRootSQLiteUseKey{},use),use,nil
++type originalRootSQLiteUse struct {
++	held     *jointPeerSQLiteMigrationExclusion
++	once     sync.Once
++	released bool
 +}
-+func (u *originalRootSQLiteUse) release(){u.once.Do(func(){u.held.lifeMu.Lock();u.released=true;u.held.uses.Done();u.held.lifeMu.Unlock()})}
-+func originalRootSQLiteUseFromContext(ctx context.Context)(*originalRootSQLiteUse,error){
-+ if ctx==nil{return nil,ErrJointSchemaUnavailable}
-+ u,ok:=ctx.Value(originalRootSQLiteUseKey{}).(*originalRootSQLiteUse)
-+ held,err:=peerSQLiteMigrationExclusionFromContext(ctx)
-+ if !ok||u==nil||u.held==nil||err!=nil||u.held!=held{return nil,ErrJointSchemaUnavailable}
-+ held.lifeMu.Lock();defer held.lifeMu.Unlock()
-+ if held.closing||u.released{return nil,ErrJointSchemaUnavailable}
-+ return u,nil
++
++func pinOriginalRootSQLiteUse(ctx context.Context) (context.Context, *originalRootSQLiteUse, error) {
++	held, err := peerSQLiteMigrationExclusionFromContext(ctx)
++	if err != nil {
++		return nil, nil, err
++	}
++	held.lifeMu.Lock()
++	defer held.lifeMu.Unlock()
++	if held.closing {
++		return nil, nil, ErrJointSchemaUnavailable
++	}
++	if err = held.check(ctx); err != nil {
++		return nil, nil, err
++	}
++	held.uses.Add(1)
++	use := &originalRootSQLiteUse{held: held}
++	return context.WithValue(ctx, originalRootSQLiteUseKey{}, use), use, nil
++}
++func (u *originalRootSQLiteUse) release() {
++	u.once.Do(func() { u.held.lifeMu.Lock(); u.released = true; u.held.uses.Done(); u.held.lifeMu.Unlock() })
++}
++func originalRootSQLiteUseFromContext(ctx context.Context) (*originalRootSQLiteUse, error) {
++	if ctx == nil {
++		return nil, ErrJointSchemaUnavailable
++	}
++	u, ok := ctx.Value(originalRootSQLiteUseKey{}).(*originalRootSQLiteUse)
++	held, err := peerSQLiteMigrationExclusionFromContext(ctx)
++	if !ok || u == nil || u.held == nil || err != nil || u.held != held {
++		return nil, ErrJointSchemaUnavailable
++	}
++	held.lifeMu.Lock()
++	defer held.lifeMu.Unlock()
++	if held.closing || u.released {
++		return nil, ErrJointSchemaUnavailable
++	}
++	return u, nil
 +}
 +
 +// A test-only context observer can mutate an actual file/owner BEFORE the
 +// admission below. It returns no fact or permission and is absent by default.
 +// No hook runs while lifeMu is held, so real owner.Close can actually join.
 +type originalRootMutationProbeKey struct{}
-+func originalRootMutationProbe(ctx context.Context,phase string){
-+ if fn,ok:=ctx.Value(originalRootMutationProbeKey{}).(func(string));ok&&fn!=nil{fn(phase)}
++
++func originalRootMutationProbe(ctx context.Context, phase string) {
++	if fn, ok := ctx.Value(originalRootMutationProbeKey{}).(func(string)); ok && fn != nil {
++		fn(phase)
++	}
 +}
-+func (u *originalRootSQLiteUse) write(ctx context.Context,phase string,run func()error) error{
-+ if u==nil||u.held==nil||run==nil{return ErrJointSchemaUnavailable}
-+ originalRootMutationProbe(ctx,phase)
-+ u.held.lifeMu.Lock();defer u.held.lifeMu.Unlock()
-+ if u.held.closing||u.released{return ErrJointSchemaUnavailable}
-+ if err:=u.held.check(ctx);err!=nil{return err}
-+ if err:=ctx.Err();err!=nil{return err}
-+ return run()
++func (u *originalRootSQLiteUse) write(ctx context.Context, phase string, run func() error) error {
++	if u == nil || u.held == nil || run == nil {
++		return ErrJointSchemaUnavailable
++	}
++	originalRootMutationProbe(ctx, phase)
++	u.held.lifeMu.Lock()
++	defer u.held.lifeMu.Unlock()
++	if u.held.closing || u.released {
++		return ErrJointSchemaUnavailable
++	}
++	if err := u.held.check(ctx); err != nil {
++		return err
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	return run()
 +}
 +
 +// This is the actual private writer pool: max1 prevents WithInstance from
 +// switching to a fresh connection between the main-file check and its own
 +// ensureVersionTable CREATE. mode=rw cannot recreate a removed filename.
-+func originalRootSQLiteWriterPool(ctx context.Context,use *originalRootSQLiteUse)(pool *sql.DB,poolErr error){
-+ poolErr=use.write(ctx,"before_writer_open",func()(runErr error){
-+  raw,err:=jointSQLiteFilenameDSN(use.held.resolvedPath,"rw");if err!=nil{return err}
-+  pool,err=sql.Open("sqlite3",raw);if err!=nil{return ErrJointSchemaUnavailable}
-+  pool.SetMaxOpenConns(1);pool.SetMaxIdleConns(1)
-+  conn,err:=pool.Conn(ctx);if err!=nil{return ErrJointSchemaUnavailable}
-+  defer func(){runErr=errors.Join(runErr,conn.Close())}()
-+  rows,err:=conn.QueryContext(ctx,"PRAGMA database_list");if err!=nil{return ErrJointSchemaUnavailable}
-+  count:=0;main:=""
-+  for rows.Next(){var seq int;var name,path string;if rows.Scan(&seq,&name,&path)!=nil{rows.Close();return ErrJointSchemaUnavailable};if name=="main"{count++;main=path}}
-+  err=errors.Join(rows.Err(),rows.Close());if err!=nil{return ErrJointSchemaUnavailable}
-+  info,err:=os.Stat(main)
-+  if err!=nil||count!=1||!filepath.IsAbs(main)||!os.SameFile(info,use.held.identity){return ErrJointSchemaUnknown}
-+  return use.held.check(ctx)
-+ })
-+ if poolErr!=nil&&pool!=nil{poolErr=errors.Join(poolErr,pool.Close());pool=nil}
-+ return pool,poolErr
++func originalRootSQLiteWriterPool(ctx context.Context, use *originalRootSQLiteUse) (pool *sql.DB, poolErr error) {
++	poolErr = use.write(ctx, "before_writer_open", func() (runErr error) {
++		raw, err := jointSQLiteFilenameDSN(use.held.resolvedPath, "rw")
++		if err != nil {
++			return err
++		}
++		pool, err = sql.Open("sqlite3", raw)
++		if err != nil {
++			return ErrJointSchemaUnavailable
++		}
++		pool.SetMaxOpenConns(1)
++		pool.SetMaxIdleConns(1)
++		conn, err := pool.Conn(ctx)
++		if err != nil {
++			return ErrJointSchemaUnavailable
++		}
++		defer func() { runErr = errors.Join(runErr, conn.Close()) }()
++		rows, err := conn.QueryContext(ctx, "PRAGMA database_list")
++		if err != nil {
++			return ErrJointSchemaUnavailable
++		}
++		count := 0
++		main := ""
++		for rows.Next() {
++			var seq int
++			var name, path string
++			if rows.Scan(&seq, &name, &path) != nil {
++				rows.Close()
++				return ErrJointSchemaUnavailable
++			}
++			if name == "main" {
++				count++
++				main = path
++			}
++		}
++		err = errors.Join(rows.Err(), rows.Close())
++		if err != nil {
++			return ErrJointSchemaUnavailable
++		}
++		info, err := os.Stat(main)
++		if err != nil || count != 1 || !filepath.IsAbs(main) || !os.SameFile(info, use.held.identity) {
++			return ErrJointSchemaUnknown
++		}
++		return use.held.check(ctx)
++	})
++	if poolErr != nil && pool != nil {
++		poolErr = errors.Join(poolErr, pool.Close())
++		pool = nil
++	}
++	return pool, poolErr
 +}
 diff --git a/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
 new file mode 100644
-index 000000000..763f691c0
+index 000000000..2edaea8c1
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,168 @@
 +//go:build linux || darwin
 +
 +package database
 +
 +import (
-+ "context"
-+ "crypto/sha256"
-+ "encoding/hex"
-+ "errors"
-+ "fmt"
-+ "os"
-+ "path/filepath"
-+ "testing"
-+ "time"
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
 +
-+ "github.com/stretchr/testify/require"
++	"github.com/stretchr/testify/require"
 +)
 +
 +// Only real schema/ledger metadata is hashed, never original body/credentials.
-+func originalRootWriterMetadata(path string)(string,error){
-+ db,_,err:=openJointLineageDB("sqlite3://unused",MigrationOptions{SQLiteDBPath:path,jointReadOnly:true});if err!=nil{return "",err}
-+ defer db.Close()
-+ rows,err:=db.Query("SELECT name,type,COALESCE(sql,'') FROM sqlite_master ORDER BY name,type");if err!=nil{return "",err}
-+ digest:=sha256.New();ledger:=false
-+ for rows.Next(){var name,kind,sqlText string;if rows.Scan(&name,&kind,&sqlText)!=nil{rows.Close();return "",ErrJointSchemaUnavailable};if name=="schema_migrations"&&kind=="table"{ledger=true};digest.Write([]byte(name+"\x00"+kind+"\x00"+sqlText+"\x00"))}
-+ if err=errors.Join(rows.Err(),rows.Close());err!=nil{return "",err}
-+ if ledger{
-+  rows,err=db.Query("SELECT version,dirty FROM schema_migrations ORDER BY version,dirty");if err!=nil{return "",err}
-+  for rows.Next(){var v int;var dirty bool;if rows.Scan(&v,&dirty)!=nil{rows.Close();return "",ErrJointSchemaUnavailable};digest.Write([]byte(fmtOriginalRootWriterLedger(v,dirty)))}
-+  if err=errors.Join(rows.Err(),rows.Close());err!=nil{return "",err}
-+ }
-+ return hex.EncodeToString(digest.Sum(nil)),nil
++func originalRootWriterMetadata(path string) (string, error) {
++	db, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path, jointReadOnly: true})
++	if err != nil {
++		return "", err
++	}
++	defer db.Close()
++	rows, err := db.Query("SELECT name,type,COALESCE(sql,'') FROM sqlite_master ORDER BY name,type")
++	if err != nil {
++		return "", err
++	}
++	digest := sha256.New()
++	ledger := false
++	for rows.Next() {
++		var name, kind, sqlText string
++		if rows.Scan(&name, &kind, &sqlText) != nil {
++			rows.Close()
++			return "", ErrJointSchemaUnavailable
++		}
++		if name == "schema_migrations" && kind == "table" {
++			ledger = true
++		}
++		digest.Write([]byte(name + "\x00" + kind + "\x00" + sqlText + "\x00"))
++	}
++	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
++		return "", err
++	}
++	if ledger {
++		rows, err = db.Query("SELECT version,dirty FROM schema_migrations ORDER BY version,dirty")
++		if err != nil {
++			return "", err
++		}
++		for rows.Next() {
++			var v int
++			var dirty bool
++			if rows.Scan(&v, &dirty) != nil {
++				rows.Close()
++				return "", ErrJointSchemaUnavailable
++			}
++			digest.Write([]byte(fmtOriginalRootWriterLedger(v, dirty)))
++		}
++		if err = errors.Join(rows.Err(), rows.Close()); err != nil {
++			return "", err
++		}
++	}
++	return hex.EncodeToString(digest.Sum(nil)), nil
 +}
-+func fmtOriginalRootWriterLedger(version int,dirty bool)string{
-+ return fmt.Sprintf("%d/%t\x00",version,dirty)
++func fmtOriginalRootWriterLedger(version int, dirty bool) string {
++	return fmt.Sprintf("%d/%t\x00", version, dirty)
 +}
-+func TestOriginalRootSQLiteMutationOwnerFaultsActual(t *testing.T){
-+ root:=sqliteRepoRoot(t);chdirAndRestore(t,root)
-+ for _,phase:=range []string{"canonical_before_initialization","canonical_before_set_version","canonical_before_run","tail_before_initialization"}{
-+  t.Run(phase,func(t *testing.T){
-+   for _,fault:=range []string{"borrowed_owner_close_joins","actual_path_replacement"}{
-+    t.Run(fault,func(t *testing.T){
-+     path:=filepath.Join(t.TempDir(),"actual writer lifetime.sqlite")
-+     if phase=="tail_before_initialization"{installSQLiteMigrationPrefixFixture(t,root,path,87)}
-+     held,owned,err:=acquireOriginalRootSQLiteBootstrap(context.Background(),"sqlite3://unused",MigrationOptions{SQLiteDBPath:path});require.NoError(t,err);require.True(t,owned)
-+     closed:=make(chan error,1)
-+     closeRequested:=false
-+     t.Cleanup(func(){
-+      if closeRequested{select{case err:=<-closed:if err!=nil{t.Error("real owner Close failed")};case <-time.After(3*time.Second):t.Error("real owner Close did not join driver release")}}else{if held.Close()!=nil{t.Error("real owner cleanup failed")}}
-+     })
-+     applied:=false;before:="";retained:=path;var observerErr error
-+     observe:=func(actualPhase string){
-+      if applied||actualPhase!=phase{return}
-+      applied=true
-+      before,observerErr=originalRootWriterMetadata(path);if observerErr!=nil{return}
-+      if fault=="actual_path_replacement"{
-+       retained=path+".retained"
-+       if observerErr=os.Rename(path,retained);observerErr!=nil{return}
-+       observerErr=os.WriteFile(path,nil,0600);return
-+      }
-+      closeRequested=true
-+      go func(){closed<-held.Close()}()
-+      deadline:=time.NewTimer(3*time.Second);defer deadline.Stop()
-+      for{
-+       held.lifeMu.Lock();closing:=held.closing;held.lifeMu.Unlock()
-+       if closing{break}
-+       tick:=time.NewTimer(time.Millisecond)
-+       select{case <-deadline.C:tick.Stop();observerErr=ErrJointSchemaUnavailable;return;case <-tick.C:}
-+      }
-+      // Close really started, but cannot finish until this actual borrower
-+      // closes its driver and releases its use after this callback returns.
-+      select{case <-closed:observerErr=ErrJointSchemaUnavailable;default:}
-+     }
-+     ctx,cancel:=context.WithTimeout(context.Background(),10*time.Second);defer cancel()
-+     ctx=context.WithValue(ctx,jointPeerSQLiteMigrationContextKey{},held)
-+     ctx=context.WithValue(ctx,originalRootMutationProbeKey{},observe)
-+     err=RunOriginalKnowledgeMigrations(ctx,"sqlite3://unused",MigrationOptions{SQLiteDBPath:path})
-+     require.True(t,applied,"real chosen mutation boundary must be reached")
-+     require.NoError(t,observerErr)
-+     require.Error(t,err,"invalidated owner/path must refuse before the observed next actual native write")
-+     after,err:=originalRootWriterMetadata(retained);require.NoError(t,err);require.Equal(t,before,after,"schema and real ledger remain exactly the boundary snapshot; no effect after invalidation")
-+     if fault=="actual_path_replacement"{originalRootActualNoLedger(t,path)}
-+    })
-+   }
-+  })
-+ }
++func TestOriginalRootSQLiteMutationOwnerFaultsActual(t *testing.T) {
++	root := sqliteRepoRoot(t)
++	chdirAndRestore(t, root)
++	for _, phase := range []string{"canonical_before_initialization", "canonical_before_set_version", "canonical_before_run", "tail_before_initialization"} {
++		t.Run(phase, func(t *testing.T) {
++			for _, fault := range []string{"borrowed_owner_close_joins", "actual_path_replacement"} {
++				t.Run(fault, func(t *testing.T) {
++					path := filepath.Join(t.TempDir(), "actual writer lifetime.sqlite")
++					if phase == "tail_before_initialization" {
++						installSQLiteMigrationPrefixFixture(t, root, path, 87)
++					}
++					held, owned, err := acquireOriginalRootSQLiteBootstrap(context.Background(), "sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++					require.NoError(t, err)
++					require.True(t, owned)
++					closed := make(chan error, 1)
++					closeRequested := false
++					t.Cleanup(func() {
++						if closeRequested {
++							select {
++							case err := <-closed:
++								if err != nil {
++									t.Error("real owner Close failed")
++								}
++							case <-time.After(3 * time.Second):
++								t.Error("real owner Close did not join driver release")
++							}
++						} else {
++							if held.Close() != nil {
++								t.Error("real owner cleanup failed")
++							}
++						}
++					})
++					applied := false
++					before := ""
++					retained := path
++					var observerErr error
++					observe := func(actualPhase string) {
++						if applied || actualPhase != phase {
++							return
++						}
++						applied = true
++						before, observerErr = originalRootWriterMetadata(path)
++						if observerErr != nil {
++							return
++						}
++						if fault == "actual_path_replacement" {
++							retained = path + ".retained"
++							if observerErr = os.Rename(path, retained); observerErr != nil {
++								return
++							}
++							observerErr = os.WriteFile(path, nil, 0600)
++							return
++						}
++						closeRequested = true
++						go func() { closed <- held.Close() }()
++						deadline := time.NewTimer(3 * time.Second)
++						defer deadline.Stop()
++						for {
++							held.lifeMu.Lock()
++							closing := held.closing
++							held.lifeMu.Unlock()
++							if closing {
++								break
++							}
++							tick := time.NewTimer(time.Millisecond)
++							select {
++							case <-deadline.C:
++								tick.Stop()
++								observerErr = ErrJointSchemaUnavailable
++								return
++							case <-tick.C:
++							}
++						}
++						// Close really started, but cannot finish until this actual borrower
++						// closes its driver and releases its use after this callback returns.
++						select {
++						case <-closed:
++							observerErr = ErrJointSchemaUnavailable
++						default:
++						}
++					}
++					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++					defer cancel()
++					ctx = context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++					ctx = context.WithValue(ctx, originalRootMutationProbeKey{}, observe)
++					err = RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++					require.True(t, applied, "real chosen mutation boundary must be reached")
++					require.NoError(t, observerErr)
++					require.Error(t, err, "invalidated owner/path must refuse before the observed next actual native write")
++					after, err := originalRootWriterMetadata(retained)
++					require.NoError(t, err)
++					require.Equal(t, before, after, "schema and real ledger remain exactly the boundary snapshot; no effect after invalidation")
++					if fault == "actual_path_replacement" {
++						originalRootActualNoLedger(t, path)
++					}
++				})
++			}
++		})
++	}
 +}
 diff --git a/internal/database/migration_peer_sqlite_exclusive.go b/internal/database/migration_peer_sqlite_exclusive.go
-index 7b689e722..5683342c9 100644
+index 7b689e722..25811d12d 100644
 --- a/internal/database/migration_peer_sqlite_exclusive.go
 +++ b/internal/database/migration_peer_sqlite_exclusive.go
 @@ -28,9 +28,19 @@ type jointPeerSQLiteMigrationExclusion struct {
@@ -4096,18 +5177,18 @@ index 7b689e722..5683342c9 100644
  	once          sync.Once
  	closeErr      error
 +	// Explicit original startup borrowers pin the owner until actual driver close.
-+	lifeMu sync.Mutex
++	lifeMu  sync.Mutex
 +	closing bool
-+	uses sync.WaitGroup
++	uses    sync.WaitGroup
  }
  
  func (x *jointPeerSQLiteMigrationExclusion) Close() error {
-+ // Mark refusal before waiting. Each controlled native write holds lifeMu,
-+ // so Close cannot release this OFD during an already-admitted SQL call.
-+ x.lifeMu.Lock()
-+ x.closing = true
-+ x.lifeMu.Unlock()
-+ x.uses.Wait()
++	// Mark refusal before waiting. Each controlled native write holds lifeMu,
++	// so Close cannot release this OFD during an already-admitted SQL call.
++	x.lifeMu.Lock()
++	x.closing = true
++	x.lifeMu.Unlock()
++	x.uses.Wait()
  	x.once.Do(func() {
  		x.mu.Lock()
  		defer x.mu.Unlock()
