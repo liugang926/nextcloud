@@ -149,3 +149,13 @@ runner 新增 `--agent`（要求 `--rag` 和真实模型配置）。源码 `ae90
 第三次真实 runner 在 NC prepare 阶段失败，未创建 Go actor。检查发现隔离 AD 证书于 `2026-10-12T04:25:53Z` 到期。新增 `renew-running-test-tls.py` 仅支持经过所有权、无宿主端口和 sleep 监督方式检查的既有隔离容器；更新私有证书、重启其中 Samba 并更新 NC 公共 CA，未重建目录或关闭 TLS 校验。实际 NC `ldap:test-config s01` 通过，三个测试用户 GUID 前后相同，新证书有效至 `2026-10-14T07:50:16Z`。临时模型导出已删除。
 
 [环境修复收据](evidence/auto-space-prd-20261012/agent-environment-repair-receipt.json) 记录上述实际结果。Agent 工具调用和撤权验收仍未通过，冻结候选未更新。
+
+## 工具结束后 HTTP 读取保护的生命周期修复
+
+使用现有机器文档夹具复现：生产同步、原件日志、处理及真实 SQL 分块/租约完成后，工具上下文结束使 HTTP 持有的读取保护一起失效。修复前七项运行、五项通过；`producer-finished` 和 `producer-borrowed` 都在外层请求仍有效的输出检查处返回 `context canceled`。这次失败到达了实际目标断言，与此前旧 history 夹具初始化失败不同。
+
+WK 提交 `aa6801173` 将回合持有的物理读取保护绑定到外层请求的取消和截止时间，保留当前消费上下文的身份等值；每次读取仍由 `ContextFor` 绑定当前调用取消，输出边界也明确拒绝已取消的消费上下文。未使用脱离取消的后台上下文，未移除当前来源或租约检查。
+
+同一组七项重跑全部通过（12.16 秒）：正常检索/合并、两种工具结束场景、外层请求取消、源撤权、缺少来源证明以及当前调用取消。工具结束后 HTTP 保护仍有效，模型和 HTTP 最后引用释放后实际读取租约归零。测试 actor 已确认不存在。[修复收据](evidence/auto-space-prd-20261012/agent-physical-lifetime-receipt.json) 固定修复前后日志与源码。
+
+本轮为 SQLite 实际 service 回归，模型、向量候选和来源接口响应由夹具控制；不能替代真实模型 Agent 工具循环、完整认证 HTTP 或 PostgreSQL 验收。冻结候选暂留 `980be4d78`，等待真实 Agent 联调后更新。
