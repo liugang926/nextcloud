@@ -139,3 +139,13 @@ runner 新增 `--agent`（要求 `--rag` 和真实模型配置）。源码 `ae90
 两次实际 runner 均在生产 chat factory 的 SSRF DNS 校验处失败（api.deepseek.com），业务阶段分别 9.45 / 9.54 秒，均未进入本轮处理和 Agent，不能记工具或撤权验收通过。之后宿主机、NC PHP，以及同镜像/同网络 getent 只读探针均能解析，Go 解析差异仍需定位；没有扩大 DeepSeek allowlist 或关闭 SSRF。另一个待实测点是 Agent/工具内部上下文结束后，最终 HTTP 发送所需的物理读取保护是否仍有效，尚未据静态分析修改生产生命周期。
 
 [本轮失败收据](evidence/auto-space-prd-20261012/live-real-agent-dns-failure-receipt.json) 固定源码和日志。两次进程已终止，owned actor 不存在，NC publication/私有 transport 清理，模型导出删除。冻结候选仍为前一轮实测通过的 `980be4d78`，没有将此次未通过路径更新为已验收候选；完整目标继续进行。
+
+## Agent 环境修复与独立生命周期诊断
+
+同镜像、同网络的 Go 1.26.8 标准库探针分别使用默认及 cgo 解析器，均成功取得 DeepSeek 公网 IPv4；IPv6 无记录。没有修改解析器配置或放宽 SSRF，前两次 DNS 故障暂未复现。
+
+独立生命周期测试尝试增加工具上下文完成后继续 HTTP 输出的断言，但九个分支均在旧 history 公共夹具初始化处失败（`knowledge_history_actor_integration_test.go:84`），未到新增断言。失败补丁和日志保留；新增断言改为使用现有机器文档处理夹具，执行仍待资源窗口。这不证明生产生命周期问题已发生或已修复。
+
+第三次真实 runner 在 NC prepare 阶段失败，未创建 Go actor。检查发现隔离 AD 证书于 `2026-10-12T04:25:53Z` 到期。新增 `renew-running-test-tls.py` 仅支持经过所有权、无宿主端口和 sleep 监督方式检查的既有隔离容器；更新私有证书、重启其中 Samba 并更新 NC 公共 CA，未重建目录或关闭 TLS 校验。实际 NC `ldap:test-config s01` 通过，三个测试用户 GUID 前后相同，新证书有效至 `2026-10-14T07:50:16Z`。临时模型导出已删除。
+
+[环境修复收据](evidence/auto-space-prd-20261012/agent-environment-repair-receipt.json) 记录上述实际结果。Agent 工具调用和撤权验收仍未通过，冻结候选未更新。

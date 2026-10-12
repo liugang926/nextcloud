@@ -1,0 +1,52 @@
+diff --git a/internal/application/service/rag_physical_lifetime_test.go b/internal/application/service/rag_physical_lifetime_test.go
+index ae18495e8..55d4c36b3 100644
+--- a/internal/application/service/rag_physical_lifetime_test.go
++++ b/internal/application/service/rag_physical_lifetime_test.go
+@@ -12,7 +12,7 @@ import (
+ )
+ 
+ func TestRAGPhysicalActualHydrationHeldUntilFinalProducerAndSenderRelease(t *testing.T) {
+-	for _, mode := range []string{"normal", "borrowed-parent", "expired-before-model", "expired-before-http", "cancel", "no-turn"} {
++	for _, mode := range []string{"normal", "borrowed-parent", "producer-finished", "producer-finished-borrowed", "owner-cancelled", "expired-before-model", "expired-before-http", "cancel", "no-turn"} {
+ 		t.Run(mode, func(t *testing.T) {
+ 			messages, kg, store, db, ctx, _ := messageMaterialActualFixture(t)
+ 			k := &types.Knowledge{ID: "actual-rag-physical-document", TenantID: 7, KnowledgeBaseID: "kb", Type: types.KnowledgeTypeManual, Channel: "web", Source: "manual", Title: "actual authored title", EnableStatus: "enabled", ParseStatus: types.ParseStatusCompleted, Metadata: types.JSON(`{"manual":{"content":"actual authored original"}}`), CustomMetadata: types.JSON(`{}`)}
+@@ -30,6 +30,8 @@ func TestRAGPhysicalActualHydrationHeldUntilFinalProducerAndSenderRelease(t *tes
+ 			ctx = types.WithRAGSourceLineage(ctx, types.NewRAGSourceLineage(func(checkCtx context.Context, value *types.SourceLineage) error {
+ 				return messages.sourceLineageGuard.Check(checkCtx, value, access.LineageReadScope{Targets: types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: "kb"}}})
+ 			}))
++			ctx, cancelOwner := context.WithCancel(ctx)
++			defer cancelOwner()
+ 			var check func() error
+ 			var releaseHTTP, releaseModel func()
+ 			var attach func(context.Context) context.Context
+@@ -42,10 +44,11 @@ func TestRAGPhysicalActualHydrationHeldUntilFinalProducerAndSenderRelease(t *tes
+ 				defer releaseModel()
+ 				markMessageMaterialReady(ctx)
+ 			}
++			httpCtx := ctx
+ 			ctx, cancel := context.WithCancel(ctx)
+ 			defer cancel()
+ 			var borrowed *readlease.NextcloudReadGuard
+-			if mode == "borrowed-parent" {
++			if mode == "borrowed-parent" || mode == "producer-finished-borrowed" {
+ 				borrowed, err = readlease.BeginNextcloudKBRead(ctx, store.ContentLeaseStore(), []readlease.NextcloudKBReadScope{{TenantID: 7, KBID: "kb"}})
+ 				require.NoError(t, err)
+ 				defer borrowed.Close()
+@@ -85,8 +88,15 @@ func TestRAGPhysicalActualHydrationHeldUntilFinalProducerAndSenderRelease(t *tes
+ 				require.NoError(t, db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Update("expires_at_ms", int64(1)).Error)
+ 			} else if mode == "cancel" {
+ 				cancel()
++			} else if mode == "owner-cancelled" {
++				cancelOwner()
+ 			}
+-			if mode == "normal" || mode == "borrowed-parent" {
++			if mode == "producer-finished" || mode == "producer-finished-borrowed" {
++				// Agent tools cancel their execution context after returning. The
++				// independent HTTP reference must still protect buffered output.
++				cancel()
++				require.NoError(t, CheckMessageMaterialOutputBoundary(attach(httpCtx)))
++			} else if mode == "normal" || mode == "borrowed-parent" {
+ 				require.NoError(t, CheckMessageMaterialOutputBoundary(attach(ctx)))
+ 			} else {
+ 				require.Error(t, CheckMessageMaterialOutputBoundary(attach(ctx)))
