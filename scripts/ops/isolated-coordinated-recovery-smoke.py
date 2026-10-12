@@ -11,6 +11,7 @@ import hashlib
 import contextlib
 import io
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -38,7 +39,10 @@ PG_IMAGE=owner['POSTGRES_IMAGE']
 
 def run(*args,input=None,timeout=600):
     r=subprocess.run(args,input=input,capture_output=True,timeout=timeout)
-    if r.returncode:raise RuntimeError(args[0]+' failed; private fixture command exit '+str(r.returncode))
+    if r.returncode:
+        error=RuntimeError(args[0]+' failed; private fixture command exit '+str(r.returncode))
+        error.private_output=r.stdout+r.stderr
+        raise error
     return r.stdout
 def write(path,v):
     path.write_bytes(v if isinstance(v,bytes) else journal.canonical(v));path.chmod(0o600)
@@ -64,6 +68,18 @@ def assert_fixture_owned(state,require_empty=False):
         item=owner['docker_inspect']('network',name);labels=item['Labels'];assert labels.get(owner['OWNER_LABEL'])==nonce and name in {project+'_default',project+'_httpedge'}
     assert resources['network'] <= {project+'_default',project+'_httpedge'}
 
+def fixture_subnets(occupied):
+    """Allocate only unused benchmark-range subnets; never remove other networks."""
+    used=[ipaddress.ip_network(value) for value in occupied]
+    choices=list(ipaddress.ip_network('198.18.0.0/15').subnets(new_prefix=28))
+    secrets.SystemRandom().shuffle(choices)
+    selected=[]
+    for candidate in choices:
+        if any(candidate.version==other.version and candidate.overlaps(other) for other in used):continue
+        selected.append(str(candidate));used.append(candidate)
+        if len(selected)==2:return selected
+    raise RuntimeError('No unused isolated fixture subnets available')
+
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--weknora-source',type=Path,required=True);p.add_argument('--evidence',type=Path,required=True);a=p.parse_args()
     os.umask(0o077)
@@ -79,6 +95,11 @@ def main():
     config['volumes']={k:v for k,v in config['volumes'].items() if k in {'ldap-certs','ldap-fixture','nc-postgres','nc-redis-data','nc-html','wk-postgres'}}
     config['networks']['default']['internal']=True
     config['networks']['httpedge']={'labels':{owner['OWNER_LABEL']:nonce}}
+    network_ids=run('docker','network','ls','-q').decode().split()
+    networks=json.loads(run('docker','network','inspect',*network_ids)) if network_ids else []
+    occupied=[entry['Subnet'] for network in networks for entry in (network.get('IPAM',{}).get('Config') or []) if entry.get('Subnet')]
+    for name,subnet in zip(('default','httpedge'),fixture_subnets(occupied)):
+        config['networks'][name]['ipam']={'config':[{'subnet':subnet}]}
     config['services']['nextcloud']['networks']=['default','httpedge']
     for name,s in config['services'].items():
         s['cpus']=1;s['mem_limit']='1g' if name=='nextcloud' else '512m';s.pop('ports',None) if name!='nextcloud' else None
@@ -179,7 +200,11 @@ def main():
         result={'schema_version':1,'status':'PASS','stages':stages,'tests':json.loads((f/'complete.json').read_text()),'owned_container_ids':ids,'go_container_id':runner,'source_commits':{'nextcloud':run('git','-C',str(ROOT),'rev-parse','HEAD').decode().strip(),'weknora':run('git','-C',str(a.weknora_source),'rev-parse','HEAD').decode().strip()},'checkpoint_manifest':manifest,'closed_gate':closed,'source_gate':sources,'observation_sha256':{name:sha(f/name) for name in ('nextcloud-closed-state.json','weknora-closed-state.json','nextcloud-final-state.json','weknora-final-state.json')},'shared_target_modified':False,'ingress_reopen_accepted':False,'runtime_boundary':'real live Nextcloud + synthetic AD LDAP; WK actual CLI/repository on stock PG, mock relational indexed chunks; full app and external index backend acceptance remains required'}
         write(a.evidence,result)
         print(json.dumps({'status':'PASS','evidence':str(a.evidence),'ingress_reopen_accepted':False}))
-    except BaseException:
+    except BaseException as failure:
+        if hasattr(failure, 'private_output'):
+            details=failure.private_output.decode(errors='replace')
+            for secret in passwords.values():details=details.replace(secret,'[redacted]')
+            write(directory/'orchestration-failure.log',details.encode())
         if runner:ids['go']=runner
         for name in ('nextcloud','openldap','go'):
             if name in ids:

@@ -68,6 +68,12 @@ WeKnora 新本地提交为 `e73726a9d`。`auto_space` manifest 与完整补丁�
 
 WK 撤权联调提交 `26f9187d0` 已纳入当前候选，精确 apply/reverse 验证通过。[权限联调收据](evidence/auto-space-prd-20261012/live-permissions-receipt.json)。
 
+## 当前协调恢复演练的前置失败
+
+当前源码重跑 `isolated-coordinated-recovery-smoke.py`，尚未执行任何数据库回滚。首次和第二次在 Docker 默认 subnet pool 耗尽时失败；脚本新增私有失败输出（合成密码脱敏），并为两个一次性网络选择与现有 Docker 网络不重叠的 benchmark-range `/28`。保留全部其他任务网络，重叠及耗尽检查通过。
+
+第三次实际启动了隔离 NC/OpenLDAP/两端 PostgreSQL/Redis，随后在身份映射前置阶段收到 HTTP 400：旧夹具用户仅具备 `adTestUser`，当前实时 AD verifier 要求真实 AD `objectClass=user`。未开启 unverified identity 绕过。每次失败均走带 nonce 标签的精确清理；诊断记录保留，结果明确 INCOMPLETE。下一步需将该恢复夹具改为真实 Samba AD，再验证当前 schema 下的双端备份/恢复与新代次重建。[本轮恢复收据](evidence/auto-space-prd-20261012/coordinated-recovery-current-receipt.json)。
+
 ## 未完成的完整验收
 
 本轮修补不能把 [A01–A40 验收映射](auto-space-prd-acceptance-map-20261010.md) 中的受控测试提升为生产验收。真实 NC 原件到实际索引/图谱/状态 inbox 已补齐，但使用受控模型；实际解析/嵌入服务及本人问答的完整联合链路、开放入口逐项撤权、完整协调恢复，以及 100 GB 文档处理容量仍需在指定测试环境完成。旧 100 GB 原件下载的八次失败保持历史失败；高级 ACL 为单独扩展。目标保持未完成，不将现有实现分支等同全部 PRD 验收通过。
