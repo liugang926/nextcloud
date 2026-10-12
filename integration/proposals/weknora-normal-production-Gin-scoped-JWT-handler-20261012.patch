@@ -1,8 +1,120 @@
+diff --git a/internal/application/service/message_material_idle_raw_original.go b/internal/application/service/message_material_idle_raw_original.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b16f4f0d8804f7cadb7e2412cd40fd40b9cf70c8
+--- /dev/null
++++ b/internal/application/service/message_material_idle_raw_original.go
+@@ -0,0 +1,106 @@
++package service
++
++import "github.com/Tencent/WeKnora/internal/types"
++
++// These immutable identifiers bind one actual raw projection to its retained
++// original guard. They carry no actor, permission, renewal or authorization
++// result. Every actual material/output checkpoint keeps its current reads.
++type messageMaterialRawOutputOrigin struct {
++	guard     *MessageMaterialGuard
++	originals []messageMaterialRawOriginal
++}
++
++type messageMaterialRawOriginal struct {
++	message, session, request, admission, generation, bodyDigest string
++	tenant, revision                                             uint64
++}
++
++func captureRawMessageMaterialOrigin(guard *MessageMaterialGuard) *messageMaterialRawOutputOrigin {
++	if guard == nil {
++		return nil
++	}
++	guard.mu.Lock()
++	defer guard.mu.Unlock()
++	snapshot := guard.snapshot
++	if snapshot == nil || snapshot.Request.IncludeOriginalUserFields || len(snapshot.Messages) == 0 || len(snapshot.Messages) != len(snapshot.Proofs) {
++		return nil
++	}
++	origin := &messageMaterialRawOutputOrigin{guard: guard}
++	for i, message := range snapshot.Messages {
++		proof := snapshot.Proofs[i]
++		if !rawMessageMaterialOriginalMatches(snapshot, message, proof) {
++			return nil
++		}
++		origin.originals = append(origin.originals, messageMaterialRawOriginal{
++			message: message.ID, session: message.SessionID, request: message.RequestID,
++			admission: proof.AdmissionID, generation: proof.GenerationID, bodyDigest: proof.BodyDigest,
++			tenant: proof.TenantID, revision: proof.Revision,
++		})
++	}
++	return origin
++}
++
++func rawMessageMaterialOriginalMatches(snapshot *types.MessageMaterialSnapshot, message *types.Message, proof *types.MessageMaterialProof) bool {
++	return snapshot != nil && message != nil && proof != nil &&
++		message.Role == "user" && message.ID != "" && message.RequestID != "" &&
++		types.SourceIndependentDerivativesAllowed(message) &&
++		proof.SourceLineage.RequireComplete() == nil && len(proof.SourceLineage.Sources) == 0 &&
++		proof.MessageID == message.ID && proof.SessionID == message.SessionID &&
++		message.SessionID == snapshot.Request.SessionID && proof.TenantID == snapshot.Request.TenantID &&
++		proof.OwnerID == snapshot.SessionOwnerID && proof.OwnerRevision == snapshot.SessionOwnerRevision &&
++		proof.AdmissionID != "" && proof.GenerationID != "" && proof.BodyDigest != "" && proof.Revision != 0
++}
++
++// Caller holds slot.mu, preserving the existing slot -> guard lock order.
++// This only recognizes an exact, source-independent authored projection while
++// there is no HTTP output. It does not authorize a later batch or renew leases.
++func rawMessageMaterialIdleEligibleLocked(slot *messageMaterialOutputSlot, index int, output []*types.Message) bool {
++	if index >= len(slot.RawOutputOrigins) || index >= len(slot.OutputBodies) {
++		return false
++	}
++	origin := slot.RawOutputOrigins[index]
++	if origin == nil || origin.guard == nil {
++		return false
++	}
++	guardIndex := -1
++	for i, held := range slot.Guards {
++		if held == origin.guard {
++			guardIndex = i
++			break
++		}
++	}
++	if guardIndex < 0 || guardIndex >= len(slot.Bodies) {
++		return false
++	}
++	guard := origin.guard
++	guard.mu.Lock()
++	defer guard.mu.Unlock()
++	snapshot := guard.snapshot
++	if guard.ctx == nil || guard.ctx.Err() != nil || guard.plan == nil || guard.plan.SourceLineage.RequireComplete() != nil ||
++		snapshot == nil || snapshot.Request.IncludeOriginalUserFields || len(snapshot.Messages) == 0 ||
++		len(snapshot.Messages) != len(snapshot.Proofs) || len(snapshot.Messages) != len(origin.originals) || len(output) != len(snapshot.Messages) {
++		return false
++	}
++	for i, message := range snapshot.Messages {
++		proof := snapshot.Proofs[i]
++		if !rawMessageMaterialOriginalMatches(snapshot, message, proof) {
++			return false
++		}
++		captured := origin.originals[i]
++		if captured != (messageMaterialRawOriginal{message: message.ID, session: message.SessionID, request: message.RequestID,
++			admission: proof.AdmissionID, generation: proof.GenerationID, bodyDigest: proof.BodyDigest,
++			tenant: proof.TenantID, revision: proof.Revision}) {
++			return false
++		}
++	}
++	originalBody, err := messageBoundaryBodyDigest(snapshot.Messages)
++	if err != nil || string(originalBody) != slot.Bodies[guardIndex] {
++		return false
++	}
++	expected, err := messageBoundaryBodyDigest(rawUserContentOnly(snapshot.Messages))
++	if err != nil || string(expected) != slot.OutputBodies[index] {
++		return false
++	}
++	actual, err := messageBoundaryBodyDigest(output)
++	return err == nil && string(actual) == string(expected)
++}
 diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
-index 6e50b411f..72f9e2c8a 100644
+index 6e50b411fae3027c246d2c21b544d080d823882f..d3367e5eb94ec971f8742f5f159e8e47225f0351 100644
 --- a/internal/application/service/message_material_output.go
 +++ b/internal/application/service/message_material_output.go
-@@ -20,19 +20,20 @@ var ErrMessageMaterialHTTPInitializing = fmt.Errorf("%w: original message materi
+@@ -20,19 +20,21 @@ var ErrMessageMaterialHTTPInitializing = fmt.Errorf("%w: original message materi
  type messageMaterialOutputKey struct{}
  type messageMaterialExternalKey struct{}
  type messageMaterialOutputSlot struct {
@@ -19,24 +131,43 @@ index 6e50b411f..72f9e2c8a 100644
 -	Failed        error
 -	Refs          int
 -	Closed        bool
-+	OwnerContext   context.Context
-+	timingObserver *originalServiceTimingObserver
-+	mu             sync.Mutex
-+	Guards         []*MessageMaterialGuard
-+	Completion     *messageCompletionBinding
-+	PhysicalReads  []*readlease.NextcloudReadGuard
-+	Models         []originalModelClientLifetime
-+	Bodies         []string
-+	Outputs        [][]*types.Message
-+	OutputBodies   []string
-+	Ready          bool
-+	Failed         error
-+	Refs           int
-+	Closed         bool
++	OwnerContext     context.Context
++	timingObserver   *originalServiceTimingObserver
++	mu               sync.Mutex
++	Guards           []*MessageMaterialGuard
++	Completion       *messageCompletionBinding
++	PhysicalReads    []*readlease.NextcloudReadGuard
++	Models           []originalModelClientLifetime
++	Bodies           []string
++	Outputs          [][]*types.Message
++	OutputBodies     []string
++	RawOutputOrigins []*messageMaterialRawOutputOrigin
++	Ready            bool
++	Failed           error
++	Refs             int
++	Closed           bool
  }
  
  func WithMessageMaterialOutputBoundary(ctx context.Context) context.Context {
-@@ -206,6 +207,11 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
+@@ -195,17 +197,27 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
+ 			return false
+ 		}
+ 	}
+-	for _, output := range slot.Outputs {
++	for i, output := range slot.Outputs {
++		complete := true
+ 		for _, message := range output {
+ 			if message == nil || message.SourceLineage.RequireComplete() != nil {
+-				return false
++				complete = false
++				break
+ 			}
+ 		}
++		if !complete && !rawMessageMaterialIdleEligibleLocked(slot, i, output) {
++			return false
++		}
+ 	}
+ 	return true
  }
  
  func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
@@ -48,7 +179,7 @@ index 6e50b411f..72f9e2c8a 100644
  	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
  	if !ok {
  		return access.ErrNextcloudPublicationUnavailable
-@@ -257,6 +263,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
+@@ -257,6 +269,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
  			return access.ErrNextcloudPublicationDenied
  		}
  	}
@@ -56,8 +187,110 @@ index 6e50b411f..72f9e2c8a 100644
  	return nil
  }
  
+@@ -392,6 +405,9 @@ func (s *messageService) admittedMessages(ctx context.Context, request types.Mes
+ 		slot.mu.Lock()
+ 		slot.Outputs = append(slot.Outputs, copied)
+ 		slot.OutputBodies = append(slot.OutputBodies, string(body))
++		// This records the actual retained producer of a deliberately stripped
++		// raw projection, never a current permission or a DTO-derived grant.
++		slot.RawOutputOrigins = append(slot.RawOutputOrigins, captureRawMessageMaterialOrigin(guard))
+ 		slot.mu.Unlock()
+ 	}
+ 	return copied, nil
+diff --git a/internal/application/service/message_material_raw_idle_actual_test.go b/internal/application/service/message_material_raw_idle_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ce7c4fb997a378922868e6072464598861d36b4
+--- /dev/null
++++ b/internal/application/service/message_material_raw_idle_actual_test.go
+@@ -0,0 +1,86 @@
++package service
++
++import (
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// The baseline comes through the actual producer, store read and retained
++// boundary. Negative projection faults cannot manufacture a read capability.
++func TestMessageMaterialActualRawProjectionIdleEligibility(t *testing.T) {
++	for _, change := range []string{"raw_projection", "content_tamper", "request_cross", "session_cross", "detached_origin", "proof_message_cross", "proof_body_changed", "proof_source_bearing", "proof_unknown", "current_actor_revoked", "body_ABA"} {
++		t.Run(change, func(t *testing.T) {
++			messages, _, _, db, ctx, session := messageMaterialActualFixture(t)
++			user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-raw-idle-original", Role: "user", Content: "actual authored raw question", IsCompleted: true})
++			require.NoError(t, err)
++			ctx, _, check, closeHTTP := BeginMessageMaterialHTTPBoundary(ctx)
++			defer closeHTTP()
++			output, err := messages.GetMessage(ctx, session.ID, user.ID)
++			require.NoError(t, err)
++			require.Nil(t, output.SourceLineage, "raw projection deliberately keeps original proof private")
++			markMessageMaterialReady(ctx)
++			require.NoError(t, check())
++			require.True(t, MessageMaterialIdleRecheckEligible(ctx), "the actual held source-independent original must cover its exact raw projection")
++			slot := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++			require.Len(t, slot.Guards, 1)
++			require.Len(t, slot.RawOutputOrigins, 1)
++			require.NotNil(t, slot.RawOutputOrigins[0])
++			guard := slot.Guards[0]
++			require.Len(t, guard.snapshot.Proofs, 1)
++			proof := guard.snapshot.Proofs[0]
++			switch change {
++			case "raw_projection":
++				return
++			case "content_tamper":
++				output.Content = "foreign output with the same producer selectors"
++				require.Error(t, check())
++			case "request_cross":
++				output.RequestID = "different actual request"
++				require.Error(t, check())
++			case "session_cross":
++				output.SessionID = "different actual session"
++				require.Error(t, check())
++			case "detached_origin":
++				slot.mu.Lock()
++				slot.RawOutputOrigins[0] = nil
++				slot.mu.Unlock()
++			case "proof_message_cross":
++				guard.mu.Lock()
++				proof.MessageID = "another original message"
++				guard.mu.Unlock()
++			case "proof_body_changed":
++				guard.mu.Lock()
++				proof.BodyDigest = "another original body digest"
++				guard.mu.Unlock()
++			case "proof_source_bearing":
++				// Fault injection into an already captured private proof, not a
++				// fake positive admission or a source publication authorization.
++				sourced, err := types.NewCompleteSourceLineage(types.SourceIdentity{Provider: types.ConnectorTypeNextcloud, TenantID: 7,
++					KnowledgeBaseID: "kb", DataSourceID: "ds", PairOperationID: "pair", InstanceID: "instance", BindingID: "binding",
++					FileID: "1", ExternalID: "nextcloud:instance:1", KnowledgeID: "knowledge", Revision: 2, ETag: "original"})
++				require.NoError(t, err)
++				guard.mu.Lock()
++				proof.SourceLineage = sourced
++				guard.mu.Unlock()
++			case "proof_unknown":
++				guard.mu.Lock()
++				proof.SourceLineage = types.UnknownSourceLineage()
++				guard.mu.Unlock()
++			case "current_actor_revoked":
++				require.NoError(t, db.Model(&types.TenantMember{}).Where("user_id='actual-user' AND tenant_id=7").Update("status", types.TenantMemberStatusSuspended).Error)
++				// Structural scheduling is not permission. The same full
++				// checkpoint still executes current reads and refuses output.
++				require.Error(t, check())
++				return
++			case "body_ABA":
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", user.ID).Update("content", "foreign transient body").Error)
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", user.ID).Update("content", user.Content).Error)
++				require.Error(t, check(), "identical cached bytes cannot erase the original body clock")
++				return
++			}
++			require.False(t, MessageMaterialIdleRecheckEligible(ctx), "unmatched or non-independent raw material must not use the idle cadence")
++		})
++	}
++}
 diff --git a/internal/application/service/model.go b/internal/application/service/model.go
-index 48ee19b07..f63eda813 100644
+index 48ee19b07d2872cf3c71ac866729bbead90cbda4..f63eda813e64b4b73feda9d7a8286696b94c827b 100644
 --- a/internal/application/service/model.go
 +++ b/internal/application/service/model.go
 @@ -570,6 +570,9 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
@@ -117,7 +350,7 @@ index 48ee19b07..f63eda813 100644
  
 diff --git a/internal/application/service/normal_original_public_handler_fixture_bridge_test.go b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
 new file mode 100644
-index 000000000..00113bca8
+index 0000000000000000000000000000000000000000..00113bca83f14d2d6f8d47788121f834a720f940
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
 @@ -0,0 +1,294 @@
@@ -417,7 +650,7 @@ index 000000000..00113bca8
 +}
 diff --git a/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
 new file mode 100644
-index 000000000..5b89235b7
+index 0000000000000000000000000000000000000000..5b89235b712ed56bb40386a35d30a91e14d21ffb
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
 @@ -0,0 +1,380 @@
@@ -803,7 +1036,7 @@ index 000000000..5b89235b7
 +}
 diff --git a/internal/application/service/original_service_timing.go b/internal/application/service/original_service_timing.go
 new file mode 100644
-index 000000000..20759baeb
+index 0000000000000000000000000000000000000000..20759baeba1864a56a2ad6bf810fc1ad4ce37701
 --- /dev/null
 +++ b/internal/application/service/original_service_timing.go
 @@ -0,0 +1,61 @@
@@ -870,7 +1103,7 @@ index 000000000..20759baeb
 +}
 diff --git a/internal/application/service/original_service_timing_profile_test.go b/internal/application/service/original_service_timing_profile_test.go
 new file mode 100644
-index 000000000..47ab6e043
+index 0000000000000000000000000000000000000000..47ab6e04308d8ee58ce178dcc16970fde70cc55d
 --- /dev/null
 +++ b/internal/application/service/original_service_timing_profile_test.go
 @@ -0,0 +1,269 @@
@@ -1143,8 +1376,63 @@ index 000000000..47ab6e043
 +		t.Fatal("late attach revived the sealed observer")
 +	}
 +}
+diff --git a/internal/handler/session/live_material_raw_control_test.go b/internal/handler/session/live_material_raw_control_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3ddf9f4fc83d2c1c836ebb73aaf2b5f24ce3bd3
+--- /dev/null
++++ b/internal/handler/session/live_material_raw_control_test.go
+@@ -0,0 +1,49 @@
++package session
++
++import (
++	"context"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLiveMaterialRawControlIsScopedToActualFrameWrites(t *testing.T) {
++	c, recorder := newTestGinContext(t, "")
++	phase := &liveMaterialWritePhase{}
++	ctx := context.WithValue(context.Background(), liveMaterialWritePhaseKey{}, phase)
++	observed := []bool{}
++	c.Writer = &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: func() error {
++		observed = append(observed, phase.RawControl)
++		return nil
++	}}
++	emitLiveMaterialStreamEvent(ctx, c, interfaces.StreamEvent{Type: types.ResponseTypeAgentQuery, Content: "actual raw control"}, "actual-request", nil)
++	require.NotEmpty(t, observed)
++	for _, raw := range observed {
++		require.True(t, raw, "the raw frame must be classified at each actual native writer checkpoint")
++	}
++	require.False(t, phase.RawControl, "an already serialized control cannot suppress later empty-poll scheduling")
++	observed = nil
++	emitLiveMaterialStreamEvent(ctx, c, interfaces.StreamEvent{Type: types.ResponseTypeAnswer, Content: "source-bearing answer frame"}, "actual-request", nil)
++	require.NotEmpty(t, observed)
++	for _, raw := range observed {
++		require.False(t, raw, "the following answer cannot inherit a raw bypass")
++	}
++	require.False(t, phase.RawControl)
++	require.Contains(t, recorder.Body.String(), "source-bearing answer frame")
++}
++
++func TestLiveMaterialRawControlClearsWhenActualWriterPanics(t *testing.T) {
++	c, _ := newTestGinContext(t, "")
++	phase := &liveMaterialWritePhase{}
++	ctx := context.WithValue(context.Background(), liveMaterialWritePhaseKey{}, phase)
++	c.Writer = &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: func() error {
++		require.True(t, phase.RawControl)
++		panic("actual writer checkpoint panic")
++	}}
++	require.Panics(t, func() {
++		emitLiveMaterialStreamEvent(ctx, c, interfaces.StreamEvent{Type: types.ResponseTypeAgentQuery}, "actual-request", nil)
++	})
++	require.False(t, phase.RawControl)
++}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 0865fd80c..c5ac25143 100644
+index 0865fd80cfe03931134c433a655ca87fc07b6d9f..c5ac251430a340c3f682d31b771ddafe683ba23c 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
 @@ -1412,7 +1412,10 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
@@ -1176,3 +1464,37 @@ index 0865fd80c..c5ac25143 100644
  	releaseMaterialProducer := applicationservice.RetainMessageMaterialHTTPProducer(streamCtx.asyncCtx)
  	go func() {
  		defer close(asyncDone)
+diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
+index ebd97716afad89b65ebf407fab2385fd29109fd1..5a6680530372053b09024b77fe16e972ce6a47f3 100644
+--- a/internal/handler/session/stream.go
++++ b/internal/handler/session/stream.go
+@@ -676,10 +676,7 @@ func (h *Handler) handleAgentEventsForSSE(
+ 					return
+ 				}
+ 
+-				if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok {
+-					phase.RawControl = evt.Type == types.ResponseTypeAgentQuery || evt.Type == types.ResponseType(event.EventStop)
+-				}
+-				emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
++				emitLiveMaterialStreamEvent(ctx, c, evt, requestID, resourceRewriter)
+ 				if writer, ok := c.Writer.(*nativeSavedReplayWriter); ok && writer.denied != nil {
+ 					emitSafeTerminalGenerationError(c, requestID)
+ 					return
+@@ -747,6 +744,17 @@ func (h *Handler) handleAgentEventsForSSE(
+ 	}
+ }
+ 
++// RawControl describes only the frame currently being serialized. Its prior
++// value cannot turn a later source-bearing frame into a raw control, or keep
++// an already emitted control attached to a future empty poll.
++func emitLiveMaterialStreamEvent(ctx context.Context, c *gin.Context, evt interfaces.StreamEvent, requestID string, rewriter *storageurl.StreamRewriter) {
++	if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok {
++		phase.RawControl = evt.Type == types.ResponseTypeAgentQuery || evt.Type == types.ResponseType(event.EventStop)
++		defer func() { phase.RawControl = false }()
++	}
++	emitStreamEvent(ctx, c, evt, requestID, rewriter)
++}
++
+ type livePublicationVerifier interface {
+ 	CheckLiveMessagePublication(context.Context, *types.Message) error
+ }
