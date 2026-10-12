@@ -131,3 +131,11 @@ runner 新增 `--history`，要求同时启用 `--rag` 与真实模型配置。�
 本轮首次完整 runner exit 0，业务 72.13 秒，HTTP 26.62 秒。WK 提交 `980be4d78` 已纳入冻结候选且精确 apply/reverse 通过；私有模型配置删除、测试 actor 确认不存在。[持久历史收据](evidence/auto-space-prd-20261012/live-real-history-receipt.json)。复现时给上一节真实模型命令追加 `--rag --history`。
 
 范围是生产消息服务的持久历史接口，登录上下文仍由夹具提供；完整 JWT/browser 历史请求、跨会话搜索、Agent/fork/export、完整应用恢复和 100 GB 不由本轮推定通过。
+
+## Agent 真实工具验收准备及 DNS 失败记录
+
+runner 新增 `--agent`（要求 `--rag` 和真实模型配置）。源码 `ae90c6be4` 已编译通过：测试调用生产 AgentEngine、search_knowledge/read_document、实际知识库/片段服务与来源守卫，要求真实模型选择两种工具、答案和工具结果携带来源依赖，并在实际分享删除后拒绝带旧答案的下一轮；同时断言流式和非流式模型调用次数不增长。新增多轮预算只用于 Agent 路径，原有 runner 时限保留。
+
+两次实际 runner 均在生产 chat factory 的 SSRF DNS 校验处失败（api.deepseek.com），业务阶段分别 9.45 / 9.54 秒，均未进入本轮处理和 Agent，不能记工具或撤权验收通过。之后宿主机、NC PHP，以及同镜像/同网络 getent 只读探针均能解析，Go 解析差异仍需定位；没有扩大 DeepSeek allowlist 或关闭 SSRF。另一个待实测点是 Agent/工具内部上下文结束后，最终 HTTP 发送所需的物理读取保护是否仍有效，尚未据静态分析修改生产生命周期。
+
+[本轮失败收据](evidence/auto-space-prd-20261012/live-real-agent-dns-failure-receipt.json) 固定源码和日志。两次进程已终止，owned actor 不存在，NC publication/私有 transport 清理，模型导出删除。冻结候选仍为前一轮实测通过的 `980be4d78`，没有将此次未通过路径更新为已验收候选；完整目标继续进行。
