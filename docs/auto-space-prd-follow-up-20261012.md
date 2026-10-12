@@ -111,3 +111,13 @@ WK 本地提交 `bec301dad`，候选补丁精确 apply/reverse 通过；临时 a
 WK 提交 `3ed70eb5c` 已纳入冻结候选并通过精确 apply/reverse。[真实模型收据](evidence/auto-space-prd-20261012/live-real-model-receipt.json)。这证明小 Markdown 文件真实模型处理与权限链路，不代表本人完整问答、Agent/历史/缓存、PDF/OCR、Redis 调度、完整应用恢复或 100 GB 全链路验收；这些仍需继续。
 
 复现时先在私有临时目录运行 `export_document_graph_models.py --database-container weknora-ldap-local-postgres-1 --app-container weknora-ldap-local-app-1 --embedding-id builtin-local-bge-small-zh-v15 --chat-id 845ddfda-a1c3-4294-bf3e-5955d45c40cf --output <私有目录>/models.json`，再给既有 live runner 追加 `--http-read --model-config <私有目录>/models.json --model-allowed-host host.docker.internal`。测试完成删除导出目录；不要将文件放入仓库或证据目录。
+
+## 真实检索、流式问答与保留结果撤权
+
+live runner 新增 `--rag`（必须同时传入真实 `--model-config`）。同一份 NC 原件处理完成后，实际 knowledgeBaseService 使用本轮 SQLite 向量/FTS 和真实 BGE 查询嵌入执行 HybridSearch，真实 SQL snapshot 验证/补全分块，再经生产 merge、提示词和 KnowledgeQAByEvent 流式插件调用 DeepSeek。测试同时检查提示词含源文档人物、答案正确包含 Bob、最终答案事件带完整非空来源依赖。
+
+真实共享删除后，保留 turn 的当前权限检查拒绝；再次 HybridSearch 按接口契约返回空结果；重复使用缓存结果进行问答，在再次调用模型前拒绝，stream 调用计数不增加。完整 runner exit 0，业务链路 66.33 秒，12 项 HTTP 入口断言 25.32 秒。所有新 HTTP 租约释放，原件保持不变，签名 NC inbox 对账通过。
+
+前三轮失败保留：初始思考/token设置未产出答案；知识服务测试夹具未接 publication guard 导致提示词剔除文档；测试把撤权检索错误要求为 error，而生产接口正确过滤为空。最终采用明确非思考模式和 512 token 上限、真实 publication guard，以及空结果契约断言，没有放宽生产授权。
+
+WK 本地提交 `0ef060af5` 已冻结且补丁精确 apply/reverse 通过。[本轮收据](evidence/auto-space-prd-20261012/live-real-rag-receipt.json)。私有配置已删除、测试 actor 确认不存在。范围是实际 service/event 流式问答和内存 turn 缓存；持久历史消息、Agent、完整登录/API/browser链路和 100 GB 仍未据此验收。
