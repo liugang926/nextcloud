@@ -159,3 +159,13 @@ WK 提交 `aa6801173` 将回合持有的物理读取保护绑定到外层请求�
 同一组七项重跑全部通过（12.16 秒）：正常检索/合并、两种工具结束场景、外层请求取消、源撤权、缺少来源证明以及当前调用取消。工具结束后 HTTP 保护仍有效，模型和 HTTP 最后引用释放后实际读取租约归零。测试 actor 已确认不存在。[修复收据](evidence/auto-space-prd-20261012/agent-physical-lifetime-receipt.json) 固定修复前后日志与源码。
 
 本轮为 SQLite 实际 service 回归，模型、向量候选和来源接口响应由夹具控制；不能替代真实模型 Agent 工具循环、完整认证 HTTP 或 PostgreSQL 验收。冻结候选暂留 `980be4d78`，等待真实 Agent 联调后更新。
+
+## 真实 Agent 联调进入来源拒绝点
+
+第 4 次重跑发现测试镜像内置 `http_proxy/https_proxy=host.docker.internal:7897` 已不可用，直接 TLS 访问 DeepSeek 返回预期的未认证 401。runner 新增可选 `--direct-network`，仅清空本次独立 actor 的六个代理环境变量，不修改全局代理、模型地址、TLS 或 SSRF 校验。
+
+第 5 次已完成真实 RAG/持久历史，Agent 实际选中 `search_knowledge` 后因测试夹具没有委托模型元数据接口而 panic。WK `c0c819bfa` 将该接口接到生产 modelService 和实际隔离模型库；第 6 次不再 panic，但仍在 Agent 来源检查处拒绝（48.60 秒），尚未完成工具循环和最终撤权。已新增可选诊断预检准备，用于得到底层工具拒绝原因；最终验收必须关闭预检，保持模型第一次工具调用的读取状态未被预热。
+
+[联调失败收据](evidence/auto-space-prd-20261012/agent-live-source-refusal-receipt.json) 保留三次真实终态与日志。保留日志已在内存解密凭据后同时扫描明文/密文，无匹配；导出文件删除、owned actor 确认不存在。Agent 仍未验收通过，冻结候选继续不变。
+
+第 7 次使用 `--agent-preflight`，在实际搜索工具中取得底层错误 `document chunk enrichment lineage adapter is unavailable`（41.93 秒），并非 LDAP 连接或已执行的分享撤销。生产适配器目前只允许纯文本、无图像及无扩展 metadata 的分块；实际处理还会生成带生产证明的摘要分块，具体命中类型仍需验证。新增只输出固定形状标志、不改变原始 snapshot 返回值的诊断包装，尚未执行；不会据推测放宽适配器。[精确预检收据](evidence/auto-space-prd-20261012/agent-search-preflight-refusal-receipt.json)。测试终态和 actor 清理已核实，模型导出删除，日志凭据扫描通过。

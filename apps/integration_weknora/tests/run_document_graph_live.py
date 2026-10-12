@@ -2,8 +2,9 @@
 """Owned, bounded actual NC document/index/graph/state-inbox integration."""
 import argparse, json, os, shutil, subprocess, tempfile, time
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--source-repo',type=Path,required=True);p.add_argument('--evidence',type=Path,required=True);p.add_argument('--http-read',action='store_true');p.add_argument('--rag',action='store_true');p.add_argument('--history',action='store_true');p.add_argument('--agent',action='store_true');p.add_argument('--model-config',type=Path);p.add_argument('--model-allowed-host',action='append',default=[]);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--source-repo',type=Path,required=True);p.add_argument('--evidence',type=Path,required=True);p.add_argument('--http-read',action='store_true');p.add_argument('--rag',action='store_true');p.add_argument('--history',action='store_true');p.add_argument('--agent',action='store_true');p.add_argument('--agent-preflight',action='store_true');p.add_argument('--direct-network',action='store_true',help='Ignore proxy variables baked into the isolated test image');p.add_argument('--model-config',type=Path);p.add_argument('--model-allowed-host',action='append',default=[]);a=p.parse_args()
 if a.agent and not a.rag:p.error('--agent requires --rag')
+if a.agent_preflight and not a.agent:p.error('--agent-preflight requires --agent')
 if a.history and not a.rag:p.error('--history requires --rag')
 if a.rag and not a.model_config:p.error('--rag requires --model-config')
 os.umask(0o077);a.evidence.mkdir(parents=True,exist_ok=True)
@@ -27,7 +28,10 @@ with tempfile.TemporaryDirectory(prefix='document-graph-live-') as private:
   build+=' internal/handler/nextcloud_processed_live_test.go && go test -p 1 -tags=sqlite,sqlite_fts5 -c -o /tmp/processed-http.test ./internal/handler'
  build+=' && go test -p 1 -tags=sqlite,sqlite_fts5 ./internal/application/service -run "^TestNextcloudLiveDocumentToGraphAndInbox$" -count=1 -v -timeout='+('300s' if a.agent else '180s')
 
- proc=subprocess.Popen(['docker','run','--rm','--name',actor,'--label','codex.task=auto-space-prd-20261012','--cpus=1','--memory=2g','--network','weknora-prd-live-processing','-v',str(a.source_repo.resolve())+':/app','-v',private+':/fixture','-v','weknora-go-mod:/go/pkg/mod','-v','weknora-go-build:/root/.cache/go-build','-w','/app','-e','GOMAXPROCS=1','-e','SSRF_WHITELIST='+','.join(a.model_allowed_host),'-e','WEKNORA_DOCUMENT_GRAPH_LIVE_FIXTURE=/fixture/fixture.json','-e','WEKNORA_DOCUMENT_GRAPH_AGENT='+('1' if a.agent else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_HISTORY='+('1' if a.history else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_RAG='+('1' if a.rag else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_MODEL_CONFIG='+('/fixture/models.json' if a.model_config else ''),'-e','WEKNORA_DOCUMENT_GRAPH_HTTP='+('1' if a.http_read else '0'),'weknora-go-test:1.26-sqlite','timeout','480s','sh','-c',build],stdout=log,stderr=subprocess.STDOUT)
+ network_env=[]
+ if a.direct_network:
+  for key in ('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy'):network_env+=['-e',key+'=']
+ proc=subprocess.Popen(['docker','run','--rm','--name',actor,'--label','codex.task=auto-space-prd-20261012','--cpus=1','--memory=2g','--network','weknora-prd-live-processing','-v',str(a.source_repo.resolve())+':/app','-v',private+':/fixture','-v','weknora-go-mod:/go/pkg/mod','-v','weknora-go-build:/root/.cache/go-build','-w','/app','-e','GOMAXPROCS=1','-e','SSRF_WHITELIST='+','.join(a.model_allowed_host),'-e','WEKNORA_DOCUMENT_GRAPH_LIVE_FIXTURE=/fixture/fixture.json','-e','WEKNORA_DOCUMENT_GRAPH_AGENT_PREFLIGHT='+('1' if a.agent_preflight else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_AGENT='+('1' if a.agent else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_HISTORY='+('1' if a.history else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_RAG='+('1' if a.rag else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_MODEL_CONFIG='+('/fixture/models.json' if a.model_config else ''),'-e','WEKNORA_DOCUMENT_GRAPH_HTTP='+('1' if a.http_read else '0'),*network_env,'weknora-go-test:1.26-sqlite','timeout','480s','sh','-c',build],stdout=log,stderr=subprocess.STDOUT)
  try:
   deadline=time.monotonic()+360
   while not Path(str(fixture)+'.ready').exists():
