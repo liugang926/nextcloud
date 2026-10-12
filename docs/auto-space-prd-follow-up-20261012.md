@@ -121,3 +121,13 @@ live runner 新增 `--rag`（必须同时传入真实 `--model-config`）。同�
 前三轮失败保留：初始思考/token设置未产出答案；知识服务测试夹具未接 publication guard 导致提示词剔除文档；测试把撤权检索错误要求为 error，而生产接口正确过滤为空。最终采用明确非思考模式和 512 token 上限、真实 publication guard，以及空结果契约断言，没有放宽生产授权。
 
 WK 本地提交 `0ef060af5` 已冻结且补丁精确 apply/reverse 通过。[本轮收据](evidence/auto-space-prd-20261012/live-real-rag-receipt.json)。私有配置已删除、测试 actor 确认不存在。范围是实际 service/event 流式问答和内存 turn 缓存；持久历史消息、Agent、完整登录/API/browser链路和 100 GB 仍未据此验收。
+
+## 真实答案持久历史与当前来源权限
+
+runner 新增 `--history`，要求同时启用 `--rag` 与真实模型配置。测试按已有顺序安装 message materials / original body schema，再通过生产消息服务创建用户原始问题和待完成 assistant。真实 RAG 流式答案及最终事件来源证明通过 UpdateMessage 提交；未预制答案或通过原始 SQL 填入正文。
+
+使用新的读取上下文，经实际 GetMessage、GetMessagesBySession、GetRecentMessagesBySession 从持久层重新读取，逐项校验正文与来源依赖。原件真实 NC LDAP share 删除后，已保留的历史正文 guard 重新检查拒绝，新详情、分页和最近消息读取均拒绝且不返回答案。RAG 缓存拒绝、12 个 HTTP 权限检查、文件字节/租约及 NC inbox 验证仍通过。
+
+本轮首次完整 runner exit 0，业务 72.13 秒，HTTP 26.62 秒。WK 提交 `980be4d78` 已纳入冻结候选且精确 apply/reverse 通过；私有模型配置删除、测试 actor 确认不存在。[持久历史收据](evidence/auto-space-prd-20261012/live-real-history-receipt.json)。复现时给上一节真实模型命令追加 `--rag --history`。
+
+范围是生产消息服务的持久历史接口，登录上下文仍由夹具提供；完整 JWT/browser 历史请求、跨会话搜索、Agent/fork/export、完整应用恢复和 100 GB 不由本轮推定通过。

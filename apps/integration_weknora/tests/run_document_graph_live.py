@@ -2,7 +2,8 @@
 """Owned, bounded actual NC document/index/graph/state-inbox integration."""
 import argparse, json, os, shutil, subprocess, tempfile, time
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--source-repo',type=Path,required=True);p.add_argument('--evidence',type=Path,required=True);p.add_argument('--http-read',action='store_true');p.add_argument('--rag',action='store_true');p.add_argument('--model-config',type=Path);p.add_argument('--model-allowed-host',action='append',default=[]);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--source-repo',type=Path,required=True);p.add_argument('--evidence',type=Path,required=True);p.add_argument('--http-read',action='store_true');p.add_argument('--rag',action='store_true');p.add_argument('--history',action='store_true');p.add_argument('--model-config',type=Path);p.add_argument('--model-allowed-host',action='append',default=[]);a=p.parse_args()
+if a.history and not a.rag:p.error('--history requires --rag')
 if a.rag and not a.model_config:p.error('--rag requires --model-config')
 os.umask(0o077);a.evidence.mkdir(parents=True,exist_ok=True)
 nc='nextcloud-auto-space-prd-test-20261010';actor='weknora-prd-docgraph-live'
@@ -20,12 +21,12 @@ with tempfile.TemporaryDirectory(prefix='document-graph-live-') as private:
  run(*command,'prepare');run('docker','cp',nc+':/tmp/document-graph-live.json',str(fixture));fixture.chmod(0o600)
  log=(a.evidence/'document-graph-live.log').open('wb')
  http_proc=None;http_log=None
- build='gofmt -w internal/application/service/knowledge_machine_pipeline_test.go internal/application/service/nextcloud_document_graph_pipeline_test.go internal/application/service/nextcloud_live_models_test.go internal/application/service/nextcloud_live_rag_test.go'
+ build='gofmt -w internal/application/service/knowledge_machine_pipeline_test.go internal/application/service/nextcloud_document_graph_pipeline_test.go internal/application/service/nextcloud_live_models_test.go internal/application/service/nextcloud_live_rag_test.go internal/application/service/nextcloud_live_history_test.go'
  if a.http_read:
   build+=' internal/handler/nextcloud_processed_live_test.go && go test -p 1 -tags=sqlite,sqlite_fts5 -c -o /tmp/processed-http.test ./internal/handler'
  build+=' && go test -p 1 -tags=sqlite,sqlite_fts5 ./internal/application/service -run "^TestNextcloudLiveDocumentToGraphAndInbox$" -count=1 -v -timeout=180s'
 
- proc=subprocess.Popen(['docker','run','--rm','--name',actor,'--label','codex.task=auto-space-prd-20261012','--cpus=1','--memory=2g','--network','weknora-prd-live-processing','-v',str(a.source_repo.resolve())+':/app','-v',private+':/fixture','-v','weknora-go-mod:/go/pkg/mod','-v','weknora-go-build:/root/.cache/go-build','-w','/app','-e','GOMAXPROCS=1','-e','SSRF_WHITELIST='+','.join(a.model_allowed_host),'-e','WEKNORA_DOCUMENT_GRAPH_LIVE_FIXTURE=/fixture/fixture.json','-e','WEKNORA_DOCUMENT_GRAPH_RAG='+('1' if a.rag else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_MODEL_CONFIG='+('/fixture/models.json' if a.model_config else ''),'-e','WEKNORA_DOCUMENT_GRAPH_HTTP='+('1' if a.http_read else '0'),'weknora-go-test:1.26-sqlite','timeout','480s','sh','-c',build],stdout=log,stderr=subprocess.STDOUT)
+ proc=subprocess.Popen(['docker','run','--rm','--name',actor,'--label','codex.task=auto-space-prd-20261012','--cpus=1','--memory=2g','--network','weknora-prd-live-processing','-v',str(a.source_repo.resolve())+':/app','-v',private+':/fixture','-v','weknora-go-mod:/go/pkg/mod','-v','weknora-go-build:/root/.cache/go-build','-w','/app','-e','GOMAXPROCS=1','-e','SSRF_WHITELIST='+','.join(a.model_allowed_host),'-e','WEKNORA_DOCUMENT_GRAPH_LIVE_FIXTURE=/fixture/fixture.json','-e','WEKNORA_DOCUMENT_GRAPH_HISTORY='+('1' if a.history else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_RAG='+('1' if a.rag else '0'),'-e','WEKNORA_DOCUMENT_GRAPH_MODEL_CONFIG='+('/fixture/models.json' if a.model_config else ''),'-e','WEKNORA_DOCUMENT_GRAPH_HTTP='+('1' if a.http_read else '0'),'weknora-go-test:1.26-sqlite','timeout','480s','sh','-c',build],stdout=log,stderr=subprocess.STDOUT)
  try:
   deadline=time.monotonic()+360
   while not Path(str(fixture)+'.ready').exists():

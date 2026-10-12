@@ -133694,7 +133694,7 @@ index 000000000..32f7f2f11
 +}
 diff --git a/internal/application/service/nextcloud_document_graph_pipeline_test.go b/internal/application/service/nextcloud_document_graph_pipeline_test.go
 new file mode 100644
-index 000000000..a71ce27b5
+index 000000000..367805db0
 --- /dev/null
 +++ b/internal/application/service/nextcloud_document_graph_pipeline_test.go
 @@ -0,0 +1,256 @@
@@ -133767,7 +133767,7 @@ index 000000000..a71ce27b5
 +			require.Eventually(t, func() bool { _, err := os.Stat(path + ".committed"); return err == nil }, 45*time.Second, 100*time.Millisecond)
 +		}}
 +	}
-+	m := newMachinePipelineFixtureWithSource(t, false, "Actual original document about its topic, with enough text for chunking and retrieval.", source)
++	m := newMachinePipelineFixtureWithSource(t, false, "Actual original document about its topic, with enough text for chunking and retrieval.", source, os.Getenv("WEKNORA_DOCUMENT_GRAPH_HISTORY") == "1")
 +	if source != nil {
 +		require.NotEmpty(t, live.Directory)
 +		require.NotEmpty(t, live.GUID)
@@ -134710,6 +134710,123 @@ index 000000000..d7cb17385
 +	require.EqualValues(t, count, states)
 +	t.Logf("real_file_heads=%d real_chunk_extract_calls=%d real_graph_records=%d durable_task_acks=%d exact_graph_resources=%d published=%d elapsed_ms=%d files_per_second=%.2f; controlled small plaintext/source/model; embedding explicitly skipped; excludes liveNC/LDAP/remoteLLM/100GB source transfer", count, model.calls, records, acks, resources, published, elapsed.Milliseconds(), float64(count)/elapsed.Seconds())
 +}
+diff --git a/internal/application/service/nextcloud_live_history_test.go b/internal/application/service/nextcloud_live_history_test.go
+new file mode 100644
+index 000000000..181d40928
+--- /dev/null
++++ b/internal/application/service/nextcloud_live_history_test.go
+@@ -0,0 +1,111 @@
++//go:build sqlite_fts5
++
++package service
++
++import (
++	"context"
++	"os"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// All history rows are written by the production message service. The final
++// body and lineage come from the real RAG stream, never a prebuilt answer.
++type documentLiveHistory struct {
++	messages        *messageService
++	ctx             context.Context
++	session         *types.Session
++	user, assistant *types.Message
++}
++
++func prepareDocumentLiveHistory(t *testing.T, m *machinePipelineFixture, ctx context.Context, query string) *documentLiveHistory {
++	t.Helper()
++	if os.Getenv("WEKNORA_DOCUMENT_GRAPH_HISTORY") != "1" {
++		return nil
++	}
++	db := m.f.db
++	if !db.Migrator().HasColumn(&types.Message{}, "artifacts") {
++		require.NoError(t, db.Exec("ALTER TABLE messages ADD COLUMN artifacts TEXT").Error)
++	}
++	for _, name := range []string{"000023_message_artifacts_table.up.sql", "000026_message_artifacts_deleted_at.up.sql"} {
++		ddl, err := os.ReadFile("../../../migrations/sqlite/" + name)
++		require.NoError(t, err)
++		require.NoError(t, db.Exec(string(ddl)).Error)
++	}
++	require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(db))
++	require.NoError(t, repository.UpgradeMessageProducerAdvanceSchema(db))
++	messages := &messageService{messageRepo: repository.NewMessageRepository(db), sessionRepo: repository.NewSessionRepository(db), sourceLineageGuard: m.f.guard, kbService: m.f.s.kbService, knowService: m.f.s}
++	ConfigureMessageMaterialProvenance(messages, m.f.store)
++	repository.ConfigureMessageOriginalBodyAvailability(m.f.store, repository.CheckOriginalBodyAvailableInTx)
++	ctx = context.WithValue(ctx, types.UserIDContextKey, types.CallerFromContext(ctx).UserID)
++	session := &types.Session{ID: "live-history-" + m.ds.ID, TenantID: 7, UserID: types.CallerFromContext(ctx).UserID}
++	require.NoError(t, db.Create(session).Error)
++	execution := types.MessageExecutionContext{KnowledgeBaseIDs: []string{m.ds.KnowledgeBaseID}}
++	user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "live-rag-history-turn", Role: "user", Content: query, IsCompleted: true, ExecutionContext: execution})
++	require.NoError(t, err)
++	assistant, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: user.RequestID, Role: "assistant", ExecutionContext: execution})
++	require.NoError(t, err)
++	return &documentLiveHistory{messages: messages, ctx: ctx, session: session, user: user, assistant: assistant}
++}
++func (h *documentLiveHistory) complete(t *testing.T, ctx context.Context, answer string, lineage *types.SourceLineage) func() {
++	t.Helper()
++	if h == nil {
++		return func() {}
++	}
++	h.assistant.Content = answer
++	h.assistant.SourceLineage = lineage
++	h.assistant.IsCompleted = true
++	require.NoError(t, h.messages.UpdateMessage(ctx, h.assistant))
++	// New reader contexts cannot borrow the model's in-memory body or proof.
++	read := WithMessageMaterialOutputBoundary(h.ctx)
++	t.Cleanup(func() { CloseMessageMaterialOutputBoundary(read) })
++	saved, err := h.messages.GetMessage(read, h.session.ID, h.assistant.ID)
++	require.NoError(t, err)
++	require.Equal(t, answer, saved.Content)
++	require.Equal(t, lineage, saved.SourceLineage)
++	require.NoError(t, CheckMessageMaterialOutputBoundary(read))
++	checkPage := func(recent bool, revoked bool) {
++		current := WithMessageMaterialOutputBoundary(h.ctx)
++		defer CloseMessageMaterialOutputBoundary(current)
++		var rows []*types.Message
++		var e error
++		if recent {
++			rows, e = h.messages.GetRecentMessagesBySession(current, h.session.ID, 20)
++		} else {
++			rows, e = h.messages.GetMessagesBySession(current, h.session.ID, 1, 20)
++		}
++		if revoked {
++			require.Error(t, e)
++			require.Empty(t, rows)
++			return
++		}
++		require.NoError(t, e)
++		found := false
++		for _, row := range rows {
++			if row.ID == h.assistant.ID {
++				found = true
++				require.Equal(t, answer, row.Content)
++				require.Equal(t, lineage, row.SourceLineage)
++			}
++		}
++		require.True(t, found, "persisted assistant must be returned before revocation")
++		require.NoError(t, CheckMessageMaterialOutputBoundary(current))
++	}
++	checkPage(false, false)
++	checkPage(true, false)
++	t.Log("REAL_HISTORY actual streamed answer persisted with original material proof; detail/list/recent reads passed")
++	return func() {
++		require.Error(t, CheckMessageMaterialOutputBoundary(read), "retained historical body must recheck current source authority")
++		current := WithMessageMaterialOutputBoundary(h.ctx)
++		denied, e := h.messages.GetMessage(current, h.session.ID, h.assistant.ID)
++		require.Error(t, e)
++		require.Nil(t, denied)
++		CloseMessageMaterialOutputBoundary(current)
++		checkPage(false, true)
++		checkPage(true, true)
++		CloseMessageMaterialOutputBoundary(read)
++	}
++}
 diff --git a/internal/application/service/nextcloud_live_models_test.go b/internal/application/service/nextcloud_live_models_test.go
 new file mode 100644
 index 000000000..9fa67e78e
@@ -134844,10 +134961,10 @@ index 000000000..9fa67e78e
 +}
 diff --git a/internal/application/service/nextcloud_live_rag_test.go b/internal/application/service/nextcloud_live_rag_test.go
 new file mode 100644
-index 000000000..5b58e7c80
+index 000000000..b1501a3af
 --- /dev/null
 +++ b/internal/application/service/nextcloud_live_rag_test.go
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,121 @@
 +//go:build sqlite_fts5
 +
 +package service
@@ -134879,6 +134996,8 @@ index 000000000..5b58e7c80
 +	var tenant types.Tenant
 +	require.NoError(t, m.f.db.Where("id=7").Take(&tenant).Error)
 +	ctx := context.WithValue(m.f.ctx, types.TenantInfoContextKey, &tenant)
++	query := "Who does Alice know on Project Cedar?"
++	history := prepareDocumentLiveHistory(t, m, ctx, query)
 +	ctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 +	t.Cleanup(cancel)
 +	ctx, attach, checkpoint, releaseHTTP := BeginMessageMaterialHTTPBoundary(ctx)
@@ -134896,7 +135015,12 @@ index 000000000..5b58e7c80
 +	cm := &types.ChatManage{}
 +	cm.TenantID = 7
 +	cm.SessionID = "live-owned-rag"
-+	cm.Query = "Who does Alice know on Project Cedar?"
++	cm.Query = query
++	if history != nil {
++		cm.SessionID = history.session.ID
++		cm.UserMessageID = history.user.ID
++		cm.MessageID = history.assistant.ID
++	}
 +	cm.UserContent = cm.Query
 +	cm.ChatModelID = models.chatRow.ID
 +	cm.SearchTargets = types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: m.ds.KnowledgeBaseID}}
@@ -134941,6 +135065,7 @@ index 000000000..5b58e7c80
 +	require.Contains(t, strings.ToLower(cm.RenderedContexts), "bob")
 +	require.Contains(t, strings.ToLower(answer.String()), "bob")
 +	require.Equal(t, streamCount+1, models.summary.streams.Load())
++	checkHistoryRevoked := history.complete(t, ctx, answer.String(), answerLineage)
 +	require.NoError(t, checkpoint())
 +	releaseModel()
 +	require.NoError(t, CheckMessageMaterialOutputBoundary(attach(ctx)))
@@ -134950,6 +135075,7 @@ index 000000000..5b58e7c80
 +	require.NotEmpty(t, lineage.Sources)
 +	t.Log("REAL_RAG native vector/FTS retrieval, actual chunk hydration/merge and real streamed answer passed; answer depends on the source")
 +	return func() {
++		checkHistoryRevoked()
 +		require.Error(t, turn.Check(ctx), "cached query/answer dependency must deny after actual share removal")
 +		denied, err := svc.HybridSearch(ctx, m.ds.KnowledgeBaseID, params)
 +		require.NoError(t, err, "search filters denied source rows")
