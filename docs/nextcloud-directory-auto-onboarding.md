@@ -68,3 +68,10 @@ The 10,000-entry fixture declares about 104.8 GB of source sizes in filecache me
 The current source version also includes the durable `source_content_revision`. Nextcloud local in-place writes can retain an ETag when inode, timestamp and byte size are unchanged. The before-write event advances the independent revision and closes the write fence; only the successful completion clears it. File/source authorization, manifest snapshots, publication checks, status projections and folder generation checks all compare this revision. Legacy callers without the field can only read revision 0 and fail closed after a source write. A failed write keeps derived knowledge blocked while the employee still sees the original's metadata as unverified.
 
 A bound root's “更换知识库” action uses the persistent `/folders/{id}/target-migration` workflow. It selects only the caller's verified target spaces and blank KBs, preserves the chosen migration operation on transport retry, and pauses the old target until the new source admission and inventory checks complete. It never overwrites the bound target through the ordinary association API.
+
+
+## 2026-10-12 后台调度与恢复保护
+
+`integration_weknora:discover-directories` 和 `DirectoryDiscoveryJob` 现在先消费目录事件，再消费到期的关联意图。五秒 worker 可继续同一 operation 的配对和权限对账，不再等待普通五分钟 cron；已有目录补偿扫描和迁移对账仍由 `DirectoryPublicationJob` 负责。每轮最多选择 20 个 pending/active 意图，以 8 秒预算停止启动后续操作；已经开始的操作仍受各 HTTP 请求的超时限制，这不是整个命令的硬超时或性能验收结果。
+
+退休意图不能被队列选择或重新取得处理租约；迟到的成功/失败元数据更新也不能改写 retired 状态。维护模式或协调恢复 control gate 关闭时，普通发现消费、意图开通、管理变更及 onboarding 远端请求拒绝执行；文件事件仍可保留待处理提示，恢复通过后才消费。该门禁不会自动开放任何来源、图谱或 GC coverage。

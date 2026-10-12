@@ -9,9 +9,10 @@ use OCP\IConfig;
 final class DirectoryOnboardingClient {
     public const PATH = '/api/v1/integrations/nextcloud/onboarding';
     public function __construct(private IClientService $clients, private EventReceiverPolicy $policy,
-        private IConfig $config) {}
+        private IConfig $config, private ControlRecoveryService $recovery) {}
 
     public function request(array $rule, string $method, string $suffix, array $body = []): array {
+        $this->recovery->requireAutomationOpen($this->config);
         $approved = $this->policy->requireApproved($rule['weknora_origin'] . EventReceiverPolicy::PATH);
         $credentialId = $rule['credential_id'] ?? null;
         if ($credentialId !== null) {

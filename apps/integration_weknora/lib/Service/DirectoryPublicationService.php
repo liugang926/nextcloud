@@ -17,7 +17,7 @@ final class DirectoryPublicationService {
         private SourcePairingRegistryService $pairs, private EventConnectionService $connections,
         private ChangeOutboxService $changes, private DirectoryOnboardingClient $remote,
         private DirectoryGrantSnapshotService $grants, private EmployeeFileStatusService $statuses,
-        private RootMigrationService $rootMoves, private TargetMigrationService $targetMoves) {}
+        private RootMigrationService $rootMoves, private TargetMigrationService $targetMoves, private ControlRecoveryService $recovery) {}
 
     public static function physicalKey(Folder $folder): string {
         // Filecache IDs remain stable on a rename and are shared across user views.
@@ -59,6 +59,7 @@ final class DirectoryPublicationService {
     }
 
     public function saveRule(array $rule, int $expectedRevision): array {
+        $this->recovery->requireAutomationOpen($this->config);
         foreach (['id', 'owner_uid', 'tenant_id', 'weknora_origin', 'base_url', 'processing_template_id'] as $field) {
             if (!is_string($rule[$field] ?? null) || $rule[$field] === '' || strlen($rule[$field]) > 512) {
                 throw new \InvalidArgumentException('Invalid directory rule');
@@ -114,6 +115,7 @@ final class DirectoryPublicationService {
         $this->db->beginTransaction();
         try {
             $this->lock();
+            $this->recovery->requireAutomationOpen($this->config);
             $old = null;
             foreach ($this->rules() as $other) {
                 if ($other['id'] === $rule['id']) { $old = $other; continue; }
@@ -206,6 +208,7 @@ final class DirectoryPublicationService {
 
     /** The intent commits before newFolder(), including the exact user's target choice. */
     public function create(string $uid, int $parentId, string $name, array $choice): array {
+        $this->recovery->requireAutomationOpen($this->config);
         if ($name === '' || strlen($name) > 255 || in_array($name, ['.', '..'], true) ||
             preg_match('/[\/\\\\\x00-\x1f\x7f]/', $name)) {
             throw new \InvalidArgumentException('Invalid directory name');
@@ -228,6 +231,7 @@ final class DirectoryPublicationService {
     }
 
     public function associate(string $uid, int $folderId, array $choice, bool $process = true): array {
+        $this->recovery->requireAutomationOpen($this->config);
         $folder = $this->folder($uid, $folderId);
         $rule = $this->requireManagement($uid, $folder);
         $identity = $this->identities->forUser($uid);
@@ -237,6 +241,7 @@ final class DirectoryPublicationService {
     }
 
     public function retry(string $uid, string $operationId): array {
+        $this->recovery->requireAutomationOpen($this->config);
         $intent = $this->find('operation_id', $operationId);
         if ($intent === null) { throw new \OutOfBoundsException('Directory operation is unavailable'); }
         if ($intent['state'] === 'retired') { throw new \DomainException('Source intent is retired'); }
@@ -251,6 +256,7 @@ final class DirectoryPublicationService {
 
 
     public function switchTarget(string $uid, int $folderId, array $choice): array {
+        $this->recovery->requireAutomationOpen($this->config);
         $root=$this->folder($uid,$folderId);$rule=$this->requireManagement($uid,$root);
         if(SourcePairingRegistryService::validOperationId($choice['operation_id']??null)&&($known=$this->targetMoves->existingChoice($choice['operation_id'],$folderId))!==null){
             foreach(['mode','knowledge_base_id','name'] as $field){if(isset($choice[$field])&&$choice[$field]!==$known[$field]){throw new \DomainException('Target migration choice changed');}}
@@ -270,6 +276,7 @@ final class DirectoryPublicationService {
     }
 
     public function targetMigration(string $uid,int $folderId,string $operationId,bool $retry=false): array {
+        if ($retry) { $this->recovery->requireAutomationOpen($this->config); }
         $root=$this->folder($uid,$folderId);$this->requireManagement($uid,$root);
         $oldRule=$this->rule($this->targetMoves->originalRule($operationId,$folderId));if(!$this->delegated($uid,$oldRule)){throw new \DomainException('Original source management is forbidden');}
         if(!$retry){return $this->targetMoves->status($operationId,$folderId);}
@@ -278,6 +285,7 @@ final class DirectoryPublicationService {
     }
 
     public function sync(string $uid, int $folderId, bool $enabled, int $revision): array {
+        $this->recovery->requireAutomationOpen($this->config);
         $status = $this->show($uid, $folderId);
         if (!($status['manageable'] ?? false) || !is_array($status['operation'] ?? null)) {
             throw new \DomainException('Publication management is forbidden');
@@ -304,6 +312,7 @@ final class DirectoryPublicationService {
 
     /** Bounded cron compensation; uploads never perform remote HTTP in node events. */
     public function reconcile(): void {
+        $this->recovery->requireAutomationOpen($this->config);
         $this->rootMoves->reconcile();
         foreach ($this->rules() as $rule) {
             if (!$rule['auto_enabled']) { continue; }
@@ -328,14 +337,25 @@ final class DirectoryPublicationService {
             $q->update('weknora_dir_rules')->set('discovery_after_id', $q->createNamedParameter($more ? $last : 0))
                 ->where($q->expr()->eq('rule_id', $q->createNamedParameter($rule['id'])))->executeStatement();
         }
+        $this->processDue();
+        $this->targetMoves->reconcile();
+    }
+
+    /** Fast worker pass: process durable intents without rescanning directory trees. */
+    public function processDue(int $limit = 20): void {
+        $this->recovery->requireAutomationOpen($this->config);
+        $deadline = microtime(true) + 8;
         $q = $this->db->getQueryBuilder();
         $r = $q->select('operation_id')->from('weknora_dir_intent')
             ->where($q->expr()->lte('next_attempt_at', $q->createNamedParameter(time())))
             ->andWhere($q->expr()->lte('lease_until', $q->createNamedParameter(time())))
-            ->orderBy('updated_at')->setMaxResults(20)->executeQuery();
+            ->andWhere($q->expr()->in('state', $q->createNamedParameter(['pending', 'active'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
+            ->orderBy('updated_at')->setMaxResults(max(1, min(100, $limit)))->executeQuery();
         try { $rows = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
-        foreach ($rows as $row) { $this->process($row['operation_id']); }
-        $this->targetMoves->reconcile();
+        foreach ($rows as $row) {
+            if (microtime(true) >= $deadline) { break; }
+            $this->process($row['operation_id']);
+        }
     }
 
     private function reserve(array $rule, string $uid, array $identity, array $choice, int $rootId,
@@ -362,6 +382,7 @@ final class DirectoryPublicationService {
         $this->db->beginTransaction();
         try {
             $this->lock();
+            $this->recovery->requireAutomationOpen($this->config);
             $existing = $this->find('operation_id', $operation);
             if ($existing !== null) {
                 if ($existing['actor_uid'] !== $uid || $existing['rule_id'] !== $rule['id'] ||
@@ -392,9 +413,11 @@ final class DirectoryPublicationService {
     }
 
     private function process(string $operationId, bool $allowResume = false, ?string $managerUid = null): void {
+        $this->recovery->requireAutomationOpen($this->config);
         $q = $this->db->getQueryBuilder();
         if ($q->update('weknora_dir_intent')->set('lease_until', $q->createNamedParameter(time() + 600))
             ->where($q->expr()->eq('operation_id', $q->createNamedParameter($operationId)))
+            ->andWhere($q->expr()->in('state', $q->createNamedParameter(['pending', 'active'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
             ->andWhere($q->expr()->lte('lease_until', $q->createNamedParameter(time())))->executeStatement() !== 1) { return; }
         $intent = $this->find('operation_id', $operationId);
         try {
@@ -496,6 +519,7 @@ final class DirectoryPublicationService {
         $this->db->beginTransaction();
         try {
             $this->lock();
+            $this->recovery->requireAutomationOpen($this->config);
             $this->assertNoOverlap($root, null, $intent['operation_id']);
             if (($other = $this->find('root_key', self::physicalKey($root))) !== null && $other['operation_id'] !== $intent['operation_id']) {
                 throw new \DomainException('Physical root is already reserved');
@@ -587,7 +611,8 @@ final class DirectoryPublicationService {
     }
     private function update(string $id, array $fields): void {
         $q = $this->db->getQueryBuilder();
-        $q->update('weknora_dir_intent')->where($q->expr()->eq('operation_id', $q->createNamedParameter($id)));
+        $q->update('weknora_dir_intent')->where($q->expr()->eq('operation_id', $q->createNamedParameter($id)))
+            ->andWhere($q->expr()->neq('state', $q->createNamedParameter('retired')));
         foreach ($fields + ['updated_at' => time()] as $column => $value) { $q->set($column, $q->createNamedParameter($value)); }
         $q->executeStatement();
     }

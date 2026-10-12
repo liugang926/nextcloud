@@ -8,7 +8,7 @@ use OCP\IDBConnection;
 /** Persistent post-operation discovery converges with explicit UI intents. */
 final class DirectoryDiscoveryService {
     public function __construct(private IDBConnection $db, private IRootFolder $files,
-        private DirectoryPublicationService $directories, private BindingRegistryService $bindings) {}
+        private DirectoryPublicationService $directories, private BindingRegistryService $bindings, private ControlRecoveryService $recovery, private \OCP\IConfig $config) {}
     public function enqueue(int $fileId): void {
         if ($fileId < 1) { return; }
         // Conflict leaves the original operation UUID intact across repeated events.
@@ -17,6 +17,7 @@ final class DirectoryDiscoveryService {
             'lease_until' => 0, 'attempt_count' => 0]);
     }
     public function deliverDue(int $limit = 20): int {
+        $this->recovery->requireAutomationOpen($this->config);
         $q = $this->db->getQueryBuilder();
         $r = $q->select('*')->from('weknora_dir_discover')
             ->where($q->expr()->lte('next_attempt_at', $q->createNamedParameter(time())))

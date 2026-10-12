@@ -11,6 +11,12 @@ final class ControlRecoveryService {
   'weknora_event_conn','weknora_identities','weknora_identity_audit','weknora_pub_audit','weknora_bind_pub_audit','weknora_recovery_head','weknora_recovery_log','weknora_recovery_apply','weknora_status_pending','weknora_status_scan','weknora_recovery_floor','weknora_control_gate'];
  public function __construct(private IDBConnection $db){}
  public function closed(): bool {$q=$this->db->getQueryBuilder();$r=$q->select('closed')->from('weknora_control_gate')->where($q->expr()->eq('id',$q->createNamedParameter(1)))->executeQuery();try{return (int)$r->fetchOne()===1;}finally{$r->closeCursor();}}
+ /** Ordinary provisioning is suspended until coordinated recovery opens controls. */
+ public function requireAutomationOpen(\OCP\IConfig $config): void {
+  if($config->getSystemValueBool('maintenance',false)||$this->closed()) {
+   throw new \DomainException('Recovery automation is closed');
+  }
+ }
  public function floor(int $file): array {return $this->floors([$file])[$file];}
  public function floors(array $ids): array {
   $out=[];foreach($ids as $id){$out[$id]=['revision'=>0,'writing'=>false];}
