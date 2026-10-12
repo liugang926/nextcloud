@@ -40495,6 +40495,25 @@ index 0000000000000000000000000000000000000000..e4ec0ad30d6c7e0ca2531adc2d5a3a0b
 +--- PASS: TestNextcloudStateTenThousandMetadataHTTPDurableACKThroughput (5.03s)
 +PASS
 +ok      github.com/Tencent/WeKnora/internal/application/service 5.552s
+diff --git a/docs/nextcloud-stream-artifact-fix-20261012.md b/docs/nextcloud-stream-artifact-fix-20261012.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8626cf62e8a2bd88477e539d9b1d0c7af0dfd313
+--- /dev/null
++++ b/docs/nextcloud-stream-artifact-fix-20261012.md
+@@ -0,0 +1,13 @@
++# Nextcloud 流式原件封存修复 — 2026-10-12
++
++实际 `DataSourceService.ProcessSync` 复验发现：`ObserveNextcloudPublicationEpoch` 取得当前发布代次后，`Emit` 将其直接写入 connector 已封存的 `FetchedItem.Metadata`。原件证明覆盖完整 fetched item，因此后续 `WithNextcloudOriginalFetchedArtifact` 正确拒绝了这个被同步层修改的对象，正常文档无法入库。
++
++修复保留 connector 原件及其摘要不变，将观察到的发布代次放入仅 service 包可构造、绑定 data source ID 的上下文，在构造独立 knowledge metadata 时才加入。当前来源/原件证明、代次、构建租约及容量门禁继续执行。不能通过忽略 proof 字段或重新封存任意修改来放宽校验。
++
++`TestKnowledgeMachineActualPipelineSQLite` 从真实 HTTP connector 下载原文，调用实际同步、原件保存、解析/分块、后处理、摘要和自动标签任务，并验证本人读取与撤权。该测试现在安装与当前代码匹配的处理台账及恢复迁移，接入真实 processing ledger；原夹具停留在旧 schema，缺少这些门禁时不能作为当前版本的正向验收。新增断言确认 observation epoch 保存到 knowledge metadata。
++
++本轮也由实际解析任务日志发现，LLM debug 保护未覆盖 `logger.Infof/Debugf` 的普通正文预览。受保护上下文的 package 日志函数现在只发固定诊断、不格式化参数或继承 metadata；直接取得 logrus logger 的调用关闭其内容输出。普通未标记上下文保留原日志行为。测试使用实际 output sink 和会在格式化时 panic 的 Stringer/error，覆盖普通、格式化、结构化及 detached context；直接 logrus 调用同样不能输出正文。
++
++验证结果由 Nextcloud 仓 `docs/evidence/auto-space-prd-20261012/machine-pipeline-*.log` 与对应 receipt 记录。该 pipeline 的 HTTP 来源、模型和检索引擎为受控夹具；解析与业务任务真实执行，但不把它记为真实 Nextcloud/LDAPS/外部模型/向量检索的完整联合验收。
++
++扩大回归选择时，两个旧 mock 测试仍失败：`TestNextcloudOrdinarySyncSkipsFailedSameETagBeforeCreate` 和 `TestNextcloudStreamHandlerStagesVersionBeforeAcceptingItem`。它们使用没有 connector 原件证明和容量准入的手工 FetchedItem，已存在于原 `baseline-regression-audit.json` 的失败清单；本轮没有放宽生产门禁来使旧 mock 通过，也没有把扩大选择报告为全绿。
 diff --git a/docs/parent-body-copy-cleanup-design.md b/docs/parent-body-copy-cleanup-design.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..17cb645ee12ed3fcfb8b2297e02b3e1bde0d0abb
@@ -109883,7 +109902,7 @@ index b4087b96a812ee0bd32ffe3481db6c77f1764c48..60ad2a04d6cc2aa1354f881faca6388a
  		ID:           "log-pending",
  		DataSourceID: ds.ID,
 diff --git a/internal/application/service/datasource_service.go b/internal/application/service/datasource_service.go
-index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de02983027293 100644
+index c0b24241aafd826a3394af4e5008eb1a73e57001..a6b34c3648ecb2a67e66628136891f527df0bdcc 100644
 --- a/internal/application/service/datasource_service.go
 +++ b/internal/application/service/datasource_service.go
 @@ -10,10 +10,12 @@ import (
@@ -110851,13 +110870,15 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  }
  
  // Emit ingests one streamed item. A canceled context aborts the stream so the
-@@ -1008,8 +1593,37 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1008,8 +1593,39 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  	if err := ctx.Err(); err != nil {
  		return err
  	}
 +	if h.ds.Type == types.ConnectorTypeNextcloud {
 +		if h.nextcloudPublicationEpoch != nil {
-+			item.Metadata["nextcloud_publication_epoch"] = strconv.FormatInt(*h.nextcloudPublicationEpoch, 10)
++			// The connector seals the complete fetched item. Keep source observation
++			// outside that immutable artifact until constructing knowledge metadata.
++			ctx = context.WithValue(ctx, nextcloudObservedEpochKey{}, nextcloudObservedEpoch{h.ds.ID, *h.nextcloudPublicationEpoch})
 +		}
 +		fileID := item.Metadata["nextcloud_file_id"]
 +		if fileID == "" || item.Metadata["nextcloud_instance_id"] != h.nextcloudInstanceID ||
@@ -110890,7 +110911,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  	return nil
  }
  
-@@ -1017,6 +1631,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
+@@ -1017,6 +1633,12 @@ func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) er
  // running counts into the sync log so progress survives a crash and the UI can
  // reflect a long sync mid-flight instead of jumping from 0 to done.
  func (h *streamSyncHandler) Checkpoint(ctx context.Context, cursor *types.SyncCursor) error {
@@ -110903,7 +110924,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  	if cursor == nil {
  		return nil
  	}
-@@ -1070,6 +1690,11 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1070,6 +1692,11 @@ func (s *DataSourceService) processSyncStreaming(
  	ds *types.DataSource, syncLog *types.SyncLog,
  	config *types.DataSourceConfig, payload types.DataSourceSyncPayload, wasPaused bool,
  ) error {
@@ -110915,7 +110936,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  	// Tenant + auto-tag setup must precede fetching because the stream ingests
  	// each item on the fly.
  	ctx = context.WithValue(ctx, types.TenantIDContextKey, ds.TenantID)
-@@ -1095,7 +1720,8 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1095,7 +1722,8 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	result := &types.SyncResult{}
@@ -110925,7 +110946,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  
  	fullBaseline := startCursor
  	if forceFull {
-@@ -1112,15 +1738,43 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1112,15 +1740,43 @@ func (s *DataSourceService) processSyncStreaming(
  	}
  
  	nextCursor, fetchErr := streamingFetch(ctx, sc, config, forceFull, startCursor, fullBaseline, handler)
@@ -110969,7 +110990,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  
  	resultJSON, _ := result.ToJSON()
  	if err := allFetchedItemsFailedError(result); err != nil {
-@@ -1129,13 +1783,11 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1129,13 +1785,11 @@ func (s *DataSourceService) processSyncStreaming(
  		return err
  	}
  
@@ -110987,7 +111008,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  
  	// Surface per-document failures as a partial sync (not silent success), so
  	// the sync-log drawer's failure detail explains which docs didn't make it —
-@@ -1159,6 +1811,26 @@ func (s *DataSourceService) processSyncStreaming(
+@@ -1159,6 +1813,26 @@ func (s *DataSourceService) processSyncStreaming(
  	return nil
  }
  
@@ -111014,7 +111035,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  func (s *DataSourceService) updateSyncRunResult(
  	ctx context.Context,
  	ds *types.DataSource,
-@@ -1179,12 +1851,26 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1179,12 +1853,26 @@ func (s *DataSourceService) updateSyncRunResult(
  	syncLog.FinishedAt = timePtr(time.Now().UTC())
  	syncLog.ErrorMessage = errorMessage
  	syncLog.Result = resultJSON
@@ -111044,7 +111065,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  			ds.Status = types.DataSourceStatusError
  		}
  	} else if wasPaused {
-@@ -1194,8 +1880,36 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1194,8 +1882,36 @@ func (s *DataSourceService) updateSyncRunResult(
  	}
  	ds.ErrorMessage = errorMessage
  	ds.LastSyncResult = resultJSON
@@ -111083,7 +111104,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  	}
  	action := types.AuditActionDataSourceSyncCompleted
  	outcome := types.AuditOutcomeSuccess
-@@ -1204,6 +1918,8 @@ func (s *DataSourceService) updateSyncRunResult(
+@@ -1204,6 +1920,8 @@ func (s *DataSourceService) updateSyncRunResult(
  		outcome = types.AuditOutcomeFailed
  	} else if status == types.SyncLogStatusPartial {
  		outcome = types.AuditOutcomePartial
@@ -111092,7 +111113,22 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  	}
  	recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, action,
  		"data_source", ds.ID, outcome,
-@@ -1285,7 +2001,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1278,6 +1996,14 @@ func (s *DataSourceService) validateDataSourceConfig(ctx context.Context, ds *ty
+ //   - Has URL only      → CreateKnowledgeFromURL  (让 WeKnora 下载并解析)
+ //
+ // Returns (isUpdate, error) — isUpdate is true when an existing item was replaced.
++// Internal source observation, scoped to the stream's data source. It does not
++// replace the connector's original-byte proof or current-source admission.
++type nextcloudObservedEpochKey struct{}
++type nextcloudObservedEpoch struct {
++	dataSourceID string
++	epoch        int64
++}
++
+ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource, item *types.FetchedItem, tagIDs []string) (bool, error) {
+ 	// Channel decides the knowledge "source" label shown in the UI. Prefer the
+ 	// connector-supplied metadata["channel"] (e.g. Feishu Drive sets it to
+@@ -1285,7 +2011,10 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	// "unknown" for the raw ds.Type "feishu_drive"). Fall back to ds.Type so
  	// connectors that don't set metadata.channel still get a meaningful label.
  	channel := ds.Type // e.g. "feishu", "notion"
@@ -111104,7 +111140,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  		if mc, ok := item.Metadata["channel"]; ok && mc != "" {
  			channel = mc
  		}
-@@ -1308,6 +2027,13 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1308,6 +2037,19 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	for k, v := range item.Metadata {
  		metadata[k] = v
  	}
@@ -111113,12 +111149,18 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
 +		metadata["datasource_id"] = ds.ID
 +		metadata["external_id"] = item.ExternalID
 +		metadata["source_resource_id"] = item.SourceResourceID
++		if observed, ok := ctx.Value(nextcloudObservedEpochKey{}).(nextcloudObservedEpoch); ok {
++			if observed.dataSourceID != ds.ID || observed.epoch < 0 {
++				return false, errors.New("Nextcloud observed publication scope changed")
++			}
++			metadata["nextcloud_publication_epoch"] = strconv.FormatInt(observed.epoch, 10)
++		}
 +		return s.ingestNextcloudItem(ctx, ds, item, metadata, tagIDs)
 +	}
  
  	// Check if a knowledge item with this external_id already exists → delete it first (update)
  	isUpdate := false
-@@ -1318,14 +2044,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1318,14 +2060,23 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  		// other during updates.
  		existing, err := repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
  		if err != nil {
@@ -111142,7 +111184,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  					logger.Warnf(ctx, "failed to hard-delete replaced knowledge %s: %v", existing.ID, herr)
  				}
  				isUpdate = true
-@@ -1407,6 +2142,97 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
+@@ -1407,6 +2158,97 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
  	return isUpdate, fmt.Errorf("item has neither content nor URL")
  }
  
@@ -111240,7 +111282,7 @@ index c0b24241aafd826a3394af4e5008eb1a73e57001..2f954940d2ef2e85646002781a1de029
  // dupIsSameNode reports whether a duplicate-content error means the parent still
  // exists in the KB *under this item's own external_id* — i.e. a content-dedup hit
  // against this same node, so reconciling its subtree is safe. File deduplication
-@@ -1524,3 +2350,28 @@ func timePtr(t time.Time) *time.Time {
+@@ -1524,3 +2366,28 @@ func timePtr(t time.Time) *time.Time {
  	utc := t.UTC()
  	return &utc
  }
@@ -122189,10 +122231,10 @@ index 0000000000000000000000000000000000000000..0295b83e645d9282327c3bd39f915131
 +}
 diff --git a/internal/application/service/knowledge_machine_pipeline_test.go b/internal/application/service/knowledge_machine_pipeline_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437711c6d06
+index 0000000000000000000000000000000000000000..d670200de051296ff67c0209ec97d243e9c90012
 --- /dev/null
 +++ b/internal/application/service/knowledge_machine_pipeline_test.go
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,730 @@
 +package service
 +
 +import (
@@ -122258,6 +122300,7 @@ index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437
 +}
 +
 +type machinePipelineFixture struct {
++	externalID, etag                      string
 +	f                                     *enrichmentTestFixture
 +	source                                *DataSourceService
 +	ds                                    *types.DataSource
@@ -122278,6 +122321,16 @@ index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437
 +}
 +
 +func newMachinePipelineFixtureWithDocument(t *testing.T, pg bool, artifact string, withMessageMaterials ...bool) *machinePipelineFixture {
++	return newMachinePipelineFixtureWithSource(t, pg, artifact, nil, withMessageMaterials...)
++}
++
++type machinePipelineSource struct {
++	Pair                    repository.NextcloudSourcePairing
++	Token, ExternalID, ETag string
++	Prepared                func(*repository.NextcloudSourcePairing)
++}
++
++func newMachinePipelineFixtureWithSource(t *testing.T, pg bool, artifact string, live *machinePipelineSource, withMessageMaterials ...bool) *machinePipelineFixture {
 +	t.Helper()
 +	fullDirectory := len(withMessageMaterials) > 1 && withMessageMaterials[1]
 +	f := newEnrichmentTestFixture(t, pg, fullDirectory)
@@ -122318,6 +122371,20 @@ index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437
 +	for _, name := range names {
 +		script, e := os.ReadFile("../../../migrations/" + directory + "/" + name + ".up.sql")
 +		require.NoError(t, e)
++		require.NoError(t, migration.Exec(string(script)).Error)
++	}
++	// This fixture exercises the current production pipeline, including the
++	// processing ledger and recovery gates added by directory onboarding.
++	processing := []string{"000032_nextcloud_event_inbox", "000038_nextcloud_gc", "000040_nextcloud_gc_object_claim", "000041_nextcloud_gc_derived_inventory", "000064_nextcloud_publication_recovery", "000075_nextcloud_processing_state", "000076_nextcloud_directory_migrations", "000077_nextcloud_content_revision", "000078_nextcloud_control_recovery", "000079_nextcloud_recovery_build_leases", "000080_nextcloud_graph_recovery_fence"}
++	if pg {
++		processing = []string{"000113_nextcloud_event_inbox", "000119_nextcloud_gc", "000121_nextcloud_gc_object_claim", "000122_nextcloud_gc_derived_inventory", "000145_nextcloud_publication_recovery", "000156_nextcloud_processing_state", "000157_nextcloud_directory_migrations", "000158_nextcloud_content_revision", "000159_nextcloud_control_recovery", "000160_nextcloud_recovery_build_leases", "000161_nextcloud_graph_recovery_fence"}
++	}
++	for _, name := range processing {
++		script, err := os.ReadFile("../../../migrations/" + directory + "/" + name + ".up.sql")
++		require.NoError(t, err)
++		if strings.HasSuffix(name, "_nextcloud_processing_state") && f.db.Migrator().HasColumn(&types.DataSource{}, "sync_enabled") {
++			script = []byte(strings.SplitN(string(script), "\n", 2)[1])
++		}
 +		require.NoError(t, migration.Exec(string(script)).Error)
 +	}
 +	// Install the actual combined body protocol, bootstrap its owned external
@@ -122425,9 +122492,23 @@ index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437
 +	pairs := repository.NewNextcloudSourcePairingRepository(f.db)
 +	repository.ConfigureDataSourceNameInputWriters(sources, pairs, factory)
 +	proposed := repository.NextcloudSourcePairing{OperationID: "actual-machine-pair", TenantID: 7, KnowledgeBaseID: "kb", InstanceID: "instance", BindingID: "binding", BaseURL: server.URL, PublicationEpoch: 1, KeyID: "local-key"}
-+	pair, created, e := pairs.PrepareSourcePairing(f.ctx, proposed, "isolated-machine")
++	token, externalID, etag := "isolated-machine", "nextcloud:instance:77", "actual-etag"
++	if live != nil {
++		proposed = live.Pair
++		if proposed.KnowledgeBaseID != kb.ID {
++			kb.ID = proposed.KnowledgeBaseID
++			kb.AutoTagConfig = nil
++			require.NoError(t, f.store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(f.ctx), &kb))
++		}
++		token, externalID, etag = live.Token, live.ExternalID, live.ETag
++		t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", proposed.BaseURL)
++	}
++	pair, created, e := pairs.PrepareSourcePairing(f.ctx, proposed, token)
 +	require.NoError(t, e)
 +	require.True(t, created)
++	if live != nil && live.Prepared != nil {
++		live.Prepared(&pair)
++	}
 +	require.NoError(t, pairs.ActivateSourcePairing(f.ctx, pair))
 +	ds, e := sources.FindByID(f.ctx, pair.DataSourceID)
 +	require.NoError(t, e)
@@ -122467,11 +122548,12 @@ index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437
 +	ConfigureKnowledgeAutoTagInputProvenance(auto, f.store, f.guard)
 +	f.post = &KnowledgePostProcessService{knowledgeRepo: f.s.repo, kbService: f.s.kbService, chunkService: f.s.chunkService, chunkRepo: f.s.chunkRepo, taskEnqueuer: f.queue, knowledgeInputs: f.store, enrichmentConfig: f.s.config, spanTracker: f.s.spanTracker}
 +	ConfigureKnowledgeAutoTagCompletion(f.post, f.s.repo, f.store)
++	ConfigureNextcloudPostProcessLedger(f.post, repository.NewNextcloudProcessingStateStore(f.db))
 +	registry := datasource.NewConnectorRegistry()
 +	require.NoError(t, registry.Register(nextcloud.NewConnector()))
 +	admission := NewNextcloudCapacityAdmission(repository.NewNextcloudCapacityStore(f.db), func(context.Context, *types.KnowledgeBase) (interfaces.FileService, error) { return files, nil })
 +	source := &DataSourceService{dsRepo: sources, syncLogRepo: repository.NewSyncLogRepository(f.db), knowledgeService: f.s, kbService: f.s.kbService, taskEnqueuer: f.queue, connectorRegistry: registry, tenantRepo: f.s.tenantRepo, nextcloudSourcePairings: pairs, nextcloudEventInbox: repository.NewNextcloudEventInboxRepository(f.db), capacityAdmission: admission, sourceInputs: f.store}
-+	return &machinePipelineFixture{f: f, source: source, ds: ds, allow: allow, auto: auto, model: model, files: files, base: base, personal: personal, publicationUnavailableAfterCompletion: unavailableAfterCompletion, publicationFailureProbe: failureProbe, publicationAuthorizeCalls: authorizeCalls}
++	return &machinePipelineFixture{externalID: externalID, etag: etag, f: f, source: source, ds: ds, allow: allow, auto: auto, model: model, files: files, base: base, personal: personal, publicationUnavailableAfterCompletion: unavailableAfterCompletion, publicationFailureProbe: failureProbe, publicationAuthorizeCalls: authorizeCalls}
 +}
 +
 +func (m *machinePipelineFixture) ingest(t *testing.T) *types.Knowledge {
@@ -122500,14 +122582,14 @@ index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437
 +	if row == nil || row.KnowledgeBaseID != p.KnowledgeBaseID {
 +		return repository.ErrKnowledgeInputChanged
 +	}
-+	scope := repository.NextcloudContentScope{TenantID: p.TenantID, KnowledgeBaseID: p.KnowledgeBaseID, KnowledgeID: p.KnowledgeID, DataSourceID: m.ds.ID, ExternalID: "nextcloud:instance:77"}
++	scope := repository.NextcloudContentScope{TenantID: p.TenantID, KnowledgeBaseID: p.KnowledgeBaseID, KnowledgeID: p.KnowledgeID, DataSourceID: m.ds.ID, ExternalID: m.externalID}
 +	leases := repository.NewNextcloudContentLeaseStore(m.f.db)
 +	lease, e := leases.AcquireKnowledge(context.Background(), scope, repository.NextcloudContentBuildLease, "actual-asynq-"+task.Type(), time.Minute)
 +	if e != nil {
 +		return e
 +	}
 +	defer leases.ReleaseLease(context.Background(), lease.ID)
-+	if e = leases.WaitForCurrentSourceVersion(context.Background(), scope, lease, "actual-etag", time.Second); e != nil {
++	if e = leases.WaitForCurrentSourceVersion(context.Background(), scope, lease, m.etag, time.Second); e != nil {
 +		return e
 +	}
 +	parent := context.Background()
@@ -122533,6 +122615,7 @@ index 0000000000000000000000000000000000000000..7dd7b61274a3d00091d63876f7e66437
 +func runKnowledgeMachineActualPipeline(t *testing.T, pg bool) {
 +	m := newMachinePipelineFixture(t, pg)
 +	row := m.ingest(t)
++	require.Equal(t, "1", row.GetMetadata()["nextcloud_publication_epoch"], "observed epoch belongs in knowledge metadata without altering the sealed connector artifact")
 +	require.NotNil(t, repository.NewNextcloudContentLeaseStore(m.f.db))
 +	for i := 0; i < len(m.f.queue.tasks); i++ {
 +		require.NoError(t, m.run(t, m.f.queue.tasks[i]), m.f.queue.tasks[i].Type())
@@ -133506,6 +133589,195 @@ index 0000000000000000000000000000000000000000..32f7f2f115c69d99278f4836d46cc97c
 +	require.NoError(t, f.db.Unscoped().Where("id = ?", "doc").Delete(&types.Knowledge{}).Error)
 +	_, err := f.svc.planKnowledgeClone(f.ctx, f.kbs.values["kb"], f.kbs.values["other"])
 +	require.ErrorIs(t, err, ErrNextcloudDerivedContent)
++}
+diff --git a/internal/application/service/nextcloud_document_graph_pipeline_test.go b/internal/application/service/nextcloud_document_graph_pipeline_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ab0de13d2a5239c9f0650e26a8fa781b9647ac6
+--- /dev/null
++++ b/internal/application/service/nextcloud_document_graph_pipeline_test.go
+@@ -0,0 +1,183 @@
++//go:build sqlite_fts5
++
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"os"
++	"strconv"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	sqlindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	"github.com/hibiken/asynq"
++	"github.com/stretchr/testify/require"
++)
++
++type documentGraphModels struct{ machinePipelineModels }
++
++func (documentGraphModels) GetEmbeddingModel(context.Context, string) (embedding.Embedder, error) {
++	return localDerivedEmbedder{}, nil
++}
++
++// No prebuilt chunks, completed spans or published candidates: the actual sync
++// and document handlers produce all of these, then enqueue the real graph task.
++// HTTP source and model responses remain controlled fixtures.
++type documentGraphLive struct {
++	Pair                                        repository.NextcloudSourcePairing
++	Token, ExternalID, ETag, Connection, Secret string
++	Directory, GUID                             string
++}
++
++func TestNextcloudDocumentToSQLIndexGraphAndCurrentState(t *testing.T) {
++	runDocumentGraphPipeline(t, "")
++}
++func TestNextcloudLiveDocumentToGraphAndInbox(t *testing.T) {
++	path := os.Getenv("WEKNORA_DOCUMENT_GRAPH_LIVE_FIXTURE")
++	if path == "" {
++		t.Skip("owned Nextcloud fixture required")
++	}
++	runDocumentGraphPipeline(t, path)
++}
++func runDocumentGraphPipeline(t *testing.T, path string) {
++	localDerivedVecAuto.Do(sqlite_vec.Auto)
++	var live documentGraphLive
++	var source *machinePipelineSource
++	if path != "" {
++		raw, err := os.ReadFile(path)
++		require.NoError(t, err)
++		require.NoError(t, json.Unmarshal(raw, &live))
++		live.Pair.TenantID = 7
++		require.NotEmpty(t, live.Pair.KnowledgeBaseID)
++		source = &machinePipelineSource{Pair: live.Pair, Token: live.Token, ExternalID: live.ExternalID, ETag: live.ETag, Prepared: func(pair *repository.NextcloudSourcePairing) {
++			raw, err := json.Marshal(pair)
++			require.NoError(t, err)
++			require.NoError(t, os.WriteFile(path+".ready", raw, 0600))
++			require.Eventually(t, func() bool { _, err := os.Stat(path + ".committed"); return err == nil }, 45*time.Second, 100*time.Millisecond)
++		}}
++	}
++	m := newMachinePipelineFixtureWithSource(t, false, "Actual original document about its topic, with enough text for chunking and retrieval.", source)
++	if source != nil {
++		require.NotEmpty(t, live.Directory)
++		require.NotEmpty(t, live.GUID)
++		require.NoError(t, m.f.db.Model(&types.Directory{}).Where("id=?", "machine-ad").Update("id", live.Directory).Error)
++		require.NoError(t, m.f.db.Model(&types.DirectoryIdentity{}).Where("id=?", "machine-ad-user").Updates(map[string]any{"directory_id": live.Directory, "object_guid": live.GUID}).Error)
++	}
++	connection, instance, secret := "actual-document-graph-connection", "instance", "0123456789abcdef0123456789abcdef"
++	if source != nil {
++		connection, instance, secret = live.Connection, live.Pair.InstanceID, live.Secret
++	}
++
++	db := m.f.db
++	engines := types.RetrieverEngines{Engines: []types.RetrieverEngineParams{
++		{RetrieverType: types.VectorRetrieverType, RetrieverEngineType: types.SQLiteRetrieverEngineType},
++		{RetrieverType: types.KeywordsRetrieverType, RetrieverEngineType: types.SQLiteRetrieverEngineType},
++	}}
++	require.NoError(t, db.Model(&types.Tenant{}).Where("id=?", 7).Update("retriever_engines", engines).Error)
++	registry := retriever.NewRetrieveEngineRegistry(nil, nil)
++	require.NoError(t, registry.Register(retriever.NewKVHybridRetrieveEngine(sqlindex.NewSQLiteRetrieveEngineRepository(db), types.SQLiteRetrieverEngineType)))
++	m.f.s.retrieveEngine = registry
++	m.f.s.modelService = documentGraphModels{machinePipelineModels{auto: m.model, summary: m.f.model}}
++	var kb types.KnowledgeBase
++	require.NoError(t, db.Where("id=?", m.ds.KnowledgeBaseID).Take(&kb).Error)
++	kb.IndexingStrategy = types.IndexingStrategy{VectorEnabled: true, KeywordEnabled: true, GraphEnabled: true, GraphRequired: true}
++	kb.ExtractConfig = &types.ExtractConfig{Enabled: true, Tags: []string{"KNOWS"}}
++	require.NoError(t, m.f.store.UpdateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(m.f.ctx), &kb))
++	state := repository.NewNextcloudProcessingStateStore(db)
++	provider := repository.NewScopedSQLGraphRepository(db, nil)
++	m.f.s.graphEngine = provider
++	base, configSHA, binding, err := repository.NextcloudEventDataSourceIdentity(m.ds.Config)
++	require.NoError(t, err)
++	encrypted, err := utils.EncryptAESGCM(secret, utils.GetAESKey())
++	require.NoError(t, err)
++	require.NoError(t, db.Table("nextcloud_event_connections").Create(map[string]any{"connection_id": connection, "tenant_id": 7, "knowledge_base_id": m.ds.KnowledgeBaseID, "datasource_id": m.ds.ID, "nextcloud_instance_id": instance, "binding_id": binding, "datasource_base_url": base, "datasource_config_sha256": configSHA, "status": "active", "current_key_id": "current", "current_secret_ciphertext": encrypted}).Error)
++	require.NoError(t, state.RefreshSourceEpoch(context.Background(), connection))
++	row := m.ingest(t)
++	model := &graphEntryModel{}
++	empty, _ := types.NewCompleteSourceLineage()
++	template, err := types.BindGraphPromptTemplateOrigin(&types.PromptTemplateStructured{Description: "extract entities and edges %s"}, empty)
++	require.NoError(t, err)
++	handler := &ChunkExtractService{buildInputs: m.f.store, template: template, modelService: &graphEntryModels{model: model}, graphEngine: provider, processingLedger: state, knowledgeRepo: m.f.s.repo}
++	graphTasks := 0
++	for i := 0; i < len(m.f.queue.tasks); i++ {
++		task := m.f.queue.tasks[i]
++		if task.Type() != types.TypeChunkExtract {
++			require.NoError(t, m.run(t, task), task.Type())
++			continue
++		}
++		graphTasks++
++		var payload types.ExtractChunkPayload
++		require.NoError(t, json.Unmarshal(task.Payload(), &payload))
++		require.Equal(t, row.ID, payload.KnowledgeID)
++		require.NotNil(t, payload.OriginalInput)
++		scope := repository.NextcloudContentScope{TenantID: 7, KnowledgeBaseID: m.ds.KnowledgeBaseID, KnowledgeID: row.ID, DataSourceID: m.ds.ID, ExternalID: m.externalID}
++		leases := repository.NewNextcloudContentLeaseStore(db)
++		lease, err := leases.AcquireKnowledge(context.Background(), scope, repository.NextcloudContentBuildLease, "actual-enqueued-graph", time.Minute)
++		require.NoError(t, err)
++		ctx := repository.WithNextcloudBuildLease(context.Background(), leases, lease, scope)
++		require.NoError(t, handler.Handle(ctx, task))
++		calls := model.calls
++		require.NoError(t, handler.Handle(ctx, asynq.NewTask(task.Type(), task.Payload())))
++		require.Equal(t, calls, model.calls, "queue redelivery must reuse durable graph ACK")
++		require.NoError(t, leases.ReleaseLease(context.Background(), lease.ID))
++	}
++	require.NoError(t, db.Where("id=?", row.ID).Take(row).Error)
++	require.Equal(t, types.ParseStatusCompleted, row.ParseStatus, row.ErrorMessage)
++	require.Positive(t, graphTasks)
++	require.Equal(t, graphTasks, model.calls)
++	var n int64
++	for _, table := range []string{"chunks", "lite_embeddings", "vec_embeddings_3", "lite_embeddings_fts", "nextcloud_graph_records", "nextcloud_status_outbox"} {
++		require.NoError(t, db.Table(table).Count(&n).Error)
++		require.Positive(t, n, table)
++	}
++	require.NoError(t, state.Capture(context.Background(), 7, m.ds.KnowledgeBaseID, m.ds.ID, m.externalID, true))
++	var persisted struct{ PayloadJSON string }
++	require.NoError(t, db.Table("nextcloud_file_states").Where("connection_id=?", connection).Take(&persisted).Error)
++	var status repository.NextcloudFileStateV2
++	require.NoError(t, json.Unmarshal([]byte(persisted.PayloadJSON), &status))
++	require.Equal(t, "published", status.PublicationState)
++	for _, stage := range []string{"parse", "chunk", "embedding", "index"} {
++		require.Equal(t, "succeeded", status.Stages[stage].State, stage)
++	}
++	require.Equal(t, "succeeded", status.Graph.State)
++	require.True(t, status.Graph.Persisted)
++	require.Equal(t, graphTasks, status.Graph.Expected)
++	if source != nil {
++		require.Equal(t, live.ETag, status.SourceETag)
++		require.Equal(t, strconv.FormatInt(live.Pair.PublicationEpoch, 10), status.PublicationEpoch)
++		dispatcher := NewNextcloudStateDispatcher(state, nil)
++		dispatcher.deliver(context.Background(), time.Now().UTC())
++		var delivered int64
++		require.NoError(t, db.Table("nextcloud_status_outbox").Where("event_id=? AND state='delivered'", status.EventID).Count(&delivered).Error)
++		require.EqualValues(t, 1, delivered)
++		require.NoError(t, os.WriteFile(path+".result", []byte(persisted.PayloadJSON), 0600))
++		// The same derived output is read with a nominal WK admin actor whose
++		// actual source identity is checked over signed HTTP against NC/LDAPS.
++		output, err := NewKnowledgeOutputAuthorizer(m.f.store, m.f.guard).Begin(m.f.ctx, []*types.Knowledge{row})
++		require.NoError(t, err)
++		require.NoError(t, output.Check(m.f.ctx, []*types.Knowledge{row}))
++		var chunk types.Chunk
++		require.NoError(t, db.Where("knowledge_id=?", row.ID).Take(&chunk).Error)
++		chunks, err := NewChunkOutputAuthorizer(m.f.store, m.f.guard).Begin(m.f.ctx, types.ChunkOutputReadRequest{TenantID: 7, KnowledgeBaseID: m.ds.KnowledgeBaseID, KnowledgeID: row.ID, ChunkIDs: []string{chunk.ID}})
++		require.NoError(t, err)
++		snapshot, err := chunks.Snapshot()
++		require.NoError(t, err)
++		require.NoError(t, chunks.Check(m.f.ctx, snapshot))
++		require.NoError(t, os.WriteFile(path+".access-ready", []byte("ready"), 0600))
++		require.Eventually(t, func() bool { _, err := os.Stat(path + ".revoked"); return err == nil }, 45*time.Second, 100*time.Millisecond)
++		require.Error(t, output.Check(m.f.ctx, []*types.Knowledge{row}), "retained document output must recheck current source access")
++		require.Error(t, chunks.Check(m.f.ctx, snapshot), "retained chunks must recheck current source access")
++		_, err = NewKnowledgeOutputAuthorizer(m.f.store, m.f.guard).Begin(m.f.ctx, []*types.Knowledge{row})
++		require.Error(t, err, "nominal WK admin must not bypass actual LDAP source revocation")
++		t.Log("actual LDAPS reader can read processed output before NC share removal; retained document/chunk output and new admin read denied after removal")
++
++	}
++	t.Log("actual HTTP sync -> saved original -> parser/chunker -> SQLite vector+FTS rows -> enqueued extraction -> fenced SQL graph -> published stage/outbox; controlled source and models")
 +}
 diff --git a/internal/application/service/nextcloud_endpoint_guard_test.go b/internal/application/service/nextcloud_endpoint_guard_test.go
 new file mode 100644
@@ -173518,7 +173790,7 @@ index 4058a8421229f73f803ad940067e19f26b5b2fb8..130b4cb9cd2bd76c76fc86e3a3832609
  	}
  
 diff --git a/internal/logger/logger.go b/internal/logger/logger.go
-index e7c9665ad5294d35bc40c51c797692b4fd97f750..2a165a8412322aff67bfa6f85e982e5ee5698875 100644
+index e7c9665ad5294d35bc40c51c797692b4fd97f750..2709376f982280ba23918f9d0afb92b0dbf33b6b 100644
 --- a/internal/logger/logger.go
 +++ b/internal/logger/logger.go
 @@ -13,6 +13,7 @@ import (
@@ -173529,7 +173801,126 @@ index e7c9665ad5294d35bc40c51c797692b4fd97f750..2a165a8412322aff67bfa6f85e982e5e
  	"github.com/Tencent/WeKnora/internal/types"
  	"github.com/sirupsen/logrus"
  	"go.opentelemetry.io/otel/trace"
-@@ -510,6 +511,9 @@ func Fatalf(c context.Context, format string, args ...interface{}) {
+@@ -278,8 +279,20 @@ func ConfigureFromEnv() {
+ 	appLogger.SetReportCaller(false)
+ }
+ 
++// Direct logrus callers cannot be safely rewritten before formatting. Disable
++// their output in protected contexts; package helpers retain fixed diagnostics.
++var protectedSourceLogger = func() *logrus.Logger {
++	l := logrus.New()
++	l.SetOutput(io.Discard)
++	l.SetLevel(logrus.PanicLevel)
++	return l
++}()
++
+ // GetLogger 获取日志实例
+ func GetLogger(c context.Context) *logrus.Entry {
++	if logprivacy.ContentSuppressed(c) {
++		return logrus.NewEntry(protectedSourceLogger)
++	}
+ 	if logger := c.Value(types.LoggerContextKey); logger != nil {
+ 		return logger.(*logrus.Entry)
+ 	}
+@@ -425,33 +438,61 @@ func WithFields(c context.Context, fields logrus.Fields) context.Context {
+ 	return context.WithValue(c, types.LoggerContextKey, logger)
+ }
+ 
++// Source worker contexts may carry document bodies, paths or provider errors.
++// Keep a diagnostic event without formatting those values or inherited fields.
++func protectedDiagnostic(c context.Context, level logrus.Level) bool {
++	if !logprivacy.ContentSuppressed(c) {
++		return false
++	}
++	logrus.NewEntry(appLogger).Log(level, "Protected source diagnostic")
++	return true
++}
++
+ // Debug 输出调试级别的日志
+ func Debug(c context.Context, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.DebugLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Debug(args...)
+ }
+ 
+ // Debugf 使用格式化字符串输出调试级别的日志
+ func Debugf(c context.Context, format string, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.DebugLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Debugf(format, args...)
+ }
+ 
+ // Info 输出信息级别的日志
+ func Info(c context.Context, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.InfoLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Info(args...)
+ }
+ 
+ // Infof 使用格式化字符串输出信息级别的日志
+ func Infof(c context.Context, format string, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.InfoLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Infof(format, args...)
+ }
+ 
+ // Warn 输出警告级别的日志
+ func Warn(c context.Context, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.WarnLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Warn(args...)
+ }
+ 
+ // Warnf 使用格式化字符串输出警告级别的日志
+ func Warnf(c context.Context, format string, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.WarnLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Warnf(format, args...)
+ }
+ 
+@@ -465,6 +506,9 @@ type Fields = logrus.Fields
+ // parsing free-form text. Format-string style (Warnf) is appropriate for
+ // low-stakes diagnostic messages.
+ func WarnWithFields(c context.Context, fields Fields, msg string) {
++	if protectedDiagnostic(c, logrus.WarnLevel) {
++		return
++	}
+ 	if fields == nil {
+ 		fields = Fields{}
+ 	}
+@@ -473,16 +517,25 @@ func WarnWithFields(c context.Context, fields Fields, msg string) {
+ 
+ // Error 输出错误级别的日志
+ func Error(c context.Context, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.ErrorLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Error(args...)
+ }
+ 
+ // Errorf 使用格式化字符串输出错误级别的日志
+ func Errorf(c context.Context, format string, args ...interface{}) {
++	if protectedDiagnostic(c, logrus.ErrorLevel) {
++		return
++	}
+ 	addCaller(GetLogger(c), 2).Errorf(format, args...)
+ }
+ 
+ // ErrorWithFields 输出带有额外字段的错误级别日志
+ func ErrorWithFields(c context.Context, err error, fields logrus.Fields) {
++	if protectedDiagnostic(c, logrus.ErrorLevel) {
++		return
++	}
+ 	if fields == nil {
+ 		fields = logrus.Fields{}
+ 	}
+@@ -510,6 +563,9 @@ func Fatalf(c context.Context, format string, args ...interface{}) {
  // new key silently defaulted to being dropped.
  func CloneContext(ctx context.Context) context.Context {
  	newCtx := context.Background()
@@ -173539,7 +173930,7 @@ index e7c9665ad5294d35bc40c51c797692b4fd97f750..2a165a8412322aff67bfa6f85e982e5e
  
  	for _, k := range types.ContextKeysClonedAcrossDetach() {
  		if v := ctx.Value(k); v != nil {
-@@ -537,6 +541,9 @@ func CloneContext(ctx context.Context) context.Context {
+@@ -537,6 +593,9 @@ func CloneContext(ctx context.Context) context.Context {
  // a tool has returned) onto the originating chat trace.
  func CloneContextWithoutTrace(ctx context.Context) context.Context {
  	newCtx := context.Background()
@@ -173549,6 +173940,55 @@ index e7c9665ad5294d35bc40c51c797692b4fd97f750..2a165a8412322aff67bfa6f85e982e5e
  	for _, k := range types.ContextKeysClonedAcrossDetach() {
  		if k == types.LangfuseTraceContextKey {
  			continue
+diff --git a/internal/logger/source_diagnostic_privacy_test.go b/internal/logger/source_diagnostic_privacy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c878bcc9a8ce99d3b66f7918432ceab7609280a
+--- /dev/null
++++ b/internal/logger/source_diagnostic_privacy_test.go
+@@ -0,0 +1,43 @@
++package logger
++
++import (
++	"bytes"
++	"context"
++	"github.com/Tencent/WeKnora/internal/logprivacy"
++	"github.com/sirupsen/logrus"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++type forbiddenLogValue struct{}
++
++func (forbiddenLogValue) String() string { panic("private value must not be formatted") }
++func (forbiddenLogValue) Error() string  { panic("private error must not be formatted") }
++func TestSourceWorkerDiagnosticsDoNotFormatContentOrInheritedFields(t *testing.T) {
++	var out bytes.Buffer
++	oldOutput, oldLevel := appLogger.Out, appLogger.Level
++	appLogger.SetOutput(&out)
++	appLogger.SetLevel(logrus.DebugLevel)
++	t.Cleanup(func() { appLogger.SetOutput(oldOutput); appLogger.SetLevel(oldLevel) })
++	ctx := WithFields(logprivacy.SuppressContent(context.Background()), Fields{"document": "PRIVATE_SOURCE_FIELD"})
++	for _, c := range []context.Context{ctx, CloneContext(ctx), CloneContextWithoutTrace(ctx)} {
++		GetLogger(c).WithField("private", forbiddenLogValue{}).Errorf("PRIVATE_SOURCE %s", forbiddenLogValue{})
++		Debug(c, forbiddenLogValue{})
++		Debugf(c, "PRIVATE_SOURCE_BODY %s", forbiddenLogValue{})
++		Info(c, forbiddenLogValue{})
++		Infof(c, "PRIVATE_SOURCE_BODY %s", forbiddenLogValue{})
++		Warn(c, forbiddenLogValue{})
++		Warnf(c, "PRIVATE_SOURCE_BODY %s", forbiddenLogValue{})
++		Error(c, forbiddenLogValue{})
++		Errorf(c, "PRIVATE_SOURCE_BODY %s", forbiddenLogValue{})
++		WarnWithFields(c, Fields{"secret": forbiddenLogValue{}}, "PRIVATE_SOURCE_WARNING")
++		ErrorWithFields(c, forbiddenLogValue{}, Fields{"secret": forbiddenLogValue{}})
++	}
++	require.Contains(t, out.String(), "Protected source diagnostic")
++	require.NotContains(t, out.String(), "PRIVATE_SOURCE")
++	require.NotContains(t, out.String(), "PANIC")
++	out.Reset()
++	Infof(WithFields(context.Background(), Fields{"ordinary": "PUBLIC_FIELD"}), "PUBLIC_MESSAGE %s", "PUBLIC_VALUE")
++	require.Contains(t, out.String(), "PUBLIC_MESSAGE PUBLIC_VALUE")
++	require.Contains(t, out.String(), "PUBLIC_FIELD")
++}
 diff --git a/internal/logprivacy/context.go b/internal/logprivacy/context.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..b876533c25db53ea92374fdc9b551b0ffe1223a2

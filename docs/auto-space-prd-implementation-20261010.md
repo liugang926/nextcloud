@@ -2,6 +2,10 @@
 
 本次实现对应 `nextcloud-weknora-auto-space-permissions-prd.md`，以独立开发分支交付。目标是已有 Tenant 内的一根一专用 KB；自动关联不创建 Tenant、不建立普通空间成员关系。生产启用须同时升级两端，应用全部迁移并配置受限服务凭据。
 
+## 2026-10-12 补充修复
+
+复验现有独立分支后，修复了目录发现 worker 未消费关联意图、退休意图被普通队列重新处理，以及恢复期间开通自动化缺少统一门禁的问题。新增真实 Nextcloud/PostgreSQL 回归先在旧代码复现退休状态被改写，再在修复代码通过。见 [补充实现与验证](auto-space-prd-follow-up-20261012.md)。原证据的模型、目录与容量边界保持不变。
+
 ## 实现范围
 
 | 能力 | Nextcloud | WeKnora |
@@ -89,7 +93,9 @@ SDK 与调用层的补充审查修复了包装器测试未覆盖的完整请求�
 | A39：压力 | 原件 10,000 文件/100 GB、10,000 条 HTTP/HMAC 状态、微文本 SQL 图谱分开计量；原件下载保留 0.08% 失败，正常上传探针 100/100 成功且没有因果 baseline |
 | A40：高级权限扩展 | 尚未适配；高级 ACL、后代单独分享、未知挂载保持明确关闭，不以固定 allow/deny 模拟支持 |
 
-## 开发候选
+## 2026-10-10 开发候选（历史）
+
+当前构建候选已在 2026-10-12 更新为 `e73726a9d`，修复流式原件证明和来源日志，详见 [补充报告](auto-space-prd-follow-up-20261012.md)。下列哈希及性能证据保留原冻结版本；实际构建以当前 manifest 为准。
 
 WeKnora 已冻结为提交 `cf2a14b0272d6bfe1af0b9480e54df3923c3bff0`，tree 为 `f988fd2f41ce277080be96ccfe20938ea14ace4a`。独立分支为 `codex/auto-space-prd-20261010`；Nextcloud 交付也在同名独立分支。`integration/candidates/manifest.json` 新增 `auto_space`，基线为精确 `c6c4bd445a8ee49e742da9d804957a3fe4bf52d4`。
 
