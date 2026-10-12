@@ -89,3 +89,13 @@ PHP 独立回滚事务测试证明篡改、缺项和错误前缀拒绝且不留�
 WK 提交 `06c6bfd45` 已更新冻结候选，精确 apply/reverse 通过。此次是实际 NC + LDAPS + PostgreSQL 上的 CLI/repository 恢复验证，WK 索引仍为关系库测试记录，不代替完整应用、外部向量后端、真实模型或 100 GB 验收。未开放共享入口。
 
 最终第 12 次 runner exit 0，Go 实际演练通过，nonce 所有权清理验证通过。双端关闭、最新外部日志链、新代次发布、无 actor 拒绝、内容版本变化拒绝，以及真实部门共享撤销均完成。[验收收据](evidence/auto-space-prd-20261012/coordinated-recovery-ad-receipt.json) 固定测试源码及日志哈希；[实际运行收据](evidence/auto-space-prd-20261012/coordinated-recovery-ad-12.json) 保留完整阶段边界。全 PRD 目标仍未完成。
+
+## 同一处理结果的四个 HTTP 读取入口
+
+新增可选 `--http-read` 联调：生产文档 handler 保留其实际数据库、原件与正文日志，独立 Gin handler 测试读取同一代次。详情、列表、预览、下载分别验证授权前 200、无本人身份 403、真实 Nextcloud LDAP share 删除后 403；预览/下载 SHA-256 与原件一致，响应 private/no-store，新增读取租约已释放。
+
+列表最初拒绝源于夹具缺少 collection checkpoint migration，以及新建 KB 时没有通过显式名称输入记录显示来源。现使用正常 migration 和生产 writer API 补齐；未放宽授权。诊断代码移除后最终 runner exit 0，HTTP 12 子项通过（21.91 秒），同链路生产任务 38.52 秒。早期失败与诊断通过日志均保留。登录上下文仍为受控 Gin middleware，模型仍为受控响应，不能据此宣称完整应用认证、真实问答、Agent/history/cache 或 100 GB 验收。
+
+WK 本地提交 `bec301dad`，候选补丁精确 apply/reverse 通过；临时 actor 确认不存在，来源 publication 关闭、私有文件清理，原件保留。[本轮收据](evidence/auto-space-prd-20261012/live-http-read-receipt.json)。
+
+用户选择的本机现有模型配置已只读定位：当前 `weknora-ldap-local-postgres-1` 模型库存含本机 BGE 512 维嵌入及 DeepSeek chat 配置。尚未将真实推理接入本轮 fixture；密钥未写入证据或 Git。

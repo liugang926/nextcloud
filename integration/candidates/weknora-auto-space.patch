@@ -122333,7 +122333,7 @@ index 000000000..0295b83e6
 +}
 diff --git a/internal/application/service/knowledge_machine_pipeline_test.go b/internal/application/service/knowledge_machine_pipeline_test.go
 new file mode 100644
-index 000000000..d670200de
+index 000000000..0e0a91381
 --- /dev/null
 +++ b/internal/application/service/knowledge_machine_pipeline_test.go
 @@ -0,0 +1,730 @@
@@ -122600,7 +122600,7 @@ index 000000000..d670200de
 +		if proposed.KnowledgeBaseID != kb.ID {
 +			kb.ID = proposed.KnowledgeBaseID
 +			kb.AutoTagConfig = nil
-+			require.NoError(t, f.store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(f.ctx), &kb))
++			require.NoError(t, f.store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeBaseNameInput(repository.WithIndependentKnowledgeInput(f.ctx), kb.ID, kb.Name), &kb))
 +		}
 +		token, externalID, etag = live.Token, live.ExternalID, live.ETag
 +		t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", proposed.BaseURL)
@@ -133694,17 +133694,20 @@ index 000000000..32f7f2f11
 +}
 diff --git a/internal/application/service/nextcloud_document_graph_pipeline_test.go b/internal/application/service/nextcloud_document_graph_pipeline_test.go
 new file mode 100644
-index 000000000..8ab0de13d
+index 000000000..8ee12559d
 --- /dev/null
 +++ b/internal/application/service/nextcloud_document_graph_pipeline_test.go
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,224 @@
 +//go:build sqlite_fts5
 +
 +package service
 +
 +import (
 +	"context"
++	"crypto/sha256"
++	"encoding/hex"
 +	"encoding/json"
++	"io"
 +	"os"
 +	"strconv"
 +	"testing"
@@ -133776,6 +133779,11 @@ index 000000000..8ab0de13d
 +	}
 +
 +	db := m.f.db
++	// Collection reads require the same membership/ABA checkpoint migration
++	// as the normal app, before document creation starts updating the scope.
++	collectionDDL, err := os.ReadFile("../../../migrations/sqlite/000058_knowledge_collection_checkpoints.up.sql")
++	require.NoError(t, err)
++	require.NoError(t, db.Exec(string(collectionDDL)).Error)
 +	engines := types.RetrieverEngines{Engines: []types.RetrieverEngineParams{
 +		{RetrieverType: types.VectorRetrieverType, RetrieverEngineType: types.SQLiteRetrieverEngineType},
 +		{RetrieverType: types.KeywordsRetrieverType, RetrieverEngineType: types.SQLiteRetrieverEngineType},
@@ -133870,12 +133878,45 @@ index 000000000..8ab0de13d
 +		snapshot, err := chunks.Snapshot()
 +		require.NoError(t, err)
 +		require.NoError(t, chunks.Check(m.f.ctx, snapshot))
++		if os.Getenv("WEKNORA_DOCUMENT_GRAPH_HTTP") == "1" {
++			var databases []struct{ Name, File string }
++			require.NoError(t, db.Raw("PRAGMA database_list").Scan(&databases).Error)
++			databasePath := ""
++			for _, database := range databases {
++				if database.Name == "main" {
++					databasePath = database.File
++				}
++			}
++			require.NotEmpty(t, databasePath)
++			// Private paths reference this exact live database and original file;
++			// the handler test must not synthesize another published generation.
++			original, err := m.files.GetFile(m.f.ctx, row.FilePath)
++			require.NoError(t, err)
++			originalBytes, err := io.ReadAll(original)
++			require.NoError(t, err)
++			require.NoError(t, original.Close())
++			bodySHA := sha256.Sum256(originalBytes)
++			descriptor := map[string]any{"database": databasePath, "file_root": m.base, "knowledge_id": row.ID,
++				"knowledge_base_id": row.KnowledgeBaseID, "user_id": "enrich-human", "file_path": row.FilePath, "body_sha256": hex.EncodeToString(bodySHA[:]),
++				"environment": map[string]string{}}
++			environment := descriptor["environment"].(map[string]string)
++			for _, key := range []string{"SYSTEM_AES_KEY", "WEKNORA_NEXTCLOUD_DEV_HTTP", "WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", "WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY", "WEKNORA_ORIGINAL_BODY_JOURNAL_KEY", "WEKNORA_ORIGINAL_BODY_JOURNAL_PIN"} {
++				environment[key] = os.Getenv(key)
++			}
++			encoded, err := json.Marshal(descriptor)
++			require.NoError(t, err)
++			require.NoError(t, os.WriteFile(path+".http-input", encoded, 0600))
++		}
 +		require.NoError(t, os.WriteFile(path+".access-ready", []byte("ready"), 0600))
-+		require.Eventually(t, func() bool { _, err := os.Stat(path + ".revoked"); return err == nil }, 45*time.Second, 100*time.Millisecond)
++		require.Eventually(t, func() bool { _, err := os.Stat(path + ".revoked"); return err == nil }, 90*time.Second, 100*time.Millisecond)
 +		require.Error(t, output.Check(m.f.ctx, []*types.Knowledge{row}), "retained document output must recheck current source access")
 +		require.Error(t, chunks.Check(m.f.ctx, snapshot), "retained chunks must recheck current source access")
 +		_, err = NewKnowledgeOutputAuthorizer(m.f.store, m.f.guard).Begin(m.f.ctx, []*types.Knowledge{row})
 +		require.Error(t, err, "nominal WK admin must not bypass actual LDAP source revocation")
++		if os.Getenv("WEKNORA_DOCUMENT_GRAPH_HTTP") == "1" {
++			require.NoError(t, os.WriteFile(path+".source-checked", []byte("checked"), 0600))
++			require.Eventually(t, func() bool { _, err := os.Stat(path + ".http-done"); return err == nil }, 60*time.Second, 100*time.Millisecond)
++		}
 +		t.Log("actual LDAPS reader can read processed output before NC share removal; retained document/chunk output and new admin read denied after removal")
 +
 +	}
@@ -163372,6 +163413,184 @@ index 000000000..2634e38e3
 +	case <-time.After(7 * time.Minute):
 +		t.Fatal("owned NC coordinator timed out")
 +	}
++}
+diff --git a/internal/handler/nextcloud_processed_live_test.go b/internal/handler/nextcloud_processed_live_test.go
+new file mode 100644
+index 000000000..273c5323b
+--- /dev/null
++++ b/internal/handler/nextcloud_processed_live_test.go
+@@ -0,0 +1,172 @@
++//go:build sqlite_fts5
++
++package handler
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/application/service"
++	storagefile "github.com/Tencent/WeKnora/internal/application/service/file"
++	"github.com/Tencent/WeKnora/internal/middleware"
++	"github.com/Tencent/WeKnora/internal/types"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	gormlogger "gorm.io/gorm/logger"
++)
++
++// Uses the producer test's actual database and file artifacts while that
++// process keeps its original-body journal and source generation alive.
++// The WK login context is controlled; source identity and READ use live NC/AD.
++func TestNextcloudProcessedLiveHTTPReadAndRevocation(t *testing.T) {
++	path := os.Getenv("WEKNORA_DOCUMENT_GRAPH_LIVE_FIXTURE")
++	if path == "" || os.Getenv("WEKNORA_DOCUMENT_GRAPH_HTTP") != "1" {
++		t.Skip("owned live producer required")
++	}
++	var input struct {
++		Database        string            `json:"database"`
++		FileRoot        string            `json:"file_root"`
++		KnowledgeID     string            `json:"knowledge_id"`
++		KnowledgeBaseID string            `json:"knowledge_base_id"`
++		UserID          string            `json:"user_id"`
++		BodySHA256      string            `json:"body_sha256"`
++		Environment     map[string]string `json:"environment"`
++	}
++	raw, err := os.ReadFile(path + ".http-input")
++	require.NoError(t, err)
++	require.NoError(t, json.Unmarshal(raw, &input))
++	for name, value := range input.Environment {
++		t.Setenv(name, value)
++	}
++	sqlite_vec.Auto()
++	db, err := gorm.Open(sqlite.Open(input.Database+"?_busy_timeout=5000"), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	defer sqlDB.Close()
++	sqlDB.SetMaxOpenConns(1)
++	require.NoError(t, repository.InstallOriginalBodyRetentionCallbacks(db))
++	require.NoError(t, repository.NewOriginalBodyRetentionStore(db).VerifyJournalReady())
++	repo := repository.NewKnowledgeRepository(db)
++	sources := repository.NewDataSourceRepository(db)
++	kbs := collectionHTTPKB{db: db}
++	groups := service.NewGroupAccessService(repository.NewGroupAccessRepository(db))
++	publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(db), sources)
++	store := repository.NewKnowledgeInputProvenanceStore(db)
++	repository.ConfigureKnowledgeInputActorGroupAccess(store, groups)
++	repository.ConfigureKnowledgeCurrentReadActor(repo, store)
++	guard := access.NewNextcloudSourceLineageGuard(repo.(access.NextcloudLineageSnapshotLookup), kbs, nil, nil, groups, publication, store)
++	repository.ConfigureKnowledgeOriginalInputSourceVerifier(store, service.NewKnowledgeOriginalInputSourceVerifier(store, guard, sources))
++	catalog := service.NewResourceCatalog(repository.NewResourceRepository(db))
++	files := storagefile.NewResourceCatalogFileService(storagefile.NewBackendScopedFileService("machine-local", storagefile.NewLocalFileService(input.FileRoot, "")), catalog)
++	leases := repository.NewNextcloudContentLeaseStore(db)
++	kg, err := service.NewKnowledgeService(nil, repo, nil, kbs, nil, nil, nil, nil, nil, nil, files, nil, catalog, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, publication, leases)
++	require.NoError(t, err)
++	h := &KnowledgeHandler{kgService: kg, kbService: kbs}
++	ConfigureKnowledgeHandlerGroupAccess(h, groups)
++	ConfigureKnowledgeHandlerPublicationGuard(h, publication)
++	ConfigureKnowledgeHandlerContentLeaseStore(h, leases)
++	ConfigureKnowledgeHandlerOutputLineage(h, service.NewKnowledgeOutputAuthorizer(store, guard))
++	ConfigureKnowledgeHandlerCollectionOutput(h, service.NewKnowledgeCollectionOutputAuthorizer(store, guard))
++	gin.SetMode(gin.TestMode)
++	human := true
++	router := gin.New()
++	router.Use(middleware.ErrorHandler(), func(c *gin.Context) {
++		ctx := types.WithCaller(c.Request.Context(), types.Caller{TenantID: 7, UserID: input.UserID, Role: types.TenantRoleAdmin})
++		ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalWebUser, ID: input.UserID})
++		if !human {
++			ctx = types.WithCaller(ctx, types.Caller{TenantID: 7, Role: types.TenantRoleAdmin})
++			ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalAPITenant, ID: "7"})
++		}
++		ctx = types.WithExecutionTenant(ctx, 7)
++		c.Set(types.TenantIDContextKey.String(), uint64(7))
++		c.Request = c.Request.WithContext(ctx)
++		c.Next()
++	})
++	router.GET("/knowledge/:id", h.GetKnowledge)
++	router.GET("/knowledge/:id/preview", h.PreviewKnowledgeFile)
++	router.GET("/knowledge/:id/download", h.DownloadKnowledgeFile)
++	router.GET("/knowledge-bases/:id/knowledge", h.ListKnowledge)
++	baseline := map[string][]string{}
++	for _, table := range []string{"nextcloud_content_leases", "original_body_leases"} {
++		var ids []string
++		require.NoError(t, db.Table(table).Where("released_at_ms IS NULL AND expires_at_ms > ?", time.Now().UnixMilli()).Pluck("lease_id", &ids).Error)
++		baseline[table] = ids
++	}
++	routes := []struct {
++		Name, URL string
++		File      bool
++	}{
++		{"detail", "/knowledge/" + input.KnowledgeID, false},
++		{"list", "/knowledge-bases/" + input.KnowledgeBaseID + "/knowledge", false},
++		{"preview", "/knowledge/" + input.KnowledgeID + "/preview", true},
++		{"download", "/knowledge/" + input.KnowledgeID + "/download", true},
++	}
++	for _, route := range routes {
++		t.Run("before_"+route.Name, func(t *testing.T) {
++			w := &closeNotifyRecorder{ResponseRecorder: httptest.NewRecorder()}
++			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, route.URL, nil))
++			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
++			if route.File {
++				sum := sha256.Sum256(w.Body.Bytes())
++				require.Equal(t, input.BodySHA256, hex.EncodeToString(sum[:]))
++				require.Equal(t, "private, no-store", w.Header().Get("Cache-Control"))
++			} else {
++				require.Contains(t, w.Body.String(), input.KnowledgeID)
++			}
++		})
++	}
++	if t.Failed() {
++		return
++	}
++	human = false
++	for _, route := range routes {
++		t.Run("without_person_"+route.Name, func(t *testing.T) {
++			w := &closeNotifyRecorder{ResponseRecorder: httptest.NewRecorder()}
++			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, route.URL, nil))
++			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
++			require.NotContains(t, w.Body.String(), input.KnowledgeID)
++		})
++	}
++	human = true
++	if t.Failed() {
++		return
++	}
++	require.NoError(t, os.WriteFile(path+".http-positive", []byte("ready"), 0600))
++	require.Eventually(t, func() bool { _, err := os.Stat(path + ".revoked"); return err == nil }, 60*time.Second, 100*time.Millisecond)
++	for _, route := range routes {
++		t.Run("revoked_"+route.Name, func(t *testing.T) {
++			w := &closeNotifyRecorder{ResponseRecorder: httptest.NewRecorder()}
++			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, route.URL, nil))
++			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
++			require.NotContains(t, w.Body.String(), input.KnowledgeID)
++		})
++	}
++	if t.Failed() {
++		return
++	}
++	// The producer retains its own output guards; only its pre-existing lease
++	// IDs may remain. Newly acquired HTTP leases must all be released.
++	require.Eventually(t, func() bool { _, err := os.Stat(path + ".source-checked"); return err == nil }, 30*time.Second, 100*time.Millisecond)
++	for table, ids := range baseline {
++		query := db.Table(table).Where("released_at_ms IS NULL AND expires_at_ms > ?", time.Now().UnixMilli())
++		if len(ids) > 0 {
++			query = query.Where("lease_id NOT IN ?", ids)
++		}
++		var count int64
++		require.NoError(t, query.Count(&count).Error)
++		require.Zero(t, count, table)
++	}
++	require.NoError(t, os.WriteFile(path+".http-done", []byte("passed"), 0600))
 +}
 diff --git a/internal/handler/nextcloud_publication.go b/internal/handler/nextcloud_publication.go
 new file mode 100644
