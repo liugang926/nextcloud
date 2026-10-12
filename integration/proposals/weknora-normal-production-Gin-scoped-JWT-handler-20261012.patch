@@ -1,9 +1,126 @@
+diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
+index 6e50b411f..72f9e2c8a 100644
+--- a/internal/application/service/message_material_output.go
++++ b/internal/application/service/message_material_output.go
+@@ -20,19 +20,20 @@ var ErrMessageMaterialHTTPInitializing = fmt.Errorf("%w: original message materi
+ type messageMaterialOutputKey struct{}
+ type messageMaterialExternalKey struct{}
+ type messageMaterialOutputSlot struct {
+-	OwnerContext  context.Context
+-	mu            sync.Mutex
+-	Guards        []*MessageMaterialGuard
+-	Completion    *messageCompletionBinding
+-	PhysicalReads []*readlease.NextcloudReadGuard
+-	Models        []originalModelClientLifetime
+-	Bodies        []string
+-	Outputs       [][]*types.Message
+-	OutputBodies  []string
+-	Ready         bool
+-	Failed        error
+-	Refs          int
+-	Closed        bool
++	OwnerContext   context.Context
++	timingObserver *originalServiceTimingObserver
++	mu             sync.Mutex
++	Guards         []*MessageMaterialGuard
++	Completion     *messageCompletionBinding
++	PhysicalReads  []*readlease.NextcloudReadGuard
++	Models         []originalModelClientLifetime
++	Bodies         []string
++	Outputs        [][]*types.Message
++	OutputBodies   []string
++	Ready          bool
++	Failed         error
++	Refs           int
++	Closed         bool
+ }
+ 
+ func WithMessageMaterialOutputBoundary(ctx context.Context) context.Context {
+@@ -206,6 +207,11 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
+ }
+ 
+ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
++	span := startOriginalServiceTiming(ctx, originalServiceTimingSlotBoundaryTotal)
++	success := false
++	// Registered before the slot unlock defer: this runs after unlock and all
++	// unchanged checks, even when the real boundary returns a refusal.
++	defer func() { span.finish(success) }()
+ 	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
+ 	if !ok {
+ 		return access.ErrNextcloudPublicationUnavailable
+@@ -257,6 +263,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
+ 			return access.ErrNextcloudPublicationDenied
+ 		}
+ 	}
++	success = true
+ 	return nil
+ }
+ 
+diff --git a/internal/application/service/model.go b/internal/application/service/model.go
+index 48ee19b07..f63eda813 100644
+--- a/internal/application/service/model.go
++++ b/internal/application/service/model.go
+@@ -570,6 +570,9 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
+ // GetChatModel retrieves and initializes a chat model instance
+ // Takes a model ID and returns a Chat interface implementation
+ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.Chat, error) {
++	span := startOriginalServiceTiming(ctx, originalServiceTimingGetChatTotal)
++	success := false
++	defer func() { span.finish(success) }()
+ 	// Check if model ID is empty
+ 	if modelId == "" {
+ 		logger.Error(ctx, "Model ID is empty")
+@@ -589,7 +592,9 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 		if acquireErr != nil {
+ 			return nil, acquireErr
+ 		}
++		beginSpan := startOriginalServiceTiming(ctx, originalServiceTimingGetChatBegin)
+ 		read, acquireErr = s.BeginModelOriginalRead(acquisitionCtx, modelId, nil)
++		beginSpan.finish(acquireErr == nil)
+ 		if acquireErr != nil {
+ 			if releaseOwner != nil {
+ 				releaseOwner()
+@@ -606,7 +611,9 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 			}
+ 		}
+ 	}()
++	snapshotSpan := startOriginalServiceTiming(ctx, originalServiceTimingSnapshot)
+ 	model, proof, err := read.Snapshot()
++	snapshotSpan.finish(err == nil)
+ 	if err != nil {
+ 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+ 			"model_id":  modelId,
+@@ -628,7 +635,9 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 
+ 	logger.Infof(ctx, "Getting chat model: %s, source: %s", model.Name, model.Source)
+ 
++	constructorSpan := startOriginalServiceTiming(ctx, originalServiceTimingConstructor)
+ 	chatModel, err := chat.NewOriginalRemoteChat(model)
++	constructorSpan.finish(err == nil)
+ 	if err != nil {
+ 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+ 			"model_id":   model.ID,
+@@ -637,11 +646,14 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 		return nil, err
+ 	}
+ 
++	bindSpan := startOriginalServiceTiming(ctx, originalServiceTimingBindRetain)
+ 	bound, err := bindOriginalModelClient(acquisitionCtx, chatModel, read, !borrowed, releaseOwner, transferOwner)
++	bindSpan.finish(err == nil)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	closeOnFailure = false
++	success = true
+ 	return bound, nil
+ }
+ 
 diff --git a/internal/application/service/normal_original_public_handler_fixture_bridge_test.go b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
 new file mode 100644
-index 000000000..c3a441f39
+index 000000000..00113bca8
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,294 @@
 +package service
 +
 +import (
@@ -41,6 +158,8 @@ index 000000000..c3a441f39
 +	Members                                       interfaces.TenantMemberService
 +	Groups                                        interfaces.GroupAccessService
 +	ProducerStarted, ProducerDone, CompletionDone <-chan struct{}
++	OuterProducerDone                             func() <-chan struct{}
++	TimingFinish                                  func(*testing.T, <-chan struct{})
 +	CompletionResult                              <-chan error
 +	QueryText, AnswerID, KBID                     string
 +	SDKCalls                                      func() int64
@@ -57,6 +176,8 @@ index 000000000..c3a441f39
 +	nativeObserved                   bool
 +	errors                           error
 +	started, done, completed         chan struct{}
++	outerDone                        <-chan struct{}
++	timing                           *originalServiceTimingCollector
 +	result                           chan error
 +	beginOnce, endOnce, completeOnce sync.Once
 +}
@@ -132,6 +253,7 @@ index 000000000..c3a441f39
 +	chatpipeline.NewPluginFilterTopK(manager)
 +	chatpipeline.NewPluginIntoChatMessage(manager, messages, knowledge)
 +	obs := &normalPublicHandlerObservations{started: make(chan struct{}), done: make(chan struct{}), completed: make(chan struct{}), result: make(chan error, 1)}
++	obs.timing = newOriginalServiceTimingCollectorForTest()
 +	models := normalPublicHandlerModelsObserver{ModelService: f.Models, observations: obs, kb: f.KB, model: f.Embedding.ID, answer: answer.ID}
 +	chatpipeline.NewPluginChatCompletionStream(manager, models)
 +	observedSessions := normalPublicHandlerSessionsObserver{SessionService: sessions, observations: obs}
@@ -140,7 +262,12 @@ index 000000000..c3a441f39
 +		obs.mu.Lock()
 +		defer obs.mu.Unlock()
 +		return obs.session, obs.assistant, obs.request, obs.session != "" && obs.assistant != "" && obs.request != ""
-+	}, NativeObserved: func() bool { obs.mu.Lock(); defer obs.mu.Unlock(); return obs.nativeObserved }}
++	}, TimingFinish: func(t *testing.T, HTTPreturned <-chan struct{}) {
++		obs.mu.Lock()
++		outerDone := obs.outerDone
++		obs.mu.Unlock()
++		obs.timing.finish(t, HTTPreturned, outerDone)
++	}, OuterProducerDone: func() <-chan struct{} { obs.mu.Lock(); defer obs.mu.Unlock(); return obs.outerDone }, NativeObserved: func() bool { obs.mu.Lock(); defer obs.mu.Unlock(); return obs.nativeObserved }}
 +}
 +
 +type normalPublicHandlerSessionsObserver struct {
@@ -210,6 +337,27 @@ index 000000000..c3a441f39
 +	kb, model    string
 +}
 +
++// This observes the actual handler's existing outer worker channel. The
++// fixture cannot create or close it, and it is not a read/SDK/completion grant.
++func (m *normalPublicHandlerMessagesObserver) ObserveOriginalMessageMaterialProducer(ctx context.Context, done <-chan struct{}) {
++	if ctx == nil || done == nil {
++		m.observations.fail(errors.New("actual original HTTP outer producer lifetime missing"))
++		return
++	}
++	if slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot); !ok || slot == nil {
++		m.observations.fail(errors.New("actual outer producer lost its original HTTP owner"))
++		return
++	}
++	m.observations.timing.attach(ctx)
++	m.observations.mu.Lock()
++	defer m.observations.mu.Unlock()
++	if m.observations.outerDone != nil {
++		m.observations.errors = errors.Join(m.observations.errors, errors.New("actual outer producer lifetime was replaced"))
++		return
++	}
++	m.observations.outerDone = done
++}
++
 +func (m *normalPublicHandlerMessagesObserver) UpdateMessage(ctx context.Context, message *types.Message) error {
 +	if message.Role == "assistant" && message.IsCompleted {
 +		if err := normalEventOriginalContextCheck(ctx, m.observations.snapshot(), m.kb, m.model); err != nil {
@@ -269,10 +417,10 @@ index 000000000..c3a441f39
 +}
 diff --git a/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
 new file mode 100644
-index 000000000..c27828d5d
+index 000000000..5b89235b7
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,380 @@
 +package service_test
 +
 +import (
@@ -445,6 +593,9 @@ index 000000000..c27828d5d
 +			require.Equal(t, user.ID, sessionBody.Data.UserID)
 +			require.EqualValues(t, 7, sessionBody.Data.TenantID)
 +			t.Cleanup(func() {
++				// Runs last, after the unchanged real HTTP/outer joins and cleanup.
++				// The helper only emits if both existing channels are closed.
++				defer f.TimingFinish(t, HTTPreturned)
 +				cleanup, done := context.WithTimeout(context.Background(), 3*time.Second)
 +				defer done()
 +				// Only the real delegate can report producer start; the real HTTP
@@ -520,6 +671,22 @@ index 000000000..c27828d5d
 +					case <-producerStart:
 +						producerStart = nil
 +						joinProducer()
++					default:
++					}
++				}
++				// Service return precedes the enclosing handler's error emission and
++				// final release. Join that real worker too, under this same deadline,
++				// before removing hooks, closing Redis or asserting released leases.
++				if outerDone := f.OuterProducerDone(); outerDone != nil {
++					select {
++					case <-outerDone:
++					case <-cleanup.Done():
++						t.Error("actual enclosing HTTP producer did not finish its release within the shared cleanup deadline")
++					}
++				} else {
++					select {
++					case <-f.ProducerStarted:
++						t.Error("actual service producer has no enclosing handler completion signal")
 +					default:
 +					}
 +				}
@@ -634,8 +801,350 @@ index 000000000..c27828d5d
 +		})
 +	}
 +}
+diff --git a/internal/application/service/original_service_timing.go b/internal/application/service/original_service_timing.go
+new file mode 100644
+index 000000000..20759baeb
+--- /dev/null
++++ b/internal/application/service/original_service_timing.go
+@@ -0,0 +1,61 @@
++package service
++
++import (
++	"context"
++	"time"
++)
++
++// These fixed inclusive spans observe actual calls. Their nested durations
++// cannot be added to infer a critical path or used as an admission decision.
++type originalServiceTimingPhase uint8
++
++const (
++	originalServiceTimingGetChatBegin originalServiceTimingPhase = iota
++	originalServiceTimingSnapshot
++	originalServiceTimingConstructor
++	originalServiceTimingBindRetain
++	originalServiceTimingGetChatTotal
++	originalServiceTimingSlotBoundaryTotal
++	originalServiceTimingPhaseCount
++)
++
++// Registration exists only in package-local test fixtures. No context,
++// selector, body, SQL, error text or authorization result enters the callback.
++type originalServiceTimingObserver struct {
++	observe func(originalServiceTimingPhase, time.Duration, bool)
++}
++
++type originalServiceTimingSpan struct {
++	observer *originalServiceTimingObserver
++	phase    originalServiceTimingPhase
++	started  time.Time
++}
++
++func startOriginalServiceTiming(ctx context.Context, phase originalServiceTimingPhase) originalServiceTimingSpan {
++	if ctx == nil || phase >= originalServiceTimingPhaseCount {
++		return originalServiceTimingSpan{}
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return originalServiceTimingSpan{}
++	}
++	slot.mu.Lock()
++	observer := slot.timingObserver
++	slot.mu.Unlock()
++	if observer == nil || observer.observe == nil {
++		return originalServiceTimingSpan{}
++	}
++	// The normal/default-off path above performs no clock read.
++	return originalServiceTimingSpan{observer: observer, phase: phase, started: time.Now()}
++}
++
++func (span originalServiceTimingSpan) finish(success bool) {
++	if span.observer == nil {
++		return
++	}
++	duration := time.Since(span.started)
++	// Diagnostic callbacks cannot replace a real return or panic in business
++	// code. No callback runs under the material-slot mutex.
++	defer func() { _ = recover() }()
++	span.observer.observe(span.phase, duration, success)
++}
+diff --git a/internal/application/service/original_service_timing_profile_test.go b/internal/application/service/original_service_timing_profile_test.go
+new file mode 100644
+index 000000000..47ab6e043
+--- /dev/null
++++ b/internal/application/service/original_service_timing_profile_test.go
+@@ -0,0 +1,269 @@
++package service
++
++import (
++	"context"
++	"os"
++	"sync"
++	"testing"
++	"time"
++)
++
++const originalServiceTimingProfileFlag = "WEKNORA_ORIGINAL_SERVICE_TIMING_PROFILE"
++const originalServiceTimingMaxCount uint64 = 1<<32 - 1
++const originalServiceTimingMaxDuration int64 = 1<<63 - 1
++
++var originalServiceTimingPhaseNames = [originalServiceTimingPhaseCount]string{
++	"getchat_begin", "snapshot", "constructor", "bind_retain",
++	"getchat_total", "fullslot_boundary_total",
++}
++
++type originalServiceTimingAggregate struct {
++	count, successes uint64
++	duration         int64
++	saturated        bool
++}
++
++// Exactly six buckets; no unbounded records or caller-specific keys. Its
++// mutex covers local arithmetic only, never SQL, network calls or joins.
++type originalServiceTimingCollector struct {
++	mu       sync.Mutex
++	buckets  [originalServiceTimingPhaseCount]originalServiceTimingAggregate
++	slot     *messageMaterialOutputSlot
++	observer *originalServiceTimingObserver
++	sealed   bool
++}
++
++func newOriginalServiceTimingCollectorForTest() *originalServiceTimingCollector {
++	if os.Getenv(originalServiceTimingProfileFlag) != "1" {
++		return nil
++	}
++	collector := &originalServiceTimingCollector{}
++	collector.observer = &originalServiceTimingObserver{observe: collector.record}
++	return collector
++}
++
++func (collector *originalServiceTimingCollector) record(phase originalServiceTimingPhase, duration time.Duration, success bool) {
++	if phase >= originalServiceTimingPhaseCount {
++		return
++	}
++	collector.mu.Lock()
++	defer collector.mu.Unlock()
++	if collector.sealed {
++		return
++	}
++	bucket := &collector.buckets[phase]
++	if bucket.count == originalServiceTimingMaxCount {
++		bucket.saturated = true
++		return
++	}
++	bucket.count++
++	if success {
++		bucket.successes++
++	}
++	ns := duration.Nanoseconds()
++	if ns < 0 {
++		ns = 0
++	}
++	if ns > originalServiceTimingMaxDuration-bucket.duration {
++		bucket.duration = originalServiceTimingMaxDuration
++		bucket.saturated = true
++	} else {
++		bucket.duration += ns
++	}
++}
++
++func (collector *originalServiceTimingCollector) attach(ctx context.Context) {
++	collector.attachBeforeInstallForTest(ctx, nil)
++}
++
++// The optional barrier is used only by the deterministic concurrency test.
++// Real fixtures pass nil; the installation and seal share collector -> slot
++// lock order, with no lock gap allowing a late attach to revive registration.
++func (collector *originalServiceTimingCollector) attachBeforeInstallForTest(ctx context.Context, beforeInstall func()) {
++	if collector == nil {
++		return
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return
++	}
++	collector.mu.Lock()
++	defer collector.mu.Unlock()
++	if collector.sealed || collector.slot != nil {
++		return
++	}
++	if beforeInstall != nil {
++		beforeInstall()
++	}
++	slot.mu.Lock()
++	if slot.timingObserver == nil {
++		slot.timingObserver = collector.observer
++		collector.slot = slot
++	}
++	slot.mu.Unlock()
++}
++
++func originalServiceTimingChannelJoined(done <-chan struct{}) bool {
++	if done == nil {
++		return false
++	}
++	select {
++	case <-done:
++		return true
++	default:
++		return false
++	}
++}
++
++// This does not wait or manufacture completion. The existing cleanup must
++// first join both genuine channels under its unchanged shared three seconds.
++func (collector *originalServiceTimingCollector) finish(t *testing.T, HTTPreturned, outerDone <-chan struct{}) {
++	if collector == nil {
++		return
++	}
++	collector.mu.Lock()
++	collector.sealed = true
++	buckets, slot := collector.buckets, collector.slot
++	collector.slot = nil
++	if slot != nil {
++		slot.mu.Lock()
++		if slot.timingObserver == collector.observer {
++			slot.timingObserver = nil
++		}
++		slot.mu.Unlock()
++	}
++	collector.mu.Unlock()
++	if !originalServiceTimingChannelJoined(HTTPreturned) || !originalServiceTimingChannelJoined(outerDone) {
++		return
++	}
++	for phase, bucket := range buckets {
++		t.Logf("original_service_timing inclusive_phase=%s count=%d success_count=%d failure_count=%d duration_ns=%d saturated=%t",
++			originalServiceTimingPhaseNames[phase], bucket.count, bucket.successes,
++			bucket.count-bucket.successes, bucket.duration, bucket.saturated)
++	}
++}
++
++func TestOriginalServiceTimingCallbackCannotReplaceRealResult(t *testing.T) {
++	observer := &originalServiceTimingObserver{observe: func(originalServiceTimingPhase, time.Duration, bool) { panic("diagnostic callback") }}
++	span := originalServiceTimingSpan{observer: observer, phase: originalServiceTimingSnapshot, started: time.Now()}
++	span.finish(false)
++	// Reaching here proves the observer panic did not escape into its caller.
++}
++
++func TestOriginalServiceTimingCollectorConcurrentBoundedAggregate(t *testing.T) {
++	collector := &originalServiceTimingCollector{}
++	var workers sync.WaitGroup
++	for phase := originalServiceTimingPhase(0); phase < originalServiceTimingPhaseCount; phase++ {
++		workers.Add(1)
++		go func(phase originalServiceTimingPhase) {
++			defer workers.Done()
++			for i := 0; i < 100; i++ {
++				collector.record(phase, time.Nanosecond, i%2 == 0)
++			}
++		}(phase)
++	}
++	workers.Wait()
++	for _, bucket := range collector.buckets {
++		if bucket.count != 100 || bucket.successes != 50 || bucket.duration != 100 || bucket.saturated {
++			t.Fatal("fixed aggregate did not preserve concurrent numeric observations")
++		}
++	}
++	collector.buckets[0] = originalServiceTimingAggregate{count: originalServiceTimingMaxCount, duration: originalServiceTimingMaxDuration}
++	collector.record(0, time.Nanosecond, true)
++	if !collector.buckets[0].saturated || collector.buckets[0].count != originalServiceTimingMaxCount {
++		t.Fatal("fixed aggregate count exceeded its bound")
++	}
++}
++
++func TestOriginalServiceTimingDefaultOffAndBoundaryCallbackAfterUnlock(t *testing.T) {
++	t.Setenv(originalServiceTimingProfileFlag, "")
++	if newOriginalServiceTimingCollectorForTest() != nil {
++		t.Fatal("default-off profile allocated a collector")
++	}
++	slot := &messageMaterialOutputSlot{}
++	ctx := context.WithValue(context.Background(), messageMaterialOutputKey{}, slot)
++	if span := startOriginalServiceTiming(ctx, originalServiceTimingSnapshot); span.observer != nil || !span.started.IsZero() {
++		t.Fatal("default-off span performed a clock read")
++	}
++	var callbackCalled, mutexReleased, succeeded bool
++	slot.timingObserver = &originalServiceTimingObserver{observe: func(phase originalServiceTimingPhase, duration time.Duration, success bool) {
++		callbackCalled = phase == originalServiceTimingSlotBoundaryTotal
++		succeeded = success
++		mutexReleased = slot.mu.TryLock()
++		if mutexReleased {
++			slot.mu.Unlock()
++		}
++	}}
++	if err := CheckMessageMaterialOutputBoundary(ctx); err != nil || !callbackCalled || !mutexReleased || !succeeded {
++		t.Fatal("boundary profile changed the return or ran under the slot mutex")
++	}
++	slot.Closed = true
++	callbackCalled, succeeded = false, true
++	if err := CheckMessageMaterialOutputBoundary(ctx); err == nil || !callbackCalled || succeeded {
++		t.Fatal("boundary refusal was replaced or recorded as successful")
++	}
++}
++
++func TestOriginalServiceTimingAttachAndFinishCannotReviveSealedObserver(t *testing.T) {
++	slot := &messageMaterialOutputSlot{}
++	ctx := context.WithValue(context.Background(), messageMaterialOutputKey{}, slot)
++	collector := &originalServiceTimingCollector{}
++	collector.observer = &originalServiceTimingObserver{observe: collector.record}
++	beforeInstall, releaseInstall := make(chan struct{}), make(chan struct{})
++	attachDone, finishDone := make(chan struct{}), make(chan struct{})
++	var releaseOnce sync.Once
++	release := func() { releaseOnce.Do(func() { close(releaseInstall) }) }
++	defer release()
++	go func() {
++		defer close(attachDone)
++		collector.attachBeforeInstallForTest(ctx, func() {
++			close(beforeInstall)
++			<-releaseInstall
++		})
++	}()
++	select {
++	case <-beforeInstall:
++	case <-time.After(time.Second):
++		t.Fatal("attach did not reach the deterministic installation barrier")
++	}
++	// This assertion directly detects the old unlock-before-install gap,
++	// independent of how the finishing goroutine is scheduled.
++	if collector.mu.TryLock() {
++		collector.mu.Unlock()
++		t.Error("attach released collector ownership before observer installation")
++	}
++	finishEntered := make(chan struct{})
++	go func() {
++		defer close(finishDone)
++		close(finishEntered)
++		// Nil real-lifetime signals suppress output; finish still seals and
++		// unregisters, as it does after a failed/early cleanup.
++		collector.finish(t, nil, nil)
++	}()
++	<-finishEntered
++	release()
++	for _, joined := range []<-chan struct{}{attachDone, finishDone} {
++		select {
++		case <-joined:
++		case <-time.After(time.Second):
++			t.Fatal("attach and finish did not join")
++		}
++	}
++	collector.mu.Lock()
++	sealed, retainedSlot := collector.sealed, collector.slot
++	collector.mu.Unlock()
++	slot.mu.Lock()
++	observer := slot.timingObserver
++	slot.mu.Unlock()
++	if !sealed || retainedSlot != nil || observer != nil {
++		t.Fatal("concurrent finish left or revived a sealed observer registration")
++	}
++	// A later actual HTTP start must remain inert after finish won the seal.
++	collector.attach(ctx)
++	slot.mu.Lock()
++	observer = slot.timingObserver
++	slot.mu.Unlock()
++	if observer != nil {
++		t.Fatal("late attach revived the sealed observer")
++	}
++}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 0865fd80c..49855c0d3 100644
+index 0865fd80c..c5ac25143 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
 @@ -1412,7 +1412,10 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
@@ -650,3 +1159,20 @@ index 0865fd80c..49855c0d3 100644
  				h.completeQuickAnswerTurn(updateCtx, streamCtx, reqCtx.query, reqCtx.userMessageID)
  			}
  			return nil
+@@ -1427,6 +1430,16 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
+ 	livePublicationMessage.KnowledgeReferences = nil
+ 	asyncDone := make(chan struct{})
+ 	streamCtx.producerDone = asyncDone
++	// A read-only lifecycle observer receives the existing enclosing worker's
++	// completion before launch. Its close remains after the actual producer
++	// release below; it supplies no material or authorization capability.
++	if streamCtx.materialClose != nil {
++		if observer, ok := h.messageService.(interface {
++			ObserveOriginalMessageMaterialProducer(context.Context, <-chan struct{})
++		}); ok {
++			observer.ObserveOriginalMessageMaterialProducer(streamCtx.asyncCtx, asyncDone)
++		}
++	}
+ 	releaseMaterialProducer := applicationservice.RetainMessageMaterialHTTPProducer(streamCtx.asyncCtx)
+ 	go func() {
+ 		defer close(asyncDone)
