@@ -111,7 +111,7 @@ index 0000000000000000000000000000000000000000..b16f4f0d8804f7cadb7e2412cd40fd40
 +	return err == nil && string(actual) == string(expected)
 +}
 diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
-index 6e50b411fae3027c246d2c21b544d080d823882f..d3367e5eb94ec971f8742f5f159e8e47225f0351 100644
+index 6e50b411fae3027c246d2c21b544d080d823882f..9f8444d1ea817f206e138d46127a2868ec6bc2f7 100644
 --- a/internal/application/service/message_material_output.go
 +++ b/internal/application/service/message_material_output.go
 @@ -20,19 +20,21 @@ var ErrMessageMaterialHTTPInitializing = fmt.Errorf("%w: original message materi
@@ -149,7 +149,78 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..d3367e5eb94ec971f8742f5f159e8e47
  }
  
  func WithMessageMaterialOutputBoundary(ctx context.Context) context.Context {
-@@ -195,17 +197,27 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
+@@ -50,6 +52,9 @@ func BeginMessageMaterialHTTPBoundary(ctx context.Context) (context.Context, fun
+ 	}
+ 	marked := attach(ctx)
+ 	check := func() error {
++		span := startOriginalServiceTiming(marked, originalServiceTimingHTTPMaterialCheck)
++		success := false
++		defer func() { span.finish(success) }()
+ 		slot.mu.Lock()
+ 		ready, failed, closed := slot.Ready, slot.Failed, slot.Closed
+ 		slot.mu.Unlock()
+@@ -62,7 +67,9 @@ func BeginMessageMaterialHTTPBoundary(ctx context.Context) (context.Context, fun
+ 		if !ready {
+ 			return ErrMessageMaterialHTTPInitializing
+ 		}
+-		return CheckMessageMaterialOutputBoundary(marked)
++		err := CheckMessageMaterialOutputBoundary(marked)
++		success = err == nil
++		return err
+ 	}
+ 	var once sync.Once
+ 	close := func() { once.Do(func() { releaseExternalMessageMaterial(slot) }) }
+@@ -153,36 +160,49 @@ func RefuseMessageMaterialOutputBoundary(ctx context.Context) {
+ // It is never authorization to publish bytes: every nonempty batch and writer
+ // still executes CheckMessageMaterialOutputBoundary and its current checks.
+ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
++	span := startOriginalServiceTiming(ctx, originalServiceTimingIdleEligible)
++	success := false
++	// Registered before every original unlock defer. The fixed reason is
++	// emitted only after slot/guard locks release, including an early refusal.
++	defer func() { span.finish(success) }()
+ 	if ctx == nil || ctx.Err() != nil {
++		span.phase = originalServiceTimingIdleContextInvalid
+ 		return false
+ 	}
+ 	if turn := types.RAGSourceLineageFromContext(ctx); turn != nil && turn.Snapshot().RequireComplete() != nil {
++		span.phase = originalServiceTimingIdleTurnUnknown
+ 		return false
+ 	}
+ 	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
+ 	if !ok {
++		span.phase = originalServiceTimingIdleSlotAbsent
+ 		return false
+ 	}
+ 	slot.mu.Lock()
+ 	defer slot.mu.Unlock()
+ 	if !slot.Ready || slot.Closed || slot.Failed != nil || len(slot.Guards) == 0 {
++		span.phase = originalServiceTimingIdleSlotState
+ 		return false
+ 	}
+ 	for _, guard := range slot.Guards {
+ 		if guard == nil {
++			span.phase = originalServiceTimingIdleGuardMissing
+ 			return false
+ 		}
+ 		guard.mu.Lock()
+ 		known := guard.ctx != nil && guard.ctx.Err() == nil && guard.plan != nil && guard.plan.SourceLineage.RequireComplete() == nil
++		span.phase = originalServiceTimingIdleGuardState
+ 		if known && guard.snapshot != nil {
+ 			for _, proof := range guard.snapshot.Proofs {
+ 				if proof == nil || proof.SourceLineage.RequireComplete() != nil {
++					span.phase = originalServiceTimingIdleGuardProofUnknown
+ 					known = false
+ 					break
+ 				}
+ 			}
+ 			for _, message := range guard.snapshot.Messages {
+ 				if message == nil || message.SourceLineage.RequireComplete() != nil {
++					span.phase = originalServiceTimingIdleGuardMessageUnknown
+ 					known = false
+ 					break
+ 				}
+@@ -195,17 +215,30 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
  			return false
  		}
  	}
@@ -164,9 +235,12 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..d3367e5eb94ec971f8742f5f159e8e47
  			}
  		}
 +		if !complete && !rawMessageMaterialIdleEligibleLocked(slot, i, output) {
++			span.phase = originalServiceTimingIdleOutputRawUncovered
 +			return false
 +		}
  	}
++	span.phase = originalServiceTimingIdleEligible
++	success = true
  	return true
  }
  
@@ -179,7 +253,7 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..d3367e5eb94ec971f8742f5f159e8e47
  	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
  	if !ok {
  		return access.ErrNextcloudPublicationUnavailable
-@@ -257,6 +269,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
+@@ -257,6 +290,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
  			return access.ErrNextcloudPublicationDenied
  		}
  	}
@@ -187,7 +261,7 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..d3367e5eb94ec971f8742f5f159e8e47
  	return nil
  }
  
-@@ -392,6 +405,9 @@ func (s *messageService) admittedMessages(ctx context.Context, request types.Mes
+@@ -392,6 +426,9 @@ func (s *messageService) admittedMessages(ctx context.Context, request types.Mes
  		slot.mu.Lock()
  		slot.Outputs = append(slot.Outputs, copied)
  		slot.OutputBodies = append(slot.OutputBodies, string(body))
@@ -199,15 +273,18 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..d3367e5eb94ec971f8742f5f159e8e47
  	return copied, nil
 diff --git a/internal/application/service/message_material_raw_idle_actual_test.go b/internal/application/service/message_material_raw_idle_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..7ce7c4fb997a378922868e6072464598861d36b4
+index 0000000000000000000000000000000000000000..f17d44b987541e802c088256b294b830f283cd55
 --- /dev/null
 +++ b/internal/application/service/message_material_raw_idle_actual_test.go
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,111 @@
 +package service
 +
 +import (
++	"context"
 +	"testing"
++	"time"
 +
++	"github.com/Tencent/WeKnora/internal/application/repository"
 +	"github.com/Tencent/WeKnora/internal/types"
 +	"github.com/stretchr/testify/require"
 +)
@@ -217,8 +294,23 @@ index 0000000000000000000000000000000000000000..7ce7c4fb997a378922868e6072464598
 +func TestMessageMaterialActualRawProjectionIdleEligibility(t *testing.T) {
 +	for _, change := range []string{"raw_projection", "content_tamper", "request_cross", "session_cross", "detached_origin", "proof_message_cross", "proof_body_changed", "proof_source_bearing", "proof_unknown", "current_actor_revoked", "body_ABA"} {
 +		t.Run(change, func(t *testing.T) {
-+			messages, _, _, db, ctx, session := messageMaterialActualFixture(t)
-+			user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-raw-idle-original", Role: "user", Content: "actual authored raw question", IsCompleted: true})
++			// The historical partial fixture stops at a closed content fence.
++			// Use the already established full-canonical actual publish/index
++			// producer and its real creator; no fence, proof or guard is seeded.
++			fx := NewScopedKnowledgePurposeFixtureForTest(t)
++			t.Cleanup(func() { fx.AssertNoLiveLeases(t) })
++			messages, db := fx.messages, fx.DB
++			ctx, cancel := context.WithTimeout(fx.Creator, 15*time.Second)
++			t.Cleanup(cancel)
++			caller := types.CallerFromContext(ctx)
++			require.NotEmpty(t, caller.UserID)
++			require.NotZero(t, caller.TenantID)
++			sessions := &sessionService{sessionRepo: repository.NewSessionRepository(db), groupAccess: fx.Groups}
++			session, err := sessions.CreateSession(ctx, &types.Session{TenantID: caller.TenantID, UserID: types.SessionOwnerIDFromContext(ctx)})
++			require.NoError(t, err)
++			require.Equal(t, caller.UserID, session.UserID)
++			require.Equal(t, caller.TenantID, session.TenantID)
++			user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-raw-idle-" + session.ID, Role: "user", Content: "actual authored raw question", IsCompleted: true})
 +			require.NoError(t, err)
 +			ctx, _, check, closeHTTP := BeginMessageMaterialHTTPBoundary(ctx)
 +			defer closeHTTP()
@@ -262,9 +354,9 @@ index 0000000000000000000000000000000000000000..7ce7c4fb997a378922868e6072464598
 +			case "proof_source_bearing":
 +				// Fault injection into an already captured private proof, not a
 +				// fake positive admission or a source publication authorization.
-+				sourced, err := types.NewCompleteSourceLineage(types.SourceIdentity{Provider: types.ConnectorTypeNextcloud, TenantID: 7,
-+					KnowledgeBaseID: "kb", DataSourceID: "ds", PairOperationID: "pair", InstanceID: "instance", BindingID: "binding",
-+					FileID: "1", ExternalID: "nextcloud:instance:1", KnowledgeID: "knowledge", Revision: 2, ETag: "original"})
++				sourced, err := types.NewCompleteSourceLineage(types.SourceIdentity{Provider: types.ConnectorTypeNextcloud, TenantID: caller.TenantID,
++					KnowledgeBaseID: fx.KB, DataSourceID: "ds", PairOperationID: "pair", InstanceID: "instance", BindingID: "binding",
++					FileID: "1", ExternalID: "nextcloud:instance:1", KnowledgeID: fx.Knowledge, Revision: 2, ETag: "original"})
 +				require.NoError(t, err)
 +				guard.mu.Lock()
 +				proof.SourceLineage = sourced
@@ -274,7 +366,14 @@ index 0000000000000000000000000000000000000000..7ce7c4fb997a378922868e6072464598
 +				proof.SourceLineage = types.UnknownSourceLineage()
 +				guard.mu.Unlock()
 +			case "current_actor_revoked":
-+				require.NoError(t, db.Model(&types.TenantMember{}).Where("user_id='actual-user' AND tenant_id=7").Update("status", types.TenantMemberStatusSuspended).Error)
++				// This creator also has real source-scoped grants. Suspending a
++				// direct membership alone would leave that current read path.
++				withdrawn := db.Model(&types.User{}).Where("id=? AND is_active=?", caller.UserID, true).Update("is_active", false)
++				require.NoError(t, withdrawn.Error)
++				require.EqualValues(t, 1, withdrawn.RowsAffected)
++				var inactive types.User
++				require.NoError(t, db.Where("id=?", caller.UserID).Take(&inactive).Error)
++				require.False(t, inactive.IsActive)
 +				// Structural scheduling is not permission. The same full
 +				// checkpoint still executes current reads and refuses output.
 +				require.Error(t, check())
@@ -1036,10 +1135,10 @@ index 0000000000000000000000000000000000000000..5b89235b712ed56bb40386a35d30a91e
 +}
 diff --git a/internal/application/service/original_service_timing.go b/internal/application/service/original_service_timing.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..20759baeba1864a56a2ad6bf810fc1ad4ce37701
+index 0000000000000000000000000000000000000000..8276dea398ee174aa6bff4f61024f0b6c036c226
 --- /dev/null
 +++ b/internal/application/service/original_service_timing.go
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,72 @@
 +package service
 +
 +import (
@@ -1058,6 +1157,17 @@ index 0000000000000000000000000000000000000000..20759baeba1864a56a2ad6bf810fc1ad
 +	originalServiceTimingBindRetain
 +	originalServiceTimingGetChatTotal
 +	originalServiceTimingSlotBoundaryTotal
++	originalServiceTimingHTTPMaterialCheck
++	originalServiceTimingIdleEligible
++	originalServiceTimingIdleContextInvalid
++	originalServiceTimingIdleTurnUnknown
++	originalServiceTimingIdleSlotAbsent
++	originalServiceTimingIdleSlotState
++	originalServiceTimingIdleGuardMissing
++	originalServiceTimingIdleGuardState
++	originalServiceTimingIdleGuardProofUnknown
++	originalServiceTimingIdleGuardMessageUnknown
++	originalServiceTimingIdleOutputRawUncovered
 +	originalServiceTimingPhaseCount
 +)
 +
@@ -1103,10 +1213,10 @@ index 0000000000000000000000000000000000000000..20759baeba1864a56a2ad6bf810fc1ad
 +}
 diff --git a/internal/application/service/original_service_timing_profile_test.go b/internal/application/service/original_service_timing_profile_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..47ab6e04308d8ee58ce178dcc16970fde70cc55d
+index 0000000000000000000000000000000000000000..857084bb15238e6621752b1500c136e732b03642
 --- /dev/null
 +++ b/internal/application/service/original_service_timing_profile_test.go
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,297 @@
 +package service
 +
 +import (
@@ -1124,6 +1234,10 @@ index 0000000000000000000000000000000000000000..47ab6e04308d8ee58ce178dcc16970fd
 +var originalServiceTimingPhaseNames = [originalServiceTimingPhaseCount]string{
 +	"getchat_begin", "snapshot", "constructor", "bind_retain",
 +	"getchat_total", "fullslot_boundary_total",
++	"http_material_check", "idle_eligible", "idle_context_invalid",
++	"idle_turn_unknown", "idle_slot_absent", "idle_slot_state",
++	"idle_guard_missing", "idle_guard_state", "idle_guard_proof_unknown",
++	"idle_guard_message_unknown", "idle_output_raw_uncovered",
 +}
 +
 +type originalServiceTimingAggregate struct {
@@ -1374,6 +1488,30 @@ index 0000000000000000000000000000000000000000..47ab6e04308d8ee58ce178dcc16970fd
 +	slot.mu.Unlock()
 +	if observer != nil {
 +		t.Fatal("late attach revived the sealed observer")
++	}
++}
++
++func TestOriginalServiceTimingHTTPInitializationAndIdleUseActualCollector(t *testing.T) {
++	ctx, _, check, closeHTTP := BeginMessageMaterialHTTPBoundary(context.Background())
++	defer closeHTTP()
++	collector := &originalServiceTimingCollector{}
++	collector.observer = &originalServiceTimingObserver{observe: collector.record}
++	collector.attach(ctx)
++	defer collector.finish(t, nil, nil)
++	// No original has been admitted. Exercise the real initializing refusal,
++	// rather than fabricating a successful guard/Caller/private capability.
++	if check() != ErrMessageMaterialHTTPInitializing {
++		t.Fatal("diagnostic changed the actual initializing HTTP refusal")
++	}
++	if MessageMaterialIdleRecheckEligible(ctx) {
++		t.Fatal("diagnostic admitted an uninitialized real HTTP owner")
++	}
++	collector.mu.Lock()
++	http, idle := collector.buckets[originalServiceTimingHTTPMaterialCheck], collector.buckets[originalServiceTimingIdleSlotState]
++	full := collector.buckets[originalServiceTimingSlotBoundaryTotal]
++	collector.mu.Unlock()
++	if http.count != 1 || http.successes != 0 || idle.count != 1 || idle.successes != 0 || full.count != 0 {
++		t.Fatal("actual initializing HTTP scope was not distinguished from a full boundary check")
 +	}
 +}
 diff --git a/internal/handler/session/live_material_raw_control_test.go b/internal/handler/session/live_material_raw_control_test.go
