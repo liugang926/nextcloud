@@ -99,3 +99,15 @@ WK 提交 `06c6bfd45` 已更新冻结候选，精确 apply/reverse 通过。此�
 WK 本地提交 `bec301dad`，候选补丁精确 apply/reverse 通过；临时 actor 确认不存在，来源 publication 关闭、私有文件清理，原件保留。[本轮收据](evidence/auto-space-prd-20261012/live-http-read-receipt.json)。
 
 用户选择的本机现有模型配置已只读定位：当前 `weknora-ldap-local-postgres-1` 模型库存含本机 BGE 512 维嵌入及 DeepSeek chat 配置。尚未将真实推理接入本轮 fixture；密钥未写入证据或 Git。
+
+## 本机真实 BGE / DeepSeek 同链路验证
+
+已按用户选择复用本机现有模型库存。新增只读 `export_document_graph_models.py`，导出指定两条模型及源应用解密配置到 0700 目录中的 0600 文件；runner 的 `--model-config` 仅复制到私有临时目录。Go fixture 使用实际生产模型 factory，正确解密后按隔离库密钥落库，无法调用时直接失败，没有回退桩。现有应用和模型数据库均未修改。
+
+使用本次创建的 Alice/Bob/Project Cedar Markdown 原件，真实 BGE 512 维嵌入、DeepSeek Flash 摘要和图谱抽取（各 1 次）完成。实际 SQLite 向量/FTS、SQL 图谱、生产阶段状态与 NC 签名 inbox 同链路通过；图谱重复投递复用持久 ACK，不重复调用模型。随后同一实际结果的 12 个 HTTP 权限断言通过，真实 AD 共享撤销后不可读，原件保持不变。业务链路 49.41 秒，HTTP 23.40 秒，runner exit 0；无真实模型配置的原回归也通过（2.589 秒）。
+
+首次执行因本机模型 host 缺少明确 allowlist 拒绝，第二次暴露导出夹具没有解密数据库凭据而返回 401；均保留失败日志。最终只在独立 actor 中允许 `host.docker.internal`，没有关闭全局 SSRF 检查。导出工具实际读取结果与本次测试配置一致。私有配置已删除，临时两个 actor 确认不存在，日志检查未包含所检查凭据。
+
+WK 提交 `3ed70eb5c` 已纳入冻结候选并通过精确 apply/reverse。[真实模型收据](evidence/auto-space-prd-20261012/live-real-model-receipt.json)。这证明小 Markdown 文件真实模型处理与权限链路，不代表本人完整问答、Agent/历史/缓存、PDF/OCR、Redis 调度、完整应用恢复或 100 GB 全链路验收；这些仍需继续。
+
+复现时先在私有临时目录运行 `export_document_graph_models.py --database-container weknora-ldap-local-postgres-1 --app-container weknora-ldap-local-app-1 --embedding-id builtin-local-bge-small-zh-v15 --chat-id 845ddfda-a1c3-4294-bf3e-5955d45c40cf --output <私有目录>/models.json`，再给既有 live runner 追加 `--http-read --model-config <私有目录>/models.json --model-allowed-host host.docker.internal`。测试完成删除导出目录；不要将文件放入仓库或证据目录。

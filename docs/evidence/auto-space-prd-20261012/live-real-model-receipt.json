@@ -1,0 +1,73 @@
+{
+  "candidate_commit": "3ed70eb5cbdff113c7458a596daf8839ce1d4440",
+  "candidate_tree": "62422100cc240a18ab65a9a5cc5173d6cef01467",
+  "runner_exit": 0,
+  "pipeline_seconds": 49.41,
+  "http_seconds": 23.4,
+  "http_cases_passed": 12,
+  "controlled_regression_seconds": 2.589,
+  "candidate_verify_exit": 0,
+  "models": {
+    "embedding": {
+      "name": "BAAI/bge-small-zh-v1.5",
+      "dimensions": 512,
+      "endpoint_host": "host.docker.internal",
+      "real_provider": true
+    },
+    "chat": {
+      "name": "deepseek-flash",
+      "endpoint_host": "api.deepseek.com",
+      "summary_calls": 1,
+      "graph_calls": 1,
+      "real_provider": true
+    }
+  },
+  "assertions": [
+    "actual NC synthetic owned Markdown original flows through production sync/parser/chunker",
+    "configured real embedder writes native SQLite vector512 and FTS rows",
+    "configured real chat generates summary and graph; actual SQL graph persistence and durable duplicate ACK",
+    "all processing stages succeeded; required graph persisted; published NC signed inbox exact current state",
+    "same artifact detail/list/preview/download: positive/no-human/real AD-share revoke; file SHA256 and no-store; HTTP leases released",
+    "original ID/ETag/SHA256 unchanged"
+  ],
+  "limitations": [
+    "single small Markdown document; not PDF/OCR or 100 GB processing",
+    "WK login context controlled; directory mapped from real NC AD identity rather than full sync",
+    "queue consumed serially; no full application Redis scheduling",
+    "no full QA/Agent/history/cache/retrieval acceptance yet",
+    "not full-app real vector/model coordinated recovery"
+  ],
+  "configuration_handling": {
+    "exporter_real_readonly_verified": true,
+    "source_app_database_unchanged": true,
+    "private_model_config_removed": true,
+    "checked_credentials_absent_from_logs": true,
+    "isolated_ssrf_allowlist": [
+      "host.docker.internal"
+    ]
+  },
+  "failed_runs_preserved": {
+    "live-real-model-1": "local model endpoint needs explicit isolated allowlist",
+    "live-real-model-2": "exported database ciphertext was not decrypted by fixture"
+  },
+  "owned_actors_absent_verified": true,
+  "logs_sha256": {
+    "live-real-model-3/document-graph-live.log": "e10a79ccf3dd12e7ff11d116d3d7b8dcaee4574041d48490998b9a4141b84374",
+    "live-real-model-3/document-graph-live-nc.log": "91600be9d6402d49f52154f695dfa0c5986938696640699698f3b485a539e9ce",
+    "live-real-model-3/document-graph-live-revoke.log": "5b58527c5b5035febd588cf2f36d2d257786a5dc1063c84c7797d16e1dc14e62",
+    "live-real-model-3/document-graph-live-http.log": "db043bc812613ffbef17b71eac99a691749a7cf532456a1f0bc346e1565c2b7d",
+    "live-real-model-3.log": "2330657170db87167cfb324f70dcd0e0a0e2739120de351dc23a0cc2cfd5e1d3",
+    "live-real-model-controlled-regression.log": "cc781a8e1b7024bdd77e17c2305ad1c4c498c227ffb6d6d83012d37fe4fac311",
+    "candidate-real-model-verification.log": "30db3888468502bbdbcfa280237d568f7e67fd3546d96a31e8c8d4246203d672"
+  },
+  "weknora_sources_sha256": {
+    "internal/application/service/nextcloud_document_graph_pipeline_test.go": "a557366a9556f4d32291682d5510cd02e5e2b03fba22e27af414f201d0a92457",
+    "internal/application/service/nextcloud_live_models_test.go": "c4521dd3fe8ca335ec5577251abeb366f2575ef73689577010f2cee460cd3224",
+    "internal/handler/nextcloud_processed_live_test.go": "08759e899782a54dc7ed416704d7c143dc581df14a57d45fd4f07ad72f337c5c"
+  },
+  "nextcloud_sources_sha256": {
+    "apps/integration_weknora/tests/run_document_graph_live.py": "9c920a6040d8550a9e0ea49195ae420016f84e3564dddae5e56c64afc179e0a0",
+    "apps/integration_weknora/tests/document_graph_live_runtime.php": "4e9953d85ba9aac6031c07a4b673a7e8e156012cb3fa2cb5fdbcd34baa410aab",
+    "apps/integration_weknora/tests/export_document_graph_models.py": "ee3d54137a59e1c88959429c1f055903d807c7914289773c02ce46e624b2c58a"
+  }
+}

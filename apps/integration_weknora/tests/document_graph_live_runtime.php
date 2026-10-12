@@ -30,7 +30,7 @@ if ($step === 'prepare') {
     }
 
     $root = \OCP\Server::get(\OCP\Files\IRootFolder::class)->getUserFolder($uid)->newFolder('document-graph-' . bin2hex(random_bytes(6)));
-    $file = $root->newFile('source.md', str_repeat('Actual original document about its topic, with enough text for chunking and retrieval. ', 4));
+    $file = $root->newFile('source.md', 'Alice is a software engineer on Project Cedar. Alice knows Bob, the database engineer on Project Cedar. Bob knows Alice. They work together to build a document search system. Project Cedar stores project documents and supports retrieval.');
     $identity = $c->get(\OCA\IntegrationWeknora\Service\IdentityMappingService::class)->forUser('prd-alice');
     $shares = \OCP\Server::get(\OCP\Share\IManager::class);
     $share = $shares->createShare($shares->newShare()->setNode($root)->setShareType(\OCP\Share\IShare::TYPE_USER)->setSharedBy($uid)->setSharedWith('prd-alice')->setPermissions(\OCP\Constants::PERMISSION_READ));
