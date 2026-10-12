@@ -1,6 +1,6 @@
 diff --git a/internal/database/migration_original_pending_tail_source.go b/internal/database/migration_original_pending_tail_source.go
 new file mode 100644
-index 000000000..bc666d8c9
+index 0000000000000000000000000000000000000000..bc666d8c924acb45a8e0211a15154b361911d0ae
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_source.go
 @@ -0,0 +1,270 @@
@@ -276,7 +276,7 @@ index 000000000..bc666d8c9
 +}
 diff --git a/internal/database/migration_original_pending_tail_source_test.go b/internal/database/migration_original_pending_tail_source_test.go
 new file mode 100644
-index 000000000..741b68b5d
+index 0000000000000000000000000000000000000000..741b68b5dbe1b3af4d24dfe403574adad3cfa310
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_source_test.go
 @@ -0,0 +1,119 @@
@@ -401,7 +401,7 @@ index 000000000..741b68b5d
 +}
 diff --git a/internal/database/migration_original_pending_tail_specs.json b/internal/database/migration_original_pending_tail_specs.json
 new file mode 100644
-index 000000000..7fd591b61
+index 0000000000000000000000000000000000000000..7fd591b610add27bd7f334b7784b0275e0a7849b
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_specs.json
 @@ -0,0 +1,231 @@
@@ -638,7 +638,7 @@ index 000000000..7fd591b61
 +}
 diff --git a/internal/database/migration_original_pending_tail_statements.go b/internal/database/migration_original_pending_tail_statements.go
 new file mode 100644
-index 000000000..ee890f7a6
+index 0000000000000000000000000000000000000000..ee890f7a650d0cd6cf4133bc6c3a5cb6f67810cf
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_statements.go
 @@ -0,0 +1,102 @@
@@ -746,10 +746,10 @@ index 000000000..ee890f7a6
 +}
 diff --git a/internal/database/migration_original_root.go b/internal/database/migration_original_root.go
 new file mode 100644
-index 000000000..d8c313241
+index 0000000000000000000000000000000000000000..6eb99b169af502cfa29de7ba0eb44648b6edf634
 --- /dev/null
 +++ b/internal/database/migration_original_root.go
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,237 @@
 +package database
 +
 +import (
@@ -784,6 +784,7 @@ index 000000000..d8c313241
 +	}
 +	dialect := jointLineageDialect(dsn, opts)
 +	source, err := admitJointOriginalRootSource(ctx, root, dialect)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntrySource, err == nil)
 +	if err != nil {
 +		return err
 +	}
@@ -808,6 +809,7 @@ index 000000000..d8c313241
 +		defer use.release()
 +	}
 +	version, dirty, known, err := observeJointSchemaHistoryBeforeDriver(ctx, dsn, opts)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntryInitialLedger, err == nil)
 +	if err != nil {
 +		return err
 +	}
@@ -842,10 +844,12 @@ index 000000000..d8c313241
 +		} else {
 +			err = RunMigrationsWithContext(ctx, dsn, canonicalOptions)
 +		}
++		observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntryCanonicalBootstrap, err == nil)
 +		if err != nil {
 +			return err
 +		}
 +		version, dirty, known, err = observeJointSchemaHistoryBeforeDriver(ctx, dsn, opts)
++		observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntryPostBootstrapLedger, err == nil)
 +		if err != nil {
 +			return err
 +		}
@@ -867,6 +871,7 @@ index 000000000..d8c313241
 +		return err
 +	}
 +	checkErr := inspectOriginalRootRoute(ctx, db, source, version, true)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntryOriginInspect, checkErr == nil)
 +	if err = errors.Join(checkErr, db.Close()); err != nil {
 +		return err
 +	}
@@ -874,6 +879,7 @@ index 000000000..d8c313241
 +		return err
 +	}
 +	m, err := newOriginalRootMigrate(ctx, dsn, opts, source, version)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntryTailInitialization, err == nil)
 +	if err != nil {
 +		return err
 +	}
@@ -887,7 +893,9 @@ index 000000000..d8c313241
 +		}
 +		setMigrationState(actual, actualDirty, fixedFailure, versionErr == nil)
 +	}()
-+	if err = m.Up(); err != nil && err != migrate.ErrNoChange {
++	err = m.Up()
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntryTailUp, err == nil || err == migrate.ErrNoChange)
++	if err != nil && err != migrate.ErrNoChange {
 +		return err
 +	}
 +	final, finalDirty, err := m.Version()
@@ -899,7 +907,9 @@ index 000000000..d8c313241
 +	if err != nil {
 +		return err
 +	}
-+	return errors.Join(inspectOriginalRootRoute(ctx, db, source, final, false), db.Close())
++	checkErr = inspectOriginalRootRoute(ctx, db, source, final, false)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticEntryFinalInspect, checkErr == nil)
++	return errors.Join(checkErr, db.Close())
 +}
 +
 +func inspectOriginalRootRoute(ctx context.Context, db *sql.DB, source *jointOriginalRootSource, version uint, allowOrigin bool) (routeErr error) {
@@ -979,10 +989,10 @@ index 000000000..d8c313241
 +}
 diff --git a/internal/database/migration_original_root_catalogue.go b/internal/database/migration_original_root_catalogue.go
 new file mode 100644
-index 000000000..7d8a605e1
+index 0000000000000000000000000000000000000000..3ba7d2373d5d297147bfbcf851b9f3e50dbe2683
 --- /dev/null
 +++ b/internal/database/migration_original_root_catalogue.go
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,209 @@
 +package database
 +
 +import (
@@ -1044,14 +1054,17 @@ index 000000000..7d8a605e1
 +		return ErrJointSchemaUnavailable
 +	}
 +	expected, err := s.expected(version, checkpoint)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueExpected, err == nil)
 +	if err != nil {
 +		return err
 +	}
 +	objects, _, err := peerPrefixObjectSets(ctx, tx, s.dialect)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueObjectKinds, err == nil)
 +	if err != nil {
 +		return err
 +	}
 +	witness, err := jointLineageWitnessesFromSource()
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueExpected, err == nil)
 +	if err != nil {
 +		return err
 +	}
@@ -1062,6 +1075,7 @@ index 000000000..7d8a605e1
 +	sentinel.Functions = append([]string{}, sentinel.Functions...)
 +	sentinel.Indexes = append([]string{}, sentinel.Indexes...)
 +	all, err := s.expected(s.spec.FinalVersion, true)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueExpected, err == nil)
 +	if err != nil {
 +		return err
 +	}
@@ -1087,43 +1101,59 @@ index 000000000..7d8a605e1
 +			}
 +		}
 +	}
-+	if err = jointVerifySentinelObjectKinds(objects, sentinel, expected); err != nil {
++	err = jointVerifySentinelObjectKinds(objects, sentinel, expected)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueObjectKinds, err == nil)
++	if err != nil {
 +		return err
 +	}
 +	for table, columns := range witness.Sentinels.Columns {
 +		for _, column := range columns {
 +			present, err := peerPrefixIntroducedColumn(ctx, tx, s.dialect, table, column)
 +			if err != nil {
++				observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueColumns, false)
 +				return err
 +			}
 +			if present {
 +				if _, ok := expected.Columns[table][column]; !ok {
++					observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueColumns, false)
 +					return ErrJointSchemaUnknown
 +				}
 +			}
 +		}
 +	}
-+	if err = verifyPeerPrefixCatalogueInTx(ctx, tx, s.dialect, expected); err != nil {
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueColumns, true)
++	err = verifyPeerPrefixCatalogueInTx(ctx, tx, s.dialect, expected)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueExactFull, err == nil)
++	if err != nil {
 +		return err
 +	}
 +	if s.dialect == "versioned" {
-+		if err = jointVerifyWithdrawalKindConstraint(ctx, tx, expected.RegistryConstraint); err != nil {
++		err = jointVerifyWithdrawalKindConstraint(ctx, tx, expected.RegistryConstraint)
++		observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueWithdrawalConstraint, err == nil)
++		if err != nil {
 +			return err
 +		}
 +		core, err := inspectJoint125LocalRepair(ctx, tx)
 +		if err != nil {
++			observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueCore125, false)
 +			return err
 +		}
 +		if core.state != joint125GuardCurrent && core.state != joint125OptionalAbsent {
++			observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueCore125, false)
 +			return ErrJointSchemaRootWitness
 +		}
++		observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueCore125, true)
 +	}
 +	if checkpoint {
-+		if err = originalRootRouteMarker(ctx, tx, s); err != nil {
++		err = originalRootRouteMarker(ctx, tx, s)
++		observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueOriginMarker, err == nil)
++		if err != nil {
 +			return err
 +		}
 +	}
-+	return s.recheck(ctx)
++	err = s.recheck(ctx)
++	observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueSourceRecheck, err == nil)
++	return err
 +}
 +
 +func originalRootFutureAbsence(ctx context.Context, db *sql.DB, s *jointOriginalRootSource) error {
@@ -1172,9 +1202,201 @@ index 000000000..7d8a605e1
 +	}
 +	return ctx.Err()
 +}
+diff --git a/internal/database/migration_original_root_diagnostic.go b/internal/database/migration_original_root_diagnostic.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c7ed455a4412b61c99709b19525a41e5c0a8b18a
+--- /dev/null
++++ b/internal/database/migration_original_root_diagnostic.go
+@@ -0,0 +1,48 @@
++package database
++
++import "context"
++
++// These labels describe actual Root call/predicate phases only. They do not
++// contain SQL, object names, selectors, rows, error text or authorization.
++type originalRootDiagnosticPhase uint8
++
++const (
++	originalRootDiagnosticEntrySource originalRootDiagnosticPhase = iota
++	originalRootDiagnosticEntryInitialLedger
++	originalRootDiagnosticEntryCanonicalBootstrap
++	originalRootDiagnosticEntryPostBootstrapLedger
++	originalRootDiagnosticEntryOriginInspect
++	originalRootDiagnosticEntryTailInitialization
++	originalRootDiagnosticEntryTailUp
++	originalRootDiagnosticEntryFinalInspect
++	originalRootDiagnosticCatalogueExpected
++	originalRootDiagnosticCatalogueObjectKinds
++	originalRootDiagnosticCatalogueColumns
++	originalRootDiagnosticCatalogueExactFull
++	originalRootDiagnosticCatalogueWithdrawalConstraint
++	originalRootDiagnosticCatalogueCore125
++	originalRootDiagnosticCatalogueOriginMarker
++	originalRootDiagnosticCatalogueSourceRecheck
++	originalRootDiagnosticPhaseCount
++)
++
++type originalRootDiagnosticObserverKey struct{}
++type originalRootDiagnosticObserver struct {
++	observe func(originalRootDiagnosticPhase, bool)
++}
++
++// Only package-local tests register the inert observer. Default calls have
++// no observer, clock read, extra SQL, context mutation or admission marker.
++func observeOriginalRootDiagnostic(ctx context.Context, phase originalRootDiagnosticPhase, success bool) {
++	if ctx == nil || phase >= originalRootDiagnosticPhaseCount {
++		return
++	}
++	observer, _ := ctx.Value(originalRootDiagnosticObserverKey{}).(*originalRootDiagnosticObserver)
++	if observer == nil || observer.observe == nil {
++		return
++	}
++	// The diagnostic callback has no return value and cannot replace the
++	// actual caller's error/permission decision, including a callback panic.
++	defer func() { _ = recover() }()
++	observer.observe(phase, success)
++}
+diff --git a/internal/database/migration_original_root_diagnostic_test.go b/internal/database/migration_original_root_diagnostic_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..597eb35462a8e1d79863ecd2938a0091782d4c54
+--- /dev/null
++++ b/internal/database/migration_original_root_diagnostic_test.go
+@@ -0,0 +1,132 @@
++package database
++
++import (
++	"context"
++	"errors"
++	"os"
++	"sync"
++	"testing"
++)
++
++const originalRootDiagnosticFlag = "WEKNORA_ORIGINAL_ROOT_PHASE_DIAGNOSTIC"
++const originalRootDiagnosticMaxCount uint64 = 1<<32 - 1
++
++var originalRootDiagnosticPhaseNames = [originalRootDiagnosticPhaseCount]string{
++	"entry_source", "entry_initial_ledger", "entry_canonical_bootstrap",
++	"entry_post_bootstrap_ledger", "entry_origin_inspect", "entry_tail_initialization",
++	"entry_tail_up", "entry_final_inspect", "catalogue_expected",
++	"catalogue_object_kinds", "catalogue_columns", "catalogue_exact_full",
++	"catalogue_withdrawal_constraint", "catalogue_core125",
++	"catalogue_origin_marker", "catalogue_source_recheck",
++}
++
++type originalRootDiagnosticBucket struct {
++	count, successes uint64
++	saturated        bool
++}
++
++type originalRootDiagnosticCollector struct {
++	mu      sync.Mutex
++	buckets [originalRootDiagnosticPhaseCount]originalRootDiagnosticBucket
++	sealed  bool
++}
++
++// Bounded fixed-enum counts only. No SQL, waits, logs or test failures execute
++// in a callback, and no test hook can replace a real migration return value.
++func (collector *originalRootDiagnosticCollector) record(phase originalRootDiagnosticPhase, success bool) {
++	if phase >= originalRootDiagnosticPhaseCount {
++		return
++	}
++	collector.mu.Lock()
++	defer collector.mu.Unlock()
++	if collector.sealed {
++		return
++	}
++	bucket := &collector.buckets[phase]
++	if bucket.count == originalRootDiagnosticMaxCount {
++		bucket.saturated = true
++		return
++	}
++	bucket.count++
++	if success {
++		bucket.successes++
++	}
++}
++
++func originalRootDiagnosticContextForTest(t *testing.T, ctx context.Context) context.Context {
++	t.Helper()
++	if os.Getenv(originalRootDiagnosticFlag) != "1" {
++		return ctx
++	}
++	collector := &originalRootDiagnosticCollector{}
++	observer := &originalRootDiagnosticObserver{observe: collector.record}
++	t.Cleanup(func() {
++		// Every synchronous Root operation has returned, including its owned
++		// migrate driver Close/deferred error joins. This performs no new wait.
++		collector.mu.Lock()
++		collector.sealed = true
++		buckets := collector.buckets
++		collector.mu.Unlock()
++		for phase, bucket := range buckets {
++			t.Logf("original_root_phase phase=%s count=%d success_count=%d failure_count=%d saturated=%t",
++				originalRootDiagnosticPhaseNames[phase], bucket.count, bucket.successes,
++				bucket.count-bucket.successes, bucket.saturated)
++		}
++	})
++	return context.WithValue(ctx, originalRootDiagnosticObserverKey{}, observer)
++}
++
++func TestOriginalRootDiagnosticCallbackCannotReplaceMigrationReturn(t *testing.T) {
++	businessErr := errors.New("fixed migration refusal")
++	observer := &originalRootDiagnosticObserver{observe: func(originalRootDiagnosticPhase, bool) { panic("diagnostic callback") }}
++	ctx := context.WithValue(context.Background(), originalRootDiagnosticObserverKey{}, observer)
++	actual := func() error {
++		observeOriginalRootDiagnostic(ctx, originalRootDiagnosticCatalogueCore125, false)
++		return businessErr
++	}
++	if actual() != businessErr {
++		t.Fatal("diagnostic callback replaced the actual migration result")
++	}
++}
++
++func TestOriginalRootDiagnosticDefaultOffAndBoundedConcurrentCounts(t *testing.T) {
++	t.Setenv(originalRootDiagnosticFlag, "")
++	base, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	if originalRootDiagnosticContextForTest(t, base) != base {
++		t.Fatal("default-off registration changed the actual context")
++	}
++	collector := &originalRootDiagnosticCollector{}
++	var workers sync.WaitGroup
++	for phase := originalRootDiagnosticPhase(0); phase < originalRootDiagnosticPhaseCount; phase++ {
++		workers.Add(1)
++		go func(phase originalRootDiagnosticPhase) {
++			defer workers.Done()
++			for i := 0; i < 100; i++ {
++				collector.record(phase, i%2 == 0)
++			}
++		}(phase)
++	}
++	workers.Wait()
++	for _, bucket := range collector.buckets {
++		if bucket.count != 100 || bucket.successes != 50 || bucket.saturated {
++			t.Fatal("fixed phase counts lost concurrent numeric observations")
++		}
++	}
++	collector.buckets[0] = originalRootDiagnosticBucket{count: originalRootDiagnosticMaxCount}
++	collector.record(0, true)
++	if collector.buckets[0].count != originalRootDiagnosticMaxCount || !collector.buckets[0].saturated {
++		t.Fatal("fixed phase count exceeded its bound")
++	}
++	before := collector.buckets
++	collector.sealed = true
++	collector.record(originalRootDiagnosticCatalogueCore125, false)
++	collector.record(originalRootDiagnosticPhaseCount, false)
++	if before != collector.buckets {
++		t.Fatal("sealed or invalid phase changed the bounded collector")
++	}
++	cancel()
++	if base.Err() != context.Canceled {
++		t.Fatal("diagnostic registration changed actual cancellation")
++	}
++}
 diff --git a/internal/database/migration_original_root_driver.go b/internal/database/migration_original_root_driver.go
 new file mode 100644
-index 000000000..54286e139
+index 0000000000000000000000000000000000000000..54286e139462c01138049c76249ae59fd660f0ab
 --- /dev/null
 +++ b/internal/database/migration_original_root_driver.go
 @@ -0,0 +1,278 @@
@@ -1458,7 +1680,7 @@ index 000000000..54286e139
 +}
 diff --git a/internal/database/migration_original_root_source.go b/internal/database/migration_original_root_source.go
 new file mode 100644
-index 000000000..0f560351c
+index 0000000000000000000000000000000000000000..0f560351c4744332154ca31a466254ebc61e2bd6
 --- /dev/null
 +++ b/internal/database/migration_original_root_source.go
 @@ -0,0 +1,211 @@
@@ -1675,10 +1897,10 @@ index 000000000..0f560351c
 +}
 diff --git a/internal/database/migration_original_root_source_test.go b/internal/database/migration_original_root_source_test.go
 new file mode 100644
-index 000000000..e6729860a
+index 0000000000000000000000000000000000000000..1cff7112021fb398734a501d70f67f8bb68211f1
 --- /dev/null
 +++ b/internal/database/migration_original_root_source_test.go
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,90 @@
 +package database
 +
 +import (
@@ -1691,10 +1913,9 @@ index 000000000..e6729860a
 +	"github.com/stretchr/testify/require"
 +)
 +
-+func originalRootSourceFixture(t *testing.T, dialect string) string {
++func originalRootSourceFixture(t *testing.T, dialect, actual string) string {
 +	t.Helper()
 +	root, _ := originalPendingTailSourceFixture(t, dialect)
-+	actual := sqliteRepoRoot(t)
 +	var manifest jointOriginalRootSourceManifest
 +	require.NoError(t, json.Unmarshal(jointOriginalRootSourceJSON, &manifest))
 +	spec := manifest.Routes[dialect]
@@ -1720,7 +1941,7 @@ index 000000000..e6729860a
 +		t.Run(dialect, func(t *testing.T) {
 +			for _, mode := range []string{"exact_copied_route_and_42_descriptors", "historical_down_changed", "copied_up_changed", "extra_route_file", "checkpoint_changed", "cancelled"} {
 +				t.Run(mode, func(t *testing.T) {
-+					root := originalRootSourceFixture(t, dialect)
++					root := originalRootSourceFixture(t, dialect, sqliteRepoRoot(t))
 +					var manifest jointOriginalRootSourceManifest
 +					require.NoError(t, json.Unmarshal(jointOriginalRootSourceJSON, &manifest))
 +					spec := manifest.Routes[dialect]
@@ -1772,7 +1993,7 @@ index 000000000..e6729860a
 +}
 diff --git a/internal/database/migration_original_root_sources.json b/internal/database/migration_original_root_sources.json
 new file mode 100644
-index 000000000..dd4fed381
+index 0000000000000000000000000000000000000000..dd4fed381b95d653d5b45b7333e83ab6b57d77b5
 --- /dev/null
 +++ b/internal/database/migration_original_root_sources.json
 @@ -0,0 +1,2085 @@
@@ -3863,10 +4084,10 @@ index 000000000..dd4fed381
 +}
 diff --git a/internal/database/migration_original_root_sql_actual_test.go b/internal/database/migration_original_root_sql_actual_test.go
 new file mode 100644
-index 000000000..881a8e076
+index 0000000000000000000000000000000000000000..24cdcaf96e1c1bc25534529b85260f259a72bfde
 --- /dev/null
 +++ b/internal/database/migration_original_root_sql_actual_test.go
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,211 @@
 +package database
 +
 +import (
@@ -3938,6 +4159,7 @@ index 000000000..881a8e076
 +			db, dsn, opts := jointLineageFixture(t, pg)
 +			chdirAndRestore(t, root)
 +			ctx := context.Background()
++			ctx = originalRootDiagnosticContextForTest(t, ctx)
 +			if mode == "peer_final_refused" || mode == "peer_same_number_tail_refused" {
 +				originalRootActualPeerTail(t, root, dialect, dsn, opts, peerFinal, mode == "peer_same_number_tail_refused")
 +				before := memoryFullSchemaSnapshot(t, db, dialect)
@@ -3982,7 +4204,7 @@ index 000000000..881a8e076
 +				}
 +			}
 +			if mode == "changed_source_before_driver" {
-+				copyRoot := originalRootSourceFixture(t, dialect)
++				copyRoot := originalRootSourceFixture(t, dialect, root)
 +				source, err := admitJointOriginalRootSource(ctx, copyRoot, dialect)
 +				require.NoError(t, err)
 +				path := filepath.Join(copyRoot, source.spec.Files[len(source.spec.Files)-2].Path)
@@ -4079,7 +4301,7 @@ index 000000000..881a8e076
 +func TestPostgresOriginalRootTailActual(t *testing.T) { runOriginalRootTailActual(t, true) }
 diff --git a/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
 new file mode 100644
-index 000000000..0f3016c0b
+index 0000000000000000000000000000000000000000..0f3016c0b3cf0bb52bce3509451dff517c47f1c9
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
 @@ -0,0 +1,280 @@
@@ -4365,7 +4587,7 @@ index 000000000..0f3016c0b
 +}
 diff --git a/internal/database/migration_original_root_sqlite_canonical.go b/internal/database/migration_original_root_sqlite_canonical.go
 new file mode 100644
-index 000000000..8dc941067
+index 0000000000000000000000000000000000000000..8dc941067763306959e131b0427979f0f9c3f83d
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_canonical.go
 @@ -0,0 +1,197 @@
@@ -4568,7 +4790,7 @@ index 000000000..8dc941067
 +}
 diff --git a/internal/database/migration_original_root_sqlite_create_unix.go b/internal/database/migration_original_root_sqlite_create_unix.go
 new file mode 100644
-index 000000000..dde83c585
+index 0000000000000000000000000000000000000000..dde83c585d8e56c070ac0e111cb9cbe00a7826b2
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_create_unix.go
 @@ -0,0 +1,23 @@
@@ -4597,7 +4819,7 @@ index 000000000..dde83c585
 +}
 diff --git a/internal/database/migration_original_root_sqlite_create_unsupported.go b/internal/database/migration_original_root_sqlite_create_unsupported.go
 new file mode 100644
-index 000000000..18477523f
+index 0000000000000000000000000000000000000000..18477523f1f8f25c542e62cc92e7a9504d42061c
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_create_unsupported.go
 @@ -0,0 +1,7 @@
@@ -4610,7 +4832,7 @@ index 000000000..18477523f
 +}
 diff --git a/internal/database/migration_original_root_sqlite_exclusion.go b/internal/database/migration_original_root_sqlite_exclusion.go
 new file mode 100644
-index 000000000..55a8b0a75
+index 0000000000000000000000000000000000000000..55a8b0a75acf544afca0511950d33a7569b7bb8f
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_exclusion.go
 @@ -0,0 +1,236 @@
@@ -4852,7 +5074,7 @@ index 000000000..55a8b0a75
 +}
 diff --git a/internal/database/migration_original_root_sqlite_writer.go b/internal/database/migration_original_root_sqlite_writer.go
 new file mode 100644
-index 000000000..d0278b7c5
+index 0000000000000000000000000000000000000000..d0278b7c5dcf808a6be1af5225a54af12eb915ab
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_writer.go
 @@ -0,0 +1,138 @@
@@ -4996,7 +5218,7 @@ index 000000000..d0278b7c5
 +}
 diff --git a/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
 new file mode 100644
-index 000000000..2edaea8c1
+index 0000000000000000000000000000000000000000..2edaea8c113a8a7fad28fe3746fc520da5e7ef00
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
 @@ -0,0 +1,168 @@
@@ -5169,7 +5391,7 @@ index 000000000..2edaea8c1
 +	}
 +}
 diff --git a/internal/database/migration_peer_sqlite_exclusive.go b/internal/database/migration_peer_sqlite_exclusive.go
-index 7b689e722..25811d12d 100644
+index 7b689e7220b2a057fd6c10f19543bc0124c303e3..25811d12d95505cc1cdfdd9886b36901a391b93e 100644
 --- a/internal/database/migration_peer_sqlite_exclusive.go
 +++ b/internal/database/migration_peer_sqlite_exclusive.go
 @@ -28,9 +28,19 @@ type jointPeerSQLiteMigrationExclusion struct {
@@ -5194,7 +5416,7 @@ index 7b689e722..25811d12d 100644
  		defer x.mu.Unlock()
 diff --git a/migrations/original-root/checkpoint/sqlite.sql b/migrations/original-root/checkpoint/sqlite.sql
 new file mode 100644
-index 000000000..67d6fa735
+index 0000000000000000000000000000000000000000..67d6fa735ac4372b843401a2af7f86b4f6ff02f2
 --- /dev/null
 +++ b/migrations/original-root/checkpoint/sqlite.sql
 @@ -0,0 +1,12 @@
@@ -5212,7 +5434,7 @@ index 000000000..67d6fa735
 +CREATE TRIGGER nextcloud_original_root_route_immutable_delete BEFORE DELETE ON nextcloud_original_root_route_origin BEGIN SELECT RAISE(ABORT, 'original_root_route_origin_immutable'); END;
 diff --git a/migrations/original-root/checkpoint/versioned.sql b/migrations/original-root/checkpoint/versioned.sql
 new file mode 100644
-index 000000000..43e565efa
+index 0000000000000000000000000000000000000000..43e565efa1c871536d82f1a091713eac721c2792
 --- /dev/null
 +++ b/migrations/original-root/checkpoint/versioned.sql
 @@ -0,0 +1,14 @@
@@ -5232,7 +5454,7 @@ index 000000000..43e565efa
 +CREATE TRIGGER nextcloud_original_root_route_immutable_delete BEFORE DELETE ON nextcloud_original_root_route_origin FOR EACH ROW EXECUTE FUNCTION nextcloud_original_root_route_immutable();
 diff --git a/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.down.sql b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.down.sql
 new file mode 100644
-index 000000000..fc24f2b5d
+index 0000000000000000000000000000000000000000..fc24f2b5d69918d2a7cec830153e78cedd4b061a
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.down.sql
 @@ -0,0 +1,2 @@
@@ -5240,7 +5462,7 @@ index 000000000..fc24f2b5d
 +SELECT RAISE(ABORT,'recovery graph fence rollback blocked');
 diff --git a/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.up.sql b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.up.sql
 new file mode 100644
-index 000000000..a762c6c7e
+index 0000000000000000000000000000000000000000..a762c6c7e46c6a47b80ff6ab190fd0b640273b77
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.up.sql
 @@ -0,0 +1,4 @@
@@ -5250,7 +5472,7 @@ index 000000000..a762c6c7e
 +END;
 diff --git a/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.down.sql b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.down.sql
 new file mode 100644
-index 000000000..d624a0440
+index 0000000000000000000000000000000000000000..d624a04409680d973727073e50b403b39b1ca072
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.down.sql
 @@ -0,0 +1,26 @@
@@ -5282,7 +5504,7 @@ index 000000000..d624a0440
 +-- lite_embeddings predates this protocol and is deliberately retained.
 diff --git a/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.up.sql b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.up.sql
 new file mode 100644
-index 000000000..30338b39a
+index 0000000000000000000000000000000000000000..30338b39a190d8c6575ce49676c3537a0b1ce364
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.up.sql
 @@ -0,0 +1,68 @@
@@ -5356,7 +5578,7 @@ index 000000000..30338b39a
 +END;
 diff --git a/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.down.sql b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.down.sql
 new file mode 100644
-index 000000000..f2923a42f
+index 0000000000000000000000000000000000000000..f2923a42ff969c604460a2d454c9475ae2c9c20a
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.down.sql
 @@ -0,0 +1,10 @@
@@ -5372,7 +5594,7 @@ index 000000000..f2923a42f
 +DROP TABLE knowledge_sqlite_query_inputs;
 diff --git a/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.up.sql b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.up.sql
 new file mode 100644
-index 000000000..946eb48d5
+index 0000000000000000000000000000000000000000..946eb48d513cae7af909b97012689775699476eb
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.up.sql
 @@ -0,0 +1,27 @@
@@ -5405,7 +5627,7 @@ index 000000000..946eb48d5
 +CREATE TRIGGER knowledge_sqlite_query_result_delete BEFORE DELETE ON knowledge_sqlite_query_receipts BEGIN SELECT RAISE(ABORT,'knowledge_query_original_immutable'); END;
 diff --git a/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql
 new file mode 100644
-index 000000000..4479b11f8
+index 0000000000000000000000000000000000000000..4479b11f884ae2d44f5f874d875a6aa775b7ece2
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql
 @@ -0,0 +1,7 @@
@@ -5418,7 +5640,7 @@ index 000000000..4479b11f8
 +DROP TABLE nextcloud_epoch_protocol_origins;
 diff --git a/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql
 new file mode 100644
-index 000000000..af7579477
+index 0000000000000000000000000000000000000000..af757947780d275351d0fec071d1728b172f72b1
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql
 @@ -0,0 +1,32 @@
@@ -5456,14 +5678,14 @@ index 000000000..af7579477
 +CREATE TRIGGER nextcloud_epoch_control_delete BEFORE DELETE ON nextcloud_epoch_current_controls BEGIN SELECT RAISE(ABORT,'nextcloud_epoch_control_changed'); END;
 diff --git a/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.down.sql b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.down.sql
 new file mode 100644
-index 000000000..e195413a9
+index 0000000000000000000000000000000000000000..e195413a9d3620f5101daff8f6ec903e70739b6f
 --- /dev/null
 +++ b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.down.sql
 @@ -0,0 +1 @@
 +DO $$ BEGIN RAISE EXCEPTION 'Retain recovery graph fences; audited export is required before rollback'; END $$;
 diff --git a/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.up.sql b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.up.sql
 new file mode 100644
-index 000000000..bcf4d8278
+index 0000000000000000000000000000000000000000..bcf4d82789ff71cc4469f6694f517c8819466b69
 --- /dev/null
 +++ b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.up.sql
 @@ -0,0 +1,10 @@
@@ -5479,7 +5701,7 @@ index 000000000..bcf4d8278
 +CREATE TRIGGER nextcloud_graph_recovery_controls_fence BEFORE INSERT ON nextcloud_graph_records FOR EACH ROW EXECUTE FUNCTION nextcloud_graph_recovery_controls_fence();
 diff --git a/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql
 new file mode 100644
-index 000000000..a4df8dced
+index 0000000000000000000000000000000000000000..a4df8dcedc7e121f90732fea6abdb3137ad62188
 --- /dev/null
 +++ b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql
 @@ -0,0 +1,6 @@
@@ -5491,7 +5713,7 @@ index 000000000..a4df8dced
 +DROP FUNCTION nextcloud_epoch_original_immutable();
 diff --git a/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql
 new file mode 100644
-index 000000000..18e9dce06
+index 0000000000000000000000000000000000000000..18e9dce06a9b7719a3b2da9509d8bec8a386a13a
 --- /dev/null
 +++ b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql
 @@ -0,0 +1,31 @@
