@@ -243,7 +243,7 @@ jobs:
             --require-test TestOriginalBodyInlineRowActualSQLite \
             --require-test TestPostgresOriginalBodyInlineRowActual
           go test -json -tags sqlite_fts5 -p 1 ./internal/application/service/chat_pipeline ./internal/application/service \
-            -run '^TestSourceLineage(Input|Stage|Model|Prompt)Boundary' -count=1 -timeout 20m > candidate-lineage-preflight.jsonl
+            -run '^TestSourceLineage(Input|Stage|Model|Prompt|References)Boundary' -count=1 -timeout 20m > candidate-lineage-preflight.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-lineage-preflight.jsonl \
             --require-test TestSourceLineageInputBoundaryCompleteHistoryUnionAndFreshSourceVersion \
             --require-test TestSourceLineageInputBoundaryProductionGuardRefreshesCurrentActor \
@@ -259,7 +259,13 @@ jobs:
             --require-test TestSourceLineageModelBoundaryPreservesSourceErrorBeforeFreezeError \
             --require-test TestSourceLineageModelBoundaryRechecksCurrentAuthorityOnNextCall \
             --require-test TestSourceLineagePromptBoundaryChecksCompleteUnionBeforePublicationReads \
-            --require-test TestSourceLineagePromptBoundaryUnknownAndOwnerFailuresDoNotRead
+            --require-test TestSourceLineagePromptBoundaryUnknownAndOwnerFailuresDoNotRead \
+            --require-test TestSourceLineageReferencesBoundaryCompleteUnionOnce \
+            --require-test TestSourceLineageReferencesBoundaryUnknownAndShapeStayClosed \
+            --require-test TestSourceLineageReferencesBoundaryOwnerPrecedesSource \
+            --require-test TestSourceLineageReferencesBoundaryConcurrentAdditionRetries \
+            --require-test TestSourceLineageReferencesBoundaryCurrentAuthorityAndBusFailure \
+            --require-test TestSourceLineageReferencesBoundaryNoEmissionStillChecksCurrentUnion
           go test -json -p 1 ./internal/handler/session \
             -run '^TestLiveSSE(SingleFrame|RawControlPhase)' -count=1 -timeout 20m > candidate-sse-preflight.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-sse-preflight.jsonl \

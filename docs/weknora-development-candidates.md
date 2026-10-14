@@ -5,7 +5,7 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
-The current development candidates are RAG `af38d3ec` and C6 `f4800efc`.
+The current development candidates are RAG `1ee7368d` and C6 `c89d2d09`.
 They correct the duplicate prompt processor in the actual HTTP fixture,
 encode a complete SSE frame before one guarded Write, and authorize the
 complete input/result union once at each unchanged pipeline boundary. Every
@@ -15,7 +15,7 @@ retain their independent current authorization and lease checks, and the
 original 8-second HTTP limits remain. Encoding failure performs no HTTP I/O;
 short writes abort without flushing or retrying. Raw-control flags end with
 their exact query or fixed stop frame, so empty polls use the existing bounded
-idle cadence. Buffered source content retains its separate checks. Model messages and options are detached before one final current-authority check at each SDK boundary. Original-body availability reads current state in bounded metadata batches while retaining per-item journal, head and cancellation checks. Each material check renews its held body leases in one transaction after fresh body, lease, epoch and journal validation; PostgreSQL body-lock contention rolls back before a bounded retry, and any failed member rolls back the complete renewal set. The complete source patches
+idle cadence. Buffered source content retains its separate checks. Model messages and options are detached before one final current-authority check at each SDK boundary. Original-body availability reads current state in bounded metadata batches while retaining per-item journal, head and cancellation checks. A references event accounts its complete input union at the event’s current authorization boundary; public checked wrappers and empty/no-event checks remain intact. Each material check renews its held body leases in one transaction after fresh body, lease, epoch and journal validation; PostgreSQL body-lock contention rolls back before a bounded retry, and any failed member rolls back the complete renewal set. The transaction uses its freshly authenticated purge ledger for every body and fully rereads the external ledger/pin and SQL head before commit; only an exactly unchanged authenticated head can succeed. The complete source patches
 and exact apply/reverse trees are pinned in the manifest. Service CI uses
 complete, sequential test groups with the original selector and all 42
 required tests; the previously failing actual paths run first as prerequisites.

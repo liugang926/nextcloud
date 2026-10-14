@@ -83487,10 +83487,10 @@ index 0000000000000000000000000000000000000000..15fe97f6146f19c1c7f87c81e76c935b
 +}
 diff --git a/internal/application/repository/original_body_lease_renewal_batch.go b/internal/application/repository/original_body_lease_renewal_batch.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e5063e49a
+index 0000000000000000000000000000000000000000..7386aae8f1875ccce83e99f77aff336b141c46e8
 --- /dev/null
 +++ b/internal/application/repository/original_body_lease_renewal_batch.go
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,239 @@
 +package repository
 +
 +import (
@@ -83535,7 +83535,7 @@ index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e
 +	sort.Strings(ordered)
 +	renew := func() error {
 +		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-+			journal, err := s.leaseRenewalJournalHead(tx)
++			journal, events, err := s.leaseRenewalJournalSnapshot(tx)
 +			if err != nil {
 +				return err
 +			}
@@ -83604,12 +83604,22 @@ index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e
 +					return ErrOriginalBodyUnavailable
 +				}
 +			}
++			// Every held body is checked against this invocation's complete,
++			// authenticated purge ledger. The final physical reread below must
++			// bind to this exact same journal head before any renewal commits.
++			purged := make(map[string]bool, len(events))
++			for _, event := range events {
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				purged[event.BodyID] = true
++			}
 +			for _, id := range bodyIDs {
 +				if err := ctx.Err(); err != nil {
 +					return err
 +				}
-+				if err := s.checkExternalBody(id); err != nil {
-+					return err
++				if purged[id] {
++					return ErrOriginalBodyUnavailable
 +				}
 +			}
 +			clock := "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
@@ -83629,7 +83639,7 @@ index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e
 +					return ErrOriginalBodyUnavailable
 +				}
 +			}
-+			finalJournal, err := s.leaseRenewalJournalHead(tx)
++			finalJournal, _, err := s.leaseRenewalJournalSnapshot(tx)
 +			if err != nil {
 +				return err
 +			}
@@ -83699,22 +83709,22 @@ index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e
 +	return column + " COLLATE BINARY"
 +}
 +
-+func (s *OriginalBodyRetentionStore) leaseRenewalJournalHead(tx *gorm.DB) (originalBodyJournalHead, error) {
++func (s *OriginalBodyRetentionStore) leaseRenewalJournalSnapshot(tx *gorm.DB) (originalBodyJournalHead, []originalBodyJournalEvent, error) {
 +	var head originalBodyJournalHead
 +	if err := bodyInternal(tx).Where("id=1").Take(&head).Error; err != nil {
-+		return head, err
++		return head, nil, err
 +	}
 +	if s.journal == nil {
-+		return head, ErrOriginalBodyUnavailable
++		return head, nil, ErrOriginalBodyUnavailable
 +	}
-+	_, pin, err := s.journal.read()
++	events, pin, err := s.journal.read()
 +	if err != nil {
-+		return head, err
++		return head, nil, err
 +	}
 +	if pin.JournalID != head.JournalID || pin.Sequence != head.Sequence || pin.HeadSHA256 != head.HeadSHA256 {
-+		return head, ErrOriginalBodyUnavailable
++		return head, nil, ErrOriginalBodyUnavailable
 +	}
-+	return head, nil
++	return head, events, nil
 +}
 +
 +func (s *KnowledgeInputProvenanceStore) RenewMessageBodyReadLeases(ctx context.Context, ids []string, ttl time.Duration) error {
@@ -83722,10 +83732,10 @@ index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e
 +}
 diff --git a/internal/application/repository/original_body_lease_renewal_batch_test.go b/internal/application/repository/original_body_lease_renewal_batch_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..49a09df3f3ae0b8c29daa23423c0b4fd414b4071
+index 0000000000000000000000000000000000000000..91e287547a1c5c0665b4600159acb5005158c22b
 --- /dev/null
 +++ b/internal/application/repository/original_body_lease_renewal_batch_test.go
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,495 @@
 +package repository
 +
 +import (
@@ -84016,6 +84026,19 @@ index 0000000000000000000000000000000000000000..49a09df3f3ae0b8c29daa23423c0b4fd
 +			require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
 +		})
 +	}
++
++	t.Run("fresh-external-purge-on-next-invocation", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		bodies, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++		require.NoError(t, store.RenewLeases(context.Background(), ids, 2*time.Minute))
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		event, err := store.journal.append(originalBodyJournalEvent{BodyID: bodies[1], TenantID: 7, PurgeEpoch: 1})
++		require.NoError(t, err)
++		require.NoError(t, bodyInternal(db).Model(&originalBodyJournalHead{}).Where("id=1").Updates(map[string]any{"sequence": event.Sequence, "head_sha256": event.HeadSHA256}).Error)
++		require.NoError(t, store.checkJournalInTx(db), "the next call must inspect the purge decision even with a valid current SQL/external binding")
++		require.ErrorIs(t, store.RenewLeases(context.Background(), ids, 2*time.Minute), ErrOriginalBodyUnavailable)
++		require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids), "a previous successful snapshot cannot renew any member of the now-denied held set")
++	})
 +
 +	t.Run("SQL-journal-change-after-update-rolls-back", func(t *testing.T) {
 +		db, store := bodyProtocolFixture(t, pg)
@@ -97665,6 +97688,325 @@ index 0000000000000000000000000000000000000000..b6865c3ef5749f800c9b41d3064eaa40
 +			}
 +		})
 +	}
++}
+diff --git a/internal/application/service/chat_pipeline/source_lineage_references_boundary.go b/internal/application/service/chat_pipeline/source_lineage_references_boundary.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2242f90e5edcaf07434a225ac98a269cc4055359
+--- /dev/null
++++ b/internal/application/service/chat_pipeline/source_lineage_references_boundary.go
+@@ -0,0 +1,23 @@
++package chatpipeline
++
++import (
++	"context"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// EmitSourceLineageResultsEvent accounts the original results at their actual
++// event boundary. Shape refusal precedes the event's owner-first current check;
++// no authority from an earlier boundary is reused. The checked public wrappers
++// remain available to callers whose accounting and emission are separate.
++func EmitSourceLineageResultsEvent(ctx context.Context, bus types.EventBusInterface, results []*types.SearchResult, evt types.Event) error {
++	if turn := types.RAGSourceLineageFromContext(ctx); turn != nil {
++		if err := collectResultSourceLineage(turn, results); err != nil {
++			return err
++		}
++		if err := turn.Snapshot().RequireComplete(); err != nil {
++			return err
++		}
++	}
++	return emitSourceLineageEvent(ctx, bus, evt)
++}
+diff --git a/internal/application/service/chat_pipeline/source_lineage_references_boundary_test.go b/internal/application/service/chat_pipeline/source_lineage_references_boundary_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fefb9a87316ff8ee0e30bb5e22238608873ceb6c
+--- /dev/null
++++ b/internal/application/service/chat_pipeline/source_lineage_references_boundary_test.go
+@@ -0,0 +1,284 @@
++package chatpipeline
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++type referencesBoundaryBusForTest struct {
++	events []types.Event
++	calls  int
++	err    error
++}
++
++func (*referencesBoundaryBusForTest) On(types.EventType, types.EventHandler) {}
++func (bus *referencesBoundaryBusForTest) Emit(_ context.Context, evt types.Event) error {
++	bus.calls++
++	if bus.err != nil {
++		return bus.err
++	}
++	bus.events = append(bus.events, evt)
++	return nil
++}
++
++func referencesBoundaryEventForTest(results []*types.SearchResult) types.Event {
++	return types.Event{
++		ID: "references", Type: types.EventType(event.EventAgentReferences), SessionID: "session",
++		Data: event.AgentReferencesData{References: results},
++	}
++}
++
++func TestSourceLineageReferencesBoundaryCompleteUnionOnce(t *testing.T) {
++	prior := inputBoundaryLineageForTest(t, "77", "prior")
++	first := inputBoundaryLineageForTest(t, "78", "first-reference")
++	second := inputBoundaryLineageForTest(t, "79", "second-reference")
++	expected, err := types.UnionSourceLineage(prior, first, second)
++	require.NoError(t, err)
++	checks, owners := 0, 0
++	ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { owners++; return nil }, nil)
++	turn := types.NewRAGSourceLineage(func(ctx context.Context, lineage *types.SourceLineage) error {
++		if err := types.CheckHistoryMaterialLifetime(ctx); err != nil {
++			return err
++		}
++		checks++
++		require.Equal(t, expected, lineage)
++		return nil
++	})
++	require.NoError(t, turn.Add(prior))
++	ctx = types.WithRAGSourceLineage(ctx, turn)
++	results := []*types.SearchResult{{ID: "first", Content: "original first", SourceLineage: first}, {ID: "second", Content: "original second", SourceLineage: second}, {ID: "duplicate", SourceLineage: first}}
++	bus := &referencesBoundaryBusForTest{}
++	require.NoError(t, EmitSourceLineageResultsEvent(ctx, bus, results, referencesBoundaryEventForTest(results)))
++	require.Equal(t, 1, checks, "the real event boundary checks the full retained union once")
++	require.Equal(t, 2, owners, "retain the explicit event owner and the production authorizer's owner check")
++	require.Len(t, bus.events, 1)
++	require.Equal(t, expected, bus.events[0].SourceLineage)
++	require.Equal(t, results, bus.events[0].Data.(event.AgentReferencesData).References)
++	require.Equal(t, first, results[0].SourceLineage, "accounting does not replace the original result receipt")
++}
++
++func TestSourceLineageReferencesBoundaryUnknownAndShapeStayClosed(t *testing.T) {
++	for _, mode := range []string{"nil-result", "missing-receipt", "unknown-receipt", "malformed-receipt", "unknown-prefix"} {
++		t.Run(mode, func(t *testing.T) {
++			proof := inputBoundaryLineageForTest(t, "77", "original")
++			checks, owners := 0, 0
++			ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { owners++; return errors.New("retired owner") }, nil)
++			turn := types.NewRAGSourceLineage(func(context.Context, *types.SourceLineage) error { checks++; return nil })
++			ctx = types.WithRAGSourceLineage(ctx, turn)
++			var bad *types.SearchResult
++			switch mode {
++			case "missing-receipt":
++				bad = &types.SearchResult{}
++			case "unknown-receipt":
++				bad = &types.SearchResult{SourceLineage: types.UnknownSourceLineage()}
++			case "malformed-receipt":
++				bad = &types.SearchResult{SourceLineage: &types.SourceLineage{Version: -1, State: types.SourceLineageComplete, Sources: []types.SourceIdentity{}}}
++			case "unknown-prefix":
++				require.NoError(t, turn.Add(types.UnknownSourceLineage()))
++				bad = &types.SearchResult{SourceLineage: proof}
++			}
++			bus := &referencesBoundaryBusForTest{}
++			results := []*types.SearchResult{{SourceLineage: proof}, bad, {SourceLineage: proof}}
++			err := EmitSourceLineageResultsEvent(ctx, bus, results, referencesBoundaryEventForTest(results))
++			if mode == "malformed-receipt" {
++				require.ErrorIs(t, err, types.ErrSourceLineageInvalid)
++			} else {
++				require.ErrorIs(t, err, types.ErrSourceLineageUnknown)
++			}
++			require.Error(t, turn.Snapshot().RequireComplete())
++			valid := []*types.SearchResult{{SourceLineage: proof}}
++			require.Error(t, EmitSourceLineageResultsEvent(ctx, bus, valid, referencesBoundaryEventForTest(valid)), "later complete results cannot repair an unknown original input")
++			require.Zero(t, owners, "result/prefix shape refusal retains priority over the owner boundary")
++			require.Zero(t, checks)
++			require.Zero(t, bus.calls)
++		})
++	}
++}
++
++func TestSourceLineageReferencesBoundaryOwnerPrecedesSource(t *testing.T) {
++	for _, rag := range []bool{false, true} {
++		t.Run(map[bool]string{false: "non-rag", true: "rag"}[rag], func(t *testing.T) {
++			proof := inputBoundaryLineageForTest(t, "77", "original")
++			ownerErr := errors.New("actual original owner retired")
++			ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { return ownerErr }, nil)
++			checks := 0
++			turn := types.NewRAGSourceLineage(func(context.Context, *types.SourceLineage) error {
++				checks++
++				return access.ErrNextcloudPublicationDenied
++			})
++			if rag {
++				ctx = types.WithRAGSourceLineage(ctx, turn)
++			}
++			bus := &referencesBoundaryBusForTest{}
++			results := []*types.SearchResult{{SourceLineage: proof}}
++			require.ErrorIs(t, EmitSourceLineageResultsEvent(ctx, bus, results, referencesBoundaryEventForTest(results)), ownerErr)
++			require.Zero(t, checks, "the unchanged explicit event owner check precedes source authorization")
++			require.Zero(t, bus.calls)
++			if rag {
++				require.Equal(t, proof, turn.Snapshot(), "results are accounted without granting their current owner")
++			}
++		})
++	}
++	t.Run("retired-during-current-check", func(t *testing.T) {
++		ownerErr := errors.New("original owner retired during current authorization")
++		var retired bool
++		ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error {
++			if retired {
++				return ownerErr
++			}
++			return nil
++		}, nil)
++		turn := types.NewRAGSourceLineage(func(ctx context.Context, _ *types.SourceLineage) error {
++			retired = true
++			return types.CheckHistoryMaterialLifetime(ctx)
++		})
++		ctx = types.WithRAGSourceLineage(ctx, turn)
++		bus := &referencesBoundaryBusForTest{}
++		require.ErrorIs(t, EmitSourceLineageResultsEvent(ctx, bus, nil, referencesBoundaryEventForTest(nil)), ownerErr)
++		require.Zero(t, bus.calls)
++	})
++}
++
++func TestSourceLineageReferencesBoundaryConcurrentAdditionRetries(t *testing.T) {
++	for _, unknown := range []bool{false, true} {
++		t.Run(map[bool]string{false: "refused-source", true: "unknown-input"}[unknown], func(t *testing.T) {
++			first := inputBoundaryLineageForTest(t, "77", "original")
++			added := inputBoundaryLineageForTest(t, "78", "concurrent")
++			expected, err := types.UnionSourceLineage(first, added)
++			require.NoError(t, err)
++			entered, completed := make(chan struct{}), make(chan error, 1)
++			checks := 0
++			turn := types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++				checks++
++				if checks == 1 {
++					require.Equal(t, first, lineage)
++					close(entered)
++					require.NoError(t, <-completed)
++					return nil
++				}
++				require.Equal(t, expected, lineage)
++				return access.ErrNextcloudPublicationDenied
++			})
++			go func() {
++				<-entered
++				if unknown {
++					completed <- turn.Add(types.UnknownSourceLineage())
++				} else {
++					completed <- turn.Add(added)
++				}
++			}()
++			ctx := types.WithRAGSourceLineage(context.Background(), turn)
++			bus := &referencesBoundaryBusForTest{}
++			results := []*types.SearchResult{{SourceLineage: first}}
++			err = EmitSourceLineageResultsEvent(ctx, bus, results, referencesBoundaryEventForTest(results))
++			if unknown {
++				require.ErrorIs(t, err, types.ErrSourceLineageUnknown)
++				require.Equal(t, 1, checks)
++			} else {
++				require.ErrorIs(t, err, access.ErrNextcloudPublicationDenied)
++				require.Equal(t, 2, checks, "the real accumulator retries the expanded union")
++			}
++			require.Zero(t, bus.calls, "the earlier success cannot certify a concurrently added original input")
++		})
++	}
++}
++
++func TestSourceLineageReferencesBoundaryCurrentAuthorityAndBusFailure(t *testing.T) {
++	for _, revoked := range []string{"source", "owner", "cancel"} {
++		t.Run(revoked, func(t *testing.T) {
++			proof := inputBoundaryLineageForTest(t, "77", "original")
++			current := proof.Sources[0]
++			var ownerErr error
++			ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { return ownerErr }, nil)
++			checks := 0
++			turn := types.NewRAGSourceLineage(func(ctx context.Context, lineage *types.SourceLineage) error {
++				if err := types.CheckHistoryMaterialLifetime(ctx); err != nil {
++					return err
++				}
++				checks++
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				require.Equal(t, proof, lineage)
++				if lineage.Sources[0] != current {
++					return access.ErrNextcloudPublicationDenied
++				}
++				return nil
++			})
++			ctx, cancel := context.WithCancel(types.WithRAGSourceLineage(ctx, turn))
++			defer cancel()
++			bus := &referencesBoundaryBusForTest{}
++			results := []*types.SearchResult{{SourceLineage: proof}}
++			require.NoError(t, EmitSourceLineageResultsEvent(ctx, bus, results, referencesBoundaryEventForTest(results)))
++			var expectedErr error = access.ErrNextcloudPublicationDenied
++			switch revoked {
++			case "source":
++				current.Revision++
++			case "owner":
++				ownerErr = errors.New("current owner withdrawn")
++				expectedErr = ownerErr
++			case "cancel":
++				cancel()
++				expectedErr = context.Canceled
++			}
++			require.ErrorIs(t, EmitSourceLineageResultsEvent(ctx, bus, nil, referencesBoundaryEventForTest(nil)), expectedErr, "empty later results retain and freshly check the original union")
++			require.Len(t, bus.events, 1)
++			if revoked == "owner" {
++				require.Equal(t, 1, checks)
++			} else {
++				require.Equal(t, 2, checks)
++			}
++		})
++	}
++	t.Run("source-withdrawn-during-current-check", func(t *testing.T) {
++		proof := inputBoundaryLineageForTest(t, "77", "original")
++		current := proof.Sources[0]
++		turn := types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++			current.Revision++
++			require.Equal(t, proof, lineage)
++			if lineage.Sources[0] != current {
++				return access.ErrNextcloudPublicationDenied
++			}
++			return nil
++		})
++		ctx := types.WithRAGSourceLineage(context.Background(), turn)
++		bus := &referencesBoundaryBusForTest{}
++		results := []*types.SearchResult{{SourceLineage: proof}}
++		require.ErrorIs(t, EmitSourceLineageResultsEvent(ctx, bus, results, referencesBoundaryEventForTest(results)), access.ErrNextcloudPublicationDenied)
++		require.Zero(t, bus.calls, "the event cannot rely on an earlier source version while its current authorizer runs")
++	})
++	t.Run("production-current-actor", func(t *testing.T) {
++		actor := &inputBoundaryCurrentActorForTest{active: true}
++		guard := access.NewNextcloudSourceLineageGuard(nil, nil, nil, nil, nil, nil, actor)
++		manager := NewEventManager()
++		ConfigureSourceLineage(manager, guard)
++		ctx := types.WithCaller(context.Background(), types.Caller{TenantID: 7, UserID: "human", Role: types.TenantRoleAdmin})
++		ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalWebUser, ID: "human"})
++		ctx, err := manager.BeginSourceLineage(ctx, &types.ChatManage{}, access.LineageReadScope{})
++		require.NoError(t, err)
++		bus := &referencesBoundaryBusForTest{}
++		require.NoError(t, EmitSourceLineageResultsEvent(ctx, bus, nil, referencesBoundaryEventForTest(nil)))
++		actor.active = false
++		require.ErrorIs(t, EmitSourceLineageResultsEvent(ctx, bus, nil, referencesBoundaryEventForTest(nil)), access.ErrNextcloudPublicationDenied)
++		require.Len(t, bus.events, 1, "a prior event cannot cache the real current actor grant")
++	})
++	t.Run("bus-failure-poisons-later-emission", func(t *testing.T) {
++		checks := 0
++		turn := types.NewRAGSourceLineage(func(context.Context, *types.SourceLineage) error { checks++; return nil })
++		ctx := types.WithRAGSourceLineage(context.Background(), turn)
++		busErr := errors.New("actual reference sink failed")
++		bus := &referencesBoundaryBusForTest{err: busErr}
++		require.ErrorIs(t, EmitSourceLineageResultsEvent(ctx, bus, nil, referencesBoundaryEventForTest(nil)), busErr)
++		bus.err = nil
++		require.ErrorIs(t, EmitSourceLineageResultsEvent(ctx, bus, nil, referencesBoundaryEventForTest(nil)), types.ErrSourceLineageUnknown)
++		require.Equal(t, 1, checks)
++		require.Equal(t, 1, bus.calls)
++		require.Empty(t, bus.events)
++	})
 +}
 diff --git a/internal/application/service/chunk.go b/internal/application/service/chunk.go
 index 8727ca04084ba1b892cbe0ef216ea4d0a1e2ac19..104954a1bfafc5e7ed585f9423bccb8e5b461665 100644
@@ -124811,7 +125153,7 @@ index fab799e6159efc38883a9bde3b320123c36c2a9c..ac0980e9528fe25188d55fb95cac15a2
  
  func TestForkUsesProvidedTitle(t *testing.T) {
 diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
-index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d95ada565a 100644
+index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..cd729bd292b66814d6ddc08d8168395b85aefe0f 100644
 --- a/internal/application/service/session_knowledge_qa.go
 +++ b/internal/application/service/session_knowledge_qa.go
 @@ -7,6 +7,7 @@ import (
@@ -124922,7 +125264,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  		if err := s.revalidateSearchTargets(ctx, chatManage.SearchTargets); err != nil {
  			return err
  		}
-@@ -804,21 +868,39 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -804,21 +868,36 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  		if eventType == types.QUERY_UNDERSTAND && chatpipeline.ShouldEmitQueryUnderstandProgress(chatManage) {
  			understandStart = stageStart
  			understandProgress = chatpipeline.BeginQueryUnderstandProgress(stageCtx, chatManage)
@@ -124943,9 +125285,6 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  		// already closed the stream, so the frontend only saw citations on refresh.
  		if eventType == types.CHAT_COMPLETION_STREAM {
 -			emitKnowledgeReferencesEvent(ctx, chatManage)
-+			if err := chatpipeline.AccountResults(ctx, chatManage.MergeResult); err != nil {
-+				return err
-+			}
 +			if err := emitKnowledgeReferencesEvent(ctx, chatManage); err != nil {
 +				return err
 +			}
@@ -124964,7 +125303,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  			understandProgress = nil
  		}
  		// Close the consolidated retrieval progress window as soon as retrieval
-@@ -829,7 +911,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -829,7 +908,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  		// tool_call pending — so the frontend keeps spinning on "正在检索知识库"
  		// forever even though the fallback answer has already streamed.
  		if retrievalProgress != nil && chatpipeline.ShouldCloseRetrievalProgress(eventType, lastRetrievalStage, err) {
@@ -124975,7 +125314,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  			retrievalProgress = nil
  		}
  		stageDuration := time.Since(stageStart)
-@@ -868,7 +952,12 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -868,7 +949,12 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  				"reason":      "search_nothing",
  				"strategy":    string(chatManage.FallbackStrategy),
  			})
@@ -124989,7 +125328,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  			return nil
  		}
  
-@@ -888,6 +977,14 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -888,6 +974,14 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  		})
  	}
  
@@ -125004,7 +125343,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  	common.PipelineInfo(ctx, "Pipeline", "all_stages_complete", map[string]interface{}{
  		"session_id":        chatManage.SessionID,
  		"total_stages":      len(eventList),
-@@ -1018,23 +1115,32 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
+@@ -1018,23 +1112,32 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
  }
  
  // handleFallbackResponse handles fallback response based on strategy
@@ -125041,7 +125380,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  	// Check if FallbackPrompt is available
  	if chatManage.FallbackPrompt == "" {
  		logger.Warnf(ctx, "Fallback strategy is 'model' but FallbackPrompt is empty, falling back to fixed response")
-@@ -1194,6 +1300,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
+@@ -1194,6 +1297,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
  		if total >= maxDocuments {
  			break
  		}
@@ -125053,28 +125392,33 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d9
  		knowledges, err := s.knowledgeService.ListKnowledgeByKnowledgeBaseID(ctx, kbID)
  		if err != nil {
  			logger.Warnf(ctx, "buildKBDocumentListing: failed to list knowledge for KB %s: %v", kbID, err)
-@@ -1296,12 +1407,12 @@ func (s *sessionService) consumeFallbackStream(
+@@ -1296,12 +1404,14 @@ func (s *sessionService) consumeFallbackStream(
  // remain available even when inline citations in the model answer are disabled.
  // Must run before CHAT_COMPLETION_STREAM so the event arrives while the
  // connection is still open (complete closes the stream).
 -func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatManage) {
-+func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatManage) error {
- 	if chatManage == nil || chatManage.EventBus == nil || len(chatManage.MergeResult) == 0 {
+-	if chatManage == nil || chatManage.EventBus == nil || len(chatManage.MergeResult) == 0 {
 -		return
++func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatManage) error {
++	if chatManage == nil {
 +		return nil
  	}
- 	logger.Infof(ctx, "Emitting references event with %d results (pre-answer)", len(chatManage.MergeResult))
+-	logger.Infof(ctx, "Emitting references event with %d results (pre-answer)", len(chatManage.MergeResult))
 -	if err := chatManage.EventBus.Emit(ctx, types.Event{
-+	if err := chatpipeline.EmitSourceLineageEvent(ctx, chatManage.EventBus, types.Event{
++	if chatManage.EventBus == nil || len(chatManage.MergeResult) == 0 {
++		return chatpipeline.AccountResults(ctx, chatManage.MergeResult)
++	}
++	if err := chatpipeline.EmitSourceLineageResultsEvent(ctx, chatManage.EventBus, chatManage.MergeResult, types.Event{
  		ID:        generateEventID("references"),
  		Type:      types.EventType(event.EventAgentReferences),
  		SessionID: chatManage.SessionID,
-@@ -1310,20 +1421,25 @@ func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatMan
+@@ -1310,20 +1420,26 @@ func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatMan
  		},
  	}); err != nil {
  		logger.Errorf(ctx, "Failed to emit references event: %v", err)
 +		return err
  	}
++	logger.Infof(ctx, "Emitted references event with %d results (pre-answer)", len(chatManage.MergeResult))
 +	return nil
  }
  
@@ -125935,6 +126279,106 @@ index 0000000000000000000000000000000000000000..dc2d62083fbc98f2f6deb6f99b3e77b7
 +		out = append(out, &copy)
 +	}
 +	return out
++}
+diff --git a/internal/application/service/source_lineage_references_boundary_test.go b/internal/application/service/source_lineage_references_boundary_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e143ab56920da075c88a11805d9f3fed71027567
+--- /dev/null
++++ b/internal/application/service/source_lineage_references_boundary_test.go
+@@ -0,0 +1,94 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestSourceLineageReferencesBoundaryNoEmissionStillChecksCurrentUnion(t *testing.T) {
++	for _, mode := range []string{"no-bus", "empty-results", "no-bus-and-empty-results"} {
++		for _, revoked := range []string{"source", "actor", "owner", "cancel"} {
++			t.Run(mode+"/"+revoked, func(t *testing.T) {
++				prior := sourceLineageStageProofForTest(t, "1")
++				result := sourceLineageStageProofForTest(t, "2")
++				cm := &types.ChatManage{}
++				cm.SessionID = "references-session"
++				expected := prior
++				if mode == "no-bus" {
++					cm.MergeResult = []*types.SearchResult{{SourceLineage: result}}
++					var err error
++					expected, err = types.UnionSourceLineage(prior, result)
++					require.NoError(t, err)
++				}
++				bus := event.NewEventBus()
++				emissions := 0
++				bus.On(event.EventAgentReferences, func(context.Context, event.Event) error { emissions++; return nil })
++				if mode == "empty-results" {
++					cm.EventBus = bus.AsEventBusInterface()
++				}
++				var ownerErr, actorErr error
++				current := prior.Sources[0]
++				ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { return ownerErr }, nil)
++				checks := 0
++				turn := types.NewRAGSourceLineage(func(ctx context.Context, lineage *types.SourceLineage) error {
++					checks++
++					if err := types.CheckHistoryMaterialLifetime(ctx); err != nil {
++						return err
++					}
++					if err := ctx.Err(); err != nil {
++						return err
++					}
++					if actorErr != nil {
++						return actorErr
++					}
++					require.Equal(t, expected, lineage, "omitting the visible event cannot omit any retained dependency")
++					for _, source := range lineage.Sources {
++						if source.KnowledgeID == current.KnowledgeID && source != current {
++							return access.ErrNextcloudPublicationDenied
++						}
++					}
++					return nil
++				})
++				require.NoError(t, turn.Add(prior))
++				ctx, cancel := context.WithCancel(types.WithRAGSourceLineage(ctx, turn))
++				defer cancel()
++				require.NoError(t, emitKnowledgeReferencesEvent(ctx, cm))
++				require.Equal(t, 1, checks)
++				var expectedErr error = access.ErrNextcloudPublicationDenied
++				switch revoked {
++				case "source":
++					current.Revision++
++				case "actor":
++					actorErr = errors.New("current actor withdrawn")
++					expectedErr = actorErr
++				case "owner":
++					ownerErr = errors.New("current original owner withdrawn")
++					expectedErr = ownerErr
++				case "cancel":
++					cancel()
++					expectedErr = context.Canceled
++				}
++				require.ErrorIs(t, emitKnowledgeReferencesEvent(ctx, cm), expectedErr)
++				require.Equal(t, 2, checks, "a no-event invocation still uses the original checked AccountResults wrapper")
++				require.Zero(t, emissions)
++			})
++		}
++	}
++	t.Run("no-bus-unknown-cannot-be-repaired", func(t *testing.T) {
++		checks := 0
++		turn := types.NewRAGSourceLineage(func(context.Context, *types.SourceLineage) error { checks++; return nil })
++		ctx := types.WithRAGSourceLineage(context.Background(), turn)
++		cm := &types.ChatManage{}
++		cm.MergeResult = []*types.SearchResult{nil}
++		require.ErrorIs(t, emitKnowledgeReferencesEvent(ctx, cm), types.ErrSourceLineageUnknown)
++		cm.MergeResult = []*types.SearchResult{{SourceLineage: sourceLineageStageProofForTest(t, "1")}}
++		require.ErrorIs(t, emitKnowledgeReferencesEvent(ctx, cm), types.ErrSourceLineageUnknown)
++		require.Zero(t, checks)
++	})
 +}
 diff --git a/internal/application/service/source_lineage_stage_boundary.go b/internal/application/service/source_lineage_stage_boundary.go
 new file mode 100644
