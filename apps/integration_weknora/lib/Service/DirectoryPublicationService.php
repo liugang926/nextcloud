@@ -19,6 +19,109 @@ final class DirectoryPublicationService {
         private DirectoryGrantSnapshotService $grants, private EmployeeFileStatusService $statuses,
         private RootMigrationService $rootMoves, private TargetMigrationService $targetMoves, private ControlRecoveryService $recovery) {}
 
+    /** Observes existing authority; it never grants, chooses or resumes a manager. */
+    public function authorizeCurrentManager(string $bindingId, array $scope): array {
+        $scope = ManagerAuthorizationProtocol::request($bindingId, $scope);
+        $before = $this->currentManagerMetadata($bindingId, $scope);
+        $after = $this->currentManagerMetadata($bindingId, $scope);
+        if ($before !== $after) { throw new \UnexpectedValueException('Manager authority changed'); }
+        return ManagerAuthorizationProtocol::decision($bindingId, $scope, true, 'authorized') + [
+            'root_file_id' => (string)$after['root_file_id'], 'rule_id' => $after['rule_id'],
+            'rule_revision' => (string)$after['rule_revision'],
+            'publication_epoch' => (string)$after['publication_epoch'],
+            'policy_revision' => hash('sha256', json_encode($after, JSON_THROW_ON_ERROR)),
+        ];
+    }
+
+    /** No folder name, request name, document or template body is projected. */
+    private function currentManagerMetadata(string $bindingId, array $scope): array {
+        $this->recovery->requireAutomationOpen($this->config);
+        // Absence is unknown, not an implicit reopened recovery control.
+        $gateQuery = $this->db->getQueryBuilder();
+        $gateResult = $gateQuery->select('closed')->from('weknora_control_gate')
+            ->where($gateQuery->expr()->eq('id', $gateQuery->createNamedParameter(1)))->executeQuery();
+        try { $gate = $gateResult->fetchAssociative(); } finally { $gateResult->closeCursor(); }
+        ManagerAuthorizationProtocol::requireRecoveryOpen($gate);
+
+        if ($this->config->getSystemValueString('instanceid') !== $scope['instance_id']) {
+            throw new \UnexpectedValueException('Manager instance is unavailable');
+        }
+        DirectoryTargetClosureService::requireOpen($this->db, $bindingId);
+        $pair = $this->pairs->status($bindingId);
+        if ($pair === null || $pair['state'] !== 'active' || $pair['binding_id'] !== $bindingId) {
+            throw new \UnexpectedValueException('Manager pair is unavailable');
+        }
+        foreach (['instance_id', 'operation_id', 'tenant_id', 'knowledge_base_id', 'data_source_id'] as $key) {
+            if (($pair[$key] ?? null) !== $scope[$key]) { throw new \UnexpectedValueException('Manager pair changed'); }
+        }
+        $binding = null;
+        foreach ($this->bindings->listBindings() as $candidate) {
+            if ($candidate['id'] === $bindingId) { $binding = $candidate; break; }
+        }
+        if ($binding === null) { throw new \UnexpectedValueException('Manager binding unavailable'); }
+        $epoch = $this->bindings->requirePublicationActive($bindingId);
+        $root = $this->bindings->requireActiveRoot($bindingId);
+        $this->acl->assertTreeSupported($root);
+        $intent = $this->managerIntentMetadata($scope['operation_id']);
+        if ($intent === null || !in_array($intent['state'], ['pending', 'active'], true) || $intent['binding_id'] !== $bindingId ||
+            (int)$intent['root_file_id'] !== $root->getId() ||
+            $intent['root_key'] !== self::physicalKey($root) ||
+            $intent['processing_template_id'] !== $scope['processing_template_id']) {
+            throw new \UnexpectedValueException('Manager intent unavailable');
+        }
+        $rule = $this->rule($intent['rule_id']);
+        $matching = $this->matchingRule($root);
+        if ($matching === null || $matching['id'] !== $rule['id'] ||
+            !is_array($rule['delegates'] ?? null) || !array_is_list($rule['delegates']) ||
+            !is_int($rule['revision'] ?? null) || $rule['revision'] <= 0) {
+            throw new \UnexpectedValueException('Manager rule unavailable');
+        }
+        $allowed = array_filter($this->targetChoices($rule), static fn(array $target): bool =>
+            ($target['tenant_id'] ?? null) === $scope['tenant_id'] &&
+            ($target['processing_template_id'] ?? null) === $scope['processing_template_id']);
+        if (count($allowed) !== 1) { throw new CurrentManagerDeniedException('Current target policy revoked'); }
+        DirectoryTenantDeletionService::requireTenantOpen($this->db, $rule['weknora_origin'], $scope['tenant_id']);
+        $identity = $this->identities->resolve($scope['directory_id'], $scope['object_guid']);
+        if ($identity === null) { throw new CurrentManagerDeniedException('Current identity denied'); }
+        $admin = $this->groups->isAdmin($identity['uid']);
+        if (!$admin && !in_array($identity['uid'], $rule['delegates'], true)) {
+            throw new CurrentManagerDeniedException('Current publication delegate revoked');
+        }
+        // A publication delegate also needs its own current root view. This is
+        // independent of, and cannot replace, per-file source READ authority.
+        $view = $this->files->getUserFolder($identity['uid']);
+        $readable = false;
+        foreach ($view->getById($root->getId()) as $candidate) {
+            if ($candidate instanceof Folder && $candidate->getId() === $root->getId() &&
+                $view->isSubNode($candidate) && $candidate->isReadable()) { $readable = true; break; }
+        }
+        if (!$readable) { throw new CurrentManagerDeniedException('Current root READ denied'); }
+        unset($rule['discovery_after_id']);
+        return ['scope' => $scope, 'binding_id' => $bindingId, 'pair' => $pair,
+            'root_file_id' => $root->getId(), 'root_hash' => SourcePairingRegistryService::rootHash($root),
+            'rule_id' => $rule['id'], 'rule_revision' => $rule['revision'],
+            'rule_sha256' => hash('sha256', json_encode($rule, JSON_THROW_ON_ERROR)),
+            'mapping_id' => $identity['mapping_id'], 'uid' => $identity['uid'],
+            'current_admin' => $admin, 'publication_epoch' => $epoch];
+    }
+
+    private function managerIntentMetadata(string $operationId): ?array {
+        $q = $this->db->getQueryBuilder();
+        $column = $q->getColumnName('request_json');
+        $template = match ($this->config->getSystemValueString('dbtype')) {
+            'pgsql' => "COALESCE($column::jsonb->>'processing_template_id','')",
+            'mysql' => "COALESCE(JSON_UNQUOTE(JSON_EXTRACT($column,'$.processing_template_id')),'')",
+            'sqlite', 'sqlite3' => "COALESCE(json_extract($column,'$.processing_template_id'),'')",
+            default => throw new \UnexpectedValueException('Manager metadata backend unavailable'),
+        };
+        $q->select('operation_id', 'binding_id', 'root_key', 'root_file_id', 'rule_id', 'state')
+            ->selectAlias($q->createFunction($template), 'processing_template_id')->from('weknora_dir_intent')
+            ->where($q->expr()->eq('operation_id', $q->createNamedParameter($operationId)))->setMaxResults(2);
+        $r = $q->executeQuery();
+        try { $rows = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
+        return count($rows) === 1 ? $rows[0] : null;
+    }
+
     public static function physicalKey(Folder $folder): string {
         // Filecache IDs remain stable on a rename and are shared across user views.
         return hash('sha256', 'nextcloud-filecache-root-v1' . "\0" . $folder->getId());

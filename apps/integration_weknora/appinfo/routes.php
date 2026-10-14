@@ -57,6 +57,12 @@ return [
             'verb' => 'POST',
             'requirements' => ['id' => '[A-Za-z0-9_-]+'],
         ],
+        [
+            'name' => 'manager_authorization#authorize',
+            'url' => '/api/v1/bindings/{id}/authorize-manager',
+            'verb' => 'POST',
+            'requirements' => ['id' => '[A-Za-z0-9_-]+'],
+        ],
         ['name' => 'identity_admin#index', 'url' => '/api/v1/admin/identities', 'verb' => 'GET'],
         ['name' => 'diagnostics#index', 'url' => '/api/v1/admin/diagnostics', 'verb' => 'GET'],
         ['name' => 'identity_admin#create', 'url' => '/api/v1/admin/identities', 'verb' => 'POST'],
