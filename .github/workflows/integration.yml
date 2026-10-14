@@ -232,8 +232,16 @@ jobs:
           export WEKNORA_ORIGINAL_BODY_TEST_CLI=/tmp/original-body-retention
           # Check the previously failing real transport paths before the full
           # selection. Their original per-request deadlines remain unchanged.
+          go test -json -tags sqlite_fts5 -p 1 ./internal/application/repository \
+            -run '^Test(OriginalBodyAvailabilityBatch(SQLite|Postgres)|OriginalBodyInlineRowActualSQLite|PostgresOriginalBodyInlineRowActual)$' \
+            -count=1 -timeout 20m > candidate-body-availability-preflight.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-body-availability-preflight.jsonl \
+            --require-test TestOriginalBodyAvailabilityBatchSQLite \
+            --require-test TestOriginalBodyAvailabilityBatchPostgres \
+            --require-test TestOriginalBodyInlineRowActualSQLite \
+            --require-test TestPostgresOriginalBodyInlineRowActual
           go test -json -tags sqlite_fts5 -p 1 ./internal/application/service/chat_pipeline ./internal/application/service \
-            -run '^TestSourceLineage(Input|Stage)Boundary' -count=1 -timeout 20m > candidate-lineage-preflight.jsonl
+            -run '^TestSourceLineage(Input|Stage|Model|Prompt)Boundary' -count=1 -timeout 20m > candidate-lineage-preflight.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-lineage-preflight.jsonl \
             --require-test TestSourceLineageInputBoundaryCompleteHistoryUnionAndFreshSourceVersion \
             --require-test TestSourceLineageInputBoundaryProductionGuardRefreshesCurrentActor \
@@ -243,7 +251,13 @@ jobs:
             --require-test TestSourceLineageStageBoundaryKeepsAllResultSetsAndPriorUnion \
             --require-test TestSourceLineageStageBoundaryEmptyGroupsRecheckCurrentAuthority \
             --require-test TestSourceLineageStageBoundaryNilAndUnknownCannotBeRepairedByLaterResults \
-            --require-test TestSourceLineageStageBoundaryCancellationUsesCurrentContext
+            --require-test TestSourceLineageStageBoundaryCancellationUsesCurrentContext \
+            --require-test TestSourceLineageModelBoundaryChecksCompleteFrozenUnionOnce \
+            --require-test TestSourceLineageModelBoundaryDenialAndShapeNeverCallSDK \
+            --require-test TestSourceLineageModelBoundaryPreservesSourceErrorBeforeFreezeError \
+            --require-test TestSourceLineageModelBoundaryRechecksCurrentAuthorityOnNextCall \
+            --require-test TestSourceLineagePromptBoundaryChecksCompleteUnionBeforePublicationReads \
+            --require-test TestSourceLineagePromptBoundaryUnknownAndOwnerFailuresDoNotRead
           go test -json -p 1 ./internal/handler/session \
             -run '^TestLiveSSE(SingleFrame|RawControlPhase)' -count=1 -timeout 20m > candidate-sse-preflight.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-sse-preflight.jsonl \

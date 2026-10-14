@@ -81827,6 +81827,236 @@ index 0000000000000000000000000000000000000000..e0c81acb2853ad9d4e6b96e1092a5416
 +		return nil
 +	})
 +}
+diff --git a/internal/application/repository/original_body_availability.go b/internal/application/repository/original_body_availability.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..48a87b33bec48f6c13269996784b1a4a7c861ec8
+--- /dev/null
++++ b/internal/application/repository/original_body_availability.go
+@@ -0,0 +1,51 @@
++package repository
++
++import (
++	"context"
++
++	"gorm.io/gorm"
++)
++
++const originalBodyAvailabilityBatchSize = 256
++
++// Load only current payload metadata for this one availability invocation.
++// Original field heads and external journal facts remain checked by the caller;
++// no body text, source grant, or result survives to another invocation.
++func originalBodyAvailabilityStates(ctx context.Context, tx *gorm.DB, heads []originalBodyFieldHead) (map[string]string, error) {
++	ids := make([]string, 0, len(heads))
++	seen := make(map[string]bool, len(heads))
++	for _, head := range heads {
++		if !seen[head.BodyID] {
++			seen[head.BodyID] = true
++			ids = append(ids, head.BodyID)
++		}
++	}
++	states := make(map[string]string, len(ids))
++	for start := 0; start < len(ids); start += originalBodyAvailabilityBatchSize {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		batch := ids[start:min(start+originalBodyAvailabilityBatchSize, len(ids))]
++		requested := make(map[string]bool, len(batch))
++		for _, id := range batch {
++			requested[id] = true
++		}
++		var rows []originalBodyPayload
++		if err := bodyInternal(tx).Select("id,state").Where("id IN ?", batch).Find(&rows).Error; err != nil {
++			return nil, err
++		}
++		for _, row := range rows {
++			if _, duplicate := states[row.ID]; duplicate || !requested[row.ID] {
++				return nil, ErrOriginalBodyUnavailable
++			}
++			states[row.ID] = row.State
++		}
++		if len(rows) != len(batch) {
++			return nil, gorm.ErrRecordNotFound
++		}
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	return states, nil
++}
+diff --git a/internal/application/repository/original_body_availability_batch_test.go b/internal/application/repository/original_body_availability_batch_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b539b141c4f653f1eb6c93a92e445862b98b5e3
+--- /dev/null
++++ b/internal/application/repository/original_body_availability_batch_test.go
+@@ -0,0 +1,167 @@
++package repository
++
++import (
++	"context"
++	"fmt"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++type availabilityMetadataObservationForTest struct {
++	queries, rows, largestBatch int
++}
++
++func observeAvailabilityMetadataForTest(t *testing.T, db *gorm.DB, after func(*gorm.DB)) *availabilityMetadataObservationForTest {
++	t.Helper()
++	observed := &availabilityMetadataObservationForTest{}
++	const name = "actual-availability-batch-metadata"
++	require.NoError(t, db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
++		if tx.Statement.Table != "original_body_payloads" || strings.Join(tx.Statement.Selects, ",") != "id,state" {
++			return
++		}
++		observed.queries++
++		observed.rows += int(tx.RowsAffected)
++		observed.largestBatch = max(observed.largestBatch, len(tx.Statement.Vars))
++		require.LessOrEqual(t, len(tx.Statement.Vars), originalBodyAvailabilityBatchSize, "each actual metadata query has a bounded ID list")
++		rows, ok := tx.Statement.Dest.(*[]originalBodyPayload)
++		require.True(t, ok)
++		for _, row := range *rows {
++			require.Nil(t, row.Payload, "availability metadata must not load original text")
++		}
++		if after != nil {
++			after(tx)
++		}
++	}))
++	t.Cleanup(func() { db.Callback().Query().Remove(name) })
++	return observed
++}
++
++func availabilityBatchMetadataFixtureForTest(t *testing.T, db *gorm.DB, count int) []originalBodyFieldHead {
++	t.Helper()
++	// These rows exercise only the private metadata reader. They create no
++	// source authorization, material receipt, field-head grant or purge proof.
++	rows := make([]originalBodyPayload, 0, count)
++	heads := make([]originalBodyFieldHead, 0, count)
++	for index := 0; index < count; index++ {
++		id := uuid.NewString()
++		body := fmt.Sprintf("owned metadata fixture original %d", index)
++		rows = append(rows, originalBodyPayload{
++			ID: id, TenantID: 7, BodySHA256: bodySHA([]byte(body)),
++			OriginDomainSHA256: bodySHA([]byte(id)), Payload: &body,
++			BodyBytes: int64(len(body)), StorageKind: "vault", State: "live",
++		})
++		heads = append(heads, originalBodyFieldHead{BodyID: id})
++	}
++	require.NoError(t, bodyInternal(db).CreateInBatches(rows, 32).Error)
++	return heads
++}
++
++func runOriginalBodyAvailabilityBatch(t *testing.T, pg bool) {
++	t.Run("actual-native-heads-and-fresh-next-call", func(t *testing.T) {
++		db, _ := bodyProtocolFixture(t, pg)
++		require.NoError(t, db.Model(&types.Knowledge{}).Where("id='one'").Updates(map[string]any{
++			"title": "native title", "file_name": "native file", "description": "native description",
++			"profile": types.JSON(`{"gist":"native profile"}`), "custom_metadata": types.JSON(`{"native":"metadata"}`),
++		}).Error)
++		var heads []originalBodyFieldHead
++		require.NoError(t, bodyInternal(db).Where("source_table='knowledges' AND row_key='one'").Find(&heads).Error)
++		unique := map[string]bool{}
++		for _, head := range heads {
++			unique[head.BodyID] = true
++		}
++		require.Greater(t, len(unique), 1)
++		observed := observeAvailabilityMetadataForTest(t, db, nil)
++		require.NoError(t, CheckOriginalBodyAvailableInTx(context.Background(), db, "knowledges", "one"))
++		require.Equal(t, 1, observed.queries, "one current native row uses one metadata SQL query")
++		require.Equal(t, len(unique), observed.rows)
++		require.NoError(t, bodyInternal(db).Model(&originalBodyPayload{}).Where("id=?", heads[0].BodyID).Update("state", "pending").Error)
++		require.ErrorIs(t, CheckOriginalBodyAvailableInTx(context.Background(), db, "knowledges", "one"), ErrOriginalBodyUnavailable,
++			"a previous invocation's live metadata cannot authorize a later nonlive original")
++		require.Equal(t, 2, observed.queries)
++	})
++
++	t.Run("duplicate-references-share-only-the-metadata-query", func(t *testing.T) {
++		db, _ := bodyProtocolFixture(t, pg)
++		id := bodyProtocolCreate(t, db, "batch-duplicate-owner", "one")
++		heads := []originalBodyFieldHead{{BodyID: id}, {BodyID: id}, {BodyID: id}}
++		observed := observeAvailabilityMetadataForTest(t, db, nil)
++		states, err := originalBodyAvailabilityStates(context.Background(), db, heads)
++		require.NoError(t, err)
++		require.Equal(t, map[string]string{id: "live"}, states)
++		require.Len(t, heads, 3, "deduplicating SQL identities must not remove original field references")
++		require.Equal(t, 1, observed.queries)
++		require.Equal(t, 1, observed.rows)
++		require.Equal(t, 1, observed.largestBatch)
++	})
++
++	t.Run("missing-current-payload", func(t *testing.T) {
++		db, _ := bodyProtocolFixture(t, pg)
++		observed := observeAvailabilityMetadataForTest(t, db, nil)
++		states, err := originalBodyAvailabilityStates(context.Background(), db, []originalBodyFieldHead{{BodyID: uuid.NewString()}})
++		require.ErrorIs(t, err, gorm.ErrRecordNotFound, "an actual empty SQL result retains the prior Take error")
++		require.Nil(t, states)
++		require.Equal(t, 1, observed.queries)
++		require.Zero(t, observed.rows)
++	})
++
++	for _, state := range []string{"pending", "purged"} {
++		t.Run("current-state-"+state, func(t *testing.T) {
++			db, _ := bodyProtocolFixture(t, pg)
++			id := bodyProtocolCreate(t, db, "batch-nonlive-owner", "one")
++			require.NoError(t, CheckOriginalBodyAvailableInTx(context.Background(), db, "knowledge_auto_tag_input_manifests", "batch-nonlive-owner"))
++			require.NoError(t, bodyInternal(db).Model(&originalBodyPayload{}).Where("id=?", id).Update("state", state).Error)
++			require.ErrorIs(t, CheckOriginalBodyAvailableInTx(context.Background(), db, "knowledge_auto_tag_input_manifests", "batch-nonlive-owner"), ErrOriginalBodyUnavailable)
++		})
++	}
++
++	t.Run("all-current-metadata-across-bounded-batches", func(t *testing.T) {
++		db, _ := bodyProtocolFixture(t, pg)
++		heads := availabilityBatchMetadataFixtureForTest(t, db, 2*originalBodyAvailabilityBatchSize+1)
++		uniqueCount := len(heads)
++		heads = append(heads, heads[0], heads[len(heads)-1])
++		observed := observeAvailabilityMetadataForTest(t, db, nil)
++		states, err := originalBodyAvailabilityStates(context.Background(), db, heads)
++		require.NoError(t, err)
++		require.Len(t, states, uniqueCount)
++		for _, head := range heads {
++			require.Equal(t, "live", states[head.BodyID])
++		}
++		require.Equal(t, 3, observed.queries, "513 unique bodies execute exactly three real bounded queries")
++		require.Equal(t, uniqueCount, observed.rows, "no current metadata is omitted or loaded twice")
++		require.Equal(t, originalBodyAvailabilityBatchSize, observed.largestBatch)
++	})
++
++	t.Run("cancel-at-last-actual-metadata-result", func(t *testing.T) {
++		db, _ := bodyProtocolFixture(t, pg)
++		heads := availabilityBatchMetadataFixtureForTest(t, db, 2*originalBodyAvailabilityBatchSize+1)
++		ctx, cancel := context.WithCancel(context.Background())
++		defer cancel()
++		returned, cancelled := int64(0), false
++		observed := observeAvailabilityMetadataForTest(t, db, func(tx *gorm.DB) {
++			returned += tx.RowsAffected
++			if returned == int64(len(heads)) {
++				require.NoError(t, ctx.Err(), "the caller remains live until the final actual metadata result")
++				cancelled = true
++				cancel()
++			}
++		})
++		_, err := originalBodyAvailabilityStates(ctx, db.WithContext(ctx), heads)
++		require.True(t, cancelled)
++		require.ErrorIs(t, err, context.Canceled, "finishing the SQL reads cannot hide final-result cancellation")
++		require.Equal(t, 3, observed.queries)
++		require.Equal(t, len(heads), observed.rows)
++	})
++}
++
++func TestOriginalBodyAvailabilityBatchSQLite(t *testing.T) {
++	runOriginalBodyAvailabilityBatch(t, false)
++}
++
++func TestOriginalBodyAvailabilityBatchPostgres(t *testing.T) {
++	runOriginalBodyAvailabilityBatch(t, true)
++}
 diff --git a/internal/application/repository/original_body_fields.go b/internal/application/repository/original_body_fields.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..7ab3bc05dbfb8d7ef65239087ee10f27d3508964
@@ -82721,10 +82951,10 @@ index 0000000000000000000000000000000000000000..26163a454079593c30ecb3321a5f456a
 +}
 diff --git a/internal/application/repository/original_body_inline_row_actual_test.go b/internal/application/repository/original_body_inline_row_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b80bfcbd62df40854beef62478b865cde6b4076
+index 0000000000000000000000000000000000000000..14da00789642cc57d39d0497f08bbf55ce6b47fd
 --- /dev/null
 +++ b/internal/application/repository/original_body_inline_row_actual_test.go
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,183 @@
 +package repository
 +
 +import (
@@ -82834,16 +83064,17 @@ index 0000000000000000000000000000000000000000..0b80bfcbd62df40854beef62478b865c
 +				defer db.Callback().Query().Remove("actual-inline-row-transition")
 +			}
 +			if mode == "mid-head-and-pin" || mode == "last-payload-cancel" {
-+				var headCount int64
-+				require.NoError(t, bodyInternal(db).Table("original_body_field_heads").Where("source_table='knowledges' AND row_key='one'").Count(&headCount).Error)
-+				payloadReads := int64(0)
++				var uniqueBodyCount int64
++				require.NoError(t, bodyInternal(db).Table("original_body_field_heads").Where("source_table='knowledges' AND row_key='one'").Distinct("body_id").Count(&uniqueBodyCount).Error)
++				payloadRowsRead := int64(0)
 +				require.NoError(t, db.Callback().Query().After("gorm:query").Register("actual-mid-availability-transition", func(tx *gorm.DB) {
 +					if tx.Statement.Table != "original_body_payloads" || triggered {
 +						return
 +					}
-+					payloadReads++
++					// Observe returned unique payloads, including the final real batch.
++					payloadRowsRead += tx.RowsAffected
 +					if mode == "last-payload-cancel" {
-+						if payloadReads == headCount {
++						if payloadRowsRead == uniqueBodyCount {
 +							triggered = true
 +							cancel()
 +						}
@@ -85806,10 +86037,10 @@ index 0000000000000000000000000000000000000000..eaf6eecd2943ad1410e4cb4731689553
 +}
 diff --git a/internal/application/repository/original_body_retention.go b/internal/application/repository/original_body_retention.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..87fce3ee2c6c7130b72f355a791bdb8f88860563
+index 0000000000000000000000000000000000000000..7f6c50189e2a36999a2124d626914b926965a2c1
 --- /dev/null
 +++ b/internal/application/repository/original_body_retention.go
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,274 @@
 +package repository
 +
 +import (
@@ -85961,15 +86192,22 @@ index 0000000000000000000000000000000000000000..87fce3ee2c6c7130b72f355a791bdb8f
 +			return ErrOriginalBodyUnavailable
 +		}
 +	}
++	states, err := originalBodyAvailabilityStates(ctx, tx, heads)
++	if err != nil {
++		return err
++	}
 +	for _, head := range heads {
-+		var body originalBodyPayload
-+		if e := bodyInternal(tx).Select("id,state").Where("id=?", head.BodyID).Take(&body).Error; e != nil {
-+			return e
++		if err := ctx.Err(); err != nil {
++			return err
 +		}
-+		if body.State != "live" {
++		state, found := states[head.BodyID]
++		if !found {
++			return gorm.ErrRecordNotFound
++		}
++		if state != "live" {
 +			return ErrOriginalBodyUnavailable
 +		}
-+		if e := store.checkExternalBody(body.ID); e != nil {
++		if e := store.checkExternalBody(head.BodyID); e != nil {
 +			return e
 +		}
 +	}
@@ -94264,42 +94502,21 @@ index bc9c7b86e5f5953656bb5e21718802cb58f92af8..7096ebe17e08427c7a475c705354af8d
  	_ = callerTenantRole
  	return agent, nil
 diff --git a/internal/application/service/chat_pipeline/chat_completion.go b/internal/application/service/chat_pipeline/chat_completion.go
-index 3a9ded2d9b74e21acd54a9112c44ba1bd94f82fb..fdef2eab5189d7fa4e8801f8f8d33f8231fc39d3 100644
+index 3a9ded2d9b74e21acd54a9112c44ba1bd94f82fb..af52713e0dd2c5a76166168a6b07dab99d3872a7 100644
 --- a/internal/application/service/chat_pipeline/chat_completion.go
 +++ b/internal/application/service/chat_pipeline/chat_completion.go
-@@ -2,6 +2,7 @@ package chatpipeline
- 
- import (
- 	"context"
-+	"github.com/Tencent/WeKnora/internal/models/api"
- 
- 	"github.com/Tencent/WeKnora/internal/types"
- 	"github.com/Tencent/WeKnora/internal/types/interfaces"
-@@ -59,6 +60,23 @@ func (p *PluginChatCompletion) OnEvent(
+@@ -59,6 +59,10 @@ func (p *PluginChatCompletion) OnEvent(
  	pipelineInfo(ctx, "Completion", "model_call", map[string]interface{}{
  		"chat_model": chatManage.ChatModelID,
  	})
-+	if err := CheckSourceLineageInputs(ctx, chatManage); err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	if err := AccountResults(ctx, chatManage.MergeResult); err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	chatMessages, err = api.FreezeSourceModelMessages(chatMessages)
++	chatMessages, opt, err = freezeSourceLineageModelBoundary(ctx, chatManage, chatMessages, opt)
 +	if err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	opt, err = api.FreezeSourceModelOptions(opt)
-+	if err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	if err := stampModelInputLineage(ctx, chatMessages); err != nil {
 +		return sourceLineagePluginError(err)
 +	}
  	chatResponse, err := chatModel.Chat(ctx, chatMessages, opt)
  	if err != nil {
  		pipelineError(ctx, "Completion", "model_call", map[string]interface{}{
-@@ -83,5 +101,12 @@ func (p *PluginChatCompletion) OnEvent(
+@@ -83,5 +87,12 @@ func (p *PluginChatCompletion) OnEvent(
  		"prompt_tokens":     chatResponse.Usage.PromptTokens,
  	})
  	chatManage.ChatResponse = chatResponse
@@ -94313,18 +94530,10 @@ index 3a9ded2d9b74e21acd54a9112c44ba1bd94f82fb..fdef2eab5189d7fa4e8801f8f8d33f82
  	return next()
  }
 diff --git a/internal/application/service/chat_pipeline/chat_completion_stream.go b/internal/application/service/chat_pipeline/chat_completion_stream.go
-index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200b6948dc5 100644
+index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..cc85243a6d0156e23032bc8a0c83f4fac5c3d181 100644
 --- a/internal/application/service/chat_pipeline/chat_completion_stream.go
 +++ b/internal/application/service/chat_pipeline/chat_completion_stream.go
-@@ -4,6 +4,7 @@ import (
- 	"context"
- 	"errors"
- 	"fmt"
-+	"github.com/Tencent/WeKnora/internal/models/api"
- 
- 	"github.com/Tencent/WeKnora/internal/event"
- 	"github.com/Tencent/WeKnora/internal/types"
-@@ -46,6 +47,13 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -46,6 +46,13 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  		"chat_model":     chatManage.ChatModelID,
  	})
  
@@ -94338,31 +94547,18 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  	// Prepare chat model and options
  	chatModel, opt, err := prepareChatModel(ctx, p.modelService, chatManage)
  	if err != nil {
-@@ -82,6 +90,23 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -82,6 +89,10 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  	pipelineInfo(ctx, "Stream", "model_call", map[string]interface{}{
  		"chat_model": chatManage.ChatModelID,
  	})
-+	if err := CheckSourceLineageInputs(ctx, chatManage); err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	if err := AccountResults(ctx, chatManage.MergeResult); err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	chatMessages, err = api.FreezeSourceModelMessages(chatMessages)
++	chatMessages, opt, err = freezeSourceLineageModelBoundary(ctx, chatManage, chatMessages, opt)
 +	if err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	opt, err = api.FreezeSourceModelOptions(opt)
-+	if err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	if err := stampModelInputLineage(ctx, chatMessages); err != nil {
 +		return sourceLineagePluginError(err)
 +	}
  	responseChan, err := chatModel.ChatStream(ctx, chatMessages, opt)
  	if err != nil {
  		pipelineError(ctx, "Stream", "model_call", map[string]interface{}{
-@@ -107,7 +132,32 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -107,7 +118,34 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  	// and plain answer text to EventAgentFinalAnswer, matching the Agent pipeline.
  	// The goroutine monitors ctx.Done() to avoid leaking when the context is cancelled
  	// and the upstream channel is not closed promptly.
@@ -94388,14 +94584,16 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
 +			// A pure code-origin failure control contains no provider/body/ref
 +			// data and never certifies the incomplete assistant. Its private bus
 +			// and exact session bind it to this owned producer instance.
-+			_ = eventBus.Emit(ctx, types.Event{Type: types.EventType(event.EventError), SessionID: chatManage.SessionID,
-+				Data: event.ErrorData{Stage: "source_output", Error: "Source output could not complete", SessionID: chatManage.SessionID}})
++			_ = eventBus.Emit(ctx, types.Event{
++				Type: types.EventType(event.EventError), SessionID: chatManage.SessionID,
++				Data: event.ErrorData{Stage: "source_output", Error: "Source output could not complete", SessionID: chatManage.SessionID},
++			})
 +			cancelLineage()
 +		}
  		answerDecoder := modelContext.StreamDecoder()
  		thinkingDecoder := modelContext.StreamDecoder()
  		thinkingID := fmt.Sprintf("%s-thinking", uuid.New().String()[:8])
-@@ -115,11 +165,11 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -115,11 +153,11 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  		thinkingOpen := false
  		answerCompleted := false
  
@@ -94410,7 +94608,7 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  				ID:        thinkingID,
  				Type:      types.EventType(event.EventAgentThought),
  				SessionID: chatManage.SessionID,
-@@ -127,7 +177,11 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -127,7 +165,11 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  					Done: true,
  				},
  			})
@@ -94422,7 +94620,7 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  		}
  
  		// flushDecoders drains any handle suffix the stream decoders held back to
-@@ -135,41 +189,64 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -135,41 +177,64 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  		// and the cancellation path must call this, otherwise a resource
  		// reference in flight at teardown is silently dropped (and never
  		// persisted, since the assistant message is saved from these events).
@@ -94496,7 +94694,7 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  					pipelineInfo(ctx, "Stream", "channel_close", map[string]interface{}{
  						"session_id": chatManage.SessionID,
  					})
-@@ -181,17 +258,8 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -181,17 +246,8 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  						"session_id": chatManage.SessionID,
  						"error":      response.Content,
  					})
@@ -94516,7 +94714,7 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  				}
  
  				if response.ResponseType == types.ResponseTypeThinking {
-@@ -201,7 +269,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -201,7 +257,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  					}
  					if response.Content != "" {
  						thinkingOpen = true
@@ -94525,7 +94723,7 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  							ID:        thinkingID,
  							Type:      types.EventType(event.EventAgentThought),
  							SessionID: chatManage.SessionID,
-@@ -209,10 +277,16 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -209,10 +265,16 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  								Content: response.Content,
  								Done:    false,
  							},
@@ -94544,7 +94742,7 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  					}
  					continue
  				}
-@@ -228,10 +302,12 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -228,10 +290,12 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  					response.Content = answerDecoder.Feed(response.Content)
  					if response.Done {
  						response.Content += answerDecoder.Flush()
@@ -94560,7 +94758,7 @@ index 9b466b2a43c1efce27d083bee7a29c9c6cea2986..4c4a1391dee2fe22888374abdddcb200
  						ID:        answerID,
  						Type:      types.EventType(event.EventAgentFinalAnswer),
  						SessionID: chatManage.SessionID,
-@@ -239,7 +315,17 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
+@@ -239,7 +303,17 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
  							Content: response.Content,
  							Done:    response.Done,
  						},
@@ -94975,7 +95173,7 @@ index 0000000000000000000000000000000000000000..6ba2669d02eb65016e6ff9d4125ba5f2
 +	}
 +}
 diff --git a/internal/application/service/chat_pipeline/into_chat_message.go b/internal/application/service/chat_pipeline/into_chat_message.go
-index e8f923ce10642ca806eef59d129bce6833e1ea61..2ac57007407be7167b3833ee66dc9ada169e3d50 100644
+index e8f923ce10642ca806eef59d129bce6833e1ea61..89f0f324ac02abbc8464a609ed72bf59b7692ca1 100644
 --- a/internal/application/service/chat_pipeline/into_chat_message.go
 +++ b/internal/application/service/chat_pipeline/into_chat_message.go
 @@ -6,6 +6,7 @@ import (
@@ -95005,14 +95203,11 @@ index e8f923ce10642ca806eef59d129bce6833e1ea61..2ac57007407be7167b3833ee66dc9ada
  	eventManager.Register(res)
  	return res
  }
-@@ -33,6 +37,16 @@ func (p *PluginIntoChatMessage) ActivationEvents() []types.EventType {
+@@ -33,6 +37,13 @@ func (p *PluginIntoChatMessage) ActivationEvents() []types.EventType {
  func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
  	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
  ) *PluginError {
-+	if err := AccountResults(ctx, chatManage.MergeResult); err != nil {
-+		return sourceLineagePluginError(err)
-+	}
-+	if err := CheckSourceLineageInputs(ctx, chatManage); err != nil {
++	if err := checkPromptSourceLineageBoundary(ctx, chatManage); err != nil {
 +		return sourceLineagePluginError(err)
 +	}
 +	// Merge can reintroduce cached references from earlier turns. Validate the
@@ -95022,7 +95217,7 @@ index e8f923ce10642ca806eef59d129bce6833e1ea61..2ac57007407be7167b3833ee66dc9ada
  	pipelineInfo(ctx, "IntoChatMessage", "input", map[string]interface{}{
  		"session_id":       chatManage.SessionID,
  		"merge_result_cnt": len(chatManage.MergeResult),
-@@ -199,10 +213,74 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
+@@ -199,10 +210,74 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
  	return next()
  }
  
@@ -95951,10 +96146,10 @@ index fb8ba98200d3b37b90de50fda3235711b84de53a..6a9b47c4cacb713d0b08ac8b477e601b
  		knowledgeService:     knowledgeService,
 diff --git a/internal/application/service/chat_pipeline/source_lineage.go b/internal/application/service/chat_pipeline/source_lineage.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a788ae7bd2
+index 0000000000000000000000000000000000000000..4a0fb4e75f433258ab21d1efc5994a328b588f78
 --- /dev/null
 +++ b/internal/application/service/chat_pipeline/source_lineage.go
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,177 @@
 +package chatpipeline
 +
 +import (
@@ -96011,6 +96206,13 @@ index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a7
 +	if turn == nil {
 +		return nil
 +	} // Non-RAG pipelines have not activated this producer.
++	if err := collectHistorySourceLineage(turn, history); err != nil {
++		return err
++	}
++	return turn.Check(ctx)
++}
++
++func collectHistorySourceLineage(turn *types.RAGSourceLineage, history []*types.History) error {
 +	for _, h := range history {
 +		if h == nil {
 +			_ = turn.Add(nil)
@@ -96020,7 +96222,7 @@ index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a7
 +			return err
 +		}
 +	}
-+	return turn.Check(ctx)
++	return nil
 +}
 +
 +func AccountResults(ctx context.Context, results []*types.SearchResult) error {
@@ -96028,6 +96230,13 @@ index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a7
 +	if turn == nil {
 +		return nil
 +	}
++	if err := collectResultSourceLineage(turn, results); err != nil {
++		return err
++	}
++	return turn.Check(ctx)
++}
++
++func collectResultSourceLineage(turn *types.RAGSourceLineage, results []*types.SearchResult) error {
 +	for _, result := range results {
 +		if result == nil {
 +			_ = turn.Add(nil)
@@ -96037,12 +96246,24 @@ index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a7
 +			return err
 +		}
 +	}
-+	return turn.Check(ctx)
++	return nil
 +}
 +
 +// CheckSourceLineageInputs checks every adapter used by the ordinary final
 +// prompt and every earlier influencing call. Unknown state is sticky.
 +func CheckSourceLineageInputs(ctx context.Context, cm *types.ChatManage) error {
++	if err := collectInputSourceLineage(ctx, cm); err != nil {
++		return err
++	}
++	if turn := types.RAGSourceLineageFromContext(ctx); turn != nil {
++		return turn.Check(ctx)
++	}
++	return nil
++}
++
++// Collection is private to a single prompt/model boundary. Callers must still
++// perform their fresh full-union check before consuming or publishing inputs.
++func collectInputSourceLineage(ctx context.Context, cm *types.ChatManage) error {
 +	if err := types.CheckHistoryMaterialLifetime(ctx); err != nil {
 +		return err
 +	}
@@ -96052,16 +96273,13 @@ index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a7
 +	}
 +	if cm == nil {
 +		_ = turn.Add(nil)
-+		return turn.Check(ctx)
++		return nil
 +	}
 +	if len(cm.Images) > 0 || len(cm.Attachments) > 0 || cm.QuotedContext != "" || cm.ImageDescription != "" ||
 +		cm.MemoryPrompt != "" || len(cm.UsedMemories) > 0 || cm.GraphResult != nil || len(cm.Entity) > 0 {
 +		_ = turn.Add(types.UnknownSourceLineage())
 +	}
-+	// AccountHistory checks the complete union after adding every history
-+	// input, including its current material-owner and source checks. Nothing
-+	// reads or changes inputs after that boundary here, so do not repeat it.
-+	return AccountHistory(ctx, cm.History)
++	return collectHistorySourceLineage(turn, cm.History)
 +}
 +
 +func sourceLineagePluginError(err error) *PluginError {
@@ -96289,6 +96507,451 @@ index 0000000000000000000000000000000000000000..2d0f5ca9c98f0b9d3823dcad7d9697ec
 +		"the first stable-looking allow cannot omit a concurrently added refused source")
 +	require.Equal(t, expected, turn.Snapshot())
 +	require.Equal(t, 2, checks, "the accumulator's real revision retry remains active")
++}
+diff --git a/internal/application/service/chat_pipeline/source_lineage_model_boundary.go b/internal/application/service/chat_pipeline/source_lineage_model_boundary.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..63e93f01c9b69741e9294f61c3162dcb006b33af
+--- /dev/null
++++ b/internal/application/service/chat_pipeline/source_lineage_model_boundary.go
+@@ -0,0 +1,66 @@
++package chatpipeline
++
++import (
++	"context"
++
++	"github.com/Tencent/WeKnora/internal/models/api"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// Prompt construction has not consumed the results or read current publication
++// rows yet. Account every original receipt before one fresh union check.
++func checkPromptSourceLineageBoundary(ctx context.Context, cm *types.ChatManage) error {
++	turn := types.RAGSourceLineageFromContext(ctx)
++	if turn != nil && cm != nil {
++		if err := collectResultSourceLineage(turn, cm.MergeResult); err != nil {
++			return err
++		}
++		// Preserve result-shape refusal before the input/owner boundary.
++		if err := turn.Snapshot().RequireComplete(); err != nil {
++			return err
++		}
++	}
++	if err := collectInputSourceLineage(ctx, cm); err != nil {
++		return err
++	}
++	if turn != nil {
++		return turn.Check(ctx)
++	}
++	return nil
++}
++
++// Freeze every wire-visible value before the final authorization callback.
++// That callback may change the original options/messages, but it cannot change
++// the detached SDK input. No checked result is cached for a later boundary.
++func freezeSourceLineageModelBoundary(ctx context.Context, cm *types.ChatManage, messages []chat.Message, options *chat.ChatOptions) ([]chat.Message, *chat.ChatOptions, error) {
++	if err := collectInputSourceLineage(ctx, cm); err != nil {
++		return nil, nil, err
++	}
++	if turn := types.RAGSourceLineageFromContext(ctx); turn != nil {
++		// Input/history shape errors retain priority over result/wire errors.
++		if err := turn.Snapshot().RequireComplete(); err != nil {
++			return nil, nil, err
++		}
++		if err := collectResultSourceLineage(turn, cm.MergeResult); err != nil {
++			return nil, nil, err
++		}
++		if err := turn.Snapshot().RequireComplete(); err != nil {
++			return nil, nil, err
++		}
++	}
++	frozenMessages, freezeErr := api.FreezeSourceModelMessages(messages)
++	var frozenOptions *chat.ChatOptions
++	if freezeErr == nil {
++		frozenOptions, freezeErr = api.FreezeSourceModelOptions(options)
++	}
++	// Keep current source/owner refusal ahead of a malformed wire snapshot,
++	// while checking only after all successful serialization has completed.
++	if err := stampModelInputLineage(ctx, frozenMessages); err != nil {
++		return nil, nil, err
++	}
++	if freezeErr != nil {
++		return nil, nil, freezeErr
++	}
++	return frozenMessages, frozenOptions, nil
++}
+diff --git a/internal/application/service/chat_pipeline/source_lineage_model_boundary_test.go b/internal/application/service/chat_pipeline/source_lineage_model_boundary_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6865c3ef5749f800c9b41d3064eaa400a117b74
+--- /dev/null
++++ b/internal/application/service/chat_pipeline/source_lineage_model_boundary_test.go
+@@ -0,0 +1,367 @@
++package chatpipeline
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++)
++
++var errSourceBoundarySDKReached = errors.New("controlled SDK boundary reached")
++
++type sourceBoundarySDKForTest struct {
++	calls    int
++	messages []chat.Message
++	options  *chat.ChatOptions
++}
++
++func (m *sourceBoundarySDKForTest) Chat(_ context.Context, messages []chat.Message, options *chat.ChatOptions) (*types.ChatResponse, error) {
++	m.calls++
++	m.messages, m.options = messages, options
++	return nil, errSourceBoundarySDKReached
++}
++
++func (m *sourceBoundarySDKForTest) ChatStream(_ context.Context, messages []chat.Message, options *chat.ChatOptions) (<-chan types.StreamResponse, error) {
++	m.calls++
++	m.messages, m.options = messages, options
++	return nil, errSourceBoundarySDKReached
++}
++
++func (*sourceBoundarySDKForTest) GetModelName() string { return "boundary-test" }
++func (*sourceBoundarySDKForTest) GetModelID() string   { return "boundary-test" }
++
++type sourceBoundaryActorForTest struct{ refreshes int }
++
++func (actor *sourceBoundaryActorForTest) RefreshCurrentReadActor(ctx context.Context) (context.Context, error) {
++	actor.refreshes++
++	if actor.refreshes > 1 {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	return ctx, nil
++}
++
++func sourceBoundaryManageForTest(t *testing.T) (*types.ChatManage, *types.SourceLineage, *types.SourceLineage) {
++	t.Helper()
++	prior := inputBoundaryLineageForTest(t, "77", "prior")
++	history := inputBoundaryLineageForTest(t, "78", "history")
++	result := inputBoundaryLineageForTest(t, "79", "result")
++	expected, err := types.UnionSourceLineage(prior, history, result)
++	require.NoError(t, err)
++	cm := &types.ChatManage{}
++	cm.SessionID, cm.Query, cm.UserContent = "boundary-session", "question", "question"
++	cm.SummaryConfig.Prompt = "system"
++	cm.SummaryConfig.ContextTemplate = "Question: {{query}}\nContexts: {{contexts}}"
++	cm.History = []*types.History{{Query: "original history query", Answer: "original history answer", SourceLineage: history}}
++	cm.MergeResult = []*types.SearchResult{{ID: "chunk", KnowledgeID: "result", KnowledgeBaseID: "kb", KnowledgeChannel: types.ConnectorTypeNextcloud, Content: "original result content", SourceLineage: result}}
++	cm.EventBus = &syncEventBus{}
++	return cm, prior, expected
++}
++
++func runSourceBoundaryPluginForTest(stream bool, ctx context.Context, cm *types.ChatManage, model *sourceBoundarySDKForTest) *PluginError {
++	service := &stubModelService{model: model}
++	if stream {
++		return (&PluginChatCompletionStream{modelService: service}).OnEvent(ctx, types.CHAT_COMPLETION_STREAM, cm, func() *PluginError { return nil })
++	}
++	return (&PluginChatCompletion{modelService: service}).OnEvent(ctx, types.CHAT_COMPLETION, cm, func() *PluginError { return nil })
++}
++
++func TestSourceLineageModelBoundaryChecksCompleteFrozenUnionOnce(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		t.Run(map[bool]string{false: "chat", true: "stream"}[stream], func(t *testing.T) {
++			cm, prior, expected := sourceBoundaryManageForTest(t)
++			thinking := true
++			cm.SummaryConfig.Thinking = &thinking
++			checks := 0
++			turn := types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++				checks++
++				require.Equal(t, expected, lineage)
++				// A successful authorizer is arbitrary code. It must not alter
++				// the already detached actual SDK input through its old aliases.
++				thinking = false
++				cm.History[0].Answer = "mutated after authorization"
++				cm.UserContent = "mutated after authorization"
++				cm.MergeResult[0].Content = "mutated after authorization"
++				return nil
++			})
++			require.NoError(t, turn.Add(prior))
++			ctx := types.WithRAGSourceLineage(context.Background(), turn)
++			model := &sourceBoundarySDKForTest{}
++			err := runSourceBoundaryPluginForTest(stream, ctx, cm, model)
++			require.NotNil(t, err)
++			require.ErrorIs(t, err.Err, errSourceBoundarySDKReached)
++			require.Equal(t, 1, checks)
++			require.Equal(t, 1, model.calls)
++			require.True(t, *model.options.Thinking)
++			for _, message := range model.messages {
++				require.Equal(t, expected, message.SourceLineage)
++				require.NotContains(t, message.Content, "mutated after authorization")
++			}
++		})
++	}
++	t.Run("nested-wire-values", func(t *testing.T) {
++		cm, prior, expected := sourceBoundaryManageForTest(t)
++		messages := []chat.Message{{Role: "user", Content: "original", ReasoningMetadata: types.ProviderMetadata{"nested": json.RawMessage(`{"value":"original"}`)}}}
++		options := &chat.ChatOptions{Tools: []chat.Tool{{Type: "function", Function: chat.FunctionDef{Name: "tool", Parameters: json.RawMessage(`{"value":"original"}`)}}}}
++		turn := types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++			require.Equal(t, expected, lineage)
++			messages[0].ReasoningMetadata["nested"][2] = 'X'
++			options.Tools[0].Function.Parameters[2] = 'X'
++			return nil
++		})
++		require.NoError(t, turn.Add(prior))
++		ctx := types.WithRAGSourceLineage(context.Background(), turn)
++		frozen, frozenOptions, err := freezeSourceLineageModelBoundary(ctx, cm, messages, options)
++		require.NoError(t, err)
++		require.JSONEq(t, `{"value":"original"}`, string(frozen[0].ReasoningMetadata["nested"]))
++		require.JSONEq(t, `{"value":"original"}`, string(frozenOptions.Tools[0].Function.Parameters))
++		require.Equal(t, expected, frozen[0].SourceLineage)
++	})
++}
++
++func TestSourceLineageModelBoundaryDenialAndShapeNeverCallSDK(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		for _, mode := range []string{"source-denied", "history-missing", "result-missing", "unknown-result", "nil-result", "opaque-input", "owner-retired", "non-rag-owner-retired", "owner-retired-by-authorizer"} {
++			t.Run(map[bool]string{false: "chat/", true: "stream/"}[stream]+mode, func(t *testing.T) {
++				cm, prior, expected := sourceBoundaryManageForTest(t)
++				current := make(map[string]types.SourceIdentity)
++				for _, source := range expected.Sources {
++					current[source.KnowledgeID] = source
++				}
++				ownerErr := errors.New("original owner retired")
++				var ownerFailure error
++				if mode == "owner-retired" || mode == "non-rag-owner-retired" {
++					ownerFailure = ownerErr
++				}
++				ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { return ownerFailure }, nil)
++				checks := 0
++				turn := types.NewRAGSourceLineage(func(checkCtx context.Context, lineage *types.SourceLineage) error {
++					checks++
++					if mode == "owner-retired-by-authorizer" {
++						ownerFailure = ownerErr
++						return types.CheckHistoryMaterialLifetime(checkCtx)
++					}
++					if mode == "source-denied" {
++						// A trusted current-version lookup changes while this
++						// callback is checking the original full source union.
++						changed := current[prior.Sources[0].KnowledgeID]
++						changed.Revision++
++						current[changed.KnowledgeID] = changed
++						for _, source := range lineage.Sources {
++							if current[source.KnowledgeID] == source {
++								continue
++							}
++							return access.ErrNextcloudPublicationDenied
++						}
++					}
++					return nil
++				})
++				require.NoError(t, turn.Add(prior))
++				if mode != "non-rag-owner-retired" {
++					ctx = types.WithRAGSourceLineage(ctx, turn)
++				}
++				switch mode {
++				case "history-missing":
++					cm.History[0].SourceLineage = nil
++				case "result-missing":
++					cm.MergeResult[0].SourceLineage = nil
++				case "unknown-result":
++					cm.MergeResult[0].SourceLineage = types.UnknownSourceLineage()
++				case "nil-result":
++					cm.MergeResult = []*types.SearchResult{nil}
++				case "opaque-input":
++					cm.QuotedContext = "unaccounted original input"
++				case "owner-retired":
++					cm.History[0].SourceLineage = nil // Owner failure keeps priority.
++				}
++				model := &sourceBoundarySDKForTest{}
++				err := runSourceBoundaryPluginForTest(stream, ctx, cm, model)
++				require.NotNil(t, err)
++				require.Zero(t, model.calls)
++				switch mode {
++				case "owner-retired", "non-rag-owner-retired", "owner-retired-by-authorizer":
++					require.ErrorIs(t, err.Err, ownerErr)
++				default:
++					require.ErrorIs(t, err.Err, access.ErrNextcloudPublicationDenied)
++				}
++				if mode == "source-denied" || mode == "owner-retired-by-authorizer" {
++					require.Equal(t, 1, checks)
++				} else {
++					require.Zero(t, checks, "invalid shape or original owner failure cannot reach source authorization")
++				}
++			})
++		}
++		t.Run(map[bool]string{false: "chat/", true: "stream/"}[stream]+"actor-revoked-during-check", func(t *testing.T) {
++			actor := &sourceBoundaryActorForTest{}
++			guard := access.NewNextcloudSourceLineageGuard(nil, nil, nil, nil, nil, nil, actor)
++			turn := types.NewRAGSourceLineage(func(ctx context.Context, lineage *types.SourceLineage) error {
++				return guard.Check(ctx, lineage, access.LineageReadScope{})
++			})
++			ctx := types.WithCaller(context.Background(), types.Caller{TenantID: 7, UserID: "human", Role: types.TenantRoleAdmin})
++			ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalWebUser, ID: "human"})
++			ctx = types.WithRAGSourceLineage(ctx, turn)
++			cm := &types.ChatManage{}
++			cm.Query, cm.UserContent = "question", "question"
++			cm.EventBus = &syncEventBus{}
++			model := &sourceBoundarySDKForTest{}
++			err := runSourceBoundaryPluginForTest(stream, ctx, cm, model)
++			require.NotNil(t, err)
++			require.ErrorIs(t, err.Err, access.ErrNextcloudPublicationDenied)
++			require.Equal(t, 2, actor.refreshes, "the production guard rechecks an actor revoked during its authorization callback")
++			require.Zero(t, model.calls)
++		})
++	}
++}
++
++func TestSourceLineageModelBoundaryPreservesSourceErrorBeforeFreezeError(t *testing.T) {
++	for _, denied := range []bool{false, true} {
++		t.Run(map[bool]string{false: "wire-error", true: "source-error"}[denied], func(t *testing.T) {
++			cm, prior, expected := sourceBoundaryManageForTest(t)
++			checks := 0
++			turn := types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++				checks++
++				require.Equal(t, expected, lineage)
++				if denied {
++					return access.ErrNextcloudPublicationUnavailable
++				}
++				return nil
++			})
++			require.NoError(t, turn.Add(prior))
++			ctx := types.WithRAGSourceLineage(context.Background(), turn)
++			messages := []chat.Message{{Role: "user", ReasoningMetadata: types.ProviderMetadata{"invalid": json.RawMessage(`{`)}}}
++			frozen, options, err := freezeSourceLineageModelBoundary(ctx, cm, messages, nil)
++			require.Error(t, err)
++			require.Nil(t, frozen)
++			require.Nil(t, options)
++			require.Equal(t, 1, checks)
++			if denied {
++				require.ErrorIs(t, err, access.ErrNextcloudPublicationUnavailable)
++			} else {
++				require.ErrorIs(t, err, types.ErrSourceLineageUnknown)
++			}
++		})
++	}
++}
++
++func TestSourceLineageModelBoundaryRechecksCurrentAuthorityOnNextCall(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		t.Run(map[bool]string{false: "chat", true: "stream"}[stream], func(t *testing.T) {
++			cm, prior, expected := sourceBoundaryManageForTest(t)
++			allowed, checks := true, 0
++			turn := types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++				checks++
++				require.Equal(t, expected, lineage)
++				if !allowed {
++					return access.ErrNextcloudPublicationDenied
++				}
++				return nil
++			})
++			require.NoError(t, turn.Add(prior))
++			ctx := types.WithRAGSourceLineage(context.Background(), turn)
++			model := &sourceBoundarySDKForTest{}
++			err := runSourceBoundaryPluginForTest(stream, ctx, cm, model)
++			require.NotNil(t, err)
++			require.ErrorIs(t, err.Err, errSourceBoundarySDKReached)
++			allowed = false
++			cm.History, cm.MergeResult = nil, nil
++			err = runSourceBoundaryPluginForTest(stream, ctx, cm, model)
++			require.NotNil(t, err)
++			require.ErrorIs(t, err.Err, access.ErrNextcloudPublicationDenied)
++			require.Equal(t, 2, checks)
++			require.Equal(t, 1, model.calls, "the earlier SDK admission cannot authorize a later invocation")
++		})
++	}
++}
++
++type sourceBoundaryKnowledgeForTest struct {
++	interfaces.KnowledgeService
++	beforeRead func()
++	reads      int
++}
++
++func (s *sourceBoundaryKnowledgeForTest) GetKnowledgeByIDOnly(_ context.Context, id string) (*types.Knowledge, error) {
++	s.reads++
++	if s.beforeRead != nil {
++		s.beforeRead()
++	}
++	return &types.Knowledge{ID: id, TenantID: 7, KnowledgeBaseID: "kb", Channel: types.ConnectorTypeNextcloud, EnableStatus: "enabled", ParseStatus: types.ParseStatusCompleted}, nil
++}
++
++func (*sourceBoundaryKnowledgeForTest) CheckKnowledgePublication(context.Context, *types.Knowledge) error {
++	return nil
++}
++
++func TestSourceLineagePromptBoundaryChecksCompleteUnionBeforePublicationReads(t *testing.T) {
++	cm, prior, expected := sourceBoundaryManageForTest(t)
++	checks := 0
++	turn := types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++		checks++
++		require.Equal(t, expected, lineage)
++		return nil
++	})
++	require.NoError(t, turn.Add(prior))
++	ctx := types.WithRAGSourceLineage(context.Background(), turn)
++	knowledge := &sourceBoundaryKnowledgeForTest{beforeRead: func() {
++		require.Equal(t, 1, checks, "all original inputs must be checked before publication reads")
++		require.Equal(t, expected, turn.Snapshot())
++	}}
++	continued := false
++	err := (&PluginIntoChatMessage{knowledgeService: knowledge}).OnEvent(ctx, types.INTO_CHAT_MESSAGE, cm, func() *PluginError { continued = true; return nil })
++	require.Nil(t, err)
++	require.Equal(t, 1, checks)
++	require.Equal(t, 1, knowledge.reads)
++	require.True(t, continued)
++	require.Contains(t, cm.UserContent, "original result content")
++}
++
++func TestSourceLineagePromptBoundaryUnknownAndOwnerFailuresDoNotRead(t *testing.T) {
++	for _, mode := range []string{"unknown-result", "unknown-history", "source-denied", "owner-retired", "non-rag-owner-retired", "owner-retired-by-authorizer"} {
++		t.Run(mode, func(t *testing.T) {
++			cm, prior, _ := sourceBoundaryManageForTest(t)
++			ownerErr := errors.New("original prompt owner retired")
++			var ownerFailure error
++			if mode == "owner-retired" || mode == "non-rag-owner-retired" {
++				ownerFailure = ownerErr
++			}
++			ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { return ownerFailure }, nil)
++			checks := 0
++			turn := types.NewRAGSourceLineage(func(checkCtx context.Context, _ *types.SourceLineage) error {
++				checks++
++				if mode == "owner-retired-by-authorizer" {
++					ownerFailure = ownerErr
++					return types.CheckHistoryMaterialLifetime(checkCtx)
++				}
++				return access.ErrNextcloudPublicationDenied
++			})
++			require.NoError(t, turn.Add(prior))
++			if mode != "non-rag-owner-retired" {
++				ctx = types.WithRAGSourceLineage(ctx, turn)
++			}
++			if mode == "unknown-result" {
++				cm.MergeResult[0].SourceLineage = nil
++			}
++			if mode == "unknown-history" || mode == "owner-retired" {
++				cm.History[0].SourceLineage = nil
++			}
++			knowledge := &sourceBoundaryKnowledgeForTest{}
++			err := (&PluginIntoChatMessage{knowledgeService: knowledge}).OnEvent(ctx, types.INTO_CHAT_MESSAGE, cm, func() *PluginError { t.Fatal("refused prompt reached next plugin"); return nil })
++			require.NotNil(t, err)
++			require.Zero(t, knowledge.reads)
++			if mode == "owner-retired" || mode == "non-rag-owner-retired" || mode == "owner-retired-by-authorizer" {
++				require.ErrorIs(t, err.Err, ownerErr)
++			} else {
++				require.ErrorIs(t, err.Err, access.ErrNextcloudPublicationDenied)
++			}
++			if mode == "source-denied" || mode == "owner-retired-by-authorizer" {
++				require.Equal(t, 1, checks)
++			} else {
++				require.Zero(t, checks)
++			}
++		})
++	}
 +}
 diff --git a/internal/application/service/chunk.go b/internal/application/service/chunk.go
 index 8727ca04084ba1b892cbe0ef216ea4d0a1e2ac19..104954a1bfafc5e7ed585f9423bccb8e5b461665 100644
@@ -120080,10 +120743,10 @@ index 0000000000000000000000000000000000000000..088d064b72b42688bb30681a53a13bdc
 +}
 diff --git a/internal/application/service/normal_references_http_actual_test.go b/internal/application/service/normal_references_http_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0dd000d9910f19aed78e057e6e1fe01798cbaa0
+index 0000000000000000000000000000000000000000..222598188431e72e92662d2d2cd5b8c274a9d9fc
 --- /dev/null
 +++ b/internal/application/service/normal_references_http_actual_test.go
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,501 @@
 +package service_test
 +
 +import (
@@ -120325,8 +120988,23 @@ index 0000000000000000000000000000000000000000..c0dd000d9910f19aed78e057e6e1fe01
 +	}))
 +	t.Cleanup(server.Close)
 +	client := &http.Client{Timeout: 8 * time.Second}
++	pool, err := f.DB.DB()
++	require.NoError(t, err)
++	poolBefore := pool.Stats()
++	renewalsBefore := f.BodyLeaseRenewals()
 +	started := time.Now()
++	logRequestMetrics := func(phase string, requestErr error) {
++		stats := pool.Stats()
++		t.Logf("actual HTTP contention: mode=%s phase=%s elapsed=%s wait_count_delta=%d wait_duration_delta=%s body_lease_renewals_delta=%d model_calls=%d idle_measured=%t empty_polls=%d consecutive_empty_polls=%d pool_max_open=%d pool_in_use=%d error=%v",
++			mode, phase, time.Since(started), stats.WaitCount-poolBefore.WaitCount,
++			stats.WaitDuration-poolBefore.WaitDuration, f.BodyLeaseRenewals()-renewalsBefore,
++			model.calls.Load(), model.idleMeasured.Load(), observedStream.emptyPolls.Load(),
++			observedStream.consecutiveEmptyPolls.Load(), stats.MaxOpenConnections, stats.InUse, requestErr)
++	}
 +	response, err := client.Post(server.URL+"/knowledge-chat/"+f.Session.ID, "application/json", strings.NewReader("{\"query\":\"current employee policy\",\"knowledge_base_ids\":[\"kb\"],\"summary_model_id\":\"normal-reference-model\",\"disable_title\":true}"))
++	if err != nil {
++		logRequestMetrics("request-failed", err)
++	}
 +	require.NoError(t, err)
 +	defer response.Body.Close()
 +	if mode == "producer-stop" {
@@ -120346,6 +121024,7 @@ index 0000000000000000000000000000000000000000..c0dd000d9910f19aed78e057e6e1fe01
 +	}
 +	var body bytes.Buffer
 +	_, err = body.ReadFrom(response.Body)
++	logRequestMetrics("body-read", err)
 +	if mode != "caller-disconnect" {
 +		require.NoError(t, err, "actual normal sender must terminate within the unchanged 8-second bound")
 +	} else {
