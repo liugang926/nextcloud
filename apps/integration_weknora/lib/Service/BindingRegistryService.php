@@ -99,6 +99,7 @@ final class BindingRegistryService {
 
     /** A fresh gate check is required for every source read. */
     public function requirePublicationActive(string $bindingId): int {
+        DirectoryTargetClosureService::requireOpen($this->db, $bindingId);
         if ($this->recovery->closed()) {
             throw new BindingPublicationStoppedException('Recovery control gate is closed');
         }
@@ -156,12 +157,14 @@ final class BindingRegistryService {
                 $this->db->commit();
                 return null;
             }
+            if ($state === 'active') { DirectoryTargetClosureService::requireOpen($this->db, $id); }
             if ($selected['publication_state'] === $state) {
                 $this->db->commit();
                 return ['publication_state' => $state,
                     'publication_epoch' => $selected['publication_epoch'], 'changed' => false];
             }
             if ($state === 'active') {
+                DirectoryTargetClosureService::requireOpen($this->db, $id);
                 // Once retirement has begun, a normal resume must never
                 // re-open source reads while the remote result is uncertain.
                 $decommission = $this->db->getQueryBuilder();
@@ -384,6 +387,7 @@ final class BindingRegistryService {
             } finally {
                 $decommissionResult->closeCursor();
             }
+            if (DirectoryTargetClosureService::lookup($this->db, 'root_key', hash('sha256', 'nextcloud-filecache-root-v1' . "\0" . $rootFileId)) !== null) { throw new \DomainException('The original publication target was deleted'); }
             $found = false;
             foreach ($bindings as &$binding) {
                 if ($binding['id'] === $id) {

@@ -44,6 +44,8 @@ final class TargetMigrationService {
   try{$this->process($row);}catch(\RuntimeException $e){/* Unknown remote outcomes retain the exact durable migration for retry. */}
  }
  private function process(array $row,?array $currentActor=null,?string $actorUid=null): void {
+  DirectoryTargetClosureService::requireOpen($this->db,$row['old_binding_id']);
+  DirectoryTargetClosureService::requireOpen($this->db,$row['new_binding_id']);
   $payload=json_decode($row['request_json'],true,32,JSON_THROW_ON_ERROR);$request=$payload['request'];
   $actorUid=$actorUid??$row['actor_uid'];
   try{[$newRule,$oldRule,$actor]=$this->currentAuthority($row,$payload,$actorUid,$currentActor);}
@@ -91,7 +93,7 @@ final class TargetMigrationService {
  private function closeUnverified(array $row): void {foreach($this->bindings->listBindings() as $binding){if(in_array($binding['id'],[$row['old_binding_id'],$row['new_binding_id']],true)&&(int)$binding['root_file_id']===(int)$row['root_file_id']){try{$this->bindings->setPublicationState($binding['id'],'stopped','target-migration-policy');}catch(\Throwable $ignored){}}}}
  private function transferLocal(array $row,array $payload): void {
   $this->db->beginTransaction();try {
-   $this->lock();$current=$this->one($row['operation_id']);if($current===null||$current['state']!=='reserved'){if($current!==null&&in_array($current['state'],['building','active'],true)){$this->db->commit();return;}throw new \DomainException('Target migration phase changed');}
+   $this->lock();DirectoryTargetClosureService::requireOpen($this->db,$row['old_binding_id']);DirectoryTargetClosureService::requireOpen($this->db,$row['new_binding_id']);$current=$this->one($row['operation_id']);if($current===null||$current['state']!=='reserved'){if($current!==null&&in_array($current['state'],['building','active'],true)){$this->db->commit();return;}throw new \DomainException('Target migration phase changed');}
    $all=$this->bindings->listBindings();$kept=[];$old=null;
    foreach($all as $binding){if($binding['id']===$row['old_binding_id']){$old=$binding;continue;}$kept[]=['id'=>$binding['id'],'name'=>$binding['name'],'owner_uid'=>$binding['owner_uid'],'root_file_id'=>$binding['root_file_id']];}
    if($old===null||$old['publication_state']!=='stopped'||$old['publication_epoch']!==(int)$row['old_epoch']||$old['root_file_id']!==(int)$row['root_file_id']){throw new \DomainException('Old source retirement fence changed');}

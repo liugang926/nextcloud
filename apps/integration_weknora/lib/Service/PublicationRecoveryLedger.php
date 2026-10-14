@@ -13,18 +13,28 @@ final class PublicationRecoveryLedger {
     public const ZERO_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
     public const KINDS = ['upsert', 'metadata', 'delete', 'subtree_scan', 'subtree_moved',
         'subtree_deleted', 'reconcile', 'withdrawn', 'eligible', 'binding_stop',
-        'binding_resume', 'binding_retired', 'binding_created', 'content_write_begin', 'content_write_complete'];
+        'binding_resume', 'binding_retired', 'binding_created', 'content_write_begin', 'content_write_complete', 'target_deleted', 'tenant_deleted'];
 
     public function __construct(private IDBConnection $db, private IConfig $config) {
     }
 
     /** Caller holds its business transaction; sequence allocation shares that commit. */
-    public static function appendInTransaction(IDBConnection $db, string $binding, ?int $file, string $kind, int $revision): void {
+    public static function appendInTransaction(IDBConnection $db, string $binding, ?int $file, string $kind, int $revision, ?array $targetClosure = null): void {
         if (!$db->inTransaction() ||
             !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $binding) ||
             ($file !== null && $file < 1) || !in_array($kind, self::KINDS, true) || $revision < 0) {
             throw new \InvalidArgumentException('Invalid recovery journal transaction');
         }
+        if ($kind === 'target_deleted') {
+            if ($file !== null || $targetClosure === null) { throw new \InvalidArgumentException('Target closure journal requires its exact retained fact'); }
+            $targetClosure = TargetDeletionProtocol::fact($targetClosure);
+            if ($targetClosure['target']['binding_id'] !== $binding || $targetClosure['target']['operation_revision'] !== (string)$revision ||
+                DirectoryTargetClosureService::lookup($db, 'binding_id', $binding) !== $targetClosure) { throw new \InvalidArgumentException('Target closure journal scope mismatch'); }
+        } elseif ($kind === 'tenant_deleted') {
+            if ($file !== null || $revision !== 0 || $targetClosure === null) { throw new \InvalidArgumentException('Tenant deletion requires exact retained namespace fact'); }
+            $targetClosure = TenantDeletionProtocol::fact($targetClosure);
+            if ($targetClosure['tenant']['binding_id'] !== $binding || DirectoryTenantDeletionService::lookupByNamespaceKey($db, DirectoryTenantDeletionService::namespaceKeyFromFact($targetClosure)) !== $targetClosure) { throw new \InvalidArgumentException('Tenant deletion journal anchor mismatch'); }
+        } elseif ($targetClosure !== null) { throw new \InvalidArgumentException('Unexpected closure journal fact'); }
         $head = self::lockHead($db);
         if ($head['sequence'] === PHP_INT_MAX) {
             throw new \UnexpectedValueException('Recovery sequence exhausted');
@@ -34,6 +44,7 @@ final class PublicationRecoveryLedger {
         $event = ['sequence' => (string)$next, 'binding_id' => $binding,
             'file_id' => $file === null ? null : (string)$file, 'kind' => $kind,
             'source_revision' => (string)$revision, 'created_at' => $time];
+        if ($targetClosure !== null) { $event[$kind === 'tenant_deleted' ? 'tenant_deletion' : 'target_closure'] = $targetClosure; }
         $chain = self::eventHash($head['chain_sha256'], $event);
         $query = $db->getQueryBuilder();
         $query->insert('weknora_recovery_log')->values([
@@ -44,6 +55,7 @@ final class PublicationRecoveryLedger {
             'source_revision' => $query->createNamedParameter($revision),
             'created_at' => $query->createNamedParameter($time),
             'chain_sha256' => $query->createNamedParameter($chain),
+            'tenant_namespace' => $query->createNamedParameter($kind === 'tenant_deleted' ? DirectoryTenantDeletionService::namespaceKeyFromFact($targetClosure) : null),
         ])->executeStatement();
         $update = $db->getQueryBuilder();
         if ($update->update('weknora_recovery_head')
@@ -82,7 +94,7 @@ final class PublicationRecoveryLedger {
                 }
             }
             $q = $this->db->getQueryBuilder();
-            $result = $q->select('sequence', 'binding_id', 'file_id', 'kind', 'source_revision', 'created_at', 'chain_sha256')
+            $result = $q->select('sequence', 'binding_id', 'file_id', 'kind', 'source_revision', 'created_at', 'chain_sha256', 'tenant_namespace')
                 ->from('weknora_recovery_log')
                 ->where($q->expr()->gt('sequence', $q->createNamedParameter($after)))
                 ->orderBy('sequence', 'ASC')->setMaxResults(self::PAGE_SIZE)->executeQuery();
@@ -107,6 +119,16 @@ final class PublicationRecoveryLedger {
                     'file_id' => $row['file_id'] === null ? null : (string)$row['file_id'],
                     'kind' => (string)$row['kind'], 'source_revision' => (string)$row['source_revision'],
                     'created_at' => (int)$row['created_at']];
+                if ($item['kind'] === 'target_deleted') {
+                    $fact = DirectoryTargetClosureService::lookup($this->db, 'binding_id', $item['binding_id']);
+                    if ($fact === null || $item['file_id'] !== null || $fact['target']['operation_revision'] !== $item['source_revision']) { throw new \UnexpectedValueException('Recovery target closure is missing'); }
+                    $item['target_closure'] = $fact;
+                } elseif ($item['kind'] === 'tenant_deleted') {
+                    $fact = DirectoryTenantDeletionService::lookupByNamespaceKey($this->db, (string)$row['tenant_namespace']);
+                    if ($fact === null || $item['file_id'] !== null || $item['source_revision'] !== '0' || $fact['tenant']['binding_id'] !== $item['binding_id']) { throw new \UnexpectedValueException('Recovery Tenant deletion fact missing'); }
+                    $item['tenant_deletion'] = $fact;
+                }
+                if ($item['kind'] !== 'tenant_deleted' && $row['tenant_namespace'] !== null) { throw new \UnexpectedValueException('Unexpected Tenant namespace journal selector'); }
                 $nextHash = self::eventHash($nextHash, $item);
                 if (!hash_equals($nextHash, (string)$row['chain_sha256'])) {
                     throw new \UnexpectedValueException('Recovery event chain mismatch');
@@ -157,7 +179,7 @@ final class PublicationRecoveryLedger {
             $sequence = $start;
             $chain = $plan['checkpoint_database_chain_sha256'];
             foreach ($events as $event) {
-                if (!is_array($event) || count($event) !== 6 ||
+                if (!is_array($event) || count($event) !== (in_array($event['kind'] ?? null, ['target_deleted', 'tenant_deleted'], true) ? 7 : 6) ||
                     ($event['sequence'] ?? null) !== (string)(++$sequence) ||
                     !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $event['binding_id'] ?? '') ||
                     !array_key_exists('file_id', $event) ||
@@ -167,6 +189,17 @@ final class PublicationRecoveryLedger {
                     !is_int($event['created_at'] ?? null) || $event['created_at'] < 0) {
                     throw new \DomainException('Invalid authenticated journal event');
                 }
+                if ($event['kind'] === 'target_deleted') {
+                    $fact = TargetDeletionProtocol::fact($event['target_closure'] ?? []);
+                    if ($fact['target']['instance_id'] !== $plan['instance_id'] || $fact['target']['binding_id'] !== $event['binding_id'] ||
+                        $event['file_id'] !== null || $fact['target']['operation_revision'] !== $event['source_revision']) { throw new \DomainException('Authenticated target closure event scope mismatch'); }
+                    DirectoryTargetClosureService::retainInTransaction($this->db, $fact);
+                } elseif ($event['kind'] === 'tenant_deleted') {
+                    $fact = TenantDeletionProtocol::fact($event['tenant_deletion'] ?? []);
+                    if ($fact['tenant']['instance_id'] !== $plan['instance_id'] || $event['file_id'] !== null || $event['source_revision'] !== '0' || $event['binding_id'] !== $fact['tenant']['binding_id']) { throw new \DomainException('Authenticated Tenant deletion event scope mismatch'); }
+                    DirectoryTenantDeletionService::validateLocalAnchor($this->db, $fact);
+                    DirectoryTenantDeletionService::retainInTransaction($this->db, $fact);
+                }
                 $chain = self::eventHash($chain, $event);
                 if (!hash_equals($chain, (string)($plan['database_prefix_hashes'][(string)$sequence] ?? ''))) {
                     throw new \DomainException('Authenticated journal event chain mismatch');
@@ -174,8 +207,9 @@ final class PublicationRecoveryLedger {
                 if ($sequence <= $head['sequence']) { continue; }
                 $q = $this->db->getQueryBuilder();
                 $values = [];
-                foreach ($event as $name => $value) { $values[$name] = $q->createNamedParameter($value); }
+                foreach ($event as $name => $value) { if (!in_array($name, ['target_closure', 'tenant_deletion'], true)) { $values[$name] = $q->createNamedParameter($value); } }
                 $values['chain_sha256'] = $q->createNamedParameter($chain);
+                $values['tenant_namespace'] = $q->createNamedParameter($event['kind'] === 'tenant_deleted' ? DirectoryTenantDeletionService::namespaceKeyFromFact($event['tenant_deletion']) : null);
                 $q->insert('weknora_recovery_log')->values($values)->executeStatement();
             }
             if (!hash_equals($chain, $plan['through_database_chain_sha256'])) {
@@ -196,6 +230,19 @@ final class PublicationRecoveryLedger {
         // Explicit ordered scalars avoid JSON encoder/key-order differences.
         $values = [$previous, $item['sequence'], $item['binding_id'], $item['file_id'] ?? '-',
             $item['kind'], $item['source_revision'], (string)$item['created_at']];
+        if (($item['kind'] ?? null) === 'target_deleted') {
+            $fact = TargetDeletionProtocol::fact($item['target_closure'] ?? []);
+            $closedAt = TargetDeletionProtocol::decimal($fact['target']['closed_at']);
+            if ($item['file_id'] !== null || $fact['target']['binding_id'] !== $item['binding_id'] || $fact['target']['operation_revision'] !== $item['source_revision'] ||
+                !is_int($item['created_at']) || ($closedAt > $item['created_at'] && $closedAt - $item['created_at'] > TargetDeletionProtocol::CLOCK_SKEW_SECONDS)) { throw new \UnexpectedValueException('Target closure journal scope or time mismatch'); }
+            $values = [...$values, ...TargetDeletionProtocol::journalFields($fact)];
+        } elseif (($item['kind'] ?? null) === 'tenant_deleted') {
+            $fact = TenantDeletionProtocol::fact($item['tenant_deletion'] ?? []); $closedAt = TargetDeletionProtocol::decimal($fact['tenant']['closed_at']);
+            if ($item['file_id'] !== null || $item['source_revision'] !== '0' || $fact['tenant']['binding_id'] !== $item['binding_id'] ||
+                !is_int($item['created_at']) || ($closedAt > $item['created_at'] && $closedAt - $item['created_at'] > TargetDeletionProtocol::CLOCK_SKEW_SECONDS)) { throw new \UnexpectedValueException('Tenant deletion journal scope or time mismatch'); }
+            $values = [...$values, ...TenantDeletionProtocol::journalFields($fact)];
+        } elseif (array_key_exists('target_closure', $item) || array_key_exists('tenant_deletion', $item)) { throw new \UnexpectedValueException('Unexpected closure journal fields'); }
+        if ((($item['kind'] ?? null) === 'target_deleted' && array_key_exists('tenant_deletion', $item)) || (($item['kind'] ?? null) === 'tenant_deleted' && array_key_exists('target_closure', $item))) { throw new \UnexpectedValueException('Conflicting closure journal fields'); }
         return hash('sha256', implode("\n", $values));
     }
 

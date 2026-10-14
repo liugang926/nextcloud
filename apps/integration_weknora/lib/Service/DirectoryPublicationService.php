@@ -166,15 +166,26 @@ final class DirectoryPublicationService {
             $intent = $this->find('binding_id', $binding['id']);
             $rule = $intent === null ? null : $this->rule((string)$intent['rule_id']);
             $pair = $this->pairs->status($binding['id']);
-            return ['folder_id' => $folderId, 'source_state' => 'bound', 'binding_id' => $binding['id'],
+            $closed = DirectoryTargetClosureService::lookup($this->db, 'binding_id', $binding['id']);
+            $operation = $intent === null ? null : $this->publicIntent($intent);
+            if ($closed !== null) { $operation = ['operation_id' => $closed['target']['operation_id'], 'binding_id' => $binding['id'],
+                'folder_id' => $binding['root_file_id'], 'state' => 'target_deleted', 'error_code' => 'target_deleted', 'revision' => (int)($intent['revision'] ?? 0)]; }
+            return ['folder_id' => $folderId, 'source_state' => $closed === null ? 'bound' : 'target_deleted', 'binding_id' => $binding['id'],
                 'binding_name' => $binding['name'], 'inherited' => $folderId !== $binding['root_file_id'],
                 'manageable' => $folderId === $binding['root_file_id'] && $rule !== null && $this->delegated($uid, $rule),
                 'publication_state' => $binding['publication_state'], 'sync_enabled' => $binding['sync_enabled'],
                 'sync_revision' => $binding['sync_revision'], 'pairing_state' => $pair['state'] ?? 'pending',
-                'tenant_id' => $pair['tenant_id'] ?? null, 'knowledge_base_id' => $pair['knowledge_base_id'] ?? null,
-                'operation' => $intent === null ? null : $this->publicIntent($intent)];
+                'tenant_id' => $closed['target']['tenant_id'] ?? $pair['tenant_id'] ?? null, 'knowledge_base_id' => $closed['target']['knowledge_base_id'] ?? $pair['knowledge_base_id'] ?? null,
+                'operation' => $operation];
         }
         $intent = $this->find('root_key', self::physicalKey($folder));
+        $closed = DirectoryTargetClosureService::lookup($this->db, 'root_key', self::physicalKey($folder));
+        if ($closed !== null) {
+            return ['folder_id' => $folderId, 'source_state' => 'target_deleted', 'inherited' => false, 'manageable' => false, 'can_create' => false,
+                'binding_id' => $closed['target']['binding_id'], 'tenant_id' => $closed['target']['tenant_id'], 'knowledge_base_id' => $closed['target']['knowledge_base_id'],
+                'publication_state' => 'stopped', 'sync_enabled' => false, 'operation' => ['operation_id' => $closed['target']['operation_id'],
+                    'state' => 'target_deleted', 'error_code' => 'target_deleted', 'revision' => (int)($intent['revision'] ?? 0)]];
+        }
         $rule = $this->matchingRule($folder);
         $creationRule = $this->matchingRule($folder, true);
         return ['folder_id' => $folderId, 'source_state' => $intent === null ? 'unbound' : 'pending',
@@ -244,7 +255,7 @@ final class DirectoryPublicationService {
         $this->recovery->requireAutomationOpen($this->config);
         $intent = $this->find('operation_id', $operationId);
         if ($intent === null) { throw new \OutOfBoundsException('Directory operation is unavailable'); }
-        if ($intent['state'] === 'retired') { throw new \DomainException('Source intent is retired'); }
+        if (in_array($intent['state'], ['retired', 'target_deleted'], true) || DirectoryTargetClosureService::lookup($this->db, 'operation_id', $operationId) !== null) { throw new \DomainException('Source target is closed'); }
         $rule = $this->rule((string)$intent['rule_id']);
         if (!$this->delegated($uid, $rule)) { throw new \DomainException('Publication management is forbidden'); }
         if ((int)$intent['root_file_id'] > 0) { $this->folder($uid, (int)$intent['root_file_id']); }
@@ -264,7 +275,7 @@ final class DirectoryPublicationService {
             return $this->targetMigration($uid,$folderId,$choice['operation_id'],true);
         }
         $intent=$this->find('root_key',self::physicalKey($root));
-        if($intent===null||$intent['state']==='retired'||(int)$intent['root_file_id']!==$folderId){throw new \DomainException('An existing root source is required');}
+        if($intent===null||in_array($intent['state'],['retired','target_deleted'],true)||DirectoryTargetClosureService::lookup($this->db,'operation_id',$intent['operation_id'])!==null||(int)$intent['root_file_id']!==$folderId){throw new \DomainException('An existing root source is required');}
         $target=$this->selectTarget($rule,is_string($choice['tenant_id']??null)?$choice['tenant_id']:null,is_string($choice['processing_template_id']??null)?$choice['processing_template_id']:null);
         if(!SourcePairingRegistryService::validOperationId($choice['operation_id']??null)||!in_array($choice['mode']??null,['create','existing'],true)||($choice['mode']==='existing'&&!SourcePairingRegistryService::validRemoteId($choice['knowledge_base_id']??null))){throw new \InvalidArgumentException('Invalid migration target');}
         $identity=$this->identities->forUser($uid);
@@ -292,6 +303,7 @@ final class DirectoryPublicationService {
         }
         $intent = $this->find('operation_id', $status['operation']['operation_id']);
 
+        DirectoryTargetClosureService::requireOpen($this->db, $intent['binding_id']);
         $rule = $this->rule($intent['rule_id']);
         $request = json_decode($intent['request_json'], true, 16, JSON_THROW_ON_ERROR);
         $rule = $this->selectTarget($rule, (string)$request['tenant_id'],(string)$request['processing_template_id']);
@@ -324,7 +336,7 @@ final class DirectoryPublicationService {
                 if (!$node instanceof Folder || $node->getId() <= $rule['discovery_after_id']) { continue; }
                 if (++$count > 100) { $more = true; break; }
                 $last = $node->getId();
-                if ($this->find('root_key', self::physicalKey($node)) !== null) { continue; }
+                if ($this->find('root_key', self::physicalKey($node)) !== null || DirectoryTargetClosureService::lookup($this->db, 'root_key', self::physicalKey($node)) !== null) { continue; }
                 if ($this->pendingCreation($container->getId(), $node->getName())) { continue; }
                 try {
                     $uid = $rule['automation_uid'];
@@ -346,12 +358,18 @@ final class DirectoryPublicationService {
         $this->recovery->requireAutomationOpen($this->config);
         $deadline = microtime(true) + 8;
         $q = $this->db->getQueryBuilder();
-        $r = $q->select('operation_id')->from('weknora_dir_intent')
-            ->where($q->expr()->lte('next_attempt_at', $q->createNamedParameter(time())))
-            ->andWhere($q->expr()->lte('lease_until', $q->createNamedParameter(time())))
-            ->andWhere($q->expr()->in('state', $q->createNamedParameter(['pending', 'active'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
-            ->orderBy('updated_at')->setMaxResults(max(1, min(100, $limit)))->executeQuery();
+        $r = $q->select('i.operation_id')->from('weknora_dir_intent', 'i')
+            ->leftJoin('i', 'weknora_target_close', 'closed', $q->expr()->eq('closed.operation_id', 'i.operation_id'))
+            ->where($q->expr()->isNull('closed.operation_id'))
+            ->andWhere($q->expr()->lte('i.next_attempt_at', $q->createNamedParameter(time())))
+            ->andWhere($q->expr()->lte('i.lease_until', $q->createNamedParameter(time())))
+            ->andWhere($q->expr()->in('i.state', $q->createNamedParameter(['pending', 'active'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
+            ->orderBy('i.updated_at')->setMaxResults(max(1, min(100, $limit)))->executeQuery();
         try { $rows = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
+        // Independent control metadata gets a bounded opportunity on every
+        // pass, including after the original root has permanently closed.
+        // It never calls process(), pairing, grants, mkdir, sync or resume.
+        $this->observeTenantDeletionMetadataDue(min(3, max(1, $limit)), $deadline);
         foreach ($rows as $row) {
             if (microtime(true) >= $deadline) { break; }
             $this->process($row['operation_id']);
@@ -391,8 +409,10 @@ final class DirectoryPublicationService {
                     ($rootId > 0 && (int)$existing['root_file_id'] !== $rootId)) {
                     throw new \DomainException('Directory operation conflicts with its original intent');
                 }
+                if (in_array($existing['state'], ['retired', 'target_deleted'], true) || DirectoryTargetClosureService::lookup($this->db, 'operation_id', $operation) !== null) { throw new \DomainException('The original source target is closed'); }
                 $this->db->commit(); return $existing;
             }
+            if (DirectoryTargetClosureService::lookup($this->db, 'root_key', $rootKey) !== null || DirectoryTargetClosureService::lookup($this->db, 'operation_id', $operation) !== null) { throw new \DomainException('The original directory target was deleted'); }
             if ($this->find('root_key', $rootKey) !== null) { throw new \DomainException('Directory already has a publication intent'); }
             if ($rootId === 0 && $this->folder($uid, $parentId)->nodeExists($name)) {
                 throw new \DomainException('Directory already exists; associate it from its details');
@@ -414,6 +434,7 @@ final class DirectoryPublicationService {
 
     private function process(string $operationId, bool $allowResume = false, ?string $managerUid = null): void {
         $this->recovery->requireAutomationOpen($this->config);
+        if (DirectoryTargetClosureService::lookup($this->db, 'operation_id', $operationId) !== null) { return; }
         $q = $this->db->getQueryBuilder();
         if ($q->update('weknora_dir_intent')->set('lease_until', $q->createNamedParameter(time() + 600))
             ->where($q->expr()->eq('operation_id', $q->createNamedParameter($operationId)))
@@ -421,6 +442,7 @@ final class DirectoryPublicationService {
             ->andWhere($q->expr()->lte('lease_until', $q->createNamedParameter(time())))->executeStatement() !== 1) { return; }
         $intent = $this->find('operation_id', $operationId);
         try {
+            DirectoryTargetClosureService::requireOpen($this->db, $intent['binding_id']);
             $rule = $this->rule($intent['rule_id']);
             $managerUid = $managerUid ?? $this->targetMoves->managerForOperation($operationId);
             $uid = $managerUid ?? $intent['actor_uid'];
@@ -448,14 +470,48 @@ final class DirectoryPublicationService {
             $this->acl->assertTreeSupported($root);
             $this->assertNoOverlap($root, $intent['binding_id'], $operationId);
             $existingPair = $this->pairs->status($intent['binding_id']);
-            $remote = ($existingPair !== null && $existingPair['state'] === 'active') ||
-                ($managerUid !== null && ($request['actor_directory_id'] !== $identity['directory_id'] || $request['actor_object_guid'] !== $identity['object_guid']))
-                ? $this->remote->request($rule, 'GET', '/operations/' . $operationId, ['actor_directory_id' => $identity['directory_id'], 'actor_object_guid' => $identity['object_guid']])
-                : $this->remote->request($rule, 'POST', '/operations', $request);
+            $currentActor = ['actor_directory_id' => $identity['directory_id'], 'actor_object_guid' => $identity['object_guid']];
+            $instance = $this->config->getSystemValueString('instanceid');
+            $floor = 0;
+            foreach ($this->bindings->listBindings() as $binding) {
+                if ($binding['id'] === $intent['binding_id']) { $floor = $binding['sync_revision']; break; }
+            }
+            $readStatus = function() use ($rule, $operationId, $currentActor, $intent, $request): array {
+                $response = $this->remote->request($rule, 'GET', '/operations/' . $operationId, $currentActor);
+                $this->retainTenantDeletionObservation($response, $intent, $request, $rule);
+                return $response;
+            };
+            if ($existingPair !== null ||
+                ($managerUid !== null && ($request['actor_directory_id'] !== $identity['directory_id'] || $request['actor_object_guid'] !== $identity['object_guid']))) {
+                $remote = $readStatus();
+            } else {
+                try {
+                    $remote = $this->remote->request($rule, 'POST', '/operations', $request);
+                } catch (\Throwable $reservationFailure) {
+                    // A lost reserve ACK may leave a real original operation
+                    // whose target was subsequently deleted before pairing.
+                    // The failed POST grants nothing: only the same scoped,
+                    // current-actor authenticated GET 200 can close that intent.
+                    $target = TargetDeletionProtocol::deletedAfterFailedReservation($reservationFailure,
+                        $readStatus, $intent, $request, $existingPair, $instance, $floor);
+                    $this->closeTarget($intent, $target);
+                    return;
+                }
+            }
             $operation = $remote['operation'] ?? null;
             if (!is_array($operation) || ($operation['operation_id'] ?? null) !== $operationId ||
                 !SourcePairingRegistryService::validRemoteId($operation['knowledge_base_id'] ?? null)) {
                 throw new \RuntimeException('Target reservation is unverified');
+            }
+            // POST reserve/pair responses cannot establish target deletion.
+            // Obtain a fresh successful status through the approved credential,
+            // TLS/actor/recovery path before any local resume or remote grants.
+            $observed = $readStatus();
+            $target = TargetDeletionProtocol::observation($observed, $intent, $request, $existingPair, $instance, $floor);
+            if ($target['knowledge_base_id'] !== $operation['knowledge_base_id']) { throw new \UnexpectedValueException('Reserved target identity changed'); }
+            if ($target['state'] === 'target_deleted') {
+                $this->closeTarget($intent, $target);
+                return;
             }
             $this->bindings->save($intent['binding_id'], $root->getName(), $rule['owner_uid'], $root->getId());
             if ($allowResume && ($oldPair=$this->pairs->status($intent['binding_id']))!==null && $oldPair['state']==='active') {
@@ -513,6 +569,101 @@ final class DirectoryPublicationService {
                 'attempt_count' => (int)$intent['attempt_count'] + 1, 'lease_until' => 0,
                 'next_attempt_at' => time() + min(300, 15 * (1 << min(4, (int)$intent['attempt_count'])))]);
         }
+    }
+
+    /** Fresh metadata only; an immutable old root fact is never reopened. */
+    private function observeTenantDeletionMetadataDue(int $limit, float $deadline): void {
+        $q = $this->db->getQueryBuilder();
+        // Expressions must be typed functions: raw strings are quoted as
+        // column identifiers by Nextcloud's query builder.
+        $nextCheck = $q->createFunction('COALESCE(' . $q->getColumnName('next_check_at', 'p') . ', 0)');
+        $leaseUntil = $q->createFunction('COALESCE(' . $q->getColumnName('lease_until', 'p') . ', 0)');
+        $r = $q->select('i.operation_id')->from('weknora_dir_intent', 'i')
+            ->leftJoin('i', 'weknora_deletion_probe', 'p', $q->expr()->eq('i.operation_id', 'p.operation_id'))
+            ->where($q->expr()->in('i.state', $q->createNamedParameter(['target_deleted', 'retired'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
+            ->andWhere($q->expr()->lte($nextCheck, $q->createNamedParameter(time())))
+            ->andWhere($q->expr()->lte($leaseUntil, $q->createNamedParameter(time())))
+            ->orderBy($nextCheck)->addOrderBy('i.operation_id')->setMaxResults($limit)->executeQuery();
+        try { $rows = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
+        foreach ($rows as $row) {
+            if (microtime(true) >= $deadline) { break; }
+            $operationId = $row['operation_id'];
+            $this->db->insertIgnoreConflict('weknora_deletion_probe', ['operation_id' => $operationId, 'next_check_at' => 0, 'lease_until' => 0]);
+            $u = $this->db->getQueryBuilder();
+            if ($u->update('weknora_deletion_probe')->set('lease_until', $u->createNamedParameter(time() + 60))
+                ->where($u->expr()->eq('operation_id', $u->createNamedParameter($operationId)))
+                ->andWhere($u->expr()->lte('next_check_at', $u->createNamedParameter(time())))
+                ->andWhere($u->expr()->lte('lease_until', $u->createNamedParameter(time())))->executeStatement() !== 1) { continue; }
+            $next = time() + 300;
+            try {
+                $this->recovery->requireAutomationOpen($this->config);
+                $intent = $this->find('operation_id', $operationId);
+                if ($intent === null || !in_array($intent['state'], ['target_deleted', 'retired'], true)) { throw new \DomainException('Metadata operation changed'); }
+                $rule = $this->rule($intent['rule_id']); $request = json_decode($intent['request_json'], true, 16, JSON_THROW_ON_ERROR);
+                $rule = $this->selectTarget($rule, (string)$request['tenant_id'], (string)$request['processing_template_id'], true);
+                if (DirectoryTenantDeletionService::lookup($this->db, TenantDeletionProtocol::originHash($rule['weknora_origin']), (string)$request['tenant_id']) !== null) { $next = PHP_INT_MAX; continue; }
+                $uid = $this->targetMoves->managerForOperation($operationId) ?? $intent['actor_uid'];
+                if (!$this->delegated($uid, $rule)) { throw new \DomainException('Metadata delegate revoked'); }
+                $identity = $this->identities->forUser($uid);
+                $response = $this->remote->request($rule, 'GET', '/operations/' . $operationId,
+                    ['actor_directory_id' => $identity['directory_id'], 'actor_object_guid' => $identity['object_guid']]);
+                if ($this->retainTenantDeletionObservation($response, $intent, $request, $rule) !== null) { $next = PHP_INT_MAX; }
+            } catch (\Throwable $unverified) {
+                // Missing actor/credential/GET200/typed fact changes no root,
+                // pair, grants, terminal state, credentials or material.
+            } finally {
+                $u = $this->db->getQueryBuilder(); $u->update('weknora_deletion_probe')->set('next_check_at', $u->createNamedParameter($next))
+                    ->set('lease_until', $u->createNamedParameter(0))->where($u->expr()->eq('operation_id', $u->createNamedParameter($operationId)))->executeStatement();
+            }
+        }
+    }
+
+    private function retainTenantDeletionObservation(array $response, array $intent, array $request, array $rule): ?array {
+        $fact = TenantDeletionProtocol::observation($response, $intent, $request, $this->config->getSystemValueString('instanceid'), $rule['weknora_origin']);
+        if ($fact === null) { return null; }
+        $this->db->beginTransaction();
+        try {
+            $this->lock(); $this->recovery->requireAutomationOpen($this->config);
+            $current = $this->find('operation_id', $intent['operation_id']);
+            if ($current === null || $current['binding_id'] !== $intent['binding_id'] || $current['request_json'] !== $intent['request_json'] ||
+                (int)$current['revision'] !== (int)$intent['revision'] || $current['rule_id'] !== $intent['rule_id']) { throw new \DomainException('Tenant deletion observation intent changed'); }
+            DirectoryTenantDeletionService::validateLocalAnchor($this->db, $fact);
+            $created = DirectoryTenantDeletionService::retainInTransaction($this->db, $fact);
+            DirectoryTenantDeletionService::stopNamespaceInTransaction($this->db, $fact, $this->bindings);
+            if ($created) { PublicationRecoveryLedger::appendInTransaction($this->db, $fact['tenant']['binding_id'], null, 'tenant_deleted', 0, $fact); }
+            $this->db->commit(); return $fact;
+        } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
+    }
+
+    /** A receipt closes only the original target; source retirement remains separate. */
+    private function closeTarget(array $intent, array $target): void {
+        $this->db->beginTransaction();
+        try {
+            $this->lock();
+            $this->recovery->requireAutomationOpen($this->config);
+            $current = $this->find('operation_id', $intent['operation_id']);
+            if ($current === null || (int)$current['revision'] !== (int)$intent['revision'] || $current['request_json'] !== $intent['request_json'] ||
+                $current['binding_id'] !== $intent['binding_id'] || $current['root_key'] !== $intent['root_key'] ||
+                !in_array($current['state'], ['pending', 'active'], true)) { throw new \DomainException('Target closure intent changed'); }
+            $request = json_decode($current['request_json'], true, 16, JSON_THROW_ON_ERROR);
+            $pair = $this->pairs->status($current['binding_id']);
+            if ($pair !== null) {
+                foreach (['operation_id', 'instance_id', 'binding_id', 'tenant_id', 'knowledge_base_id'] as $field) {
+                    if ((string)($pair[$field] ?? '') !== $target[$field]) { throw new \DomainException('Target closure pair changed'); }
+                }
+            }
+            foreach ($this->bindings->listBindings() as $binding) {
+                if ($binding['id'] === $current['binding_id'] && $binding['sync_revision'] > TargetDeletionProtocol::decimal($target['operation_revision'])) {
+                    throw new \DomainException('Target closure control revision regressed');
+                }
+            }
+            $fact = TargetDeletionProtocol::fact(['target' => $target, 'root_file_id' => (string)$current['root_file_id'], 'root_key' => $current['root_key']]);
+            $created = DirectoryTargetClosureService::retainInTransaction($this->db, $fact);
+            $this->bindings->setPublicationState($current['binding_id'], 'stopped', 'target-deleted');
+            DirectoryTargetClosureService::closeRestoredIntentInTransaction($this->db, $fact);
+            if ($created) { PublicationRecoveryLedger::appendInTransaction($this->db, $current['binding_id'], null, 'target_deleted', TargetDeletionProtocol::decimal($target['operation_revision']), $fact); }
+            $this->db->commit();
+        } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
     }
 
     private function attachRoot(array $intent, Folder $root): void {
@@ -574,12 +725,17 @@ final class DirectoryPublicationService {
     private function targetChoices(array $rule): array {
         return $rule['targets'] ?? [['tenant_id' => $rule['tenant_id'], 'processing_template_id' => $rule['processing_template_id']]];
     }
-    private function selectTarget(array $rule, ?string $tenantId,?string $templateId=null): array {
+    private function selectTarget(array $rule, ?string $tenantId,?string $templateId=null, bool $metadataOnly = false): array {
         $useDefault=$tenantId===null&&$templateId===null;$tenantId=$tenantId??$rule['tenant_id'];
         if($useDefault){$templateId=$rule['processing_template_id'];}
         $matches=[];foreach($this->targetChoices($rule) as $target){if($target['tenant_id']===$tenantId&&($templateId===null||$target['processing_template_id']===$templateId)){$matches[]=$target;}}
         if(count($matches)!==1){throw new \DomainException('Target tenant/template combination is unavailable or ambiguous');}
-        return array_replace($rule,$matches[0]);
+        $selected = array_replace($rule,$matches[0]);
+        if (!$metadataOnly) {
+            try { DirectoryTenantDeletionService::requireTenantOpen($this->db, $selected['weknora_origin'], $selected['tenant_id']); }
+            catch (BindingPublicationStoppedException $closed) { throw new \DomainException('Publication target Tenant is closed'); }
+        }
+        return $selected;
     }
     private function rule(string $id): array {
         foreach ($this->rules() as $rule) { if ($rule['id'] === $id) { return $rule; } }
@@ -612,7 +768,7 @@ final class DirectoryPublicationService {
     private function update(string $id, array $fields): void {
         $q = $this->db->getQueryBuilder();
         $q->update('weknora_dir_intent')->where($q->expr()->eq('operation_id', $q->createNamedParameter($id)))
-            ->andWhere($q->expr()->neq('state', $q->createNamedParameter('retired')));
+            ->andWhere($q->expr()->notIn('state', $q->createNamedParameter(['retired', 'target_deleted'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)));
         foreach ($fields + ['updated_at' => time()] as $column => $value) { $q->set($column, $q->createNamedParameter($value)); }
         $q->executeStatement();
     }
@@ -623,6 +779,7 @@ final class DirectoryPublicationService {
         try { if ($r->fetchOne() === false) { throw new \RuntimeException('Directory registry lock is unavailable'); } } finally { $r->closeCursor(); }
     }
     private function publicIntent(array $row): array {
+        if (DirectoryTargetClosureService::lookup($this->db, 'operation_id', $row['operation_id']) !== null) { $row['state'] = 'target_deleted'; $row['error_code'] = 'target_deleted'; }
         return ['operation_id' => $row['operation_id'], 'binding_id' => $row['binding_id'],
             'folder_id' => (int)$row['root_file_id'], 'state' => $row['state'], 'revision' => (int)$row['revision'],
             'error_code' => $row['error_code'], 'updated_at' => (int)$row['updated_at']];

@@ -32,7 +32,7 @@ try {
         $db->getQueryBuilder()->delete($table)->executeStatement();
     }
     $ids = [];
-    foreach (['retired', 'pending', 'active'] as $state) {
+    foreach (['retired', 'target_deleted', 'pending', 'active'] as $state) {
         $id = DirectoryPublicationService::uuid(); $ids[$state] = $id;
         $db->insertIgnoreConflict('weknora_dir_intent', [
             'operation_id'=>$id, 'binding_id'=>'test_'.$state, 'root_key'=>hash('sha256', $id),
@@ -46,11 +46,16 @@ try {
             ->where($q->expr()->eq('operation_id',$q->createNamedParameter($id)))->executeQuery();
         try { return $r->fetchAssociative(); } finally { $r->closeCursor(); }
     };
-    $retired = $read($ids['retired']);
-    $process->invoke($directories, $ids['retired']);
-    workerCheck($read($ids['retired']) === $retired, 'A retired intent was claimed or rewritten by an old worker');
-    $update->invoke($directories, $ids['retired'], ['state'=>'active', 'permission_version'=>9]);
-    workerCheck($read($ids['retired']) === $retired, 'Late completion resurrected retired metadata');
+    $terminal = [];
+    foreach (['retired', 'target_deleted'] as $state) {
+        $terminal[$state] = $read($ids[$state]);
+        $process->invoke($directories, $ids[$state]);
+        workerCheck($read($ids[$state]) === $terminal[$state], 'A terminal intent was claimed or rewritten by an old worker');
+        foreach (['active', 'pending'] as $lateState) {
+            $update->invoke($directories, $ids[$state], ['state'=>$lateState, 'permission_version'=>9]);
+            workerCheck($read($ids[$state]) === $terminal[$state], 'Late completion or failure resurrected terminal metadata');
+        }
+    }
 
     // Execute the actual five-second CLI path: discovery alone must not leave intents idle.
     $command=$c->get(DiscoverDirectories::class);
@@ -60,9 +65,34 @@ try {
         $row=$read($ids[$state]);
         workerCheck((int)$row['attempt_count'] === 1 && (int)$row['next_attempt_at'] > time(), 'Fast worker did not process a due intent');
     }
-    workerCheck($read($ids['retired']) === $retired, 'Queue selection retried retirement');
+    foreach ($terminal as $state => $before) {
+        workerCheck($read($ids[$state]) === $before, 'Queue selection retried a terminal intent');
+    }
+    $readProbe = static function (string $id) use ($db): array {
+        $q = $db->getQueryBuilder();
+        $r = $q->select('*')->from('weknora_deletion_probe')
+            ->where($q->expr()->eq('operation_id', $q->createNamedParameter($id)))->executeQuery();
+        try { return $r->fetchAssociative(); } finally { $r->closeCursor(); }
+    };
+    $probes = [];
+    foreach (array_keys($terminal) as $state) {
+        $probes[$state] = $readProbe($ids[$state]);
+        workerCheck((int)$probes[$state]['next_check_at'] > time() && (int)$probes[$state]['lease_until'] === 0,
+            'Missing-probe metadata check did not persist backoff or release its lease');
+    }
     $command->run(new \Symfony\Component\Console\Input\ArrayInput([]), new \Symfony\Component\Console\Output\NullOutput());
     workerCheck((int)$read($ids['pending'])['attempt_count'] === 1, 'Worker ignored persisted retry backoff');
+    foreach ($probes as $state => $before) {
+        workerCheck($readProbe($ids[$state]) === $before, 'Terminal metadata probe ignored persisted backoff');
+    }
+    // A due check owned by another worker must remain untouched.
+    $q = $db->getQueryBuilder();
+    $q->update('weknora_deletion_probe')->set('next_check_at', $q->createNamedParameter(0))
+        ->set('lease_until', $q->createNamedParameter(time() + 600))
+        ->where($q->expr()->eq('operation_id', $q->createNamedParameter($ids['target_deleted'])))->executeStatement();
+    $leased = $readProbe($ids['target_deleted']);
+    $directories->processDue();
+    workerCheck($readProbe($ids['target_deleted']) === $leased, 'A second worker stole an active metadata lease');
 
     $controls->closeFromPlan(['latest_content_revisions'=>[]]);
     $before=$controls->metadataInventory()['sha256'];
@@ -78,5 +108,5 @@ try {
     workerClosed(fn()=>$directories->sync('fixture',1,true,0));
     workerClosed(fn()=>$c->get(DirectoryOnboardingClient::class)->request([], 'POST', '/operations'));
     workerCheck($before === $controls->metadataInventory()['sha256'], 'Closed automation mutated recovery inventory');
-    echo "PASS: retired intents and late completion stay retired; real CLI processes pending/active intents with backoff; closed recovery blocks discovery, provisioning and outbound requests without metadata changes\n";
+    echo "PASS: retired/target_deleted intents reject late success and failure; real CLI processes pending/active intents with backoff; closed recovery blocks discovery, provisioning and outbound requests without metadata changes\n";
 } finally { $db->rollBack(); }
