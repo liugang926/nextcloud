@@ -4760,10 +4760,10 @@ index 000000000..24cdcaf96
 +func TestPostgresOriginalRootTailActual(t *testing.T) { runOriginalRootTailActual(t, true) }
 diff --git a/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
 new file mode 100644
-index 000000000..0f3016c0b
+index 000000000..40ffc4840
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,420 @@
 +//go:build linux || darwin
 +
 +package database
@@ -4778,9 +4778,12 @@ index 000000000..0f3016c0b
 +	"os/exec"
 +	"path/filepath"
 +	"strings"
++	"sync"
 +	"testing"
 +	"time"
 +
++	"github.com/golang-migrate/migrate/v4"
++	sqlite3migrate "github.com/golang-migrate/migrate/v4/database/sqlite3"
 +	"github.com/stretchr/testify/require"
 +)
 +
@@ -4824,6 +4827,8 @@ index 000000000..0f3016c0b
 +	if mode != "probe_and_run" {
 +		t.Fatal("unknown actual helper mode")
 +	}
++	ctx, finishDiagnostic := originalRootActualChildDiagnosticContext(ctx)
++	defer finishDiagnostic()
 +	probe, stop := context.WithTimeout(ctx, 60*time.Millisecond)
 +	_, _, err := acquireOriginalRootSQLiteBootstrap(probe, "sqlite3://unused", opts)
 +	stop()
@@ -4831,10 +4836,12 @@ index 000000000..0f3016c0b
 +		t.Fatal("actual parent OFD exclusion did not block bootstrap")
 +	}
 +	fmt.Println("ORIGINAL_ROOT_BOOTSTRAP_BLOCKED")
-+	if RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", opts) != nil {
++	if err := RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", opts); err != nil {
++		fmt.Printf("original_root_child_failure step=run class=%s\n", originalRootActualChildErrorClass(err))
 +		t.Fatal("actual complete Root bootstrap/tail failed")
 +	}
-+	if VerifyOriginalKnowledgeSchemaReady(ctx, "sqlite3://unused", opts) != nil {
++	if err := VerifyOriginalKnowledgeSchemaReady(ctx, "sqlite3://unused", opts); err != nil {
++		fmt.Printf("original_root_child_failure step=ready class=%s\n", originalRootActualChildErrorClass(err))
 +		t.Fatal("actual complete Root readiness failed")
 +	}
 +	fmt.Println("ORIGINAL_ROOT_READY")
@@ -4870,10 +4877,14 @@ index 000000000..0f3016c0b
 +	scanned := make(chan error, 1)
 +	go func() {
 +		scanner := bufio.NewScanner(stdout)
++		diagnosticBytes := 0
 +		for scanner.Scan() {
 +			line := scanner.Text()
 +			if strings.HasPrefix(line, "ORIGINAL_ROOT_") {
 +				tokens <- line
++			} else if len(line) <= 128 && originalRootActualChildDiagnosticLine(line) && len(line) <= 4096-diagnosticBytes {
++				diagnosticBytes += len(line)
++				t.Log(line)
 +			}
 +		}
 +		scanned <- scanner.Err()
@@ -4972,7 +4983,7 @@ index 000000000..0f3016c0b
 +	})
 +	t.Run("real_root_prefix_alias_blocks_before_upgrade", func(t *testing.T) {
 +		path := filepath.Join(t.TempDir(), "actual root prefix.sqlite")
-+		installSQLiteMigrationPrefixFixture(t, root, path, 75)
++		installOriginalRootActualSQLitePrefix(t, root, path, 75)
 +		alias := filepath.Join(t.TempDir(), "actual root alias.sqlite")
 +		require.NoError(t, os.Symlink(path, alias))
 +		holder := startOriginalRootActualProcess(t, root, path, "hold")
@@ -5039,10 +5050,139 @@ index 000000000..0f3016c0b
 +		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 +		defer cancel()
 +		ctx = context.WithValue(ctx, jointPeerSQLiteMigrationContextKey{}, held)
++		ctx = originalRootDiagnosticContextForTest(t, ctx)
 +		require.NoError(t, RunOriginalKnowledgeMigrations(ctx, "sqlite3://unused", MigrationOptions{SQLiteDBPath: path}))
 +		require.NoError(t, held.check(context.Background()), "borrower closes real migrator pools, not the outer owner")
 +		originalRootActualFinal(t, path)
 +	})
++}
++
++// Prefix preparation must address the same actual filename as the Root owner.
++// The legacy URL Open stringifies spaces before passing a bare filename to
++// sqlite3; the production URI pool decodes them while WithInstance binds that
++// exact pool. This local fixture still runs only the genuine historical SQL.
++func installOriginalRootActualSQLitePrefix(t *testing.T, source, path string, version uint) {
++	t.Helper()
++	db, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
++	require.NoError(t, err)
++	driver, err := sqlite3migrate.WithInstance(db, &sqlite3migrate.Config{})
++	if err != nil {
++		_ = db.Close()
++		require.NoError(t, err)
++	}
++	m, err := migrate.NewWithDatabaseInstance("file://"+filepath.ToSlash(filepath.Join(source, "migrations", "sqlite")), "sqlite3", driver)
++	if err != nil {
++		_ = driver.Close()
++		require.NoError(t, err)
++	}
++	err = m.Migrate(version)
++	sourceErr, databaseErr := m.Close()
++	require.NoError(t, err)
++	require.NoError(t, sourceErr)
++	require.NoError(t, databaseErr)
++}
++
++// Kernel-helper-only live observations use the existing fixed Root observer.
++// The callback does no IO/wait/SQL and can only offer bounded enum/bool records
++// to a nonblocking queue. A separate sink writes at most two records per phase.
++func originalRootActualChildDiagnosticContext(ctx context.Context) (context.Context, func()) {
++	if os.Getenv("WEKNORA_ORIGINAL_ROOT_KERNEL_HELPER") != "1" || os.Getenv(originalRootDiagnosticFlag) != "1" {
++		return ctx, func() {}
++	}
++	type record struct {
++		phase   originalRootDiagnosticPhase
++		success bool
++	}
++	events := make(chan record, 2*int(originalRootDiagnosticPhaseCount))
++	done := make(chan struct{})
++	var mu sync.Mutex
++	var seen [originalRootDiagnosticPhaseCount]uint8
++	sealed := false
++	go func() {
++		defer close(done)
++		for value := range events {
++			fmt.Printf("original_root_child_phase phase=%d success=%t\n", value.phase, value.success)
++		}
++	}()
++	observer := &originalRootDiagnosticObserver{observe: func(phase originalRootDiagnosticPhase, success bool) {
++		if phase >= originalRootDiagnosticPhaseCount {
++			return
++		}
++		mask := uint8(1)
++		if success {
++			mask = 2
++		}
++		mu.Lock()
++		defer mu.Unlock()
++		if sealed || seen[phase]&mask != 0 {
++			return
++		}
++		seen[phase] |= mask
++		select {
++		case events <- record{phase: phase, success: success}:
++		default:
++		}
++	}}
++	marked := context.WithValue(ctx, originalRootDiagnosticObserverKey{}, observer)
++	marked = WithJointSchemaCataloguePhaseObserver(marked, func(value JointSchemaCataloguePhaseObservation) {
++		phase, tailPhase, tail, known := originalRootExactDiagnosticPhaseForTest(value)
++		if known {
++			observeOriginalRootDiagnostic(marked, phase, !value.Failed)
++			if tail {
++				observeOriginalRootDiagnostic(marked, tailPhase, !value.Failed)
++			}
++		}
++	})
++	return marked, func() {
++		mu.Lock()
++		sealed = true
++		close(events)
++		mu.Unlock()
++		<-done
++	}
++}
++
++func originalRootActualChildErrorClass(err error) string {
++	switch {
++	case errors.Is(err, context.DeadlineExceeded):
++		return "deadline"
++	case errors.Is(err, context.Canceled):
++		return "cancelled"
++	case errors.Is(err, ErrJointSchemaUnknown):
++		return "schema_unknown"
++	case errors.Is(err, ErrJointSchemaSourceIdentity):
++		return "source_identity"
++	case errors.Is(err, ErrJointSchemaUnavailable):
++		return "schema_unavailable"
++	case errors.Is(err, ErrJointSchemaAmbiguousDirty):
++		return "schema_dirty"
++	case errors.Is(err, ErrOriginalRootSchemaNotReady):
++		return "root_not_ready"
++	case errors.Is(err, ErrOriginalRootPeerTail):
++		return "peer_tail"
++	default:
++		return "other"
++	}
++}
++
++// Only exact fixed diagnostic grammar is relayed. General child stdout,
++// stderr, paths, SQL, stack frames and provider error messages are discarded.
++func originalRootActualChildDiagnosticLine(line string) bool {
++	var phase uint
++	var success bool
++	if _, err := fmt.Sscanf(line, "original_root_child_phase phase=%d success=%t", &phase, &success); err == nil {
++		return phase < uint(originalRootDiagnosticPhaseCount) && line == fmt.Sprintf("original_root_child_phase phase=%d success=%t", phase, success)
++	}
++	var step, class string
++	if _, err := fmt.Sscanf(line, "original_root_child_failure step=%s class=%s", &step, &class); err != nil ||
++		(step != "run" && step != "ready") || line != fmt.Sprintf("original_root_child_failure step=%s class=%s", step, class) {
++		return false
++	}
++	switch class {
++	case "deadline", "cancelled", "schema_unknown", "source_identity", "schema_unavailable", "schema_dirty", "root_not_ready", "peer_tail", "other":
++		return true
++	}
++	return false
 +}
 diff --git a/internal/database/migration_original_root_sqlite_canonical.go b/internal/database/migration_original_root_sqlite_canonical.go
 new file mode 100644
@@ -5677,7 +5817,7 @@ index 000000000..d0278b7c5
 +}
 diff --git a/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
 new file mode 100644
-index 000000000..2edaea8c1
+index 000000000..c76cfc17e
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
 @@ -0,0 +1,168 @@
@@ -5758,7 +5898,7 @@ index 000000000..2edaea8c1
 +				t.Run(fault, func(t *testing.T) {
 +					path := filepath.Join(t.TempDir(), "actual writer lifetime.sqlite")
 +					if phase == "tail_before_initialization" {
-+						installSQLiteMigrationPrefixFixture(t, root, path, 87)
++						installOriginalRootActualSQLitePrefix(t, root, path, 87)
 +					}
 +					held, owned, err := acquireOriginalRootSQLiteBootstrap(context.Background(), "sqlite3://unused", MigrationOptions{SQLiteDBPath: path})
 +					require.NoError(t, err)
