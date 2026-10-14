@@ -169,3 +169,15 @@ WK 提交 `aa6801173` 将回合持有的物理读取保护绑定到外层请求�
 [联调失败收据](evidence/auto-space-prd-20261012/agent-live-source-refusal-receipt.json) 保留三次真实终态与日志。保留日志已在内存解密凭据后同时扫描明文/密文，无匹配；导出文件删除、owned actor 确认不存在。Agent 仍未验收通过，冻结候选继续不变。
 
 第 7 次使用 `--agent-preflight`，在实际搜索工具中取得底层错误 `document chunk enrichment lineage adapter is unavailable`（41.93 秒），并非 LDAP 连接或已执行的分享撤销。生产适配器目前只允许纯文本、无图像及无扩展 metadata 的分块；实际处理还会生成带生产证明的摘要分块，具体命中类型仍需验证。新增只输出固定形状标志、不改变原始 snapshot 返回值的诊断包装，尚未执行；不会据推测放宽适配器。[精确预检收据](evidence/auto-space-prd-20261012/agent-search-preflight-refusal-receipt.json)。测试终态和 actor 清理已核实，模型导出删除，日志凭据扫描通过。
+
+## 2026-10-14：真实 Agent 工具与撤权链路通过
+
+形状诊断确认实际命中一条正文和一条生产生成的摘要：两者来源完整，均无图像或扩展 metadata，摘要被原先仅支持正文的适配器拒绝。新增 snapshot 的内部 `ProducerMaterialVerified` 标志，只由可信持久生产证明读取器在核对实际内容、摘要值和版本后设置；仅有当前发布身份的旧读取器不能设置。Agent 现在接受带该证明的摘要，其他尚未适配的扩展内容继续拒绝；标志不序列化到公共 JSON。
+
+八项工具边界测试通过。实际生产文档→解析/索引/摘要/图谱数据库测试也通过：摘要完整证明为真，旧读取器仅有来源身份时为假，删除对应生产证明后拒绝或保留未知来源（4.88 秒）。
+
+关闭 `--agent-preflight` 后，完整 runner 实际 exit 0（业务 111.07 秒）。BGE 512 维与 DeepSeek Flash 真正执行处理、RAG、持久历史，以及 Agent 的 `search_knowledge` 和 `read_document`；两种工具结果和最终答案都带完整非空来源依赖。真实 NC LDAP 分享删除后，旧 Agent 历史在流式和非流式模型调用前拒绝，调用次数不增加；持久历史和 RAG 缓存拒绝仍通过。
+
+同一代次 12 项 Gin 文档 HTTP 权限断言通过（37.37 秒），原件字节不变、新租约释放、NC 签名 inbox 对账通过。WK 提交 `72d0e21c1` 已冻结为新候选，精确 apply/reverse 校验通过。模型导出已删除，明文及密文凭据日志扫描无匹配，两个测试 actor 均确认不存在。[本轮验收收据](evidence/auto-space-prd-20261014/real-agent-acceptance-receipt.json)。
+
+范围仍是小 Markdown、SQLite 向量/FTS、SQL 图谱及受控 WK 登录上下文。真实 NC/AD 来源检查、生产 Agent engine 和两个工具已经验证；完整 JWT/browser Agent、其他工具、跨会话搜索/导出、完整应用恢复及 100 GB 处理仍需继续，不能由本轮替代。复现使用 `--http-read --rag --history --agent --direct-network`，不启用诊断预检。

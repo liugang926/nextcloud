@@ -47459,6 +47459,53 @@ index 04052773e..accf5c52e 100644
  			imageCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
  			descriptions := e.describeImages(imageCtx, call.Result.Images)
  			cancel()
+diff --git a/internal/agent/tools/document_summary_projection_test.go b/internal/agent/tools/document_summary_projection_test.go
+new file mode 100644
+index 000000000..8b2ec7d32
+--- /dev/null
++++ b/internal/agent/tools/document_summary_projection_test.go
+@@ -0,0 +1,41 @@
++package tools
++
++import (
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestDocumentSummaryProjectionRequiresProducerMaterial(t *testing.T) {
++	for _, mode := range []string{"text", "unproved-summary", "proved-summary", "unknown-lineage", "image", "metadata", "unsupported-type", "missing-chunk"} {
++		t.Run(mode, func(t *testing.T) {
++			lineage, err := types.NewCompleteSourceLineage()
++			require.NoError(t, err)
++			snapshot := types.RAGChunkInputSnapshot{Chunk: &types.Chunk{ChunkType: types.ChunkTypeSummary}, SourceLineage: lineage, ProducerMaterialVerified: true}
++			switch mode {
++			case "text":
++				snapshot.Chunk.ChunkType = types.ChunkTypeText
++				snapshot.ProducerMaterialVerified = false
++			case "unproved-summary":
++				snapshot.ProducerMaterialVerified = false
++			case "unknown-lineage":
++				snapshot.SourceLineage = types.UnknownSourceLineage()
++			case "image":
++				snapshot.Chunk.ImageInfo = `[{"url":"unaccounted"}]`
++			case "metadata":
++				snapshot.Chunk.Metadata = types.JSON(`{"text":"unaccounted"}`)
++			case "unsupported-type":
++				snapshot.Chunk.ChunkType = types.ChunkTypeImageOCR
++			case "missing-chunk":
++				snapshot.Chunk = nil
++			}
++			err = validateDocumentChunkProjection(snapshot)
++			if mode == "text" || mode == "proved-summary" {
++				require.NoError(t, err)
++			} else {
++				require.Error(t, err)
++			}
++		})
++	}
++}
 diff --git a/internal/agent/tools/exec_context.go b/internal/agent/tools/exec_context.go
 index dca3684c6..f6088dfe9 100644
 --- a/internal/agent/tools/exec_context.go
@@ -49111,10 +49158,10 @@ index 8b9f9af86..d713266c5 100644
  }
 diff --git a/internal/agent/tools/read_document_lineage.go b/internal/agent/tools/read_document_lineage.go
 new file mode 100644
-index 000000000..39933e74b
+index 000000000..8b6c9bff1
 --- /dev/null
 +++ b/internal/agent/tools/read_document_lineage.go
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,182 @@
 +package tools
 +
 +import (
@@ -49238,8 +49285,8 @@ index 000000000..39933e74b
 +			if c == nil || c.ID != chunks[i].ID || c.TenantID != k.TenantID || c.KnowledgeBaseID != k.KnowledgeBaseID || c.KnowledgeID != k.ID {
 +				return nil, ErrToolSourceLineageUnavailable
 +			}
-+			if c.ChunkType != types.ChunkTypeText || (strings.TrimSpace(c.ImageInfo) != "" && strings.TrimSpace(c.ImageInfo) != "[]") || (len(c.Metadata) > 0 && strings.TrimSpace(string(c.Metadata)) != "{}") {
-+				return nil, errors.New("document chunk enrichment lineage adapter is unavailable")
++			if err := validateDocumentChunkProjection(snapshot); err != nil {
++				return nil, err
 +			}
 +			out.Chunks = append(out.Chunks, c)
 +		} else if snapshot.Chunk != nil {
@@ -49267,6 +49314,23 @@ index 000000000..39933e74b
 +		return nil, err
 +	}
 +	return out, nil
++}
++
++func validateDocumentChunkProjection(snapshot types.RAGChunkInputSnapshot) error {
++	if err := snapshot.SourceLineage.RequireComplete(); err != nil {
++		return err
++	}
++	c := snapshot.Chunk
++	if c == nil {
++		return ErrToolSourceLineageUnavailable
++	}
++	// Generated summaries need an exact producer receipt. Older readers that
++	// can only pin current source identity retain the original text-only scope.
++	supported := c.ChunkType == types.ChunkTypeText || (c.ChunkType == types.ChunkTypeSummary && snapshot.ProducerMaterialVerified)
++	if !supported || (strings.TrimSpace(c.ImageInfo) != "" && strings.TrimSpace(c.ImageInfo) != "[]") || (len(c.Metadata) > 0 && strings.TrimSpace(string(c.Metadata)) != "{}") {
++		return errors.New("document chunk enrichment lineage adapter is unavailable")
++	}
++	return nil
 +}
 +
 +// Only fields from the covered source snapshot are rendered. Generated
@@ -99764,10 +99828,10 @@ index 000000000..3e36cc6ae
 +}
 diff --git a/internal/application/repository/rag_chunk_snapshot.go b/internal/application/repository/rag_chunk_snapshot.go
 new file mode 100644
-index 000000000..bec97fcb1
+index 000000000..28f6d47de
 --- /dev/null
 +++ b/internal/application/repository/rag_chunk_snapshot.go
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,254 @@
 +package repository
 +
 +import (
@@ -99918,6 +99982,7 @@ index 000000000..bec97fcb1
 +					}
 +				}
 +				lineage := sourceLineage
++				materialVerified := false
 +				if controlled && r.ordinary != nil {
 +					proof, ok := r.ordinary.(ControlledRAGInputProofLookup)
 +					if !ok {
@@ -99934,6 +99999,7 @@ index 000000000..bec97fcb1
 +						if err := lineage.Validate(); err != nil {
 +							return err
 +						}
++						materialVerified = chunk != nil && lineage.RequireComplete() == nil
 +					}
 +				}
 +				if !controlled {
@@ -99950,6 +100016,7 @@ index 000000000..bec97fcb1
 +						if err := lineage.Validate(); err != nil {
 +							return err
 +						}
++						materialVerified = chunk != nil && lineage.RequireComplete() == nil
 +					}
 +				}
 +				if request.ExpectedLineage != nil {
@@ -99964,7 +100031,7 @@ index 000000000..bec97fcb1
 +					return err
 +				}
 +				copyKnowledge := knowledge
-+				out = append(out, RAGChunkInputSnapshot{Knowledge: &copyKnowledge, Chunk: chunk, SourceLineage: copyLineage})
++				out = append(out, RAGChunkInputSnapshot{Knowledge: &copyKnowledge, Chunk: chunk, SourceLineage: copyLineage, ProducerMaterialVerified: materialVerified && copyLineage.RequireComplete() == nil})
 +			}
 +		}
 +		return nil
@@ -126745,7 +126812,7 @@ index 4ac525b1f..fa9b6a2a2 100644
  		out := parseDocumentSummaryOutput("```json\n" +
 diff --git a/internal/application/service/knowledgebase_rag_hydration.go b/internal/application/service/knowledgebase_rag_hydration.go
 new file mode 100644
-index 000000000..d2109ab23
+index 000000000..c3a466e6f
 --- /dev/null
 +++ b/internal/application/service/knowledgebase_rag_hydration.go
 @@ -0,0 +1,254 @@
@@ -126808,7 +126875,7 @@ index 000000000..d2109ab23
 +		guard = owned
 +	}
 +	if guard == nil || !guard.Covers(scopes) {
-+		guard, err = readlease.BeginNextcloudKBRead(ctx, s.contentLeases, scopes)
++		guard, err = readlease.BeginNextcloudKBRead(ragPhysicalReadLifetimeContext(ctx), s.contentLeases, scopes)
 +		if err != nil {
 +			return nil, err
 +		}
@@ -127096,7 +127163,7 @@ index 000000000..25bfdb5b1
 +	}
 +}
 diff --git a/internal/application/service/knowledgebase_search.go b/internal/application/service/knowledgebase_search.go
-index 5970777fd..db60496ae 100644
+index 5970777fd..7fc11800b 100644
 --- a/internal/application/service/knowledgebase_search.go
 +++ b/internal/application/service/knowledgebase_search.go
 @@ -3,7 +3,9 @@ package service
@@ -127144,7 +127211,7 @@ index 5970777fd..db60496ae 100644
 +	if guard == nil || !guard.Covers(scopes) {
 +		if s.contentLeases != nil {
 +			var beginErr error
-+			guard, beginErr = readlease.BeginNextcloudKBRead(ctx, s.contentLeases, scopes)
++			guard, beginErr = readlease.BeginNextcloudKBRead(ragPhysicalReadLifetimeContext(ctx), s.contentLeases, scopes)
 +			if beginErr != nil {
 +				return nil, fmt.Errorf("protect knowledge search: %w", beginErr)
 +			}
@@ -130318,10 +130385,10 @@ index 000000000..f034203b6
 +}
 diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
 new file mode 100644
-index 000000000..8f493fb38
+index 000000000..157fd58ec
 --- /dev/null
 +++ b/internal/application/service/message_material_output.go
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,596 @@
 +package service
 +
 +import (
@@ -130521,6 +130588,9 @@ index 000000000..8f493fb38
 +}
 +
 +func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
++	if ctx == nil || ctx.Err() != nil {
++		return access.ErrNextcloudPublicationUnavailable
++	}
 +	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
 +	if !ok {
 +		return access.ErrNextcloudPublicationUnavailable
@@ -130563,6 +130633,25 @@ index 000000000..8f493fb38
 +	}
 +	return nil
 +}
++
++// A tool's execution context ends before the HTTP sender consumes its buffered
++// output. Turn-owned physical fences follow the request owner; ContextFor still
++// binds each individual read to its current consumer's cancellation and values.
++func ragPhysicalReadLifetimeContext(ctx context.Context) context.Context {
++	if slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot); ok && slot.OwnerContext != nil {
++		return &ragReadOwnerContext{Context: ctx, owner: slot.OwnerContext}
++	}
++	return ctx
++}
++
++type ragReadOwnerContext struct {
++	context.Context
++	owner context.Context
++}
++
++func (c *ragReadOwnerContext) Deadline() (time.Time, bool) { return c.owner.Deadline() }
++func (c *ragReadOwnerContext) Done() <-chan struct{}       { return c.owner.Done() }
++func (c *ragReadOwnerContext) Err() error                  { return c.owner.Err() }
 +
 +// A turn owns each actual retrieval guard before index/body access. Its model
 +// and HTTP references release independently; cached bytes never prolong a
@@ -133694,10 +133783,10 @@ index 000000000..32f7f2f11
 +}
 diff --git a/internal/application/service/nextcloud_document_graph_pipeline_test.go b/internal/application/service/nextcloud_document_graph_pipeline_test.go
 new file mode 100644
-index 000000000..367805db0
+index 000000000..58d8947eb
 --- /dev/null
 +++ b/internal/application/service/nextcloud_document_graph_pipeline_test.go
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,263 @@
 +//go:build sqlite_fts5
 +
 +package service
@@ -133750,7 +133839,7 @@ index 000000000..367805db0
 +	}
 +	runDocumentGraphPipeline(t, path)
 +}
-+func runDocumentGraphPipeline(t *testing.T, path string) {
++func runDocumentGraphPipeline(t *testing.T, path string, inspect ...func(*machinePipelineFixture, *types.Knowledge)) {
 +	localDerivedVecAuto.Do(sqlite_vec.Auto)
 +	var live documentGraphLive
 +	var source *machinePipelineSource
@@ -133799,6 +133888,10 @@ index 000000000..367805db0
 +	if liveModels != nil {
 +		require.NoError(t, db.Save(&liveModels.embeddingRow).Error)
 +		require.NoError(t, db.Save(&liveModels.chatRow).Error)
++		// Agent retrieval resolves model identity through the production service.
++		// Keep the real provider wrappers for call accounting, and delegate the
++		// remaining model metadata methods to the actual persisted model rows.
++		liveModels.ModelService = &modelService{repo: repository.NewModelRepository(db)}
 +		m.f.s.modelService = liveModels
 +		dimensions = liveModels.embedder.GetDimensions()
 +	}
@@ -133877,6 +133970,9 @@ index 000000000..367805db0
 +	require.Equal(t, "succeeded", status.Graph.State)
 +	require.True(t, status.Graph.Persisted)
 +	require.Equal(t, graphTasks, status.Graph.Expected)
++	for _, check := range inspect {
++		check(m, row)
++	}
 +	var checkRAGRevoked func()
 +	if source != nil && liveModels != nil && os.Getenv("WEKNORA_DOCUMENT_GRAPH_RAG") == "1" {
 +		checkRAGRevoked = documentLiveRAG(t, m, liveModels, row.ID)
@@ -134710,6 +134806,136 @@ index 000000000..d7cb17385
 +	require.EqualValues(t, count, states)
 +	t.Logf("real_file_heads=%d real_chunk_extract_calls=%d real_graph_records=%d durable_task_acks=%d exact_graph_resources=%d published=%d elapsed_ms=%d files_per_second=%.2f; controlled small plaintext/source/model; embedding explicitly skipped; excludes liveNC/LDAP/remoteLLM/100GB source transfer", count, model.calls, records, acks, resources, published, elapsed.Milliseconds(), float64(count)/elapsed.Seconds())
 +}
+diff --git a/internal/application/service/nextcloud_live_agent_test.go b/internal/application/service/nextcloud_live_agent_test.go
+new file mode 100644
+index 000000000..53a180c57
+--- /dev/null
++++ b/internal/application/service/nextcloud_live_agent_test.go
+@@ -0,0 +1,124 @@
++//go:build sqlite_fts5
++
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/agent"
++	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++)
++
++func documentLiveAgent(t *testing.T, m *machinePipelineFixture, models *documentLiveModels, kbs *knowledgeBaseService) func() {
++	t.Helper()
++	if os.Getenv("WEKNORA_DOCUMENT_GRAPH_AGENT") != "1" {
++		return func() {}
++	}
++	// Use the same persisted KB and body services as retrieval; no tool response stubs.
++	m.f.s.kbService = kbs
++	m.f.s.contentLeases = m.f.store.ContentLeaseStore()
++	m.f.s.groupAccess = NewGroupAccessService(repository.NewGroupAccessRepository(m.f.db))
++	var tenant types.Tenant
++	require.NoError(t, m.f.db.Where("id=7").Take(&tenant).Error)
++	ctx := context.WithValue(m.f.ctx, types.TenantInfoContextKey, &tenant)
++	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
++	t.Cleanup(cancel)
++	ctx, attach, check, releaseHTTP := BeginMessageMaterialHTTPBoundary(ctx)
++	t.Cleanup(releaseHTTP)
++	ctx, releaseModel, external := retainMessageMaterialProducer(ctx)
++	require.True(t, external)
++	t.Cleanup(releaseModel)
++	markMessageMaterialReady(ctx)
++	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, TenantID: 7, KnowledgeBaseID: m.ds.KnowledgeBaseID}}
++	scope := access.LineageReadScope{Targets: targets}
++	verify := func(ctx context.Context, l *types.SourceLineage) error { return m.f.guard.Check(ctx, l, scope) }
++	chunks := NewChunkService(m.f.s.chunkRepo, m.f.s.repo, repository.NewKnowledgeBaseRepository(m.f.db), models, m.f.s.retrieveEngine, nil, nil, nil)
++	registry := agenttools.NewToolRegistry()
++	registry.RegisterTool(agenttools.NewSearchKnowledgeTool(kbs, m.f.s, chunks, targets, nil, nil))
++	registry.RegisterTool(agenttools.NewReadDocumentTool(m.f.s, chunks, targets))
++	registry.SetRAGChunkSnapshotReader(repository.NewRAGChunkSnapshotReader(m.f.db, m.f.store))
++	if os.Getenv("WEKNORA_DOCUMENT_GRAPH_AGENT_PREFLIGHT") == "1" {
++		// Diagnostic only; the final acceptance run omits this preflight so
++		// the model's first tool call starts with a fresh physical-read slot.
++		probe := agenttools.NewSearchKnowledgeTool(kbs, m.f.s, chunks, targets, nil, nil)
++		probe.SetRAGChunkSnapshotReader(documentAgentSnapshotDiagnostic{t, repository.NewRAGChunkSnapshotReader(m.f.db, m.f.store)})
++		probeCtx := types.WithRAGSourceLineage(ctx, types.NewRAGSourceLineage(verify))
++		_, probeErr := probe.ExecuteSourceLineage(probeCtx, json.RawMessage(`{"query":"Who does Alice know on Project Cedar?","limit":3}`))
++		require.NoError(t, probeErr, "actual search tool preflight before the model loop")
++	}
++	independent, _ := types.NewCompleteSourceLineage()
++	thinking, citations := false, false
++	makeEngine := func() *agent.AgentEngine {
++		engine := agent.NewAgentEngine(&types.AgentConfig{MaxIterations: 5, Temperature: 0.1, Thinking: &thinking, CitationEnabled: &citations, MaxCompletionTokens: 512, SearchTargets: targets}, models.summary, registry, event.NewEventBus(), []*agent.KnowledgeBaseInfo{{ID: m.ds.KnowledgeBaseID, Name: "Owned acceptance document collection", Type: "document", Capabilities: []string{"chunks"}, SourceLineage: independent}}, nil, "live-owned-agent", "")
++		require.NotNil(t, engine)
++		engine.SetSourceLineageVerifier(verify)
++		return engine
++	}
++	result, err := makeEngine().Execute(ctx, "live-owned-agent", "live-agent-turn", "Use search_knowledge to find the Project Cedar document, then use read_document to inspect it. Based only on that document, who does Alice know? Answer with the person's name in one sentence.", nil)
++	require.NoError(t, err)
++	require.NotNil(t, result)
++	require.True(t, result.IsComplete)
++	require.Contains(t, strings.ToLower(result.FinalAnswer), "bob")
++	require.NoError(t, result.SourceLineage.RequireComplete())
++	require.NotEmpty(t, result.SourceLineage.Sources)
++	used := map[string]bool{}
++	for _, step := range result.RoundSteps {
++		for _, call := range step.ToolCalls {
++			if call.ExecutionName() == agenttools.ToolSearchKnowledge || call.ExecutionName() == agenttools.ToolReadDocument {
++				require.NotNil(t, call.Result)
++				require.True(t, call.Result.Success)
++				require.NoError(t, call.Result.SourceLineage.RequireComplete())
++				require.NotEmpty(t, call.Result.SourceLineage.Sources)
++				used[call.ExecutionName()] = true
++			}
++		}
++	}
++	require.True(t, used[agenttools.ToolSearchKnowledge])
++	require.True(t, used[agenttools.ToolReadDocument])
++	require.NoError(t, check())
++	releaseModel()
++	require.NoError(t, CheckMessageMaterialOutputBoundary(attach(ctx)))
++	t.Log("REAL_AGENT actual model selected search_knowledge and read_document, real tool outputs and final answer carry source dependencies")
++	return func() {
++		require.Error(t, verify(ctx, result.SourceLineage))
++		calls := models.summary.streams.Load()
++		syncCalls := models.summary.calls.Load()
++		_, err := makeEngine().Execute(ctx, "live-owned-agent", "live-agent-after-revoke", "Explain the previous answer again.", []chat.Message{{Role: "assistant", Content: result.FinalAnswer, SourceLineage: result.SourceLineage}})
++		require.Error(t, err)
++		require.Equal(t, calls, models.summary.streams.Load(), "revoked Agent history must be rejected before model call")
++		require.Equal(t, syncCalls, models.summary.calls.Load(), "revoked Agent history must not reach non-streaming model either")
++		t.Log("REAL_AGENT revoked source history rejected before either model entrypoint")
++		releaseHTTP()
++	}
++}
++
++// Print only fixed shape flags, never document text or model credentials.
++// This wrapper returns the production reader's exact result unchanged.
++type documentAgentSnapshotDiagnostic struct {
++	t     *testing.T
++	inner interfaces.RAGChunkSnapshotReader
++}
++
++func (d documentAgentSnapshotDiagnostic) HydrateRAGChunkSnapshots(ctx context.Context, requests []types.RAGChunkReadRequest) ([]types.RAGChunkInputSnapshot, error) {
++	rows, err := d.inner.HydrateRAGChunkSnapshots(ctx, requests)
++	for _, row := range rows {
++		if c := row.Chunk; c != nil {
++			metadata := strings.TrimSpace(string(c.Metadata))
++			images := strings.TrimSpace(c.ImageInfo)
++			d.t.Logf("AGENT_SNAPSHOT text=%t summary=%t metadata_empty=%t metadata_null=%t images_empty=%t lineage_complete=%t", c.ChunkType == types.ChunkTypeText, c.ChunkType == types.ChunkTypeSummary, metadata == "" || metadata == "{}", metadata == "null", images == "" || images == "[]", row.SourceLineage.RequireComplete() == nil)
++		}
++	}
++	return rows, err
++}
 diff --git a/internal/application/service/nextcloud_live_history_test.go b/internal/application/service/nextcloud_live_history_test.go
 new file mode 100644
 index 000000000..181d40928
@@ -134961,16 +135187,17 @@ index 000000000..9fa67e78e
 +}
 diff --git a/internal/application/service/nextcloud_live_rag_test.go b/internal/application/service/nextcloud_live_rag_test.go
 new file mode 100644
-index 000000000..b1501a3af
+index 000000000..a8b5c84a2
 --- /dev/null
 +++ b/internal/application/service/nextcloud_live_rag_test.go
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,128 @@
 +//go:build sqlite_fts5
 +
 +package service
 +
 +import (
 +	"context"
++	"os"
 +	"strings"
 +	"testing"
 +	"time"
@@ -134998,7 +135225,11 @@ index 000000000..b1501a3af
 +	ctx := context.WithValue(m.f.ctx, types.TenantInfoContextKey, &tenant)
 +	query := "Who does Alice know on Project Cedar?"
 +	history := prepareDocumentLiveHistory(t, m, ctx, query)
-+	ctx, cancel := context.WithTimeout(ctx, 150*time.Second)
++	budget := 150 * time.Second
++	if os.Getenv("WEKNORA_DOCUMENT_GRAPH_AGENT") == "1" {
++		budget = 240 * time.Second
++	}
++	ctx, cancel := context.WithTimeout(ctx, budget)
 +	t.Cleanup(cancel)
 +	ctx, attach, checkpoint, releaseHTTP := BeginMessageMaterialHTTPBoundary(ctx)
 +	t.Cleanup(releaseHTTP)
@@ -135066,6 +135297,7 @@ index 000000000..b1501a3af
 +	require.Contains(t, strings.ToLower(answer.String()), "bob")
 +	require.Equal(t, streamCount+1, models.summary.streams.Load())
 +	checkHistoryRevoked := history.complete(t, ctx, answer.String(), answerLineage)
++	checkAgentRevoked := documentLiveAgent(t, m, models, svc)
 +	require.NoError(t, checkpoint())
 +	releaseModel()
 +	require.NoError(t, CheckMessageMaterialOutputBoundary(attach(ctx)))
@@ -135076,6 +135308,7 @@ index 000000000..b1501a3af
 +	t.Log("REAL_RAG native vector/FTS retrieval, actual chunk hydration/merge and real streamed answer passed; answer depends on the source")
 +	return func() {
 +		checkHistoryRevoked()
++		checkAgentRevoked()
 +		require.Error(t, turn.Check(ctx), "cached query/answer dependency must deny after actual share removal")
 +		denied, err := svc.HybridSearch(ctx, m.ds.KnowledgeBaseID, params)
 +		require.NoError(t, err, "search filters denied source rows")
@@ -135904,6 +136137,63 @@ index 000000000..d4d912f3f
 +	require.NoError(t, receiver.Table("state_inbox").Select("received_at").Order("received_at").Offset(9499).Limit(1).Scan(&p95).Error)
 +	t.Logf("p95_receiver_persist_lag_ms=%d dispatch_cadence_upper_bound_ms=5000", p95-started.UnixMilli())
 +	t.Log(fmt.Sprintf("metadata_rows=10000 exact_persisted_acks=%d elapsed_ms=%d throughput_per_second=%.1f entire_batch_sender_lag_ms=%d; includes actual HTTP, HMAC, sender DB and receiver FULL SQLite commits; excludes Nextcloud Files/LDAP costs and document bodies", persisted, elapsed.Milliseconds(), 10000/elapsed.Seconds(), elapsed.Milliseconds()))
++}
+diff --git a/internal/application/service/nextcloud_summary_snapshot_test.go b/internal/application/service/nextcloud_summary_snapshot_test.go
+new file mode 100644
+index 000000000..d934dab28
+--- /dev/null
++++ b/internal/application/service/nextcloud_summary_snapshot_test.go
+@@ -0,0 +1,51 @@
++//go:build sqlite_fts5
++
++package service
++
++import (
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/readlease"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestProcessedSummarySnapshotRequiresPersistedProducerReceipt(t *testing.T) {
++	runDocumentGraphPipeline(t, "", func(m *machinePipelineFixture, knowledge *types.Knowledge) {
++		var summary types.Chunk
++		require.NoError(t, m.f.db.Where("knowledge_id=? AND chunk_type=?", knowledge.ID, types.ChunkTypeSummary).Take(&summary).Error)
++		guard, err := readlease.BeginNextcloudKBRead(m.f.ctx, m.f.store.ContentLeaseStore(), []readlease.NextcloudKBReadScope{{TenantID: 7, KBID: knowledge.KnowledgeBaseID}})
++		require.NoError(t, err)
++		defer guard.Close()
++		require.NoError(t, guard.PinKnowledge(knowledge))
++		lease, err := guard.ExactLease(knowledge)
++		require.NoError(t, err)
++		requests := []types.RAGChunkReadRequest{{TenantID: 7, KnowledgeBaseID: knowledge.KnowledgeBaseID, KnowledgeID: knowledge.ID, ChunkIDs: []string{summary.ID}, Lease: lease}}
++		reader := repository.NewRAGChunkSnapshotReader(m.f.db, m.f.store)
++		rows, err := reader.HydrateRAGChunkSnapshots(guard.Context(), requests)
++		require.NoError(t, err)
++		require.Len(t, rows, 1)
++		require.True(t, rows[0].ProducerMaterialVerified)
++		require.NoError(t, rows[0].SourceLineage.RequireComplete())
++		require.Equal(t, summary.Content, rows[0].Chunk.Content)
++		// A current publication pin is not the summary's original producer proof.
++		legacy, err := repository.NewRAGChunkSnapshotReader(m.f.db, nil).HydrateRAGChunkSnapshots(guard.Context(), requests)
++		require.NoError(t, err)
++		require.Len(t, legacy, 1)
++		require.NoError(t, legacy[0].SourceLineage.RequireComplete())
++		require.False(t, legacy[0].ProducerMaterialVerified)
++		// Losing the actual receipt cannot be repaired by current source identity.
++		deleted := m.f.db.Exec("DELETE FROM knowledge_input_material_receipts WHERE row_kind='chunk' AND row_id=?", summary.ID)
++		require.NoError(t, deleted.Error)
++		require.EqualValues(t, 1, deleted.RowsAffected)
++		missing, err := reader.HydrateRAGChunkSnapshots(guard.Context(), requests)
++		if err != nil {
++			require.Nil(t, missing)
++		} else {
++			require.Len(t, missing, 1)
++			require.False(t, missing[0].ProducerMaterialVerified)
++			require.Error(t, missing[0].SourceLineage.RequireComplete())
++		}
++	})
 +}
 diff --git a/internal/application/service/nextcloud_sync_pause_test.go b/internal/application/service/nextcloud_sync_pause_test.go
 new file mode 100644
@@ -138026,10 +138316,10 @@ index 000000000..f2f64befe
 +}
 diff --git a/internal/application/service/rag_turn_reuse_actual_test.go b/internal/application/service/rag_turn_reuse_actual_test.go
 new file mode 100644
-index 000000000..69383c050
+index 000000000..7f06a6ee7
 --- /dev/null
 +++ b/internal/application/service/rag_turn_reuse_actual_test.go
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,156 @@
 +package service
 +
 +import (
@@ -138049,7 +138339,7 @@ index 000000000..69383c050
 +// Only the vector backend is controlled: it returns actual persisted chunk IDs,
 +// whose text/provenance is captured by the real SQL snapshot reader.
 +func runRAGPhysicalActualReusedTurn(t *testing.T, pg bool) {
-+	for _, mode := range []string{"search-and-merge", "source-revoked", "missing-proof", "caller-cancelled"} {
++	for _, mode := range []string{"search-and-merge", "producer-finished", "producer-borrowed", "owner-cancelled", "source-revoked", "missing-proof", "caller-cancelled"} {
 +		t.Run(mode, func(t *testing.T) {
 +			m := newMachinePipelineFixture(t, pg)
 +			k := m.ingest(t)
@@ -138068,6 +138358,8 @@ index 000000000..69383c050
 +			var tenant types.Tenant
 +			require.NoError(t, m.f.db.Where("id=7").Take(&tenant).Error)
 +			ctx := context.WithValue(m.f.ctx, types.TenantInfoContextKey, &tenant)
++			ctx, cancelOwner := context.WithCancel(ctx)
++			defer cancelOwner()
 +			ctx, attach, checkpoint, releaseHTTP := BeginMessageMaterialHTTPBoundary(ctx)
 +			defer releaseHTTP()
 +			ctx, releaseModel, external := retainMessageMaterialProducer(ctx)
@@ -138085,9 +138377,41 @@ index 000000000..69383c050
 +			params := types.SearchParams{QueryText: "actual original topic", QueryEmbedding: []float32{0.5}, MatchCount: 1}
 +			// The holder may acquire its fence before the QA entry adds its
 +			// lineage accumulator. Reuse must preserve that later accumulator.
-+			warm, err := svc.HybridSearch(ctx, "kb", params)
++			readCtx := ctx
++			var finishTool context.CancelFunc
++			var borrowed *readlease.NextcloudReadGuard
++			if mode == "producer-finished" || mode == "producer-borrowed" {
++				readCtx, finishTool = context.WithCancel(ctx)
++				defer finishTool()
++				if mode == "producer-borrowed" {
++					var err error
++					borrowed, err = readlease.BeginNextcloudKBRead(readCtx, m.f.store.ContentLeaseStore(), []readlease.NextcloudKBReadScope{{TenantID: 7, KBID: "kb"}})
++					require.NoError(t, err)
++					defer borrowed.Close()
++					readCtx = borrowed.Context()
++				}
++			}
++			warm, err := svc.HybridSearch(readCtx, "kb", params)
 +			require.NoError(t, err)
 +			require.Len(t, warm, 1)
++			if finishTool != nil {
++				if borrowed != nil {
++					require.NoError(t, borrowed.Close())
++				}
++				finishTool()
++				releaseModel()
++				require.NoError(t, CheckMessageMaterialOutputBoundary(attach(ctx)), "HTTP sender retains the original read fence after tool context completion")
++				releaseHTTP()
++				var active int64
++				require.NoError(t, m.f.db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&active).Error)
++				require.Zero(t, active)
++				return
++			}
++			if mode == "owner-cancelled" {
++				cancelOwner()
++				require.Error(t, checkpoint(), "actual request cancellation still denies output")
++				return
++			}
 +			ctx, err = manager.BeginSourceLineage(ctx, cm, access.LineageReadScope{Targets: cm.SearchTargets})
 +			require.NoError(t, err)
 +			turn := types.RAGSourceLineageFromContext(ctx)
@@ -181612,10 +181936,10 @@ index 000000000..67a072fb5
 +}
 diff --git a/internal/types/rag_chunk_snapshot.go b/internal/types/rag_chunk_snapshot.go
 new file mode 100644
-index 000000000..e778767a2
+index 000000000..0b9195da1
 --- /dev/null
 +++ b/internal/types/rag_chunk_snapshot.go
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,39 @@
 +package types
 +
 +import "time"
@@ -181650,6 +181974,10 @@ index 000000000..e778767a2
 +	Knowledge     *Knowledge     `json:"-"`
 +	Chunk         *Chunk         `json:"-"`
 +	SourceLineage *SourceLineage `json:"-"`
++	// Set only after the trusted snapshot reader verifies the exact persisted
++	// producer material, including its digest/revision. Current publication
++	// identity by itself cannot authorize generated summary text.
++	ProducerMaterialVerified bool `json:"-"`
 +}
 diff --git a/internal/types/rag_content_privacy_test.go b/internal/types/rag_content_privacy_test.go
 new file mode 100644
