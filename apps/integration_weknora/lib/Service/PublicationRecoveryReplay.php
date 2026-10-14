@@ -10,7 +10,8 @@ use OCP\IDBConnection;
 /** Apply only conservative closure in maintenance; reconciliation opens later. */
 final class PublicationRecoveryReplay {
     public function __construct(private IDBConnection $db, private IConfig $config,
-        private BindingRegistryService $bindings, private FilePublicationStateService $files) {
+        private BindingRegistryService $bindings, private FilePublicationStateService $files,
+        private ControlRecoveryService $controls) {
     }
 
     public function apply(array $plan): array {
@@ -67,6 +68,10 @@ final class PublicationRecoveryReplay {
         if (!is_string($checkpointHash) || !hash_equals($checkpointHash, (string)($plan['checkpoint_database_chain_sha256'] ?? ''))) {
             throw new \DomainException('Restored checkpoint history does not match external journal');
         }
+
+        // No source content/grant/control can reopen from a restored DB alone.
+        // Typed external facts establish floors; current bytes are never restamped.
+        $this->controls->closeFromPlan($plan);
         $bindingIds = [];
         foreach ($plan['close_bindings'] as $entry) {
             if (!is_array($entry) || !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $entry['binding_id'] ?? '') ||
@@ -104,6 +109,11 @@ final class PublicationRecoveryReplay {
         // File storage and ACL changes are not guaranteed to emit every hint.
         // All restored active bindings stay closed until authoritative scanning.
         foreach (array_keys($current) as $id) { $bindingIds[$id] = true; }
+        // Restore authenticated metadata history before closure appends new events.
+        // This never restores publication state or source content.
+        if ($receipt === false) {
+            (new PublicationRecoveryLedger($this->db, $this->config))->restoreTail($plan);
+        }
         $this->db->insertIgnoreConflict('weknora_recovery_apply', [
             'recovery_sha256' => $plan['recovery_record_sha256'],
             'checkpoint_sha256' => $plan['checkpoint_record_sha256'], 'plan_sha256' => $planDigest,
@@ -176,10 +186,10 @@ final class PublicationRecoveryReplay {
         }
         $q = $this->db->getQueryBuilder();
         $r = $q->select('operation_id', 'binding_id', 'instance_id', 'tenant_id', 'knowledge_base_id', 'data_source_id', 'key_id', 'state', 'publication_epoch')
-            ->from('weknora_src_pair')->orderBy('operation_id')->executeQuery();
+            ->from('weknora_src_pair')->where($q->expr()->neq('state',$q->createNamedParameter('retired')))->orderBy('operation_id')->executeQuery();
         try { $pairs = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
         return ['schema_version' => 1, 'instance_id' => $plan['instance_id'],
             'receipt' => $receipt, 'bindings' => $bindings, 'pairs' => $pairs,
-            'withdrawals' => $withdrawals, 'ingress_reopen_permitted' => false];
+            'withdrawals' => $withdrawals, 'control_state' => $this->controls->metadataInventory(), 'ingress_reopen_permitted' => false];
     }
 }

@@ -1,0 +1,42 @@
+{
+  "status": "INCOMPLETE",
+  "restore_executed": false,
+  "attempts": [
+    {
+      "log": "coordinated-recovery-current.log",
+      "exit": 1,
+      "phase": "compose startup",
+      "reason": "default Docker subnet pools exhausted"
+    },
+    {
+      "log": "coordinated-recovery-current-2.log",
+      "exit": 1,
+      "phase": "compose startup",
+      "reason": "same exhaustion; private orchestrator diagnostic retained"
+    },
+    {
+      "log": "coordinated-recovery-current-3.log",
+      "exit": 1,
+      "phase": "Nextcloud identity setup before pairing or backup",
+      "reason": "legacy OpenLDAP adTestUser entries rejected by current live AD objectClass=user verifier"
+    }
+  ],
+  "fixes": [
+    "private failed-command output retained with synthetic passwords redacted",
+    "two non-overlapping /28 fixture networks selected from unused benchmark address range without modifying existing networks"
+  ],
+  "checks": [
+    "overlap selection including IPv6 input passed",
+    "exhausted explicit fixture range refused",
+    "five isolated services observed started before identity rejection",
+    "finally removed exact owned compose resources"
+  ],
+  "script_sha256": "56c00d807474b77164d21685dd029236447280a93eea1894b9243b2156b6c90c",
+  "log_sha256": {
+    "coordinated-recovery-current.log": "b6770c030817c49905fa31a59ec67591da0a731b926cec2b0d36e65e1af09fb1",
+    "coordinated-recovery-current-2.log": "987655197704ec8bfdaaa21c5e6b40d2e41b7a6d310014c5409a5ed91d6b5ebe",
+    "coordinated-recovery-current-3.log": "50d798d4adeb9d6f78fe1e873a69c409e2ad271ad29289c0d82777dc0912e2c4"
+  },
+  "identity_bypass_enabled": false,
+  "next_step": "Migrate owned coordinated recovery fixture to real Samba AD and rerun current recovery CLI/schema"
+}

@@ -22,6 +22,9 @@ use OCA\IntegrationWeknora\Service\BindingRegistryService;
 use OCA\IntegrationWeknora\Service\BrowserFileUrl;
 use OCA\IntegrationWeknora\Service\BindingPublicationStoppedException;
 use OCA\IntegrationWeknora\Service\PairedServiceToken;
+use OCA\IntegrationWeknora\Service\SourceContentRevisionService;
+use OCA\IntegrationWeknora\Service\ControlRecoveryService;
+use OCP\IDBConnection;
 use OCP\Lock\ILockingProvider;
 
 final class ApiController extends Controller {
@@ -38,6 +41,9 @@ final class ApiController extends Controller {
         private ManifestSnapshotService $manifestSnapshots,
         private BindingRegistryService $bindingRegistry,
         private PairedServiceToken $serviceToken,
+        private ?SourceContentRevisionService $contentRevisions = null,
+        private ?ControlRecoveryService $recoveryControls = null,
+        private ?IDBConnection $recoveryDB = null,
     ) {
         parent::__construct(self::APP_ID, $request);
     }
@@ -51,6 +57,7 @@ final class ApiController extends Controller {
 
         return $this->json([
             'protocol_version' => '1',
+            'source_content_revision' => true,
             'instance_id' => $this->config->getSystemValueString('instanceid'),
         ]);
     }
@@ -77,8 +84,24 @@ final class ApiController extends Controller {
                 'root_file_id' => $binding['root_file_id'],
                 'publication_state' => $binding['publication_state'],
                 'publication_epoch' => $binding['publication_epoch'],
+                'sync_enabled' => $binding['sync_enabled'],
             ], $bindings),
         ]);
+    }
+
+    #[PublicPage]
+    #[NoCSRFRequired]
+    public function recoveryState(string $id): Response {
+        if (!$this->isAuthorized($id)) { return $this->unauthorized(); }
+        try {
+            $epoch=$this->bindingRegistry->requirePublicationActive($id);$this->bindingRegistry->requireActiveRoot($id);
+            if ($this->recoveryControls===null || $this->recoveryDB===null) { return $this->configurationError(); }
+            $q=$this->recoveryDB->getQueryBuilder();$r=$q->select('stream_id','sequence','chain_sha256')->from('weknora_recovery_head')->where($q->expr()->eq('id',$q->createNamedParameter(1)))->executeQuery();try{$head=$r->fetchAssociative();}finally{$r->closeCursor();}
+            if ($head===false) { return $this->configurationError(); }
+            $inventory=$this->recoveryControls->metadataInventory();
+            if ($inventory['closed'] || $this->bindingRegistry->requirePublicationActive($id)!==$epoch) { return $this->json(['error'=>'recovery_changed'],409); }
+            return $this->json(['instance_id'=>$this->config->getSystemValueString('instanceid'),'binding_id'=>$id,'publication_epoch'=>$epoch,'stream_id'=>$head['stream_id'],'sequence'=>(string)$head['sequence'],'chain_sha256'=>$head['chain_sha256'],'controls_closed'=>false,'control_inventory_sha256'=>$inventory['sha256']]);
+        } catch (\Throwable $e) { return $this->json(['error'=>'recovery_unverified'],409); }
     }
 
     #[PublicPage]
@@ -111,7 +134,7 @@ final class ApiController extends Controller {
                 usort($items, static fn (array $a, array $b): int => $a['file_id'] <=> $b['file_id']);
                 $snapshot = array_map(static fn (array $item): array => [
                     $item['file_id'], $item['etag'], $item['path'],
-                    $item['mime_type'], $item['size'], $item['mtime'],
+                    $item['mime_type'], $item['size'], $item['mtime'], $item['source_content_revision'],
                 ], $items);
                 $generation = hash('sha256', json_encode([
                     $binding['id'], $binding['root_file_id'], $snapshot,
@@ -160,6 +183,14 @@ final class ApiController extends Controller {
             }
             if ($this->manifestSnapshots->publicationRevision($id) !== $publicationRevision) {
                 return $this->json(['error' => 'manifest_changed'], 409);
+            }
+            if ($this->contentRevisions !== null) {
+                $versions = $this->contentRevisions->snapshotForFiles(array_map(static fn (array $v): int => $v['file_id'], $items));
+                foreach ($items as $item) {
+                    if ($versions[$item['file_id']]['writing'] || $versions[$item['file_id']]['revision'] !== ($item['source_content_revision'] ?? '0')) {
+                        return $this->json(['error' => 'manifest_changed'], 409);
+                    }
+                }
             }
 
             return $this->json([
@@ -221,6 +252,11 @@ final class ApiController extends Controller {
                 $node->lock(ILockingProvider::LOCK_SHARED);
                 try {
                     $etag = $node->getEtag();
+                    $contentRevision = $this->contentRevisions?->current($fileId) ?? '0';
+                    $expectedRevision = $this->request->getParam('content_revision', '0');
+                    if (!is_string($expectedRevision) || $expectedRevision !== $contentRevision) {
+                        return $this->json(['error' => 'version_changed'], 412);
+                    }
                     $size = (int)$node->getSize();
                     $ifMatch = trim($this->request->getHeader('If-Match'));
                     if ($ifMatch !== '' && trim($ifMatch, '"') !== $etag) {
@@ -254,7 +290,7 @@ final class ApiController extends Controller {
                         fclose($buffer);
                         throw $exception;
                     }
-                    if ($freshEpoch !== $bindingEpoch ||
+                    if (($this->contentRevisions?->current($fileId) ?? '0') !== $contentRevision || $freshEpoch !== $bindingEpoch ||
                         $this->publicationState->getState($id, $fileId) !== 'eligible') {
                         fclose($buffer);
                         return $this->json(['error' => 'publication_changed'], 409);
@@ -264,6 +300,7 @@ final class ApiController extends Controller {
                         'Content-Type' => $node->getMimeType(),
                         'Content-Length' => (string)$copied,
                         'ETag' => '"' . $etag . '"',
+                        'X-Nextcloud-Content-Revision' => $contentRevision,
                         'Cache-Control' => 'no-store',
                         'X-Content-Type-Options' => 'nosniff',
                     ]);
@@ -296,11 +333,12 @@ final class ApiController extends Controller {
         $instanceId = $this->request->getParam('instance_id');
         $expectedEtag = $this->request->getParam('etag');
         $expectedPath = $this->request->getParam('path');
+        $expectedRevision = $this->request->getParam('content_revision', '0');
         if ($fileId < 1 || !is_string($instanceId) || $instanceId === '' ||
             !is_string($expectedEtag) || trim($expectedEtag) === '' ||
             !is_string($expectedPath) || $expectedPath === '' ||
             strlen($instanceId) > 256 || strlen($expectedEtag) > 1024 ||
-            strlen($expectedPath) > 4096) {
+            strlen($expectedPath) > 4096 || !is_string($expectedRevision) || !preg_match('/\A(?:0|[1-9][0-9]{0,18})\z/D', $expectedRevision)) {
             return $this->json(['error' => 'invalid_request'], 400);
         }
         try {
@@ -330,13 +368,13 @@ final class ApiController extends Controller {
                 $node->lock(ILockingProvider::LOCK_SHARED);
                 try {
                     $path = $bindingRoot->getRelativePath($node->getPath());
-                    if (!is_string($path) || ltrim($path, '/') !== $expectedPath ||
+                    if (($this->contentRevisions?->current($fileId) ?? '0') !== $expectedRevision || !is_string($path) || ltrim($path, '/') !== $expectedPath ||
                         $node->getEtag() !== $expectedEtag ||
                         $this->publicationState->getState($id, $fileId) !== 'eligible') {
                         return $this->json(['error' => 'publication_changed'], 409);
                     }
                     $freshRoot = $this->bindingRegistry->requireActiveRoot($id);
-                    if ($freshRoot->getId() !== $bindingRoot->getId() ||
+                    if (($this->contentRevisions?->current($fileId) ?? '0') !== $expectedRevision || $freshRoot->getId() !== $bindingRoot->getId() ||
                         $freshRoot->getPath() !== $bindingRoot->getPath() ||
                         $this->bindingRegistry->requirePublicationActive($id) !== $epoch ||
                         $this->publicationState->getState($id, $fileId) !== 'eligible' ||
@@ -437,6 +475,7 @@ final class ApiController extends Controller {
                 }
                 $visitedFiles[$node->getId()] = true;
                 $items[] = [
+                    'source_content_revision' => '0',
                     'file_id' => $node->getId(),
                     'etag' => $node->getEtag(),
                     'name' => $node->getName(),
@@ -456,6 +495,14 @@ final class ApiController extends Controller {
             }
         }
 
+        if ($this->contentRevisions !== null) {
+            $versions = $this->contentRevisions->snapshotForFiles(array_map(static fn (array $v): int => $v['file_id'], $items));
+            foreach ($items as &$item) {
+                if ($versions[$item['file_id']]['writing']) { throw new \DomainException('Source write is incomplete'); }
+                $item['source_content_revision'] = $versions[$item['file_id']]['revision'];
+            }
+            unset($item);
+        }
         return $items;
     }
 

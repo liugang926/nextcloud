@@ -9,11 +9,38 @@ style('integration_weknora', 'weknora-admin');
     <h2>WeKnora publication</h2>
     <p>Choose a dedicated Nextcloud folder as the source of files eligible for WeKnora indexing.</p>
 
+    <div class="weknora-admin__panel">
+        <h3>目录自动关联规则</h3>
+        <p>登记发布范围、已有工作空间及明确管理委派后，员工可在目录详情中创建或关联专用知识库。自动发现只处理容器的直接子目录。</p>
+        <form id="weknora-directory-rule-form" autocomplete="off">
+            <div class="weknora-admin__fields">
+                <label>规则 ID <input name="id" required pattern="[A-Za-z0-9_-]{1,128}"></label>
+                <label>当前规则版本 <input name="expected_revision" type="number" min="0" value="0" required></label>
+                <label>来源账户 UID <input name="owner_uid" maxlength="64" required></label>
+                <label>容器目录 ID <input name="container_file_id" type="number" min="1" required></label>
+                <label>已有工作空间 ID <input name="tenant_id" inputmode="numeric" required></label>
+                <label>处理模板知识库 ID <input name="processing_template_id" required></label>
+                <label>允许的工作空间与凭据 ID（可选 JSON） <textarea name="targets" rows="4" placeholder='[{"tenant_id":"7","processing_template_id":"template-kb","credential_id":"research-space"}]'></textarea></label>
+                <label>WeKnora 地址 <input name="weknora_origin" type="url" placeholder="https://weknora.example.com" required></label>
+                <label>Nextcloud 地址 <input name="base_url" type="url" placeholder="https://nextcloud.example.com" required></label>
+                <label>目录发现 <select name="discovery"><option value="explicit">范围内显式关联</option><option value="direct_children">容器直接子目录</option></select></label>
+                <label>管理委派 UID（逗号分隔） <input name="delegates" required></label>
+                <label>自动操作账户 UID <input name="automation_uid" maxlength="64"></label>
+                <label><input name="auto_enabled" type="checkbox">启用自动发现</label>
+            </div>
+            <button type="submit" class="button primary">保存规则</button>
+            <button type="button" id="weknora-directory-rules-refresh" class="button">刷新规则</button>
+            <p id="weknora-directory-rule-message" role="status" aria-live="polite"></p>
+        </form>
+        <pre id="weknora-directory-rules-list"></pre>
+        <p>服务端须预置已限定范围的开通凭据与允许的 WeKnora 地址。员工不接触此凭据。暂停同步保留当前权限检查；停止发布立即关闭来源读取。</p>
+    </div>
+
     <div class="weknora-admin__notice" role="note">
         <h3>Automatic publication scope</h3>
         <p>A binding covers readable files recursively inside the selected child folder, including new and updated files. Withdrawing a file ID excludes it from this app's manifest and content API until an administrator explicitly republishes it. A folder binding does not itself make content searchable in WeKnora.</p>
         <p>Stop publication closes the binding's source read and authorization gates without deleting its files, binding ID, machine keys, or file exclusions. Resume checks the current root and asks the connector to reconcile again. Existing WeKnora copies require its retrieval guard and later cleanup; this page cannot verify that cleanup.</p>
-        <p>Current limits: bindings must share one owner account and their roots cannot overlap. Source pairing uses an operator workflow; this page shows its local state and can configure local event delivery. Its applied watermark is connection-wide, not per-file synchronization, parsing, indexing, or cleanup progress. End-to-end audience and ACL enforcement and in-Nextcloud AI chat are not complete. Withdrawal immediately blocks this app's read API; removal of an already indexed WeKnora copy still requires connector reconciliation and WeKnora retrieval controls. Use a verified dedicated publication folder for pilot data only.</p>
+        <p>Publication roots cannot overlap across any owner view. Local home folders and the verified Team Folders adapter are supported; unknown mounts, advanced ACL and descendant shares pause onboarding. A connection's applied watermark is distinct from current per-file processing status. Source reads and authorization continue to verify current permissions, including when synchronization is paused.</p>
     </div>
 
     <div class="weknora-admin__panel">

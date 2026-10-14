@@ -6,9 +6,11 @@ namespace OCA\IntegrationWeknora\Listener;
 
 use OCA\IntegrationWeknora\Service\BindingRegistryService;
 use OCA\IntegrationWeknora\Service\ChangeOutboxService;
+use OCA\IntegrationWeknora\Service\RootMigrationService;
 use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
 use OCP\Files\Events\Node\BeforeNodeRenamedEvent;
+use OCP\Files\Events\Node\BeforeNodeDeletedEvent;
 use OCP\Files\Events\Node\NodeCopiedEvent;
 use OCP\Files\Events\Node\NodeCreatedEvent;
 use OCP\Files\Events\Node\NodeDeletedEvent;
@@ -20,25 +22,36 @@ use OCP\Files\FileInfo;
 use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
 use OCP\Files\Node;
+use OCP\IDBConnection;
 use Psr\Log\LoggerInterface;
 
 /** @implements IEventListener<Event> */
 final class FileChangeListener implements IEventListener {
     /** @var array<string, int> Captured before rename; never enqueued before success. */
     private array $pendingRenameSourceIds = [];
+    private array $pendingRenameScopes = [];
+    /** Canonical owner-view facts captured before delete; never a pre-delete hint. */
+    private array $pendingDeletes = [];
 
     public function __construct(
         private BindingRegistryService $bindings,
         private IRootFolder $rootFolder,
         private ChangeOutboxService $outbox,
         private LoggerInterface $logger,
+        private ?RootMigrationService $rootMoves = null,
+        private ?IDBConnection $db = null,
     ) {
     }
 
     public function handle(Event $event): void {
         try {
             if ($event instanceof BeforeNodeRenamedEvent) {
+                if ($event->getSource() instanceof Folder && $this->rootMoves !== null) { $this->rootMoves->capture($event->getSource()); }
                 $this->captureRenameIdentity($event);
+                return;
+            }
+            if ($event instanceof BeforeNodeDeletedEvent) {
+                $this->captureDelete($event->getNode());
                 return;
             }
             $bindings = $this->bindings->listBindings();
@@ -47,8 +60,11 @@ final class FileChangeListener implements IEventListener {
             return;
         }
 
+        if ($event instanceof NodeRenamedEvent && $this->rootMoves !== null) { $this->rootMoves->observe(); }
         $capturedSourceId = $event instanceof NodeRenamedEvent ?
             $this->takeRenameIdentity($event) : null;
+        $renameKey = $event instanceof NodeRenamedEvent ? $this->renameKey($event->getSource(), $event->getTarget()) : null;
+        $renameScopes = $renameKey === null ? [] : ($this->pendingRenameScopes[$renameKey] ?? []);
         foreach ($bindings as $binding) {
             try {
                 $rootPath = $this->bindingRootPath($binding);
@@ -56,19 +72,87 @@ final class FileChangeListener implements IEventListener {
                 $bindingId = $binding['id'];
 
                 if ($event instanceof NodeRenamedEvent) {
-                    $this->recordRename($bindingId, $rootId, $rootPath, $event, $capturedSourceId);
+                    $target = $this->canonicalNode($binding, $event->getTarget());
+                    $this->recordRename($bindingId, $rootId, $rootPath, $event, $capturedSourceId,
+                        $renameScopes[$bindingId] ?? null, $target);
                 } elseif ($event instanceof NodeDeletedEvent) {
-                    $this->recordDelete($bindingId, $rootId, $rootPath, $event->getNode());
+                    $captured = $this->pendingDeletes[$this->deleteKey($event->getNode())][$bindingId] ?? null;
+                    if ($captured !== null) {
+                        // Deleting a receiver's shared mount can be only an
+                        // unshare. A surviving canonical source is not a tombstone.
+                        $survivor = $this->canonicalNode($binding, $event->getNode(), $captured['file_id']);
+                        if ($survivor !== null) { $this->outbox->append($bindingId, null, 'reconcile'); }
+                        else { $this->recordCapturedDelete($binding, $captured); }
+                    } else {
+                        if ($this->canonicalNode($binding, $event->getNode()) !== null) {
+                            $this->outbox->append($bindingId, null, 'reconcile');
+                        } else { $this->recordDelete($bindingId, $rootId, $rootPath, $event->getNode()); }
+                    }
                 } elseif ($event instanceof NodeCopiedEvent) {
-                    $this->recordCurrent($bindingId, $rootId, $rootPath, $event->getTarget());
+                    $canonical = $this->canonicalNode($binding, $event->getTarget());
+                    if ($canonical !== null) { $this->recordCurrent($bindingId, $rootId, $rootPath, $canonical); }
                 } elseif ($event instanceof NodeCreatedEvent || $event instanceof NodeWrittenEvent ||
                     $event instanceof NodeTouchedEvent) {
-                    $this->recordCurrent($bindingId, $rootId, $rootPath, $event->getNode());
+                    $canonical = $this->canonicalNode($binding, $event->getNode());
+                    if ($canonical !== null) { $this->recordCurrent($bindingId, $rootId, $rootPath, $canonical); }
                 }
             } catch (\Throwable $exception) {
                 $this->logFailure($event, $exception);
             }
         }
+        if ($event instanceof NodeDeletedEvent) { unset($this->pendingDeletes[$this->deleteKey($event->getNode())]); }
+        if ($renameKey !== null) { unset($this->pendingRenameScopes[$renameKey]); }
+    }
+
+    private function deleteKey(Node $node): string { return $this->nodePath($node) ?? ('id:' . ($this->nodeId($node) ?? 'unknown')); }
+
+    private function captureDelete(Node $node): void {
+        $key = $this->deleteKey($node); $facts = [];
+        foreach ($this->bindings->listBindings() as $binding) {
+            $canonical = $this->canonicalNode($binding, $node);
+            if ($canonical === null) { continue; }
+            $facts[$binding['id']] = ['file_id' => $canonical->getId(), 'path' => $canonical->getPath(),
+                'folder' => $canonical instanceof Folder, 'internal_path' => trim($canonical->getInternalPath(), '/'),
+                'storage_id' => $canonical->getMountPoint()?->getNumericStorageId()];
+        }
+        $this->pendingDeletes[$key] = $facts;
+    }
+
+    /** Match physical filecache IDs through the publisher's actual mount view. */
+    private function canonicalNode(array $binding, Node $node, ?int $knownId = null): ?Node {
+        $fileId = $knownId ?? $this->nodeId($node);
+        if ($fileId === null) { return null; }
+        $view = $this->rootFolder->getUserFolder($binding['owner_uid']);
+        foreach ($view->getById($binding['root_file_id']) as $root) {
+            if (!$root instanceof Folder || !$root->isReadable() || !$view->isSubNode($root)) { continue; }
+            if ($root->getId() === $fileId) { return $root; }
+            foreach ($root->getById($fileId) as $current) {
+                if ($current instanceof Node && $current->getId() === $fileId && $root->isSubNode($current) && $current->isReadable()) {
+                    return $current;
+                }
+            }
+        }
+        return null;
+    }
+
+    private function recordCapturedDelete(array $binding, array $captured): void {
+        // A failed owner-view lookup is an unknown source, not evidence of
+        // physical deletion. Successful post-delete + a usable files view is
+        // required before withdrawing the pre-captured physical identity.
+        $view = $this->rootFolder->getUserFolder($binding['owner_uid']);
+        if (!$view->isReadable()) { $this->outbox->append($binding['id'], null, 'reconcile'); return; }
+        if ($this->db === null || !is_int($captured['storage_id'])) {
+            $this->outbox->append($binding['id'], null, 'reconcile'); return;
+        }
+        $q = $this->db->getQueryBuilder();
+        $r = $q->select('storage', 'path')->from('filecache')
+            ->where($q->expr()->eq('fileid', $q->createNamedParameter($captured['file_id'])))->executeQuery();
+        try { $stored = $r->fetchAssociative(); } finally { $r->closeCursor(); }
+        if ($stored !== false && (int)$stored['storage'] === $captured['storage_id'] &&
+            trim((string)$stored['path'], '/') === $captured['internal_path']) {
+            $this->outbox->append($binding['id'], null, 'reconcile'); return;
+        }
+        $this->outbox->append($binding['id'], $captured['file_id'], $captured['folder'] ? 'subtree_deleted' : 'delete', $captured['path']);
     }
 
     private function logFailure(Event $event, \Throwable $exception): void {
@@ -87,7 +171,18 @@ final class FileChangeListener implements IEventListener {
         $sourceId = $this->nodeId($event->getSource());
         if ($oldPath !== null && $newPath !== null && $sourceId !== null) {
             $this->pendingRenameSourceIds[$oldPath . "\0" . $newPath] = $sourceId;
+            $scopes = [];
+            foreach ($this->bindings->listBindings() as $binding) {
+                $source = $this->canonicalNode($binding, $event->getSource());
+                if ($source !== null) { $scopes[$binding['id']] = ['path' => $source->getPath(), 'file_id' => $source->getId()]; }
+            }
+            $this->pendingRenameScopes[$oldPath . "\0" . $newPath] = $scopes;
         }
+    }
+
+    private function renameKey(Node $source, Node $target): ?string {
+        $old = $this->nodePath($source); $new = $this->nodePath($target);
+        return $old === null || $new === null ? null : $old . "\0" . $new;
     }
 
     private function takeRenameIdentity(NodeRenamedEvent $event): ?int {
@@ -158,15 +253,17 @@ final class FileChangeListener implements IEventListener {
         ?string $rootPath,
         NodeRenamedEvent $event,
         ?int $capturedSourceId,
+        ?array $capturedScope = null,
+        ?Node $canonicalTarget = null,
     ): void {
         $source = $event->getSource();
         $target = $event->getTarget();
-        $oldPath = $this->nodePath($source);
-        $newPath = $this->nodePath($target);
-        $sourceId = $this->nodeId($source) ?? $capturedSourceId;
-        $targetId = $this->nodeId($target);
-        $wasInside = $this->inScope($rootId, $rootPath, $oldPath, $sourceId);
-        $isInside = $this->inScope($rootId, $rootPath, $newPath, $targetId);
+        $oldPath = $capturedScope['path'] ?? $this->nodePath($source);
+        $newPath = $canonicalTarget === null ? $this->nodePath($target) : $this->nodePath($canonicalTarget);
+        $sourceId = $capturedScope['file_id'] ?? $this->nodeId($source) ?? $capturedSourceId;
+        $targetId = $canonicalTarget === null ? $this->nodeId($target) : $this->nodeId($canonicalTarget);
+        $wasInside = $capturedScope !== null || $this->inScope($rootId, $rootPath, $oldPath, $sourceId);
+        $isInside = $canonicalTarget !== null || $this->inScope($rootId, $rootPath, $newPath, $targetId);
         if (!$wasInside && !$isInside) {
             return;
         }
@@ -176,10 +273,10 @@ final class FileChangeListener implements IEventListener {
             $this->outbox->append($bindingId, $sourceId ?? $targetId, $type, $oldPath, $newPath);
         } elseif ($wasInside && $isInside) {
             $this->outbox->append($bindingId, $targetId, $targetId === null ? 'reconcile' : 'metadata',
-                $oldPath, $newPath, $this->nodeEtag($target), $this->relativePath($rootPath, $newPath));
+                $oldPath, $newPath, $this->nodeEtag($canonicalTarget ?? $target), $this->relativePath($rootPath, $newPath));
         } elseif ($isInside) {
             $this->outbox->append($bindingId, $targetId, $targetId === null ? 'reconcile' : 'upsert',
-                $oldPath, $newPath, $this->nodeEtag($target), $this->relativePath($rootPath, $newPath));
+                $oldPath, $newPath, $this->nodeEtag($canonicalTarget ?? $target), $this->relativePath($rootPath, $newPath));
         } else {
             // The source ID captured before the operation is safe to withdraw
             // only now that its post-rename event confirms success. If an

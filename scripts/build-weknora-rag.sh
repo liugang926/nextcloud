@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_dir="$(cd "$project_dir/.." && pwd)"
-source_dir="$workspace_dir/WeKnora-ldap-ad"
+source_dir="${WEKNORA_RAG_SOURCE_DIR:-$workspace_dir/WeKnora-ldap-ad}"
 patch_file="$project_dir/integration/weknora-rag-b6ea8b56.patch"
 base_commit="b6ea8b560b886cef77fb32fb2e092123cdce4ed3"
 expected_patch_sha="8bbffc98f1fbdc03f08be0e7f6d959da61536b17b1b75b8b3a4258b914e612ae"
@@ -17,16 +17,22 @@ if [[ "$candidate_mode" != 0 && "$candidate_mode" != 1 ]]; then
 fi
 default_tag_suffix=nextcloud-rag
 if [[ "$candidate_mode" == 1 ]]; then
-  candidate_fields="$(python3 - "$project_dir" "$base_commit" <<'PY'
+  candidate_profile="${WEKNORA_RAG_CANDIDATE_PROFILE:-rag}"
+  if [[ "$candidate_profile" != rag && "$candidate_profile" != auto_space ]]; then
+    echo 'WEKNORA_RAG_CANDIDATE_PROFILE must be rag or auto_space.' >&2
+    exit 1
+  fi
+  candidate_fields="$(python3 - "$project_dir" "$base_commit" "$candidate_profile" <<'PY'
 import json
 from pathlib import Path
 import re
 import sys
 
 project = Path(sys.argv[1])
-entry = json.loads((project / 'integration/candidates/manifest.json').read_text())['profiles']['rag']
-if (entry['base'] != sys.argv[2] or not re.fullmatch(r'[a-f0-9]{64}', entry['patch_sha256'])
-        or any(not re.fullmatch(r'[a-f0-9]{40}', entry[field]) for field in ('candidate_tree', 'candidate_commit'))):
+entry = json.loads((project / 'integration/candidates/manifest.json').read_text())['profiles'][sys.argv[3]]
+if ((sys.argv[3] == 'rag' and entry['base'] != sys.argv[2])
+        or not re.fullmatch(r'[a-f0-9]{64}', entry['patch_sha256'])
+        or any(not re.fullmatch(r'[a-f0-9]{40}', entry[field]) for field in ('base', 'candidate_tree', 'candidate_commit'))):
     raise SystemExit('Candidate baseline or SHA is invalid')
 path = project / entry['path']
 if path.resolve().parent != (project / 'integration/candidates').resolve():
@@ -35,6 +41,7 @@ print(path)
 print(entry['patch_sha256'])
 print(entry['candidate_tree'])
 print(entry['candidate_commit'])
+print(entry['base'])
 PY
 )"
   patch_file="${candidate_fields%%$'\n'*}"
@@ -42,8 +49,13 @@ PY
   expected_patch_sha="${candidate_remainder%%$'\n'*}"
   candidate_remainder="${candidate_remainder#*$'\n'}"
   candidate_tree="${candidate_remainder%%$'\n'*}"
-  candidate_commit="${candidate_remainder#*$'\n'}"
+  candidate_remainder="${candidate_remainder#*$'\n'}"
+  candidate_commit="${candidate_remainder%%$'\n'*}"
+  base_commit="${candidate_remainder#*$'\n'}"
   default_tag_suffix=nextcloud-rag-candidate
+  if [[ "$candidate_profile" == auto_space ]]; then
+    default_tag_suffix=nextcloud-auto-space-candidate
+  fi
 fi
 
 # An alternate suffix lets an operator verify a candidate without replacing
@@ -112,7 +124,7 @@ if [[ "$patch_sha" != "$expected_patch_sha" ]]; then
 fi
 if [[ "$candidate_mode" == 1 ]]; then
   python3 "$project_dir/scripts/ops/verify-weknora-candidate.py" \
-    --profile=rag --source-repo="$source_dir"
+    --profile="$candidate_profile" --source-repo="$source_dir"
 fi
 
 build_dir="$(mktemp -d "$workspace_dir/.weknora-rag-build.XXXXXXXX")"
@@ -125,12 +137,12 @@ cp "$patch_file" "$build_meta_dir/source.patch"
 patch_file="$build_meta_dir/source.patch"
 if [[ "$candidate_mode" == 1 ]]; then
   cp "$project_dir/integration/candidates/manifest.json" "$build_meta_dir/manifest.json"
-  python3 - "$build_meta_dir/manifest.json" "$base_commit" "$expected_patch_sha" "$candidate_tree" "$candidate_commit" <<'PYVERIFY'
+  python3 - "$build_meta_dir/manifest.json" "$base_commit" "$expected_patch_sha" "$candidate_tree" "$candidate_commit" "$candidate_profile" <<'PYVERIFY'
 import json
 import sys
-entry = json.load(open(sys.argv[1]))['profiles']['rag']
+entry = json.load(open(sys.argv[1]))['profiles'][sys.argv[6]]
 actual = [entry[key] for key in ('base', 'patch_sha256', 'candidate_tree', 'candidate_commit')]
-if actual != sys.argv[2:]:
+if actual != sys.argv[2:6]:
     raise SystemExit('Candidate manifest changed before the frozen build snapshot')
 PYVERIFY
 fi

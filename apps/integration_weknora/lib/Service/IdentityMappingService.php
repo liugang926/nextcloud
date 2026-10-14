@@ -42,6 +42,26 @@ final class IdentityMappingService {
         }
     }
 
+    /** Discover and persist a session user's verified identity without name matching. */
+    public function forUser(string $uid): array {
+        $user = $this->users->get($uid);
+        if ($user === null || !$user->isEnabled()) {
+            throw new \DomainException('Directory user is unavailable');
+        }
+        foreach ($this->listMappings() as $mapping) {
+            if ($mapping['nextcloud_uid'] === $uid) {
+                if ($this->resolve((string)$mapping['directory_id'], (string)$mapping['object_guid']) === null) {
+                    throw new \DomainException('Directory identity changed');
+                }
+                return ['directory_id' => (string)$mapping['directory_id'], 'object_guid' => (string)$mapping['object_guid']];
+            }
+        }
+        $identity = $this->ldapGuids->identity($user);
+        if ($identity === null) { throw new \DomainException('Verified directory identity is required'); }
+        $this->create($identity['directory_id'], $identity['object_guid'], $uid, $uid);
+        return $identity;
+    }
+
     /** @return array{uid: string, user: IUser, mapping_id: int}|null */
     public function resolve(string $directoryId, string $objectGuid): ?array {
         [$directoryId, $objectGuid] = self::normalizeIdentity($directoryId, $objectGuid);

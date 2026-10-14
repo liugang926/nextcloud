@@ -1,0 +1,53 @@
+{
+  "classification": "ACTUAL_TURN_PHYSICAL_FENCE_LIFETIME_REPAIR",
+  "commit": "aa6801173c498b6c7567c6b618e6c2d5d52e6f28",
+  "tree": "78ff837cd5a6bdbed367258ddaae445e55405179",
+  "before": {
+    "session": 88999,
+    "exit": 1,
+    "cases": 7,
+    "passed": 5,
+    "failed": 2,
+    "failed_cases": [
+      "producer-finished",
+      "producer-borrowed"
+    ],
+    "error": "context canceled at the still-active HTTP output checkpoint"
+  },
+  "after": {
+    "session": 38886,
+    "exit": 0,
+    "cases": 7,
+    "passed": 7,
+    "failed": 0,
+    "business_seconds": 12.16
+  },
+  "cases": [
+    "search-and-merge",
+    "producer-finished",
+    "producer-borrowed",
+    "owner-cancelled",
+    "source-revoked",
+    "missing-proof",
+    "caller-cancelled"
+  ],
+  "fix": "Turn physical read fences use the request owner cancellation/deadline and current consumer values; reads still bind to current consumer cancellation via ContextFor; output boundary rejects cancelled consumers explicitly",
+  "actual_inputs": "Signed controlled source sync, persisted original body journal, processing and real SQL chunks/leases; controlled model/vector response IDs and source authorization endpoint",
+  "scope_limits": [
+    "SQLite targeted service regression",
+    "No real Agent model tool loop acceptance yet",
+    "No PG repeat or full JWT HTTP Agent acceptance in this run",
+    "Frozen candidate remains 980be4d78 until live Agent integration is retested"
+  ],
+  "actor_absent_verified": true,
+  "logs_sha256": {
+    "agent-lifetime-machine-before.log": "18758d2b624761a3cef4f0895d22f0e480784c1e53950ccc5b865e9753f65777",
+    "agent-lifetime-machine-after.log": "fe0632d7728723bb471d5abbce654b1e460563cab06f1ffdd75e437f8dd9b676"
+  },
+  "source_sha256": {
+    "internal/application/service/message_material_output.go": "9aa55069cf9a4489b7d871ec6b89d928f2fb862d97292db48ee598abb5590868",
+    "internal/application/service/knowledgebase_search.go": "1fdacbaac6c0f0756d2cafefc5a9f4667f0830c87e4a5b66ae9695569a397f47",
+    "internal/application/service/knowledgebase_rag_hydration.go": "37833708fcdfe1fde2640308fd9c273fbb8a90300aa920a55faa9edf55b5e1e5",
+    "internal/application/service/rag_turn_reuse_actual_test.go": "3398f67d0304f67efd50edf46bcb5ef3904829661f22c33ab4d601c1445684da"
+  }
+}

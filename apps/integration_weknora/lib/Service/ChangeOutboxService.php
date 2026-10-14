@@ -76,6 +76,9 @@ final class ChangeOutboxService {
             ]);
             $insert->executeStatement();
             $id = $this->db->lastInsertId('weknora_outbox');
+            if ($fileId !== null && in_array($type, ['upsert', 'metadata'], true)) {
+                StatusPollQueue::enqueueInTransaction($this->db, $bindingId, $fileId);
+            }
             PublicationRecoveryLedger::appendInTransaction($this->db, $bindingId, $fileId, $type, (int)$id);
             $this->db->commit();
             try {

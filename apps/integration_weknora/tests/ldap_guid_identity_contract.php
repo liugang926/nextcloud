@@ -9,6 +9,7 @@ namespace OCP {
     interface IUser {
         public function getUID(): string;
         public function getBackendClassName(): string;
+        public function isEnabled(): bool;
     }
     interface IConfig {
         public function getAppValue(string $appName, string $key, string $default = ''): string;
@@ -71,10 +72,12 @@ namespace {
     $ldapUser = new class implements IUser {
         public function getUID(): string { return 'employee'; }
         public function getBackendClassName(): string { return 'LDAP'; }
+        public function isEnabled(): bool { return true; }
     };
     $localUser = new class implements IUser {
         public function getUID(): string { return 'employee'; }
         public function getBackendClassName(): string { return 'Database'; }
+        public function isEnabled(): bool { return true; }
     };
     $guid = '00112233-4455-6677-8899-aabbccddeeff';
 

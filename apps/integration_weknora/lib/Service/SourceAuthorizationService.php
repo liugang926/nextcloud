@@ -15,15 +15,80 @@ final class SourceAuthorizationService {
         private IdentityMappingService $identities,
         private FilePublicationStateService $publications,
         private IRootFolder $rootFolder,
+        private SourceAudienceVerifier $audience,
+        private SourceContentRevisionService $contentRevisions,
+        private SourcePairingRegistryService $pairings,
     ) {
     }
 
+    /** Fresh root proof for source KB metadata; never authorizes any document. */
+    public function authorizeRoot(string $bindingId, string $directoryId, string $objectGuid): array {
+        if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $bindingId)) {
+            throw new \InvalidArgumentException('Invalid source identity');
+        }
+        [$directoryId, $objectGuid] = IdentityMappingService::normalizeIdentity($directoryId, $objectGuid);
+        $binding = null;
+        foreach ($this->bindings->listBindings() as $candidate) {
+            if ($candidate['id'] === $bindingId) { $binding = $candidate; break; }
+        }
+        if ($binding === null) { return $this->deny('binding_not_found'); }
+        $pair = $this->pairings->status($bindingId);
+        if ($pair === null || $pair['state'] !== 'active') { return $this->deny('source_pairing_inactive'); }
+        try { $epoch = $this->bindings->requirePublicationActive($bindingId); }
+        catch (BindingPublicationStoppedException $e) { return $this->deny('publication_stopped'); }
+        $identity = $this->identities->resolve($directoryId, $objectGuid);
+        if ($identity === null) { return $this->deny('identity_unmapped_or_disabled'); }
+        $ownerRoot = $this->bindings->requireActiveRoot($bindingId);
+        if (!$ownerRoot->isReadable()) { return $this->deny('source_not_published'); }
+        // A KB title must not expose a source whose current permission mode
+        // is unknown. The first-phase adapter requires a uniform whole tree.
+        if (!$this->rootAudience($bindingId, $ownerRoot, $binding['owner_uid'], $identity['user'],
+            $directoryId, $objectGuid)) {
+            return $this->deny('current_directory_membership_denied');
+        }
+        $userFolder = $this->rootFolder->getUserFolder($identity['uid']);
+        if ($userFolder->getId() === $binding['root_file_id']) { return $this->deny('source_not_readable'); }
+        foreach ($userFolder->getById($binding['root_file_id']) as $root) {
+            if (!$root instanceof Folder || $root->getId() !== $binding['root_file_id'] ||
+                !$userFolder->isSubNode($root) || !$root->isReadable()) { continue; }
+            $permissions = $this->readablePermissionChain($root, $root);
+            if ($permissions === null) { continue; }
+            if ($this->bindings->requirePublicationActive($bindingId) !== $epoch ||
+                $this->pairings->status($bindingId) !== $pair ||
+                $this->bindings->requireActiveRoot($bindingId)->getPath() !== $ownerRoot->getPath() ||
+                $this->identities->resolve($directoryId, $objectGuid) === null ||
+                !$this->rootAudience($bindingId, $ownerRoot, $binding['owner_uid'], $identity['user'],
+                    $directoryId, $objectGuid) || !$root->isReadable()) {
+                return $this->deny('publication_changed');
+            }
+            return ['allow' => true, 'reason' => 'authorized', 'binding_id' => $bindingId,
+                'publication_epoch' => (string)$epoch, 'directory_id' => $directoryId,
+                'object_guid' => $objectGuid, 'policy_revision' => hash('sha256', json_encode([
+                    $bindingId, $epoch, $identity['mapping_id'], $permissions], JSON_THROW_ON_ERROR)),
+                'checked_at' => time()];
+        }
+        return $this->deny('source_not_readable');
+    }
+
+    private function rootAudience(string $bindingId, Folder $root, string $ownerUid,
+        \OCP\IUser $user, string $directoryId, string $objectGuid): bool {
+        try { return $this->audience->allows($root, $ownerUid, $user, $directoryId, $objectGuid, true); }
+        catch (UnsupportedPublicationAclException $e) {
+            // Unsupported descendants invalidate the whole uniform source.
+            $this->bindings->setPublicationState($bindingId, 'stopped', 'acl-policy');
+            throw $e;
+        }
+    }
+
     /** @return array{allow: bool, reason: string, policy_revision: ?string, source_etag: ?string, checked_at: int} */
-    public function authorize(string $bindingId, string $directoryId, string $objectGuid, int $fileId): array {
+    public function authorize(string $bindingId, string $directoryId, string $objectGuid, int $fileId, string $expectedContentRevision = '0'): array {
         if (!preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $bindingId) || $fileId < 1) {
             throw new \InvalidArgumentException('Invalid source identity');
         }
         [$directoryId, $objectGuid] = IdentityMappingService::normalizeIdentity($directoryId, $objectGuid);
+        try { $contentRevision = $this->contentRevisions->current($fileId); }
+        catch (\Throwable $e) { return $this->deny('source_version_unverified'); }
+        if ($expectedContentRevision !== $contentRevision) { return $this->deny('source_version_changed'); }
 
         $binding = null;
         foreach ($this->bindings->listBindings() as $candidate) {
@@ -56,6 +121,10 @@ final class SourceAuthorizationService {
         // files hidden by a more restrictive ACL within an otherwise readable
         // binding root.
         $ownerRoot = $this->bindings->requireActiveRoot($bindingId);
+        if ($identity['user']->getBackendClassName() === 'LDAP' &&
+            !$this->audience->allows($ownerRoot, $binding['owner_uid'], $identity['user'], $directoryId, $objectGuid)) {
+            return $this->deny('current_directory_membership_denied');
+        }
         $ownerCanPublish = false;
         foreach ($ownerRoot->getById($fileId) as $ownerFile) {
             if (!$ownerFile instanceof File || $ownerFile->getId() !== $fileId ||
@@ -106,7 +175,7 @@ final class SourceAuthorizationService {
                 } catch (BindingPublicationStoppedException $exception) {
                     return $this->deny('publication_stopped');
                 }
-                if ($freshEpoch !== $bindingEpoch ||
+                if ($this->contentRevisions->current($fileId) !== $contentRevision || $freshEpoch !== $bindingEpoch ||
                     $this->publications->getState($bindingId, $fileId) !== 'eligible') {
                     return $this->deny('publication_changed');
                 }
@@ -119,6 +188,7 @@ final class SourceAuthorizationService {
                     // keep serving its previous answer while a new build is
                     // pending or has failed.
                     'source_etag' => $file->getEtag(),
+                    'source_content_revision' => $contentRevision,
                     'checked_at' => time(),
                 ];
             }
@@ -132,7 +202,7 @@ final class SourceAuthorizationService {
      *
      * @return list<array{int, int}>|null
      */
-    private function readablePermissionChain(File $file, Folder $root): ?array {
+    private function readablePermissionChain(File|Folder $file, Folder $root): ?array {
         $cursor = $file;
         $permissions = [];
         $visited = [];
@@ -159,6 +229,6 @@ final class SourceAuthorizationService {
     /** @return array{allow: bool, reason: string, policy_revision: null, source_etag: null, checked_at: int} */
     private function deny(string $reason): array {
         return ['allow' => false, 'reason' => $reason, 'policy_revision' => null,
-            'source_etag' => null, 'checked_at' => time()];
+            'source_etag' => null, 'source_content_revision' => null, 'checked_at' => time()];
     }
 }

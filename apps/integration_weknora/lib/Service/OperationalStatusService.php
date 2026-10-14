@@ -11,6 +11,7 @@ final class OperationalStatusService {
     public function __construct(
         private IDBConnection $db,
         private BindingRegistryService $bindings,
+        private ?StageOperationalStatusService $stages = null,
     ) {
     }
 
@@ -197,6 +198,7 @@ final class OperationalStatusService {
             'oldest_outbox_pending_application_age_seconds' => $oldestUnappliedAt === null
                 ? null : max(0, $now - $oldestUnappliedAt),
             'event_connections' => $connectionStatuses,
+            'processing' => $this->stages?->snapshot($now),
         ];
     }
 }
