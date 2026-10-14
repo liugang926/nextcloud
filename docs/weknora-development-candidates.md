@@ -5,13 +5,21 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
-The current development candidates are RAG `1bbd0cc8` and C6 `b43afa53`.
-Their exact two-profile source gates and owned cleanup passed. The final RAG
-ordinary AnyDoc app/UI images subsequently built with verified source labels;
-this record includes no C6 normal-image build. The subsequent fresh running
-gate failed after successful startup and permission matrix; QA2/replay are
+The current development candidates are RAG `e719051b` and C6 `4fded3f8`.
+They differ from RAG `1bbd0cc8` / C6 `b43afa53` only in the actual HTTP test
+fixture: the prompt processor is registered once, followed by a separate fault
+checkpoint. Production source bytes, all authorization checks and the original
+8-second HTTP limit are preserved. The complete source patches and exact
+apply/reverse trees are pinned in the manifest. Service CI uses complete,
+sequential test groups with the original selector and all 42 required tests.
+
+The earlier pair's exact two-profile source gates and owned cleanup passed.
+Its RAG ordinary AnyDoc app/UI images subsequently built with verified source
+labels; those older image labels do not identify the current trees, and this
+record includes no C6 normal-image build. The subsequent fresh running gate
+failed after successful startup and permission matrix; QA2/replay are
 unaccepted and full restore did not execute. Pending Auto restore and P5 remain
-pending. See the
+pending. Historical source and image evidence is retained in the
 [final source-gate record](evidence/ordinary-qa-idle-material-final-gates-20261010.json)
 and [normal-image/controller record](evidence/ordinary-qa-final-normal-images-controller-20261010.json).
 

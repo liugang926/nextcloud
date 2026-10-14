@@ -37,9 +37,12 @@ older component snapshots below retain their separate scope and failure history.
 | Explicit original Root startup | `48d30be0`:597 parsed/full157 compile; test-only URI fixture repair, production bytes unchanged. Parent72d strict35 allPASS; full91 attempt78 had74PASS/4FAIL | Current20 then sameHEAD full91 pending; fresh/bootstrap failures remain unproven fixed. Default application startup/registry/restore not adopted |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
-The adopted manifest is unchanged and the PR remains Draft. Full V1, enterprise
-AD pilot, model/capacity measurements, coordinated restore and physical GC are
-still open; component passes are not a full release acceptance.
+The development manifest pins C6 `4fded3f8` and RAG `e719051b`, adding only a
+normal HTTP test-fixture correction to the previous pair; separately recorded
+Root/Gin proposals remain unadopted. Development-baseline integration and full
+V1 acceptance are separate: enterprise AD pilot, model/capacity measurements,
+coordinated restore and physical GC remain open. Component passes are not a
+full release acceptance.
 
 The current `be76d2d6` source preserves historical SQL bytes. Its partial
 SQL110, preupgrade Ready/DOWN38, original route20/Root91/startup34/Linux process6
