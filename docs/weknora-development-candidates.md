@@ -5,7 +5,7 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
-The current development candidates are RAG `14f6aa14` and C6 `6b5b318e`.
+The current development candidates are RAG `2e52c071` and C6 `21c556d3`.
 They correct the duplicate prompt processor in the actual HTTP fixture and
 encode a complete SSE frame before one guarded Write. Write and Flush each
 retain their independent current authorization and lease checks, and the

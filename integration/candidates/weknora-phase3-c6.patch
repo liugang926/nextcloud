@@ -151827,10 +151827,10 @@ index 0000000000000000000000000000000000000000..f0d5d10e0909b5837a4b6594b9fe218d
 +}
 diff --git a/internal/handler/session/single_sse_frame_test.go b/internal/handler/session/single_sse_frame_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..7ad62e4eee499e0f3fa965e4b7b7f2d09468c8d3
+index 0000000000000000000000000000000000000000..538edd69074e767221ec798912cbf8016b3d8bc6
 --- /dev/null
 +++ b/internal/handler/session/single_sse_frame_test.go
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,220 @@
 +package session
 +
 +import (
@@ -152045,8 +152045,10 @@ index 0000000000000000000000000000000000000000..7ad62e4eee499e0f3fa965e4b7b7f2d0
 +	payload := singleSSERevokingJSONForTest{revoke: func() { allowed = false }}
 +	if writeSingleSSEFrame(c, "message", payload) || allowed || checks != 1 ||
 +		!errors.Is(writer.denied, access.ErrNextcloudPublicationDenied) ||
-+		transport.writes != 0 || transport.flushes != 0 || transport.headerWrites != 0 || transport.body.Len() != 0 || !c.IsAborted() {
-+		t.Fatal("authority withdrawn during encoding must deny before any HTTP IO")
++		transport.writes != 0 || transport.flushes != 0 || transport.body.Len() != 0 ||
++		transport.headerWrites != 1 || transport.status != http.StatusForbidden || transport.header.Get("Content-Type") != "" ||
++		len(c.Errors) != 1 || !c.IsAborted() {
++		t.Fatal("authority withdrawn during encoding must return the existing 403 without source bytes or Flush")
 +	}
 +}
 diff --git a/internal/handler/session/steer.go b/internal/handler/session/steer.go
