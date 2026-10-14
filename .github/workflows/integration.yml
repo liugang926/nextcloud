@@ -230,6 +230,23 @@ jobs:
           export WEKNORA_CAPACITY_RECONCILE_CLI=/tmp/capacity-reconcile
           go build -tags sqlite_fts5 -buildvcs=false -p 1 -o /tmp/original-body-retention ./cmd/original-body-retention
           export WEKNORA_ORIGINAL_BODY_TEST_CLI=/tmp/original-body-retention
+          # Check the previously failing real transport paths before the full
+          # selection. Their original per-request deadlines remain unchanged.
+          go test -json -p 1 ./internal/handler/session \
+            -run '^TestLiveSSESingleFrame' -count=1 -timeout 20m > candidate-sse-preflight.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-sse-preflight.jsonl \
+            --require-test TestLiveSSESingleFrameSerializationFailureHasNoHTTPIO \
+            --require-test TestLiveSSESingleFrameMatchesPinnedGinWireAndChecksEveryIO
+          go test -json -tags sqlite_fts5 -p 1 ./internal/handler \
+            -run '^TestSteerOriginalMaterialActualHTTPAgentPromoteCanonicalAndRedisForgery$/^retained_current_source$' \
+            -count=1 -timeout 20m > candidate-agent-preflight.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-agent-preflight.jsonl \
+            --require-test TestSteerOriginalMaterialActualHTTPAgentPromoteCanonicalAndRedisForgery/retained_current_source
+          go test -json -tags sqlite_fts5 -p 1 ./internal/application/service \
+            -run '^TestPostgresNormalReferencesActualHTTPIdleMaterial$' -count=1 -timeout 20m > candidate-idle-preflight.jsonl
+          python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-idle-preflight.jsonl \
+            --require-test TestPostgresNormalReferencesActualHTTPIdleMaterial/idle-current \
+            --require-test TestPostgresNormalReferencesActualHTTPIdleMaterial/idle-source-revoke
           candidate_selector='SteerMaterial|SteerOriginalMaterialActualHTTP|AgentSteerOriginal|AgentSteerUnknown|PostgresSteerOriginalUpgradeFrom153|MessageRewindMaterial|OriginalRewind|RAGPhysicalActual|NextcloudKBRead|NextcloudKnowledgeLeaseScope|NativeLive|MessageNativeLive|NormalReferencesActualHTTP|OriginalBody|PostgresOriginalBody|ParentBodyCopy|ParentCopy|KnowledgeAutoCompletion|PostgresKnowledgeAutoCompletion|AgentHistoryActual|AgentHistoryPostgresActual|CommittedHistoryParentRequest|MessageGeneratedField|MessageFork|MessageActual|NativeSavedReplay|MessageMaterialLiveHTTP|ChunkOutputHTTP|KnowledgeMachine|PostgresKnowledgeMachine|DataSourceName|MessageMaterial|KnowledgeHistory|NextcloudGCManualActual|NextcloudGCAdminStatus|NextcloudGCActualAdminHTTPPreview|NextcloudGCAdminPagination|^TestWikiMandatorySourcePolicy$|^TestWikiIDScopeBeforeBodyAndOrdinaryUsable$|^TestWikiMetadataCannotRelabelProtectedOwner$|KnowledgeEnrichmentTemplate|EnrichmentTemplate|NextcloudActualGCProcessCrash|PostgresNextcloudActualGCProcessCrash|PostgresNextcloudActualGCProvider|NextcloudActualRunDue|PostgresNextcloudActualRunDue|NextcloudRunDuePhysical|NextcloudGC|PostgresNextcloudGC|NextcloudExactChunkGC|PostgresNextcloudExactChunkGC|NextcloudContentLease|PostgresNextcloudContentLease|CapacityIntent|PostgresCapacityIntent|NextcloudCapacity|CollectionHTTPReadLease|KnowledgeCollection|FAQ|Enrichment|OriginalBuildPurpose|ActualGraphBuildPurpose|KnowledgeInputLegacyConfiguration|KnowledgeAutoTag|AutoTagActualAsynq|TagOutput|KnowledgeInputActor|RouterWiring|SQLite|RecoveryPrivate|Nextcloud.*Recovery|PostgresNextcloudPublicationRecovery'
           go test -json -tags sqlite_fts5 -p 1 ./internal/config ./internal/application/readlease ./internal/application/repository ./internal/application/service/file ./internal/agent ./internal/handler ./internal/container ./internal/router ./internal/database ./cmd/publication-recovery ./cmd/capacity-reconcile \
             -run "$candidate_selector" -count=1 -timeout 20m > candidate-tests.jsonl
@@ -286,7 +303,7 @@ jobs:
         working-directory: candidate
         run: |
           go test -json -p 1 ./internal/handler/session \
-            -run '^Test.*(Steer|SetupSSEStream|NativeLive|LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError)' -count=1 > candidate-qa-terminal.jsonl
+            -run '^Test.*(Steer|SetupSSEStream|NativeLive|LiveSSESingleFrame|LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError)' -count=1 > candidate-qa-terminal.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-qa-terminal.jsonl \
             --require-test TestLiveSSEProducerErrorWithRefusedOriginalMaterialHolder \
             --require-test TestSteerProductionMissingOriginalServiceRejectsCachedInput \

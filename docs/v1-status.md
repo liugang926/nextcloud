@@ -37,8 +37,8 @@ older component snapshots below retain their separate scope and failure history.
 | Explicit original Root startup | `48d30be0`:597 parsed/full157 compile; actual20 has16PASS/4FAIL. Borrow13 allPASS; process7 has3PASS/4FAIL. Fixed prefix ledger works; fresh canonical10s and READY3s still fail | Repair bootstrap cost/lifetime while retaining current checks, then sameHEAD full91. Default application startup/registry/restore not adopted |
 | Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
 
-The development manifest pins C6 `4fded3f8` and RAG `e719051b`, adding only a
-normal HTTP test-fixture correction to the previous pair; separately recorded
+The development manifest pins C6 `6b5b318e` and RAG `14f6aa14`, including
+SSE transport and actual HTTP fixture corrections; separately recorded
 Root/Gin proposals remain unadopted. Development-baseline integration and full
 V1 acceptance are separate: enterprise AD pilot, model/capacity measurements,
 coordinated restore and physical GC remain open. Component passes are not a

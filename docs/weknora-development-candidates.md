@@ -5,15 +5,18 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
-The current development candidates are RAG `e719051b` and C6 `4fded3f8`.
-They differ from RAG `1bbd0cc8` / C6 `b43afa53` only in the actual HTTP test
-fixture: the prompt processor is registered once, followed by a separate fault
-checkpoint. Production source bytes, all authorization checks and the original
-8-second HTTP limit are preserved. The complete source patches and exact
-apply/reverse trees are pinned in the manifest. Service CI uses complete,
-sequential test groups with the original selector and all 42 required tests.
+The current development candidates are RAG `14f6aa14` and C6 `6b5b318e`.
+They correct the duplicate prompt processor in the actual HTTP fixture and
+encode a complete SSE frame before one guarded Write. Write and Flush each
+retain their independent current authorization and lease checks, and the
+original 8-second HTTP limits remain. Encoding failure performs no HTTP I/O;
+short writes abort without flushing or retrying. The complete source patches
+and exact apply/reverse trees are pinned in the manifest. Service CI uses
+complete, sequential test groups with the original selector and all 42
+required tests; the previously failing actual paths run first as prerequisites.
 
-The earlier pair's exact two-profile source gates and owned cleanup passed.
+The historical `1bbd0cc8` / `b43afa53` pair's exact two-profile source gates
+and owned cleanup passed.
 Its RAG ordinary AnyDoc app/UI images subsequently built with verified source
 labels; those older image labels do not identify the current trees, and this
 record includes no C6 normal-image build. The subsequent fresh running gate

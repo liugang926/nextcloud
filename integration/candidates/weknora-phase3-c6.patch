@@ -151594,6 +151594,66 @@ index 0000000000000000000000000000000000000000..163e4574cb9ae32415e641082ddb482a
 +	foreign := []interfaces.StreamEvent{{Type: types.ResponseTypeAnswer, Content: "foreign source", SourceLineage: ragPrefixProof(t)}}
 +	require.ErrorIs(t, checkReplayPublication(context.Background(), verifier, message, foreign), access.ErrNextcloudPublicationDenied)
 +}
+diff --git a/internal/handler/session/resource_urls.go b/internal/handler/session/resource_urls.go
+index 9fe099f1de6c032a063eea5adad359fb064cfc3d..68036c93cd8f8746f019c90c1e2e04b00df6cffd 100644
+--- a/internal/handler/session/resource_urls.go
++++ b/internal/handler/session/resource_urls.go
+@@ -116,13 +116,14 @@ func emitStreamEvent(
+ 	evt interfaces.StreamEvent,
+ 	requestID string,
+ 	rewriter *storageurl.StreamRewriter,
+-) {
++) bool {
+ 	response := buildStreamResponseFor(ctx, evt, requestID, rewriter)
+ 	if terminalResponseTypes[evt.Type] {
+-		flushHeldStreamContent(ctx, c, requestID, rewriter)
++		if !flushHeldStreamContent(ctx, c, requestID, rewriter) {
++			return false
++		}
+ 	}
+-	c.SSEvent("message", response)
+-	c.Writer.Flush()
++	return writeSingleSSEFrame(c, "message", response)
+ }
+ 
+ // flushHeldStreamContent emits whatever the holdback buffer still retains, so a
+@@ -136,10 +137,13 @@ func flushHeldStreamContent(
+ 	c *gin.Context,
+ 	requestID string,
+ 	rewriter *storageurl.StreamRewriter,
+-) {
++) bool {
+ 	held := rewriter.FlushAll(ctx)
+-	if len(held) == 0 || c.Request.Context().Err() != nil {
+-		return
++	if len(held) == 0 {
++		return true
++	}
++	if c.Request.Context().Err() != nil {
++		return false
+ 	}
+ 	for key, fragment := range held {
+ 		if fragment.Content == "" {
+@@ -147,14 +151,16 @@ func flushHeldStreamContent(
+ 		}
+ 		responseType, eventID := parseHoldbackKey(key)
+ 		logger.Debugf(ctx, "Flushing held stream fragment, type: %s, event: %s", responseType, eventID)
+-		c.SSEvent("message", &types.StreamResponse{
++		if !writeSingleSSEFrame(c, "message", &types.StreamResponse{
+ 			ID:           requestID,
+ 			ResponseType: responseType,
+ 			Content:      fragment.Content,
+ 			Data:         heldFragmentData(fragment.Meta, eventID),
+-		})
+-		c.Writer.Flush()
++		}) {
++			return false
++		}
+ 	}
++	return true
+ }
+ 
+ // heldFragmentData rebuilds the metadata for a released tail from the event it
 diff --git a/internal/handler/session/resource_urls_test.go b/internal/handler/session/resource_urls_test.go
 index 302c5bd763770f55f0cb3fcba61403f2d22dff5f..c0fe242aa73d52b94db93bdc0ab69a7472cf2500 100644
 --- a/internal/handler/session/resource_urls_test.go
@@ -151704,6 +151764,291 @@ index b114042dd93a89bcee20d76b0b8e8ae630a5d83f..dabe935211ae775061501ff50a2267aa
  	}
  	r.POST("/knowledge-search", h.SearchKnowledge)
  
+diff --git a/internal/handler/session/single_sse_frame.go b/internal/handler/session/single_sse_frame.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f0d5d10e0909b5837a4b6594b9fe218d8bf71f0e
+--- /dev/null
++++ b/internal/handler/session/single_sse_frame.go
+@@ -0,0 +1,55 @@
++package session
++
++import (
++	"bytes"
++	"io"
++	"net/http"
++
++	"github.com/gin-contrib/sse"
++	"github.com/gin-gonic/gin"
++)
++
++// Encode one logical event before touching the actual HTTP writer. Framing
++// fragments do not need separate writes; the actual Write and Flush still
++// perform their own current authorization checks through the guarded writer.
++func writeSingleSSEFrame(c *gin.Context, name string, data any) bool {
++	if c.IsAborted() {
++		return false
++	}
++	event := sse.Event{Event: name, Data: data}
++	var body bytes.Buffer
++	if err := sse.Encode(&body, event); err != nil {
++		_ = c.Error(err)
++		c.Abort()
++		return false
++	}
++	c.Render(-1, encodedSSEFrame{event: event, body: body.Bytes()})
++	if c.IsAborted() {
++		return false
++	}
++	c.Writer.Flush()
++	if guarded, ok := c.Writer.(*nativeSavedReplayWriter); ok && guarded.denied != nil {
++		_ = c.Error(guarded.denied)
++		c.Abort()
++		return false
++	}
++	return true
++}
++
++type encodedSSEFrame struct {
++	event sse.Event
++	body  []byte
++}
++
++func (frame encodedSSEFrame) WriteContentType(writer http.ResponseWriter) {
++	frame.event.WriteContentType(writer)
++}
++
++func (frame encodedSSEFrame) Render(writer http.ResponseWriter) error {
++	frame.WriteContentType(writer)
++	written, err := writer.Write(frame.body)
++	if err == nil && written != len(frame.body) {
++		return io.ErrShortWrite
++	}
++	return err
++}
+diff --git a/internal/handler/session/single_sse_frame_test.go b/internal/handler/session/single_sse_frame_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ad62e4eee499e0f3fa965e4b7b7f2d09468c8d3
+--- /dev/null
++++ b/internal/handler/session/single_sse_frame_test.go
+@@ -0,0 +1,218 @@
++package session
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++)
++
++type singleSSETransportForTest struct {
++	header               http.Header
++	status, headerWrites int
++	writes, flushes      int
++	body                 bytes.Buffer
++	partial              bool
++	writeErr             error
++	afterWrite           func()
++}
++
++func (w *singleSSETransportForTest) Header() http.Header { return w.header }
++func (w *singleSSETransportForTest) WriteHeader(status int) {
++	w.status = status
++	w.headerWrites++
++}
++
++func (w *singleSSETransportForTest) Write(body []byte) (int, error) {
++	w.writes++
++	count := len(body)
++	if w.partial && count > 7 {
++		count = 7
++	}
++	_, _ = w.body.Write(body[:count])
++	if w.afterWrite != nil {
++		w.afterWrite()
++	}
++	return count, w.writeErr
++}
++func (w *singleSSETransportForTest) Flush() { w.flushes++ }
++
++func singleSSEContextForTest(t *testing.T, ctx context.Context, transport *singleSSETransportForTest, check func() error) (*gin.Context, *nativeSavedReplayWriter) {
++	t.Helper()
++	transport.header = make(http.Header)
++	c, _ := gin.CreateTestContext(transport)
++	c.Request = httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(ctx)
++	writer := &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: check}
++	c.Writer = writer
++	return c, writer
++}
++
++func TestLiveSSESingleFrameMatchesPinnedGinWireAndChecksEveryIO(t *testing.T) {
++	for _, data := range []any{
++		&types.StreamResponse{ID: "request", ResponseType: types.ResponseTypeAnswer, Content: "line1\nline2 <>& 中文", Data: map[string]any{"done": true}},
++		map[string]any{"text": "line1\nline2", "nested": []any{"value", true}},
++		"text\nnext\rline",
++		[]byte("bytes\nnext\rline"),
++	} {
++		baseline, recorder := newTestGinContext(t, "")
++		baseline.Header("Cache-Control", "private")
++		baseline.SSEvent("message", data)
++		baseline.Writer.Flush()
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, _ := singleSSEContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++		c.Header("Cache-Control", "private")
++		if !writeSingleSSEFrame(c, "message", data) {
++			t.Fatal("current permitted frame failed")
++		}
++		if !bytes.Equal(transport.body.Bytes(), recorder.Body.Bytes()) || c.Writer.Status() != baseline.Writer.Status() ||
++			transport.header.Get("Content-Type") != recorder.Header().Get("Content-Type") || transport.header.Get("Cache-Control") != "private" {
++			t.Fatal("frame changed pinned Gin wire bytes, status or headers")
++		}
++		if transport.writes != 1 || transport.flushes != 1 || transport.headerWrites != 1 || checks != 2 || len(c.Errors) != 0 || c.IsAborted() {
++			t.Fatal("one event must retain one fresh check per actual Write and Flush")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameRefusalBeforeWriteOrFlushIsSticky(t *testing.T) {
++	for _, denyFirst := range []bool{true, false} {
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, writer := singleSSEContextForTest(t, context.Background(), transport, func() error {
++			checks++
++			if denyFirst || checks == 2 {
++				return access.ErrNextcloudPublicationDenied
++			}
++			return nil
++		})
++		if writeSingleSSEFrame(c, "message", "current answer") || !errors.Is(writer.denied, access.ErrNextcloudPublicationDenied) || transport.flushes != 0 || !c.IsAborted() || len(c.Errors) != 1 {
++			t.Fatal("refused actual IO must abort without flushing")
++		}
++		if denyFirst && (transport.writes != 0 || transport.body.Len() != 0 || checks != 1) ||
++			!denyFirst && (transport.writes != 1 || transport.body.Len() == 0 || checks != 2) {
++			t.Fatal("Write and Flush must each check current authority independently")
++		}
++		before, writes, headers, checksBefore := append([]byte(nil), transport.body.Bytes()...), transport.writes, transport.headerWrites, checks
++		if writeSingleSSEFrame(c, "message", "later answer") || !bytes.Equal(before, transport.body.Bytes()) || transport.writes != writes || transport.headerWrites != headers || checks != checksBefore || transport.flushes != 0 {
++			t.Fatal("an aborted stream retried IO or reused a refused owner")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameRechecksBetweenSeparateFrames(t *testing.T) {
++	transport := &singleSSETransportForTest{}
++	allowed, checks := true, 0
++	c, _ := singleSSEContextForTest(t, context.Background(), transport, func() error {
++		checks++
++		if !allowed {
++			return access.ErrNextcloudPublicationDenied
++		}
++		return nil
++	})
++	if !writeSingleSSEFrame(c, "message", "first frame") || checks != 2 {
++		t.Fatal("first frame must pass both real IO checks")
++	}
++	before := append([]byte(nil), transport.body.Bytes()...)
++	allowed = false
++	if writeSingleSSEFrame(c, "message", "refused next frame") || checks != 3 || transport.writes != 1 || transport.flushes != 1 || !bytes.Equal(before, transport.body.Bytes()) {
++		t.Fatal("a prior frame's authority was reused for a later actual Write")
++	}
++}
++
++func TestLiveSSESingleFrameCancellationStopsSubsequentIO(t *testing.T) {
++	for _, cancelDuringWrite := range []bool{false, true} {
++		ctx, cancel := context.WithCancel(context.Background())
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, writer := singleSSEContextForTest(t, ctx, transport, func() error { checks++; return nil })
++		if cancelDuringWrite {
++			transport.afterWrite = cancel
++		} else {
++			cancel()
++		}
++		if writeSingleSSEFrame(c, "message", "current answer") || !errors.Is(writer.denied, context.Canceled) || transport.flushes != 0 || !c.IsAborted() {
++			t.Fatal("cancellation must prevent the next actual IO")
++		}
++		cancel()
++		if cancelDuringWrite && (transport.writes != 1 || checks != 1) || !cancelDuringWrite && (transport.writes != 0 || checks != 0 || transport.body.Len() != 0) {
++			t.Fatal("cancelled frame reached extra IO or reused an earlier check")
++		}
++	}
++}
++
++func TestLiveSSESingleFramePartialWriteDoesNotFlushOrRetry(t *testing.T) {
++	failure := errors.New("controlled transport failure")
++	for _, writeErr := range []error{nil, failure} {
++		transport := &singleSSETransportForTest{partial: true, writeErr: writeErr}
++		checks := 0
++		c, _ := singleSSEContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++		if writeSingleSSEFrame(c, "message", "current answer") {
++			t.Fatal("partial frame cannot succeed")
++		}
++		wanted := writeErr
++		if wanted == nil {
++			wanted = io.ErrShortWrite
++		}
++		if transport.writes != 1 || transport.body.Len() != 7 || transport.flushes != 0 || checks != 1 || len(c.Errors) != 1 || !errors.Is(c.Errors[0].Err, wanted) || !c.IsAborted() {
++			t.Fatal("partial IO must retain its error and abort before any Flush")
++		}
++		if writeSingleSSEFrame(c, "message", "retry") || transport.writes != 1 || transport.flushes != 0 || checks != 1 {
++			t.Fatal("partial frame was retried")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameSerializationFailureHasNoHTTPIO(t *testing.T) {
++	transport := &singleSSETransportForTest{}
++	checks := 0
++	c, _ := singleSSEContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++	if writeSingleSSEFrame(c, "message", map[string]any{"unsupported": make(chan int)}) || transport.writes != 0 || transport.flushes != 0 || transport.headerWrites != 0 || transport.body.Len() != 0 || checks != 0 || len(c.Errors) != 1 || !c.IsAborted() || c.Writer.Written() {
++		t.Fatal("serialization failure must abort with a Gin error before all HTTP IO")
++	}
++	if writeSingleSSEFrame(c, "message", "later frame") || transport.writes != 0 || transport.flushes != 0 || transport.headerWrites != 0 || checks != 0 {
++		t.Fatal("serialization failure was followed by actual IO")
++	}
++}
++
++func TestLiveSSESingleFrameProductionEmitterUsesSingleGuardedWrite(t *testing.T) {
++	transport := &singleSSETransportForTest{}
++	checks := 0
++	c, _ := singleSSEContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++	if !emitStreamEvent(context.Background(), c, interfaces.StreamEvent{Type: types.ResponseTypeAnswer, Content: "actual emitter content"}, "request", nil) || transport.writes != 1 || transport.flushes != 1 || checks != 2 {
++		t.Fatal("production emitter bypassed the single-frame current IO checks")
++	}
++}
++
++type singleSSERevokingJSONForTest struct{ revoke func() }
++
++func (data singleSSERevokingJSONForTest) MarshalJSON() ([]byte, error) {
++	data.revoke()
++	return []byte(`"current answer"`), nil
++}
++
++func TestLiveSSESingleFrameRechecksAuthorityAfterEncoding(t *testing.T) {
++	transport := &singleSSETransportForTest{}
++	allowed, checks := true, 0
++	c, writer := singleSSEContextForTest(t, context.Background(), transport, func() error {
++		checks++
++		if !allowed {
++			return access.ErrNextcloudPublicationDenied
++		}
++		return nil
++	})
++	payload := singleSSERevokingJSONForTest{revoke: func() { allowed = false }}
++	if writeSingleSSEFrame(c, "message", payload) || allowed || checks != 1 ||
++		!errors.Is(writer.denied, access.ErrNextcloudPublicationDenied) ||
++		transport.writes != 0 || transport.flushes != 0 || transport.headerWrites != 0 || transport.body.Len() != 0 || !c.IsAborted() {
++		t.Fatal("authority withdrawn during encoding must deny before any HTTP IO")
++	}
++}
 diff --git a/internal/handler/session/steer.go b/internal/handler/session/steer.go
 index 19a36ad806a87312b914df7bfd9a631b67a00d9e..6f5096cdb17a9157c56ff23450c1dc9f06cf5dec 100644
 --- a/internal/handler/session/steer.go
@@ -152481,7 +152826,7 @@ index 0000000000000000000000000000000000000000..e50cc008ecc609f6f1a36abdf2125209
 +	return &follow, true, true
 +}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd29109fd1 100644
+index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..2986b25bd0ef4c60af2ea0283a547bc73f831ccc 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -7,6 +7,8 @@ import (
@@ -152576,21 +152921,25 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
  
  	logger.Infof(
  		ctx, "Preparing to replay %d events and continue streaming, session ID: %s, message ID: %s",
-@@ -149,7 +202,12 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+@@ -149,8 +202,15 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	// Replay existing events, a segment's worth of chunks per frame
  	replay := coalesceReplayEvents(events)
  	logger.Debugf(ctx, "Replaying %d existing events as %d frames", len(events), len(replay))
 -	for _, evt := range replay {
+-		emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter)
 +	for index, evt := range replay {
 +		if index > 0 && (message.IsCompleted || liveBatchNeedsPublicationCheck([]interfaces.StreamEvent{evt})) {
 +			if err := checkReplayPublication(ctx, h.messageService, message, nil); err != nil {
 +				return
 +			}
 +		}
- 		emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter)
++		if !emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter) {
++			return
++		}
  	}
  
-@@ -176,13 +234,41 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+ 	// If stream is already completed, send final event and return
+@@ -176,19 +236,49 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  			newEvents, newOffset, err := h.streamManager.GetEvents(ctx, sessionID, messageID, currentOffset)
  			if err != nil {
  				logger.Errorf(ctx, "Failed to get new events: %v", err)
@@ -152633,7 +152982,16 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
  				// Check for completion event
  				if evt.Type == "complete" {
  					streamCompletedNow = true
-@@ -204,6 +290,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
+ 				}
+ 
+-				emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter)
++				if !emitStreamEvent(ctx, c, evt, message.RequestID, resourceRewriter) {
++					return
++				}
+ 			}
+ 
+ 			// Update offset
+@@ -204,6 +294,110 @@ func (h *Handler) ContinueStream(c *gin.Context) {
  	}
  }
  
@@ -152744,7 +153102,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
  // StopSession godoc
  // @Summary      停止生成
  // @Description  停止当前正在进行的生成任务
-@@ -249,7 +439,7 @@ func (h *Handler) StopSession(c *gin.Context) {
+@@ -249,7 +443,7 @@ func (h *Handler) StopSession(c *gin.Context) {
  	tenantIDUint := tenantID.(uint64)
  
  	// Verify message ownership and status
@@ -152753,7 +153111,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
  	if err != nil {
  		logger.ErrorWithFields(ctx, err, map[string]interface{}{
  			"session_id": sessionID,
-@@ -335,6 +525,7 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -335,6 +529,7 @@ func (h *Handler) handleAgentEventsForSSE(
  	eventBus *event.EventBus,
  	waitForTitle bool,
  	resourceRewriter *storageurl.StreamRewriter,
@@ -152761,7 +153119,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
  ) {
  	ticker := time.NewTicker(100 * time.Millisecond)
  	defer ticker.Stop()
-@@ -343,6 +534,10 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -343,6 +538,10 @@ func (h *Handler) handleAgentEventsForSSE(
  	log := logger.GetLogger(ctx)
  
  	log.Infof("Starting pull-based SSE streaming for session=%s, message=%s", sessionID, assistantMessageID)
@@ -152772,7 +153130,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
  
  	for {
  		select {
-@@ -362,11 +557,72 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -362,11 +561,72 @@ func (h *Handler) handleAgentEventsForSSE(
  				log.Warnf("Failed to get events from stream: %v", err)
  				continue
  			}
@@ -152846,26 +153204,42 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
  				// Check for stop event
  				if evt.Type == types.ResponseType(event.EventStop) {
  					log.Infof("Detected stop event, triggering stop via EventBus for session=%s", sessionID)
-@@ -420,7 +676,14 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -388,7 +648,9 @@ func (h *Handler) handleAgentEventsForSSE(
+ 					// before the stop is still the user's content, and in
+ 					// public resource URL mode part of it may be sitting in
+ 					// the holdback buffer.
+-					flushHeldStreamContent(ctx, c, requestID, resourceRewriter)
++					if !flushHeldStreamContent(ctx, c, requestID, resourceRewriter) {
++						return
++					}
+ 
+ 					// Send stop notification to frontend
+ 					c.SSEvent("message", &types.StreamResponse{
+@@ -420,7 +682,17 @@ func (h *Handler) handleAgentEventsForSSE(
  					return
  				}
  
+-				emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
 +				if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok {
 +					phase.RawControl = evt.Type == types.ResponseTypeAgentQuery || evt.Type == types.ResponseType(event.EventStop)
 +				}
- 				emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
++				sent := emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
 +				if writer, ok := c.Writer.(*nativeSavedReplayWriter); ok && writer.denied != nil {
 +					emitSafeTerminalGenerationError(c, requestID)
++					return
++				}
++				if !sent {
 +					return
 +				}
  			}
  
  			// Update offset
-@@ -449,7 +712,17 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -449,8 +721,20 @@ func (h *Handler) handleAgentEventsForSSE(
  								break titleWaitLoop
  							}
  							if len(events) > 0 {
 -								for _, evt := range events {
+-									emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
 +								if err := checkLiveStreamPublication(ctx, h.messageService, liveMessage, events); err != nil {
 +									stopLiveStreamForPublication(ctx, c, eventBus, sessionID, assistantMessageID, requestID, err)
 +									return
@@ -152877,10 +153251,13 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..ebd97716afad89b65ebf407fab2385fd
 +											return
 +										}
 +									}
- 									emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
++									if !emitStreamEvent(ctx, c, evt, requestID, resourceRewriter) {
++										return
++									}
  									// If we got the title, we can exit
  									if evt.Type == types.ResponseTypeSessionTitle {
-@@ -473,3 +746,330 @@ func (h *Handler) handleAgentEventsForSSE(
+ 										log.Infof("Title event received: %s", evt.Content)
+@@ -473,3 +757,330 @@ func (h *Handler) handleAgentEventsForSSE(
  		}
  	}
  }
