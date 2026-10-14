@@ -83731,10 +83731,10 @@ index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e
 +}
 diff --git a/internal/application/repository/original_body_lease_renewal_batch_test.go b/internal/application/repository/original_body_lease_renewal_batch_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..70e5280a4fa5f7d70467ad3e1f36830951e05327
+index 0000000000000000000000000000000000000000..49a09df3f3ae0b8c29daa23423c0b4fd414b4071
 --- /dev/null
 +++ b/internal/application/repository/original_body_lease_renewal_batch_test.go
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,482 @@
 +package repository
 +
 +import (
@@ -84070,7 +84070,10 @@ index 0000000000000000000000000000000000000000..70e5280a4fa5f7d70467ad3e1f368309
 +			before := leaseRenewalSnapshotForTest(t, db, ids)
 +			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 +			defer cancel()
-+			legacy := db.WithContext(ctx).Begin()
++			// Request cancellation must not also cancel the independent lock holder.
++			legacyCtx, legacyCancel := context.WithTimeout(context.Background(), 5*time.Second)
++			defer legacyCancel()
++			legacy := db.WithContext(legacyCtx).Begin()
 +			require.NoError(t, legacy.Error)
 +			defer legacy.Rollback()
 +			// The real old acquirer holds B first, then will acquire A. The
