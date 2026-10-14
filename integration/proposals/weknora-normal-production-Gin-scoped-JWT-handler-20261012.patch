@@ -1514,6 +1514,191 @@ index 0000000000000000000000000000000000000000..857084bb15238e6621752b1500c136e7
 +		t.Fatal("actual initializing HTTP scope was not distinguished from a full boundary check")
 +	}
 +}
+diff --git a/internal/handler/session/controlled_normal_stop_test.go b/internal/handler/session/controlled_normal_stop_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3bd6606828e31d9d1f1b08fcfe3c7cfb4a2038c7
+--- /dev/null
++++ b/internal/handler/session/controlled_normal_stop_test.go
+@@ -0,0 +1,137 @@
++package session
++
++import (
++	"context"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/logger"
++	"github.com/Tencent/WeKnora/internal/stream"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/stretchr/testify/require"
++)
++
++type controlledNormalStopMessages struct {
++	interfaces.MessageService
++	updates atomic.Int64
++	saved   *types.Message
++	tenant  uint64
++	err     error
++}
++
++func (m *controlledNormalStopMessages) UpdateMessage(ctx context.Context, message *types.Message) error {
++	m.updates.Add(1)
++	if m.err != nil {
++		return m.err
++	}
++	copy := *message
++	m.saved = &copy
++	m.tenant = types.MustTenantIDFromContext(ctx)
++	return nil
++}
++
++// Lifecycle policy removes persistence. These unit observers never supply an
++// original guard or claim real caller/model/typed-completion authorization.
++func TestControlledNormalStopCancelsWithoutCertifyingMessage(t *testing.T) {
++	messages := &controlledNormalStopMessages{}
++	h := &Handler{messageService: messages}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "actual-stop-row", SessionID: "actual-stop-session", RequestID: "actual-stop-request", Role: "assistant", Content: "in-memory uncommitted output"}
++	before := *message
++	ctx, cancel := context.WithCancel(context.Background())
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, cancel, true)
++	for i := 0; i < 2; i++ {
++		require.NoError(t, bus.Emit(context.Background(), event.Event{Type: event.EventStop, SessionID: message.SessionID,
++			Data: event.StopData{SessionID: message.SessionID, MessageID: message.ID, Reason: "user_requested"}}))
++	}
++	require.ErrorIs(t, ctx.Err(), context.Canceled)
++	require.Zero(t, messages.updates.Load())
++	require.Nil(t, messages.saved)
++	require.Equal(t, before, *message, "Stop must not mutate even in-memory completion/content/source fields")
++}
++
++func TestLegacyStopExplicitlyRetainsOriginalPersistence(t *testing.T) {
++	messages := &controlledNormalStopMessages{}
++	h := &Handler{messageService: messages}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "legacy-row", SessionID: "legacy-session", Role: "assistant", Content: "legacy already streamed output"}
++	ctx, cancel := context.WithCancel(types.WithExecutionTenant(context.Background(), 99))
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, cancel, false)
++	require.NoError(t, bus.Emit(ctx, event.Event{Type: event.EventStop, SessionID: message.SessionID}))
++	require.ErrorIs(t, ctx.Err(), context.Canceled)
++	require.EqualValues(t, 1, messages.updates.Load())
++	require.NotNil(t, messages.saved)
++	require.True(t, messages.saved.IsCompleted)
++	require.Equal(t, "legacy already streamed output", messages.saved.Content)
++	require.EqualValues(t, 7, messages.tenant, "legacy save keeps the actual session tenant, not the effective event tenant")
++}
++
++type stopWatcherPrivateContextKey struct{}
++
++func TestControlledNormalStopWatcherCloneKeepsOnlyCancelPolicy(t *testing.T) {
++	mini := miniredis.RunT(t)
++	manager, err := stream.NewRedisStreamManager(mini.Addr(), "", "", 0, "actual-stop-policy-watcher", time.Minute)
++	require.NoError(t, err)
++	messages := &controlledNormalStopMessages{}
++	h := &Handler{messageService: messages, streamManager: manager}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "watcher-row", SessionID: "watcher-session", Role: "assistant"}
++	before := *message
++	generation, stopGeneration := context.WithCancel(context.Background())
++	defer stopGeneration()
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, stopGeneration, true)
++	original := context.WithValue(types.WithExecutionTenant(context.Background(), 7), stopWatcherPrivateContextKey{}, "not a grant")
++	cloned := logger.CloneContext(original)
++	require.Nil(t, cloned.Value(stopWatcherPrivateContextKey{}), "the actual detached clone does not carry arbitrary private context")
++	watchCtx, stopWatch := context.WithCancel(cloned)
++	done := h.startStopWatcher(watchCtx, message.SessionID, message.ID, bus)
++	defer func() {
++		stopWatch()
++		select {
++		case <-done:
++		case <-time.After(3 * time.Second):
++			t.Error("actual stop watcher did not join before Redis cleanup")
++		}
++		require.NoError(t, manager.Close())
++	}()
++	require.NoError(t, manager.AppendEvent(context.Background(), message.SessionID, message.ID, interfaces.StreamEvent{
++		Type: types.ResponseType(event.EventStop), Done: true,
++		Data: map[string]interface{}{"session_id": message.SessionID, "message_id": message.ID, "reason": "user_requested"},
++	}))
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("actual Redis stop event did not reach and join the detached watcher")
++	}
++	require.ErrorIs(t, generation.Err(), context.Canceled)
++	require.Zero(t, messages.updates.Load())
++	require.Nil(t, messages.saved)
++	require.Equal(t, before, *message)
++}
++
++// This checks the existing persist-before-notify ordering on a queued Done
++// after Stop, not a substitute for the actual original handler's typed tests.
++func TestControlledStopQueuedDoneRefusalDoesNotPublishCompletion(t *testing.T) {
++	messages := &controlledNormalStopMessages{err: access.ErrNextcloudPublicationUnavailable}
++	stream := &imageCompletionStream{}
++	h := &Handler{messageService: messages, streamManager: stream}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "queued-row", SessionID: "queued-session", Role: "assistant", Content: "uncertified queued output"}
++	ctx, cancel := context.WithCancel(types.WithExecutionTenant(context.Background(), 7))
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, cancel, true)
++	streamHandler := h.setupStreamHandler(ctx, message.SessionID, message.ID, "queued-request", 7, time.Now(), message, bus)
++	require.NoError(t, bus.Emit(context.Background(), event.Event{Type: event.EventStop, SessionID: message.SessionID}))
++	require.Zero(t, messages.updates.Load())
++	require.False(t, message.IsCompleted)
++	h.completeQuickAnswerTurn(ctx, &sseStreamContext{eventBus: bus, streamHandler: streamHandler, assistantMessage: message}, "", "")
++	require.EqualValues(t, 1, messages.updates.Load(), "a queued real-Done path still reaches the existing refusing persistence boundary")
++	require.Nil(t, messages.saved)
++	for _, e := range stream.events {
++		require.NotEqual(t, types.ResponseTypeComplete, e.Type, "a rejected save must not notify successful completion")
++	}
++}
+diff --git a/internal/handler/session/helpers.go b/internal/handler/session/helpers.go
+index 3b845054d5e77bad6eb9faa75989a0bd000ded06..8b51585b196b446328b5e4b4eff25e6fde5cfa5b 100644
+--- a/internal/handler/session/helpers.go
++++ b/internal/handler/session/helpers.go
+@@ -330,10 +330,17 @@ func (h *Handler) setupStopEventHandler(
+ 	sessionTenantID uint64,
+ 	assistantMessage *types.Message,
+ 	cancel context.CancelFunc,
++	cancelOnly bool,
+ ) {
+ 	eventBus.On(event.EventStop, func(ctx context.Context, evt event.Event) error {
+ 		logger.Infof(ctx, "Received stop event, cancelling async operations for session: %s", sessionID)
+ 		cancel()
++		// The policy is captured from the actual server-owned stream setup,
++		// not the stop event's cloned context. A cancellation cannot certify
++		// an original assistant body or manufacture its missing query inputs.
++		if cancelOnly {
++			return nil
++		}
+ 		// Preserve whatever has been streamed so far; do not overwrite Content.
+ 		// Use session's tenant for message update (ctx may have effectiveTenantID when using shared agent).
+ 		// Use WithoutCancel so the GORM UPDATE survives the upcoming ctx.Done triggered by cancel()/client disconnect.
+@@ -374,8 +381,10 @@ func (h *Handler) startStopWatcher(
+ 	ctx context.Context,
+ 	sessionID, assistantMessageID string,
+ 	eventBus *event.EventBus,
+-) {
++) <-chan struct{} {
++	done := make(chan struct{})
+ 	go func() {
++		defer close(done)
+ 		watchCtx, cancel := context.WithTimeout(ctx, stopWatcherMaxDuration)
+ 		defer cancel()
+ 
+@@ -421,6 +430,7 @@ func (h *Handler) startStopWatcher(
+ 			}
+ 		}
+ 	}()
++	return done
+ }
+ 
+ // writeAgentQueryEvent writes an agent query event to the stream manager
 diff --git a/internal/handler/session/live_material_raw_control_test.go b/internal/handler/session/live_material_raw_control_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..d3ddf9f4fc83d2c1c836ebb73aaf2b5f24ce3bd3
@@ -1570,10 +1755,23 @@ index 0000000000000000000000000000000000000000..d3ddf9f4fc83d2c1c836ebb73aaf2b5f
 +	require.False(t, phase.RawControl)
 +}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 0865fd80cfe03931134c433a655ca87fc07b6d9f..c5ac251430a340c3f682d31b771ddafe683ba23c 100644
+index 0865fd80cfe03931134c433a655ca87fc07b6d9f..1cefcef1b2fd6e6f96acd17ccbb921a433e8933e 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
-@@ -1412,7 +1412,10 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
+@@ -848,7 +848,11 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool, m
+ 	)
+ 
+ 	// Setup stop event handler
+-	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel)
++	// Only this server-selected normal mode with a genuine HTTP material
++	// owner uses cancel-only Stop. This removes a completion attempt; it
++	// supplies no read, query, model, lease or completed-output authority.
++	cancelOnlyStop := mode == qaModeNormal && materialClose != nil
++	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel, cancelOnlyStop)
+ 
+ 	// Watch for stop events independently of the client SSE connection so a
+ 	// user-requested stop reliably cancels generation even when the client
+@@ -1412,7 +1416,10 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
  				completionHandled = true
  
  				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
@@ -1585,7 +1783,7 @@ index 0865fd80cfe03931134c433a655ca87fc07b6d9f..c5ac251430a340c3f682d31b771ddafe
  				h.completeQuickAnswerTurn(updateCtx, streamCtx, reqCtx.query, reqCtx.userMessageID)
  			}
  			return nil
-@@ -1427,6 +1430,16 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
+@@ -1427,6 +1434,16 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
  	livePublicationMessage.KnowledgeReferences = nil
  	asyncDone := make(chan struct{})
  	streamCtx.producerDone = asyncDone
@@ -1602,6 +1800,250 @@ index 0865fd80cfe03931134c433a655ca87fc07b6d9f..c5ac251430a340c3f682d31b771ddafe
  	releaseMaterialProducer := applicationservice.RetainMessageMaterialHTTPProducer(streamCtx.asyncCtx)
  	go func() {
  		defer close(asyncDone)
+diff --git a/internal/handler/session/resource_urls.go b/internal/handler/session/resource_urls.go
+index 9fe099f1de6c032a063eea5adad359fb064cfc3d..4f57409dc3d3df51e7d8ea5c8824c9ae2a25efe9 100644
+--- a/internal/handler/session/resource_urls.go
++++ b/internal/handler/session/resource_urls.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/storageurl"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-contrib/sse"
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+@@ -121,7 +122,7 @@ func emitStreamEvent(
+ 	if terminalResponseTypes[evt.Type] {
+ 		flushHeldStreamContent(ctx, c, requestID, rewriter)
+ 	}
+-	c.SSEvent("message", response)
++	c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: response}})
+ 	c.Writer.Flush()
+ }
+ 
+@@ -147,12 +148,12 @@ func flushHeldStreamContent(
+ 		}
+ 		responseType, eventID := parseHoldbackKey(key)
+ 		logger.Debugf(ctx, "Flushing held stream fragment, type: %s, event: %s", responseType, eventID)
+-		c.SSEvent("message", &types.StreamResponse{
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: &types.StreamResponse{
+ 			ID:           requestID,
+ 			ResponseType: responseType,
+ 			Content:      fragment.Content,
+ 			Data:         heldFragmentData(fragment.Meta, eventID),
+-		})
++		}}})
+ 		c.Writer.Flush()
+ 	}
+ }
+diff --git a/internal/handler/session/single_sse_frame.go b/internal/handler/session/single_sse_frame.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..47d751f8d9671f39bfb9d06a0a8073d0e8105bf3
+--- /dev/null
++++ b/internal/handler/session/single_sse_frame.go
+@@ -0,0 +1,34 @@
++package session
++
++import (
++	"bytes"
++	"io"
++	"net/http"
++
++	"github.com/gin-contrib/sse"
++)
++
++// singleSSEFrame preserves the pinned Gin SSE codec and headers. Only one
++// logical event is serialized locally, then the actual guarded response writer
++// receives one Write. Its current check and the caller's Flush check remain.
++// No event is queued/merged, no authorization result is cached or reused.
++type singleSSEFrame struct {
++	event sse.Event
++}
++
++func (frame singleSSEFrame) WriteContentType(writer http.ResponseWriter) {
++	frame.event.WriteContentType(writer)
++}
++
++func (frame singleSSEFrame) Render(writer http.ResponseWriter) error {
++	frame.WriteContentType(writer)
++	var body bytes.Buffer
++	if err := sse.Encode(&body, frame.event); err != nil {
++		return err
++	}
++	n, err := writer.Write(body.Bytes())
++	if err == nil && n != body.Len() {
++		return io.ErrShortWrite
++	}
++	return err
++}
+diff --git a/internal/handler/session/single_sse_frame_test.go b/internal/handler/session/single_sse_frame_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cfa99dab0ba4b08db7d077f13d102290f0fe0f7d
+--- /dev/null
++++ b/internal/handler/session/single_sse_frame_test.go
+@@ -0,0 +1,162 @@
++package session
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-contrib/sse"
++	"github.com/gin-gonic/gin"
++)
++
++type singleSSETransportForTest struct {
++	header                  http.Header
++	status, writes, flushes int
++	body                    bytes.Buffer
++	partial                 bool
++	writeErr                error
++	afterWrite              func()
++}
++
++func (writer *singleSSETransportForTest) Header() http.Header  { return writer.header }
++func (writer *singleSSETransportForTest) WriteHeader(code int) { writer.status = code }
++func (writer *singleSSETransportForTest) Write(body []byte) (int, error) {
++	writer.writes++
++	count := len(body)
++	if writer.partial && count > 7 {
++		count = 7
++	}
++	_, _ = writer.body.Write(body[:count])
++	if writer.afterWrite != nil {
++		writer.afterWrite()
++	}
++	return count, writer.writeErr
++}
++func (writer *singleSSETransportForTest) Flush() { writer.flushes++ }
++
++func singleSSEActualGinContextForTest(t *testing.T, ctx context.Context, transport *singleSSETransportForTest, check func() error) (*gin.Context, *nativeSavedReplayWriter) {
++	t.Helper()
++	transport.header = make(http.Header)
++	c, _ := gin.CreateTestContext(transport)
++	c.Request = httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(ctx)
++	writer := &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: check}
++	c.Writer = writer
++	return c, writer
++}
++
++func TestLiveSSESingleFrameMatchesPinnedGinWireAndChecksEachIO(t *testing.T) {
++	for _, data := range []any{
++		&types.StreamResponse{ID: "fixed-case", ResponseType: types.ResponseTypeAnswer, Content: "line1\nline2 <>& 中文", Data: map[string]any{"done": true}},
++		map[string]any{"text": "line1\nline2", "nested": []any{"value", true}},
++		"text\nnext\rline",
++		[]byte("bytes\nnext\rline"),
++	} {
++		baseline, recorder := newTestGinContext(t, "")
++		baseline.Header("Cache-Control", "private")
++		baseline.SSEvent("message", data)
++		baseline.Writer.Flush()
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, _ := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++		c.Header("Cache-Control", "private")
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: data}})
++		c.Writer.Flush()
++		if !bytes.Equal(transport.body.Bytes(), recorder.Body.Bytes()) || c.Writer.Status() != baseline.Writer.Status() ||
++			transport.header.Get("Content-Type") != recorder.Header().Get("Content-Type") || transport.header.Get("Cache-Control") != "private" {
++			t.Fatal("single frame changed pinned Gin wire bytes, status or headers")
++		}
++		if transport.writes != 1 || transport.flushes != 1 || checks != 2 || len(c.Errors) != 0 || c.IsAborted() {
++			t.Fatal("one serialized event did not preserve a fresh current check per actual Write and Flush")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameRefusalBeforeWriteAndBetweenFrames(t *testing.T) {
++	for _, denyFirst := range []bool{true, false} {
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, writer := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error {
++			checks++
++			if denyFirst || checks == 2 {
++				return access.ErrNextcloudPublicationDenied
++			}
++			return nil
++		})
++		frame := singleSSEFrame{event: sse.Event{Event: "message", Data: "fixed answer"}}
++		c.Render(-1, frame)
++		c.Writer.Flush()
++		if writer.denied == nil || transport.flushes != 0 {
++			t.Fatal("actual refusal did not suppress a denied Write or Flush")
++		}
++		if denyFirst && (transport.writes != 0 || transport.body.Len() != 0 || !c.IsAborted() || len(c.Errors) == 0) {
++			t.Fatal("pre-write refusal released event bytes or lost Gin error/Abort")
++		}
++		if !denyFirst && (transport.writes != 1 || transport.body.Len() == 0 || checks != 2) {
++			t.Fatal("current authority was reused for Flush instead of checked again")
++		}
++		before := append([]byte(nil), transport.body.Bytes()...)
++		c.Render(-1, frame)
++		c.Writer.Flush()
++		if !bytes.Equal(before, transport.body.Bytes()) || transport.writes > 1 || transport.flushes != 0 {
++			t.Fatal("sticky refusal was bypassed by a future event")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameCancellationSuppressesSubsequentIO(t *testing.T) {
++	for _, cancelDuringWrite := range []bool{false, true} {
++		ctx, cancel := context.WithCancel(context.Background())
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, writer := singleSSEActualGinContextForTest(t, ctx, transport, func() error { checks++; return nil })
++		if cancelDuringWrite {
++			transport.afterWrite = cancel
++		} else {
++			cancel()
++		}
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: "fixed answer"}})
++		c.Writer.Flush()
++		cancel()
++		if !errors.Is(writer.denied, context.Canceled) || transport.flushes != 0 {
++			t.Fatal("actual cancellation was dropped before subsequent IO")
++		}
++		if cancelDuringWrite && (transport.writes != 1 || checks != 1) || !cancelDuringWrite && (transport.writes != 0 || checks != 0 || transport.body.Len() != 0) {
++			t.Fatal("canceled frame reached extra IO or reused a prior check")
++		}
++	}
++}
++
++func TestLiveSSESingleFramePartialWritesReportWithoutRetry(t *testing.T) {
++	failure := errors.New("fixed transport failure")
++	for _, writeErr := range []error{nil, failure} {
++		transport := &singleSSETransportForTest{partial: true, writeErr: writeErr}
++		checks := 0
++		c, _ := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: "fixed answer"}})
++		c.Writer.Flush()
++		wanted := writeErr
++		if wanted == nil {
++			wanted = io.ErrShortWrite
++		}
++		if transport.writes != 1 || transport.body.Len() != 7 || checks != 2 || len(c.Errors) != 1 || !errors.Is(c.Errors[0].Err, wanted) || !c.IsAborted() {
++			t.Fatal("partial actual IO retried bytes or lost Gin error/Abort semantics")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameSerializationErrorPreservesGinAbort(t *testing.T) {
++	transport := &singleSSETransportForTest{}
++	checks := 0
++	c, _ := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++	c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: make(chan int)}})
++	c.Writer.Flush()
++	if transport.writes != 0 || transport.body.Len() != 0 || transport.flushes != 1 || checks != 1 || len(c.Errors) != 1 || !c.IsAborted() {
++		t.Fatal("encoding failure emitted a partial event or lost existing Render/Flush semantics")
++	}
++}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
 index ebd97716afad89b65ebf407fab2385fd29109fd1..5a6680530372053b09024b77fe16e972ce6a47f3 100644
 --- a/internal/handler/session/stream.go
