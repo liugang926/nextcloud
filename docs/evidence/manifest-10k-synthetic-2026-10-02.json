@@ -1,0 +1,38 @@
+{
+  "observed_at_utc": "2026-10-02T09:35:32Z",
+  "base_commit": "d38ffce8e87333f5676fcba0bde2ba202e8c9ebd",
+  "runner": "nextcloud:34.0.4-apache PHP CLI, --network none, memory_limit=512M",
+  "runner_image_id": "sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c",
+  "reproduce": "docker run --rm --network none --entrypoint php -v $PWD/apps/integration_weknora:/app:ro -w /app nextcloud:34.0.4-apache -d memory_limit=512M tests/manifest_10k_synthetic_contract.php",
+  "test": "apps/integration_weknora/tests/manifest_10k_synthetic_contract.php",
+  "result": {
+    "scope": "synthetic_metadata_php_controller_snapshot_only",
+    "php_version": "8.5.10",
+    "php_memory_limit": "512M",
+    "file_count": 10000,
+    "page_count": 50,
+    "snapshot_json_bytes": 2600001,
+    "first_scan_folder_listings": 11,
+    "stored_page_tree_rescans": 0,
+    "first_page_ms": 41.27,
+    "remaining_pages_ms": 574.25,
+    "memory_baseline_bytes": 2097152,
+    "memory_peak_bytes": 35573760,
+    "invalidations": [
+      "root_etag",
+      "withdrawal_revision",
+      "stop_resume_epoch",
+      "snapshot_ttl",
+      "tampered_cursor",
+      "unreadable_node"
+    ],
+    "not_measured": [
+      "Nextcloud filecache",
+      "PostgreSQL I/O",
+      "HTTP/network transfer",
+      "WeKnora indexing",
+      "100 GB source content",
+      "real AD or Team Folder ACL"
+    ]
+  }
+}

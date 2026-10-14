@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "classification": "reviewable_scoped_SQLite_lease_writer_candidate_not_full_HTTP_accepted",
+  "base": "0e56af9092ceb1999368f83d3961c3dbfd938328",
+  "head": "1128547691b729dd4038a8f27cf8d2fc9a0b2701",
+  "tree": "a9a311849c5d38a77fc7b587ff12cf999c41c31c",
+  "patch_file": "weknora-scoped-SQLite-message-body-lease-writer-20261011.patch",
+  "patch_SHA256": "29471c6b3f3eb6073e11f1c94d0699900c569739c40b9e78732fe23e0f53a76c",
+  "source_files": [
+    "internal/application/repository/original_body_message_scopes.go",
+    "internal/application/service/message_body_lease_sqlite_writer_actual_test.go"
+  ],
+  "source_files_SHA256": {
+    "internal/application/repository/original_body_message_scopes.go": "c5b44c7c4f9a6f801c3c25f478483cb71b8bed0ddc335394f2c0dda8ce73f15a",
+    "internal/application/service/message_body_lease_sqlite_writer_actual_test.go": "722defdfc0db18181dc27f5b36bd3333a32b451e2c1622429c7d64ebe8652945"
+  },
+  "forward_reverse_tree_exact": true,
+  "production_scope": "SQLite AcquireMessageBodyReadLeases and RenewLease only; first zero-row UPDATE on leases reserves writer before authority/journal/body reads. No data/lease/authorization minted. PG and subsequent validations unchanged; stale nested read snapshots still return real errors.",
+  "validation": {
+    "selected_compile_packages_PASS": 3,
+    "server_no_test_files": true,
+    "business_compile_RUN": 0,
+    "original_sourcepath6_PASS": 4,
+    "original_sourcepath6_FAIL": 2,
+    "WAL5_PASS": 5,
+    "WAL5_FAIL": 0,
+    "WAL5_prerequisite_FAIL_previous": 5
+  },
+  "remaining": "OriginalHTTP6 retains separate modelOriginalRecheck permission-version CREATE busy_snapshot; pair WAL5 isaccepted, whole normal application stillunaccepted.",
+  "candidate_manifest_adopted": false,
+  "full_V1": false,
+  "evidence": [
+    "../../docs/evidence/scoped-SQLite-message-lease-writer-WAL5-GREEN-20261011.json",
+    "../../docs/evidence/scoped-SQLite-writer-sourcepath6-busy-snapshot-failure-20261011.json"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "classification": "dual_service_restore_current_owner_nonce_mutation_boundary_unit_GREEN",
+  "base": "a1b0eac6d2b8ba388c566436a2798ddcf84bfaa8",
+  "source_files_SHA256": {
+    "scripts/ops/isolated-dual-service-restore.py": "db99be3f92144a79911bd4b9effb2464f09487a5a89923eb0ba3ae49a92951f3",
+    "scripts/ops/test_isolated_dual_service_restore_ownership.py": "5f3f333be9405a70235cffcf981f688bbd33d94b0d1d1eb20df23fcd7070d887"
+  },
+  "changes": [
+    "everyCompose operation revalidatescurrentmarker/state/fingerprint andfullcontainer/volume/networkowner nonce",
+    "directvolume mounts requireproject+role+owner nonce"
+  ],
+  "validation": [
+    {
+      "command": "python3 scripts/ops/test_isolated_dual_service_restore_ownership.py",
+      "tests": 4,
+      "PASS": 4,
+      "FAIL": 0
+    },
+    {
+      "command": "python3 scripts/ops/test-synthetic-ldap-fixture-state.py",
+      "tests": 4,
+      "PASS": 4,
+      "FAIL": 0
+    }
+  ],
+  "real_boundary": "Actualowned_state/assert_owned_resources used, onlyDockerreadinventory mocked; foreignnonce preventsCompose mutation runner invocation.",
+  "Docker_executed": false,
+  "actual_restore_accepted": false,
+  "full_V1": false
+}

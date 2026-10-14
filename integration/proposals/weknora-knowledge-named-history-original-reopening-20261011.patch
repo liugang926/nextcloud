@@ -1,0 +1,1307 @@
+diff --git a/internal/application/repository/knowledge_input_provenance.go b/internal/application/repository/knowledge_input_provenance.go
+index ad9bd50a5..1c4c555c8 100644
+--- a/internal/application/repository/knowledge_input_provenance.go
++++ b/internal/application/repository/knowledge_input_provenance.go
+@@ -11,6 +11,7 @@ import (
+ 	"fmt"
+ 	"reflect"
+ 	"sort"
++	"sync"
+ 
+ 	"github.com/Tencent/WeKnora/internal/application/access"
+ 	"github.com/Tencent/WeKnora/internal/types"
+@@ -90,6 +91,8 @@ func (knowledgeInputMaterialReceipt) TableName() string { return "knowledge_inpu
+ // KnowledgeInputProvenanceStore owns private, original admission and material
+ // receipts. Missing old/derived facts are unknown; there is no inferred origin.
+ type KnowledgeInputProvenanceStore struct {
++	knowledgeNamedHistory   *KnowledgeSQLiteEmbeddingStore
++	knowledgeNamedHistoryMu sync.RWMutex
+ 	memoryRecallHistory     *memoryOriginalAdmissionRepository
+ 	db                      *gorm.DB
+ 	displayAuthorityFactory KnowledgeDisplayAuthorityFactory
+diff --git a/internal/application/repository/knowledge_named_history.go b/internal/application/repository/knowledge_named_history.go
+new file mode 100644
+index 000000000..ebdf5ff6d
+--- /dev/null
++++ b/internal/application/repository/knowledge_named_history.go
+@@ -0,0 +1,577 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"reflect"
++	"sort"
++	"sync"
++	"time"
++
++	modelembedding "github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++)
++
++// Only a concrete same-pool original store can supply history readers. This
++// wiring is not permission, a model constructor or a metadata proof issuer.
++func ConfigureKnowledgeNamedHistoryStore(actual *KnowledgeSQLiteEmbeddingStore) {
++	if actual == nil || actual.material == nil || actual.models == nil {
++		return
++	}
++	a, e := actual.db.DB()
++	b, e2 := actual.material.db.DB()
++	c, e3 := actual.models.db.DB()
++	if e != nil || e2 != nil || e3 != nil || a != b || a != c {
++		return
++	}
++	actual.material.knowledgeNamedHistoryMu.Lock()
++	defer actual.material.knowledgeNamedHistoryMu.Unlock()
++	if actual.material.knowledgeNamedHistory == nil {
++		actual.material.knowledgeNamedHistory = actual
++	}
++}
++
++type knowledgeNamedHistoryRead struct {
++	store    *KnowledgeSQLiteEmbeddingStore
++	ctx      context.Context
++	cancel   context.CancelFunc
++	captured *types.KnowledgeEmbeddingConsumption
++	input    types.KnowledgeQueryEmbeddingInput
++	result   types.KnowledgeQueryEmbeddingReceipt
++	proof    types.ModelOriginalProof
++	model    *historicalModelRead
++	vector   *KnowledgeSQLiteEmbeddingVectorRead
++	parent   *types.MessageMaterialReadPlan
++	leases   map[string]originalBodyLease
++	payloads map[string]originalBodyPayload
++	heads    []originalBodyFieldHead
++	rows     []originalBodyAvailabilityRow
++	content  []NextcloudContentLease
++	mu       sync.Mutex
++	checks   sync.WaitGroup
++	closed   bool
++	failed   error
++	joined   chan struct{}
++}
++
++func (r *knowledgeNamedHistoryRead) start() error {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.closed {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if r.failed != nil {
++		return r.failed
++	}
++	if err := r.ctx.Err(); err != nil {
++		return err
++	}
++	r.checks.Add(1)
++	return nil
++}
++func (r *knowledgeNamedHistoryRead) finish(err error) error {
++	r.mu.Lock()
++	if err == nil {
++		err = r.ctx.Err()
++	}
++	if err != nil && r.failed == nil {
++		r.failed = err
++		r.cancel()
++	}
++	r.mu.Unlock()
++	r.checks.Done()
++	return err
++}
++func (r *knowledgeNamedHistoryRead) Context() context.Context { return r.ctx }
++func (s *KnowledgeSQLiteEmbeddingStore) beginNamedKnowledgeHistory(ctx context.Context, c *types.KnowledgeEmbeddingConsumption) (*knowledgeNamedHistoryRead, error) {
++	if ctx == nil || ctx.Err() != nil || c == nil || c.Version != 1 || c.Recipe != "knowledge.query-native-vector-consumer.v1" || c.SourceLineage.RequireComplete() != nil || len(c.SourceLineage.Sources) != 0 || len(c.Candidates) == 0 || c.QueryInputID == "" || c.QueryReceiptID == "" {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	digest, err := knowledgeConsumptionDigest(c)
++	if err != nil || digest != c.Digest {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	r := &knowledgeNamedHistoryRead{store: s, captured: c, leases: map[string]originalBodyLease{}, payloads: map[string]originalBodyPayload{}, joined: make(chan struct{})}
++	r.ctx, r.cancel = context.WithCancel(ctx)
++	fail := func(err error) (*knowledgeNamedHistoryRead, error) { return nil, errors.Join(err, r.Close()) }
++	err = s.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
++		if e := knowledgeQuerySchemaInTx(tx); e != nil {
++			return e
++		}
++		if e := tx.Select("id,tenant_id,knowledge_base_id,session_id,message_id,admission_id,generation_id,message_body_digest,plan_json,plan_digest,kb_revision,kb_config_digest,model_id,model_proof_json,space_digest,expected_dimensions,input_sha256,digest,created_at_ms").Where("id=?", c.QueryInputID).Take(&r.input).Error; e != nil {
++			return e
++		}
++		if e := tx.Select("id,input_id,input_digest,tenant_id,knowledge_base_id,model_id,space_digest,dimensions,body_sha256,vector_sha256,digest,created_at_ms").Where("id=?", c.QueryReceiptID).Take(&r.result).Error; e != nil {
++			return e
++		}
++		d, e := knowledgeQueryInputDigest(r.input)
++		if e != nil || d != r.input.Digest || d != c.QueryInputDigest {
++			return ErrKnowledgeInputChanged
++		}
++		d, e = knowledgeQueryResultDigest(r.result)
++		if e != nil || d != r.result.Digest || d != c.QueryReceiptDigest || r.result.InputID != r.input.ID || r.result.InputDigest != r.input.Digest || r.result.TenantID != r.input.TenantID || r.result.ModelID != r.input.ModelID || r.input.TenantID != c.TenantID || r.input.KnowledgeBaseID != c.KnowledgeBaseID || r.result.KnowledgeBaseID != c.KnowledgeBaseID || r.result.SpaceDigest != c.SpaceDigest || r.input.SpaceDigest != c.SpaceDigest || r.result.Dimensions != r.input.ExpectedDimensions {
++			return ErrKnowledgeInputChanged
++		}
++		if json.Unmarshal([]byte(r.input.ModelProofJSON), &r.proof) != nil || !r.proof.Valid() || r.proof.ModelID != r.input.ModelID {
++			return ErrKnowledgeInputChanged
++		}
++		var saved types.MessageMaterialReadPlan
++		if json.Unmarshal([]byte(r.input.PlanJSON), &saved) != nil || saved.MetadataDigest != r.input.PlanDigest || saved.Request.AllSession || len(saved.Request.MessageIDs) != 1 || saved.Request.MessageIDs[0] != r.input.MessageID {
++			return ErrKnowledgeInputChanged
++		}
++		plan, e := s.material.peekMessageMaterialReadPlanInTx(tx, saved.Request)
++		if e != nil {
++			return e
++		}
++		a, b := *plan, saved
++		a.MetadataDigest = ""
++		b.MetadataDigest = ""
++		a.RecallHistory = nil
++		b.RecallHistory = nil
++		if !faqInputEqual(a, b) {
++			return ErrKnowledgeInputChanged
++		}
++		r.parent = plan
++		var fact messageMaterialAdmission
++		if e = tx.Where("id=? AND generation_id=? AND message_id=? AND session_id=? AND tenant_id=?", r.input.AdmissionID, r.input.GenerationID, r.input.MessageID, r.input.SessionID, r.input.TenantID).Take(&fact).Error; e != nil {
++			return e
++		}
++		_, owner, rev, e := s.material.currentMessageOwnerInTx(tx, r.input.SessionID)
++		if e != nil || fact.OwnerID != owner.UserID || fact.OwnerRevision != rev || fact.BodyDigest != r.input.MessageBodyDigest {
++			return ErrKnowledgeInputChanged
++		}
++		return nil
++	}, memoryWriteOptions(s.db))
++	if err != nil {
++		return fail(err)
++	}
++	history, err := s.models.BeginHistoricalModelOriginalRead(r.ctx, r.proof)
++	if err != nil {
++		return fail(err)
++	}
++	model, ok := history.(*historicalModelRead)
++	if !ok {
++		_ = history.Close()
++		return fail(ErrKnowledgeSQLiteEmbeddingUnknown)
++	}
++	r.model = model
++	r.ctx = model.Context()
++	owner := "knowledge-named-history/" + uuid.NewString()
++	ids, err := s.material.AcquireMessageBodyReadLeases(r.ctx, r.parent, owner, 15*time.Minute)
++	if err != nil {
++		return fail(err)
++	}
++	if len(ids) == 0 {
++		return fail(ErrOriginalBodyUnavailable)
++	}
++	// Capture every actual parent lease before any named query body hydration.
++	err = s.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
++		for _, id := range ids {
++			var l originalBodyLease
++			if e := bodyInternal(tx).Where("lease_id=?", id).Take(&l).Error; e != nil {
++				return e
++			}
++			if l.OwnerID != owner {
++				return ErrOriginalBodyUnavailable
++			}
++			r.leases[id] = l
++		}
++		for _, l := range r.model.hold.Hold.Leases {
++			r.leases[l.LeaseID] = l
++		}
++		return nil
++	}, memoryWriteOptions(s.db))
++	if err != nil {
++		cleanup, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 5*time.Second)
++		for _, id := range ids {
++			_ = NewOriginalBodyRetentionStore(s.db).ReleaseLease(cleanup, id)
++		}
++		cancel()
++		return fail(err)
++	}
++	scopes := append([]types.KnowledgeSearchScope{}, r.parent.Scopes...)
++	scopes = append(scopes, types.KnowledgeSearchScope{TenantID: r.input.TenantID, KBID: r.input.KnowledgeBaseID})
++	seen := map[types.KnowledgeSearchScope]bool{}
++	for _, scope := range scopes {
++		if seen[scope] {
++			continue
++		}
++		seen[scope] = true
++		l, e := s.material.ContentLeaseStore().AcquireKBRead(r.ctx, scope.TenantID, scope.KBID, owner, 2*time.Minute)
++		if e != nil {
++			return fail(e)
++		}
++		r.content = append(r.content, l)
++	}
++	r.ctx, err = WithFAQReadLeaseCoverage(r.ctx, r.content)
++	if err != nil {
++		return fail(err)
++	}
++	r.ctx, err = WithMessageMaterialReadPlan(r.ctx, r.parent)
++	if err != nil {
++		return fail(err)
++	}
++	rowIDs := []uint64{}
++	for _, candidate := range c.Candidates {
++		rowIDs = append(rowIDs, candidate.RowID)
++	}
++	r.vector, err = s.BeginVectorRead(r.ctx, rowIDs)
++	if err != nil {
++		return fail(err)
++	}
++	err = s.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
++		rows := []originalBodyAvailabilityRow{{r.input.TableName(), r.input.ID}, {r.result.TableName(), r.result.ID}}
++		if e := checkOriginalBodyAvailableBatchInTx(r.ctx, tx, rows); e != nil {
++			return e
++		}
++		heads, e := originalBodyBatchHeads(tx, rows)
++		if e != nil || len(heads) != 2 {
++			return ErrOriginalBodyUnavailable
++		}
++		r.rows = rows
++		r.heads = heads
++		for _, h := range heads {
++			sha, id, column := r.input.InputSHA256, r.input.ID, "input_json"
++			if h.SourceTable == r.result.TableName() {
++				sha, id, column = r.result.BodySHA256, r.result.ID, "vector_json"
++			} else if h.SourceTable != r.input.TableName() {
++				return ErrOriginalBodyUnavailable
++			}
++			scope := originalBodyScope{Tenant: r.input.TenantID, KB: r.input.KnowledgeBaseID, OwnerKind: h.SourceTable, OwnerID: id}
++			if h.SourceTable == r.input.TableName() {
++				scope.AdmissionID = r.input.AdmissionID
++			}
++			ref, ok := bodyReference(h.OriginalBodyRef)
++			if !ok || h.ColumnName != column || h.RowKey != id || h.TenantID != r.input.TenantID || h.KnowledgeBaseID != r.input.KnowledgeBaseID || h.SourceIdentitySHA256 != bodyIdentity(h.SourceTable, id, column, scope) || ref.BodyID != h.BodyID || ref.SlotID != h.SlotID || ref.SHA256 != sha {
++				return ErrOriginalBodyUnavailable
++			}
++		}
++		for _, h := range heads {
++			id, e := NewOriginalBodyRetentionStore(tx).acquireLeaseInTx(tx, h.BodyID, "read", owner, 15*time.Minute)
++			if e != nil {
++				return e
++			}
++			var l originalBodyLease
++			if e = bodyInternal(tx).Where("lease_id=?", id).Take(&l).Error; e != nil {
++				return e
++			}
++			r.leases[id] = l
++		}
++		for _, l := range r.leases {
++			var b originalBodyPayload
++			if e = bodyInternal(tx).Where("id=?", l.BodyID).Take(&b).Error; e != nil {
++				return e
++			}
++			r.payloads[l.BodyID] = b
++		}
++		return r.checkInTx(tx)
++	}, memoryWriteOptions(s.db))
++	if err != nil {
++		return fail(err)
++	}
++	return r, nil
++}
++func (r *knowledgeNamedHistoryRead) checkInTx(tx *gorm.DB) error {
++	if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	pool, err := tx.DB()
++	if err != nil {
++		return err
++	}
++	actual, err := r.store.db.DB()
++	if err != nil || actual != pool || !sameOriginalModelCallerInRepository(tx.Statement.Context, r.ctx) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	authority, err := knowledgeSQLiteEmbeddingAuthority(tx, r.store.material)
++	if err != nil {
++		return err
++	}
++	fresh, err := authority.RefreshCurrentReadActor(r.ctx)
++	if err != nil {
++		return err
++	}
++	var kb types.KnowledgeBase
++	if err = tx.Select("id,tenant_id,type,creator_id,is_temporary,embedding_model_id,summary_model_id,chunking_config,image_processing_config,vlm_config,asr_config,extract_config,faq_config,question_generation_config,auto_tag_config,profile_config,wiki_config,indexing_strategy,enrichment_templates,deleted_at").Where("id=? AND tenant_id=? AND deleted_at IS NULL", r.input.KnowledgeBaseID, r.input.TenantID).Take(&kb).Error; err != nil {
++		return err
++	}
++	if kb.EmbeddingModelID != r.input.ModelID || !kb.IndexingStrategy.VectorEnabled {
++		return ErrKnowledgeInputChanged
++	}
++	dummy := &KnowledgeSQLiteEmbeddingVectorRead{}
++	if err = dummy.authorizeKB(authority, fresh, &kb); err != nil {
++		return err
++	}
++	lineage, e := readKnowledgeConfigurationOrigin(tx, &kb)
++	if e != nil || lineage == nil || lineage.RequireComplete() != nil || len(lineage.Sources) != 0 {
++		return ErrKnowledgeInputChanged
++	}
++	revision, e := knowledgeConfigurationControlRevision(tx, kb.ID)
++	if e != nil || revision != r.input.KBRevision {
++		return ErrKnowledgeInputChanged
++	}
++	config, e := knowledgeConfigurationOriginDigest(&kb)
++	if e != nil || config != r.input.KBConfigDigest {
++		return ErrKnowledgeInputChanged
++	}
++	if err = CheckHistoricalModelOriginalHolds(r.model.Context(), tx.Session(&gorm.Session{NewDB: true}), r.proof); err != nil {
++		return err
++	}
++	facts, err := loadHistoricalModelFacts(tx.Session(&gorm.Session{NewDB: true}).WithContext(r.model.Context()), r.proof)
++	if err != nil {
++		return err
++	}
++	var definition types.ModelOriginalDefinition
++	if json.Unmarshal([]byte(facts.Definition.DefinitionJSON), &definition) != nil || definition.Type != types.ModelTypeEmbedding || definition.Parameters.OriginalEmbedding == nil || modelembedding.ValidateOriginalEmbeddingDefinition(definition.Parameters.OriginalEmbedding) != nil || definition.Parameters.OriginalEmbedding.SpaceDigest != r.input.SpaceDigest || definition.Parameters.OriginalEmbedding.ExpectedDimensions != r.input.ExpectedDimensions {
++		return ErrKnowledgeInputChanged
++	}
++	var in types.KnowledgeQueryEmbeddingInput
++	var result types.KnowledgeQueryEmbeddingReceipt
++	if err = tx.Where("id=?", r.input.ID).Take(&in).Error; err != nil {
++		return err
++	}
++	if err = tx.Where("id=?", r.result.ID).Take(&result).Error; err != nil {
++		return err
++	}
++	id, err := knowledgeQueryInputDigest(in)
++	if err != nil || id != r.input.Digest || id != in.Digest || bodySHA([]byte(in.InputJSON)) != in.InputSHA256 {
++		return ErrKnowledgeInputChanged
++	}
++	rd, err := knowledgeQueryResultDigest(result)
++	if err != nil || rd != r.result.Digest || rd != result.Digest || bodySHA([]byte(result.VectorJSON)) != result.BodySHA256 {
++		return ErrKnowledgeInputChanged
++	}
++	metaIn, metaResult := in, result
++	metaIn.InputJSON = ""
++	metaResult.VectorJSON = ""
++	if !reflect.DeepEqual(metaIn, r.input) || !reflect.DeepEqual(metaResult, r.result) {
++		return ErrKnowledgeInputChanged
++	}
++	var queryBody struct{ Text string }
++	if json.Unmarshal([]byte(in.InputJSON), &queryBody) != nil || queryBody.Text == "" {
++		return ErrKnowledgeInputChanged
++	}
++	var original messageMaterialAdmission
++	if err = tx.Where("id=? AND generation_id=? AND tenant_id=?", in.AdmissionID, in.GenerationID, in.TenantID).Take(&original).Error; err != nil {
++		return err
++	}
++	_, owner, ownerRevision, e := r.store.material.currentMessageOwnerInTx(tx, in.SessionID)
++	if e != nil || original.OwnerID != owner.UserID || original.OwnerRevision != ownerRevision || original.BodyDigest != in.MessageBodyDigest {
++		return ErrKnowledgeInputChanged
++	}
++	var vector []float32
++	if json.Unmarshal([]byte(result.VectorJSON), &vector) != nil {
++		return ErrKnowledgeInputChanged
++	}
++	bytes, err := knowledgeSQLiteVectorBytes(vector)
++	if err != nil || len(vector) != in.ExpectedDimensions || bodySHA(bytes) != result.VectorSHA256 {
++		return ErrKnowledgeInputChanged
++	}
++	var named types.MessageMaterialReadPlan
++	if json.Unmarshal([]byte(in.PlanJSON), &named) != nil {
++		return ErrKnowledgeInputChanged
++	}
++	current, err := r.store.material.peekMessageMaterialReadPlanInTx(tx, named.Request)
++	if err != nil {
++		return err
++	}
++	a, b := *current, named
++	a.MetadataDigest = ""
++	b.MetadataDigest = ""
++	a.RecallHistory = nil
++	b.RecallHistory = nil
++	if !faqInputEqual(a, b) {
++		return ErrKnowledgeInputChanged
++	}
++	snapshot, err := r.store.material.captureMessageMaterialInTx(tx.Session(&gorm.Session{NewDB: true}), named.Request)
++	if err != nil {
++		return err
++	}
++	if len(snapshot.Messages) != 1 || len(snapshot.Proofs) != 1 || snapshot.Messages[0] == nil || snapshot.Proofs[0] == nil {
++		return ErrKnowledgeInputChanged
++	}
++	message, proof := snapshot.Messages[0], snapshot.Proofs[0]
++	if message.ID != in.MessageID || message.Role != "user" || !message.IsCompleted || message.Content != queryBody.Text || proof.AdmissionID != in.AdmissionID || proof.GenerationID != in.GenerationID || proof.BodyDigest != in.MessageBodyDigest {
++		return ErrKnowledgeInputChanged
++	}
++	if err = r.vector.CheckInTx(r.vector.Context(), tx); err != nil {
++		return err
++	}
++	for _, candidate := range r.captured.Candidates {
++		input, receipt := r.vector.originals[candidate.RowID], r.vector.receipts[candidate.RowID]
++		if input.ID != candidate.InputID || input.Digest != candidate.InputDigest || receipt.ID != candidate.ReceiptID || receipt.Digest != candidate.ReceiptDigest || receipt.Revision != candidate.Revision || input.ModelProofJSON != candidate.ModelProofJSON || input.SpaceDigest != in.SpaceDigest {
++			return ErrKnowledgeInputChanged
++		}
++	}
++	// Never run a new provider or rerank to certify old output. Exact named hits
++	// and query bytes are authenticated by the immutable saved consumption.
++	seen := map[uint64]bool{}
++	for _, h := range r.captured.Hits {
++		if seen[h.RowID] || r.vector.receipts[h.RowID].ID == "" {
++			return ErrKnowledgeInputChanged
++		}
++		seen[h.RowID] = true
++	}
++	if err = checkOriginalBodyAvailableBatchForCapturedInTx(r.ctx, tx, r.rows, r.heads); err != nil {
++		return err
++	}
++	return r.finalClockInTx(tx)
++}
++func (r *knowledgeNamedHistoryRead) capturedBindings() (map[string]originalBodyLease, map[string]originalBodyPayload, []NextcloudContentLease, error) {
++	all := map[string]originalBodyLease{}
++	payloads := map[string]originalBodyPayload{}
++	if err := mergeMemoryFinalLeaseBindings(all, r.leases); err != nil {
++		return nil, nil, nil, err
++	}
++	if err := mergeMemoryFinalLeaseBindings(all, r.vector.leases); err != nil {
++		return nil, nil, nil, err
++	}
++	for id, b := range r.payloads {
++		payloads[id] = b
++	}
++	for id, b := range r.vector.payloads {
++		if before, ok := payloads[id]; ok && !reflect.DeepEqual(before, b) {
++			return nil, nil, nil, ErrOriginalBodyUnavailable
++		}
++		payloads[id] = b
++	}
++	return all, payloads, r.content, nil
++}
++func (r *knowledgeNamedHistoryRead) finalClockInTx(tx *gorm.DB) error {
++	all, payloads, content, err := r.capturedBindings()
++	if err != nil {
++		return err
++	}
++	// Current identity/KB permission stays fresh after the named physical IO.
++	authority, err := knowledgeSQLiteEmbeddingAuthority(tx, r.store.material)
++	if err != nil {
++		return err
++	}
++	fresh, err := authority.RefreshCurrentReadActor(r.ctx)
++	if err != nil {
++		return err
++	}
++	var kb types.KnowledgeBase
++	if err = tx.Select("id,tenant_id,type,creator_id,is_temporary,deleted_at").Where("id=? AND tenant_id=? AND deleted_at IS NULL", r.input.KnowledgeBaseID, r.input.TenantID).Take(&kb).Error; err != nil {
++		return err
++	}
++	if err = r.vector.authorizeKB(authority, fresh, &kb); err != nil {
++		return err
++	}
++	if err = NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx); err != nil {
++		return err
++	}
++	if err = knowledgeQueryFinalClockInTx(tx, all, payloads, content); err != nil {
++		return err
++	}
++	for _, ctx := range r.clockContexts() {
++		if err = ctx.Err(); err != nil {
++			return err
++		}
++	}
++	return tx.Statement.Context.Err()
++}
++func (r *knowledgeNamedHistoryRead) Recheck() error {
++	if err := r.start(); err != nil {
++		return err
++	}
++	err := r.store.db.WithContext(r.ctx).Transaction(r.checkInTx, memoryWriteOptions(r.store.db))
++	return r.finish(err)
++}
++func (r *knowledgeNamedHistoryRead) Close() error {
++	r.mu.Lock()
++	if r.closed {
++		joined := r.joined
++		r.mu.Unlock()
++		<-joined
++		r.mu.Lock()
++		err := r.failed
++		r.mu.Unlock()
++		return err
++	}
++	r.closed = true
++	r.cancel()
++	r.mu.Unlock()
++	r.checks.Wait()
++	cleanup, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 5*time.Second)
++	defer cancel()
++	var err error
++	borrowed := map[string]bool{}
++	if r.model != nil {
++		for _, l := range r.model.hold.Hold.Leases {
++			borrowed[l.LeaseID] = true
++		}
++	}
++	ids := []string{}
++	for id := range r.leases {
++		if !borrowed[id] {
++			ids = append(ids, id)
++		}
++	}
++	sort.Strings(ids)
++	for _, id := range ids {
++		err = errors.Join(err, NewOriginalBodyRetentionStore(r.store.db).ReleaseLease(cleanup, id))
++	}
++	for _, l := range r.content {
++		err = errors.Join(err, r.store.material.ContentLeaseStore().ReleaseLease(cleanup, l.ID))
++	}
++	if r.vector != nil {
++		err = errors.Join(err, r.vector.Close())
++	}
++	if r.model != nil {
++		err = errors.Join(err, r.model.Close())
++	}
++	r.mu.Lock()
++	if r.failed == nil {
++		r.failed = err
++	}
++	close(r.joined)
++	r.mu.Unlock()
++	return err
++}
++
++// No binding is read back from SQL as new authority. The owning group joins
++// Close while callers project these exact privately acquired identities.
++func (r *knowledgeNamedHistoryRead) clockContexts() []context.Context {
++	out := []context.Context{r.ctx, r.model.Context(), r.vector.Context()}
++	for _, model := range r.vector.models {
++		out = append(out, model.Context())
++	}
++	return out
++}
++
++// Capture the complete baseline only when the owning group has just acquired
++// and concretely checked this exact opaque historical read. Later clocks must
++// compare this baseline, never accept a newly observed payload as authority.
++func knowledgeHistoricalModelPayloadsInTx(ctx context.Context, tx *gorm.DB, read *historicalModelRead) (map[string]originalBodyPayload, error) {
++	if read == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := CheckHistoricalModelOriginalHolds(ctx, tx, read.hold.Hold.Proof); err != nil {
++		return nil, err
++	}
++	out := map[string]originalBodyPayload{}
++	for _, body := range read.hold.Hold.Bodies {
++		var p originalBodyPayload
++		if err := bodyInternal(tx).Where("id=?", body.Head.BodyID).Take(&p).Error; err != nil {
++			return nil, err
++		}
++		lease, ok := read.hold.Hold.Leases[body.Head.BodyID]
++		if !ok || p.ID != lease.BodyID || p.TenantID != read.hold.Hold.Proof.OwnerTenantID || p.State != "live" || p.PurgeEpoch != lease.Epoch || p.BodySHA256 != body.Receipt.BodyDigest {
++			return nil, ErrOriginalBodyUnavailable
++		}
++		out[p.ID] = p
++	}
++	return out, nil
++}
++
++// The first concrete configuration is immutable. Request reads take only this
++// short pointer lock; it never spans SQL or a wait on the shared pool.
++func (s *KnowledgeInputProvenanceStore) knowledgeNamedHistoryStore() *KnowledgeSQLiteEmbeddingStore {
++	s.knowledgeNamedHistoryMu.RLock()
++	defer s.knowledgeNamedHistoryMu.RUnlock()
++	return s.knowledgeNamedHistory
++}
+diff --git a/internal/application/repository/memory_recall_history.go b/internal/application/repository/memory_recall_history.go
+index 41952f82c..a6448c183 100644
+--- a/internal/application/repository/memory_recall_history.go
++++ b/internal/application/repository/memory_recall_history.go
+@@ -3,6 +3,7 @@ package repository
+ import (
+ 	"context"
+ 	"encoding/json"
++	"reflect"
+ 	"sort"
+ 	"sync"
+ 	"time"
+@@ -33,20 +34,23 @@ type memoryRecallHistoricalRead struct {
+ 	joined     chan struct{}
+ }
+ type messageRecallHistoryRead struct {
+-	store        *KnowledgeInputProvenanceStore
+-	ctx          context.Context
+-	cancel       context.CancelFunc
+-	reads        map[string][]*memoryRecallHistoricalRead
+-	semantic     map[string][]*memorySemanticHistoricalRead
+-	models       map[string][]interfaces.MemoryDerivedExecutionRead
+-	dependencies map[string]*types.MessageRecallHistoryDependency
+-	opening      map[string]bool
+-	opened       map[string]bool
+-	mu           sync.Mutex
+-	checks       sync.WaitGroup
+-	closed       bool
+-	failed       error
+-	joined       chan struct{}
++	store                  *KnowledgeInputProvenanceStore
++	ctx                    context.Context
++	cancel                 context.CancelFunc
++	reads                  map[string][]*memoryRecallHistoricalRead
++	semantic               map[string][]*memorySemanticHistoricalRead
++	models                 map[string][]interfaces.MemoryDerivedExecutionRead
++	knowledge              map[string][]*knowledgeNamedHistoryRead
++	knowledgeModels        map[string][]*historicalModelRead
++	knowledgeModelPayloads map[string]map[string]originalBodyPayload
++	dependencies           map[string]*types.MessageRecallHistoryDependency
++	opening                map[string]bool
++	opened                 map[string]bool
++	mu                     sync.Mutex
++	checks                 sync.WaitGroup
++	closed                 bool
++	failed                 error
++	joined                 chan struct{}
+ }
+ 
+ func ConfigureMessageRecallHistoryAuthority(store *KnowledgeInputProvenanceStore, admissions interfaces.MemoryOriginalAdmissionRepository) {
+@@ -138,12 +142,19 @@ func (s *KnowledgeInputProvenanceStore) messageRecallDependencyInTx(tx *gorm.DB,
+ 	if json.Unmarshal([]byte(row.ParentManifest), &manifest) != nil || manifest.Recipe != row.Recipe || manifest.Version != 1 || manifest.AssistantAdmissionID != fact.ID || manifest.AssistantGenerationID != fact.GenerationID || manifest.AssistantMessageID != fact.MessageID || manifest.SessionID != fact.SessionID || manifest.TenantID != fact.TenantID || manifest.OwnerID != fact.OwnerID || manifest.OwnerRevision != fact.OwnerRevision || manifest.SourceLineage.RequireComplete() != nil {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
+-	// Named knowledge-query/vector reopening is a separate required capability.
+-	// Do not silently drop its durable dependencies while admitting old bytes.
+-	if len(manifest.KnowledgeConsumptions) > 0 {
+-		return nil, types.ErrSourceLineageUnknown
++	// Named query/vector dependencies must be reopened from the immutable
++	// completion manifest; their DTOs never replace actual held originals.
++	for _, consumption := range manifest.KnowledgeConsumptions {
++		if consumption == nil || consumption.Version != 1 || consumption.Recipe != "knowledge.query-native-vector-consumer.v1" || consumption.TenantID != fact.TenantID || consumption.SourceLineage.RequireComplete() != nil {
++			return nil, types.ErrSourceLineageUnknown
++		}
++		digest, e := knowledgeConsumptionDigest(consumption)
++		if e != nil || digest != consumption.Digest {
++			return nil, types.ErrSourceLineageUnknown
++		}
+ 	}
+-	if len(manifest.RecallConsumptions) == 0 && len(manifest.SemanticConsumptions) == 0 {
++
++	if len(manifest.RecallConsumptions) == 0 && len(manifest.SemanticConsumptions) == 0 && len(manifest.KnowledgeConsumptions) == 0 {
+ 		if hasUsed != 0 {
+ 			return nil, types.ErrSourceLineageUnknown
+ 		}
+@@ -174,7 +185,7 @@ func (s *KnowledgeInputProvenanceStore) messageRecallDependencyInTx(tx *gorm.DB,
+ 			return nil, err
+ 		}
+ 	}
+-	return &types.MessageRecallHistoryDependency{AdmissionID: fact.ID, GenerationID: fact.GenerationID, MessageID: fact.MessageID, SessionID: fact.SessionID, TenantID: fact.TenantID, ManifestDigest: row.ManifestDigest, Consumptions: manifest.RecallConsumptions, SemanticConsumptions: manifest.SemanticConsumptions, Models: manifest.ModelInputs}, nil
++	return &types.MessageRecallHistoryDependency{AdmissionID: fact.ID, GenerationID: fact.GenerationID, MessageID: fact.MessageID, SessionID: fact.SessionID, TenantID: fact.TenantID, ManifestDigest: row.ManifestDigest, KnowledgeConsumptions: manifest.KnowledgeConsumptions, Consumptions: manifest.RecallConsumptions, SemanticConsumptions: manifest.SemanticConsumptions, Models: manifest.ModelInputs}, nil
+ }
+ 
+ func collectMessageRecallDependencies(plan *types.MessageMaterialReadPlan, result map[string]*types.MessageRecallHistoryDependency, visiting map[*types.MessageMaterialReadPlan]bool) error {
+@@ -685,10 +696,22 @@ func (s *KnowledgeInputProvenanceStore) BeginMessageRecallHistoryRead(ctx contex
+ 		return nil, nil
+ 	}
+ 	r := s.memoryRecallHistory
+-	if r == nil || r.authorityFactory == nil || r.generatedModels == nil || r.generatedModels.BeginHistory == nil || r.generatedModels.CheckHistory == nil {
++	needMemory, needKnowledge := false, false
++	for _, dependency := range dependencies {
++		if len(dependency.Consumptions) > 0 || len(dependency.SemanticConsumptions) > 0 {
++			needMemory = true
++		}
++		if len(dependency.KnowledgeConsumptions) > 0 {
++			needKnowledge = true
++		}
++	}
++	if needMemory && (r == nil || r.authorityFactory == nil || r.generatedModels == nil || r.generatedModels.BeginHistory == nil || r.generatedModels.CheckHistory == nil) {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
+-	group := &messageRecallHistoryRead{store: s, reads: map[string][]*memoryRecallHistoricalRead{}, semantic: map[string][]*memorySemanticHistoricalRead{}, models: map[string][]interfaces.MemoryDerivedExecutionRead{}, dependencies: dependencies, opening: map[string]bool{}, opened: map[string]bool{}, joined: make(chan struct{})}
++	if needKnowledge && s.knowledgeNamedHistoryStore() == nil {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	group := &messageRecallHistoryRead{store: s, reads: map[string][]*memoryRecallHistoricalRead{}, semantic: map[string][]*memorySemanticHistoricalRead{}, knowledge: map[string][]*knowledgeNamedHistoryRead{}, knowledgeModels: map[string][]*historicalModelRead{}, knowledgeModelPayloads: map[string]map[string]originalBodyPayload{}, models: map[string][]interfaces.MemoryDerivedExecutionRead{}, dependencies: dependencies, opening: map[string]bool{}, opened: map[string]bool{}, joined: make(chan struct{})}
+ 	group.ctx, group.cancel = context.WithCancel(ctx)
+ 	group.ctx = context.WithValue(group.ctx, memoryRecallHistoryContextKey{}, group)
+ 	fail := func(err error) (interfaces.MemoryEmbeddingConsumerRead, error) { _ = group.Close(); return nil, err }
+@@ -716,7 +739,7 @@ func (group *messageRecallHistoryRead) openDependency(dependency *types.MessageR
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
+ 	r := group.store.memoryRecallHistory
+-	if r == nil {
++	if r == nil && (len(dependency.Consumptions) > 0 || len(dependency.SemanticConsumptions) > 0) {
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
+ 	err := group.store.db.WithContext(group.ctx).Transaction(func(tx *gorm.DB) error {
+@@ -765,7 +788,50 @@ func (group *messageRecallHistoryRead) openDependency(dependency *types.MessageR
+ 		}
+ 		group.semantic[dependency.AdmissionID] = append(group.semantic[dependency.AdmissionID], read)
+ 	}
++	for _, captured := range dependency.KnowledgeConsumptions {
++		store := group.store.knowledgeNamedHistoryStore()
++		if store == nil {
++			return types.ErrSourceLineageUnknown
++		}
++		read, e := store.beginNamedKnowledgeHistory(openingCtx, captured)
++		if e != nil {
++			return e
++		}
++		group.knowledge[dependency.AdmissionID] = append(group.knowledge[dependency.AdmissionID], read)
++	}
+ 	for _, proof := range dependency.Models {
++		if len(dependency.KnowledgeConsumptions) > 0 && len(dependency.Consumptions) == 0 && len(dependency.SemanticConsumptions) == 0 {
++			store := group.store.knowledgeNamedHistoryStore()
++			if store == nil {
++				return types.ErrSourceLineageUnknown
++			}
++			read, e := store.models.BeginHistoricalModelOriginalRead(openingCtx, proof)
++			if e != nil {
++				return e
++			}
++			actual, ok := read.(*historicalModelRead)
++			if !ok {
++				_ = read.Close()
++				return types.ErrSourceLineageUnknown
++			}
++			var captured map[string]originalBodyPayload
++			captureErr := group.store.db.WithContext(actual.Context()).Transaction(func(tx *gorm.DB) error {
++				var e error
++				captured, e = knowledgeHistoricalModelPayloadsInTx(actual.Context(), tx, actual)
++				return e
++			}, memoryWriteOptions(group.store.db))
++			if captureErr != nil {
++				_ = actual.Close()
++				return captureErr
++			}
++			if prior, found := group.knowledgeModelPayloads[proof.Digest]; found && !reflect.DeepEqual(prior, captured) {
++				_ = actual.Close()
++				return ErrOriginalBodyUnavailable
++			}
++			group.knowledgeModelPayloads[proof.Digest] = captured
++			group.knowledgeModels[dependency.AdmissionID] = append(group.knowledgeModels[dependency.AdmissionID], actual)
++			continue
++		}
+ 		wire, err := json.Marshal(proof)
+ 		if err != nil {
+ 			return err
+@@ -904,9 +970,27 @@ func (group *messageRecallHistoryRead) checkDependencyInTx(tx *gorm.DB, dependen
+ 	}
+ 	visiting[dependency.AdmissionID] = true
+ 	defer delete(visiting, dependency.AdmissionID)
+-	if len(group.reads[dependency.AdmissionID]) != len(dependency.Consumptions) || len(group.semantic[dependency.AdmissionID]) != len(dependency.SemanticConsumptions) || len(group.models[dependency.AdmissionID]) != len(dependency.Models) {
++	if len(group.reads[dependency.AdmissionID]) != len(dependency.Consumptions) || len(group.semantic[dependency.AdmissionID]) != len(dependency.SemanticConsumptions) || len(group.knowledge[dependency.AdmissionID]) != len(dependency.KnowledgeConsumptions) || len(group.models[dependency.AdmissionID])+len(group.knowledgeModels[dependency.AdmissionID]) != len(dependency.Models) {
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
++	for index, read := range group.knowledge[dependency.AdmissionID] {
++		if read == nil || read.captured.Digest != dependency.KnowledgeConsumptions[index].Digest {
++			return types.ErrSourceLineageUnknown
++		}
++		if e := read.start(); e != nil {
++			return e
++		}
++		e := read.checkInTx(tx)
++		if e = read.finish(e); e != nil {
++			return e
++		}
++	}
++	for index, read := range group.knowledgeModels[dependency.AdmissionID] {
++		if e := CheckHistoricalModelOriginalHolds(read.Context(), tx, dependency.Models[index]); e != nil {
++			return e
++		}
++	}
++
+ 	for index, read := range group.reads[dependency.AdmissionID] {
+ 		if read == nil || read.captured.Digest != dependency.Consumptions[index].Digest {
+ 			return types.ErrMemoryOriginalUnavailable
+@@ -1036,6 +1120,52 @@ func (group *messageRecallHistoryRead) finalClockWithAvailabilityInTx(tx *gorm.D
+ 			contexts = append(contexts, childContexts...)
+ 		}
+ 	}
++	hasKnowledge := false
++	knowledgePayloads := map[string]originalBodyPayload{}
++	for _, reads := range group.knowledge {
++		for _, read := range reads {
++			hasKnowledge = true
++			bindings, payloads, leases, e := read.capturedBindings()
++			if e != nil {
++				return e
++			}
++			if e = mergeMemoryFinalLeaseBindings(all, bindings); e != nil {
++				return e
++			}
++			for id, b := range payloads {
++				if old, ok := knowledgePayloads[id]; ok && !reflect.DeepEqual(old, b) {
++					return ErrOriginalBodyUnavailable
++				}
++				knowledgePayloads[id] = b
++			}
++			for _, l := range leases {
++				if old, ok := content[l.ID]; ok && old != l {
++					return ErrNextcloudContentLeaseInvalid
++				}
++				content[l.ID] = l
++			}
++			contexts = append(contexts, read.clockContexts()...)
++		}
++	}
++	for _, reads := range group.knowledgeModels {
++		for _, read := range reads {
++			hasKnowledge = true
++			if e := mergeMemoryFinalLeaseBindings(all, read.hold.Hold.Leases); e != nil {
++				return e
++			}
++			contexts = append(contexts, read.ctx)
++			captured, ok := group.knowledgeModelPayloads[read.hold.Hold.Proof.Digest]
++			if !ok || len(captured) != len(read.hold.Hold.Bodies) {
++				return ErrOriginalBodyUnavailable
++			}
++			for id, b := range captured {
++				if before, ok := knowledgePayloads[id]; ok && !reflect.DeepEqual(before, b) {
++					return ErrOriginalBodyUnavailable
++				}
++				knowledgePayloads[id] = b
++			}
++		}
++	}
+ 	if len(all) == 0 {
+ 		return ErrOriginalBodyUnavailable
+ 	}
+@@ -1056,6 +1186,29 @@ func (group *messageRecallHistoryRead) finalClockWithAvailabilityInTx(tx *gorm.D
+ 	// The existing routine validates every tuple/body/open content fence before
+ 	// ONE fresh SQL clock; all read A/B parent, consumer policy and content TTLs
+ 	// participate even if later authority/IO checks took time.
++	if hasKnowledge {
++		// Retain the concrete existing clock/fence checks; the final projection adds
++		// complete named body tuples after all availability/head/journal IO.
++		if len(group.reads) > 0 || len(group.semantic) > 0 {
++			return types.ErrSourceLineageUnknown
++		}
++		leases := []NextcloudContentLease{}
++		for _, l := range content {
++			leases = append(leases, l)
++		}
++		if e := knowledgeQueryFinalClockInTx(tx, all, knowledgePayloads, leases); e != nil {
++			return e
++		}
++		for _, ctx := range contexts {
++			if ctx == nil {
++				return types.ErrSourceLineageUnknown
++			}
++			if e := ctx.Err(); e != nil {
++				return e
++			}
++		}
++		return nil
++	}
+ 	clock := &memoryQueryEmbeddingRead{repo: group.store.memoryRecallHistory, ctx: group.ctx, bodyBindings: all}
+ 	ids := []string{}
+ 	for id := range content {
+@@ -1085,7 +1238,7 @@ func (group *messageRecallHistoryRead) Recheck() error {
+ 		if err != nil {
+ 			return err
+ 		}
+-		original, err := group.store.memoryRecallHistory.db.DB()
++		original, err := group.store.db.DB()
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -1131,6 +1284,20 @@ func (group *messageRecallHistoryRead) Close() error {
+ 	group.mu.Unlock()
+ 	group.checks.Wait()
+ 	var first error
++	for _, reads := range group.knowledge {
++		for _, read := range reads {
++			if e := read.Close(); e != nil && first == nil {
++				first = e
++			}
++		}
++	}
++	for _, reads := range group.knowledgeModels {
++		for _, read := range reads {
++			if e := read.Close(); e != nil && first == nil {
++				first = e
++			}
++		}
++	}
+ 	for _, reads := range group.semantic {
+ 		for _, read := range reads {
+ 			if err := read.Close(); err != nil && first == nil {
+@@ -1188,7 +1355,11 @@ func (s *KnowledgeInputProvenanceStore) checkMessageRecallHistoryInTx(tx *gorm.D
+ 	if err != nil {
+ 		return err
+ 	}
+-	if len(dependency.Consumptions) != 1 || used != dependency.Consumptions[0].UsedDigest {
++	if len(dependency.KnowledgeConsumptions) > 0 && len(dependency.Consumptions) == 0 {
++		if len(message.UsedMemories) != 0 {
++			return types.ErrSourceLineageUnknown
++		}
++	} else if len(dependency.Consumptions) != 1 || used != dependency.Consumptions[0].UsedDigest {
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
+ 	if err = group.start(); err != nil {
+diff --git a/internal/application/repository/memory_semantic_history_clock.go b/internal/application/repository/memory_semantic_history_clock.go
+index 4bcbc50eb..1ec97ccd8 100644
+--- a/internal/application/repository/memory_semantic_history_clock.go
++++ b/internal/application/repository/memory_semantic_history_clock.go
+@@ -78,5 +78,36 @@ func (group *messageRecallHistoryRead) capturedClockBindings(tx *gorm.DB) (all m
+ 			contexts = append(contexts, childContexts...)
+ 		}
+ 	}
++	for _, reads := range group.knowledge {
++		for _, read := range reads {
++			if read == nil {
++				return nil, nil, nil, types.ErrSourceLineageUnknown
++			}
++			if err := read.start(); err != nil {
++				return nil, nil, nil, err
++			}
++			bindings, _, leases, err := read.capturedBindings()
++			err = read.finish(err)
++			if err != nil {
++				return nil, nil, nil, err
++			}
++			if err = mergeMemoryFinalLeaseBindings(all, bindings); err != nil {
++				return nil, nil, nil, err
++			}
++			content = append(content, leases...)
++			contexts = append(contexts, read.clockContexts()...)
++		}
++	}
++	for _, models := range group.knowledgeModels {
++		for _, model := range models {
++			if model == nil || model.ctx.Err() != nil {
++				return nil, nil, nil, types.ErrSourceLineageUnknown
++			}
++			if err := mergeMemoryFinalLeaseBindings(all, model.hold.Hold.Leases); err != nil {
++				return nil, nil, nil, err
++			}
++			contexts = append(contexts, model.Context())
++		}
++	}
+ 	return all, content, contexts, nil
+ }
+diff --git a/internal/application/service/knowledge_named_history_sql_http_actual_test.go b/internal/application/service/knowledge_named_history_sql_http_actual_test.go
+new file mode 100644
+index 000000000..fb5f1f7bb
+--- /dev/null
++++ b/internal/application/service/knowledge_named_history_sql_http_actual_test.go
+@@ -0,0 +1,308 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	"github.com/stretchr/testify/require"
++)
++
++func TestKnowledgeNamedHistoryActualSQLiteHTTP(t *testing.T) {
++	for _, mode := range []string{"current", "credential_successor", "definition_successor", "actor_revoked", "query_parent_purged", "vector_ABA"} {
++		t.Run(mode, func(t *testing.T) {
++			knowledgeSQLiteOriginalVecAuto.Do(sqlite_vec.Auto)
++			store, db, base := jointFullSchemaBusinessFixture(t, false)
++			installKnowledgeSQLiteOriginal90ForTest(t, db)
++			installKnowledgeQuery91Actual(t, db)
++			var embeddingCalls, chatCalls atomic.Int64
++			var mu sync.Mutex
++			var observed error
++			const userText = "What does the source say?"
++			const sourceText = "retained-source-body"
++			const indexedText = "query-title\nretained-source-body"
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				var err error
++				if r.Header.Get("Authorization") != "Bearer actual-query-key" {
++					err = errors.New("actual query SDK auth mismatch")
++				}
++				if r.URL.Path == "/embeddings" {
++					embeddingCalls.Add(1)
++					var request struct {
++						Input      []string `json:"input"`
++						Dimensions int      `json:"dimensions"`
++					}
++					if e := json.NewDecoder(r.Body).Decode(&request); e != nil {
++						err = e
++					}
++					if len(request.Input) != 1 || request.Dimensions != 2 || request.Input[0] != indexedText && request.Input[0] != userText {
++						err = errors.Join(err, errors.New("actual query SDK did not receive leased exact text"))
++					}
++					mu.Lock()
++					observed = errors.Join(observed, err)
++					mu.Unlock()
++					if err != nil {
++						w.WriteHeader(503)
++						return
++					}
++					w.Header().Set("Content-Type", "application/json")
++					_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{map[string]interface{}{"index": 0, "embedding": []float32{1, 0}}}})
++					return
++				}
++				if r.URL.Path == "/chat/completions" {
++					chatCalls.Add(1)
++					var request struct {
++						Messages []struct{ Role, Content string } `json:"messages"`
++					}
++					if e := json.NewDecoder(r.Body).Decode(&request); e != nil {
++						err = e
++					}
++					all := ""
++					for _, m := range request.Messages {
++						all += m.Content
++					}
++					if !strings.Contains(all, userText) || !strings.Contains(all, sourceText) {
++						err = errors.Join(err, errors.New("actual answer SDK input lost original query/returned vector material"))
++					}
++					mu.Lock()
++					observed = errors.Join(observed, err)
++					mu.Unlock()
++					if err != nil {
++						w.WriteHeader(400)
++						return
++					}
++					w.Header().Set("Content-Type", "application/json")
++					_ = json.NewEncoder(w).Encode(map[string]interface{}{"choices": []interface{}{map[string]interface{}{"message": map[string]interface{}{"role": "assistant", "content": sourceText}, "finish_reason": "stop"}}})
++					return
++				}
++				mu.Lock()
++				observed = errors.Join(observed, errors.New("unexpected actual SDK endpoint"))
++				mu.Unlock()
++				w.WriteHeader(404)
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			modelRepo := repository.NewModelRepository(db)
++			groups := NewGroupAccessService(repository.NewGroupAccessRepository(db))
++			ConfigureModelOriginalAuthority(modelRepo, store, groups, nil)
++			models := NewModelService(modelRepo, nil, nil, nil, nil, nil)
++			model := &types.Model{ID: "knowledge-query-embedding", TenantID: 7, Name: "genuine query embedding", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "actual-query-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++			require.NoError(t, models.CreateModel(base, model))
++			require.NotNil(t, model.OriginalProof)
++			answer := actualModelLiteral("knowledge-query-answer", 7)
++			answer.Name = "genuine query answer"
++			answer.Parameters.BaseURL = server.URL
++			answer.Parameters.APIKey = "actual-query-key"
++			require.NoError(t, models.CreateModel(base, answer))
++			kb := &types.KnowledgeBase{ID: "knowledge-query-kb", TenantID: 7, Name: "query original KB", EmbeddingModelID: model.ID, ChunkingConfig: types.ChunkingConfig{ChunkSize: 512}, IndexingStrategy: types.IndexingStrategy{VectorEnabled: true}}
++			require.NoError(t, store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(base), kb))
++			k := &types.Knowledge{ID: "knowledge-query-document", TenantID: 7, KnowledgeBaseID: kb.ID, Type: types.KnowledgeTypeManual, Title: "query-title", ParseStatus: types.ParseStatusCompleted, EnableStatus: "enabled"}
++			require.NoError(t, k.SetManualMetadata(types.NewManualKnowledgeMetadata(sourceText, types.ManualKnowledgeStatusPublish, 1)))
++			proof, err := store.CreateKnowledgeWithInput(repository.WithIndependentKnowledgeInput(base), k, sourceText)
++			require.NoError(t, err)
++			build, err := store.RestoreKnowledgeBuildActor(base, proof)
++			require.NoError(t, err)
++			build = repository.WithKnowledgeBuildInputProof(build, store, proof)
++			c := &types.Chunk{ID: "knowledge-query-chunk", TenantID: 7, KnowledgeBaseID: kb.ID, KnowledgeID: k.ID, Content: sourceText, ChunkType: types.ChunkTypeText, IsEnabled: true}
++			require.NoError(t, repository.NewChunkRepository(db).CreateChunks(build, []*types.Chunk{c}))
++			original := repository.NewKnowledgeSQLiteEmbeddingStore(db, store, modelRepo)
++			index := sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(db, store, modelRepo)
++			engine := retriever.NewKVHybridRetrieveEngine(index, types.SQLiteRetrieverEngineType)
++			op, cancelOp := context.WithTimeout(build, 10*time.Second)
++			defer cancelOp()
++			sdk, err := models.GetEmbeddingModel(op, model.ID)
++			require.NoError(t, err)
++			info := &types.IndexInfo{Content: buildKnowledgeIndexContent(k, c.EmbeddingContent()), SourceID: c.ID, SourceType: types.ChunkSourceType, ChunkID: c.ID, KnowledgeID: k.ID, KnowledgeBaseID: kb.ID, IsEnabled: true}
++			require.NoError(t, engine.BatchIndex(op, sdk, []*types.IndexInfo{info}, []types.RetrieverType{types.VectorRetrieverType}))
++			require.EqualValues(t, 1, embeddingCalls.Load())
++			publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(db), repository.NewDataSourceRepository(db))
++			publication.ConfigureSourcePathResolver(repository.NewNextcloudOnboardingStore(db))
++			knowledge := repository.NewKnowledgeRepository(db)
++			repository.ConfigureKnowledgeCurrentReadActor(knowledge, store)
++			guard := access.NewNextcloudSourceLineageGuard(knowledge.(access.NextcloudLineageSnapshotLookup), enrichmentTestBases{db: db}, nil, nil, groups, publication)
++			messages := &messageService{messageRepo: repository.NewMessageRepository(db), sessionRepo: repository.NewSessionRepository(db), sourceLineageGuard: guard}
++			ConfigureMessageMaterialProvenance(messages, store)
++			session := &types.Session{ID: "actual-knowledge-query-session", TenantID: 7, UserID: types.CallerFromContext(base).UserID}
++			_, err = messages.sessionRepo.Create(base, session)
++			require.NoError(t, err)
++			user, err := messages.CreateMessage(base, &types.Message{SessionID: session.ID, RequestID: "actual-query-request", Role: "user", Content: userText, IsCompleted: true})
++			require.NoError(t, err)
++			assistant, err := messages.CreateMessage(base, &types.Message{SessionID: session.ID, RequestID: user.RequestID, Role: "assistant"})
++			require.NoError(t, err)
++			owner, cancelOwner := context.WithTimeout(base, 8*time.Second)
++			defer cancelOwner()
++			httpctx, attach, check, releaseHTTP := BeginMessageMaterialHTTPBoundary(owner)
++			call, cancelCall := context.WithCancel(attach(httpctx))
++			releaseProducer := RetainMessageMaterialHTTPProducer(call)
++			t.Cleanup(func() {
++				cancelCall()
++				releaseProducer()
++				releaseHTTP()
++				cancelOwner()
++				var remaining int64
++				require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&remaining).Error)
++				require.Zero(t, remaining)
++			})
++			actual, err := messages.GetMessage(call, session.ID, user.ID)
++			require.NoError(t, err)
++			require.Equal(t, userText, actual.Content)
++			parents, e := messageMaterialBoundarySnapshots(call)
++			require.NoError(t, e)
++			require.Len(t, parents, 1)
++			require.Len(t, parents[0].Proofs, 1)
++			require.NotNil(t, parents[0].Proofs[0])
++			require.Equal(t, user.ID, parents[0].Proofs[0].MessageID)
++			heldSource := parents[0].Proofs[0].SourceLineage
++			require.NotNil(t, heldSource)
++			require.NoError(t, heldSource.RequireComplete())
++			require.NoError(t, messages.bindInitialMessageMaterial(call, assistant.ID, user.ID, user.RequestID))
++			call, err = bindKnowledgeQueryMessageOriginal(call, session.ID, user.ID)
++			require.NoError(t, err)
++			query, err := EmbedOriginalKnowledgeQuery(call, original, models, kb.ID, model.ID)
++			require.NoError(t, err)
++			require.NotNil(t, query)
++			snapshot, err := query.Snapshot()
++			require.NoError(t, err)
++			require.Equal(t, kb.ID, snapshot.KnowledgeBaseID)
++			require.Equal(t, model.Parameters.OriginalEmbedding.SpaceDigest, snapshot.SpaceDigest)
++			require.Equal(t, []float32{1, 0}, snapshot.Vector)
++			require.EqualValues(t, 2, embeddingCalls.Load())
++			resultCtx := query.Context()
++			params := types.RetrieveParams{Embedding: append([]float32(nil), snapshot.Vector...), KnowledgeBaseIDs: []string{kb.ID}, TopK: 1, RetrieverType: types.VectorRetrieverType, AdditionalParams: map[string]interface{}{"embedding_space_digest": snapshot.SpaceDigest}}
++			results, err := index.Retrieve(resultCtx, params)
++			require.NoError(t, err)
++			require.Len(t, results, 1)
++			require.Len(t, results[0].Results, 1)
++			require.Equal(t, c.ID, results[0].Results[0].ChunkID)
++			client, err := models.GetChatModel(resultCtx, answer.ID)
++			require.NoError(t, err)
++			response, err := client.Chat(resultCtx, []chat.Message{{Role: "user", Content: actual.Content + "\n" + results[0].Results[0].Content, SourceLineage: heldSource}}, &chat.ChatOptions{})
++			require.NoError(t, err)
++			require.Equal(t, sourceText, response.Content)
++			markMessageMaterialReady(httpctx)
++			require.NoError(t, check())
++			assistant.Content = response.Content
++			assistant.IsCompleted = true
++			assistant.SourceLineage, err = types.UnionSourceLineage(heldSource)
++			require.NoError(t, err)
++			err = messages.UpdateMessage(resultCtx, assistant)
++			require.NoError(t, err)
++			var completed bool
++			require.NoError(t, db.Table("messages").Select("is_completed").Where("id=?", assistant.ID).Scan(&completed).Error)
++			require.True(t, completed)
++			var raw struct{ ParentManifest string }
++			require.NoError(t, db.Table("message_completion_input_manifests").Take(&raw).Error)
++			var manifest types.MessageCompletionInputManifest
++			require.NoError(t, json.Unmarshal([]byte(raw.ParentManifest), &manifest))
++			require.Len(t, manifest.KnowledgeConsumptions, 1)
++			require.Equal(t, snapshot.ReceiptID, manifest.KnowledgeConsumptions[0].QueryReceiptID)
++			require.Len(t, manifest.KnowledgeConsumptions[0].Candidates, 1)
++			require.Len(t, manifest.KnowledgeConsumptions[0].Hits, 1)
++			require.Equal(t, c.ID, results[0].Results[0].ChunkID)
++			cancelCall()
++			releaseProducer()
++			require.NoError(t, check())
++			releaseHTTP()
++			beforeEmb, beforeChat := embeddingCalls.Load(), chatCalls.Load()
++			if mode == "credential_successor" {
++				key := "actual-historical-credential"
++				_, e := models.UpdateModelCredentials(base, model.ID, &key, nil)
++				require.NoError(t, e)
++				_, e = models.UpdateModelCredentials(base, answer.ID, &key, nil)
++				require.NoError(t, e)
++			}
++			if mode == "definition_successor" {
++				fresh := &types.Model{ID: model.ID, TenantID: 7, Name: "genuine replacement embedding definition", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "actual-query-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++				writer, ok := modelRepo.(interfaces.ModelOriginalWriter)
++				require.True(t, ok)
++				require.NoError(t, writer.ReplaceModelOriginal(base, fresh))
++				require.NotEqual(t, model.OriginalProof.DefinitionID, fresh.OriginalProof.DefinitionID)
++			}
++			if mode == "actor_revoked" {
++				uid := types.CallerFromContext(base).UserID
++				write := db.Table("users").Where("id=? AND is_active=?", uid, true).Update("is_active", false)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var active bool
++				require.NoError(t, db.Table("users").Select("is_active").Where("id=?", uid).Scan(&active).Error)
++				require.False(t, active)
++			}
++			if mode == "query_parent_purged" {
++				var head struct{ BodyID string }
++				require.NoError(t, db.Table("original_body_field_heads").Select("body_id").Where("source_table='knowledge_sqlite_query_inputs' AND row_key=?", snapshot.OriginalID).Take(&head).Error)
++				write := db.Table("original_body_payloads").Where("id=? AND state='live'", head.BodyID).Update("state", "purged")
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var state string
++				require.NoError(t, db.Table("original_body_payloads").Select("state").Where("id=?", head.BodyID).Scan(&state).Error)
++				require.Equal(t, "purged", state)
++			}
++			if mode == "vector_ABA" {
++				var original struct{ Vector []byte }
++				require.NoError(t, db.Table("knowledge_sqlite_embedding_vectors").Select("vector").Take(&original).Error)
++				var rowID uint64
++				require.NoError(t, db.Table("knowledge_sqlite_embedding_vectors").Select("row_id").Scan(&rowID).Error)
++				changed, _ := sqlite_vec.SerializeFloat32([]float32{0, 1})
++				a := db.Table("knowledge_sqlite_embedding_vectors").Where("row_id=?", rowID).Update("vector", changed)
++				require.NoError(t, a.Error)
++				require.EqualValues(t, 1, a.RowsAffected)
++				b := db.Table("knowledge_sqlite_embedding_vectors").Where("row_id=?", rowID).Update("vector", original.Vector)
++				require.NoError(t, b.Error)
++				require.EqualValues(t, 1, b.RowsAffected)
++				var after struct{ Vector []byte }
++				require.NoError(t, db.Table("knowledge_sqlite_embedding_vectors").Select("vector").Where("row_id=?", rowID).Take(&after).Error)
++				require.Equal(t, original.Vector, after.Vector)
++			}
++			historyCtx, historyCancel := context.WithTimeout(base, 8*time.Second)
++			defer historyCancel()
++			boundary := WithMessageMaterialOutputBoundary(historyCtx)
++			defer CloseMessageMaterialOutputBoundary(boundary)
++			page, e := messages.GetMessagesBySession(boundary, session.ID, 1, 10)
++			negative := mode == "actor_revoked" || mode == "query_parent_purged" || mode == "vector_ABA"
++			if negative {
++				require.Error(t, e)
++				require.Nil(t, page)
++			} else {
++				require.NoError(t, e)
++				require.Len(t, page, 2)
++				var saved *types.Message
++				for _, item := range page {
++					if item.ID == assistant.ID {
++						saved = item
++					}
++				}
++				require.NotNil(t, saved)
++				require.Equal(t, sourceText, saved.Content)
++				require.NoError(t, CheckMessageMaterialOutputBoundary(boundary))
++			}
++			require.Equal(t, beforeEmb, embeddingCalls.Load(), "named history never invokes an old or current embedding provider")
++			require.Equal(t, beforeChat, chatCalls.Load(), "named history never regenerates the old answer")
++			CloseMessageMaterialOutputBoundary(boundary)
++			var live int64
++			require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++			require.Zero(t, live)
++			require.EqualValues(t, 1, chatCalls.Load())
++			mu.Lock()
++			err = observed
++			mu.Unlock()
++			require.NoError(t, err)
++		})
++	}
++}
+diff --git a/internal/application/service/knowledge_query_message_original.go b/internal/application/service/knowledge_query_message_original.go
+index 093fa59d9..0a1bb8913 100644
+--- a/internal/application/service/knowledge_query_message_original.go
++++ b/internal/application/service/knowledge_query_message_original.go
+@@ -78,6 +78,7 @@ func EmbedOriginalKnowledgeQuery(ctx context.Context, store *repository.Knowledg
+ 	if store == nil || models == nil {
+ 		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
+ 	}
++	repository.ConfigureKnowledgeNamedHistoryStore(store)
+ 	owner, release, transfer, err := interfaces.AcquireKnowledgeEmbeddingConsumerContext(ctx)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/internal/types/memory_recall_history.go b/internal/types/memory_recall_history.go
+index 485acfd69..4eb128049 100644
+--- a/internal/types/memory_recall_history.go
++++ b/internal/types/memory_recall_history.go
+@@ -3,6 +3,7 @@ package types
+ // This row is copied only from a validated immutable actual completion
+ // manifest. It is a plan dependency, not a caller-authored authorization.
+ type MessageRecallHistoryDependency struct {
++	KnowledgeConsumptions                                           []*KnowledgeEmbeddingConsumption `json:"KnowledgeConsumptions,omitempty"`
+ 	SemanticConsumptions                                            []*MemorySemanticConsumption
+ 	AdmissionID, GenerationID, MessageID, SessionID, ManifestDigest string
+ 	TenantID                                                        uint64

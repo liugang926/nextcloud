@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "classification": "actual_sourcepath_WAL_fixedphase6_PG_reader_wrapper_capture_unavailable_failure",
+  "head": "e57f5713782da9637bfcf41f2a66a94912d97e7a",
+  "tree": "9ca7429fd7b49146e2551ee5b1c8da5858af1f00",
+  "window_terminal": 1,
+  "seconds": 92.698,
+  "counts": {
+    "pass": 0,
+    "fail": 6,
+    "skip": 0
+  },
+  "RUN": 6,
+  "raw_SHA256": "de7574dcc87e0897fdcd54368a0cdafa9f6f6e09faecf65932e3d564392ad403",
+  "raw_bytes": 427233,
+  "fixed_phase_events": [
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/current",
+      "fixed_event": "phase=schedule_prepare failed=false class=ok"
+    },
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/current",
+      "fixed_event": "phase=schedule_model_begin failed=false class=ok"
+    },
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/current",
+      "fixed_event": "phase=capture_request failed=true class=memory_original_unavailable"
+    },
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/current",
+      "fixed_event": "phase=schedule_capture_persist failed=true class=memory_original_unavailable"
+    },
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/publication_after_model",
+      "fixed_event": "phase=schedule_prepare failed=false class=ok"
+    },
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/publication_after_model",
+      "fixed_event": "phase=schedule_model_begin failed=false class=ok"
+    },
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/publication_after_model",
+      "fixed_event": "phase=capture_request failed=true class=memory_original_unavailable"
+    },
+    {
+      "test": "TestPostgresMemoryTransactionSourcePathActual/publication_after_model",
+      "fixed_event": "phase=schedule_capture_persist failed=true class=memory_original_unavailable"
+    }
+  ],
+  "PG_source_verified_cause": "NewMemoryOriginalSourceReader requires actual *messageService; fixture f.Messages is *normalReferencesObservedMessagesForTest embedding the genuine service. Direct assertion yields nil backing service, so capture_request refuses before model-capability/admission. Only testbridge unwrap same genuine service/store/guard; keep HTTP observation wrapper and production closed constructor.",
+  "SQLite_observed": "ordinary HTTP answer prelude remains failed despite actual WAL/5000/FK assertions; no sourcepath final transaction reached, cause still pending",
+  "directory_RUN": 0,
+  "independent_owned_SQL_terminal": [
+    {
+      "kind": "pg",
+      "id": "cff51a286bd439bc512681c95e095f9f8a06c8f9baccfee7aa391ad138794d47",
+      "running": false,
+      "exit": 0,
+      "oom": false
+    },
+    {
+      "kind": "redis",
+      "id": "3e81661a2a33049c1b62dfb6655e312560b218b4b221215419c664052e2865d5",
+      "running": false,
+      "exit": 0,
+      "oom": false
+    }
+  ],
+  "Go_actor_independent_absent": "213fd61c111a2ea02da256471f4d733e42c1e4e7c71f503adafac4443767e508",
+  "failed_owned_volumes_network_logs_retained": true,
+  "scope": "Unchanged real sourcepath6 precondition remains RED. Observed schedule_prepare and model_begin pass; capture_request fails. No admission fabricated, no source/model guard weakening, no8s/20s/10s extension.",
+  "full_V1": false
+}

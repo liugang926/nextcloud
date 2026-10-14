@@ -1,0 +1,79 @@
+diff --git a/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go b/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go
+index 46d28293d..9af620704 100644
+--- a/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go
++++ b/internal/application/service/owned_nextcloud_machine_ancestor_index_sql_http_actual_test.go
+@@ -73,6 +73,7 @@ func TestOwnedNextcloudMachineNonemptyAncestorActualSQLiteHTTP(t *testing.T) {
+ 			var calls atomic.Int64
+ 			var faultApplied atomic.Bool
+ 			var reachedExpiry atomic.Bool
++			var lateOutputObserved atomic.Bool
+ 			var mu sync.Mutex
+ 			var callbackErr error
+ 			transmitted := [][]string{}
+@@ -472,14 +473,24 @@ func TestOwnedNextcloudMachineNonemptyAncestorActualSQLiteHTTP(t *testing.T) {
+ 						fail(q.Error)
+ 						return
+ 					}
+-					var captured struct {
+-						LeaseID string
+-						OwnerID string
+-						Epoch   int64
++					lateOutputObserved.Store(true)
++					type capturedAncestorTuple struct {
++						LeaseID, OwnerID, Kind       string
++						TenantID                     uint64
++						KnowledgeBaseID, KnowledgeID string
++						Epoch, ExpiresAtMS           int64
++						ReleasedAtMS                 *int64
++						FenceEpoch                   int64
++						FenceState                   string
++						DataSourceID                 string `gorm:"column:datasource_id"`
++						ExternalID                   string
+ 					}
+-					q = tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Raw(`SELECT l.lease_id,l.owner_id,l.epoch FROM nextcloud_content_leases l WHERE l.tenant_id=? AND l.knowledge_base_id=? AND l.knowledge_id=? AND l.datasource_id=? AND l.external_id=? AND l.kind='read' AND l.released_at_ms IS NULL AND l.owner_id IN(SELECT bl.owner_id FROM original_body_leases bl JOIN original_body_field_heads bh ON bh.body_id=bl.body_id WHERE bh.source_table='nextcloud_original_upload_inputs' AND bh.row_key=? AND bl.kind='read' AND bl.released_at_ms IS NULL)`, 7, a.scope.KnowledgeBaseID, a.scope.KnowledgeID, a.scope.DataSourceID, a.scope.ExternalID, bKnowledge.ID).Take(&captured)
+-					if q.Error != nil || captured.LeaseID == "" {
+-						fail(errors.New("actual B-captured ancestor content lease missing"))
++					const leaseFenceColumns = "l.lease_id,l.owner_id,l.kind,l.tenant_id,l.knowledge_base_id,l.knowledge_id,l.epoch,l.expires_at_ms,l.released_at_ms,f.epoch AS fence_epoch,f.state AS fence_state,f.datasource_id,f.external_id"
++					const leaseFenceJoin = " FROM nextcloud_content_leases l JOIN nextcloud_content_fences f ON f.tenant_id=l.tenant_id AND f.knowledge_base_id=l.knowledge_base_id AND f.knowledge_id=l.knowledge_id AND f.epoch=l.epoch "
++					var captured capturedAncestorTuple
++					q = tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Raw("SELECT "+leaseFenceColumns+leaseFenceJoin+`WHERE l.tenant_id=? AND l.knowledge_base_id=? AND l.knowledge_id=? AND f.datasource_id=? AND f.external_id=? AND f.state='open' AND l.kind='read' AND l.released_at_ms IS NULL AND l.owner_id IN(SELECT bl.owner_id FROM original_body_leases bl JOIN original_body_field_heads bh ON bh.body_id=bl.body_id WHERE bh.source_table='nextcloud_original_upload_inputs' AND bh.row_key=? AND bl.kind='read' AND bl.released_at_ms IS NULL)`, 7, a.scope.KnowledgeBaseID, a.scope.KnowledgeID, a.scope.DataSourceID, a.scope.ExternalID, bKnowledge.ID).Take(&captured)
++					if q.Error != nil || captured.LeaseID == "" || captured.OwnerID == "" || captured.Kind != "read" || captured.TenantID != 7 || captured.KnowledgeBaseID != a.scope.KnowledgeBaseID || captured.KnowledgeID != a.scope.KnowledgeID || captured.Epoch != a.lease.Epoch || captured.FenceEpoch != captured.Epoch || captured.FenceState != "open" || captured.DataSourceID != a.scope.DataSourceID || captured.ExternalID != a.scope.ExternalID || captured.ReleasedAtMS != nil {
++						fail(errors.New("actual B-captured ancestor content lease/fence tuple missing or changed"))
+ 						return
+ 					}
+ 					included := false
+@@ -501,14 +512,12 @@ func TestOwnedNextcloudMachineNonemptyAncestorActualSQLiteHTTP(t *testing.T) {
+ 						return
+ 					}
+ 					expiry := now + 60
+-					mutation := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_leases").Where("lease_id=? AND owner_id=? AND epoch=? AND kind='read' AND released_at_ms IS NULL", captured.LeaseID, captured.OwnerID, captured.Epoch).Update("expires_at_ms", expiry)
+-					var actual struct {
+-						LeaseID     string
+-						OwnerID     string
+-						Epoch       int64
+-						ExpiresAtMS int64
+-					}
+-					if mutation.Error != nil || mutation.RowsAffected != 1 || tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_leases").Where("lease_id=?", captured.LeaseID).Take(&actual).Error != nil || actual.LeaseID != captured.LeaseID || actual.OwnerID != captured.OwnerID || actual.Epoch != captured.Epoch || actual.ExpiresAtMS != expiry {
++					mutation := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_leases").Where("lease_id=? AND tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND owner_id=? AND epoch=? AND kind=? AND expires_at_ms=? AND released_at_ms IS NULL", captured.LeaseID, captured.TenantID, captured.KnowledgeBaseID, captured.KnowledgeID, captured.OwnerID, captured.Epoch, captured.Kind, captured.ExpiresAtMS).Update("expires_at_ms", expiry)
++					var actual capturedAncestorTuple
++					readback := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Raw("SELECT "+leaseFenceColumns+leaseFenceJoin+"WHERE l.lease_id=?", captured.LeaseID).Take(&actual)
++					wanted := captured
++					wanted.ExpiresAtMS = expiry
++					if mutation.Error != nil || mutation.RowsAffected != 1 || readback.Error != nil || actual != wanted {
+ 						fail(errors.New("actual ancestor expiry CAS/readback failed"))
+ 						return
+ 					}
+@@ -540,6 +549,13 @@ func TestOwnedNextcloudMachineNonemptyAncestorActualSQLiteHTTP(t *testing.T) {
+ 			negative := mode != "published_A_derived_template_B_native_save"
+ 			indexErr := ownedAncestorWriteIndex(t, m, b, models, &negative)
+ 			if negative {
++				if mode == "ancestor_content_last_SQL_clock" {
++					mu.Lock()
++					actualProbeErr := callbackErr
++					mu.Unlock()
++					require.NoError(t, actualProbeErr, "actual last-union SQL probe failed before the expiry oracle")
++					require.True(t, lateOutputObserved.Load(), "actual requested B result lease must reach the genuine final clock before fault injection")
++				}
+ 				require.True(t, faultApplied.Load())
+ 				require.Error(t, indexErr)
+ 				if mode == "ancestor_content_last_SQL_clock" {

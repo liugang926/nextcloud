@@ -1,0 +1,2284 @@
+diff --git a/internal/application/service/message_material_idle_raw_original.go b/internal/application/service/message_material_idle_raw_original.go
+new file mode 100644
+index 000000000..b16f4f0d8
+--- /dev/null
++++ b/internal/application/service/message_material_idle_raw_original.go
+@@ -0,0 +1,106 @@
++package service
++
++import "github.com/Tencent/WeKnora/internal/types"
++
++// These immutable identifiers bind one actual raw projection to its retained
++// original guard. They carry no actor, permission, renewal or authorization
++// result. Every actual material/output checkpoint keeps its current reads.
++type messageMaterialRawOutputOrigin struct {
++	guard     *MessageMaterialGuard
++	originals []messageMaterialRawOriginal
++}
++
++type messageMaterialRawOriginal struct {
++	message, session, request, admission, generation, bodyDigest string
++	tenant, revision                                             uint64
++}
++
++func captureRawMessageMaterialOrigin(guard *MessageMaterialGuard) *messageMaterialRawOutputOrigin {
++	if guard == nil {
++		return nil
++	}
++	guard.mu.Lock()
++	defer guard.mu.Unlock()
++	snapshot := guard.snapshot
++	if snapshot == nil || snapshot.Request.IncludeOriginalUserFields || len(snapshot.Messages) == 0 || len(snapshot.Messages) != len(snapshot.Proofs) {
++		return nil
++	}
++	origin := &messageMaterialRawOutputOrigin{guard: guard}
++	for i, message := range snapshot.Messages {
++		proof := snapshot.Proofs[i]
++		if !rawMessageMaterialOriginalMatches(snapshot, message, proof) {
++			return nil
++		}
++		origin.originals = append(origin.originals, messageMaterialRawOriginal{
++			message: message.ID, session: message.SessionID, request: message.RequestID,
++			admission: proof.AdmissionID, generation: proof.GenerationID, bodyDigest: proof.BodyDigest,
++			tenant: proof.TenantID, revision: proof.Revision,
++		})
++	}
++	return origin
++}
++
++func rawMessageMaterialOriginalMatches(snapshot *types.MessageMaterialSnapshot, message *types.Message, proof *types.MessageMaterialProof) bool {
++	return snapshot != nil && message != nil && proof != nil &&
++		message.Role == "user" && message.ID != "" && message.RequestID != "" &&
++		types.SourceIndependentDerivativesAllowed(message) &&
++		proof.SourceLineage.RequireComplete() == nil && len(proof.SourceLineage.Sources) == 0 &&
++		proof.MessageID == message.ID && proof.SessionID == message.SessionID &&
++		message.SessionID == snapshot.Request.SessionID && proof.TenantID == snapshot.Request.TenantID &&
++		proof.OwnerID == snapshot.SessionOwnerID && proof.OwnerRevision == snapshot.SessionOwnerRevision &&
++		proof.AdmissionID != "" && proof.GenerationID != "" && proof.BodyDigest != "" && proof.Revision != 0
++}
++
++// Caller holds slot.mu, preserving the existing slot -> guard lock order.
++// This only recognizes an exact, source-independent authored projection while
++// there is no HTTP output. It does not authorize a later batch or renew leases.
++func rawMessageMaterialIdleEligibleLocked(slot *messageMaterialOutputSlot, index int, output []*types.Message) bool {
++	if index >= len(slot.RawOutputOrigins) || index >= len(slot.OutputBodies) {
++		return false
++	}
++	origin := slot.RawOutputOrigins[index]
++	if origin == nil || origin.guard == nil {
++		return false
++	}
++	guardIndex := -1
++	for i, held := range slot.Guards {
++		if held == origin.guard {
++			guardIndex = i
++			break
++		}
++	}
++	if guardIndex < 0 || guardIndex >= len(slot.Bodies) {
++		return false
++	}
++	guard := origin.guard
++	guard.mu.Lock()
++	defer guard.mu.Unlock()
++	snapshot := guard.snapshot
++	if guard.ctx == nil || guard.ctx.Err() != nil || guard.plan == nil || guard.plan.SourceLineage.RequireComplete() != nil ||
++		snapshot == nil || snapshot.Request.IncludeOriginalUserFields || len(snapshot.Messages) == 0 ||
++		len(snapshot.Messages) != len(snapshot.Proofs) || len(snapshot.Messages) != len(origin.originals) || len(output) != len(snapshot.Messages) {
++		return false
++	}
++	for i, message := range snapshot.Messages {
++		proof := snapshot.Proofs[i]
++		if !rawMessageMaterialOriginalMatches(snapshot, message, proof) {
++			return false
++		}
++		captured := origin.originals[i]
++		if captured != (messageMaterialRawOriginal{message: message.ID, session: message.SessionID, request: message.RequestID,
++			admission: proof.AdmissionID, generation: proof.GenerationID, bodyDigest: proof.BodyDigest,
++			tenant: proof.TenantID, revision: proof.Revision}) {
++			return false
++		}
++	}
++	originalBody, err := messageBoundaryBodyDigest(snapshot.Messages)
++	if err != nil || string(originalBody) != slot.Bodies[guardIndex] {
++		return false
++	}
++	expected, err := messageBoundaryBodyDigest(rawUserContentOnly(snapshot.Messages))
++	if err != nil || string(expected) != slot.OutputBodies[index] {
++		return false
++	}
++	actual, err := messageBoundaryBodyDigest(output)
++	return err == nil && string(actual) == string(expected)
++}
+diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
+index 6e50b411f..c8f512b49 100644
+--- a/internal/application/service/message_material_output.go
++++ b/internal/application/service/message_material_output.go
+@@ -20,19 +20,21 @@ var ErrMessageMaterialHTTPInitializing = fmt.Errorf("%w: original message materi
+ type messageMaterialOutputKey struct{}
+ type messageMaterialExternalKey struct{}
+ type messageMaterialOutputSlot struct {
+-	OwnerContext  context.Context
+-	mu            sync.Mutex
+-	Guards        []*MessageMaterialGuard
+-	Completion    *messageCompletionBinding
+-	PhysicalReads []*readlease.NextcloudReadGuard
+-	Models        []originalModelClientLifetime
+-	Bodies        []string
+-	Outputs       [][]*types.Message
+-	OutputBodies  []string
+-	Ready         bool
+-	Failed        error
+-	Refs          int
+-	Closed        bool
++	OwnerContext     context.Context
++	timingObserver   *originalServiceTimingObserver
++	mu               sync.Mutex
++	Guards           []*MessageMaterialGuard
++	Completion       *messageCompletionBinding
++	PhysicalReads    []*readlease.NextcloudReadGuard
++	Models           []originalModelClientLifetime
++	Bodies           []string
++	Outputs          [][]*types.Message
++	OutputBodies     []string
++	RawOutputOrigins []*messageMaterialRawOutputOrigin
++	Ready            bool
++	Failed           error
++	Refs             int
++	Closed           bool
+ }
+ 
+ func WithMessageMaterialOutputBoundary(ctx context.Context) context.Context {
+@@ -50,6 +52,9 @@ func BeginMessageMaterialHTTPBoundary(ctx context.Context) (context.Context, fun
+ 	}
+ 	marked := attach(ctx)
+ 	check := func() error {
++		span := startOriginalServiceTiming(marked, originalServiceTimingHTTPMaterialCheck)
++		success := false
++		defer func() { span.finish(success) }()
+ 		slot.mu.Lock()
+ 		ready, failed, closed := slot.Ready, slot.Failed, slot.Closed
+ 		slot.mu.Unlock()
+@@ -62,7 +67,9 @@ func BeginMessageMaterialHTTPBoundary(ctx context.Context) (context.Context, fun
+ 		if !ready {
+ 			return ErrMessageMaterialHTTPInitializing
+ 		}
+-		return CheckMessageMaterialOutputBoundary(marked)
++		err := CheckMessageMaterialOutputBoundary(marked)
++		success = err == nil
++		return err
+ 	}
+ 	var once sync.Once
+ 	close := func() { once.Do(func() { releaseExternalMessageMaterial(slot) }) }
+@@ -153,36 +160,49 @@ func RefuseMessageMaterialOutputBoundary(ctx context.Context) {
+ // It is never authorization to publish bytes: every nonempty batch and writer
+ // still executes CheckMessageMaterialOutputBoundary and its current checks.
+ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
++	span := startOriginalServiceTiming(ctx, originalServiceTimingIdleEligible)
++	success := false
++	// Registered before every original unlock defer. The fixed reason is
++	// emitted only after slot/guard locks release, including an early refusal.
++	defer func() { span.finish(success) }()
+ 	if ctx == nil || ctx.Err() != nil {
++		span.phase = originalServiceTimingIdleContextInvalid
+ 		return false
+ 	}
+ 	if turn := types.RAGSourceLineageFromContext(ctx); turn != nil && turn.Snapshot().RequireComplete() != nil {
++		span.phase = originalServiceTimingIdleTurnUnknown
+ 		return false
+ 	}
+ 	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
+ 	if !ok {
++		span.phase = originalServiceTimingIdleSlotAbsent
+ 		return false
+ 	}
+ 	slot.mu.Lock()
+ 	defer slot.mu.Unlock()
+ 	if !slot.Ready || slot.Closed || slot.Failed != nil || len(slot.Guards) == 0 {
++		span.phase = originalServiceTimingIdleSlotState
+ 		return false
+ 	}
+ 	for _, guard := range slot.Guards {
+ 		if guard == nil {
++			span.phase = originalServiceTimingIdleGuardMissing
+ 			return false
+ 		}
+ 		guard.mu.Lock()
+ 		known := guard.ctx != nil && guard.ctx.Err() == nil && guard.plan != nil && guard.plan.SourceLineage.RequireComplete() == nil
++		span.phase = originalServiceTimingIdleGuardState
+ 		if known && guard.snapshot != nil {
+ 			for _, proof := range guard.snapshot.Proofs {
+ 				if proof == nil || proof.SourceLineage.RequireComplete() != nil {
++					span.phase = originalServiceTimingIdleGuardProofUnknown
+ 					known = false
+ 					break
+ 				}
+ 			}
+ 			for _, message := range guard.snapshot.Messages {
+ 				if message == nil || message.SourceLineage.RequireComplete() != nil {
++					span.phase = originalServiceTimingIdleGuardMessageUnknown
+ 					known = false
+ 					break
+ 				}
+@@ -195,17 +215,34 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
+ 			return false
+ 		}
+ 	}
+-	for _, output := range slot.Outputs {
++	for i, output := range slot.Outputs {
++		complete := true
+ 		for _, message := range output {
+ 			if message == nil || message.SourceLineage.RequireComplete() != nil {
+-				return false
++				complete = false
++				break
+ 			}
+ 		}
++		if !complete && !rawMessageMaterialIdleEligibleLocked(slot, i, output) {
++			span.phase = originalServiceTimingIdleOutputRawUncovered
++			return false
++		}
+ 	}
++	span.phase = originalServiceTimingIdleEligible
++	success = true
+ 	return true
+ }
+ 
+ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
++	span := startOriginalServiceTiming(ctx, originalServiceTimingSlotBoundaryTotal)
++	callerSpan := originalServiceTimingBoundaryCallerSpan(span)
++	success := false
++	// Registered before the slot unlock defer: both overlapping observations
++	// run after unlock and all unchanged checks, including a real refusal.
++	defer func() {
++		callerSpan.finish(success)
++		span.finish(success)
++	}()
+ 	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
+ 	if !ok {
+ 		return access.ErrNextcloudPublicationUnavailable
+@@ -257,6 +294,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
+ 			return access.ErrNextcloudPublicationDenied
+ 		}
+ 	}
++	success = true
+ 	return nil
+ }
+ 
+@@ -392,6 +430,9 @@ func (s *messageService) admittedMessages(ctx context.Context, request types.Mes
+ 		slot.mu.Lock()
+ 		slot.Outputs = append(slot.Outputs, copied)
+ 		slot.OutputBodies = append(slot.OutputBodies, string(body))
++		// This records the actual retained producer of a deliberately stripped
++		// raw projection, never a current permission or a DTO-derived grant.
++		slot.RawOutputOrigins = append(slot.RawOutputOrigins, captureRawMessageMaterialOrigin(guard))
+ 		slot.mu.Unlock()
+ 	}
+ 	return copied, nil
+diff --git a/internal/application/service/message_material_raw_idle_actual_test.go b/internal/application/service/message_material_raw_idle_actual_test.go
+new file mode 100644
+index 000000000..f17d44b98
+--- /dev/null
++++ b/internal/application/service/message_material_raw_idle_actual_test.go
+@@ -0,0 +1,111 @@
++package service
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// The baseline comes through the actual producer, store read and retained
++// boundary. Negative projection faults cannot manufacture a read capability.
++func TestMessageMaterialActualRawProjectionIdleEligibility(t *testing.T) {
++	for _, change := range []string{"raw_projection", "content_tamper", "request_cross", "session_cross", "detached_origin", "proof_message_cross", "proof_body_changed", "proof_source_bearing", "proof_unknown", "current_actor_revoked", "body_ABA"} {
++		t.Run(change, func(t *testing.T) {
++			// The historical partial fixture stops at a closed content fence.
++			// Use the already established full-canonical actual publish/index
++			// producer and its real creator; no fence, proof or guard is seeded.
++			fx := NewScopedKnowledgePurposeFixtureForTest(t)
++			t.Cleanup(func() { fx.AssertNoLiveLeases(t) })
++			messages, db := fx.messages, fx.DB
++			ctx, cancel := context.WithTimeout(fx.Creator, 15*time.Second)
++			t.Cleanup(cancel)
++			caller := types.CallerFromContext(ctx)
++			require.NotEmpty(t, caller.UserID)
++			require.NotZero(t, caller.TenantID)
++			sessions := &sessionService{sessionRepo: repository.NewSessionRepository(db), groupAccess: fx.Groups}
++			session, err := sessions.CreateSession(ctx, &types.Session{TenantID: caller.TenantID, UserID: types.SessionOwnerIDFromContext(ctx)})
++			require.NoError(t, err)
++			require.Equal(t, caller.UserID, session.UserID)
++			require.Equal(t, caller.TenantID, session.TenantID)
++			user, err := messages.CreateMessage(ctx, &types.Message{SessionID: session.ID, RequestID: "actual-raw-idle-" + session.ID, Role: "user", Content: "actual authored raw question", IsCompleted: true})
++			require.NoError(t, err)
++			ctx, _, check, closeHTTP := BeginMessageMaterialHTTPBoundary(ctx)
++			defer closeHTTP()
++			output, err := messages.GetMessage(ctx, session.ID, user.ID)
++			require.NoError(t, err)
++			require.Nil(t, output.SourceLineage, "raw projection deliberately keeps original proof private")
++			markMessageMaterialReady(ctx)
++			require.NoError(t, check())
++			require.True(t, MessageMaterialIdleRecheckEligible(ctx), "the actual held source-independent original must cover its exact raw projection")
++			slot := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++			require.Len(t, slot.Guards, 1)
++			require.Len(t, slot.RawOutputOrigins, 1)
++			require.NotNil(t, slot.RawOutputOrigins[0])
++			guard := slot.Guards[0]
++			require.Len(t, guard.snapshot.Proofs, 1)
++			proof := guard.snapshot.Proofs[0]
++			switch change {
++			case "raw_projection":
++				return
++			case "content_tamper":
++				output.Content = "foreign output with the same producer selectors"
++				require.Error(t, check())
++			case "request_cross":
++				output.RequestID = "different actual request"
++				require.Error(t, check())
++			case "session_cross":
++				output.SessionID = "different actual session"
++				require.Error(t, check())
++			case "detached_origin":
++				slot.mu.Lock()
++				slot.RawOutputOrigins[0] = nil
++				slot.mu.Unlock()
++			case "proof_message_cross":
++				guard.mu.Lock()
++				proof.MessageID = "another original message"
++				guard.mu.Unlock()
++			case "proof_body_changed":
++				guard.mu.Lock()
++				proof.BodyDigest = "another original body digest"
++				guard.mu.Unlock()
++			case "proof_source_bearing":
++				// Fault injection into an already captured private proof, not a
++				// fake positive admission or a source publication authorization.
++				sourced, err := types.NewCompleteSourceLineage(types.SourceIdentity{Provider: types.ConnectorTypeNextcloud, TenantID: caller.TenantID,
++					KnowledgeBaseID: fx.KB, DataSourceID: "ds", PairOperationID: "pair", InstanceID: "instance", BindingID: "binding",
++					FileID: "1", ExternalID: "nextcloud:instance:1", KnowledgeID: fx.Knowledge, Revision: 2, ETag: "original"})
++				require.NoError(t, err)
++				guard.mu.Lock()
++				proof.SourceLineage = sourced
++				guard.mu.Unlock()
++			case "proof_unknown":
++				guard.mu.Lock()
++				proof.SourceLineage = types.UnknownSourceLineage()
++				guard.mu.Unlock()
++			case "current_actor_revoked":
++				// This creator also has real source-scoped grants. Suspending a
++				// direct membership alone would leave that current read path.
++				withdrawn := db.Model(&types.User{}).Where("id=? AND is_active=?", caller.UserID, true).Update("is_active", false)
++				require.NoError(t, withdrawn.Error)
++				require.EqualValues(t, 1, withdrawn.RowsAffected)
++				var inactive types.User
++				require.NoError(t, db.Where("id=?", caller.UserID).Take(&inactive).Error)
++				require.False(t, inactive.IsActive)
++				// Structural scheduling is not permission. The same full
++				// checkpoint still executes current reads and refuses output.
++				require.Error(t, check())
++				return
++			case "body_ABA":
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", user.ID).Update("content", "foreign transient body").Error)
++				require.NoError(t, db.Model(&types.Message{}).Where("id=?", user.ID).Update("content", user.Content).Error)
++				require.Error(t, check(), "identical cached bytes cannot erase the original body clock")
++				return
++			}
++			require.False(t, MessageMaterialIdleRecheckEligible(ctx), "unmatched or non-independent raw material must not use the idle cadence")
++		})
++	}
++}
+diff --git a/internal/application/service/model.go b/internal/application/service/model.go
+index 48ee19b07..f63eda813 100644
+--- a/internal/application/service/model.go
++++ b/internal/application/service/model.go
+@@ -570,6 +570,9 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
+ // GetChatModel retrieves and initializes a chat model instance
+ // Takes a model ID and returns a Chat interface implementation
+ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.Chat, error) {
++	span := startOriginalServiceTiming(ctx, originalServiceTimingGetChatTotal)
++	success := false
++	defer func() { span.finish(success) }()
+ 	// Check if model ID is empty
+ 	if modelId == "" {
+ 		logger.Error(ctx, "Model ID is empty")
+@@ -589,7 +592,9 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 		if acquireErr != nil {
+ 			return nil, acquireErr
+ 		}
++		beginSpan := startOriginalServiceTiming(ctx, originalServiceTimingGetChatBegin)
+ 		read, acquireErr = s.BeginModelOriginalRead(acquisitionCtx, modelId, nil)
++		beginSpan.finish(acquireErr == nil)
+ 		if acquireErr != nil {
+ 			if releaseOwner != nil {
+ 				releaseOwner()
+@@ -606,7 +611,9 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 			}
+ 		}
+ 	}()
++	snapshotSpan := startOriginalServiceTiming(ctx, originalServiceTimingSnapshot)
+ 	model, proof, err := read.Snapshot()
++	snapshotSpan.finish(err == nil)
+ 	if err != nil {
+ 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+ 			"model_id":  modelId,
+@@ -628,7 +635,9 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 
+ 	logger.Infof(ctx, "Getting chat model: %s, source: %s", model.Name, model.Source)
+ 
++	constructorSpan := startOriginalServiceTiming(ctx, originalServiceTimingConstructor)
+ 	chatModel, err := chat.NewOriginalRemoteChat(model)
++	constructorSpan.finish(err == nil)
+ 	if err != nil {
+ 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+ 			"model_id":   model.ID,
+@@ -637,11 +646,14 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
+ 		return nil, err
+ 	}
+ 
++	bindSpan := startOriginalServiceTiming(ctx, originalServiceTimingBindRetain)
+ 	bound, err := bindOriginalModelClient(acquisitionCtx, chatModel, read, !borrowed, releaseOwner, transferOwner)
++	bindSpan.finish(err == nil)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	closeOnFailure = false
++	success = true
+ 	return bound, nil
+ }
+ 
+diff --git a/internal/application/service/normal_original_public_handler_fixture_bridge_test.go b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
+new file mode 100644
+index 000000000..00113bca8
+--- /dev/null
++++ b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
+@@ -0,0 +1,294 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/config"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// Test-only actual composition for the real public Handler/Auth tests. This
++// exports real services, no Caller/Principal/material slot/query/model cap.
++type NormalOriginalPublicHandlerFixtureForTest struct {
++	Source                                        *ScopedKnowledgePurposeFixtureForTest
++	DB                                            *gorm.DB
++	Config                                        *config.Config
++	Sessions                                      interfaces.SessionService
++	Messages                                      interfaces.MessageService
++	KBs                                           interfaces.KnowledgeBaseService
++	Models                                        interfaces.ModelService
++	Tenants                                       interfaces.TenantService
++	Users                                         interfaces.UserService
++	Members                                       interfaces.TenantMemberService
++	Groups                                        interfaces.GroupAccessService
++	ProducerStarted, ProducerDone, CompletionDone <-chan struct{}
++	OuterProducerDone                             func() <-chan struct{}
++	TimingFinish                                  func(*testing.T, <-chan struct{})
++	CompletionResult                              <-chan error
++	QueryText, AnswerID, KBID                     string
++	SDKCalls                                      func() int64
++	Error                                         func() error
++	SetQueryHook                                  func(func() error)
++	ActualTurn                                    func() (string, string, string, bool)
++	NativeObserved                                func() bool
++}
++
++type normalPublicHandlerObservations struct {
++	mu                               sync.Mutex
++	ctx                              context.Context
++	session, assistant, request      string
++	nativeObserved                   bool
++	errors                           error
++	started, done, completed         chan struct{}
++	outerDone                        <-chan struct{}
++	timing                           *originalServiceTimingCollector
++	result                           chan error
++	beginOnce, endOnce, completeOnce sync.Once
++}
++
++func (o *normalPublicHandlerObservations) fail(err error) {
++	o.mu.Lock()
++	o.errors = errors.Join(o.errors, err)
++	o.mu.Unlock()
++}
++func (o *normalPublicHandlerObservations) snapshot() context.Context {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	return o.ctx
++}
++func (o *normalPublicHandlerObservations) error() error {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	return o.errors
++}
++
++func NewNormalOriginalPublicHandlerFixtureForTest(t *testing.T, endpoint string) *NormalOriginalPublicHandlerFixtureForTest {
++	t.Helper()
++	f := NewScopedKnowledgePurposeFixtureForTest(t)
++	answer := *f.Answer
++	answer.Parameters.BaseURL = endpoint
++	answer.Parameters.OriginalChat = nil
++	require.NoError(t, f.Models.UpdateModel(f.Creator, &answer))
++	require.NotNil(t, answer.OriginalProof)
++	var kb types.KnowledgeBase
++	require.NoError(t, f.DB.Where("id=? AND tenant_id=?", f.KB, 7).Take(&kb).Error)
++	require.Equal(t, answer.ID, kb.SummaryModelID)
++	require.False(t, kb.IndexingStrategy.GraphRequired)
++	require.False(t, kb.IndexingStrategy.GraphEnabled)
++	registry := retriever.NewRetrieveEngineRegistry(nil, nil)
++	require.NoError(t, registry.Register(retriever.NewKVHybridRetrieveEngine(f.index, types.SQLiteRetrieverEngineType)))
++	knowRepo := repository.NewKnowledgeRepository(f.DB)
++	repository.ConfigureKnowledgeCurrentReadActor(knowRepo, f.Store)
++	chunkRepo := repository.NewChunkRepository(f.DB)
++	publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(f.DB), repository.NewDataSourceRepository(f.DB))
++	publication.ConfigureSourcePathResolver(repository.NewNextcloudOnboardingStore(f.DB))
++	guard, ok := f.messages.sourceLineageGuard.(*access.NextcloudSourceLineageGuard)
++	require.True(t, ok)
++	kbs := &knowledgeBaseService{repo: repository.NewKnowledgeBaseRepository(f.DB), kgRepo: knowRepo, chunkRepo: chunkRepo, modelService: f.Models, retrieveEngine: registry, tenantRepo: repository.NewTenantRepository(f.DB), contentLeases: f.Store.ContentLeaseStore(), groupAccess: f.Groups, publicationGuard: publication}
++	ConfigureKnowledgeBaseRAGChunkHydration(kbs, repository.NewRAGChunkSnapshotReader(f.DB, f.Store), guard)
++	require.NoError(t, ConfigureKnowledgeBaseOriginalQueries(kbs, f.Store, f.ModelRepository))
++	var tenant types.Tenant
++	require.NoError(t, f.DB.Where("id=?", 7).Take(&tenant).Error)
++	composite, err := retriever.CreateRetrieveEngineForKB(context.WithValue(f.Creator, types.TenantInfoContextKey, &tenant), registry, nil, 7, kb.VectorStoreID)
++	require.NoError(t, err)
++	require.NoError(t, ConfigureKnowledgeBaseOriginalQueryEngine(kbs, composite))
++	cfg := &config.Config{Conversation: &config.ConversationConfig{MaxRounds: 0, EmbeddingTopK: 1, RerankTopK: 1, EnableRewrite: false, EnableQueryExpansion: false, FallbackStrategy: "fixed", FallbackResponse: "CURRENT FIXED SAFE FALLBACK", Summary: &config.SummaryConfig{Prompt: "Answer using the admitted original source", ContextTemplate: "{{query}}\n{{contexts}}"}}}
++	chunks := NewChunkService(chunkRepo, knowRepo, kbs.repo, f.Models, registry, nil, nil, nil)
++	tenants := NewTenantService(repository.NewTenantRepository(f.DB), repository.NewStorageBackendRepository(f.DB))
++	userRepo := repository.NewUserRepository(f.DB)
++	tokenRepo := repository.NewAuthTokenRepository(f.DB)
++	members := NewTenantMemberService(repository.NewTenantMemberRepository(f.DB), nil, userRepo, tokenRepo)
++	users := NewUserService(cfg, userRepo, tokenRepo, tenants, members, nil, repository.NewDirectoryRepository(f.DB), f.Groups)
++	knowledge := &knowledgeService{config: cfg, repo: knowRepo, kbService: kbs, tenantRepo: repository.NewTenantRepository(f.DB), tenantService: tenants, chunkService: chunks, chunkRepo: chunkRepo, modelService: f.Models, retrieveEngine: registry, groupAccess: f.Groups, publicationGuard: publication, contentLeases: f.Store.ContentLeaseStore(), knowledgeInputs: f.Store}
++	messages := f.messages
++	messages.kbService = kbs
++	messages.knowService = knowledge
++	messages.modelService = f.Models
++	manager := chatpipeline.NewEventManager()
++	sessions := &sessionService{cfg: cfg, sessionRepo: repository.NewSessionRepository(f.DB), messageRepo: repository.NewMessageRepository(f.DB), knowledgeBaseService: kbs, knowledgeService: knowledge, chunkService: chunks, modelService: f.Models, tenantService: tenants, eventManager: manager, busyGate: NewSessionBusyGate(), groupAccess: f.Groups}
++	ConfigureMessageSourceLineage(messages, sessions, &SessionForkService{}, manager, guard)
++	chatpipeline.NewPluginLoadHistory(manager, messages, cfg)
++	chatpipeline.NewPluginMemoryRecall(manager, nil)
++	chatpipeline.NewPluginQueryUnderstand(manager, f.Models, messages, nil, cfg)
++	chatpipeline.NewPluginSearchParallel(manager, kbs, knowledge, chunks, cfg, nil, tenants, sessions, nil, nil, nil, chunkRepo, knowRepo)
++	chatpipeline.NewPluginRerank(manager, f.Models)
++	chatpipeline.NewPluginMerge(manager, chunkRepo, chunks)
++	chatpipeline.ConfigureRAGChunkMergeHydration(manager, kbs)
++	chatpipeline.NewPluginFilterTopK(manager)
++	chatpipeline.NewPluginIntoChatMessage(manager, messages, knowledge)
++	obs := &normalPublicHandlerObservations{started: make(chan struct{}), done: make(chan struct{}), completed: make(chan struct{}), result: make(chan error, 1)}
++	obs.timing = newOriginalServiceTimingCollectorForTest()
++	models := normalPublicHandlerModelsObserver{ModelService: f.Models, observations: obs, kb: f.KB, model: f.Embedding.ID, answer: answer.ID}
++	chatpipeline.NewPluginChatCompletionStream(manager, models)
++	observedSessions := normalPublicHandlerSessionsObserver{SessionService: sessions, observations: obs}
++	observedMessages := &normalPublicHandlerMessagesObserver{messageService: messages, observations: obs, groups: f.Groups, kb: f.KB, model: f.Embedding.ID}
++	return &NormalOriginalPublicHandlerFixtureForTest{Source: f, DB: f.DB, Config: cfg, Sessions: observedSessions, Messages: observedMessages, KBs: kbs, Models: models, Tenants: tenants, Users: users, Members: members, Groups: f.Groups, ProducerStarted: obs.started, ProducerDone: obs.done, CompletionDone: obs.completed, CompletionResult: obs.result, QueryText: personalQueryText, AnswerID: answer.ID, KBID: f.KB, SDKCalls: f.SDKCalls, Error: obs.error, SetQueryHook: f.SetQueryHook, ActualTurn: func() (string, string, string, bool) {
++		obs.mu.Lock()
++		defer obs.mu.Unlock()
++		return obs.session, obs.assistant, obs.request, obs.session != "" && obs.assistant != "" && obs.request != ""
++	}, TimingFinish: func(t *testing.T, HTTPreturned <-chan struct{}) {
++		obs.mu.Lock()
++		outerDone := obs.outerDone
++		obs.mu.Unlock()
++		obs.timing.finish(t, HTTPreturned, outerDone)
++	}, OuterProducerDone: func() <-chan struct{} { obs.mu.Lock(); defer obs.mu.Unlock(); return obs.outerDone }, NativeObserved: func() bool { obs.mu.Lock(); defer obs.mu.Unlock(); return obs.nativeObserved }}
++}
++
++type normalPublicHandlerSessionsObserver struct {
++	interfaces.SessionService
++	observations *normalPublicHandlerObservations
++}
++
++func (s normalPublicHandlerSessionsObserver) KnowledgeQA(ctx context.Context, req *types.QARequest, bus *event.EventBus) (err error) {
++	// Actual handler already created and attached its owned HTTP material slot.
++	s.observations.mu.Lock()
++	s.observations.ctx = ctx
++	s.observations.session = req.Session.ID
++	s.observations.assistant = req.AssistantMessageID
++	s.observations.request = req.UserMessageID
++	s.observations.mu.Unlock()
++	s.observations.beginOnce.Do(func() { close(s.observations.started) })
++	defer s.observations.endOnce.Do(func() { close(s.observations.done) })
++	err = s.SessionService.KnowledgeQA(ctx, req, bus)
++	if err != nil {
++		if observed := normalPublicHandlerActualNativeObserved(ctx); observed {
++			s.observations.mu.Lock()
++			s.observations.nativeObserved = true
++			s.observations.mu.Unlock()
++		}
++	}
++	return err
++}
++
++// The real public handler probes these production optional interfaces before
++// creating a turn. The observer must not hide them behind SessionService.
++func (s normalPublicHandlerSessionsObserver) RejectSendIfRewinding(ctx context.Context, session string) error {
++	actual, ok := s.SessionService.(*sessionService)
++	if !ok || actual == nil {
++		return repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return actual.RejectSendIfRewinding(ctx, session)
++}
++func (s normalPublicHandlerSessionsObserver) HoldSandboxTurn(ctx context.Context, session, configID string) (func(), error) {
++	actual, ok := s.SessionService.(*sessionService)
++	if !ok || actual == nil {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return actual.HoldSandboxTurn(ctx, session, configID)
++}
++
++type normalPublicHandlerModelsObserver struct {
++	interfaces.ModelService
++	observations      *normalPublicHandlerObservations
++	kb, model, answer string
++}
++
++func (m normalPublicHandlerModelsObserver) GetChatModel(ctx context.Context, id string) (chat.Chat, error) {
++	if id != m.answer {
++		return nil, errors.New("actual public handler answer selector changed")
++	}
++	if err := normalEventOriginalContextCheck(ctx, m.observations.snapshot(), m.kb, m.model); err != nil {
++		m.observations.fail(err)
++		return nil, err
++	}
++	return m.ModelService.GetChatModel(ctx, id)
++}
++
++type normalPublicHandlerMessagesObserver struct {
++	*messageService
++	observations *normalPublicHandlerObservations
++	groups       interfaces.GroupAccessService
++	kb, model    string
++}
++
++// This observes the actual handler's existing outer worker channel. The
++// fixture cannot create or close it, and it is not a read/SDK/completion grant.
++func (m *normalPublicHandlerMessagesObserver) ObserveOriginalMessageMaterialProducer(ctx context.Context, done <-chan struct{}) {
++	if ctx == nil || done == nil {
++		m.observations.fail(errors.New("actual original HTTP outer producer lifetime missing"))
++		return
++	}
++	if slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot); !ok || slot == nil {
++		m.observations.fail(errors.New("actual outer producer lost its original HTTP owner"))
++		return
++	}
++	m.observations.timing.attach(ctx)
++	m.observations.mu.Lock()
++	defer m.observations.mu.Unlock()
++	if m.observations.outerDone != nil {
++		m.observations.errors = errors.Join(m.observations.errors, errors.New("actual outer producer lifetime was replaced"))
++		return
++	}
++	m.observations.outerDone = done
++}
++
++func (m *normalPublicHandlerMessagesObserver) UpdateMessage(ctx context.Context, message *types.Message) error {
++	if message.Role == "assistant" && message.IsCompleted {
++		if err := normalEventOriginalContextCheck(ctx, m.observations.snapshot(), m.kb, m.model); err != nil {
++			m.observations.fail(err)
++			return err
++		}
++		caller := types.CallerFromContext(ctx)
++		role, err := m.groups.EffectiveTenantRole(ctx, caller.UserID, caller.TenantID, time.Now().UTC())
++		if err != nil {
++			return err
++		}
++		// Presence is only an observation; the real UpdateMessage below must still
++		// reauthorize concrete current models/source/inputs/fulllease finalclock.
++		if role.ScopedOnly && !repository.ScopedKnowledgeModelPurposePresent(ctx) {
++			return errors.New("actual public handler lost scoped answer context")
++		}
++	}
++	err := m.messageService.UpdateMessage(ctx, message)
++	if message.Role == "assistant" && message.IsCompleted {
++		m.observations.completeOnce.Do(func() { m.observations.result <- err; close(m.observations.completed) })
++	}
++	return err
++}
++
++// No holder is made here. Only actual resources still owned by the handler's
++// material slot can establish that native retrieval preceded a refusal.
++func normalPublicHandlerActualNativeObserved(ctx context.Context) bool {
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return false
++	}
++	queries := []*repository.KnowledgeQueryEmbeddingResultRead{}
++	vectors := []*repository.KnowledgeSQLiteEmbeddingVectorRead{}
++	slot.mu.Lock()
++	for _, resource := range slot.Models {
++		switch actual := resource.(type) {
++		case *knowledgeQueryBoundaryResource:
++			if actual != nil && actual.read != nil && actual.retained.Load() {
++				queries = append(queries, actual.read)
++			}
++		case *knowledgeEmbeddingBoundaryResource:
++			if actual != nil && actual.read != nil && actual.query != nil {
++				vectors = append(vectors, actual.read)
++			}
++		}
++	}
++	slot.mu.Unlock()
++	if len(queries) != 1 || len(vectors) != 1 {
++		return false
++	}
++	snapshot, err := queries[0].Snapshot()
++	if err != nil || snapshot == nil {
++		return false
++	}
++	_, actual, err := repository.WithActualKnowledgeCompletionReads(queries[0].Context(), queries, vectors)
++	return err == nil && len(actual) == 1 && actual[0].QueryReceiptID == snapshot.ReceiptID && len(actual[0].Candidates) > 0 && len(actual[0].Hits) > 0 && actual[0].SourceLineage.RequireComplete() == nil && len(actual[0].SourceLineage.Sources) == 1 && vectors[0].Recheck() == nil
++}
+diff --git a/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
+new file mode 100644
+index 000000000..5b89235b7
+--- /dev/null
++++ b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
+@@ -0,0 +1,380 @@
++package service_test
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	service "github.com/Tencent/WeKnora/internal/application/service"
++	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
++	"github.com/Tencent/WeKnora/internal/middleware"
++	"github.com/Tencent/WeKnora/internal/stream"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++)
++
++// Real JWT middleware and the production session handler own and save the turn.
++// No test invokes KnowledgeQAByEvent, creates user/assistant messages, opens a
++// material boundary or supplies a SourceLineage/query/vector/model capability.
++func TestNormalOriginalPublicHandlerActualSQLiteJWT(t *testing.T) {
++	for _, mode := range []string{"configured_summary_public_handler_completion", "unrelated_summary_public_handler_denied", "A_grant_after_query_SDK_public_handler_denied"} {
++		t.Run(mode, func(t *testing.T) {
++			var calls atomic.Int64
++			var mu sync.Mutex
++			var providerErr error
++			fail := func(e error) { mu.Lock(); providerErr = errors.Join(providerErr, e); mu.Unlock() }
++			var f *service.NormalOriginalPublicHandlerFixtureForTest
++			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				calls.Add(1)
++				var wire struct {
++					Stream   bool
++					Messages []struct{ Role, Content string }
++				}
++				if json.NewDecoder(r.Body).Decode(&wire) != nil || r.URL.Path != "/chat/completions" || !wire.Stream || r.Header.Get("Authorization") != "Bearer owned-ancestor-embedding" {
++					fail(errors.New("actual public answer SSE wire mismatch"))
++					w.WriteHeader(400)
++					return
++				}
++				text := ""
++				for _, m := range wire.Messages {
++					text += m.Content
++				}
++				if f == nil || !strings.Contains(text, f.QueryText) || !strings.Contains(text, "Original configuration influence") {
++					fail(errors.New("actual public answer input lost original source"))
++					w.WriteHeader(400)
++					return
++				}
++				w.Header().Set("Content-Type", "text/event-stream")
++				if _, e := fmt.Fprint(w, "data: {\"id\":\"actual-public-answer\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Actual normal original event answer.\"},\"finish_reason\":null}]}\n\n"); e != nil {
++					fail(e)
++					return
++				}
++				if flush, ok := w.(http.Flusher); ok {
++					flush.Flush()
++				}
++				if _, e := fmt.Fprint(w, "data: {\"id\":\"actual-public-answer\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"); e != nil {
++					fail(e)
++				}
++			}))
++			t.Cleanup(provider.Close)
++			f = service.NewNormalOriginalPublicHandlerFixtureForTest(t, provider.URL)
++			baseline := f.SDKCalls()
++			require.EqualValues(t, 1, baseline)
++			email := "public-handler-" + uuid.NewString() + "@example.test"
++			password := "Owned-public-handler-password-71!"
++			user, err := f.Users.Register(context.Background(), &types.RegisterRequest{Username: "actual-public-" + uuid.NewString()[:8], Email: email, Password: password, TenantProvisioning: types.TenantProvisioningTenantless})
++			require.NoError(t, err)
++			require.Zero(t, user.TenantID)
++			require.False(t, user.IsSystemAdmin)
++			login, err := f.Users.Login(context.Background(), &types.LoginRequest{Email: email, Password: password})
++			require.NoError(t, err)
++			require.True(t, login.Success)
++			var directory types.Directory
++			require.NoError(t, f.DB.Where("id=?", f.Source.Directory).Take(&directory).Error)
++			guid := "aabbccdd-0011-2233-4455-667788990011"
++			var known int64
++			require.NoError(t, f.DB.Model(&types.DirectoryIdentity{}).Where("directory_id=? AND object_guid=?", f.Source.Directory, guid).Count(&known).Error)
++			require.Zero(t, known)
++			dirs := service.NewDirectoryService(repository.NewDirectoryRepository(f.DB))
++			_, err = dirs.ApplySnapshot(f.Source.Creator, &types.DirectorySnapshot{DirectoryID: f.Source.Directory, ExpectedConfigVersion: directory.ConfigVersion, Complete: true, PaginationComplete: true, StartedAt: time.Now().UTC(), Identities: []types.DirectoryIdentitySnapshot{{ObjectGUID: f.Source.CreatorGUID, DN: "cn=actual-creator,ou=People,dc=example,dc=test", SAMAccountName: "actual-creator", UPN: "actual-creator@example.test", Enabled: true}, {ObjectGUID: guid, DN: "cn=actual-public-handler,ou=People,dc=example,dc=test", SAMAccountName: "actual-public-handler", UPN: email, Email: email, Enabled: true}}})
++			require.NoError(t, err)
++			var identity types.DirectoryIdentity
++			require.NoError(t, f.DB.Where("directory_id=? AND object_guid=? AND status=?", f.Source.Directory, guid, types.DirectoryObjectActive).Take(&identity).Error)
++			require.Nil(t, identity.UserID)
++			require.NoError(t, dirs.LinkIdentity(f.Source.Creator, identity.ID, user.ID))
++			require.NoError(t, f.Source.Grant(f.Source.Creator, guid, true))
++			var direct, groups int64
++			require.NoError(t, f.DB.Model(&types.TenantMember{}).Where("user_id=? AND tenant_id=? AND deleted_at IS NULL", user.ID, 7).Count(&direct).Error)
++			require.Zero(t, direct)
++			require.NoError(t, f.DB.Model(&types.TenantGroupRoleGrant{}).Where("tenant_id=?", 7).Count(&groups).Error)
++			require.Zero(t, groups)
++			mini := miniredis.RunT(t)
++			redis, err := stream.NewRedisStreamManager(mini.Addr(), "", "", 0, "actual-original-public-handler", time.Minute)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if e := redis.Close(); e != nil {
++					t.Error(e)
++				}
++			})
++			h := sessionhandler.NewHandler(f.Sessions, f.Messages, nil, redis, f.Config, f.KBs, nil, f.Tenants, nil, nil, nil, nil, nil, f.Models, nil, nil, nil, nil, nil, nil, nil, f.Users, f.Members, nil, nil, nil, nil, nil, nil, nil, nil, f.Groups)
++			gin.SetMode(gin.TestMode)
++			router := gin.New()
++			router.Use(middleware.RequestID())
++			router.Use(middleware.ErrorHandler())
++			router.Use(middleware.Auth(f.Tenants, f.Users, f.Members, nil, f.Config, f.Groups))
++			var authObserved atomic.Bool
++			router.Use(func(c *gin.Context) {
++				caller := types.CallerFromContext(c.Request.Context())
++				principal, present := types.PrincipalFromContext(c.Request.Context())
++				if !present || principal.Type != types.PrincipalWebUser || principal.ID != user.ID || caller.UserID != user.ID || caller.TenantID != 7 || caller.Role != types.TenantRoleViewer {
++					c.AbortWithStatus(http.StatusForbidden)
++					return
++				}
++				role, e := f.Groups.EffectiveTenantRole(c.Request.Context(), user.ID, 7, time.Now().UTC())
++				if e != nil || !role.ScopedOnly || !role.Member || role.DirectRole != nil || len(role.GroupMatches) != 0 {
++					c.AbortWithStatus(http.StatusForbidden)
++					return
++				}
++				authObserved.Store(true)
++				c.Next()
++			})
++			router.POST("/api/v1/sessions", h.CreateSession)
++			router.POST("/api/v1/knowledge-chat/:session_id", h.KnowledgeQA)
++			router.POST("/api/v1/sessions/:session_id/stop", h.StopSession)
++			HTTPstarted := make(chan struct{})
++			var HTTPreturned chan struct{} = make(chan struct{})
++			var serverBeginOnce, serverOnce sync.Once
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if strings.Contains(r.URL.Path, "/knowledge-chat/") {
++					serverBeginOnce.Do(func() { close(HTTPstarted) })
++					defer serverOnce.Do(func() { close(HTTPreturned) })
++				}
++				router.ServeHTTP(w, r)
++			}))
++			client := &http.Client{Timeout: 8 * time.Second}
++			post := func(path string, body any) (*http.Response, error) {
++				raw, e := json.Marshal(body)
++				if e != nil {
++					return nil, e
++				}
++				request, e := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(raw))
++				if e != nil {
++					return nil, e
++				}
++				request.Header.Set("Content-Type", "application/json")
++				request.Header.Set("Authorization", "Bearer "+login.Token)
++				request.Header.Set("X-Tenant-ID", "7")
++				return client.Do(request)
++			}
++			created, e := post("/api/v1/sessions", map[string]any{"title": "actual public original question"})
++			require.NoError(t, e)
++			var sessionBody struct{ Data types.Session }
++			require.NoError(t, json.NewDecoder(created.Body).Decode(&sessionBody))
++			created.Body.Close()
++			require.Equal(t, http.StatusCreated, created.StatusCode)
++			require.NotEmpty(t, sessionBody.Data.ID)
++			require.Equal(t, user.ID, sessionBody.Data.UserID)
++			require.EqualValues(t, 7, sessionBody.Data.TenantID)
++			t.Cleanup(func() {
++				// Runs last, after the unchanged real HTTP/outer joins and cleanup.
++				// The helper only emits if both existing channels are closed.
++				defer f.TimingFinish(t, HTTPreturned)
++				cleanup, done := context.WithTimeout(context.Background(), 3*time.Second)
++				defer done()
++				// Only the real delegate can report producer start; the real HTTP
++				// wrapper independently reports entry and return, including early 500.
++				producerStart := f.ProducerStarted
++				joinProducer := func() {
++					select {
++					case <-f.ProducerDone:
++					default:
++						sid, aid, _, known := f.ActualTurn()
++						if !known {
++							t.Error("actual public turn selectors missing for authorized StopSession")
++						} else {
++							body, _ := json.Marshal(map[string]any{"message_id": aid})
++							request, e := http.NewRequestWithContext(cleanup, http.MethodPost, server.URL+"/api/v1/sessions/"+sid+"/stop", bytes.NewReader(body))
++							if e != nil {
++								t.Error(e)
++							} else {
++								request.Header.Set("Content-Type", "application/json")
++								request.Header.Set("Authorization", "Bearer "+login.Token)
++								request.Header.Set("X-Tenant-ID", "7")
++								response, e := client.Do(request)
++								if e != nil {
++									t.Error(e)
++								} else {
++									if response.StatusCode != http.StatusOK {
++										t.Errorf("actual StopSession failed with status %d", response.StatusCode)
++									}
++									if e = response.Body.Close(); e != nil {
++										t.Error(e)
++									}
++								}
++							}
++						}
++					}
++					select {
++					case <-f.ProducerDone:
++					case <-cleanup.Done():
++						t.Error("actual public producer did not join after real StopSession")
++					}
++				}
++				select {
++				case <-producerStart:
++					producerStart = nil
++					joinProducer()
++				default:
++				}
++				httpStarted := false
++				select {
++				case <-HTTPstarted:
++					httpStarted = true
++				default:
++				}
++				if httpStarted {
++					waitingHTTP := true
++					for waitingHTTP {
++						select {
++						case <-HTTPreturned:
++							waitingHTTP = false
++						case <-producerStart:
++							producerStart = nil
++							joinProducer()
++						case <-cleanup.Done():
++							t.Error("actual public HTTP handler did not return within the shared cleanup deadline")
++							waitingHTTP = false
++						}
++					}
++				}
++				// HTTP return does not itself prove a detached producer joined.
++				// Reinspect its actual start after the independently joined HTTP.
++				if producerStart != nil {
++					select {
++					case <-producerStart:
++						producerStart = nil
++						joinProducer()
++					default:
++					}
++				}
++				// Service return precedes the enclosing handler's error emission and
++				// final release. Join that real worker too, under this same deadline,
++				// before removing hooks, closing Redis or asserting released leases.
++				if outerDone := f.OuterProducerDone(); outerDone != nil {
++					select {
++					case <-outerDone:
++					case <-cleanup.Done():
++						t.Error("actual enclosing HTTP producer did not finish its release within the shared cleanup deadline")
++					}
++				} else {
++					select {
++					case <-f.ProducerStarted:
++						t.Error("actual service producer has no enclosing handler completion signal")
++					default:
++					}
++				}
++				f.SetQueryHook(nil)
++				client.CloseIdleConnections()
++				server.Close()
++				f.Source.AssertNoLiveLeases(t)
++				if e := f.Error(); e != nil {
++					t.Error(e)
++				}
++				mu.Lock()
++				e := providerErr
++				mu.Unlock()
++				if e != nil {
++					t.Error(e)
++				}
++			})
++			var faultApplied atomic.Bool
++			if mode == "A_grant_after_query_SDK_public_handler_denied" {
++				f.SetQueryHook(func() error {
++					e := f.Source.Grant(f.Source.Creator, guid, false)
++					if e == nil {
++						faultApplied.Store(true)
++					}
++					return e
++				})
++			}
++			answerID := f.AnswerID
++			if mode == "unrelated_summary_public_handler_denied" {
++				answerID = f.Source.Unrelated.ID
++			}
++			response, e := post("/api/v1/knowledge-chat/"+sessionBody.Data.ID, map[string]any{"query": f.QueryText, "knowledge_base_ids": []string{f.KBID}, "summary_model_id": answerID, "disable_title": true})
++			require.NoError(t, e)
++			raw, e := io.ReadAll(response.Body)
++			response.Body.Close()
++			require.NoError(t, e)
++			require.NotEmpty(t, response.Header.Get("X-Request-ID"), "real RequestID middleware must produce the handler request identity")
++			require.Equal(t, http.StatusOK, response.StatusCode)
++			require.True(t, authObserved.Load())
++			select {
++			case <-f.ProducerDone:
++			case <-time.After(3 * time.Second):
++				t.Fatal("actual public KnowledgeQA did not return")
++			}
++			select {
++			case <-HTTPreturned:
++			case <-time.After(3 * time.Second):
++				t.Fatal("actual public handler did not return")
++			}
++			var actualMessages []*types.Message
++			require.NoError(t, f.DB.Where("session_id=?", sessionBody.Data.ID).Find(&actualMessages).Error)
++			require.Len(t, actualMessages, 2)
++			var actualUser, assistant *types.Message
++			for _, m := range actualMessages {
++				if m.Role == "user" {
++					actualUser = m
++				}
++				if m.Role == "assistant" {
++					assistant = m
++				}
++			}
++			require.NotNil(t, actualUser)
++			require.NotNil(t, assistant)
++			require.Equal(t, f.QueryText, actualUser.Content)
++			require.NotEmpty(t, actualUser.RequestID)
++			require.Equal(t, actualUser.RequestID, assistant.RequestID)
++			var manifests int64
++			require.NoError(t, f.DB.Table("message_completion_input_manifests m").Joins("JOIN message_material_admissions a ON a.id=m.assistant_admission_id").Where("a.message_id=? AND a.session_id=?", assistant.ID, sessionBody.Data.ID).Count(&manifests).Error)
++			if mode == "configured_summary_public_handler_completion" {
++				select {
++				case <-f.CompletionDone:
++				case <-time.After(3 * time.Second):
++					t.Fatal("actual public handler did not save completion")
++				}
++				select {
++				case e := <-f.CompletionResult:
++					require.NoError(t, e)
++				default:
++					t.Fatal("actual completion result missing")
++				}
++				require.True(t, assistant.IsCompleted)
++				require.Equal(t, "Actual normal original event answer.", assistant.Content)
++				require.NoError(t, assistant.SourceLineage.RequireComplete())
++				require.Len(t, assistant.SourceLineage.Sources, 1)
++				require.Equal(t, f.Source.Knowledge, assistant.SourceLineage.Sources[0].KnowledgeID)
++				require.EqualValues(t, 1, manifests)
++				require.EqualValues(t, 1, calls.Load())
++				require.Equal(t, baseline+1, f.SDKCalls())
++				require.Contains(t, string(raw), "Actual normal original event answer.")
++				require.NotContains(t, string(raw), "generation_failed")
++			} else {
++				require.False(t, assistant.IsCompleted)
++				require.Empty(t, assistant.Content)
++				require.Zero(t, manifests)
++				require.Zero(t, calls.Load())
++				require.Equal(t, baseline+1, f.SDKCalls())
++				if mode == "unrelated_summary_public_handler_denied" {
++					require.True(t, f.NativeObserved(), "actual native consumer must precede Summary selector refusal")
++				}
++				require.NotContains(t, string(raw), "Actual normal original event answer.")
++				require.Contains(t, string(raw), "generation_failed")
++				if mode == "A_grant_after_query_SDK_public_handler_denied" {
++					require.True(t, faultApplied.Load())
++					var a, b int64
++					require.NoError(t, f.DB.Model(&types.NextcloudSourceGrant{}).Where("knowledge_base_id=? AND object_guid=?", f.KBID, guid).Count(&a).Error)
++					require.Zero(t, a)
++					require.NoError(t, f.DB.Model(&types.NextcloudSourceGrant{}).Where("knowledge_base_id=? AND object_guid=?", f.Source.SecondGrantedKB, guid).Count(&b).Error)
++					require.EqualValues(t, 1, b)
++				}
++			}
++			require.NoError(t, f.Error())
++		})
++	}
++}
+diff --git a/internal/application/service/original_service_timing.go b/internal/application/service/original_service_timing.go
+new file mode 100644
+index 000000000..088e976d4
+--- /dev/null
++++ b/internal/application/service/original_service_timing.go
+@@ -0,0 +1,87 @@
++package service
++
++import (
++	"context"
++	"time"
++)
++
++// These fixed inclusive spans observe actual calls. Their nested durations
++// cannot be added to infer a critical path or used as an admission decision.
++type originalServiceTimingPhase uint8
++
++const (
++	originalServiceTimingGetChatBegin originalServiceTimingPhase = iota
++	originalServiceTimingSnapshot
++	originalServiceTimingConstructor
++	originalServiceTimingBindRetain
++	originalServiceTimingGetChatTotal
++	originalServiceTimingSlotBoundaryTotal
++	originalServiceTimingHTTPMaterialCheck
++	originalServiceTimingIdleEligible
++	originalServiceTimingIdleContextInvalid
++	originalServiceTimingIdleTurnUnknown
++	originalServiceTimingIdleSlotAbsent
++	originalServiceTimingIdleSlotState
++	originalServiceTimingIdleGuardMissing
++	originalServiceTimingIdleGuardState
++	originalServiceTimingIdleGuardProofUnknown
++	originalServiceTimingIdleGuardMessageUnknown
++	originalServiceTimingIdleOutputRawUncovered
++	originalServiceTimingCallerHTTPWrite
++	originalServiceTimingCallerHTTPFlush
++	originalServiceTimingCallerHTTPHeader
++	originalServiceTimingCallerHTTPPoll
++	originalServiceTimingCallerInputDirect
++	originalServiceTimingCallerHistoryUnion
++	originalServiceTimingCallerResultsUnion
++	originalServiceTimingCallerModelStamp
++	originalServiceTimingCallerEventDirect
++	originalServiceTimingCallerEventUnion
++	originalServiceTimingCallerStreamUnion
++	originalServiceTimingCallerSnapshot
++	originalServiceTimingCallerAgentHistory
++	originalServiceTimingCallerHistoryOther
++	originalServiceTimingCallerUnknown
++	originalServiceTimingPhaseCount
++)
++
++// Registration exists only in package-local test fixtures. No context,
++// selector, body, SQL, error text or authorization result enters the callback.
++type originalServiceTimingObserver struct {
++	observe func(originalServiceTimingPhase, time.Duration, bool)
++}
++
++type originalServiceTimingSpan struct {
++	observer *originalServiceTimingObserver
++	phase    originalServiceTimingPhase
++	started  time.Time
++}
++
++func startOriginalServiceTiming(ctx context.Context, phase originalServiceTimingPhase) originalServiceTimingSpan {
++	if ctx == nil || phase >= originalServiceTimingPhaseCount {
++		return originalServiceTimingSpan{}
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return originalServiceTimingSpan{}
++	}
++	slot.mu.Lock()
++	observer := slot.timingObserver
++	slot.mu.Unlock()
++	if observer == nil || observer.observe == nil {
++		return originalServiceTimingSpan{}
++	}
++	// The normal/default-off path above performs no clock read.
++	return originalServiceTimingSpan{observer: observer, phase: phase, started: time.Now()}
++}
++
++func (span originalServiceTimingSpan) finish(success bool) {
++	if span.observer == nil {
++		return
++	}
++	duration := time.Since(span.started)
++	// Diagnostic callbacks cannot replace a real return or panic in business
++	// code. No callback runs under the material-slot mutex.
++	defer func() { _ = recover() }()
++	span.observer.observe(span.phase, duration, success)
++}
+diff --git a/internal/application/service/original_service_timing_caller.go b/internal/application/service/original_service_timing_caller.go
+new file mode 100644
+index 000000000..80abd4b98
+--- /dev/null
++++ b/internal/application/service/original_service_timing_caller.go
+@@ -0,0 +1,86 @@
++package service
++
++import (
++	"runtime"
++	"strings"
++)
++
++// Caller attribution observes only the existing full-boundary span. It does
++// not retain or expose stack frames, function names, source paths or PCs. The
++// inclusive total and its single caller bucket overlap and cannot be added.
++const originalServiceTimingCallerFrameLimit = 12
++
++func originalServiceTimingBoundaryCallerSpan(span originalServiceTimingSpan) originalServiceTimingSpan {
++	if span.observer == nil || span.observer.observe == nil {
++		// The default-off path reads neither the stack nor another clock.
++		return originalServiceTimingSpan{}
++	}
++	const service = "github.com/Tencent/WeKnora/internal/application/service."
++	const pipeline = "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline."
++	const types = "github.com/Tencent/WeKnora/internal/types."
++	const handler = "github.com/Tencent/WeKnora/internal/handler/session."
++	var pcs [originalServiceTimingCallerFrameLimit]uintptr
++	count := runtime.Callers(2, pcs[:])
++	frames := runtime.CallersFrames(pcs[:count])
++	rag, lifetime := false, false
++	span.phase = originalServiceTimingCallerUnknown
++	for index := 0; index < originalServiceTimingCallerFrameLimit; index++ {
++		frame, more := frames.Next()
++		switch frame.Function {
++		case handler + "(*nativeSavedReplayWriter).Write":
++			span.phase = originalServiceTimingCallerHTTPWrite
++			return span
++		case handler + "(*nativeSavedReplayWriter).Flush":
++			span.phase = originalServiceTimingCallerHTTPFlush
++			return span
++		case handler + "(*nativeSavedReplayWriter).WriteHeaderNow":
++			span.phase = originalServiceTimingCallerHTTPHeader
++			return span
++		case handler + "(*Handler).handleAgentEventsForSSE":
++			span.phase = originalServiceTimingCallerHTTPPoll
++			return span
++		case service + "messageMaterialBoundarySnapshots":
++			span.phase = originalServiceTimingCallerSnapshot
++			return span
++		case service + "messageLineageHistoryAdmission.CheckAgentHistoryReplay", service + "(*messageLineageHistoryAdmission).CheckAgentHistoryReplay":
++			span.phase = originalServiceTimingCallerAgentHistory
++			return span
++		case types + "CheckHistoryMaterialLifetime":
++			lifetime = true
++		case types + "(*RAGSourceLineage).CheckedSnapshot":
++			rag = true
++		case pipeline + "AccountHistory":
++			span.phase = originalServiceTimingCallerHistoryUnion
++			return span
++		case pipeline + "AccountResults":
++			span.phase = originalServiceTimingCallerResultsUnion
++			return span
++		case pipeline + "stampModelInputLineage":
++			span.phase = originalServiceTimingCallerModelStamp
++			return span
++		case pipeline + "emitSourceLineageEvent":
++			span.phase = originalServiceTimingCallerEventDirect
++			if rag {
++				span.phase = originalServiceTimingCallerEventUnion
++			}
++			return span
++		case pipeline + "CheckSourceLineageInputs":
++			span.phase = originalServiceTimingCallerInputDirect
++			return span
++		default:
++			if rag && strings.HasPrefix(frame.Function, pipeline+"(*PluginChatCompletionStream).OnEvent.") {
++				// The response loop and decoder drain are anonymous closures
++				// under this fixed owner; do not infer a finer callsite.
++				span.phase = originalServiceTimingCallerStreamUnion
++				return span
++			}
++		}
++		if !more {
++			break
++		}
++	}
++	if lifetime {
++		span.phase = originalServiceTimingCallerHistoryOther
++	}
++	return span
++}
+diff --git a/internal/application/service/original_service_timing_caller_test.go b/internal/application/service/original_service_timing_caller_test.go
+new file mode 100644
+index 000000000..19e931da9
+--- /dev/null
++++ b/internal/application/service/original_service_timing_caller_test.go
+@@ -0,0 +1,75 @@
++package service
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++func TestOriginalServiceTimingCallerUsesRealClosedOwnerAndCollector(t *testing.T) {
++	if off := originalServiceTimingBoundaryCallerSpan(originalServiceTimingSpan{}); off.observer != nil || !off.started.IsZero() {
++		t.Fatal("default-off caller attribution created an active span")
++	}
++	ctx, _, _, closeHTTP := BeginMessageMaterialHTTPBoundary(context.Background())
++	slot := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	collector := &originalServiceTimingCollector{}
++	unlocked := true
++	collector.observer = &originalServiceTimingObserver{observe: func(phase originalServiceTimingPhase, duration time.Duration, success bool) {
++		if slot.mu.TryLock() {
++			slot.mu.Unlock()
++		} else {
++			unlocked = false
++		}
++		collector.record(phase, duration, success)
++	}}
++	collector.attach(ctx)
++	defer collector.finish(t, nil, nil)
++	// Use a genuine retired HTTP owner, never an empty success guard or a
++	// fabricated capability. Every route below must retain its real refusal.
++	closeHTTP()
++	lifetime := types.WithHistoryMaterialLifetime(ctx, func() error { return CheckMessageMaterialOutputBoundary(ctx) }, nil)
++	manager := &chatpipeline.EventManager{}
++	bound, err := manager.BeginSourceLineage(lifetime, &types.ChatManage{}, access.LineageReadScope{})
++	if err == nil {
++		t.Fatal("closed original owner was admitted at the real pipeline entry")
++	}
++	if chatpipeline.AccountHistory(bound, nil) == nil || chatpipeline.AccountResults(bound, nil) == nil ||
++		chatpipeline.EmitSourceLineageEvent(bound, nil, types.Event{}) == nil {
++		t.Fatal("caller attribution replaced a real union or event refusal")
++	}
++	if _, err := messageMaterialBoundarySnapshots(ctx); err == nil {
++		t.Fatal("caller attribution replaced a real snapshot refusal")
++	}
++	if types.CheckHistoryMaterialLifetime(bound) == nil || CheckMessageMaterialOutputBoundary(ctx) == nil {
++		t.Fatal("caller attribution replaced a real lifetime or direct refusal")
++	}
++	wanted := map[originalServiceTimingPhase]bool{
++		originalServiceTimingCallerInputDirect:  true,
++		originalServiceTimingCallerHistoryUnion: true,
++		originalServiceTimingCallerResultsUnion: true,
++		originalServiceTimingCallerEventDirect:  true,
++		originalServiceTimingCallerSnapshot:     true,
++		originalServiceTimingCallerHistoryOther: true,
++		originalServiceTimingCallerUnknown:      true,
++	}
++	collector.mu.Lock()
++	buckets := collector.buckets
++	collector.mu.Unlock()
++	if !unlocked || buckets[originalServiceTimingSlotBoundaryTotal].count != uint64(len(wanted)) ||
++		buckets[originalServiceTimingSlotBoundaryTotal].successes != 0 {
++		t.Fatal("overlapping caller observations changed real check counts or ran under the slot mutex")
++	}
++	for phase := originalServiceTimingCallerHTTPWrite; phase < originalServiceTimingPhaseCount; phase++ {
++		count := uint64(0)
++		if wanted[phase] {
++			count = 1
++		}
++		if buckets[phase].count != count || buckets[phase].successes != 0 {
++			t.Fatal("actual closed-owner routes did not produce one fixed caller bucket per full boundary")
++		}
++	}
++}
+diff --git a/internal/application/service/original_service_timing_profile_test.go b/internal/application/service/original_service_timing_profile_test.go
+new file mode 100644
+index 000000000..665ab99b2
+--- /dev/null
++++ b/internal/application/service/original_service_timing_profile_test.go
+@@ -0,0 +1,302 @@
++package service
++
++import (
++	"context"
++	"os"
++	"sync"
++	"testing"
++	"time"
++)
++
++const originalServiceTimingProfileFlag = "WEKNORA_ORIGINAL_SERVICE_TIMING_PROFILE"
++const originalServiceTimingMaxCount uint64 = 1<<32 - 1
++const originalServiceTimingMaxDuration int64 = 1<<63 - 1
++
++var originalServiceTimingPhaseNames = [originalServiceTimingPhaseCount]string{
++	"getchat_begin", "snapshot", "constructor", "bind_retain",
++	"getchat_total", "fullslot_boundary_total",
++	"http_material_check", "idle_eligible", "idle_context_invalid",
++	"idle_turn_unknown", "idle_slot_absent", "idle_slot_state",
++	"idle_guard_missing", "idle_guard_state", "idle_guard_proof_unknown",
++	"idle_guard_message_unknown", "idle_output_raw_uncovered",
++	"boundary_caller_http_write", "boundary_caller_http_flush", "boundary_caller_http_header",
++	"boundary_caller_http_poll", "boundary_caller_input_direct", "boundary_caller_history_union",
++	"boundary_caller_results_union", "boundary_caller_model_stamp", "boundary_caller_event_direct",
++	"boundary_caller_event_union", "boundary_caller_stream_union", "boundary_caller_snapshot",
++	"boundary_caller_agent_history", "boundary_caller_history_other", "boundary_caller_unknown",
++}
++
++type originalServiceTimingAggregate struct {
++	count, successes uint64
++	duration         int64
++	saturated        bool
++}
++
++// Exactly six buckets; no unbounded records or caller-specific keys. Its
++// mutex covers local arithmetic only, never SQL, network calls or joins.
++type originalServiceTimingCollector struct {
++	mu       sync.Mutex
++	buckets  [originalServiceTimingPhaseCount]originalServiceTimingAggregate
++	slot     *messageMaterialOutputSlot
++	observer *originalServiceTimingObserver
++	sealed   bool
++}
++
++func newOriginalServiceTimingCollectorForTest() *originalServiceTimingCollector {
++	if os.Getenv(originalServiceTimingProfileFlag) != "1" {
++		return nil
++	}
++	collector := &originalServiceTimingCollector{}
++	collector.observer = &originalServiceTimingObserver{observe: collector.record}
++	return collector
++}
++
++func (collector *originalServiceTimingCollector) record(phase originalServiceTimingPhase, duration time.Duration, success bool) {
++	if phase >= originalServiceTimingPhaseCount {
++		return
++	}
++	collector.mu.Lock()
++	defer collector.mu.Unlock()
++	if collector.sealed {
++		return
++	}
++	bucket := &collector.buckets[phase]
++	if bucket.count == originalServiceTimingMaxCount {
++		bucket.saturated = true
++		return
++	}
++	bucket.count++
++	if success {
++		bucket.successes++
++	}
++	ns := duration.Nanoseconds()
++	if ns < 0 {
++		ns = 0
++	}
++	if ns > originalServiceTimingMaxDuration-bucket.duration {
++		bucket.duration = originalServiceTimingMaxDuration
++		bucket.saturated = true
++	} else {
++		bucket.duration += ns
++	}
++}
++
++func (collector *originalServiceTimingCollector) attach(ctx context.Context) {
++	collector.attachBeforeInstallForTest(ctx, nil)
++}
++
++// The optional barrier is used only by the deterministic concurrency test.
++// Real fixtures pass nil; the installation and seal share collector -> slot
++// lock order, with no lock gap allowing a late attach to revive registration.
++func (collector *originalServiceTimingCollector) attachBeforeInstallForTest(ctx context.Context, beforeInstall func()) {
++	if collector == nil {
++		return
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok || slot == nil {
++		return
++	}
++	collector.mu.Lock()
++	defer collector.mu.Unlock()
++	if collector.sealed || collector.slot != nil {
++		return
++	}
++	if beforeInstall != nil {
++		beforeInstall()
++	}
++	slot.mu.Lock()
++	if slot.timingObserver == nil {
++		slot.timingObserver = collector.observer
++		collector.slot = slot
++	}
++	slot.mu.Unlock()
++}
++
++func originalServiceTimingChannelJoined(done <-chan struct{}) bool {
++	if done == nil {
++		return false
++	}
++	select {
++	case <-done:
++		return true
++	default:
++		return false
++	}
++}
++
++// This does not wait or manufacture completion. The existing cleanup must
++// first join both genuine channels under its unchanged shared three seconds.
++func (collector *originalServiceTimingCollector) finish(t *testing.T, HTTPreturned, outerDone <-chan struct{}) {
++	if collector == nil {
++		return
++	}
++	collector.mu.Lock()
++	collector.sealed = true
++	buckets, slot := collector.buckets, collector.slot
++	collector.slot = nil
++	if slot != nil {
++		slot.mu.Lock()
++		if slot.timingObserver == collector.observer {
++			slot.timingObserver = nil
++		}
++		slot.mu.Unlock()
++	}
++	collector.mu.Unlock()
++	if !originalServiceTimingChannelJoined(HTTPreturned) || !originalServiceTimingChannelJoined(outerDone) {
++		return
++	}
++	for phase, bucket := range buckets {
++		t.Logf("original_service_timing inclusive_phase=%s count=%d success_count=%d failure_count=%d duration_ns=%d saturated=%t",
++			originalServiceTimingPhaseNames[phase], bucket.count, bucket.successes,
++			bucket.count-bucket.successes, bucket.duration, bucket.saturated)
++	}
++}
++
++func TestOriginalServiceTimingCallbackCannotReplaceRealResult(t *testing.T) {
++	observer := &originalServiceTimingObserver{observe: func(originalServiceTimingPhase, time.Duration, bool) { panic("diagnostic callback") }}
++	span := originalServiceTimingSpan{observer: observer, phase: originalServiceTimingSnapshot, started: time.Now()}
++	span.finish(false)
++	// Reaching here proves the observer panic did not escape into its caller.
++}
++
++func TestOriginalServiceTimingCollectorConcurrentBoundedAggregate(t *testing.T) {
++	collector := &originalServiceTimingCollector{}
++	var workers sync.WaitGroup
++	for phase := originalServiceTimingPhase(0); phase < originalServiceTimingPhaseCount; phase++ {
++		workers.Add(1)
++		go func(phase originalServiceTimingPhase) {
++			defer workers.Done()
++			for i := 0; i < 100; i++ {
++				collector.record(phase, time.Nanosecond, i%2 == 0)
++			}
++		}(phase)
++	}
++	workers.Wait()
++	for _, bucket := range collector.buckets {
++		if bucket.count != 100 || bucket.successes != 50 || bucket.duration != 100 || bucket.saturated {
++			t.Fatal("fixed aggregate did not preserve concurrent numeric observations")
++		}
++	}
++	collector.buckets[0] = originalServiceTimingAggregate{count: originalServiceTimingMaxCount, duration: originalServiceTimingMaxDuration}
++	collector.record(0, time.Nanosecond, true)
++	if !collector.buckets[0].saturated || collector.buckets[0].count != originalServiceTimingMaxCount {
++		t.Fatal("fixed aggregate count exceeded its bound")
++	}
++}
++
++func TestOriginalServiceTimingDefaultOffAndBoundaryCallbackAfterUnlock(t *testing.T) {
++	t.Setenv(originalServiceTimingProfileFlag, "")
++	if newOriginalServiceTimingCollectorForTest() != nil {
++		t.Fatal("default-off profile allocated a collector")
++	}
++	slot := &messageMaterialOutputSlot{}
++	ctx := context.WithValue(context.Background(), messageMaterialOutputKey{}, slot)
++	if span := startOriginalServiceTiming(ctx, originalServiceTimingSnapshot); span.observer != nil || !span.started.IsZero() {
++		t.Fatal("default-off span performed a clock read")
++	}
++	var callbackCalled, mutexReleased, succeeded bool
++	slot.timingObserver = &originalServiceTimingObserver{observe: func(phase originalServiceTimingPhase, duration time.Duration, success bool) {
++		callbackCalled = phase == originalServiceTimingSlotBoundaryTotal
++		succeeded = success
++		mutexReleased = slot.mu.TryLock()
++		if mutexReleased {
++			slot.mu.Unlock()
++		}
++	}}
++	if err := CheckMessageMaterialOutputBoundary(ctx); err != nil || !callbackCalled || !mutexReleased || !succeeded {
++		t.Fatal("boundary profile changed the return or ran under the slot mutex")
++	}
++	slot.Closed = true
++	callbackCalled, succeeded = false, true
++	if err := CheckMessageMaterialOutputBoundary(ctx); err == nil || !callbackCalled || succeeded {
++		t.Fatal("boundary refusal was replaced or recorded as successful")
++	}
++}
++
++func TestOriginalServiceTimingAttachAndFinishCannotReviveSealedObserver(t *testing.T) {
++	slot := &messageMaterialOutputSlot{}
++	ctx := context.WithValue(context.Background(), messageMaterialOutputKey{}, slot)
++	collector := &originalServiceTimingCollector{}
++	collector.observer = &originalServiceTimingObserver{observe: collector.record}
++	beforeInstall, releaseInstall := make(chan struct{}), make(chan struct{})
++	attachDone, finishDone := make(chan struct{}), make(chan struct{})
++	var releaseOnce sync.Once
++	release := func() { releaseOnce.Do(func() { close(releaseInstall) }) }
++	defer release()
++	go func() {
++		defer close(attachDone)
++		collector.attachBeforeInstallForTest(ctx, func() {
++			close(beforeInstall)
++			<-releaseInstall
++		})
++	}()
++	select {
++	case <-beforeInstall:
++	case <-time.After(time.Second):
++		t.Fatal("attach did not reach the deterministic installation barrier")
++	}
++	// This assertion directly detects the old unlock-before-install gap,
++	// independent of how the finishing goroutine is scheduled.
++	if collector.mu.TryLock() {
++		collector.mu.Unlock()
++		t.Error("attach released collector ownership before observer installation")
++	}
++	finishEntered := make(chan struct{})
++	go func() {
++		defer close(finishDone)
++		close(finishEntered)
++		// Nil real-lifetime signals suppress output; finish still seals and
++		// unregisters, as it does after a failed/early cleanup.
++		collector.finish(t, nil, nil)
++	}()
++	<-finishEntered
++	release()
++	for _, joined := range []<-chan struct{}{attachDone, finishDone} {
++		select {
++		case <-joined:
++		case <-time.After(time.Second):
++			t.Fatal("attach and finish did not join")
++		}
++	}
++	collector.mu.Lock()
++	sealed, retainedSlot := collector.sealed, collector.slot
++	collector.mu.Unlock()
++	slot.mu.Lock()
++	observer := slot.timingObserver
++	slot.mu.Unlock()
++	if !sealed || retainedSlot != nil || observer != nil {
++		t.Fatal("concurrent finish left or revived a sealed observer registration")
++	}
++	// A later actual HTTP start must remain inert after finish won the seal.
++	collector.attach(ctx)
++	slot.mu.Lock()
++	observer = slot.timingObserver
++	slot.mu.Unlock()
++	if observer != nil {
++		t.Fatal("late attach revived the sealed observer")
++	}
++}
++
++func TestOriginalServiceTimingHTTPInitializationAndIdleUseActualCollector(t *testing.T) {
++	ctx, _, check, closeHTTP := BeginMessageMaterialHTTPBoundary(context.Background())
++	defer closeHTTP()
++	collector := &originalServiceTimingCollector{}
++	collector.observer = &originalServiceTimingObserver{observe: collector.record}
++	collector.attach(ctx)
++	defer collector.finish(t, nil, nil)
++	// No original has been admitted. Exercise the real initializing refusal,
++	// rather than fabricating a successful guard/Caller/private capability.
++	if check() != ErrMessageMaterialHTTPInitializing {
++		t.Fatal("diagnostic changed the actual initializing HTTP refusal")
++	}
++	if MessageMaterialIdleRecheckEligible(ctx) {
++		t.Fatal("diagnostic admitted an uninitialized real HTTP owner")
++	}
++	collector.mu.Lock()
++	http, idle := collector.buckets[originalServiceTimingHTTPMaterialCheck], collector.buckets[originalServiceTimingIdleSlotState]
++	full := collector.buckets[originalServiceTimingSlotBoundaryTotal]
++	collector.mu.Unlock()
++	if http.count != 1 || http.successes != 0 || idle.count != 1 || idle.successes != 0 || full.count != 0 {
++		t.Fatal("actual initializing HTTP scope was not distinguished from a full boundary check")
++	}
++}
+diff --git a/internal/handler/session/controlled_normal_stop_test.go b/internal/handler/session/controlled_normal_stop_test.go
+new file mode 100644
+index 000000000..3bd660682
+--- /dev/null
++++ b/internal/handler/session/controlled_normal_stop_test.go
+@@ -0,0 +1,137 @@
++package session
++
++import (
++	"context"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/logger"
++	"github.com/Tencent/WeKnora/internal/stream"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/stretchr/testify/require"
++)
++
++type controlledNormalStopMessages struct {
++	interfaces.MessageService
++	updates atomic.Int64
++	saved   *types.Message
++	tenant  uint64
++	err     error
++}
++
++func (m *controlledNormalStopMessages) UpdateMessage(ctx context.Context, message *types.Message) error {
++	m.updates.Add(1)
++	if m.err != nil {
++		return m.err
++	}
++	copy := *message
++	m.saved = &copy
++	m.tenant = types.MustTenantIDFromContext(ctx)
++	return nil
++}
++
++// Lifecycle policy removes persistence. These unit observers never supply an
++// original guard or claim real caller/model/typed-completion authorization.
++func TestControlledNormalStopCancelsWithoutCertifyingMessage(t *testing.T) {
++	messages := &controlledNormalStopMessages{}
++	h := &Handler{messageService: messages}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "actual-stop-row", SessionID: "actual-stop-session", RequestID: "actual-stop-request", Role: "assistant", Content: "in-memory uncommitted output"}
++	before := *message
++	ctx, cancel := context.WithCancel(context.Background())
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, cancel, true)
++	for i := 0; i < 2; i++ {
++		require.NoError(t, bus.Emit(context.Background(), event.Event{Type: event.EventStop, SessionID: message.SessionID,
++			Data: event.StopData{SessionID: message.SessionID, MessageID: message.ID, Reason: "user_requested"}}))
++	}
++	require.ErrorIs(t, ctx.Err(), context.Canceled)
++	require.Zero(t, messages.updates.Load())
++	require.Nil(t, messages.saved)
++	require.Equal(t, before, *message, "Stop must not mutate even in-memory completion/content/source fields")
++}
++
++func TestLegacyStopExplicitlyRetainsOriginalPersistence(t *testing.T) {
++	messages := &controlledNormalStopMessages{}
++	h := &Handler{messageService: messages}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "legacy-row", SessionID: "legacy-session", Role: "assistant", Content: "legacy already streamed output"}
++	ctx, cancel := context.WithCancel(types.WithExecutionTenant(context.Background(), 99))
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, cancel, false)
++	require.NoError(t, bus.Emit(ctx, event.Event{Type: event.EventStop, SessionID: message.SessionID}))
++	require.ErrorIs(t, ctx.Err(), context.Canceled)
++	require.EqualValues(t, 1, messages.updates.Load())
++	require.NotNil(t, messages.saved)
++	require.True(t, messages.saved.IsCompleted)
++	require.Equal(t, "legacy already streamed output", messages.saved.Content)
++	require.EqualValues(t, 7, messages.tenant, "legacy save keeps the actual session tenant, not the effective event tenant")
++}
++
++type stopWatcherPrivateContextKey struct{}
++
++func TestControlledNormalStopWatcherCloneKeepsOnlyCancelPolicy(t *testing.T) {
++	mini := miniredis.RunT(t)
++	manager, err := stream.NewRedisStreamManager(mini.Addr(), "", "", 0, "actual-stop-policy-watcher", time.Minute)
++	require.NoError(t, err)
++	messages := &controlledNormalStopMessages{}
++	h := &Handler{messageService: messages, streamManager: manager}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "watcher-row", SessionID: "watcher-session", Role: "assistant"}
++	before := *message
++	generation, stopGeneration := context.WithCancel(context.Background())
++	defer stopGeneration()
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, stopGeneration, true)
++	original := context.WithValue(types.WithExecutionTenant(context.Background(), 7), stopWatcherPrivateContextKey{}, "not a grant")
++	cloned := logger.CloneContext(original)
++	require.Nil(t, cloned.Value(stopWatcherPrivateContextKey{}), "the actual detached clone does not carry arbitrary private context")
++	watchCtx, stopWatch := context.WithCancel(cloned)
++	done := h.startStopWatcher(watchCtx, message.SessionID, message.ID, bus)
++	defer func() {
++		stopWatch()
++		select {
++		case <-done:
++		case <-time.After(3 * time.Second):
++			t.Error("actual stop watcher did not join before Redis cleanup")
++		}
++		require.NoError(t, manager.Close())
++	}()
++	require.NoError(t, manager.AppendEvent(context.Background(), message.SessionID, message.ID, interfaces.StreamEvent{
++		Type: types.ResponseType(event.EventStop), Done: true,
++		Data: map[string]interface{}{"session_id": message.SessionID, "message_id": message.ID, "reason": "user_requested"},
++	}))
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("actual Redis stop event did not reach and join the detached watcher")
++	}
++	require.ErrorIs(t, generation.Err(), context.Canceled)
++	require.Zero(t, messages.updates.Load())
++	require.Nil(t, messages.saved)
++	require.Equal(t, before, *message)
++}
++
++// This checks the existing persist-before-notify ordering on a queued Done
++// after Stop, not a substitute for the actual original handler's typed tests.
++func TestControlledStopQueuedDoneRefusalDoesNotPublishCompletion(t *testing.T) {
++	messages := &controlledNormalStopMessages{err: access.ErrNextcloudPublicationUnavailable}
++	stream := &imageCompletionStream{}
++	h := &Handler{messageService: messages, streamManager: stream}
++	bus := event.NewEventBus()
++	message := &types.Message{ID: "queued-row", SessionID: "queued-session", Role: "assistant", Content: "uncertified queued output"}
++	ctx, cancel := context.WithCancel(types.WithExecutionTenant(context.Background(), 7))
++	h.setupStopEventHandler(bus, message.SessionID, 7, message, cancel, true)
++	streamHandler := h.setupStreamHandler(ctx, message.SessionID, message.ID, "queued-request", 7, time.Now(), message, bus)
++	require.NoError(t, bus.Emit(context.Background(), event.Event{Type: event.EventStop, SessionID: message.SessionID}))
++	require.Zero(t, messages.updates.Load())
++	require.False(t, message.IsCompleted)
++	h.completeQuickAnswerTurn(ctx, &sseStreamContext{eventBus: bus, streamHandler: streamHandler, assistantMessage: message}, "", "")
++	require.EqualValues(t, 1, messages.updates.Load(), "a queued real-Done path still reaches the existing refusing persistence boundary")
++	require.Nil(t, messages.saved)
++	for _, e := range stream.events {
++		require.NotEqual(t, types.ResponseTypeComplete, e.Type, "a rejected save must not notify successful completion")
++	}
++}
+diff --git a/internal/handler/session/helpers.go b/internal/handler/session/helpers.go
+index 3b845054d..8b51585b1 100644
+--- a/internal/handler/session/helpers.go
++++ b/internal/handler/session/helpers.go
+@@ -330,10 +330,17 @@ func (h *Handler) setupStopEventHandler(
+ 	sessionTenantID uint64,
+ 	assistantMessage *types.Message,
+ 	cancel context.CancelFunc,
++	cancelOnly bool,
+ ) {
+ 	eventBus.On(event.EventStop, func(ctx context.Context, evt event.Event) error {
+ 		logger.Infof(ctx, "Received stop event, cancelling async operations for session: %s", sessionID)
+ 		cancel()
++		// The policy is captured from the actual server-owned stream setup,
++		// not the stop event's cloned context. A cancellation cannot certify
++		// an original assistant body or manufacture its missing query inputs.
++		if cancelOnly {
++			return nil
++		}
+ 		// Preserve whatever has been streamed so far; do not overwrite Content.
+ 		// Use session's tenant for message update (ctx may have effectiveTenantID when using shared agent).
+ 		// Use WithoutCancel so the GORM UPDATE survives the upcoming ctx.Done triggered by cancel()/client disconnect.
+@@ -374,8 +381,10 @@ func (h *Handler) startStopWatcher(
+ 	ctx context.Context,
+ 	sessionID, assistantMessageID string,
+ 	eventBus *event.EventBus,
+-) {
++) <-chan struct{} {
++	done := make(chan struct{})
+ 	go func() {
++		defer close(done)
+ 		watchCtx, cancel := context.WithTimeout(ctx, stopWatcherMaxDuration)
+ 		defer cancel()
+ 
+@@ -421,6 +430,7 @@ func (h *Handler) startStopWatcher(
+ 			}
+ 		}
+ 	}()
++	return done
+ }
+ 
+ // writeAgentQueryEvent writes an agent query event to the stream manager
+diff --git a/internal/handler/session/live_material_raw_control_test.go b/internal/handler/session/live_material_raw_control_test.go
+new file mode 100644
+index 000000000..d3ddf9f4f
+--- /dev/null
++++ b/internal/handler/session/live_material_raw_control_test.go
+@@ -0,0 +1,49 @@
++package session
++
++import (
++	"context"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLiveMaterialRawControlIsScopedToActualFrameWrites(t *testing.T) {
++	c, recorder := newTestGinContext(t, "")
++	phase := &liveMaterialWritePhase{}
++	ctx := context.WithValue(context.Background(), liveMaterialWritePhaseKey{}, phase)
++	observed := []bool{}
++	c.Writer = &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: func() error {
++		observed = append(observed, phase.RawControl)
++		return nil
++	}}
++	emitLiveMaterialStreamEvent(ctx, c, interfaces.StreamEvent{Type: types.ResponseTypeAgentQuery, Content: "actual raw control"}, "actual-request", nil)
++	require.NotEmpty(t, observed)
++	for _, raw := range observed {
++		require.True(t, raw, "the raw frame must be classified at each actual native writer checkpoint")
++	}
++	require.False(t, phase.RawControl, "an already serialized control cannot suppress later empty-poll scheduling")
++	observed = nil
++	emitLiveMaterialStreamEvent(ctx, c, interfaces.StreamEvent{Type: types.ResponseTypeAnswer, Content: "source-bearing answer frame"}, "actual-request", nil)
++	require.NotEmpty(t, observed)
++	for _, raw := range observed {
++		require.False(t, raw, "the following answer cannot inherit a raw bypass")
++	}
++	require.False(t, phase.RawControl)
++	require.Contains(t, recorder.Body.String(), "source-bearing answer frame")
++}
++
++func TestLiveMaterialRawControlClearsWhenActualWriterPanics(t *testing.T) {
++	c, _ := newTestGinContext(t, "")
++	phase := &liveMaterialWritePhase{}
++	ctx := context.WithValue(context.Background(), liveMaterialWritePhaseKey{}, phase)
++	c.Writer = &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: func() error {
++		require.True(t, phase.RawControl)
++		panic("actual writer checkpoint panic")
++	}}
++	require.Panics(t, func() {
++		emitLiveMaterialStreamEvent(ctx, c, interfaces.StreamEvent{Type: types.ResponseTypeAgentQuery}, "actual-request", nil)
++	})
++	require.False(t, phase.RawControl)
++}
+diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
+index 0865fd80c..1cefcef1b 100644
+--- a/internal/handler/session/qa.go
++++ b/internal/handler/session/qa.go
+@@ -848,7 +848,11 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool, m
+ 	)
+ 
+ 	// Setup stop event handler
+-	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel)
++	// Only this server-selected normal mode with a genuine HTTP material
++	// owner uses cancel-only Stop. This removes a completion attempt; it
++	// supplies no read, query, model, lease or completed-output authority.
++	cancelOnlyStop := mode == qaModeNormal && materialClose != nil
++	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel, cancelOnlyStop)
+ 
+ 	// Watch for stop events independently of the client SSE connection so a
+ 	// user-requested stop reliably cancels generation even when the client
+@@ -1412,7 +1416,10 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
+ 				completionHandled = true
+ 
+ 				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
+-				updateCtx := context.WithValue(streamCtx.asyncCtx, types.TenantIDContextKey, reqCtx.session.TenantID)
++				// The owned producer's emitted context retains its actual query and
++				// configured-answer purpose. The pre-search async context cannot
++				// reconstruct those private held inputs at completion.
++				updateCtx := context.WithValue(ctx, types.TenantIDContextKey, reqCtx.session.TenantID)
+ 				h.completeQuickAnswerTurn(updateCtx, streamCtx, reqCtx.query, reqCtx.userMessageID)
+ 			}
+ 			return nil
+@@ -1427,6 +1434,16 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
+ 	livePublicationMessage.KnowledgeReferences = nil
+ 	asyncDone := make(chan struct{})
+ 	streamCtx.producerDone = asyncDone
++	// A read-only lifecycle observer receives the existing enclosing worker's
++	// completion before launch. Its close remains after the actual producer
++	// release below; it supplies no material or authorization capability.
++	if streamCtx.materialClose != nil {
++		if observer, ok := h.messageService.(interface {
++			ObserveOriginalMessageMaterialProducer(context.Context, <-chan struct{})
++		}); ok {
++			observer.ObserveOriginalMessageMaterialProducer(streamCtx.asyncCtx, asyncDone)
++		}
++	}
+ 	releaseMaterialProducer := applicationservice.RetainMessageMaterialHTTPProducer(streamCtx.asyncCtx)
+ 	go func() {
+ 		defer close(asyncDone)
+diff --git a/internal/handler/session/resource_urls.go b/internal/handler/session/resource_urls.go
+index 9fe099f1d..4f57409dc 100644
+--- a/internal/handler/session/resource_urls.go
++++ b/internal/handler/session/resource_urls.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/storageurl"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-contrib/sse"
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+@@ -121,7 +122,7 @@ func emitStreamEvent(
+ 	if terminalResponseTypes[evt.Type] {
+ 		flushHeldStreamContent(ctx, c, requestID, rewriter)
+ 	}
+-	c.SSEvent("message", response)
++	c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: response}})
+ 	c.Writer.Flush()
+ }
+ 
+@@ -147,12 +148,12 @@ func flushHeldStreamContent(
+ 		}
+ 		responseType, eventID := parseHoldbackKey(key)
+ 		logger.Debugf(ctx, "Flushing held stream fragment, type: %s, event: %s", responseType, eventID)
+-		c.SSEvent("message", &types.StreamResponse{
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: &types.StreamResponse{
+ 			ID:           requestID,
+ 			ResponseType: responseType,
+ 			Content:      fragment.Content,
+ 			Data:         heldFragmentData(fragment.Meta, eventID),
+-		})
++		}}})
+ 		c.Writer.Flush()
+ 	}
+ }
+diff --git a/internal/handler/session/single_sse_frame.go b/internal/handler/session/single_sse_frame.go
+new file mode 100644
+index 000000000..47d751f8d
+--- /dev/null
++++ b/internal/handler/session/single_sse_frame.go
+@@ -0,0 +1,34 @@
++package session
++
++import (
++	"bytes"
++	"io"
++	"net/http"
++
++	"github.com/gin-contrib/sse"
++)
++
++// singleSSEFrame preserves the pinned Gin SSE codec and headers. Only one
++// logical event is serialized locally, then the actual guarded response writer
++// receives one Write. Its current check and the caller's Flush check remain.
++// No event is queued/merged, no authorization result is cached or reused.
++type singleSSEFrame struct {
++	event sse.Event
++}
++
++func (frame singleSSEFrame) WriteContentType(writer http.ResponseWriter) {
++	frame.event.WriteContentType(writer)
++}
++
++func (frame singleSSEFrame) Render(writer http.ResponseWriter) error {
++	frame.WriteContentType(writer)
++	var body bytes.Buffer
++	if err := sse.Encode(&body, frame.event); err != nil {
++		return err
++	}
++	n, err := writer.Write(body.Bytes())
++	if err == nil && n != body.Len() {
++		return io.ErrShortWrite
++	}
++	return err
++}
+diff --git a/internal/handler/session/single_sse_frame_test.go b/internal/handler/session/single_sse_frame_test.go
+new file mode 100644
+index 000000000..bfb0c91b3
+--- /dev/null
++++ b/internal/handler/session/single_sse_frame_test.go
+@@ -0,0 +1,169 @@
++package session
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/gin-contrib/sse"
++	"github.com/gin-gonic/gin"
++)
++
++type singleSSETransportForTest struct {
++	header                  http.Header
++	status, writes, flushes int
++	body                    bytes.Buffer
++	partial                 bool
++	writeErr                error
++	afterWrite              func()
++}
++
++func (writer *singleSSETransportForTest) Header() http.Header  { return writer.header }
++func (writer *singleSSETransportForTest) WriteHeader(code int) { writer.status = code }
++func (writer *singleSSETransportForTest) Write(body []byte) (int, error) {
++	writer.writes++
++	count := len(body)
++	if writer.partial && count > 7 {
++		count = 7
++	}
++	_, _ = writer.body.Write(body[:count])
++	if writer.afterWrite != nil {
++		writer.afterWrite()
++	}
++	return count, writer.writeErr
++}
++func (writer *singleSSETransportForTest) Flush() { writer.flushes++ }
++
++func singleSSEActualGinContextForTest(t *testing.T, ctx context.Context, transport *singleSSETransportForTest, check func() error) (*gin.Context, *nativeSavedReplayWriter) {
++	t.Helper()
++	transport.header = make(http.Header)
++	c, _ := gin.CreateTestContext(transport)
++	c.Request = httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(ctx)
++	writer := &nativeSavedReplayWriter{ResponseWriter: c.Writer, ctx: ctx, check: check}
++	c.Writer = writer
++	return c, writer
++}
++
++func TestLiveSSESingleFrameMatchesPinnedGinWireAndChecksEachIO(t *testing.T) {
++	for _, data := range []any{
++		&types.StreamResponse{ID: "fixed-case", ResponseType: types.ResponseTypeAnswer, Content: "line1\nline2 <>& 中文", Data: map[string]any{"done": true}},
++		map[string]any{"text": "line1\nline2", "nested": []any{"value", true}},
++		"text\nnext\rline",
++		[]byte("bytes\nnext\rline"),
++	} {
++		baseline, recorder := newTestGinContext(t, "")
++		baseline.Header("Cache-Control", "private")
++		baseline.SSEvent("message", data)
++		baseline.Writer.Flush()
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, _ := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++		c.Header("Cache-Control", "private")
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: data}})
++		c.Writer.Flush()
++		if !bytes.Equal(transport.body.Bytes(), recorder.Body.Bytes()) || c.Writer.Status() != baseline.Writer.Status() ||
++			transport.header.Get("Content-Type") != recorder.Header().Get("Content-Type") || transport.header.Get("Cache-Control") != "private" {
++			t.Fatal("single frame changed pinned Gin wire bytes, status or headers")
++		}
++		if transport.writes != 1 || transport.flushes != 1 || checks != 2 || len(c.Errors) != 0 || c.IsAborted() {
++			t.Fatal("one serialized event did not preserve a fresh current check per actual Write and Flush")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameRefusalBeforeWriteAndBetweenFrames(t *testing.T) {
++	for _, denyFirst := range []bool{true, false} {
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, writer := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error {
++			checks++
++			if denyFirst || checks == 2 {
++				return access.ErrNextcloudPublicationDenied
++			}
++			return nil
++		})
++		frame := singleSSEFrame{event: sse.Event{Event: "message", Data: "fixed answer"}}
++		c.Render(-1, frame)
++		c.Writer.Flush()
++		if writer.denied == nil || transport.flushes != 0 {
++			t.Fatal("actual refusal did not suppress a denied Write or Flush")
++		}
++		if denyFirst && (transport.writes != 0 || transport.body.Len() != 0 || !c.IsAborted() || len(c.Errors) == 0) {
++			t.Fatal("pre-write refusal released event bytes or lost Gin error/Abort")
++		}
++		if !denyFirst && (transport.writes != 1 || transport.body.Len() == 0 || checks != 2) {
++			t.Fatal("current authority was reused for Flush instead of checked again")
++		}
++		before := append([]byte(nil), transport.body.Bytes()...)
++		c.Render(-1, frame)
++		c.Writer.Flush()
++		if !bytes.Equal(before, transport.body.Bytes()) || transport.writes > 1 || transport.flushes != 0 {
++			t.Fatal("sticky refusal was bypassed by a future event")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameCancellationSuppressesSubsequentIO(t *testing.T) {
++	for _, cancelDuringWrite := range []bool{false, true} {
++		ctx, cancel := context.WithCancel(context.Background())
++		transport := &singleSSETransportForTest{}
++		checks := 0
++		c, writer := singleSSEActualGinContextForTest(t, ctx, transport, func() error { checks++; return nil })
++		if cancelDuringWrite {
++			transport.afterWrite = cancel
++		} else {
++			cancel()
++		}
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: "fixed answer"}})
++		c.Writer.Flush()
++		cancel()
++		if !errors.Is(writer.denied, context.Canceled) || transport.flushes != 0 {
++			t.Fatal("actual cancellation was dropped before subsequent IO")
++		}
++		if cancelDuringWrite && (transport.writes != 1 || checks != 1) || !cancelDuringWrite && (transport.writes != 0 || checks != 0 || transport.body.Len() != 0) {
++			t.Fatal("canceled frame reached extra IO or reused a prior check")
++		}
++	}
++}
++
++func TestLiveSSESingleFramePartialWritesReportWithoutRetry(t *testing.T) {
++	failure := errors.New("fixed transport failure")
++	for _, writeErr := range []error{nil, failure} {
++		transport := &singleSSETransportForTest{partial: true, writeErr: writeErr}
++		checks := 0
++		c, _ := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++		c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: "fixed answer"}})
++		c.Writer.Flush()
++		wanted := writeErr
++		if wanted == nil {
++			wanted = io.ErrShortWrite
++		}
++		if transport.writes != 1 || transport.body.Len() != 7 || checks != 2 || len(c.Errors) != 1 || !errors.Is(c.Errors[0].Err, wanted) || !c.IsAborted() {
++			t.Fatal("partial actual IO retried bytes or lost Gin error/Abort semantics")
++		}
++	}
++}
++
++func TestLiveSSESingleFrameSerializationErrorPreservesGinAbort(t *testing.T) {
++	data := map[string]any{"unsupported": make(chan int)}
++	var encoded bytes.Buffer
++	var unsupported *json.UnsupportedTypeError
++	if err := sse.Encode(&encoded, sse.Event{Event: "message", Data: data}); !errors.As(err, &unsupported) {
++		t.Fatal("serialization error fixture did not reach the pinned codec JSON unsupported-type path")
++	}
++	transport := &singleSSETransportForTest{}
++	checks := 0
++	c, _ := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
++	c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: data}})
++	c.Writer.Flush()
++	if transport.writes != 0 || transport.body.Len() != 0 || transport.flushes != 1 || checks != 1 || len(c.Errors) != 1 || !c.IsAborted() {
++		t.Fatal("encoding failure emitted a partial event or lost existing Render/Flush semantics")
++	}
++}
+diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
+index ebd97716a..5a6680530 100644
+--- a/internal/handler/session/stream.go
++++ b/internal/handler/session/stream.go
+@@ -676,10 +676,7 @@ func (h *Handler) handleAgentEventsForSSE(
+ 					return
+ 				}
+ 
+-				if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok {
+-					phase.RawControl = evt.Type == types.ResponseTypeAgentQuery || evt.Type == types.ResponseType(event.EventStop)
+-				}
+-				emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
++				emitLiveMaterialStreamEvent(ctx, c, evt, requestID, resourceRewriter)
+ 				if writer, ok := c.Writer.(*nativeSavedReplayWriter); ok && writer.denied != nil {
+ 					emitSafeTerminalGenerationError(c, requestID)
+ 					return
+@@ -747,6 +744,17 @@ func (h *Handler) handleAgentEventsForSSE(
+ 	}
+ }
+ 
++// RawControl describes only the frame currently being serialized. Its prior
++// value cannot turn a later source-bearing frame into a raw control, or keep
++// an already emitted control attached to a future empty poll.
++func emitLiveMaterialStreamEvent(ctx context.Context, c *gin.Context, evt interfaces.StreamEvent, requestID string, rewriter *storageurl.StreamRewriter) {
++	if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok {
++		phase.RawControl = evt.Type == types.ResponseTypeAgentQuery || evt.Type == types.ResponseType(event.EventStop)
++		defer func() { phase.RawControl = false }()
++	}
++	emitStreamEvent(ctx, c, evt, requestID, rewriter)
++}
++
+ type livePublicationVerifier interface {
+ 	CheckLiveMessagePublication(context.Context, *types.Message) error
+ }

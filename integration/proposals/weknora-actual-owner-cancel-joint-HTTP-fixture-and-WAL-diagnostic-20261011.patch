@@ -1,0 +1,294 @@
+diff --git a/internal/application/service/knowledge_embedding_consumer_owner_sql_http_actual_test.go b/internal/application/service/knowledge_embedding_consumer_owner_sql_http_actual_test.go
+index f39fe3ef2a7adbe7338cc876b1721419ce7aa53a..c73ad6e92902b207a7b4aa2ec67e950db6d8e6c1 100644
+--- a/internal/application/service/knowledge_embedding_consumer_owner_sql_http_actual_test.go
++++ b/internal/application/service/knowledge_embedding_consumer_owner_sql_http_actual_test.go
+@@ -149,7 +149,24 @@ func TestKnowledgeEmbeddingConsumerOwnerActualHTTP(t *testing.T) {
+ 				require.Nil(t, actual.ReleasedAtMS)
+ 			}
+ 			if mode == "owner_cancellation_refuses_output" {
++				// Cancel the actual boundary owner, not the transport/producer. Its held
++				// context inherits cancellation through AfterFunc, so observe that real
++				// propagation before checking output. The wait keeps the original deadline.
++				slot.mu.Lock()
++				actualOwner := slot.OwnerContext
++				slot.mu.Unlock()
++				require.True(t, actualOwner == owner)
++				deadline, ok := owner.Deadline()
++				require.True(t, ok)
++				await, stopAwait := context.WithDeadline(context.WithoutCancel(owner), deadline)
++				defer stopAwait()
+ 				cancelOwner()
++				select {
++				case <-resource.read.Context().Done():
++					require.ErrorIs(t, resource.read.Context().Err(), context.Canceled)
++				case <-await.Done():
++					t.Fatal("actual reader did not observe owner cancellation within its original deadline")
++				}
+ 				require.Error(t, check())
+ 			}
+ 			if mode == "current_actor_refuses_output" {
+diff --git a/internal/application/service/normal_model_original_http_fixture_test.go b/internal/application/service/normal_model_original_http_fixture_test.go
+index 109c24e30d28b53fcfd3f8259a9efa9bca11fcf2..914ebe2e51bfe1db3c63184479d949514194f65e 100644
+--- a/internal/application/service/normal_model_original_http_fixture_test.go
++++ b/internal/application/service/normal_model_original_http_fixture_test.go
+@@ -6,11 +6,9 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/models/chat"
+ 	"github.com/Tencent/WeKnora/internal/models/embedding"
+-	"github.com/Tencent/WeKnora/internal/types"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	"github.com/stretchr/testify/require"
+ 	"gorm.io/gorm"
+-	"os"
+ 	"sync"
+ 	"testing"
+ 	"time"
+@@ -18,7 +16,8 @@ import (
+ 
+ // Retrieval retains its existing bounded embedding transport. The final model
+ // uses genuine authoring, actor authorization, body holds and the actual HTTP
+-// SDK constructor. This component fixture is not full migration/app acceptance.
++// SDK constructor after production full joint migrations. This remains model
++// HTTP component coverage, not full application/ingest acceptance.
+ type normalOriginalModelsForTest struct {
+ 	interfaces.ModelService
+ 	observer *normalModelLifetimeDiagnosticForTest
+@@ -91,15 +90,12 @@ func NewNormalOriginalModelHTTPFixtureForTest(t *testing.T, pg bool, endpoint st
+ 	observer := &normalModelLifetimeDiagnosticForTest{}
+ 	fixture := newNormalReferencesHTTPFixtureForTest(t, pg, nil, func(m *machinePipelineFixture, migration *gorm.DB) interfaces.ModelService {
+ 		db := m.f.db
+-		require.NoError(t, db.AutoMigrate(&types.MemorySubject{}, &types.MemoryItem{}, &types.MemoryTombstone{}, &types.MemoryTopicStat{}, &types.MemoryDocAffinity{}, &types.MemoryItemEmbedding{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.PermissionVersion{}))
+-		require.NoError(t, db.Migrator().CreateTable(&memAtomicLegacyExtraction{}))
+-		dir, name := "sqlite", "000075_memory_original_admissions.up.sql"
+-		if pg {
+-			dir, name = "versioned", "000156_memory_original_admissions.up.sql"
+-		}
+-		ddl, err := os.ReadFile("../../../migrations/pending/memory_original_admissions/" + dir + "/" + name)
+-		require.NoError(t, err)
+-		require.NoError(t, migration.Exec(string(ddl)).Error)
++        // The joint constructor ran the production full87/168 migrations before
++        // authoring data. A current sessions.nextcloud_scoped marker must not be
++        // mixed with the old partial schema or a fabricated maintenance proof.
++        var schema struct{Version uint;Dirty bool}
++        require.NoError(t,db.Table("schema_migrations").Take(&schema).Error);want:=uint(87);if pg{want=168};require.Equal(t,want,schema.Version);require.False(t,schema.Dirty)
++        for _,table:=range []string{"model_definition_originals","model_credential_originals","memory_original_admissions","nextcloud_control_recovery_gates","nextcloud_publication_recovery_scopes","nextcloud_recovery_build_leases","nextcloud_root_migrations"}{require.True(t,db.Migrator().HasTable(table),"full joint schema must precede the genuine model/HTTP fixture")}
+ 		require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(db))
+ 		repo := repository.NewModelRepository(db)
+ 		ConfigureModelOriginalAuthority(repo, m.f.store, NewGroupAccessService(repository.NewGroupAccessRepository(db)), nil)
+@@ -109,7 +105,7 @@ func NewNormalOriginalModelHTTPFixtureForTest(t *testing.T, pg bool, endpoint st
+ 		require.NoError(t, models.CreateModel(m.f.ctx, model))
+ 		require.NotNil(t, model.OriginalProof)
+ 		return normalOriginalModelsForTest{ModelService: models, observer: observer}
+-	})
++	}, "joint-normal-original-model")
+ 	// Later test resources register their cleanup after this point. Their HTTP
+ 	// teardown therefore precedes this joined observer drain; callbacks never
+ 	// call testing.T or emit body/error diagnostics from an asynchronous task.
+diff --git a/internal/application/service/normal_references_http_fixture_test.go b/internal/application/service/normal_references_http_fixture_test.go
+index 3cf30aa3938b455e64440122a9b7d4b1cd67ca52..d7950f27c1f2160510564d3f8ffd0c683e10d4c4 100644
+--- a/internal/application/service/normal_references_http_fixture_test.go
++++ b/internal/application/service/normal_references_http_fixture_test.go
+@@ -75,7 +75,7 @@ func newNormalReferencesHTTPFixtureForTest(t *testing.T, pg bool, final chat.Cha
+ 	if len(modes) > 0 {
+ 		mode = modes[0]
+ 	}
+-	joint := mode == "joint-memory-publication" || mode == "directory-periodic" && os.Getenv("WEKNORA_TEST_JOINT_DIRECTORY_SCHEMA") == "1"
++	joint := mode == "joint-normal-original-model" || mode == "joint-memory-publication" || mode == "directory-periodic" && os.Getenv("WEKNORA_TEST_JOINT_DIRECTORY_SCHEMA") == "1"
+ 	m := newMachinePipelineFixtureWithDocument(t, pg, "Current employee policy: read the approved record, then ask before changing another department's access.", true, mode == "directory-periodic", joint)
+ 	k := m.ingest(t)
+ 	for i := 0; i < len(m.f.queue.tasks); i++ {
+diff --git a/internal/database/migration_peer_partial_unix_process_actual_test.go b/internal/database/migration_peer_partial_unix_process_actual_test.go
+index 6d7ee072baef14b7e79a13c60336e06d700fe5b6..d78b309d9124d20523cc3ab6c7433140e04a39f8 100644
+--- a/internal/database/migration_peer_partial_unix_process_actual_test.go
++++ b/internal/database/migration_peer_partial_unix_process_actual_test.go
+@@ -90,6 +90,7 @@ func TestPeerPartialUnixProcessReadinessActual(t *testing.T) {
+ 					aliasInfo, err := os.Stat(alias)
+ 					require.NoError(t, err)
+ 					require.True(t, os.SameFile(originalInfo, aliasInfo))
++					peerPartialWALDiagnostic(t, "before_parent_main_fd", options.SQLiteDBPath, alias)
+ 					held, err := acquirePeerSQLiteMigrationExclusion(ctx, dsn, options)
+ 					require.NoError(t, err)
+ 					t.Cleanup(func() {
+@@ -130,6 +131,7 @@ func TestPeerPartialUnixProcessReadinessActual(t *testing.T) {
+ 						peerSQLiteToken(t, child, "PEER_OFD_BLOCKED")
+ 						require.NoError(t, first.Up(), "real first migrator runs remaining historical SQL and honest 88/89 bridge")
+ 						require.NoError(t, closeFirst())
++						peerPartialWALDiagnostic(t, "before_external_main_fd_close", options.SQLiteDBPath, alias)
+ 						require.NoError(t, held.Close())
+ 						peerSQLiteToken(t, child, "PEER_UP_COMPLETE")
+ 						peerSQLiteJoin(t, child, true)
+@@ -141,10 +143,12 @@ func TestPeerPartialUnixProcessReadinessActual(t *testing.T) {
+ 							}
+ 						})
+ 						peerSQLiteToken(t, child, "PEER_OFD_BLOCKED")
++						peerPartialWALDiagnostic(t, "before_external_main_fd_close", options.SQLiteDBPath, alias)
+ 						require.NoError(t, held.Close())
+ 						peerSQLiteToken(t, child, "PEER_UP_COMPLETE")
+ 						peerSQLiteJoin(t, child, true)
+ 					}
++					peerPartialWALDiagnostic(t, "after_child_actual_wait", options.SQLiteDBPath, alias)
+ 					version, dirty = jointLineageMigrationState(t, pool)
+ 					require.EqualValues(t, 89, version)
+ 					require.False(t, dirty)
+diff --git a/internal/database/migration_peer_partial_wal_diagnostic_test.go b/internal/database/migration_peer_partial_wal_diagnostic_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f319b68bfbf2292356da23b8c0ed9a8902122866
+--- /dev/null
++++ b/internal/database/migration_peer_partial_wal_diagnostic_test.go
+@@ -0,0 +1,156 @@
++//go:build linux || darwin
++
++package database
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/json"
++	"fmt"
++	"io"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++const peerPartialWALDiagnosticFlag = "WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC"
++
++type peerPartialWALSidecarMetadata struct {
++	Exists         bool
++	IdentitySHA256 string
++	HeaderSHA256   string
++	HeaderBytes    int
++}
++type peerPartialWALPathMetadata struct {
++	ReadOK, Known, Dirty, Ready bool
++	Version                     uint
++	JournalMode                 string
++}
++type peerPartialWALDiagnosticMetadata struct {
++	MainIdentitySHA256                     string
++	AliasSameMain                          bool
++	Main, Alias                            peerPartialWALPathMetadata
++	WAL, SHM                               peerPartialWALSidecarMetadata
++	POSIXProbeOK, ParentSharedLockObserved bool
++	POSIXLockType                          int16
++}
++
++func peerPartialWALFileIdentity(info os.FileInfo) string {
++	st, ok := info.Sys().(*syscall.Stat_t)
++	if !ok {
++		return ""
++	}
++	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprint(st.Dev)+"/"+fmt.Sprint(st.Ino))))
++}
++func peerPartialWALSidecar(path string) peerPartialWALSidecarMetadata {
++	info, err := os.Stat(path)
++	if err != nil {
++		return peerPartialWALSidecarMetadata{}
++	}
++	out := peerPartialWALSidecarMetadata{Exists: true, IdentitySHA256: peerPartialWALFileIdentity(info)}
++	file, err := os.Open(path)
++	if err != nil {
++		return out
++	}
++	header := make([]byte, 32)
++	n, err := io.ReadFull(file, header)
++	closeErr := file.Close()
++	if (err == nil || err == io.ErrUnexpectedEOF || err == io.EOF) && closeErr == nil {
++		out.HeaderBytes = n
++		out.HeaderSHA256 = fmt.Sprintf("%x", sha256.Sum256(header[:n]))
++	}
++	return out
++}
++func peerPartialWALReadOnlyPath(ctx context.Context, path string) peerPartialWALPathMetadata {
++	out := peerPartialWALPathMetadata{}
++	db, _, err := openJointLineageDB("sqlite3://unused", MigrationOptions{SQLiteDBPath: path, jointReadOnly: true})
++	if err != nil {
++		return out
++	}
++	db.SetMaxOpenConns(1)
++	version, dirty, known, readErr := observeJointSchemaHistoryOnDB(ctx, db, "sqlite")
++	out.Version, out.Dirty, out.Known = version, dirty, known
++	journalErr := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&out.JournalMode)
++	out.Ready = VerifyJointSchemaReadyOnDB(ctx, db, "sqlite") == nil
++	closeErr := db.Close()
++	out.ReadOK = readErr == nil && journalErr == nil && closeErr == nil
++	return out
++}
++
++// Dedicated independent process: only schema/lock/sidecar metadata is read.
++// It never signs an original, opens a migrate driver, changes a pragma or writes.
++// The kernel probe closes its FD BEFORE opening any SQLite connection in this
++// probe process; that close cannot release the parent process's POSIX locks.
++func TestPeerPartialSQLiteWALDiagnosticHelper(t *testing.T) {
++	if os.Getenv("WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_HELPER") != "1" {
++		return
++	}
++	main, alias := os.Getenv("WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_MAIN"), os.Getenv("WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_ALIAS")
++	require.NotEmpty(t, main)
++	require.NotEmpty(t, alias)
++	parent, err := strconv.Atoi(os.Getenv("WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_PARENT"))
++	require.NoError(t, err)
++	require.Positive(t, parent)
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	info, err := os.Stat(main)
++	require.NoError(t, err)
++	aliasInfo, err := os.Stat(alias)
++	require.NoError(t, err)
++	out := peerPartialWALDiagnosticMetadata{MainIdentitySHA256: peerPartialWALFileIdentity(info), AliasSameMain: os.SameFile(info, aliasInfo)}
++	resolved, err := filepath.EvalSymlinks(main)
++	require.NoError(t, err)
++	fd, err := unix.Open(resolved, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	require.NoError(t, err)
++	// Pinned SQLite's MAIN SHARED range is [PENDING_BYTE+2,+510).
++	lock := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0x40000002, Len: 510}
++	probeErr := unix.FcntlFlock(uintptr(fd), unix.F_GETLK, &lock)
++	closeErr := unix.Close(fd)
++	out.POSIXProbeOK = probeErr == nil && closeErr == nil
++	if out.POSIXProbeOK {
++		out.POSIXLockType = lock.Type
++		out.ParentSharedLockObserved = lock.Type == unix.F_RDLCK && int(lock.Pid) == parent
++	}
++	out.WAL = peerPartialWALSidecar(resolved + "-wal")
++	out.SHM = peerPartialWALSidecar(resolved + "-shm")
++	out.Main = peerPartialWALReadOnlyPath(ctx, main)
++	out.Alias = peerPartialWALReadOnlyPath(ctx, alias)
++	raw, err := json.Marshal(out)
++	require.NoError(t, err)
++	fmt.Println("PEER_WAL_DIAG " + string(raw))
++}
++func peerPartialWALDiagnostic(t *testing.T, phase, main, alias string) {
++	t.Helper()
++	if os.Getenv(peerPartialWALDiagnosticFlag) != "1" {
++		return
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPeerPartialSQLiteWALDiagnosticHelper$", "-test.count=1")
++	cmd.Env = append(os.Environ(), "WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_HELPER=1", "WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_MAIN="+main, "WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_ALIAS="+alias, "WEKNORA_PEER_SQLITE_WAL_DIAGNOSTIC_PARENT="+strconv.Itoa(os.Getpid()))
++	var stdout bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stdout
++	require.NoError(t, cmd.Run(), "owned read-only diagnostic process must actually terminate")
++	var metadata peerPartialWALDiagnosticMetadata
++	seen := 0
++	for _, line := range strings.Split(stdout.String(), "\n") {
++		if strings.HasPrefix(line, "PEER_WAL_DIAG ") {
++			seen++
++			require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "PEER_WAL_DIAG ")), &metadata))
++		}
++	}
++	require.Equal(t, 1, seen)
++	raw, err := json.Marshal(metadata)
++	require.NoError(t, err)
++	t.Logf("peer_partial_wal_diagnostic_phase=%s metadata=%s", phase, string(raw))
++}

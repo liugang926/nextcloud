@@ -1,0 +1,50 @@
+{
+  "classification": "SOURCE_only_personal_completion_bridge_current_gaps",
+  "source_head": "094b7ddd07f02215d923c874969ec76109001d21",
+  "source_tree": "e5254ec113c44a0b69d5d988f70c180bc5cea8f9",
+  "base": "d1a887718d8504e5a25b5a15ee63dbb2ac8b7195",
+  "author_metadata_SHA256": "a012cc9fe84cf82994078f557f55d1dfc90f2b3d657dbd80ef99e2ebea57ef8c",
+  "independent_SOURCE_audit_SHA256": "8d7a1cb28e5f43de326dda65af98292d892f5d864f0e53d087bf205199e8ef42",
+  "findings": [
+    {
+      "path": "internal/application/repository/knowledge_embedding_completion.go",
+      "function": "RecheckKnowledgeEmbeddingConsumerInTx",
+      "line": 236,
+      "source_mechanism": "Combined retained query/vector recheck checks source through r.checkInTx then does nativehits/body/journal IO, but final clock receives query v.content only and no r.sourceContent/KBFences. New terminal completion hook fix does not fix HTTP resource, nativequery or WithActualKnowledgeCompletionReads264 callers of this recheck. Actual source lease expiry during later IO is outside terminal union.",
+      "required": "Include all actual private sourceContent and conflict-checked captured KBFences in the same finalWithKBFences clock for coupled recheck too."
+    },
+    {
+      "path": "internal/application/repository/knowledge_embedding_completion.go",
+      "function": "checkActualKnowledgeCompletionFinalInTx",
+      "line": 430,
+      "source_mechanism": "Actual current source/actor/grants check during makeConsumption372 and modelchecks399 precedes allhead physical/journal IO430-440. FinalSQL442 reads body/content/fences but no current user/GUID/grant/publication epoch. A same-TX revocation reached during last journal may leave all captured lease/fence rows intact and return success; contexts.Err does not reflect database revocation. SOURCE reachable order only, not actual SQL exploit reproduction.",
+      "required": "After last external IO, genuinely revalidate local current actor/source/grant/epoch predicates. If reusing a remote source check, place its IO before fresh model/native/head/fullpayload checks and one final whole captured tuple clock, avoid prior68 late-remote ordering gap."
+    }
+  ],
+  "already_correct": [
+    "makeConsumption first genuine query result and actual vector CheckInTx, then bodyProof.SourceLineage RequireComplete union must exact captured private sourceLineage with owned content/fences; no DTO/raw authority",
+    "Query parentPlan must authentic complete and emptySources; unknown/nonempty not overwritten with NewComplete",
+    "New terminal collector appends all r.sourceContent plus actual query content, compares complete same-ID lease values, conflictchecks full samecanonicalKBscope fence tuples/open/positiveepoch",
+    "Unique terminalWithKBFences replaces basic completionclock; body/model leases and fullpayload, contexts/Close WG retained",
+    "Fivepersonal paths exact reviewed68 including fixed remote-before-current-controls/native/head/payload ordering. Current d1 epoch/strictown/save/release paths untouched"
+  ],
+  "implementation_status": "author repairing both source union and post-externalIO current local eligibility; next true published Nextcloud query/completion fixture not frozen",
+  "scope_limits": [
+    "currently direct real WebAdmin technical lane; source-only/nonmember user isolation matrix still required",
+    "sourced named history nonempty hardgate remains separate",
+    "normal registry/query raw-float propagation and actual startup90/91 route not activated",
+    "noevent pending93/172 WIP not frozen or applied",
+    "source findings are reachable code mechanisms, not runtime SQL exploit reproduction"
+  ],
+  "execution": {
+    "format": 0,
+    "compile": 0,
+    "Go": 0,
+    "SQL": 0,
+    "Docker": 0
+  },
+  "production_adoption": false,
+  "full_V1": false,
+  "local_eligibility_API_handoff_SHA256": "ce235a3f82e720fea5fac42d3c54551322c6158d04680d7784255c68d9eefec9",
+  "additional_SOURCE_boundary": "SourceIdentity.Revision is the content fence generation; coherent source recheck and local guard suffix do not themselves compare original/current publication epoch. A true leased original epoch selector/current active source epoch and legal RootMigration eligibility are needed; held fences or DTO selectors cannot supply permission."
+}

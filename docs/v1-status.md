@@ -1,0 +1,3831 @@
+# V1 implementation status
+
+This repository implements a local development slice of the [PRD](development-plan.md), not a V1 enterprise release. The PRD describes requirements; the table records the historical implementation and tests through 2026-09-24, with a newer addendum below. Only synthetic local data has been used for cross-system testing.
+
+## Current checkpoint — 2026-10-12
+
+Latest verified work on the integrated development candidate is summarized here;
+older component snapshots below retain their separate scope and failure history.
+
+| Work item | Latest actual result | Remaining work |
+| --- | --- | --- |
+| Startup/schema qualification | `7cb5c6ce`: all157 packages compile, zero business RUN; startup34 PASS34/FAIL0/SKIP0;8 resources absent | Normal application restore/startup |
+| Original-memory source path | `a3741d26`: original SQL/HTTP6 all pass; `112854`:lease WAL5 passes; `92b1bc76`:model permission WAL7 passes; original8s/10s/2pool retained | Whole normal application and matched final model/memory/authority regressions |
+| Ordinary embedding operation | `a3741d26`:actualSQL/HTTP12 pass; `92b1bc76`:originalfourprotocol80 pass; same proved reader across retries/Wiki two batches | Actual local vector input/result receipts, sameTX publication authority, graph/status/personalQA and external backend atomicity |
+| Directory authorization | Snapshot23 on `3707fce5`; periodic10 on `0621bef7` all pass in separate windows | Matched final-source33 plus full application regression |
+| Pending169 guard repair | `1f185e4d`: genuine Peer161→169→171 upgrade/restart and actual local guard repair pass on Parade17 | Partial-prefix and normal application regression |
+| Native and productive memory | `e3ab8442`:55+24 all79 pass; `c5e9`:whole-result6/final-clock6 pass; `0e56`:new fulljoint consolidation16/multicluster6 pass; earliercab8 policy58/QVR58 pass separatewindows | Matched final195/remaining gates on one final source and normal app acceptance |
+| Historical PeerApplied forward upgrade | `7cb5c6ce`: partial SQL110, preupgrade Ready/DOWN38 and original route20/Root91/startup34 pass; Linux32 and nativeDarwin20 include original6, genuinepartial7 and retainedFD7 | Other platforms/filesystems and full application upgrade/restore |
+| SQLite original vector storage | `be76d2d6`: actual SDK/storage/native-read10 PASS10/FAIL0/SKIP0, including genuine credential successor, original lease-before-hydration and final lease expiry | Nextcloud input/query/HTTP completion owner union, production migration/registry and exact durable cleanup remain open |
+| Knowledge HTTP output ownership | `0ea85f63`: explicit owner5 + original vector10 + ordinary modelHTTP10 pass25 in one window; seven resources absent; production identical to full157-compiled `190c1da0` | Normal knowledge QA/query/completion and Nextcloud final lease union remain closed |
+| Knowledge query SDK/completion and named history | `17d75ff3`: full157 compile and actual query13+named history7 PASS20/FAIL0/SKIP0;7 resources absent; old HTTP25 passed on `440a3837` | Normal QA/registry/startup90/91, sourced history, different-output vector succession, empty/multi-KB/rewrite and Nextcloud final union |
+| Nextcloud original upload / machine index purpose | `f1e85131`:544 files format, all157 packages compile; existing query/history20 pass on this source; new machine12 fails fixture identity preparation and old HTTP25 has15PASS/10FAIL before ordinary SDK | Genuine isolated fixture, authenticated-human lifetime vs scoped machine purpose, nonempty ancestor and personal native consumption; candidate remains unadopted |
+| Nextcloud authenticated upload compatibility | `2461bdfa`:545 files format/full157 compile; actual GORM mapping1 and ordinary HTTP25 pass; machine12 fails at chunk-write backend-coverage precheck; failed owners stopped, successful resources absent | Machine backend-selection fixture/SDK/publication, recurrent model-definition lease cleanup, human classification5, nonempty ancestor and personal native consumption still open |
+| Actual backend selection and owned model release | `e75d0b7e`:547 files format/full157 compile; concurrent release3 + query/history20 PASS23; ordinary HTTP25 PASS25; machine12 7PASS/5FAIL | Machine save caller adapter, genuine current epoch fault and final-clock positive remain; source-only human/ancestor/personal drafts require further repairs and actual validation |
+| Event-managed machine original save and current epoch | `eac6b136`:549 files format/full157 compile; actual machine12, arithmetic6/schema1, HTTP25 and release/history23 all PASS67;24 runtime resources and3 compiler resources independently absent | General no-event manual sync, cross-app onboarding readiness, legal root successor, normal application publication/QA, personal and inherited-source gates remain incomplete |
+| Typed derived template and nonempty ancestor | `9d9280a5`:551 files format/full157 compile; existing67 regressions pass; new ancestor8 all fail at sourceA published precondition | Fixture omits the production indexed-success enabled transition; test-only repair pending, no inherited-source acceptance |
+| Nonempty ancestor indexed-success fixture | `2023169f`:551 files format/full157 compile; ancestor8 6PASS/2FAIL including parent, existing67 regressions pass | Positive inheritance/native save and five fault leaves pass; last-clock fault probe has a wrong lease-table column reference and remains unaccepted |
+| Nonempty ancestor final fence clock | `d1a88771`:551 files format/full157 compile; fullancestor8 and old67 pass75; independent ancestor audit agrees;31 runtime+3compiler resources absent | Primitive event-managed A→template→B save only; normal public QA, no-event sync, personal/source-only read matrix and startup remain open |
+| Explicit no-event current epoch originals | `5eaa2498`:559 files format/full157 compile; SQLite13 + PG4 + existing75 all PASS92/FAIL0/SKIP0;39 runtime and3 compiler resources absent | Explicit component only; normal registry/startup93/172, concurrent availability, whole restore and personal sourced QA remain open |
+| Personal source query and completion | `5ac10a32`:565 files format/full157 compile; actual8 PASS8/FAIL0/SKIP0 and7 runtime+3 compiler resources absent; production/SQL/old92 exact to parent559, whose existing92 regressions pass | Explicit WebAdmin/GraphRequired=false pipeline only; source-only nonmember KB/Agent/model boundary, normal QA/registry, graph-required inputs and sourced history remain open |
+| Source-only nonmember model isolation | `e2274d13`:571 files format/full157 compile; repaired realJWT13 + oldpersonal8 allPASS21/FAIL0/SKIP0;14 runtime and3 compiler resources absent | Explicit current/query/native/answer model scope; remaining92 same-source regressions all pass,113 total component nodes. Normal QA/registry, sourced inheritance/history and graph-required inputs remain open |
+| Actual original-query store access | `1bff7738`:566 files format/all157 packages compile, zero business RUN; actual SQLite→KV→unique vector Composite getter and safe nil ctor verified by source audit;3 compiler resources absent | Normal DI/typed query context propagation and startup qualification remain open; getter grants no caller permission |
+| Owned original-query context bridge | `aa159fbf`:572 files format/all157 packages compile, zero business RUN; source audit and exact patch roundtrip pass;3 compiler resources absent | Actual normal service/event consumer and its new-source runtime validation remain open |
+| Normal single-KB original event pipeline | `055403ec`:577 files format/all157 packages compile; clone message selectors repaired; actual event10 PASS10/FAIL0/SKIP0;7 runtime+3 compiler resources absent | WebAdmin explicit original single-KB service/event only; normal ScopedOnly JWT/handler, default registry/startup and broader QA remain open |
+| Normal ScopedOnly JWT event matrix | `31f162f2`:579 format/full157 compile; actualJWT5+matchedWebAdmin10 PASS15/FAIL0/SKIP0 in two fresh serial windows;17 runtime/compiler resources independently absent | Actual Auth customGET→service/event single-KB slice; real production Gin handler, default registry/startup and broader QA remain open |
+| Production Gin scoped JWT QA | `057aa6a1`:595 parsed/full157 compile; current33 has31PASS/2FAIL. Largest fixed caller bucket results_union25; original positiveHTTP8 still fails; Go2 absent/SQL2 stopped | Implement one safe repair from actual caller costs under unchanged HTTP8, then matched full regressions; full QA not accepted |
+| Explicit original Root startup | `48d30be0`:597 parsed/full157 compile; actual20 has16PASS/4FAIL. Borrow13 allPASS; process7 has3PASS/4FAIL. Fixed prefix ledger works; fresh canonical10s and READY3s still fail | Repair bootstrap cost/lifetime while retaining current checks, then sameHEAD full91. Default application startup/registry/restore not adopted |
+| Partial Unix process upgrade | `7cb5c6ce`: Linux32 and nativeDarwin20 pass; unchanged original parent pool/Conn reads89 and keeps SQLite POSIX shared locks; unknown/network/readonly FS refuse | Other FS/OS validation; normal application upgrade/restore |
+
+The development manifest pins C6 `c89d2d09` and RAG `1ee7368d`, including
+SSE transport, actual HTTP fixture and same-boundary source-union, raw-control phase, detached model input, current body metadata and atomic held-lease renewal, same-boundary references and transaction-local authenticated journal corrections;
+separately recorded
+Root/Gin proposals remain unadopted. Development-baseline integration and full
+V1 acceptance are separate: enterprise AD pilot, model/capacity measurements,
+coordinated restore and physical GC remain open. Component passes are not a
+full release acceptance.
+
+The current `be76d2d6` source preserves historical SQL bytes. Its partial
+SQL110, preupgrade Ready/DOWN38, original route20/Root91/startup34/Linux process6
+and original-vector10 pass in seven separate windows. The309 exact selected
+nodes are not one combined release test. Root reparses RUN/PASS pairs and
+verifies all50 owned resources are absent. See the [matched309 record](evidence/partial-route-Ready-DOWN-vector-matched309-seven-windows-GREEN-20261011.json)
+and [latest source proposal](../integration/proposals/weknora-partial-DOWN-preupgrade-Ready-and-credential-successor-20261011.json).
+
+The explicit original-vector component now passes all10 actual SDK, SQL and
+native retrieval nodes. The fixture uses the real canonical87 and pending90
+migration files, and the existing credential-specific author API creates a
+genuine successor with stable definition/space and no extra SDK call. Earlier
+prelude and generic-model-update failures remain recorded. The production
+registry and normal Nextcloud/query/HTTP completion owner chain are not bound;
+full vector functionality and V1 remain unaccepted. See the [vector10 record](evidence/SQLite-original-vector10-actual-SQL-HTTP-native-GREEN-20261011.json).
+
+The newer explicit HTTP carrier retains genuine knowledge/model/input/result
+reads through the last HTTP reference. Its5 nodes and the unchanged vector10
+and ordinary modelHTTP10 pass together on `0ea85f63`. The owner-cancel check
+waits for the actual reader cancellation within the original8s deadline, and
+the ordinary fixture now starts from real fulljoint87/168 rather than a partial
+schema missing current maintenance controls. Production guards are unchanged.
+The new provider-done leaf uses producer-context cancellation; it does not
+establish normal knowledge QA streaming/completion. See the [actual25 record](evidence/HTTP-knowledge-owner5-vector10-ordinary-model10-actual25-GREEN-20261011.json).
+
+The next explicit query candidate binds the original user message to a genuine
+SDK response capability, native-vector consumption and a typed completion
+manifest. All157 packages compile on `440a3837`; old owner5/vector10/model10
+pass25 in one separate window with seven resources independently absent.
+The new query13 now passes on `f6b4ea8a`. Its first run fails because a fresh lineage
+repository lacks the current-actor binding. The test-only `539ad9a2` fixes that
+configuration and compiles, then the next run exposes a production query lease
+request of15 minutes against the unchanged5-minute content-lease maximum.
+The `68f8d52f` child uses the existing2-minute message-read duration and adds a
+real SDK endpoint prerequisite to the error leaf, which previously accepted an
+unrelated prelude error. Its real query13 then reaches query SDK, native retrieval
+and answer SDK with9PASS/4FAIL. Completion rejects the fixture's nil lineage from
+the deliberately reduced public raw-user DTO; the genuine held original proof
+is the correct source. The test-only `f6b4ea8a` uses that verified proof and
+diagnoses the separate one-lease cleanup failure without forcing its Close.
+Its532 files parse and all157 packages compile. All13 exact actual nodes then
+pass in47.849s, including genuine completion, actual SDK-error execution, bare
+and substituted SDK-capability refusal, and real final-clock lease expiry.
+The naked-vector refusal and zero live read leases also pass on this fixture;
+the earlier one-lease observation is retained without an independently isolated
+root-cause claim. Seven exact resources are independently absent. Earlier
+failures and stopped owned data remain recorded.
+Normal registry/startup90/91, saved history, empty candidates, multi-KB, rewrite
+and Nextcloud ingestion remain open. See the [HTTP25 regression](evidence/knowledge-query-candidate-existing-HTTP25-GREEN-20261011.json),
+[current-actor failure](evidence/knowledge-query13-current-actor-fixture-failure-20261011.json)
+and [content-lease failure](evidence/knowledge-query13-content-lease-TTL-failure-20261011.json),
+[completion/release failure](evidence/knowledge-query13-completion-source-and-release-failure-20261011.json)
+and [held-lineage compile](evidence/knowledge-query-held-lineage-full157-compile-PASS-20261011.json).
+See the [actual13 record](evidence/knowledge-query13-actual-SDK-native-completion-GREEN-20261011.json)
+and [reviewable source proposal](../integration/proposals/weknora-knowledge-query-SDK-result-and-typed-completion-20261011.json).
+
+The saved named-history child now passes together with the unchanged query13
+on `17d75ff3`: all20 exact nodes pass in82.555s, zero failures/skips/OOM, with
+seven owned resources independently absent. Its534 files format and all157
+packages compile with zero business RUN. Genuine credential and definition
+successors preserve the old saved answer without a second embedding/chat SDK
+call; current actor revocation, query-parent body unavailability and real vector
+ABA refuse. The reader reopens the named immutable query/input/vector/model
+graph, uses opaque historical model reads, and joins all original leases at
+the final SQL clock. This covers the explicit manual single-KB path; sourced
+history and different-output vector succession remain open. See the [actual20
+record](evidence/knowledge-query13-named-history7-actual20-GREEN-20261011.json)
+and [named-history proposal](../integration/proposals/weknora-knowledge-named-history-original-reopening-20261011.json).
+
+The next Nextcloud proposal moves typed upload/body/content/build holds before
+plaintext, adds scoped configured-model execution for genuine onboarding and
+DirGUID authority, and checks exact original index text before SDK IO. Source
+review repairs caller-context laundering and reserves the SDK input owner's
+SQLite writer before schema/fact reads. `f1e85131` formats544 Go files and
+compiles all157 packages after a retained real assignment compile failure.
+Existing query/history20 passes on that exact source, with seven resources
+independently absent. The new machine12 fails before SDK because its sourcepair
+and linked-identity setup collides with existing fixture rows; an isolated
+test-only child is prepared without deleting old rows or weakening constraints.
+Old HTTP25 has15PASS/10FAIL: owner5/vector10 pass, while ordinary modelHTTP10
+fails in the Nextcloud processing prelude. Its headless legacy-pair preparation
+does not supply a genuine onboarding purpose. The corrected path must retain
+original leases for legitimate authenticated-human uploads while keeping
+machine authority limited to real onboarding credentials; no legacy pair
+automatically gains machine access. See the [machine proposal](../integration/proposals/weknora-Nextcloud-original-upload-machine-index-purpose-20261011.json),
+[compile](evidence/Nextcloud-machine-held-upload-SDK-full157-compile-PASS-20261011.json),
+[machine12 failure](evidence/Nextcloud-machine12-first-fixture-identity-collision-failure-20261011.json)
+and [ordinary prelude failure](evidence/Nextcloud-machine-candidate-HTTP25-ordinary-prelude-failure-20261011.json).
+
+The compatibility child retains the real Web principal and current KB/source
+authority for authenticated legacy uploads while reserving machine purpose for
+genuine onboarding. A human holder rejects any later same-named onboarding
+operation; nil purpose comparisons safely refuse. The isolated machine source
+fixture preserves all original assertions. Intermediate `44046f20` compiles all
+157 packages, but its actual machine12 still rejects the fixture's incorrect
+allow reason and ordinary HTTP10 still rejects the old v1 empty zero revision
+against the source API's canonical `"0"`. Query/history20 passes18/fails2,
+including the parent and naked-vector completion cleanup, which observes one
+unreleased model-definition body lease. Its cause remains unestablished; no
+forced Close or weakened zero-lease assertion is used. All three failed owners
+are terminal, with Go absent and owned SQL/data retained. The next `c9a0c1e0`
+proposal repairs the exact allow response and normalizes only the revision
+comparison, preserving immutable original bytes and digests. All157 packages
+compile on that source in269.586s, with three resources independently absent.
+Fresh machine12 and HTTP25 pass the earlier reason/revision checks but still
+fail before SDK at the content tuple precheck. The SQL data-source column
+mapping is under investigation; no runtime acceptance is claimed. See the
+[compatibility proposal](../integration/proposals/weknora-Nextcloud-human-upload-and-zero-revision-compatibility-20261011.json),
+[intermediate failure evidence](evidence/Nextcloud-human-upload-intermediate440-regression-failures-20261011.json)
+and [current tuple failure evidence](evidence/Nextcloud-canonical-zero-c9-full157-and-content-tuple-failure-20261011.json).
+
+The explicit `datasource_id` scan tag fixes the final union's field mapping
+without changing its SQL, clock or exact lease predicates. On `2461bdfa`, all
+545 Go files parse and all157 packages compile in273.177s. The actual GORM
+mapping oracle passes, and unchanged HTTP owner5/vector10/ordinary model10
+pass25 with zero failures/skips in57.465s; seven resources are independently
+absent. Machine12 now passes upload admission and parsing but fails at the first
+chunk write with protocol coverage unproven before model/SDK. The primitive
+fixture omits the production backend-selection record required by the derived
+artifact writer; the next test-only correction must use that actual producer. Its Go actors are absent and owned SQL/data retained. Query/history20 is
+not rerun on this head while its earlier lease-cleanup failure remains open.
+See the [scan fix proposal](../integration/proposals/weknora-Nextcloud-final-content-datasource-column-20261011.json)
+and [current actual evidence](evidence/Nextcloud-scanner-full157-HTTP25-GREEN-machine12-model-coverage-failure-20261011.json).
+
+The machine fixture now records the actual tenant/KB-selected original SQLite
+backend through the production plan producer before writing chunks. The same
+candidate reserves SQLite's writer before each owned model lease release;
+caller-owned release behavior and all original query assertions are preserved.
+On `e75d0b7e`,547 files format and all157 packages compile. Actual concurrent
+Close/owner-cancel tests pass3 and the unchanged query13/named-history7 pass20,
+with eight resources independently absent. Ordinary HTTP25 also passes, with
+seven resources absent. The prior one-lease failure did not record a driver
+error code, so its exact cause remains unisolated despite the current zero-lease
+result. Machine12 has7PASS/5FAIL: five post-SDK fault refusals and bare/wire
+refusals pass, while positive saves still hit the ordinary Principal comparator.
+The epoch fault attempts to change an immutable pair row and is correctly
+rejected by its trigger; the final-clock hook is blocked by save admission.
+These are required remaining fixes, not accepted machine publication. See the
+[reviewable proposal](../integration/proposals/weknora-model-original-owned-release-and-actual-backend-selection-20261011.json)
+and [current actual record](evidence/model-owned-release3-query-history20-HTTP25-PASS-machine12-partial-20261011.json).
+
+The saved original input now uses the existing strict private-upload caller
+comparison. Event-managed builds capture the authentic publication epoch and
+recheck the actual active connection/current status, signed source inspection
+and same final body/content/epoch SQL clock. Seconds are range-checked before
+millisecond conversion. On `eac6b136`, all157 packages compile, and all67 selected
+nodes pass: original machine12, arithmetic6/schema1, ordinary HTTP25 and
+release3/query-history20. Twenty-four runtime resources and three compiler
+resources are independently absent. The machine fixture uses actual full87
+plus pending90; it does not install pending91. Its main lease-zero assertions
+cover the upload owner's namespace, while bare/substitution leaves check all
+original read leases. Native vector inspection proves local storage behavior,
+not public personal retrieval or application publication/QA. The slice requires
+a real event-managed current epoch; general no-event manual sync still needs
+an independent signed-current observation protocol. Source inspection proves
+the normal new-onboarding Pair/Grants/Refresh chain, but cross-app runtime and
+its readiness gap remain unverified. See the [source proposal](../integration/proposals/weknora-Nextcloud-machine-save-current-epoch-20261012.json)
+and [actual67 evidence](evidence/Nextcloud-machine12-current-epoch-schema7-HTTP25-history23-actual67-GREEN-20261012.json).
+
+The typed template producer now holds current source heads/payloads before full
+snapshot reads, requires an authentic independent target configuration, and
+joins extra holds with the current publication/body/content clock. Its four-path
+fusion compiles all157 packages on `9d9280a5`; the unchanged67 regressions pass.
+The new ancestor8 fails before B: A is indexed and completed but remains staging.
+Completion does attempt publication, and chunk creation already defaults to
+ready. The fixture omitted the real indexed-success transition that enables A;
+the next test-only child uses the production helper and protected update after
+actual index success. No raw published-state write or weakened assertion is
+accepted. See the [proposal](../integration/proposals/weknora-Nextcloud-typed-derived-template-and-nonempty-ancestor-20261012.json)
+and [actual first failure](evidence/Nextcloud-typed-ancestor8-first-publication-prelude-failure-old67-GREEN-20261012.json).
+
+The test-only indexed-success correction now passes the true A publication,
+typed template and B headless SDK/native save flow on `2023169f`. Grant, epoch,
+source, body and final-actor rollback leaves also pass. The last-clock leaf still
+fails its required faultApplied assertion, so the parent fails and the full
+ancestor8 remains unaccepted. Its source probe incorrectly selects datasource
+and external IDs from the lease table; those fields belong to the fence table.
+Raw evidence proves the fault was not applied, without proving this probe was
+reached. A real scoped fence join is required; the expiry/clock assertions and
+budgets remain intact. All157 packages compile and the unchanged67 regressions
+pass on this source. See the [current partial result](evidence/Nextcloud-ancestor8-indexed-stage-positive6-late-clock-failure-20261012.json).
+
+The corrected lease/fence probe reaches the actual output transaction and
+verifies the captured ancestor tuple, exact expiry CAS/readback and natural SQL
+clock crossing. All8 ancestor nodes pass on `d1a88771`, together with the old67
+regressions; all157 packages compile and31 runtime plus3 compiler resources are
+independently absent. Independent raw/source review confirms the positive A
+publication→typed template→B no-login SDK/native save and withdrawal gates.
+The actor rollback leaf uses only A and the typed configuration transaction;
+six other leaves exercise A+B SDK. All seven leaves assert global original-body
+read leases zero; content release uses bounded cleanup, without a whole-content
+or arbitrary-goroutine join claim. This accepts the explicit primitive component
+chain, not B's normal application publication or public QA. See the [final probe
+proposal](../integration/proposals/weknora-Nextcloud-ancestor-final-fence-probe-20261012.json)
+and [actual75 evidence](evidence/Nextcloud-nonempty-ancestor8-machine19-HTTP25-history23-actual75-GREEN-20261012.json).
+
+Normal personal QA activation still requires the original user query capability
+to survive embedding and retrieval fan-out; the current float-only interface
+drops it. Completion also needs source content leases and KB fences in its final
+union, and named history still rejects nonempty sources. Pending90/91 require
+the complete startup catalogue/source-route qualification. These dependencies
+must close before the original adapter replaces the normal registry.
+
+The first private personal-completion bridge `094b7ddd` is source-only and
+unaccepted. It joins actual source lineage and completion source leases, but
+independent review finds two remaining paths: coupled consumer recheck still
+omits source leases/fences, and terminal completion lacks current local
+actor/source/grant/epoch revalidation after final physical/journal IO. The next
+repair must preserve the original user query, actual private vector evidence
+and the final model/native/head/payload order. A held lease is not current
+permission. The initial real WebAdmin lane also does not prove the PRD's
+source-only nonmember isolation matrix. See the [source gap audit](evidence/personal-original-query-completion-source-gap-audit-20261012.json).
+
+The explicit no-event candidate adds genuine signed observations, immutable
+epoch readers and pending SQLite93/PostgreSQL172 with real catalogue checks.
+Its exact current-source fusion preserves strict inherited-body and cleanup
+logic. All157 packages compile on `ccf2d330`, and the existing75 regressions pass.
+The first Root plan was refused before Go because stage keys contained uppercase
+letters; a fresh owner corrects only those names. Actual SQLite13 then fails
+generation initialization with a unique-key error; PG4 is not dispatched.
+Independent source analysis traces a live AfterCreate statement reused by actor
+queries, and a minimal same-pool/context clean-statement child is awaiting fresh
+verification. No constraint, original body or permission check is weakened.
+Schema cookies/OIDs cover only scoped table replacement checks; coordinated
+database/external-journal restore and normal parallel availability remain
+unproven. See the [source proposal](../integration/proposals/weknora-noevent-current-publication-epoch-originals-20261012.json)
+and [actual first failure](evidence/NoEvent-current-epoch-first-initialization-failure-old75-GREEN-20261012.json).
+
+Independent process tests exposed a migration-lock release defect: closing the
+extra main-inode FD cleared this process's SQLite POSIX locks, leaving its old
+pool on74/75 while fresh readers saw89. The fixed `7cb5c6ce` explicitly unlocks
+OFD and retains bounded descriptors without closing them. A cancellable local
+owner gate prevents same-process reentry; unlock failure poisons the entry.
+The unchanged old pool/Conn now sees89 and retains its POSIX shared lock.
+Linux32 and nativeDarwin20 pass, followed by all293 migration/Ready regression
+nodes on the same source in separate Linux windows. The six Linux windows have
+325 unique RUN/PASS pairs and43 independently absent resources; native20 is a
+separate platform run. Actual Linux FS class is ext4; the other allowlisted FS
+are source contracts rather than mounted-runtime acceptance. See the [matched
+record](evidence/retained-FD-matched-Linux325-nativeDarwin20-GREEN-20261011.json).
+The [prior diagnostic](evidence/Unix-partial7-actual-POSIX-lock-loss-stale-WAL-diagnostic-20261011.json)
+and first conservative native-monitor refusal remain preserved.
+
+Ordinary original-model HTTP now passes10 selected nodes after fixing the
+constructor-to-HTTP owner lifetime. Four remote embedding protocols pass80
+SQL/HTTP nodes; a production-identical manual-fixture child passes24 memory
+input/result and public-entry nodes in a separate window. Those component
+results do not accept the full embedding feature. The reviewable source remains
+separate from the adopted candidate manifest.
+
+Current source `7c9b30e2` now passes all227 mandatory nodes in one serial
+window: native55, productive derived24, ordinary model HTTP10, model authoring/
+memory/body58, policy58 and queue/lifecycle22. Zero failures/skips/OOM; the
+window took995.190s under the unchanged20-minute bound. All12 exact owned
+resources are independently absent. This closes those complete selected gates,
+including the formerly failing PG public-writer operation; it does not recover
+the unchanged unbound515 test or accept new consumers/full V1. See the [227-node
+record](evidence/memory-current-native-model-policy-227-GREEN-20261011.json).
+
+The original partial processing test now passes SQLite and PostgreSQL under
+the unchanged20s deadline on `ce006db6`, with its full test file byte-identical
+to the failed71d source. Same-TX physical availability batching addresses the
+repeated head/journal/file IO identified in the [paired diagnostics](evidence/memory-derived-performance-diagnostics-20261011.json).
+Old inline22, new batch14, new actual lease-expiry2 and old worker final-clock6
+nodes pass on production-identical test-only children in separate windows.
+Actual mutation and expiry-readback prerequisites were strengthened before
+acceptance; earlier failures remain preserved. This is not a single46-node run
+or full PRD performance acceptance. See the [partial and clock record](evidence/memory-original-partial-and-clock-GREEN-20261011.json).
+
+The newer `32c2597` candidate includes the durable ordinary Recall completion
+manifest bridge, exact PostgreSQL immutable-body trigger fixture, and migration
+schema/transaction repairs. All242 changed Go files parsed and11 selected
+packages compiled; no business tests ran in that compile window. See the
+[compile record](evidence/memory-completion-query-migration-compile-20261011.json).
+The50-node original/body/clock regression remains green on the earlier
+production snapshot; see the [latejournal record](evidence/memory-last-journal-50-GREEN-20261011.json).
+
+Both database query original gates now pass all22 nodes. The actual HTTP-owner
+fix also passes all8 single-pool/Close concurrency nodes on `545eebcb`: producer
+cancellation leaves the real consumed message guard alive until final HTTP
+release. See the [query30 record](evidence/memory-query-owner30-GREEN-20261011.json)
+and [reviewable owner proposal](../integration/proposals/weknora-message-HTTP-owner-20261011.json).
+A fresh corrected-plan ordinary-model HTTP gate now passes10/10 on unchanged
+`545eebcb`, with all seven owned resources independently absent and the original
+8s limits preserved. It is separate from the query30 window; see the
+[ordinary HTTP10 record](evidence/memory-message-owner-ordinaryHTTP10-GREEN-20261011.json).
+Prior query22/concurrency8 failures remain preserved.
+
+The vector reader/ranking/receipt component passes20/20 nodes on `545eebcb`.
+After binding the observer to the actual terminal consumption clock, Recall SQL
+passes16/16 nodes on production-identical `930df22a`, including genuine late
+lease expiry and readback in both databases. Recall HTTP runs14 nodes with
+5PASS/9FAIL: SQLite cancellation stops only the HTTP sender while the intentional
+background owner completes; the negative now uses real authenticated
+StopSession while preserving zero-completion assertions. The corrected SQLite
+HTTP7 gate now passes on production-identical `a14481d0`, with actual Redis stop,
+provider cancel/join, zero completion/manifests and all seven resources absent.
+See the [SQLite HTTP7 record](evidence/memory-SQLite-RecallHTTP7-GREEN-20261011.json).
+Existing legal disconnect/continued-generation tests remain unchanged. Meanwhile,
+all PostgreSQL completion preludes exceed the original8s bound. Local/Ollama was not dispatched in that failed window. Its independent unchanged-
+source `930df22a` gate now passes32/32 nodes in47.571s, zero failures/skips/OOM,
+with seven exact resources independently absent. See the [Local32 record](evidence/memory-Local-Ollama32-GREEN-20261011.json). See the [Recall16 and HTTP14 record](evidence/memory-RecallSQL16-GREEN-RecallHTTP14-failure-20261011.json).
+The earlier observer failure remains in its evidence record.
+
+The real ParadeDB17/SQLite full migration now passes all34 nodes on `b6b15c59`,
+zero failures/skips/OOM, with all seven exact owned resources independently
+absent. The four native kinds initialize UNKNOWN controls without publishing
+originals or re-signing old text; empty blocks do not acquire false controls.
+The original ANY-DROP downgrade protection remains unchanged. This is SQL
+migration/schema/FK/control acceptance only. See the [migration34 record](evidence/memory-full-migration34-GREEN-20261011.json).
+The updated4b53 download tail also passes all36 actual nodes, including the two
+new download-fact DOWN cases. All36 raw RUN/PASS pairs are independently
+verified exactly once, although the copied legacy plan still listed34 required
+pairs. Seven owned resources are absent. See the [migration36 record](evidence/memory-full-migration36-download-GREEN-20261011.json).
+Earlier30-node and34-node failed attempts remain preserved.
+
+Exact saved-history Recall reopening now has an actual12-node failure: SQLite
+legal completion succeeds but fresh history refuses before negatives; PostgreSQL
+completion preludes exceed the original HTTP8s bound. Failed owners/raw/data
+are retained, and the later vector/Recall/Local stages did not run. See the
+[history12 record](evidence/memory-saved-Recall-history12-failure-20261011.json).
+The repaired exact saved-history path now passes all6 SQLite nodes on4b53:
+current reading, subject-disabled/body-unavailable refusal, and a genuinely
+written model successor while old history stays readable with no second SDK
+call. Seven exact resources are absent; see the [SQLite history6 record](evidence/memory-SQLite-savedhistory6-GREEN-20261011.json).
+The first multi-read SQLite3 run fails its real HTTP8s prelude before the final
+union fault is reached. It does not establish a final-clock failure; both leaves complete first request A within8s, but second request B reaches
+retrieval only around7.46s and times out. Historical reentry is outside the
+initial current-Recall body scope. A dedicated post-scope SQLite3 rerun also
+fails that unchanged8s prelude; see the [scope performance record](evidence/memory-SQLite-multihistory-scope8s-failure-20261011.json). See the [multihistory prelude record](evidence/memory-SQLite-multihistory3-prelude-failure-20261011.json).
+The current-Recall sameTX body scope now passes12 real SQLite/PG correctness
+nodes: genuine positive, native final head/body mutation and cancel refusal,
+and different-transaction cache refusal. It compiles271 Go files/12 test packages
+plus cmd/server. The original uninstrumented PG/current2 gate still fails8s
+after the scope change; see the [actual performance failure](evidence/memory-PG-current-scope8s-failure-20261011.json). See the
+[scope12 record](evidence/memory-Recall-body-scope12-GREEN-20261011.json).
+The outer-history-group sameTXscope compiles and preserves SQLite history6,
+but its multi3 still exceeds second-request8s before the final union fault.
+Targeted operation diagnostics now show B initial history1call/65ms,
+message capture298calls and historygroup58calls; nested durations are not
+additive wall time. Repeated capture IO is the next measured target. See the
+[B operation record](evidence/memory-SECOND-B-operation-profile-failure-20261011.json);
+see the [group-scope actual record](evidence/memory-history-group-scope6-GREEN-multi3-failure-20261011.json).
+Actual multi-read late-clock and PostgreSQL history still need matched gates.
+Focused PG/current
+profiling retains the original8s failure and records64,207 Recall-boundary and
+34,937 message-guard-boundary SQL callbacks; observer stack scanning adds CPU
+cost, so this is diagnostic evidence rather than an uninstrumented benchmark.
+See the [PG profile](evidence/memory-PG-Recall-current-profile-failure-20261011.json). A new counter-only diagnostic (no stack scans)
+records114,437 callbacks with fewer head/payload/journal queries, while the
+original8s test still fails. Instrumentation differs, so this is observed query
+reduction rather than a paired walltime benchmark; see the [counter-only
+record](evidence/memory-PG-counteronly-scope-profile-failure-20261011.json). See the [SQLite history
+record](evidence/memory-SQLite-history4-GREEN-successor2-failure-20261011.json). Semantic query/vector completion and named historical dependencies now compile
+285 Go files/12 test packages plus cmd/server on c345a3b1. Existing query22,
+vector20 and RecallSQL16 pass58/58 in171.590s with nine exact resources absent;
+see the [existing58 record](evidence/memory-semantic-existing58-GREEN-20261011.json).
+A source review found missing absent-candidate every-read control checks; its
+narrow child is being compiled. Real semantic current4 now executes on corrected fixtures, but both database
+HTTP8s preludes fail before savedhistory assertions. The source remains
+unaccepted as full semantic functionality; see the [current4 failure](evidence/memory-semantic-current4-HTTP8s-failure-20261011.json).
+The sameTX rank capture optimization compiles292 files and passes10 actual
+SQL count/current/late-actor/querybody/vectorbody nodes, but semantic current4
+still fails the original8s prelude. Its final full checks remain intact; the
+optimization alone is insufficient. See the [rank10/current4 record](evidence/memory-rank-capture10-GREEN-current4-failure-20261011.json).
+Actualsemantic completion/history and lawful different-output vector successor
+gates remain required. The download/host
+combination parses265 Go files and compiles12 test-bearing packages plus the
+cmd/server package-only terminal; an old parser misclassified that terminal
+and retained its stopped owner. See the [compile parser record](evidence/memory-download-host-compile-parser-failure-20261011.json).
+The next `42ae5379` source includes the saved-history fields-scope and complete
+multi-read final union repair. It parses265 Go files and compiles12 test-bearing
+packages plus cmd/server with a corrected parser and zero business RUN/SKIP;
+compile actor/temp are independently absent. See the [compile record](evidence/memory-download-history-fixed-compile-20261011.json).
+Creation download30 and real HTTP-expired-drain shutdown2 now pass on `4b53d5cc`
+in one58.106s window, zero failures/skips/OOM, with eight exact resources absent.
+The genuine download is canceled/joined before dependent cleanup even after
+HTTP drain expires. Desktop-native shell/startup Fatal/crash replay/remote weight
+inventory remain pending. See the [download/host32 record](evidence/memory-local-download-host32-GREEN-20261011.json)
+and the exact [reviewable source proposal](../integration/proposals/weknora-original-local-download-20261011.json).
+Failed Close release retry/error propagation now has a corrected source and
+16 actual SQL/HTTP nodes passing on789d6aa, including postcommit initialization
+refusal. It preserves both errors and nilread, reports outstanding failures,
+and retries only captured closed-owner releases. Eight resources are absent;
+see the [failure16 record](evidence/memory-download-release-failures16-GREEN-20261011.json).
+The same corrected source now passes all100 shared model/download regressions
+in262.830s, with10 exact resources absent. See the [existing100 record](evidence/memory-release-retry-existing100-GREEN-20261011.json)
+and [reviewable cleanup proposal](../integration/proposals/weknora-original-download-cleanup-retry-20261011.json).
+Durable originaldownload dispatch/attempt/exact-owner source now passes16 actual
+startup/replay/revocation/receipt/owner-recovery nodes on59692b75, with pinned
+SDK and transcript byte checks, seven exact resources absent. It also passes
+full migration38 (31protocoltables including durable facts), seven resources
+absent. See the [durable16](evidence/memory-durable-download16-GREEN-20261011.json)
+and [migration38](evidence/memory-full-migration38-durable-GREEN-20261011.json).
+Existing model/download100 passes on that durable source, but old cleanup10
+failed error-object identity. A narrow terminal aggregation repair now passes
+the byte-preserved cleanup10 plus initialization6 in76.901s, all eight resources
+absent; see the [error identity16 record](evidence/memory-terminal-errorABI16-GREEN-20261011.json).
+The private construction-time history opening repair now passes SQLite capture5:
+genuine fresh history, final-head mutation/cancel refusal, and copied-context
+different-transaction body refusal. PG capture5 still fails its original HTTP8s
+prelude before those assertions. See the [capture10 record](evidence/memory-owned-opening-capture5-GREEN-PG5-failure-20261011.json).
+The same 5ca source compiles294 Go files and12 test-bearing packages plus
+cmd/server. Its actual semantic pipeline diagnostic4 still fails HTTP8s in both
+databases; HTTP material-output checks dominate measured nested duration,
+with large repeated SQL counts. Nested timings overlap and do not establish
+paired performance acceptance. See the [pipeline diagnostic](evidence/memory-semantic-pipeline4-operation-profile-failure-20261011.json).
+The next d34 source also retains a claim-only release owner when initialization
+refuses before acquiring body leases and native Finish fails. It compiles295 Go
+files and passes all138 nodes in one380.834s window: new cleanup6, the complete
+old116, and durable startup/replay16. Every selected RUN/PASS pair is exact once;
+14 owned resources are independently absent. See the [138-node record](evidence/memory-download-claim-cleanup-existing138-GREEN-20261011.json)
+and [reviewable claim cleanup proposal](../integration/proposals/weknora-original-download-claim-cleanup-20261011.json). Newservice-instance
+recovery is explicitly separate from real OS-kill/11-minute-claim-expiry E2E;
+The genuine SQLite process-crash gate now passes on f5d: independently launched
+child killed by actual SIGKILL9, immutable660s SQL claim expires naturally, second
+process performs production startup recovery and current-author validation. Two
+actual SDK requests produce one result, replay adds no third request, original
+fact/body fingerprints stay unchanged, and four exact leases are released. The
+681.499s window includes runtime resource preparation and finishes under1200s;
+three owned resources are independently absent. The [reviewable crash helper and owned drivers](../integration/proposals/weknora-original-download-real-crash-helper-20261011.json)
+reproduce the executed helper/runner bytes and keep separate proposal heads. Before execution, copy the published inner runner byte-for-byte into a new
+private0700 directory, chmod the copy0600, and verify its manifest SHA256 before
+passing it as `--runner`. Git publishes the source as0644; the private-input guard
+correctly refuses that mode before creating any resources. See the [actual OS-crash record](evidence/memory-original-download-OS-SIGKILL-SQLite-GREEN-20261011.json).
+PG crash, durable broker/ACK, application recovery and physical weight inventory
+remain required. A combined policy/vector/crash-helper source now parses302 Go files and
+compiles12 test packages plus cmd/server, with zero business RUN. Independent
+review found a policy final-payload ordering gap and a crash-fixture expiry
+boundary race; both are being repaired before runtime acceptance. See the
+[compile-only record](evidence/memory-policy-vector-crash-helper-compile-20261011.json). The repaired f5d source also compiles302 files and passes policy12 plus
+vector final-union/lifecycle14 in one selected30 window. Its four original
+semantic-current nodes still fail HTTP8s before saved-history assertions. The
+final inline-byte/state and actual pool/Close checks are accepted only within
+those26 correctness nodes; the performance gate remains unaccepted. See the
+[26-pass/4-failure record](evidence/memory-policy12-vector14-GREEN-semanticcurrent4-failure-20261011.json). Exact review proposals are available for [policy sameTX reads](../integration/proposals/weknora-policy-same-TX-read-20261011.json)
+and [embedding output succession](../integration/proposals/weknora-embedding-output-succession-20261011.json).
+Both reproduce the selected source files from the tested fusion and have exact
+forward/reverse tree proofs; separate proposal heads are not runtime-run or adopted. The same f5d full canonical migration also passes38/38 on real ParadeDB17
+and SQLite in30.834s, with seven exact resources independently absent. See the
+[current migration38 record](evidence/memory-current-full-migration38-successor-GREEN-20261011.json). Existing query22/vector20/RecallSQL16 also passes58/58 on the samef5d
+source in116.672s, with nine exact owned resources independently absent; see
+the [current existing58 record](evidence/memory-f5d-existing58-GREEN-20261011.json). A matched-observer pipeline4 run on f5d still fails the original HTTP8s
+prelude. Policy receipt table reads fall from47170→6291 (SQLite) and19606→3179
+(PG), while more HTTP checks finish. Source progress differs and nested times
+overlap, so this is observed duplicate-read reduction rather than an exact
+per-operation or uninstrumented walltime result. Source review identifies
+separate query/rank/vector Recheck transactions and repeated checks inside one
+rank operation; the next change must retain all current authority/final clocks.
+See the [current paired diagnostic](evidence/memory-f5d-semantic-pipeline4-paired-diagnostic-failure-20261011.json). The next cd9375 source parses306 Go files and compiles12 test-bearing
+packages plus cmd/server. Actual rank sameTXscope10 and immutable native
+publication-retirement10 pass in one24-node window; all four original semantic
+current nodes still exceed HTTP8s line149. Retirements record actual producer
+supersession, preserve active ancestor bodies and do not enable physical GC.
+The same cd9375 full SQLite/realParadeDB17 migration38 also passes,
+including retirement table inventory, genuine schema/FK refusal and unchanged
+ANYDROP-first protection; seven owned resources are independently absent.
+The same cd9375 source now passes all159 selected native55/productive24/
+policy58/lifecycle22 regressions in813.853s, with ten exact resources independently
+absent. Genuine generated multi-effect/model-successor paths remain compatible;
+see the [current core159 record](evidence/memory-rank-retirement-core159-GREEN-20261011.json).
+UNKNOWN and new-table-specific genuine DOWN coverage remain required. Reviewable exact-source patches are available for [rank sameTX checks](../integration/proposals/weknora-rank-recheck-same-TX-20261011.json)
+and [publication retirement facts](../integration/proposals/weknora-memory-publication-retirement-20261011.json).
+They reproduce the selected files from cd9375 and have exact forward/reverse
+tree proofs; proposal heads remain separately unrun and unadopted. A copied boundary plan listed14 batch nodes while the current unchanged
+test file contains18, including four final-journal fault cases. Raw partial2,
+inline22 and batch18 all pass, but the strict plan correctly rejects the extra
+nodes and later stages do not run. The repaired50-node plan uses a fresh owner;
+see the [preserved plan mismatch](evidence/memory-rank-retirement-boundary-plan-mismatch-20261011.json). The corrected plan now passes all50 exact nodes on unchangedcd9375 in
+151.875s: originalpartial2/inline22/fullbatch18/actualderivedexpiry2/workerclock6.
+Eleven exact owned resources are independently absent; see the [boundary50
+record](evidence/memory-rank-retirement-boundary50-GREEN-20261011.json). A same-observer cd9375 pipeline diagnostic still fails originalHTTP8s in
+both databases. SQLite completes162 checks versus163 before, with nested
+output-check total12.48s versus16.00s and fewer head/journal reads. PostgreSQL
+completes111 versus90 checks but still fails; those progress differences and
+overlapping durations prohibit a paired uninstrumented walltime acceptance.
+See the [rank-scope diagnostic](evidence/memory-rank-scope-pipeline4-diagnostic-failure-20261011.json).
+A test-only candidate compiles309 files, but inherited-rank callbacks contain a
+known FailNow/WG failure-path issue that is being repaired before execution; see
+the [compile-only record](evidence/memory-rank-retirement-extra-test-compile-20261011.json). The repaired production-identical35496c test child compiles309 files and
+passes all four genuine UNKNOWN/tailDOWN nodes plus five SQLite inherited
+Recall/nestedpolicy/current/Close nodes. All five PG nodes still fail original
+HTTP8s line139 before their target assertions. The callback Fatal/WG path is
+closed in source and did not hang this actual run; expiry uses natural120ms
+wall wait plus actual SQL clock/readback, not a claimed120ms SQL IO. See the
+[actual9-pass/5-failure record](evidence/memory-retirement4-inherited-SQLite5-GREEN-PG5-failure-20261011.json). See the [retirement migration record](evidence/memory-rank-retirement-full-migration38-GREEN-20261011.json).
+See the [20-pass/4-failure record](evidence/memory-rank10-retirement10-GREEN-semanticcurrent4-failure-20261011.json). The shared model final-binding repair preserves its earlier test-only compile
+failure; the corrected source now passes all38 current/download late-IO nodes on `4b53d5cc`, zero
+failures/skips/OOM; all seven exact owned resources are independently absent.
+Existing ordinary HTTP10 and model-authoring/current-history/memory/body58 now
+pass68/68 together on the same4b53 source in208.040s, with eight exact resources
+absent. See the [existing68 record](evidence/memory-model-finalbinding-existing68-GREEN-20261011.json).
+Remaining ancestor worker clocks and matched old-source RED remain pending.
+See the [final-binding38 record](evidence/memory-model-finalbinding38-GREEN-20261011.json). See the
+[compile failure](evidence/memory-model-finalbinding-compile-failure-20261011.json). Tenant-cloud
+credentials, complete history, application/broker/recovery and PRD performance
+remain required. The full V1 goal remains active; deployment and coverage flags
+remain disabled.
+
+## Joint V1 source integration — 2026-10-11
+
+A full PRD audit identifies the unbuilt joint candidate as a main delivery gap.
+The adopted C6/RAG manifest still points to the existing snapshots/plugin0.4.38;
+peer auto-space source/plugin0.6.0 has separate component evidence. Neither set
+of tests alone proves the nonempty normal application flow. See the [full PRD
+remaining audit](evidence/full-PRD-unified-candidate-gap-audit-20261011.json).
+
+The private0aab source merges cd937 originals/lifecycle with cf2 automatic-space
+features, resolves DI/router/auth/API privacy conflicts, and preserves Root's
+schema-qualified125 guard. Root155/156 and SQLite74/75 collide with peer's
+onboarding/processing migrations. Unique fresh-root tails162–168/81–87 remove
+duplicate versions, preserve peer UP bytes and refuse all tail DOWN operations.
+This does not rewrite applied peer history or support its upgrade branch; exact
+lineage preflight and a separate forward bridge remain required. See the [joint
+assembly record](evidence/joint-auto-space-source-assembly-20261011.json).
+
+The first full `./...` zero-business compile parses412 Go files but fails on a
+duplicate privacy import. A narrow source child removes it without altering
+suppression. Independent source review also finds that directory login snapshot
+had regressed to two reads; the previously gated atomic method must be restored.
+No joint app, shared database upgrade, deployment or adoption has run. See the
+[preserved compiler failure](evidence/joint-auto-space-first-full-compile-failure-20261011.json). The next3e9 source restores the atomic directory method and fixes duplicate
+import. Full compile parses417 Go files and compiles116 test packages plus40
+no-test packages, but service tests fail because the restored periodic-directory
+tests require a missing real SourceAuthorizeCalls transport counter. Assertions
+are kept and the fixture ABI is being restored; see the [full compile ABI
+record](evidence/joint-atomic-full-compile-fixture-ABI-failure-20261011.json).
+A separate one-line child also wires a sameTX onboarding path resolver into
+the final original-input transaction; late signed-path behavior remains pending. The nextdf4bb joint source now parses418 changed Go files and fully
+compiles117 test-bearing plus40 no-test packages in133.495s, with zero business
+RUN/SKIP/OOM and exact compiler/temp absence. Source now includes restored
+real authorization counting; see the [first full joint compile pass](evidence/joint-auto-space-full-compile-GREEN-20261011.json).
+A first lineage bootstrap child is source-frozen to refuse conflicting/mixed
+history before Up or Force, but supports only fresh/common absence so far.
+Installed Root catalogue positives and peerApplied forward bridge remain
+required; this incremental gate is not normal joint app acceptance.
+
+The next `0ff63d22` joint source includes the full directory fixture and runtime
+missing-root-path guard. All423 changed Go files parse and all157 packages
+compile (117 test-bearing and40 no-test packages) in216.646s, with zero business
+RUN and independently absent compiler/temp resources. See the [first-guards
+compile record](evidence/joint-first-guards-full-compile-GREEN-20261011.json).
+Independent review finds that the first lineage preflight executes after driver
+initialization can create a migration ledger. Early readonly refusal, complete
+source-set validation and legitimate installed Root catalogue positives are
+being implemented before bootstrap acceptance. PeerApplied forward migration
+and full normal-app behavior remain required.
+
+On the same `0ff63d22` joint source, actual SQLite/PostgreSQL root-path module
+tests pass8/8 in49.601s: installed empty module preserves a lawful path, missing
+from startup refuses, and the same running store refuses after actual DROP and
+catalogue readback. Exact joint83/164 DDL is used; no invented authorization or
+publication is supplied. All7 owned resources are independently absent. See the
+[path-module8 record](evidence/joint-root-path-module8-GREEN-20261011.json) and
+[reviewable source patch](../integration/proposals/weknora-joint-root-path-module-20261011.json).
+This closes only the module metadata contract, not lineage or full app startup.
+
+The `e39ed067` joint child adds early readonly preflight, installed Root
+catalogue checks, explicit old prefix fixtures and a genuine full-schema HTTP
+business test. It parses432 Go files;116 test-bearing plus40 no-test packages
+compile, but the service test package has an actual handler/service import cycle.
+No business tests run. The package boundary is being repaired, and independent
+review also requires an exact PostgreSQL withdrawal kind CHECK witness before
+bootstrap acceptance. See the [preserved compile failure](evidence/joint-readonly-business-full-compile-import-cycle-failure-20261011.json).
+
+The next `76925343` compile resolves the import cycle and includes the exact PG
+withdrawal CHECK plus genuine nonempty-original upgrade fixtures. It parses436
+Go files and compiles116 test-bearing/40 no-test packages, but two external-test
+cursor references use a nonexistent `MessageID` field. A two-field test-only
+repair uses the actual `ID` and preserves the no-advance assertion. No business
+RUN occurs; failed compiler/temp evidence remains retained. See the [cursor ABI
+record](evidence/joint-PGcheck-nonempty-full-compile-cursor-ABI-failure-20261011.json).
+The next source also adds33 explicit full-joint directory snapshot/concurrency/
+periodic nodes. Nonempty upgrade6, source-path HTTP6 and directory33 are source
+drafts pending compilation and actual gates; controlled directory model
+transports are a component limit, not real provider/whole-app acceptance.
+
+The repaired `535253e4` joint source parses439 changed Go files and compiles
+all157 packages (117 test-bearing/40 no-test) in81.281s with zero business RUN
+and independently absent compiler/temp resources. See the [full compile
+record](evidence/joint-catalogue-nonempty-directory-full-compile-GREEN-20261011.json).
+Its strict66-node actual migration window then runs all66 exactly once:
+38PASS/28FAIL/0SKIP/OOM in42.632s. Observed Root74/155 prefix preflight and
+Up to87/168 succeed, but complete restart rejects the legitimate catalogue;
+all installed-prefix restart cases remain failed. Unknown/source refusal
+positives do not offset that failure, and targeted constraint-negative passes
+cannot establish integrity while their current baseline is refused. Go is
+independently absent, owned PG/Redis stopped, and failed logs/network/three
+volumes retained. No subsequent nonempty/HTTP/directory business stages run.
+See the [preserved actual66 failure](evidence/joint-lineage66-complete-restart-catalogue-failure-20261011.json).
+
+A production-identical test-only child then runs two fixed-object diagnostics.
+Both retain the real restart failure: SQLite mismatches only the temporary
+`nextcloud_gc_items_processing_v2` table name after the real migration renames
+it; PostgreSQL mismatches `memory_subjects_derived_block` WHEN plus the
+`memory_original_dispatch_due` and `nextcloud_root_migration_live` partial
+index predicates. Fixed object names/codes/booleans are logged without rows,
+body/credential values or DDL text. A one-table-name SQLite witness correction
+is frozen; PostgreSQL trigger-context and predicate normalization fixes are
+being implemented with changed-condition negatives. See the [actual diagnostic
+record](evidence/joint-complete-restart-object-diagnostic2-failure-20261011.json).
+
+The `4a7d62e1` repair parses441 Go files and fully compiles157 packages in
+134.176s, zero business RUN. Actual strict79 then produces65PASS/14FAIL/0SKIP/OOM
+in61.301s. All PostgreSQL installed-prefix restarts and new WHEN/index fault
+gates pass; all failures are SQLite complete-restart cases. Individual SQLite
+object verifiers now pass, but the untyped object-name set mistakes11 legitimate
+SQLite triggers for PostgreSQL function sentinels. Object-kind/dialect separation
+is being repaired with trigger integrity checks retained. The full79 gate
+remains unaccepted and business45 has not run. See the [compile record](evidence/joint-restart-representation-repair-full-compile-GREEN-20261011.json)
+and [actual79 failure](evidence/joint-repaired79-PG-GREEN-SQLite-object-kind-failure-20261011.json).
+
+The typed repair `cf4d9887` now parses442 Go files, compiles all157 packages
+in127.099s, and passes the complete actual91-node lineage gate in65.871s.
+Every selected RUN/PASS pair occurs exactly once, with0FAIL/SKIP/OOM and7 exact
+owned resources independently absent. Both databases accept all9 lawful Root/
+joint prefixes and complete restarts while unknown/source/dirty/constraint/
+trigger/index/type faults remain refused. This closes the selected schema
+lineage correctness gate, including all earlier restart failures. It does not
+accept nonempty original preservation, PeerApplied forward route or full app
+behavior. See [actual91](evidence/joint-full-lineage91-GREEN-20261011.json),
+[full compile](evidence/joint-typed-catalogue-full-compile-GREEN-20261011.json) and
+[exact reviewable source](../integration/proposals/weknora-joint-catalogue-restart-20261011.json).
+
+On the same `cf4d9887` source, the first actual business stage runs6 nodes:
+1PASS/5FAIL/0SKIP/OOM in60.759s. SQLite lawful nonempty model/policy/native
+producer originals survive canonical75→87 production upgrade and restart,
+held leases and SQL/body/journal/keypin fingerprints remain exact, and current
+reads/Close pass. Its revocation leaf then fails: after actual user disable
+CAS/readback, held model Recheck correctly refuses but independent policy
+Recheck unexpectedly returns nil; the later derived assertion is not reached. Both PG leaves fail actual Model.Create
+preparation before upgrade, with original-input unavailable/changed. The entire
+6-node gate remains failed, and HTTP6/directory33 do not run. Owned Go is absent,
+PG/Redis stopped, failed logs/network/volumes retained. See the [actual nonempty
+record](evidence/joint-nonempty-SQLite-live-upgrade-GREEN-revoke-PG-failure-20261011.json).
+
+The current actor repair `f126d3cd` parses445 changed Go files and compiles
+all157 packages in224.989s with zero business RUN and exact compiler/temp
+absence. Independent policy reads and10 child consumers use the actual bound
+current-actor factory on the active transaction; viewer reading remains legal
+and writer admin checks stay separate. The fixed PG Model.Create phase observer
+records only compiled stages/booleans. New14 test cleanup must first preserve
+the existing sticky operation error on repeated Close; no runtime acceptance
+is claimed yet. See the [compile record](evidence/joint-policy-actor-model-diagnostic-full-compile-GREEN-20261011.json).
+
+The production-identical oracle child `8cd300f5` passes service/server selected
+compile in37.578s and actual standalone policy14/14 in61.360s, with genuine
+current/viewer positives, user/membership/cancel/missing-authority negatives
+and real lease release/sticky-close identity. Its subsequent PG model diagnostic
+remains1FAIL: real Create passes authorization/write/reload, but authored and
+reloaded definition bytes differ while decoded structure and credentials match;
+only nested settings bytes differ after JSONB representation. The original
+Create success assertion remains. A stable serialization repair is required;
+no original hash or source check is relaxed. The78.850s combined window is
+failed overall, with both Go actors absent and owned PG/Redis stopped. See the
+[policy14 and actual model diagnostic](evidence/joint-policy-actor14-GREEN-PG-model-JSONB-diagnostic-failure-20261011.json).
+The [reviewable policy actor source](../integration/proposals/weknora-policy-standalone-current-actor-20261011.json) reproduces the tested files and has exact
+forward/reverse tree proof; complete child-consumer regressions remain required.
+
+The bounded chat JSONB repair candidate `3944b8b2` parses451 changed Go files
+and compiles157 packages in348.816s under480s. It retains raw stored
+definition/fact/body digests and normalizes only four established chat recipe
+Settings objects, with exact numbers, duplicate-key refusal and array order.
+Independent review finds a legacy SQLite unchanged-definition update regression:
+prewrite normalization could bump the old definition revision. A subsequent
+private child restores authenticated old Settings bytes before such writes,
+retaining the control guard; it is being compiled before runtime acceptance.
+Fulljoint policy/query/vector/Recall/native/productive opt-ins remain0RUN.
+True old-producer facts across new-reader/credential updates and embedding
+RawSettings/SpaceDigest compatibility remain separately required. See the
+[compile-only record](evidence/joint-chat-JSONB-regression-fixtures-full-compile-GREEN-20261011.json).
+
+The subsequent `1f7d6c87` candidate includes the reviewed prewrite preservation
+fix and compiles452 changed Go files/all157 packages in211.398s, with0 business
+RUN/OOM and exact compiler/temp absence. Its actual17 gate is being dispatched:
+new bounded Settings tests, genuine PG creation/representation/meaning change,
+the unchanged producer diagnostic and nonempty upgrade/revocation6. True
+old-producer/new-reader compatibility remains a separate required two-process
+gate. See the [compile record](evidence/joint-chat-JSONB-legacy-preserve-full-compile-GREEN-20261011.json).
+
+The first actual17 controller stops after6purePASS because a copied uppercase
+`settings-PG` stage violates its lowercase validation before creating an actor.
+PG/nonempty0RUN; this preparation error is preserved and the fresh corrected
+window uses new owned resources. See the [stage preflight record](evidence/joint-model17-stage-label-preflight-failure-20261011.json).
+That corrected window on `1f7d6c87` runs17 exactly once:13PASS/4FAIL/0SKIP/OOM
+in54.479s. Pure6 and actual PG JSONB/model creation/representation/mutation plus
+unchanged diagnostic5 pass. Both databases lawful nonempty held-original
+upgrade/restart live leaves pass. Both actor-disabled leaves reach real
+model/policy/derived refusal and main release/lease-zero, but repeated cleanup
+Close misclassifies sticky policy/derived operation errors as release failures;
+two leaves and their parents remain failed until the test oracle is corrected.
+No production Close behavior changes. See the [actual17 record](evidence/joint-model-JSONB13-GREEN-nonempty-duplicate-close-failure-20261011.json).
+
+The test-only Close oracle child `3cf07c3f` now passes the complete17-node
+model/nonempty window in79.619s, exact RUN/PASS once and0FAIL/SKIP/OOM; all10
+owned resources are independently absent. It is production-identical to full
+compiled `1f7d6c87`. Real PG creation now succeeds after actual JSONB reload,
+equivalent settings representation preserves proof and meaningful changes
+refuse. Both database nonempty model/policy/native originals and held leases
+survive actual standard migration/restart with unchanged body/fact/keypin
+fingerprints; actor revocation and exact Close error semantics pass. Pure6
+legacy serialization cases do not replace the separate actual old-producer
+compatibility gate. Source-path HTTP6 and directory33 are next. See the
+[actual17 record](evidence/joint-PG-chat-JSONB-nonempty-upgrade17-GREEN-20261011.json).
+The [reviewable chat Settings repair](../integration/proposals/weknora-chat-original-settings-JSONB-20261011.json) reproduces the tested source files with exact tree
+roundtrip proof; actual old-producer/new-reader compatibility stays required.
+
+The subsequent source-path HTTP6 stage on the same3cf source runs6FAIL/0PASS
+with0SKIP/OOM in19.058s. SQLite rejects actual Nextcloud sync-item processing
+before the normal HTTP/path assertion; PostgreSQL rejects genuine embedding
+model creation in complete-schema setup. The chat Settings fix is not an
+embedding RawSettings/SpaceDigest fix. No target late-path fault or directory33
+stage runs. Owned Go is absent, PG/Redis stopped, failed logs/network/volumes
+retained. See the [sourcepath preparation failure](evidence/joint-sourcepath6-SQLite-sync-PG-embedding-preparation-failure-20261011.json).
+
+A test-only real embedding producer diagnostic then runs1FAIL/0SKIP/OOM on
+production-identical `0d5dabfd`. Authorization/write/reload succeeds; decoded
+definition, credentials and dimensions match, while RawSettings bytes differ
+after JSONB. Stored SpaceDigest still equals the authored value, but digest
+recomputation from the reloaded recipe differs. The actual failure is recorded
+without Settings/credential output; source repair must preserve authenticated
+old SpaceDigest/vector identity rather than re-signing it. See the [embedding
+space diagnostic](evidence/joint-embedding-ModelCreate-JSONB-space-diagnostic-failure-20261011.json).
+Independent SQLite source review also identifies post-seal metadata mutation:
+streaming Emit adds publication_epoch after connector original-artifact sealing,
+so subsequent exact ItemDigest verification rejects the real fetched item.
+Epoch capture before seal plus unchanged consumer consistency checks is being
+implemented; no reseal or weaker original verification is accepted.
+
+The unified embedding/epoch source `97e739e0` parses457 Go files and compiles
+116 test-bearing/40 no-test packages in338.437s, but its new connector test has
+one unused types import;0 business RUN occurs. Failed compiler/temp is retained.
+Independent review also identifies a producer input boundary: absent/null binding
+epoch deserializes as0 and becomes sealed metadata, despite Emit itself refusing
+missing metadata. Presence-aware response decoding must preserve explicit legacy0
+and refuse absent/null before seal. The next child includes that correction and
+compiler import repair. See the [preserved compiler failure](evidence/joint-embedding-seal-full-compile-test-import-failure-20261011.json).
+
+The corrected unified `afd1c6c8` candidate now parses457 changed Go files and
+compiles all157 packages (117 test packages,40 without tests). Actual compiler
+and formatter terminal0, no business RUN/failure/OOM, and all three owned
+resources are independently absent. The source distinguishes missing/null
+binding epoch from explicit0 before all bindings consumers and records the
+authenticated source epoch before immutable sealing. The prior import failure
+and missing-epoch review remain preserved. Actual embedding/seal/path/directory
+acceptance is still pending; see the [full compile record](evidence/joint-embedding-epoch-presence-full-compile-GREEN-20261011.json). Reviewable [embedding settings](../integration/proposals/weknora-embedding-original-settings-JSONB-20261011.json) and [epoch sealing](../integration/proposals/weknora-publication-epoch-before-seal-20261011.json) proposals contain exact actual candidate file bytes and forward/reverse tree proofs; neither is adopted.
+
+The next actual business controllers require a shared `CLOCK_MONOTONIC` origin:
+an actual host probe confirms Python3.9 macOS `time.monotonic()` values have
+process-relative origins while `clock_gettime(CLOCK_MONOTONIC)` agrees across
+parent/child. Parent-only compiler watchdogs remain valid. Future business
+drivers also join actual owned child/attach processes and require both final
+clocks before success; fixed1200s and10s cleanup reserve are retained.
+See the [readonly clock probe](evidence/host-cross-process-monotonic-origin-probe-20261011.json).
+
+The true old8cd producer and current joint reader compatibility helpers now
+compile independently on `d6e49743` and `d59de336`, respectively. Both service
+and server compile with0 business RUN; the two formatted helper files are
+identical across sources, all production bytes match their respective bases,
+and six owned resources are independently absent. The two-process same-volume
+SQLite chat/embedding opaque-space lifecycle tests are prepared but not run;
+see the [two-source compile record](evidence/two-source-model-compat-test-compile-GREEN-20261011.json).
+
+The first actual61 window on `afd1c6c8` passes the embedding pure node, then
+stops in controller preflight before an embedding-current actor is created.
+The later60 business nodes have0 RUN. Both owned SQL actors are independently
+stopped; raw logs and owned network/volumes remain retained. Empty AssertionError
+metadata cannot identify the failed assertion, so a fresh-owner diagnostic
+adds only code basename/function/line, preserving all assertions and bounds.
+See the [controller failure](evidence/joint61-controller-preflight-after-pure1-failure-20261011.json).
+
+The fresh diagnostic window on the same `afd1c6c8` candidate passes22/22
+actual component nodes: embedding12 (four remote protocol Model.Create and
+Space identity/successor cases) plus authenticated source epoch/sealing10.
+All RUN/PASS pairs occur once,0 failure/skip/OOM; four Go actors are independently
+absent. The window then stops at the parent's nonce-in-argv process capture
+assertion before waiting the next stage; owned cleanup stops both SQL actors,
+and child preflight observes stopped Redis. This is a controller failure,
+not a spontaneous Redis failure or full61 acceptance. The later path6/directory33
+have0 RUN. The exact-byte embedding/seal proposals now carry this component
+validation; old-producer compatibility and fulljoint regressions remain pending.
+See the [actual22 and controller failure](evidence/joint-embedding12-seal10-GREEN-controller-nonce-failure-20261011.json).
+
+The bounded identity controller now enters the remaining39 business window
+on unchanged `afd1c6c8`. Sourcepath6 runs0PASS/6FAIL at the genuine postprocess
+prelude: the manual joint fixture omits `ConfigureNextcloudPostProcessLedger`,
+which production DI binds to the real full-schema processing state store.
+The repair must call that formal binder without weakening the graph guard or
+seeding ledger rows. HTTP8s assertions and directory33 are not reached.
+Both SQL actors are independently stopped, the Go actor is absent, and failed
+owned data/logs remain retained. See the [graph-ledger fixture failure](evidence/joint-sourcepath6-real-graph-ledger-fixture-failure-20261011.json).
+
+The four-line real graph-ledger fixture child `fda2db49` compiles service/server
+with0 business RUN and unchanged production bytes; three owned compile resources
+are independently absent. The matched39 window then runs sourcepath6 with
+0PASS/6FAIL in68.107s. Actual ingestion/postprocess advances: SQLite fails during
+ordinary HTTP output with database-lock errors, while PG passes real answer/
+complete/producer-return/assistant-complete assertions and then fails original
+Memory admission (no progress row). That admission reason is still unclassified.
+Directory33 and final source-path transaction assertions have0 RUN; original
+8s/20s/10s bounds remain. Both SQL actors are independently stopped and Go
+is absent. See the [fixture compile](evidence/joint-real-graph-ledger-fixture-compile-GREEN-20261011.json) and [actual failure](evidence/joint-sourcepath6-real-ledger-SQLite-lock-PG-admission-failure-20261011.json).
+
+The genuine old8cd producer-to-current-reader SQLite chat compatibility pair
+now passes both required nodes in82.181s on `d6e49743`/`d59de336`. Separate
+processes share one owned SQL file/journal/keypin; transfer SHA is unchanged
+before/after the new reader. Production75→87 upgrade preserves original
+definition/control/body fingerprints through genuine credential rotation,
+historical/current reading and actual actor disable; leases return to0. Both
+Go actors and the owned volume are independently absent. This closes the
+chat SQLite old-source compatibility lane only; PG, embedding/vector/rank
+outputs and fullapp remain separate. See the [real two-source pair](evidence/two-source-SQLite-chat-legacy2-GREEN-20261011.json).
+
+The separate genuine old8cd→current-reader SQLite embedding pair also passes
+2/2 in25.590s on the same two compiled source snapshots. Old Model.Create
+produces the original opaque Settings/Space/dimensions on75; the new reader
+upgrades the same owned SQL/journal to87, retains raw definition/control/body
+fingerprints through credential rotation and current/historical reads, and
+refuses actual actor disable with leases0. Both selector transfer files have
+identical SHA before/after the new process; both Go actors and the independent
+owned volume are absent. This is model opaque-space lifecycle acceptance;
+old embedding wire/vector/output/rank facts remain pending. See the [real
+embedding pair](evidence/two-source-SQLite-embedding-opaque-space2-GREEN-20261011.json).
+
+Startup qualification candidate `e552aa62` now parses464 changed Go files and
+compiles all157 packages with0 business RUN; three owned resources are
+independently absent. It aborts migration failures before application writers,
+qualifies disabled-auto startup through full readonly catalogue/source checks,
+and verifies the actual opened SQLite pool with escaped filenames and proper
+initial/late pool cleanup. Actual34 first runs database21 as13PASS/8FAIL: all
+SQLite nodes pass, PG fails preparation because the fixture requires a URI
+and runner supplies a keyword DSN. Container13 has0 RUN. The next fresh
+runner changes only the migration-test key to the same owned-service URI;
+source/bounds remain unchanged. See [full compile](evidence/joint-startup-readonly-qualification-full-compile-GREEN-20261011.json) and [URI preparation failure](evidence/joint-startup-SQLite13-GREEN-PG-URI-preparation-failure-20261011.json).
+
+The separate `e57f5713` source compiles service/server and459 changed Go files
+with0 business RUN, combining genuine joint SQLite WAL PRAGMA assertions and
+default-off fixedphase/errorclass capture observation. Original guard, return
+paths, business bytes and8s/20s/10s bounds remain. Its matched6 diagnostic
+remains pending; see the [diagnostic compile](evidence/joint-WAL-capture-fixedphase-diagnostic-compile-GREEN-20261011.json).
+
+The URI-corrected startup34 run on `e552aa62` passes all real database21
+qualification nodes and8 container nodes, with5 container failures (29PASS/
+5FAIL overall). Full-auto/external positives refuse unknown lineage, and
+clean-prefix/dirty direct migrate fixtures use raw filenames with spaces that
+do not match the escaped runtime inspector. The latter prelude failures occur
+before initDatabase assertions; they must use the genuine escaped WithInstance
+driver, never synthetic ledgers. Startup34 remains unaccepted. Two Go actors
+are absent and both SQL actors are independently stopped. See the [actual29
+and remaining5](evidence/joint-startup-database21-GREEN-container8-GREEN-5-failure-20261011.json).
+
+The real WAL/fixedphase sourcepath6 diagnostic on `e57f5713` still fails all6
+nodes in92.698s. PG actual prepare and model begin pass; capture_request
+refuses before model capability/admission. Source inspection confirms the
+testbridge passes an observed wrapper to a constructor requiring the genuine
+`*messageService`, leaving the backing reader unavailable. The fix is only
+testbridge unwrapping the same real store/guard/service; the closed production
+constructor and HTTP observer remain. SQLite still fails ordinary HTTP prelude,
+so WAL has not accepted that lane. Sourcepath final transaction/directory33
+remain pending. See the [fixedphase failure](evidence/joint-sourcepath6-WAL-fixedphase-PG-reader-wrapper-failure-20261011.json).
+
+
+The reviewed real-message backing testbridge `ab3b1193` compiles service/server
+and passes the genuine PostgreSQL/current sourcepath leaf. The matched6 window
+has1PASS/5FAIL: SQLite/current still fails ordinary HTTP; both publication-after-
+model leaves reach real original admission but fail the required post-SDK final
+transaction source query. The6-node gate and directory33 remain unaccepted.
+See [actual sourcepath progress](evidence/joint-sourcepath-real-message-backing-PG-current1-GREEN-remaining5-20261011.json)
+and [reviewable testbridge](../integration/proposals/weknora-real-message-backing-testbridge-20261011.json).
+
+Startup `7e4cb6b5` compiles database/container/server and now passes31 of34
+actual nodes: all database21 and container10. Real direct escaped SQLite drivers
+repair the dirty88 and prefix75 preludes; both full-clean startup positives
+still refuse at `nextcloud_onboarding_touch_wiki_pages_update`. The default-off
+fixed-phase diagnostic identifies that exact trigger without changing readiness.
+No unknown-schema refusal is relaxed. See [actual31 and remaining3](evidence/joint-startup-real-SQLite-driver31-GREEN-Wiki-trigger3-failure-20261011.json)
+and [current source proposal](../integration/proposals/weknora-startup-readonly-schema-qualification-20261011.json).
+
+
+The exact Wiki wrapper repair now passes the complete unchanged startup34 on
+`3707fce5`: database21 and container13, zero failures/skips/OOM, exact RUN/PASS
+once, all8 owned resources independently absent in55.340s. All35 descriptor
+Key/Columns match the actual issuer; Wiki body lifecycle remains unsupported.
+The same candidate parses470 Go files and compiles all157 packages, integrating
+unwired169/peer-forward source components. See [full compilation](evidence/joint-Wiki-wrapper-pending169-assets-full-compile-GREEN-20261011.json),
+[actual startup34](evidence/joint-Wiki-exact-wrapper-startup34-GREEN-20261011.json)
+and [exact startup proposal](../integration/proposals/weknora-startup-readonly-schema-qualification-20261011.json).
+Peer forward171/89 assets retain historical SQL and remain source-integrity
+only; they grant no startup eligibility. See [source boundary](evidence/peer-forward-bare-embedding-source-assets-unwired-20261011.json).
+
+
+Real Parade17 vector/pg_search pending169 runs21 nodes on `3707fce5`: existing
+absent/local15 allPASS, while the wrapper-coexist parent and5 leaves fail at the
+actual production trigger-installer prelude. The canonical168 schema is genuine,
+Root125 SQL is unchanged and all unknown local/foreign/column/index/sequence
+cases execute. The pending21 component and PeerApplied upgrade remain
+unaccepted; all Go actors are absent and SQL actors stopped, failed data retained.
+See [actual15 and wrapper6 failure](evidence/pending169-Parade17-existing15-GREEN-wrapper6-prelude-failure-20261011.json).
+
+Independent directory33 now actually runs on `3707fce5`. Snapshot23 allPASS,
+including real concurrent point-in-time/phantom/cancel cases; periodic10 fails
+the real graph-ledger fixture prelude before directory assertions. That startup
+branch did not yet contain the earlier proven four-line actual store binding.
+All Go actors are absent, SQL stopped, failed data retained; sourcepath6 and
+whole33 remain unaccepted. See [snapshot23 and periodic10 failure](evidence/joint-directory-snapshot23-GREEN-periodic10-real-ledger-failure-20261011.json).
+
+
+Current `0621bef7` parses477 Go files and compiles all157 packages after the
+Root DB-entry signature correction; the failed compile is retained separately.
+The real graph-ledger fixture is now merged: periodic directory10 passes all
+actual nodes in113.722s, zero failures/skips/OOM and7 owned resources absent.
+Snapshot23 passed on earlier3707 in another window; this is not one33-node run.
+See [corrected full compilation](evidence/joint-peer-prefix-root-ABI-postSDK-full-compile-GREEN-20261011.json),
+[compile failure](evidence/peer-prefix-readonly-interface-root-ABI-compile-failure-20261011.json)
+and [periodic10](evidence/joint-real-graph-ledger-directory-periodic10-GREEN-20261011.json).
+
+
+The real libpq/GORM fixture correction now passes the entire pending16921 on
+`0621bef7`, including actual current/missing bare guard, known other-table
+wrappers, local-OID-only locking, foreign/function/shape/index/sequence refusal
+and preserved data/ledger. It remains unwired. The next private historical
+prefix14 runs6PASS/8FAIL: nonempty clean161/80 positives and issued-wrapper
+positives refuseUnknown; mixedRoot unexpectedly passes the private observer because its compiled
+core table definition mistakenly includes Root155 additional enum kinds. Sourceassets3 has0RUN. All Go actors are absent, SQL
+stopped and failed data retained. See [16921 and prefix14](evidence/pending169-Parade17-full21-GREEN-peer-prefix14-failure-20261011.json).
+
+
+Actual postSDK authority10 on `cab8df4e` passes both databases in104.723s,
+including genuine actor/model mutation and actual lease CAS/readback followed
+by SQLclock expiry, with7 resources absent. Original sourcepath6 improves to
+4PASS/2FAIL: SQLite/current and allPG nodes pass; the only remaining leaf fails
+SQLite ordinaryHTTP answer before extraction. Its producer observation count
+is0, so the diagnostic context binding and exact cause remain pending.
+The private peer-prefix projection also needs correction: historical core125/44
+metadata was copied after a Root155 enum overlay, which rejects purepeer and
+incorrectly accepts the mixedtable. It is unwired; Root startup/access remains
+closed to that route. See [postSDK10](evidence/joint-postSDK-sameTX-authority-real-expiry10-GREEN-20261011.json)
+and [sourcepath4/2](evidence/joint-sourcepath-PG3-SQLite-current1-GREEN-SQLiteHTTP2-failure-20261011.json).
+
+
+The complete unified-source policy58 and query/vector/RecallSQL58 regressions
+now pass on `cab8df4e` in independent210.717s and136.798s windows. Every selected
+parent/leaf has exact once RUN/PASS, nofail/skip/OOM, and9+9 owned resources are
+independently absent. Native55 subsequently runs50PASS/5FAIL and productive24 is0RUN after
+failfast;195 remains unaccepted. See [policy58](evidence/joint-current-full-schema-policy58-GREEN-20261011.json)
+and [query/vector/Recall58](evidence/joint-current-full-schema-query-vector-Recall58-GREEN-20261011.json).
+
+
+Unified native55 now has a complete50PASS/5FAIL actual result on `cab8df4e`.
+Both healthy outbox transport and first cross-input checkpoint Handles fail in
+both databases, plus PG commit/public-writer serialization. The original10s
+success assertions are retained and source causes are under investigation.
+Productive24 has0RUN in that failed window; an independent run later fails24
+nodes at the initial genuine Handle prelude;
+mandatory195 is not accepted. Go is absent, SQL stopped and failed data retained.
+See [native55 failure](evidence/joint-current-native55-50pass5fail-productive24-notrun-20261011.json).
+
+
+Independent productive24 subsequently runs0PASS/24FAIL in162.199s, all22 leaves
+stopping at the initial genuine Handle success prelude. Mandatory195 now has
+all195 actual nodes across4windows:166PASS/29FAIL, zeroSKIP/OOM. The successful
+policy58/query-vector-Recall58 remain separate accepted regressions; native55
+and productive24 remainRED. Source review identifies real testDI omissions
+(unconfigured fresh tenant policy authority and a wrapper hiding the actual
+postSDK verifier); no production guard or original10s/NoError is relaxed.
+All Go actors are absent, SQL stopped and failed data retained. See [productive
+prelude24](evidence/joint-current-productive24-real-Handle-prelude-failure-20261011.json).
+
+
+The real fixtureDI correction, exact historical125/44 metadata projection and
+HTTP producer observer/cleanup now compile together on `e3ab8442`:481 changed
+Go files parsed and all157 packages pass with0businessRUN, noOOM and3 exact
+owned resources absent. Matchednative79, peer-prefix/source-projection20 and
+sourcepath6 actuals are next; compilation does not accept those runtime gates.
+See [realDI source](evidence/joint-native-productive-real-DI-source-correction-20261011.json)
+and [current fullcompile](evidence/joint-real-DI-historical-HTTP-observer-full-compile-GREEN-20261011.json).
+
+
+The matched realDI/verifier child now passes the fullnative55+productive24
+79-node gate on `e3ab8442` in673.617s, zeroFAIL/SKIP/OOM, eachRUN/PASS once,
+with8owned resources independently absent. All5oldnative healthy/publicwriter
+failures and24productive initialHandle failures are closed by true fixture
+DI/backing forwarding; alloriginalsuccess/counter/10s/serialbarrier assertions
+remain. Policy58 andQVR58 passed on earliercab8 separatewindows; there is no
+single195/fullapplication acceptance. See [actual79](evidence/joint-real-DI-native55-productive24-79-GREEN-20261011.json).
+
+
+Private peer-prefix14 reruns after the exacthistorical table projection repair
+on `e3ab8442`:8PASS/6FAIL, with bothmixedRoot refusal cases nowPASS. Fourpurepeer
+nonempty/current-issuedwrapper positives still refuseUnknown; sourceassets3
+andprojection3 have0RUN afterfailfast. This remains an unwired/read-only
+observation, notforwardupgrade readiness. Goabsent/SQLstopped; faileddata retained.
+See [correctedprojection14](evidence/peer-historical-projection-corrected-prefix14-8pass6fail-20261011.json).
+
+
+The correctly boundHTTP producer sourcepath6 diagnostic on `e3ab8442` still
+runs4PASS/2FAIL, nowSQLite/current andparent fail while SQLitewithdrawal and
+allPG nodesPASS. ActualSessionreturn precisely captures sqlite3 busy/busy_snapshot;
+115publication rechecks and109bodyacquires pass beforethatreturn. The exact
+read-to-write transaction remains under diagnosis; neither retries nor8s/10s
+orpool limits changed. EachSQLiteleaf passed in separatewindows, never a full6.
+Goabsent/SQLstopped, failed data retained. See [actualBusySnapshot](evidence/joint-HTTP-producer-bound-sourcepath-SQLite-busy-snapshot-failure-20261011.json).
+
+
+The default-offpeer phase/remainingworker testDI fusion passes selecteddatabase,
+service andserver compilation on `0aa89caf`,0businessRUN/3ownedresourcesabsent.
+Its test-onlyactualSQLite errorobserver child `c5e9a07f` also compiles thosepackages.
+Matchedprivateprefix14 again runs8PASS/6FAIL: allpurepeer legalcases fail typed
+`nextcloud_indexed_withdrawal_items` beforemissing-trigger predicates. An
+independent sourcepure6 window nowpasses all6 in15.236s, exactpairs, nofail/skip/OOM
+and8resourcesabsent; it proves assets/projections only, no runtimeupgrade/Ready.
+See [selectedcompile](evidence/peerprefix-diagnostic-remaining-worker-selected-compile-GREEN-20261011.json),
+[tablephase](evidence/peerprefix-fixedphase-core-withdrawal-table-refusal-20261011.json)
+and [sourcepure6](evidence/peer-forward-assets-historical-projection-pure6-GREEN-20261011.json).
+
+
+The actualSQL-error sourcepath6 observer on `c5e9a07f` runs4PASS/2FAIL in83.407s.
+It pins SQLite/current failure to `original_body_leases` CREATE inside a real
+transaction, with fixed callsites `body_lease_acquire,message_body_scope_acquire`
+and actual SQLite busy/busy (distinct from earlierbusy_snapshot return). BothPG
+andSQLitewithdrawal cases PASS. The read-before-write body-scope transaction and
+concurrent renewal now have a concrete target; no retry/timeout/pool/authority
+change has been applied. Goabsent/SQLstopped and faileddata retained.
+See [SQLobserver compile](evidence/actual-SQLite-operation-observer-selected-compile-GREEN-20261011.json)
+and [actual lease-create busy](evidence/joint-SQLite-message-body-scope-lease-create-busy-failure-20261011.json).
+
+
+Remainingworker component34 now has actual evidence inthree independent windows:
+whole-result6 PASS6, generatedconsolidation16 FAIL16, multicluster6 FAIL6, and
+finalclock6 PASS6. The22generated failures allstop attrue shared-agent message
+GetMessage (helper91), beforeoperationassertions; fixedsource error is
+ErrNextcloudOnboardingDenied andactualschema/authority wiring isunder diagnosis.
+No component scope is widenedto fulljoint87/168/fullV1; original10s/20s preserved.
+Finalclock6 runs40.325s/7resourcesabsent; failedowners stopped/dataretained.
+See [whole-result/consolidation](evidence/remaining-component-whole-result6-GREEN-consolidation16-sharedagent-failure-20261011.json),
+[multicluster](evidence/remaining-component-multicluster6-sharedagent-message-read-failure-20261011.json)
+and [finalclock6](evidence/remaining-component-worker-finalclock6-GREEN-20261011.json).
+
+
+Explicitcommon129/48 source_revision evolution now compiles andpasses sourcepure6
+on `d389cc29` in15.440s (8resourcesabsent). In matchedprivateprefix14, all4legal
+nonempty/issuedwrapper observations passcompletecatalogue/digests/core125;
+remaining6failures areline186 Rootpreflight expectedPeerBridge versus actual
+SourceMismatch, whose fixture/canonicalsource cause isunderreview. Missingtrigger
+negative nowactuallyreachesnamedtrigger, mixedRoot/dirty/sourcechanged refuse.
+No privateobservation iswired toReady/access/upgrade. See [compile](evidence/peer-typed-common129-48-evolution-selected-compile-GREEN-20261011.json),
+[observeradvanced/Rootassertion](evidence/peer-common129-48-private-positive-root-source-refusal-assertion-failure-20261011.json)
+and [exactcommonpure6](evidence/peer-typed-common129-48-fullDDL-projection-pure6-GREEN-20261011.json).
+
+The canonical cwd helper correction now preserves all original historical14
+assertions on `0e56af90`:14 PASS, zero failures/skips/OOM,22.053s. All7 owned
+resources are independently absent. Source assets/projection6 also pass in a
+separate15.783s window, with8 resources absent. The unchanged Root preflight
+still rejects the peer branch with PeerForwardBridge. This accepts the private
+observer and source projection only; production upgrade/startup remains open.
+See [prefix14](evidence/historical-root-cwd-private-prefix14-GREEN-20261011.json),
+[source6](evidence/historical-cwd-source-projection6-GREEN-20261011.json) and
+[reviewable test delta](../integration/proposals/weknora-historical-cwd-joint-generated-entries-20261011.json).
+
+On `0e56af90`, the new fulljoint shared-Agent entries pass all16 consolidation
+and6 multicluster nodes in separate fresh165.478s and53.247s windows. Each
+window has7 independently absent resources, zero failures/skips/OOM. These
+entries run the original business bodies with complete production87/168
+schema; they preserve genuine sharing and add no source-tenant membership.
+The old partial-schema component22 failures remain preserved. See
+[consolidation16](evidence/joint-sharedagent-consolidation16-GREEN-20261011.json)
+and [multicluster6](evidence/joint-sharedagent-multicluster6-GREEN-20261011.json).
+
+The scoped SQLite lease-writer candidate `01f02907` parses484Go files and
+compiles repository/database/service plus server with zero business RUN. It
+reserves the writer before Acquire/Renew metadata reads without changing a
+lease row. Original SQL/HTTP6 remains4PASS/2FAIL: SQLite/current passes,
+withdrawal's HTTP prelude returns busy_snapshot from model-original permission
+recheck; allPG nodes pass. Failed Go is absent and bothSQL actors are stopped.
+IndependentWAL5 initially refused an uppercase plan stage beforeGo, then all5
+failed the fixture's WAL prerequisite before writer assertions. Both failures
+remain recorded; test-only complete-schema fixture correction is pending.
+See [compile](evidence/scoped-SQLite-message-lease-writer-selected-compile-GREEN-20261011.json),
+[original6](evidence/scoped-SQLite-writer-sourcepath6-busy-snapshot-failure-20261011.json),
+[plan refusal](evidence/scoped-SQLite-WAL5-stage-name-pre-Go-refusal-20261011.json),
+[WAL prerequisite](evidence/scoped-SQLite-WAL5-fixture-mode-prerequisite-failure-20261011.json)
+and [reviewable candidate](../integration/proposals/weknora-scoped-SQLite-message-body-lease-writer-20261011.json).
+
+The one-line fulljoint fixture optin on `11285476` now passes all5 genuine
+SQLite WAL writer nodes in42.738s, zero failures/skips/OOM,7 resources
+independently absent. Real competing Acquire/Renew complete; zero-row
+reservation leaves every existing lease tuple unchanged and fires no row
+trigger; changed original plans and stale nested snapshots still refuse without
+claims. The same candidate parses484Go files and selected compilation passes.
+The original6 failure remains separate: actual modelOriginalRead.Recheck
+reads actor/member/tenant permissions before creating directory_permission_versions,
+which can upgrade an old snapshot. That owning transaction is the next minimal
+fix; no permission upsert is removed. See [realWAL5](evidence/scoped-SQLite-message-lease-writer-WAL5-GREEN-20261011.json)
+and [compile](evidence/fulljoint-SQLite-WAL5-fixture-selected-compile-GREEN-20261011.json).
+
+Model permission Recheck now reserves the SQLite writer before its first
+permission read/upsert. On `a3741d26`, the original SQL/HTTP6 passes completely
+in110.314s and the new embedding operation12 passes in29.466s. Each separate
+window has7 independently absent resources. The source has a full157-package
+compile,490parsedGo files andzero business RUN in that compiler window.
+The prior compile failed a new test-only SSRF utility import and remains
+recorded. No authority/upsert/original/HTTP8s/write10s/pool2 requirement changed.
+
+On production-identical `92b1bc76`, stronger model writer7 passes in43.573s.
+The earlier caller-owned test incorrectly expected a refused reader to revive
+after SQL rollback; its new oracle requires the original failure to remain
+latched, actualClose, then a genuinely fresh authorized same-proof reader to
+succeed. All original four remote embedding protocol80 tests then pass in one
+103.872s window, with8 resources absent and originalfixtures/parents unchanged.
+The operation uses the same actualmodel/credential reader through backoff,
+Wiki batches and index saves, retains per-call current checks, joins cancelled
+SDK/watchers before closing, and preserves borrowed outer holds.
+
+These are source-specific component windows. Real external backend writes,
+knowledge embedding input/output receipts and sameTX final publication,
+graph/status/personalQA andV1 remain incomplete. Peer-forward route has a
+verified SQLite per-instance-lock race; a Linux same-inode OFD-lock child is
+being reviewed, with other platforms and partialprefixes still open.
+See [fullcompile](evidence/model-Recheck-embedding-operation-full157-compile-GREEN-20261011.json),
+[original6](evidence/model-Recheck-writer-original-sourcepath6-GREEN-20261011.json),
+[operation12](evidence/original-embedding-operation-SQL-HTTP12-GREEN-20261011.json),
+[writer7](evidence/model-original-Recheck-writer-WAL7-GREEN-20261011.json),
+[original80](evidence/model-Recheck-embedding-original-four-protocols80-GREEN-20261011.json)
+and [exactreviewable source](../integration/proposals/weknora-model-recheck-writer-and-embedding-operation-20261011.json).
+
+Production PeerApplied routing now passes genuine nonempty161→169→171 and
+80→88→89 upgrade/restart/read-onlyReady/actualopenedpool checks on `1f185e4d`.
+All20 selected nodes pass in38.721s. Source/mixed/dirty/staleledger and DOWN
+refusals remain intact, and real local PostgreSQL guard repair runs onParade17.
+SQL UP/DOWN bytes and historical source identities remain unchanged.
+
+SQLite exclusion now uses the real existing database inode and OFD byte0,
+covering decisive ledger/catalogue/source selection through actualm.Close.
+Linux process6 passes in12.244s: actual independentprocess andsymlink exclusion,
+context timeout, closingotherFD withoutlosingthelock, normalSQLwriter operation,
+SIGKILL release, genuine migration thensecondprocesshonestrestart, andhardlink/
+replacedinode refusal. Readiness remains read-only; m.Close errors propagate.
+The earlier per-instance SQLite migrate.Lock was rejected by independent
+source review and is not accepted as cross-process exclusion.
+
+Original Rootlineage91 and startup qualification34 remain unchanged and pass
+completely onthe samecandidate in104.073s and71.120s separate windows. Their
+7 and8 resources, plus7 forroute20 and7 forOFD6, are independently absent.
+An independent raw audit verifies all151 distinctselected RUN/PASS pairs once,
+zero failures/skips/unexpected nodes and originalmigration bytes unchanged.
+This is fourcomponent windows, not one151-node or fullapplication acceptance.
+
+Darwin source/ABI was reviewed and a private official Go1.26.8 toolchain matches
+the pinnedDocker release; nativecompile/process6 is still pending. Other
+platforms/filesystems, noncooperativeoldmigrators, partialpeer155–160/74–79,
+normalparse/embedding/graph/status/QA, coordinatedrestore andphysicalGC remain
+open. See [route20](evidence/peer-forward-nonempty-honest-route20-GREEN-20261011.json),
+[Linuxprocess6](evidence/peer-SQLite-Linux-same-inode-OFD-process6-GREEN-20261011.json),
+[original91](evidence/peer-route-original-Rootlineage91-GREEN-20261011.json),
+[original34](evidence/peer-route-original-startup-ready34-GREEN-20261011.json)
+and [exactreviewable source](../integration/proposals/weknora-peer-forward-route-and-inode-migration-exclusion-20261011.json).
+
+Darwin/arm64 native validation is now actual: privateofficial Go1.26.8 matches
+the pinnedDocker release/hash, the exactdatabase package compiles natively,
+and all6 sameinode/OFD processnodes pass onthishost in7.416s. RealCGO/SDK,
+actualindependentprocess/alias/ctx/SIGKILL/SQLwriter/migration-restart assertions
+execute; nativeGo/helper groups are independently absent after actualwait.
+The code/source tree remains exactly `1f185e4d` usedbyLinux componentwindows.
+
+The first cold nativecompiler exits0/packagePASS/0business butitscontroller
+rejects transientps argumentdisplay changes. That receipt is retained. A fresh
+status-aware runner treats unchangedbirthidentity OS-zombies as terminal,
+never signals them, keeps otheridentitychanges closed, and passes the actual
+warmcompiler andprocess6 underunchanged480/1200 budgets. Targetmetadata
+closure309packages/25externalmodules matchesgo.sum; thisdoesnot claimall348
+modules orfullnativeapp compilation. No globaltools/sharedcaches were changed.
+Unknownplatforms/filesystems/VFS andnoncooperative oldmigrators remainopen.
+See [nativecompile/process6](evidence/peer-Darwin-native-compile-OFD-process6-GREEN-20261011.json)
+and [retainedcontroller refusal](evidence/peer-Darwin-native-compiler-PASS-runner-identity-refusal-20261011.json).
+
+## Prior component checkpoints — 2026-10-10
+
+These entries preserve earlier evidence and superseded intermediate states. The current checkpoint above governs current acceptance.
+
+Native fixture follow-up on `c42071de` passes40/55 nodes, with15 failures and
+no skips/OOM; the gate is unaccepted. The new complete-effect verifier uses
+a pending-only loader after successful completion, which needs a historical
+metadata oracle; the public-writer barrier has a separate unresolved error.
+Original partial tests still pass SQLite and fail PostgreSQL second Handle at
+20s after same-TX metadata reuse on `71d92523`. The old20s bound and test body
+remain unchanged. Query-count/profile pairs are prepared for real bottleneck
+measurement; no optimized-performance acceptance is claimed. All failed
+owners/raw/volumes/networks remain preserved.
+
+Embedding memory follow-up now passes24 nodes on test-only child `5766a09b`:
+exact leased document input and same-TX vector/output/body receipts, current
+actor/policy/dimension refusals, and public Remember/Update/optional-failure
+entry behavior. The genuine manual origin fixture repair changes no production
+code; the prior80 four-protocol model gates remain separately attributed.
+The window took77.147 seconds, zero failures/skips/OOM, with original write10s
+unchanged. Query/receipt-backed rank/history/sync/local/cloud routes remain
+in progress. The [embedding proposal](../integration/proposals/weknora-original-embedding-20261010.json)
+round-trips to its exact tree and is kept separate from the adopted manifest.
+
+New private embedding source `f3a4f1b1` parsed186 changed Go files and compiled
+all11 selected packages (127.796 seconds, zero runtime tests). Its true remote
+model original producers/held constructors now pass80 SQL/HTTP nodes across
+OpenAI, DashScope, Ark and Google, including exact recipe/body/dimensions and
+current-authority/active-cancel cases. Memory input/result tests failed all10
+nodes before provider entry because their Remember fixture omitted explicit
+manual origin; existing defaults classify it as unproven extracted output and
+correctly refuse it. A two-line test-only authoring repair is prepared, not
+executed. Query/vector-receipt/history/rank/sync and local/cloud variants remain
+required. See the [embedding gates](evidence/original-embedding-models-and-memory-gates-20261010.json).
+
+The matched ordinary original-model HTTP selection now passes all10 nodes
+on private source `e8b2dd63`, zero failures/skips/OOM. Real old-source observer
+confirmed constructor cancellation closed the model read while HTTP still
+owned one reference. The fix preserves cancellation throughout acquisition
+and transfers the proved read to the live message owner; provider calls keep
+their original cancellation. All four legal current/Done-open cases publish
+answer/references/complete and one assistant/original input manifest, while
+actor/model revocations still cancel/join and create no completion. Original
+HTTP8s/package20m remain; the window took86.350 seconds. Paired tests/diagnostic
+are byte-identical, and all seven successful resource identities are independently
+absent. See the [owner-lifetime GREEN](evidence/ordinary-model-owner-lifetime-GREEN-20261010.json).
+
+Final-source policy58 and unit/lifecycle22 nodes now also pass, zero failures/
+skips/OOM. Their independent two-stage window took182.309 seconds, with all
+eight exact resources confirmed absent and original package20m retained. This
+adds those current-source gates alongside model-author58; ordinary, native and
+derived failures below remain unaccepted and under repair.
+
+Remaining regressions on `e90ba8b6` expose gaps beyond the previous selected
+passes. Model authoring/memory/body passes all58 nodes, including genuine model
+producers and both databases. Ordinary HTTP passes4/10: all legal current/
+done_open cases fail at final material checks despite actual provider call/join.
+Source analysis identifies premature model cancellation at lineage completion;
+a cancellation-preserving owner-lifetime repair and exact diagnostic
+are prepared but unexecuted. Derived passes0/26: productive B cases stop at
+the real five-minute subject cadence instead of the fixture7s relay bound;
+partial Handle has an independent record-not-found failure. Native passes34/55
+and is unaccepted; resident-block effects, policy-origin setup and proof hash oracles
+need source-backed repairs. Failed owners are stopped and their raw/volumes/
+networks retained. See the [remaining regression evidence](evidence/memory-final-remaining-regressions-20261010.json).
+
+The embedding implementation now has an isolated genuine remote model recipe
+and held client source draft. Exact input/result/vector receipts and service
+backfill are being implemented separately; no format/compile/HTTP or functional
+embedding acceptance is claimed yet.
+
+Source-identical test child `e90ba8b6` now passes all32 additional nodes: all12
+current-bound original workflows per SQLite/PostgreSQL (26 nodes), and exact
+two-cluster prompts plus later-cluster whole-transaction rollback (six nodes).
+The window took264.265 seconds, zero failures/skips/OOM, under unchanged20m
+package and10s worker bounds. Genuine producer/DI/outbox scheduling honors
+actual NotBefore and RelayOne; prior context is established by true completed
+Handle/checkpoint. Later-cluster refusal is checked after actual first-cluster
+SQL writes, with complete rollback. Production bytes match `54ce8e73`; the
+original unbound515 function stays unchanged and is not declared recovered.
+All eight successful identities are independently absent. The first fixture
+compile missed an assertion import; it ran no business tests and its failed
+SQL owner/three volumes/network/raw remain. See the [workflow and multi-cluster evidence](evidence/memory-current-workflow-multicluster-20261010.json) and [test proposal](../integration/proposals/weknora-original-memory-workflow-tests-20261010.json).
+
+The [reviewable original-memory proposal](../integration/proposals/weknora-original-memory-20261010.json)
+now contains the exact source patch from RAG `1bbd0cc8` to `54ce8e73`; its
+SHA/tree round-trip is verified. It is kept separate from the adopted candidate
+manifest. Source-identical test children now exercise all12 current-bound
+original workflows and two-cluster prompt/rollback boundaries; their32-node passing scope is recorded above. The [remaining functional
+contracts](evidence/memory-functional-remaining-contracts-20261010.json) identify
+embedding/backfill/recall and model variants that still need genuine original
+inputs/results and complete lifetimes.
+
+Final private source `54ce8e73` now passes201 test/subtest nodes across12
+serial component stages, zero failures/skips/OOM, with all182 mandatory
+parent/leaf pairs observed RUN/PASS. The combined window took511.151 seconds
+under a fixed20-minute dual clock bound; original package20m/HTTP8s/race3s
+bounds remain. Current-policy rollback, productive consolidation, stale
+maintenance, SDK/caller/worker/topic/actual OTLP span privacy, production SQL
+bound-variable logging, and the earlier82 model/DAO nodes all pass together.
+All18 exact successful identities are independently absent. The complete Go
+package selection compiled156 packages:116 test-bearing PASS and40 package-only
+SKIP with actual no-test-files output; no business tests ran or skipped. The
+first wrapper miscounted no-test packages despite actual Go Exit0; its stopped
+actor/temp/raw are preserved. A corrected rerun passed in16.124 seconds and
+removed its two exact resources. Eight specified failed SQL owners remain
+stopped with24 volumes and eight networks. See the [final component
+record](evidence/memory-final-integrated-components-20261010.json).
+
+This accepts those selected components. RootTrace/direct Generation/opaque
+metadata, SQL literals/error bodies/independent handles, complete original
+workflows, multiple clusters/final ancestor TTL, model embedding variants,
+full migrations/broker/normal application/restore and V1 remain open.
+
+The byte-identical strict policy diagnostic now passes all26 stale-maintenance
+nodes on final private source `54ce8e73`, zero failures/skips/OOM. Both databases
+still prove real policy2→3 replacement and model1, but the old call is rejected
+with zero publication/receipt increments and importance5 unchanged. The14-line
+production check locks tenant before actor/control and compares actual current
+policy revision/proof in the same transaction. Legal maintenance/no-candidate/
+model-decline/merge and original rollback assertions pass. Final source parsing
+covered168 Go files;167 formatted outputs were applied while preserving the
+one matched diagnostic byte-for-byte, and10 selected packages compiled.
+The broader combined window passed as recorded above. See the [matched current-policy GREEN](evidence/memory-generated-policy-successor-GREEN-20261010.json).
+
+A stricter test-only stale diagnostic on `e27ef96b` confirms an actual
+generated-policy commit defect on both databases: real current policy proof
+changed from revision2 to3 during model1; the old call still published one
+derived record and one receipt and demoted importance5 to1 with nil error.
+Those genuine before/after proof and fault/model assertions executed before
+the unchanged expected rejection. The selection passed22 nodes and failed4
+(two policy leaves and parents), zero skips/OOM. The metadata-only old-fact
+oracle now lets both purged-body rollback cases pass. A same-transaction
+current-policy comparison is being repaired; the gate remains unaccepted.
+See the [policy successor RED](evidence/memory-generated-policy-successor-RED-20261010.json).
+
+Generated consolidation now passed all 16 selected nodes on `7aff9c5f`,
+zero failures/skips, in 133.810 seconds including preparation and cleanup.
+Its retained `a01f9c40` baseline failed at fixture admission, repaired only
+by retaining the genuine model lifetime reader. Legal original-bound merge
+and post-model source/body/actor/input/model/invalid-result refusals passed.
+Multi-cluster atomicity and final ancestor clock boundaries remain separate.
+
+Stale-task maintenance on the same source passed 20 of 26 nodes, with six
+failures including both parents and no skips/OOM. Both policy-change leaves
+unexpectedly returned nil; both purged-body leaves failed at the final retained
+fact read. Their exact production/fixture cause is under review. This gate is
+unaccepted; its SQL owner, volumes and raw logs are stopped and retained.
+See the [generated/stale record](evidence/memory-generated-stale-components-20261010.json).
+
+Private integrated source `7aff9c5f` now passed all 82 selected component
+nodes, zero failures/skips, in 200.643 seconds including preparation and cleanup.
+This adds actual two-call first-create concurrency, repeated-subject/error/cancel
+behavior, current/history model lifetimes and one-pool checks, captured provider
+configuration, real HTTP wrapping and whole-result refusal. All required parents
+and exact leaves were observed RUN/PASS. The original 20-minute package timeout,
+eight-second HTTP bound and three-second race barrier were retained. Prior
+formatting parsed 162 changed Go files; all nine selected packages compiled,
+with zero runtime test nodes and the old515 business assertions byte-identical.
+See the [integrated component record](evidence/memory-integrated-model-components-20261010.json).
+
+The generated consolidation baseline on `a01f9c40` failed all 16 nodes before
+the first model call: its model fixture omitted the genuine lifetime reader,
+so Schedule returned before a pending row existed. This is a retained setup
+failure, not a consolidation business RED. The isolated fixture repair supplies
+the actual configured service capability. Its selected business rerun passed as recorded above.
+Worker/topic-log and enabled telemetry privacy follow-ons, full consolidation,
+stale maintenance, final ancestor TTL, full original workflows/migrations,
+durable broker, normal application/restore and V1 acceptance remain pending.
+
+The complete original service diagnostic on `1bbd0cc8` passed all 604 test
+nodes and 178 parents, including all 28 required original service parents,
+with zero failures or test skips. The original eight-second HTTP bound,
+20-minute package timeout and count one were retained. Package JSON reports
+905.111 seconds; compilation, test and attach took 957.246 seconds; the complete
+driver took 1057.413 seconds. Both ordinary HTTP parents passed with their
+original subsequent assertions present; no individual assertion trace was
+captured. Original binaries and profiles are independently hashed. All nine
+owned resources were removed and their absence verified. See the
+[whole-service profiling record](evidence/ordinary-qa-whole-service-profiling-20261010.json).
+
+A foreign runtime was observed during that timed run and subsequently
+disappeared. This result does not establish strict isolation or explain old
+CI failures. It accepts this service diagnostic only; full 42/new 47 selections,
+normal application, restore and V1 acceptance remain pending for the current
+proposals. The earlier storage preflight is retained as history below.
+
+Private repaired source `ef58c603` now passed the matched repeated-subject
+diagnostic on both SQLite and PostgreSQL: all ten nodes, no failures/skips.
+The exact same tests failed before the sole EnsureSubject DAO change. The
+original worker final-clock selection also passed all six nodes: model1 legal
+commit and late actual current-model lease expiry rollback on both databases.
+Its effect/checkpoint/cursor and actual final SQL hook assertions passed under
+unchanged bounds. Total preparation, both stages and cleanup took 94.420 seconds.
+All eight exact owned identities are absent; previous failed SQL owners/volumes
+and the compile failure actor/temp are retained.
+
+This accepts repeated-subject idempotence and current-model final-TTL component
+behavior. First-create concurrency, all ancestor TTL variants, full model/
+ordinary HTTP/derived/consolidation/privacy, migrations, durable broker, normal
+application and restore remain pending. New extra DAO tests are source drafts
+and do not expand this passing scope. See the
+[matched GREEN and worker TTL record](evidence/memory-subject-idempotence-GREEN-20261010.json).
+
+A test-only diagnostic on `fe26fa24` now confirms a repeated-subject
+initialization defect on both SQLite and PostgreSQL: four model-service/
+admissions lifetime leaves passed Begin/Snapshot/Recheck/Close; four scheduling
+leaves passed existing-subject/enabled/config/actor checks, then repeated
+EnsureSubject returned record-not-found. The resulting ten-node selection
+passed four and failed six (including both parents), with zero skips/OOM.
+The DAO's no-op upsert supplies a new UUID to a body-capture callback, which
+looks for that uninserted row. This is a genuine subject-idempotence RED, not
+a worker TTL RED. A guarded idempotence/concurrency repair is under development.
+The failed owner is stopped with its three volumes/network/raw preserved.
+See the [subject failure record](evidence/memory-subject-idempotence-RED-20261010.json).
+
+Private memory source `856ea3b1` now compiles the final worker lease union and
+original-bound consolidation across all six selected packages, with zero
+runtime tests. All 121 changed Go files parsed/formatted successfully. The first
+compile failed on one unused import; removing it passed in 96.385 seconds.
+Successful owned resources are absent, while the first failure actor/temp remain.
+Twelve host SQLite schema-only checks passed the fused guard: 17 fact tables
+are checked before any DROP, mutated controls above seed revision one are
+retained, and UNKNOWN seed rows still allow empty DOWN. Revision one cannot
+distinguish initialization from a first raw insert. No full journal/chain or
+business proof is claimed from these schema checks.
+
+The first actual SQLite/PostgreSQL worker gate failed all six nodes: its four
+leaves found no pending extraction row after ScheduleExtraction, before any
+model call or final-clock hook. The gate is unaccepted and is not a TTL business
+RED. Its Go is absent; stopped PG/Redis, three volumes, network and raw/source
+are retained. A ten-node test-only enqueue diagnostic is prepared. Independent
+stale-maintenance and model-SDK privacy repairs are also fused at `35c80847`,
+but remain unformatted/uncompiled/unexecuted. RAG caller logs, embedding, full
+workflows/migrations/broker/restore and V1 acceptance remain open. See the
+[consolidation and enqueue prelude record](evidence/memory-consolidation-enqueue-prelude-20261010.json).
+
+Private formatted memory source `2e088198` now passed parsing/formatting
+on all 102 changed Go files and compiled all six selected packages, including
+chat constructor tests, with zero runtime test nodes and no failures/skips/OOM.
+65 files changed only through formatting; the original 515 business function
+remained byte-identical. Compilation took 118.762 seconds; formatting and
+compilation completed naturally in 121.787 seconds. All three owned identities
+(two Go actors and one temporary volume) are absent. Raw logs and frozen
+sources remain. Independent review found a cross-process clock-epoch flaw in
+the executed wrapper: its passing natural duration does not prove strict
+480-second outer-timeout enforcement; future drivers are being repaired.
+
+Final all-hold TTL validation also remains incomplete: policy/current-model
+and derived ancestor policy/historical-model holds need a final union check
+after subsequent SQL IO. Compilation accepts types/wiring only. Actual new
+model/derived/whole-result gates, full legacy workflows, migrations, broker,
+normal application and restore remain pending. See the
+[format and compilation record](evidence/model-whole-result-compilation-20261010.json).
+
+The latest private memory source is `674e77cc`, integrating model lifetime
+repairs with whole-result validation. Unsupported or invalid model decisions
+now reject the complete result before writes; explicit NoOp and proven
+snapshot duplicate/tombstone suppression remain. Two new SQLite/PostgreSQL
+parents contain four mixed-valid-invalid cases (six declared nodes), with
+genuine scheduling, dispatch and Handle plus zero-effect/checkpoint oracles.
+A test-only baseline has identical tests for a future matched regression.
+These are source checks only: neither baseline nor fix has executed, and the
+fused source is still unformatted/uncompiled. The complete core patch again
+round-trips to the exact base. See the
+[whole-result source record](evidence/memory-whole-result-source-20261010.json).
+
+Model provider lifetime repairs are now integrated privately at `dd7f6e24`.
+The source captures complete remote protocol/URL/query/header/auth/settings
+recipes, reauthorizes the current actor in the same SQL transaction, retains
+original model bodies through ordinary message completion, and cancels and
+joins the actual provider stream. It fixes unconsumed-stream Close and the
+single-connection SQL pool lock ordering; 29 new cases in eight parent tests
+are source drafts only. The full core patch round-trips exactly, and the old
+515 business test function is byte-identical. Formatting, compilation and
+all new business execution are pending. Whole-result invalid decision handling
+is also under repair; builtin/YAML/Ollama/embedding and full existing-memory
+workflows remain required. See the
+[model provider lifetime source record](evidence/model-provider-lifetime-source-20261010.json).
+
+Model/policy/derived-memory source is now fused privately, with the latest
+test-adapter integration at `b1c24809`. Both sets of original body publications,
+execution proof fields and pending schema modules are preserved. A complete
+core patch round-trips to its exact base tree. Six host SQLite schema checks
+passed: empty DOWN succeeds; four representative invalid schema facts refuse
+before any DROP/ALTER, with all other modules retained. All 14 fact tables are
+listed in the upfront guard, not claimed as 14 individually executed cases.
+These sources have no formatting, compilation or business acceptance. Model
+catalog/default fallback and current actor/provider lifetime defects remain
+under repair; legitimate ordinary/builtin/embedding and complete old-memory
+flows remain required. See the [integrated source record](evidence/memory-model-derived-integration-source-20261010.json).
+
+Original-policy source `f9375193` now passed the complete six-parent SQLite/
+PostgreSQL component selection: all 58 nodes (52 leaves), zero failures or
+skips, in 151.950 seconds. Every node ran and passed once. A separate two-parent
+authoring stage passed 20 nodes in 47.711 seconds; those nodes are included in
+the full 58 and are not added to its count. The earlier ACK fixture repair now
+uses the actual emitted queue payload, and both database rollback cases verify
+that the hook ran, the owned context was canceled and all original state rolled
+back. Production checks and business expectations are unchanged. The complete
+prepare/authoring/component window finished naturally in 204.080 seconds under
+its planned coordinated 300-second window, retaining the original 20-minute package
+timeout. All eight exact owned runtime identities are absent; earlier failed
+volumes, raw evidence and source are retained. This accepts the policy component
+slice; old full legal memory, model/derived workflows, full migrations, real
+broker and restore remain pending. See the
+[policy SQL pass record](evidence/memory-policy-SQL-pass-20261010.json).
+
+The preceding `862fd486` run remains recorded as 48/58 because its test-created
+ACK payload omitted Language after successful Handle/model/item/checkpoint
+checks. Its failed volumes and raw evidence remain retained. See the
+[historical policy SQL partial record](evidence/memory-policy-SQL-partial-20261010.json).
+
+Integrated original-policy source `862fd486` now compiled all five selected
+packages successfully in 115.442 seconds, with no OOM or compiler errors.
+This `-run ^$` check executed no business tests. Its owned actor and temporary
+volume are confirmed absent; raw output and source remain retained. Genuine
+policy authoring/successor/body lease tests and model/derived integration are
+next. See the [policy compilation record](evidence/memory-policy-compilation-20261010.json).
+
+Private source `a8c2a303` now passed the complete 19-parent native SQLite/
+PostgreSQL component selection: all 55 nodes, no failures, skips or OOM, in
+285.993 seconds. A separate focused run also passed both shared-Agent cases,
+including actual source9 permission withdrawal and PostgreSQL epoch blocking.
+The repair configures the same transaction-bound shared-resource readers as
+production. All eight exact owned runtime identities are now absent; earlier
+failed volumes and raw evidence remain retained. The 16-parent/22-node unit
+result stays attributed to `a35ab0c3`; its production/unit bytes are unchanged.
+This accepts the native component slice only. Complete custom policy/model,
+existing-memory workflows, full migrations, real broker and restore remain
+pending. See the [native component pass](evidence/memory-native-component-pass-20261010.json).
+
+Repaired private source `a35ab0c3` passed all 16 selected unit/lifecycle parents
+and 22 test nodes across three packages, without failures or skips. Its SQLite/
+PostgreSQL component run passed 53 of 55 nodes; the PostgreSQL cross-input
+checkpoint path now passed. Both shared-Agent cases still stopped at fixture
+message hydration because the transaction authority lacks its Agent share
+service, before memory scheduling/model execution. Full native acceptance
+remains pending; failed runtime volumes are retained. Policy source `2a847047`
+also passed formatting/parsing on 19 changed Go files, without compilation or
+business execution. See the
+[repaired component and unit record](evidence/memory-repaired-components-and-units-20261010.json).
+
+A separate original-policy proposal is integrated as private source `71a1911b`.
+It adds authorized full-policy authoring, immutable origin/body receipts,
+retained version controls, real successor binding and owned policy body leases.
+The integration preserves the native fixture repairs and fixes an inherited
+context marker in the rollback test. Seven host SQLite fragment checks passed
+for UNKNOWN initialization, ABA/delete-recreate versions, immutable controls
+and DOWN guards. They used no full body schema, Go, PostgreSQL or model calls.
+The source is not formatted, compiled, business-tested or adopted. Model
+originals and complete existing-memory workflows remain under development;
+mutable settings views are separate from the policy lifetime reader. See the
+[policy source and schema record](evidence/memory-policy-original-source-20261010.json).
+
+The original-memory SQL proposal `fe254893` now passed its native admission
+selection on both SQLite and PostgreSQL: six nodes, zero failures or skips.
+The subsequent 19-parent component run passed 52 of 55 nodes and failed three,
+with no OOM or skip. Whole-result commits, capacity rollback, durable intent
+relay, queued policy rejection, configured single-pool reads and public writer
+concurrency passed. PostgreSQL cross-input cursor comparison and both shared
+Agent fixtures remain under repair; the complete component stage is unaccepted.
+The first attempt exposed a missing permission epoch schema in its fixture;
+adding its empty schema introduced no grants or original facts. Failed runtime
+volumes and private raw evidence are retained. Unit/lifecycle, full legal memory,
+broker and restore gates remain pending. See the
+[memory SQL component record](evidence/memory-native-components-20261010.json).
+
+The private original-memory format checkpoint is `652df78f`, tree `4e523143`,
+with atomic output/capacity receipts, durable recovery, Lite worker shutdown and
+shared permission/public mutation fences integrated. Formatting and parsing
+passed, but its subsequent actual compilation exited 1 on two lineage-interface
+wiring errors; no business tests ran, and its runtime owner was cleaned up.
+Current source `5e071eef`, tree `a2ceaa09`, corrects those interfaces and the
+transaction-bound KnowledgeBase service wiring. Its second compilation passed
+all five selected packages in 212.012 seconds, with zero test skips and zero
+business tests (`-run ^$`). Its owned compile actor and temporary volume were
+removed while shared caches remained. This accepts compilation only; complete
+derived-memory workflows, remaining writer/permission paths and business gates
+still require work. The candidate manifest is unchanged. See the
+[memory compilation record](evidence/memory-integrated-compilation-20261010.json).
+The [service evidence](evidence/ordinary-qa-whole-service-profiling-20261010.json)
+retains the historical memory format checkpoint separately from its tested
+service source.
+
+An earlier original-memory atomic-result and recovery integration froze
+private source proposal `386a68a5`, with four overlapping files resolved
+and all additional SQL test sources bound to its exact tree. A private index
+applies its patch to `1bbd0cc8` and reverses it to the exact original tree.
+Six in-memory SQLite checks passed on its fused pending schema; a separate
+13-case schema-only probe checked foreign keys, immutable facts and DOWN guards.
+These checks executed no model, Go, PostgreSQL, broker or restore cases. The
+formatting, fence and capacity gaps described by that earlier record have
+subsequent source work above; complete workflows and actual acceptance remain
+pending. This historical proposal is not in the candidate manifest. See the
+[integrated source record](evidence/memory-original-integrated-source-20261010.json).
+
+Memory task source preparation now persists an original-bound dispatch intent
+with the admission and pending revision in one transaction. Its recovery relay
+retains that exact intent after broker or post-commit failures, while completion
+still requires an immutable successful receipt. A separate Lite executor change
+cancels and joins its workers and refuses new tasks after shutdown. Fixed-image
+source parsing/formatting passed; 14 test declarations have not run, and no
+compilation, SQL, broker or restore acceptance is claimed. These earlier changes
+were frozen on private source `ca5f9233` and are included in the newer integration
+above; full legal memory workflows and actual gates remain pending. They are
+not in the current candidate manifest. See the [memory source preparation record](evidence/memory-original-source-preparation-20261010.json).
+
+The first whole-service attempt stopped at storage preflight: host free space
+was 10.380 GiB against its fixed 12 GiB diagnostic floor. It created no runtime
+resources and ran no business tests; all nine prospective names were verified
+absent, and 24 pure driver checks passed. This is a historical attempt, not a
+current blocker for the completed service diagnostic above. See the
+[preflight record](evidence/ordinary-qa-whole-service-preflight-20261010.json).
+
+A fresh source-exact PostgreSQL ordinary-QA profiling run on `1bbd0cc8`
+passed its single required parent under the original eight-second HTTP and
+20-minute package limits. The original binary, CPU/block/mutex profiles and
+raw output are source-bound and independently hashed. This isolated run did
+not reproduce the four a38 Linux-CI body deadlines; it does not accept the
+full test selection. The complete selected service diagnostic above has now
+passed under its original cumulative package budget. See the [focused profiling record](evidence/ordinary-qa-fresh-focused-profiling-20261010.json).
+
+The proposed directory-publication correction reads the unique user binding,
+current directory, identity and groups in one consistent transaction. Its
+matched SQLite/PostgreSQL regressions passed 16 nodes, the existing access
+selection passed 42, and the real open-provider HTTP selection passed 10 with
+actual cancellation and released leases on revocation. Seven PostgreSQL
+transaction-overlap nodes also passed. The C6 mirror passed 62 component nodes;
+both final source trees compiled 155 packages with zero runtime tests.
+The exact test owner, network and both disk volumes were removed while sources,
+raw logs and shared caches remained. These are component results on proposed
+RAG `853c19cc` / C6 `7e1d5ce4`; the current manifest still pins `1bbd0cc8` /
+`b43afa53`. The new full 47-parent selection, normal images, application replay
+and restore remain pending. See the [atomic directory component record](evidence/directory-atomic-components-20261010.json).
+
+The current development candidates are RAG `1bbd0cc8` and C6 `b43afa53`. Root verified the final RAG source's 50 ordinary-HTTP nodes across
+10 parents, 59 session-terminal nodes and all 1177 selected nodes, including
+all 42 mandatory parents. The full selection finished in 1020.933 seconds
+within its original 20-minute package limit, with no failures or test skips.
+Full compilation covered 155 packages: 115 with tests and 40 without, and
+executed zero runtime tests. On its exact final source, C6 also passed 50
+ordinary-HTTP nodes / 10 parents and 59 session-terminal nodes, and its two
+source-bound CLI builds passed with verified bytes, mode and single link.
+C6's full selection also passed all 1177 nodes and 42 mandatory parents in
+1007.649 seconds, with zero failures or test skips. Its package metadata has
+11 passed packages and one without tests; that no-test package is not a skipped
+test. C6 full compilation also passed for 155 packages: 115 test packages and
+40 no-test metadata records, with zero runtime tests. Final exact owner cleanup
+removed the test containers, network and disk volume and released the heavy
+window while preserving private logs, source and shared caches. These results
+permit adopting the exact pair as development candidates. The final RAG
+ordinary AnyDoc app/UI build subsequently completed in 155.666 seconds from
+the frozen `a38e152` runner; distinct immutable images and all five source/role
+labels match the exact `1bbd0cc8` manifest. This records RAG image provenance,
+not a C6 normal-image build. The fresh final-RAG owner passed up, bootstrap and
+its permission matrix, then the actual running-window gate failed after 48.038
+seconds. It produced no history receipt: QA2 and replay are unaccepted, and
+restore did not execute. Pending Auto restore and P5 still need actual
+acceptance; V1 remains incomplete.
+All eleven owned containers subsequently stopped with their volumes and network
+retained; the watcher exited with terminal 1 after the stop sequence interrupted
+a Docker CLI query. Its fourteen samples and removed marker are preserved,
+without accepting that observer exit as success. The application recorded a
+directory snapshot denial during stream publication; its exact rejecting
+predicate and the separate snapshot-read race still need causal verification.
+
+The empty-stream correction reduced successful renewals of eight held bodies
+from 80 to eight in the matched poll window. Actual source revocation stops
+the model in both databases. Separate late actor-deactivation and body-lease
+expiry regressions verified actual provider cancellation, service return,
+released pins and zero completed rows/manifests. Earlier failed preparation
+and causal baselines retain their own source identities; the earlier 44/59
+component gates on `3f327fc3` are not attributed to the final source. The
+[final-gate record](evidence/ordinary-qa-idle-material-final-gates-20261010.json)
+records the completed two-profile source gates and cleanup. The new
+[normal-image/controller record](evidence/ordinary-qa-final-normal-images-controller-20261010.json)
+accepts the final RAG image build and records the subsequent normal-running
+failure separately. QA2/replay remain unaccepted; full restore, pending Auto
+restore and P5 are pending.
+
+Integration head `9df5dfc` tested the preceding `1ab47546`/`aac58fa7` candidates.
+Both push and PR CI failed their candidate producer jobs at actual ordinary
+HTTP's unchanged eight-second termination assertion. Eight other jobs passed.
+Three service packages later exhausted their cumulative 20-minute limit while
+running different boundary cases; PR RAG ended failed without a timeout panic.
+These runs did not test the new final idle sources and establish no observer
+Python or Docker-pull terminal failure. Their original ZIP/log hashes and
+exact failure nodes remain in the final-gate record. Earlier `06811da` CI
+failures, including independently proved image-pull quota and direct-upgrade
+startup failures with missing diagnostics, remain in their separate
+[historical CI record](evidence/ci-06811da-failures-20261010.json). Neither CI
+record is application acceptance; no deadline or safety assertion was relaxed.
+
+The first final-source build was interrupted with actual BuildKit `canceled` /
+`context canceled`; no successful driver result or images were inferred. Its
+original logs and cancellation receipt remain separate from the fresh R2 build.
+The private controller also retained a pure fake-child regression: an actual
+fast terminal could race its PID/start lookup before phase recording. The
+minimal correction records the real exit, refuses still-live unknown identity
+and retains all PID/start/group fences. Eight simulated old/new cases passed;
+these are not normal application tests. The subsequent normal lane ended with
+actual failure: its single HTTP reader returned 200, two events and EOF, while
+the required running window was not observed before the deadline. Those
+transport facts do not certify an answer or completed QA2. Reader threads joined
+and the running marker was removed. Guarded stop returned 0 and recorded all 11
+owned services stopped; volumes/CURRENT preservation has a separate independent
+audit. The observer ended 1 with 14 samples and its marker removed; its exact
+cause is under review and is not asserted as the running-window failure's cause.
+
+The preceding manifest candidates were C6 `aac58fa7` and RAG `1ab47546`;
+the current manifest pins C6 `b43afa53` and RAG `1bbd0cc8`.
+Use the [latest candidate record](weknora-development-candidates.md) and its
+frozen evidence for current implementation facts; the table below is historical.
+The preceding ordinary AnyDoc app/UI images for RAG `1ab47546` built from
+the frozen integration runner `06811da` in 324.927 seconds. Their distinct
+immutable image IDs and all five source/role labels match the private frozen
+manifest. The first attempt stopped before Docker build because the host had
+6.2 GiB free; exact retired private compile-cache cleanup restored 32.06 GiB
+while preserving source, failed logs and original results. The existing
+16 GiB build minimum was retained. The [actual image record](evidence/ordinary-qa-normal-anydoc-images-20261010.json)
+accepts only the build and image provenance; fresh normal QA, running replay,
+dual-database restore and P5 still require actual acceptance.
+The readonly observer now diagnoses the exact kind and names involved in
+disagreeing prefix inventories, verifies current resources and limits complete
+rescans to three. Mutation helpers still reject the same mismatch immediately.
+[Ninety-one offline preparation checks](evidence/resource-watch-prefix-snapshot-preparation-20261010.json)
+passed without skipped tests; a fresh actual startup must still verify this fix.
+The two [fresh startup failures](evidence/ordinary-qa-normal-startup-failures-20261010.json) remain unaccepted and ran no QA or restore.
+The first stopped before resources; the second observer recorded zero samples and removed its marker, and all owned services stopped with volumes/CURRENT preserved. Its exact unlabelled-prefix resource remains unrecorded.
+The preceding normal AnyDoc app/UI build for RAG `595f241f` completed; its immutable IDs and
+source labels were verified. A new owned nested-LDAP environment passed startup,
+signed ingestion and the permission matrix, but its first actual QA failed:
+the references producer emitted no checked source lineage, so the strict stream
+consumer refused it and retained an unknown prefix. No two-round baseline or
+restore acceptance was created. All owned services were stopped with volumes,
+controls, originals and CURRENT anchors preserved. The observer also failed
+during the startup resource inventory; its exact Docker failure is not yet proved.
+The `63e03f2` full push/PR CI failed despite successful isolated checks: the
+service package exhausted its cumulative 20-minute budget, while a retained-source
+HTTP sender did not finish in time. Title-control regressions passed. These
+[actual failure records](evidence/normal-application-ci-failure-20261010.json)
+remain unaccepted and are being corrected without removing required tests.
+
+The resource observer now bounds complete readonly ownership rescans when an
+exact allowed one-off inspection reports that its container disappeared. All
+ordinary container, owner, image and budget mismatches still refuse, and the
+mutation helpers are unchanged. Safe command diagnostics avoid losing the
+next failure's cause. [Nineteen independent preparation checks](evidence/resource-watch-transition-preparation-20261010.json)
+passed; the earlier exact command and the suspected startup race remain
+unproved, and the next fresh startup must verify the observer in practice.
+
+The ordinary QA correction now carries checked lineage on progress, references
+and fixed fallback, propagates asynchronous publication errors, and waits for
+the owned producer before releasing its last material holder. Successful Done
+ends the producer even when the provider keeps its channel open. Actual
+PostgreSQL/SQLite boundary tests passed 28 nodes. The final combined sources,
+including HTTP-caller disconnect, provider-error/EOF and real schema-probe
+cancellation regressions, passed 77 focused nodes per profile with no failures
+or test skips. The original caller-disconnect test sends normal model Done
+after HTTP cancellation; it does not establish producer-context cancellation.
+That early completed-state assertion is now replaced by actual service-return,
+HTTP-handler-return and detached stop-watcher-exit observations. The strengthened
+real StopSession test verifies provider cancellation, every completed write
+being refused by the original-material boundary, released leases and final
+completed/manifest counts. It also verifies legitimate background completion
+after HTTP disconnect. The inline-body checker now
+checks all heads once per row and rechecks the original head set, journal pin
+and cancellation at the return boundary, including a real canceled schema
+probe without changing actual absent-schema compatibility. Its 22 row-boundary
+nodes passed, and
+actual cancellation during an actual journal-key file read failed on the old
+source and passed on the correction in both databases. A matched 20-node
+parent-copy run fell from 27.71 to 22.90 seconds for SQLite and 57.13 to 43.03
+seconds for PostgreSQL; this single comparison is not P5 acceptance.
+Root independently verified the [raw-log records](evidence/ordinary-qa-body-combined-boundaries-20261010.json).
+The corrected sources are now the manifest candidates. The complete selection
+and compile records remain labelled with their tested production commits
+`48ce1d3c`/`0388c309`; the final candidate trees add only three test files,
+whose full ordinary QA target passed 38 nodes per profile. Fresh normal
+application QA/restore still needs actual acceptance. CI now explicitly selects ordinary QA
+and requires all twelve new test parents without changing its timeout.
+
+The first final RAG full selection ended within its original 20-minute budget
+with 1155 passed nodes, 8 failed nodes and no skipped tests. The owned PostgreSQL
+cluster recorded OOM and a recovery window while its 512MiB PGDATA tmpfs was
+96% occupied. Seven actual cases failed before their business assertions with
+EOF or SQLSTATE 57P03; one additional node aggregates a child failure. Root
+independently verified the [failed full-gate record](evidence/ordinary-qa-full-gate-PG-OOM-20261010.json),
+including the exact owner, image, memory limit and cgroup OOM event. This run is
+not accepted. A fresh owned disk-backed PGDATA fixture will rerun the complete
+selection with the same memory/CPU budgets, timeout and required tests; the
+failed logs, diagnostics and binaries remain preserved.
+
+The fresh disk-backed RAG full selection subsequently passed all 1163 test
+nodes with zero failures or skipped tests, including all 38 mandatory parents.
+The same frozen `48ce1d3c` source also passed 59 session-terminal nodes and 35
+local-derived nodes, plus compilation of 155 packages (115 test packages and
+40 packages with no tests). Root independently verified raw hashes, actual
+required terminals, unchanged before/after source identity and removed owned
+Go containers in the [disk-gate record](evidence/ordinary-qa-full-disk-gates-20261010.json).
+C6 `0388c309` subsequently passed the same 1163 selected nodes, all 38 mandatory
+parents, 59 session-terminal nodes, 35 local-derived nodes and compilation of
+155 packages. Root verified the corresponding raw records and exact source
+identities too. The first strengthened StopSession test run had 12 fixture
+failures: its older fixture lacked the real completion-manifest migration,
+and its one-second model-start check preceded actual start. These are
+preparation failures, not a business red or accepted cancellation test. The
+fixture is being upgraded through the real forward migrations while preserving
+the eight-second HTTP bound. The final strengthened tests subsequently passed on RAG `1ab47546` and C6
+`aac58fa7`: 38 ordinary QA/boundary nodes per profile with no failures or skips.
+The [real StopSession record](evidence/ordinary-QA-real-stop-chain-20261010.json)
+keeps the original full-suite identities separate and proves that production
+bytes did not change in the test supplement. Both patches reproduce and reverse
+their exact baseline trees. These sources are promoted as development candidates.
+The later ordinary image build is recorded above; application/restore and P5
+remain unaccepted.
+
+Normal AnyDoc images for the preceding `eb7d5756` source have been built and
+their exact source labels verified. A fresh nested-LDAP application passed startup, signed ingestion and the
+permission matrix. The early HTTP material-initialization 503 is fixed, but
+first QA failed after Merge: a legitimate generated summary's parent
+relationship was rejected as an unsupported input. The new candidates preserve
+the summary's original proof and verify its own captured body and relationship;
+actual PostgreSQL/SQLite regressions passed 42 RAG and 18 new C6 cases.
+The latest normal image's broader QA failure is recorded above. Its corrective
+source still needs normal application QA/history/replay, clean restore and
+measured P5 acceptance.
+
+Steer's original-material integration is now included, with PostgreSQL154 and
+SQLite73 forward migrations. The actual HTTP input keeps its immutable author
+and original run; consumption derives the next real user and completion inputs.
+Exact controls and owned membership transitions are checked across the handoff,
+and the successor waits for the preceding producer's real finalization.
+Refused inputs cannot trigger automatic follow-up, and failed claims preserve
+their evidence while denying consumption. Both frozen profiles passed 233
+test nodes / 107 top-level tests with zero failures or skipped tests, plus full
+compilation; [the recorded logs](evidence/steer-original-material-20261009.json)
+were independently rechecked. Old request JSON/digests and unknown legacy
+history remain unchanged. The new normal application run is still pending.
+
+The `fc2682b` push CI completed all six jobs. Its actual retained logs were
+rechecked for both profiles: 1043 selected producer/recovery test nodes, 59
+session nodes, 35 local-derived nodes and 11 native-vector nodes passed per
+profile, with zero failed or skipped selected tests and full compile for
+155 packages. The required after, migration, JSON-contract and actual Redis
+tests were confirmed present in the [CI evidence](evidence/steer-candidate-ci-20261009.json).
+These checks do not accept the upcoming normal application or full restore.
+
+Known old parent-body copies now include the immutable original dependencies of
+later generated fields in their retention scope. Cleanup requires closed hosts,
+retired source fences and the exact complete closure; unknown copies remain
+retained. Own generated-field growth acquires and retains its additional KB and
+source leases and rechecks withdrawal, epoch and cancellation before installing
+new material. Agent QA also honors `disable_title`, fixing the observed CI
+sender timeout without extending its deadline. The combined sources are now
+included in this manifest. Each profile passed 414 distinct test nodes / 165
+top-level tests, zero failures or test skips, and compilation of 155 packages.
+Root independently verified the [raw-log evidence](evidence/parent-copy-title-original-material-20261009.json)
+and resource cleanup. The subsequent normal images are verified, but application
+acceptance failed as recorded above.
+The historical local withdrawal inventory still needs immutable backend plans
+and writer artifacts observed after current rows disappear; its prepared
+forward migration remains untested and incomplete.
+Independent review found that its pinned SQLite rollback fixtures copied only
+UP files. A separate test-only preparation now also copies the original matching
+DOWN files for Steer73 and inventory74, keeping all downgrade assertions and
+production SQL unchanged. Its real upgrade/down execution, C6 mirror and the
+complete withdrawal/ACK/retirement chain remain pending in the
+[source-review record](evidence/remaining-consumer-inventory-source-review-20261010.json).
+
+Candidate CI now checks that selected tests actually executed and completed,
+including required HTTP, PostgreSQL, Redis and summary regressions. The
+[evidence check](evidence/candidate-test-evidence-gate-20261009.json) was
+verified against both preceding candidate CI artifacts and preserved real
+failure logs. This does not establish full application or V1 acceptance.
+
+The history/clean-restore probes now pin the actual producer identities,
+assistant content and structured citations across live generation, saved
+history, completed replay and restoration. They require successful terminals
+and an actual two-round baseline. The
+[criterion regressions](evidence/actual-history-criteria-20261009.json)
+passed, while running replay and the next full application trial remain
+unaccepted.
+
+A fresh-fixture running replay driver is now prepared. It delays one actual
+model HTTP response for at most 20 seconds, reads the same answer prefix and
+citations concurrently through native replay, and checks the real unfinished
+assistant before allowing completion. Its model code and opt-in configuration
+are frozen with the fixture; the default delay is zero. Preparation regressions
+are [recorded here](evidence/running-replay-preparation-20261009.json);
+the actual running replay, midstream source revocation and full restore remain
+unaccepted. Candidate CI's complete compile and frontend checks now have a
+55-minute outer budget after an observed 35-minute timeout interrupted the C6
+frontend step; the selected Go test timeout and assertions are unchanged.
+
+The clean restore driver now restores the actual private control files and
+requires a genuine Nextcloud `default_language` fault to change `config.php`.
+The checkpoint must contain that exact file in its cold `nc-html` archive;
+after full data restoration, PHP and `occ` must prove the original configuration
+hash and value returned. The driver checks the same owner, source, candidate,
+image, model and resource profile before and after restoring controls, and
+excludes CURRENT body/publication anchors. [Preparation checks](evidence/configuration-restore-preparation-20261009.json)
+passed 70 tests, including actual temporary-file restoration; the complete
+application configuration fault and restore have not yet run.
+
+The separate pending-Auto restore driver is now source-prepared. It pauses a
+real final enrichment response, stops the owned broker, and requires an actual
+undelivered SQL intent with both immutable input manifests before checkpointing.
+It reuses the full database, files and configuration restore path, then checks
+one genuine startup execution and no additional execution after restart.
+Source, actor and model rejection each require an independent original checkpoint.
+[Preparation evidence](evidence/pending-auto-restore-preparation-20261009.json)
+records 89 independently rerun pure tests with zero skips. No broker fault,
+full application restore or startup execution has yet been accepted.
+
+The pending driver's separate `closed` phase can now precede `reopen` without
+rewriting its evidence file. Each call repeats all current gates; an existing
+receipt must match the freshly computed canonical bytes and pass private-file
+checks. [File and flow regressions](evidence/pending-auto-closed-receipt-preparation-20261009.json)
+passed 97 tests with zero skips, including changed current state and tampered
+receipts which must refuse startup. These remain preparation checks.
+
+The remaining V1 work includes the full normal QA/source-revocation loop;
+clean and stale-publication recovery plus real pending-Auto fault recovery;
+Steer and other exposed consumer original-material/lifetime coverage; old
+parent body-copy closure and purge; complete indexed-source withdrawal
+inventory, physical receipts and credential retirement; external derived GC
+and capacity coverage; 100 independent latency samples and upload comparisons,
+followed by the full AI workload pilot; fault/retry/rotation and operations UX;
+and enterprise AD, real-model, deployment and recovery acceptance. Existing
+failed-candidate retry and local selected-resource cleanup are implemented
+components and must not be mistaken for these broader acceptance results.
+
+Manual publication snapshots, explicit file replacement and delegated embedded
+Q&A/SSO are V1.1; unrestricted private/shared/file-ACL expansion is product V2.
+PRD §7.7's V2/V3 document revisions are V1 consistency requirements. Security
+of already exposed history, Agent, download and other consumer paths remains
+required in V1 regardless of later product phases.
+
+## Historical implementation table
+
+| PRD area | Implemented and checked locally | Remaining before V1 |
+| --- | --- | --- |
+| Docker and app | Nextcloud 34.0.4, PostgreSQL 16 and Redis 7 use separate volumes; the app installs and upgrades; Compose includes cron, separate five-second event sender and applied-status workers, and a mock embedding service. A deterministic app packaging script emits a runtime-only 0.4.24 archive and verifies its install layout. A disposable fresh Nextcloud stack installed the preceding 0.4.23 archive without a source bind mount, created the expected migration tables, and returned authenticated DAV 207. The local shared stack upgraded to 0.4.24; a fresh 0.4.24 install and direct 0.4.6-to-0.4.24 upgrade passed GitHub CI at `a134851`. The existing `weknora-ldap-local` app can use an image built from a fixed WeKnora commit plus this repository's patch. | Pin a production image and dependency matrix for both stacks; verify rollback and coordinated backup/restore. |
+| Binding and source API | Administrator settings can create bounded, nonoverlapping folder bindings, stop or resume an entire binding, and withdraw or republish individual files. Stop preserves originals, machine keys and per-file exclusions while new authorization, manifest and content reads fail closed; resume revalidates the current root and emits a reconciliation hint. The service API supplies capabilities, paginated manifests, conditional file reads, ordered change hints, and current per-user source authorization with a live file ETag. The WeKnora repository serializes data-source writes on the owning knowledge base and rejects mixed or historical sources and documents when establishing a Nextcloud-dedicated knowledge base. Nextcloud and WeKnora now expose a headless two-phase source-pairing protocol for a new dedicated knowledge base, with a one-time operation key, exact signed commit, a paused pending source and idempotent retry. The operator CLI and focused Nextcloud HTTP, Go and SQLite checks cover this protocol. Local HTTP smoke exercises a 207-file manifest and authorization/event cases. Machine API requests use a canonical HMAC signature, timestamp, database-backed nonce and overlapping key rotation; replay, tampering and immediate revocation have local HTTP checks. Each machine key belongs to one binding, and cross-binding requests are denied. WeKnora requires an operator-approved destination, and transaction checks prevent a KB editor from repointing a stored token or reviving a cleared credential. A disposable cross-system fault smoke verifies lost-key recovery, exact pending abort, wrong-operation rejection and active-pair abort rejection. An active paired source completed a live key rotation and subsequent manual sync. Ordinary administrator DELETE returns HTTP 409 for any binding with pairing history and preserves its credentials. A signed empty-source retirement path now handles only new pairs with a durable never-touched proof; both sides must acknowledge the exact operation before Nextcloud retires its binding and keys. | Validate the live GUID proof against the target AD, production TLS and reverse proxy; test larger folders, source failures and rotation faults against the isolated live pair. PostgreSQL now has a first-stage indexed-pair withdrawal that pauses publication, revokes its event receiver and retains an append-only observed local inventory. It always reports inventory incomplete and never ACKs Nextcloud; a complete historical/external copy inventory, physical GC receipts and credential retirement remain open. The empty-source path leaves a paused WeKnora tombstone and does not clean indexed copies. |
+| Change journal and connector | The Nextcloud outbox records file hints. A daily job retains at least 30 days and advances a transactional cursor floor; an old cursor returns 409. The WeKnora connector requires exactly one selected binding, consumes hints, periodically reconciles a full manifest, downloads with ETag checks, and requires two complete scans before treating absence as deletion. The fixed-baseline Go integration tests pass locally. The patch has a pair-scoped signed event receiver with a transactional inbox and receipt watermark. Its administrator API can provision, rotate and revoke a connection after live binding validation; the one-time secret is encrypted at rest. Nextcloud 0.4.24 stores a scoped encrypted sender credential, signs bounded batches, verifies durable-only 202 receipts, persists backoff or pause state, exposes an administrator retry for a paused sender without advancing its receipt cursor, and protects hints from retention until a signed same-scope applied watermark covers them. Local fault tests cover retry, false receipts, pause, rotation, redirect rejection and fairness across bindings; a synthetic cross-system run matched both receipt watermarks. The WeKnora dispatcher persists a leased queue intent, checks source inventory and instance identity, and serializes Nextcloud manual, scheduled and event sync admission through PostgreSQL/SQLite. A later paired-source run verified real queue acceptance and matching verified applied watermarks for both an upsert and a two-scan delete. | A 60-second Nextcloud background job now emits redacted, deduplicated log warnings for paused senders, old pending hints, failed or stale signed applied-status polling, and unavailable binding roots, with recovery logs; it executed in the local stack. External alert routing, complete item-level publication evidence, and recovery of uncertain manual/scheduled enqueue remain incomplete. The connector streams one downloaded file at a time only after a complete metadata manifest preflight and keeps the old cursor until all emits succeed. Metadata and one file body remain buffered; scoped event scans re-download touched files after a complete manifest preflight, while broad hints and the independent daily content audit re-download all importable files. There is no mid-scan resume. The dispatcher now polls every five seconds by default and the local sender runs every five seconds, but the end-to-end P95 10-second task latency and 10,000-file/100-GB performance targets remain unaccepted. An item already being written can finish after connection revocation; long-running and partial-failure acceptance remains. Event-connection HMAC rotation accepts only the immediately previous key for up to two minutes; a second rotation discards the oldest key, and revocation rejects both keys immediately. A sender that receives 401 still requires operator inspection. Active source machine-key rotation has a maximum 24-hour overlap after commit, ends it at final ACK, and supports crash retry; a finalized rotation invalidates any event connection pinned to the prior source config hash. A 202 receipt does not mean a hint has been applied. Connected hints can be pruned after the minimum retention window only when the verified applied watermark covers them, so cross-service restore still cannot assume full historical replay; a verified full manifest reconciliation remains necessary. The outbox is a hint feed, not a deletion authority. |
+| Source identity and read guard | Nextcloud administrators register one-to-one AD objectGUID ↔ Nextcloud UID mappings only after a fresh LDAP GUID comparison; each authorization repeats that comparison. A local PHP contract and strict local-account HTTP denial passed. The synthetic authorization smoke passed only with an explicit, local-Compose-only identity bypass. The WeKnora patch requires an explicit linked web user, fresh directory state, exactly one selected binding, a live Nextcloud allow decision, and equality between the imported and current source ETag. Guarded Go tests cover search/RAG, Agent tools, direct knowledge/chunk/file/resource reads, history and live streams, embed/MCP/public routes, and derived-content restrictions. Missing identity, stale source, unsupported caller, or unavailable authorization fail closed. Local HTTP smokes check direct and group folder shares, group membership removal and restoration, share revocation, disabled account, mapping revocation and publication withdrawal against Nextcloud's live mount view. A separate synthetic Team folder probe on groupfolders 22.0.6 checks group access, a file-level advanced ACL deny and restoration, and group membership removal. | Prove both services use the same enterprise AD and verify real user, nested AD group, primary group and production Team folder ACL semantics. Complete a browser/API entry-point audit and a permission/revocation matrix with authorized and denied users. Conservative history rules may hide otherwise permitted mixed-source answers; existing presigned URLs require expiry planning. |
+| Publication and version lifecycle | Manual withdrawal and binding-wide Stop publication block new Nextcloud source reads immediately. A changed source ETag prevents WeKnora from serving an older imported version through the guarded paths. Nextcloud provenance is persisted on imported resources, including a fail-closed legacy/unknown state. A durable per-source version row now stages an invisible candidate, publishes only the currently desired candidate after parse completion and a signed, exact source recheck, then probes again after commit; confirmed deletion is tombstoned. PostgreSQL migration 126 / SQLite migration 45 add an append-only observation for every subsequent local version-row write; pre-upgrade rows permanently carry `legacy_history_unknown`, and the sequence is not a complete external-copy inventory. Focused Go and Nextcloud HTTP tests cover the recheck. An isolated live file was published, overwritten with a new candidate, and tombstoned after deletion using the new image; signed HTTP fault injection now covers withdrawal and ETag change between publication probes; the second probe rejects both with published=false. A transient SQL marker between the local commit and final probe remains visible to direct SQL/vector readers, so all external read paths require live source authorization. Repository tests cover failed parsing, old-task completion and physical-row retention. Durable GC inventory, retry state and tenant-admin status are implemented. A leased transaction claim now releases registered, tenant-scoped local source objects only after their retention deadline and last binding disappears; provider-confirmed unlink is counted once. An isolated PostgreSQL 120→121 upgrade and two synthetic tombstone jobs confirmed two 37-byte local unlinks, zero remaining bindings and 74 fewer bytes under the local file volume. | Complete the PRD's cross-system document-revision and publication ledger, an atomic cross-system publication guarantee, production-scale failed-staging recovery, cancellation and version-aware history; clean derived indexes, chunks, graph/vector and cloud objects, 90-day history retention, metrics, and restore/replay tests. The two tested jobs remain blocked on derived indexes even though their local originals were collected. An exact-ID local chunk/embedding deletion helper remains dormant: selected retrieval, streaming and build paths now hold leases or write fences, but complete reader and external-writer coverage is still missing, so GC coverage remains denied by default. The [read/build lease gate](nextcloud-derived-gc-read-lease.md) records the concrete paths and race tests needed before enabling deletion. Migration 122/41 reopens older falsely collected jobs and retains a derived-index blocker for every historical Nextcloud GC job; chunk and local embedding IDs are inventoried, but physical vector/chunk cleanup remains unimplemented. The version row provides a narrow visibility barrier, not an atomic cross-system publication guarantee. |
+| Product and operations | The administrator publication settings and focused HTTP/Go smoke tests exist. The admin page can inspect the latest local source-pairing state, install a one-time WeKnora event credential, inspect local delivery status and revoke its local sender. It displays durable received and separately verified applied watermarks, including the last check result. Separate operator CLIs prepare, retry, abort pending pairs and rotate source pairing credentials; pairing actions are not yet integrated into the admin page. A Files sidebar shows each readable file's source scope, withdrawal or binding-stopped state and modification time, with a configurable link to the WeKnora login only while source publication is open. It now accepts a signed, pair-scoped WeKnora status for the current file ETag and reports ready only for a completed, enabled publication of that ETag; Q&A authorization remains separate. The signature contract, source-side HTTP smoke and a live paired-status/withdrawal check pass. After a signed current-ETag `ready`, withdrawal immediately changed the sidebar result to `withdrawn / unverified`; the temporary event connection was revoked afterward. Administrator diagnostics show binding-root availability, retained source hints, explicit withdrawals, and configured senders' local pending outbox count/oldest age alongside their receipt and separately verified applied watermarks. These counters exclude unconfigured bindings and already received retained hints, and do not establish WeKnora task queue, synchronization, parsing, indexing or per-file publication health. An isolated Docker backup/restore drill verifies synthetic Nextcloud and WeKnora database, file and key fixtures without touching live volumes. | Enterprise failure/retry UX acceptance with real AD and pilot files, physical WeKnora copy cleanup after Stop, consumer-aware monitoring, load/fault tests for the PRD's 10,000-file/100-GB pilot assumption, coordinated restoration of the actual application stack and pilot acceptance. Personal embedded Q&A and SSO are V1.1 work. |
+
+The WeKnora patch also exposes an administrator-only paired-source health GET.
+It reports scoped event inbox watermarks and backlog, retained sync-log states,
+and current candidate parsing counts. SQLite, PostgreSQL, handler authorization,
+and router tests pass. These database observations do not count the shared
+Redis task queue or prove that a file is indexed, published, or readable.
+
+## 2026-09-30 integration update
+
+Nextcloud app 0.4.29 was packaged as a runtime archive and upgraded in the
+shared local Docker stack. Its LAN listener is `http://10.106.105.128:18082`;
+`scripts/allow-lan-access.sh` sets the browser origin used for original-file
+citations. The Files sidebar shows a question handoff only for a readable,
+current, signed `ready` file. WeKnora's browser route and interactive
+`ask-target` endpoint resolve that exact paired file after current personal
+knowledge-base, group, source and ETag checks. The manifest keeps separate
+machine content and browser Files URLs. Existing indexed files need reindexing
+to acquire the latter citation metadata. A URL contract checks IPv4, bracketed
+IPv6 and reverse-proxy path handling for original-file links.
+
+The 0.4.29 runtime archive has SHA-256
+`54f2de890d784b8f0296948209e8f9dfff0864be5b7fed2b199bb2e908947b5e`
+and 73 verified runtime files. `occ upgrade` completed on the shared stack;
+the installed app reports 0.4.29, maintenance mode is off, and both LAN entry
+points returned HTTP 200. A fresh disposable Nextcloud stack installed that
+archive, created migrations and returned authenticated DAV 207; it was cleaned
+afterward.
+
+Another isolated install used the packaged 0.4.29 app to verify an actual
+WebDAV file across app disable, re-enable and Nextcloud restart. The test
+read and overwrote the same file while the integration app was disabled,
+then read the new exact bytes after restart. Its private app configuration
+also survived the lifecycle. The disposable containers, volumes and network
+were removed; this establishes local core Files availability through those
+app operations, not behavior during an enterprise deployment.
+
+A separate disposable `0.4.6` to `0.4.29` Nextcloud upgrade-recovery drill
+failed deliberately in the final app migration (`occ upgrade` exit 5), after
+the late migration table existed while maintenance mode remained on. Its cold,
+matched PostgreSQL and HTML checkpoint restored the original instance ID,
+file ID and exact WebDAV bytes,
+binding configuration, publication-state row, enabled `0.4.6` app and live
+administrator binding route. The database and file were both changed after
+the checkpoint before restoring, proving the restored state replaced those
+changes. The successful run used project `nc-upgrade-recovery-8dcc3a45` and
+confirmed its containers, volumes and network were removed. Its checkpoint
+archive SHA-256 values were
+`62259c6fc67a98fde048f3ce6c3d37c3c41ee115c769a2a2186dad24c95fe8e5`
+(PostgreSQL) and
+`ef390b54cabb2012eae8e23d54f7f8537552c94307258084a72c7e948fd1aec5`
+(HTML); the recovered file SHA-256 was
+`366f8cde9b04c3fd66cd6004d0cd95836bb5dd3d6f63c1a41b112e3afc9bc55b`.
+This is an isolated same-image rollback exercise, not cross-service recovery,
+queued-event replay, a production migration rollback or an RPO/RTO result.
+See [the runbook](isolated-nextcloud-upgrade-recovery.md).
+
+The shared development stack's three configured binding roots were later found
+in the Nextcloud trashbin, making administrator diagnostics report unavailable
+roots. Before recovery, the Nextcloud database and its config/data volume were
+archived under ignored `dist/backups/` with mode `0600` and verified SHA-256
+digests. Restoring only those three exact trash items preserved file IDs 76,
+6718 and 6720. Diagnostics then reported all binding roots available; the
+`dev-published` signed manifest and its file 77 content returned HTTP 200.
+The shared WeKnora source records still include a paused historical pair and
+another missing data source, so this repair does not establish a fresh
+cross-system sync or user question flow. Disposable paired fixtures provide
+the isolated integration evidence below.
+
+A fresh disposable direct-group OpenLDAP fixture paired and indexed one
+synthetic file, then exercised the Files question link as a mapped user.
+Alice received a file-scoped mock-model answer with a citation to her
+Nextcloud original; Bob and a stale ETag were denied. Before revocation,
+Alice's persisted history contained the answer marker and citation URL.
+After removing her only group grant, the same pre-revocation JWT received no
+direct document, chunk, preview, search or prior-answer content. The second
+isolated run observed all denials about seven seconds after the mutation.
+These are HTTP/API and synthetic-LDAP observations, not a browser-click test,
+real-model quality assessment, enterprise AD permission matrix or revocation
+SLA. The [fixture record](synthetic-ldap-compose.md) has the exact checks.
+
+A separate fresh fixture removed only the Nextcloud Engineering folder share
+after first recording an authorized answer and original-file citation. Alice
+remained in the LDAP Engineering group and WeKnora's Engineering knowledge-base
+grant remained active. Her pre-revocation JWT was then denied by Nextcloud
+DAV/source authorization and by WeKnora's ask target, direct content, preview,
+both search scopes and history display. The first synthetic poll observed the
+denials about three seconds after share removal. This isolates the source-side
+permission boundary; it is not a production Team Folder ACL or revocation SLA.
+
+A further disposable fixture installed pinned groupfolders 22.0.6 on
+Nextcloud 34.0.4 and paired a genuine Team Folder root. Alice and the owner
+initially resolved the same file ID; Bob was denied. An advanced `-read` ACL
+on only Alice's `acl-note.txt` then denied her original DAV file, signed source
+authorization, Files status, ask target, direct content, searches and earlier
+answer/citation through the old JWT. The first poll observed the denials about
+four seconds after the ACL mutation. Her LDAP group membership, Team Folder
+root access and WeKnora Engineering KB grant remained in place; the owner
+still read the same original file. This covers one isolated real groupfolders
+ACL path, not enterprise AD, production ACL configuration or an SLA.
+
+Source-side diagnostics now separate retained hints awaiting a durable receipt
+from those already received but still above the last verified applied watermark.
+The admin page shows both counts and oldest hint ages. A fresh, successful
+signed applied-status check plus a received-but-unapplied hint created at least
+five minutes ago produces a redacted `application_overdue` warning. The age is
+measured from hint creation, not receipt, and the counter does not prove an
+individual file is parsed or ready. The PHP alert contract and the shared-stack
+HTTP smoke passed, including anonymous, machine-token, administrator and
+ordinary-user access checks. CI additionally exercises the delivery watermark
+transitions and their diagnostics fields.
+
+A separate disposable dual-service restore drill stopped both apps, created
+PostgreSQL logical dumps and cold physical PostgreSQL/file-volume archives,
+and checked their hashes. After the live file was deleted and two full scans
+tombstoned it, the drill restored the older checkpoint while app ingress
+remained stopped. It verified the original Nextcloud instance ID, pair
+operation, root/file IDs and source ETag, then replayed the persisted
+post-checkpoint deletion journal on Nextcloud before starting WeKnora. The
+same old JWT still authenticated Alice but could not read stale document,
+chunk, preview or search content before or after two reconciliation scans;
+the final source row was a tombstone with no visible candidate. Checkpoint and
+restoration took 30.159 and 63.946 seconds for this small synthetic fixture.
+The script confirmed its own Compose containers, volumes and network were
+removed. This is local recovery evidence, not a production RPO/RTO promise,
+external vector/Wiki/object restore or a durable production replay ledger.
+See [the drill and its limits](isolated-dual-service-restore.md).
+
+An earlier pinned RAG build compiled the WeKnora app with `WITH_ANYDOC=1` and the
+`anydoc` Go build tag from source commit
+`e5cc3e4491ee10fb85e0c2ad79f1e3329826d02e`; both candidate images carry
+the complete patch SHA-256
+`a7d638ac36f2e64b5adf998cdd16a811c238de343a5ab8d001262fa8207c3961`.
+An isolated, loopback-only dual-service fixture verified the candidate app
+image `sha256:c8e8b10b275bc0abfe8446278132e35e4b87d79338d4f55c331cf4f84e42e551`:
+AnyDoc was available, the synthetic PDF reached two ready chunks and two
+embeddings with its protected text, Alice received a file-scoped answer with
+an original Nextcloud `/f/<file_id>` citation, and Bob was denied. Removing
+only the source share made Alice's old JWT lose DAV, source, ask, direct,
+search and prior citation access on the first poll; LDAP membership, WeKnora
+grant and owner's PDF remained. The PDF had complete DocReader text, so this
+first run did not trigger the short-text AnyDoc recovery branch. A second
+independent fixture forced only its DocReader to rasterize the same PDF: the
+primary result had 46 searchable characters, the candidate logged AnyDoc
+recovery to 283 characters, and the same indexing, answer, citation and
+old-JWT revocation checks passed. This verifies the running fallback branch
+under controlled input, not natural PDF truncation or scanned-PDF OCR. The
+shared WeKnora LAN service still uses its prior image while the candidate is
+reviewed. See [the PDF candidate record](isolated-pdf-candidate.md).
+
+An earlier combined RAG candidate has complete patch SHA-256
+`ed055900b1eca78cc15a14021794fb6dc95dafb3e8e5592ce3f865ca1538af03`,
+app image `sha256:d052febfcd39d3ea20e136a12a9dc10fda2389d14c118748764318f2d32f22dd`,
+and UI image `sha256:699f4ae751e57a838f875093bbd739ee0e1a64418d38bf00a56958b0b28e2b08`.
+Both normal and controlled short-primary PDF flows passed again against the
+current app. In the controlled flow DocReader supplied 46 searchable
+characters and the local AnyDoc recovery supplied 283; indexing, source-scoped
+answer, original-file citation, and old-JWT denial after source-share removal
+passed. A separate disposable real-browser flow used the current app and UI:
+Alice followed the Nextcloud Files sidebar handoff, signed in through LDAP,
+asked about the exact published file and received the synthetic marker with
+HTTP 200. The ordinary request omitted Agent identifiers. Clicking its
+citation opened the original Nextcloud `/f/92` route; the same browser session
+read the exact source file over WebDAV with HTTP 200. The browser check passed
+again after the fixture began checking that state ports and images exactly
+match its owned Compose configuration. All owned Compose projects were removed
+after their runs. These are synthetic local checks;
+there is no real AD/Team Folder acceptance, natural PDF truncation/OCR proof,
+or enterprise answer-quality evidence.
+
+The same current app image also passed the separate local BGE candidate
+smoke with its pinned source and patch labels: the built-in embedding returned
+512 dimensions, ReRank ranked the matching fictional clause first, one
+synthetic knowledge item completed parsing, and pure vector search returned
+one hit from one enabled 512-dimensional vector. That owned Docker project
+was removed. This checks model wiring and a tiny retrieval example, not
+answer quality on approved enterprise questions.
+
+The current RAG app image also passed a fresh owned, loopback-only dual-service
+event exercise in `nc-synldap-51dbd280`. Event e1 reached verified applied
+watermark 2 on both services. Finalizing an exact source machine-key rotation
+made the old event sender pause with `receiver_unauthorized`, without
+advancing its receipt. The operator rebind command retained the connection ID,
+HMAC key and inbox watermarks, resumed that sender through the scoped
+compare-and-swap retry, and returned `already_active` on an identical replay.
+Event e2 then reached verified applied watermark 4 on both services. The
+fixture's containers, volumes and network were removed. This is one synthetic
+rotation and continuation, not production fault-rate or latency acceptance.
+
+Both complete WeKnora patches were regenerated from their pinned fixed and RAG
+baselines and passed clean-apply checks. Selected direct HTTP reads,
+HybridSearch, Agent read/list and live answer paths acquire renewable read
+leases and recheck current source and user grants at output. Enumerated
+Asynq/Lite document build workers acquire build leases; same-transaction
+chunk, knowledge and version writes are fenced. MCP machine read routes reject
+Nextcloud source documents. Focused fixed and RAG Go suites, including
+revocation-during-hydration and HTTP-write tests, passed locally.
+
+The coverage marker remains absent, so physical derived-copy GC stays denied.
+External vector, graph and object writes, Wiki and other read paths, old task
+drain, production coordinated restore, production alert routing and the 10,000-file /
+100-GB performance target remain open. The same-directory LDAP fixture is
+synthetic; a real AD and production Team Folder permission matrix is not yet available.
+
+## Local cross-system evidence
+
+The first cross-system ingestion and event probes preceded the source-pairing gate. Their legacy synthetic data source is now intentionally denied for new sync and event intake. A second, isolated WeKnora stack paired a new dedicated knowledge base with Nextcloud binding `isolated-pair-8dc8867a58`; both sides reported `active`. The existing local WeKnora test stack was connected to the isolated Nextcloud Compose network. A synthetic embedding model and dedicated knowledge base were created; syncing the `dev-published` datasource imported `department-notes.md`. WeKnora reported successful sync and completed parsing, and the resource carried Nextcloud source provenance. The local WeKnora administrator has no linked AD identity; direct knowledge access and the knowledge-base list returned HTTP 403. This is one ingestion and denial case. It does not validate an authorized AD user's retrieval or a generated answer; no real chat model or enterprise AD test account was used.
+
+After the minimal version-state migration, a repeated local sync succeeded and left one completed, enabled candidate with a matching active source ETag in `nextcloud_source_versions`. On the newly paired source, a real manual sync imported `paired-note.md`, parsing completed and the version row became `published`. Moving that same Nextcloud file ID to `paired-note-renamed.md` and syncing updated the visible knowledge filename and provenance path without changing its candidate ID; moving it back and syncing restored both names. A separate synthetic `version-probe.md` was uploaded, synced, overwritten with different bytes and deleted; each version reached one visible candidate, and the candidate ID changed. After WebDAV deletion and two complete syncs, the source had a durable tombstone and zero visible candidates. The probe file was removed. On the later 0.4.18 image, another isolated synthetic file (file ID 6958) published, was overwritten with a new candidate and ETag, and became a tombstone with zero visible candidates after two deletion scans. Failed parsing and late-task handling still have repository tests rather than a cross-system fault drill. The Nextcloud stack has local accounts and groupfolders 22.0.6 for a synthetic ACL probe, but `user_ldap` is disabled. The existing WeKnora stack connects to enterprise AD while its OpenLDAP fixture is inactive, so neither an authorized AD read nor the full nested-group and production Team folder matrix has been demonstrated here.
+
+The app's local HTTP smoke scripts cover service authentication, pagination, publication withdrawal, source authorization, change hints, root-folder events, runtime binding scope and retention. The change-hint smoke additionally verifies same-name delete/re-upload with a new file ID and a folder move out of and back into the bound scope; content access returned 404 while out of scope and 200 after return. A binding-wide Stop/Resume smoke verifies stopped reads, retained machine binding visibility, stale cursor rejection after resume, audit persistence and preserved per-file withdrawal. The optional Team folder probe can be run after installing the compatible groupfolders app in local Compose: `docker compose exec -T nextcloud chown www-data:www-data /var/www/html/custom_apps`, then `docker compose exec -T -u www-data nextcloud php occ app:install groupfolders --no-interaction`, then `python3 apps/integration_weknora/tests/team_folder_acl_http_smoke.py`. It removes its temporary user, group, folder, binding and identity. An isolated 0.4.6→0.4.22 upgrade smoke passes with valid and invalid old binding configuration. Fixed-baseline Go tests cover the connector and the guard paths in the patch. A 0.4.22 source-pairing HTTP smoke and WeKnora focused Go/SQLite suites also pass locally. The isolated paired-source ingestion and rename probe uses only synthetic data. These checks establish a development environment and selected safety behavior, not the PRD's acceptance matrix.
+
+The 0.4.22 local diagnostics HTTP smoke passed after upgrade: anonymous and machine-token callers were denied, an administrator received only the documented non-sensitive sender fields, and a temporary non-administrator was denied. The event-delivery fault smoke observed a pending hint before receipt, zero pending after a durable receipt, and a paused sender with a pending hint and error code. Its single worker wake-to-receipt sample was 4.27 seconds, not a P95 result. The app archive contains 69 runtime files and passed its install-layout check. The loopback and LAN login URLs returned HTTP 200, and authenticated WebDAV on the LAN address returned 207. This is host-side verification; a second physical LAN client has not been exercised.
+
+The fresh-install smoke extracted the 0.4.22 archive into a new Nextcloud 34.0.4 container backed by unique PostgreSQL and Redis volumes. `occ app:enable` completed on that empty instance; `installed_version` matched the archive, the binding, source-pairing and event-connection tables existed, and a newly generated administrator authenticated to DAV with HTTP 207. The script removed its Compose project and volumes afterward. This validates a clean local package installation, not production upgrade or rollback.
+
+A later disposable run installed the 0.4.29 archive, disabled and re-enabled
+the app, and restarted Nextcloud. `app:list` reflected each state; a private
+app configuration value survived re-enable and restart. Authenticated DAV
+created and read a test file before disable, read and overwrote it while the
+app was disabled, and read the updated bytes after restart. Its isolated
+volumes were removed. This covers local disable/re-enable and restart behavior,
+not an upgrade-failure recovery or production rollback.
+
+The WeKnora event-connection administrator API was exercised against the earlier local synthetic data source. A signed hint received HTTP 202 with a durable receipt watermark; nonce replay and a rotated or revoked key returned HTTP 401. Nextcloud's sender then delivered a temporary WebDAV file event, and both durable receipt watermarks matched. That earlier dispatch probe observed queue acceptance while the applied watermark was still `0`. On the newly paired isolated source, the revised `local-event-pipeline-smoke.py --expect-applied` created a temporary file and then deleted it. Each hint reached WeKnora's real full-source sync queue, and both WeKnora's applied watermark and Nextcloud's separately verified signed applied watermark covered the upsert and later delete. The delete required two complete scans and a dispatcher retry; the test cleaned up its file and revoked both temporary connections. This proves one synthetic event and publication cycle, not the PRD's sustained latency or enterprise load targets. A later isolated rerun covered upsert event 4973 and delete event 4974: both WeKnora and Nextcloud reached the applied watermark, the deleted source version became `tombstone`, and zero active knowledge rows retained a visible source ETag for that file. The first attempt used an unapproved isolated receiver origin and failed at sender configuration; a temporary Compose-only allowlist entry enabled the rerun and was then removed. The 0.4.18 rerun with `--verify-index` then covered upsert 4980 and delete 4981: both applied watermarks advanced, the upsert candidate had a ready chunk and enabled embedding, and the delete ended with a tombstone and zero visible candidates. Its temporary receiver allowlist and event connections were removed.
+
+A separate isolated administrator-withdrawal probe used only temporary file ID 6962. Before withdrawal, its candidate was published and parsed, with one ready chunk and one visible knowledge row. Immediately after withdrawal, the Nextcloud manifest excluded it, its content endpoint returned HTTP 404, and publication recheck returned HTTP 409. Before a full sync, WeKnora still held the published candidate, so immediate denial relies on the live source/read guard rather than completed index cleanup. Two successful manual syncs then left a tombstone, no candidate ID, and zero visible knowledge rows. Republish restored HTTP 200 content; WebDAV deletion and two more syncs returned to a tombstone with zero visible candidates. The temporary file and machine key were removed; the specific trash DAV item returned HTTP 404 after deletion, while a `oc_files_trash` metadata row and publication audit state remain. The old WeKnora knowledge row was soft-deleted, but a ready chunk and enabled embedding remained; derived-index physical cleanup is still incomplete. This manual-sync probe is separate from the event applied-watermark acceptance above. Synthetic share, group-membership and Team ACL revocation tests do not establish the real AD two-account or authorized-retrieval acceptance matrix.
+
+The isolated `local-source-pairing-abort-smoke.py` run used a separate Nextcloud Compose project and a fresh folder, binding and empty knowledge base. A one-shot loopback relay returned HTTP 503 only for that operation's signed commit, leaving a paused WeKnora source and pending Nextcloud intent; an exact abort closed both sides and removed the paused source. The same run verified Nextcloud-only lost-key abort, wrong-operation rejection, idempotent retry and active-pair abort rejection. It removed its fixtures and relay, and the temporary WeKnora origin approval and network attachment were reverted. This is a synthetic fault path, not a production network failure drill.
+
+The isolated active pair then rotated its source credential with operation `024e590d-c574-46c1-830a-b8965de980bb`. Both services reported `finalized`, the old Nextcloud machine key disappeared, and the following WeKnora manual sync succeeded with two items and zero failures. The optional event connection had already been revoked, so this did not test event-connection repair after source-key rotation or a lost response during rotation.
+
+The isolated WeKnora database upgraded from migration 120 to 121 without a dirty state, preserving its GC inventory. After making only two synthetic tombstone jobs due for a local retry, the new worker removed both registered local original objects. Their resource rows changed to `deleted`, their bindings fell from two to zero, and confirmed released bytes totaled 74; `/data/files/10000` shrank by 74 bytes. Both jobs remained `blocked` with derived index items outstanding, so this is a local object deletion proof rather than complete GC or capacity acceptance. Migration 122 / SQLite 41 reopens any prior GC job incorrectly marked complete and retains a derived-index blocker for every historical Nextcloud job. Migration 124 / SQLite 43 invalidates earlier empty-pair proofs, including a possible false proof minted by repair of an old pending pair; a durable operation-ID lineage prevents a deleted pair from regaining virgin status after reconstruction. Existing decommission records stop this upgrade for manual review.
+
+The isolated WeKnora PostgreSQL database then upgraded from 123 to 124 without a dirty state. In a separate disposable Nextcloud Compose project, `local-empty-source-decommission-smoke.py` created a fresh empty folder, binding and dedicated WeKnora knowledge base after that upgrade. The exact pair became active; Nextcloud recorded a stopped decommission intent, rejected a different operation UUID and premature finalize, and WeKnora returned a signed empty-inventory ACK. Both sides reported `acknowledged` before Nextcloud finalized; retries with the same UUID were idempotent. The old machine credential returned HTTP 401, the binding disappeared from the active list, and WeKnora retained a paused source with an `acknowledged` decommission tombstone and historical `active` pair identity. The one-shot relay and empty WebDAV folder were removed. This proves the virgin-source path only; no indexed source was retired or physically cleaned.
+
+The first-stage indexed-source withdrawal was tested against disposable PostgreSQL schemas with migration 125 and SQLite schema 44. Its PostgreSQL tests cover a signed event batch before withdrawal, atomic event-key revocation and dispatch blocking, a denied later signed batch with an unchanged receipt watermark, concurrent connection locks, write fences, append-only observed inventory and a permanent external-index blocker. A fresh, fully disposable Nextcloud 0.4.21 / WeKnora PostgreSQL 125 dual-stack HTTP drill then paired and indexed one synthetic text file (one ready chunk and one enabled embedding). An exact stopped Nextcloud intent led to WeKnora HTTP 202 with `logical_withdrawn=true` and `inventory_complete=false`; the old event key returned 401. Nextcloud retained its stopped binding and source key, had no ACK, and rejected premature finalize with 409. The drill used an isolated mock embedding endpoint after the initial built-in model endpoint was rejected by SSRF policy; its owned containers, volumes and temporary credentials were removed. This is one synthetic first-stage withdrawal, not proof of full historical copy inventory, physical cleanup or enterprise behavior.
+
+PostgreSQL migration 126 and SQLite migration 45 add a local source-version observation ledger. Disposable PostgreSQL 123→126 and SQLite 43→45 upgrades preserved current rows while marking pre-existing histories unknown. A PostgreSQL migration lock blocks writes across the backfill and trigger installation; a concurrency regression checked a writer that committed before the lock and a later writer that appended revision 2. Eight concurrent UPSERTs remained monotonic in both databases, and rejected writes against the indexed-withdrawal fence did not append a revision. Tests also rejected ledger edits and automatic rollback. These observations do not enumerate pre-upgrade candidates or external vector, graph, Wiki, backup and object copies, and they do not change indexed-withdrawal `inventory_complete=false` or authorize GC or an ACK.
+
+PostgreSQL migration 127 and SQLite migration 46 add an inert per-knowledge
+read/build lease and retirement fence foundation. Disposable PostgreSQL and
+SQLite tests cover acquire-versus-retire and GC-claim-versus-KB-read races;
+an active exact GC claim now rejects new KB-wide read leases until release or
+expiry. The coverage table is empty after migration, so GC claims are denied
+by default. Direct knowledge, chunk, preview and download HTTP handlers now
+acquire renewable exact read leases and recheck publication and reader grants
+at bounded response writes; handler/router/container and repository tests
+passed in isolated Docker. The 2026-09-30 update above adds selected search,
+Agent, MCP and build paths. Frequent remote publication checks still need
+large-download performance measurement. Wiki, graph, other readers, old task
+drain and external index adapters remain uncovered. No coverage marker is
+written and this does not authorize physical deletion. The [content lease
+design](nextcloud-derived-gc-read-lease.md) tracks the remaining gates.
+
+## Isolated synthetic LDAP acceptance
+
+A separate disposable stack connected Nextcloud `user_ldap` and WeKnora to the
+same AD-shaped OpenLDAP directory. Both synthetic users could log in. With
+only A in Engineering, A could read the published file and retrieve its
+WeKnora knowledge, chunk, preview and search hit; B was denied. Removing A
+from Engineering made Nextcloud DAV and signed source authorization deny the
+file. A's **old JWT** then received HTTP 403 for direct knowledge, chunk and
+preview reads; search returned zero hits. A fresh-login matrix agreed after
+directory sync. The protected fixture, containers, volumes, images and network
+were removed after the drill. [Reproduction and limits](synthetic-ldap-acceptance.md)
+record the exact synthetic scope; this does not establish enterprise AD, nested
+groups, production Team ACLs or the full Q&A citation path.
+
+The same isolated stack, rebuilt with `77c2f9f`, indexed two files and ran a
+signed event for an update to just one. WeKnora's received, dispatched and
+applied watermarks reached event 4; Nextcloud verified the signed applied
+watermark 4. In the event sync window, the changed file had one content GET and
+the unchanged file had none. Paired-source health returned HTTP 200 to the
+administrator, 403 to a non-administrator and 401 anonymously. The source
+retained two published, parse-completed candidates. This is one scoped event
+case, not the PRD's 10,000-file/100-GB or P95 latency acceptance.
+
+A disposable paired pilot harness now measures bulk sync and event-to-durable
+queue admission with explicit small and large fixture controls. Its final
+reduced run synchronized two 256-byte files in 0.335 seconds and observed
+three independent event-to-queue intervals of 6,073.6, 5,069.7 and 5,266.1
+milliseconds; all three reached the applied watermark. Nearest-rank P95 for
+these **three** samples was 6,073.6 ms. Five samples saw a 343,703,552-byte
+WeKnora process RSS peak. This is a tiny, sequential, synthetic check of the
+measurement path, not acceptance of the 10,000-file/100-GB, sustained P95,
+upload-latency or connector-memory targets. The two pilot projects and their
+private credentials were removed after recording a credential-free report;
+see [pilot load runbook](../scripts/ops/PILOT-load.md).
+
+The acceptance scripts now require a fresh, attribute-limited LDAP topology
+export before claiming a synthetic primary-group or nested-group case. A
+separate loopback-only probe checks GUID/UID mapping conflicts, and a watcher
+holds the original JWTs across a synthetic group-revocation drill. Their 16
+offline contracts and five WeKnora OpenLDAP network tests passed. A fresh,
+disposable dual-service stack then passed the six-field nested-only group
+HTTP matrix: Alice had file/source/knowledge/search access through
+Alice→Platform→Engineering, while Bob could log in but was denied all four
+content checks. Its one synthetic file had a ready chunk and embedding. The
+earlier primary-only case failed across services: WeKnora recognized Alice's
+`primaryGroupID` membership, but Nextcloud `user_ldap` omitted Alice from
+Engineering because raw OpenLDAP did not match its textual SID lookup against
+binary `objectSid`. A later fresh, loopback-only fixture added a narrow
+OpenLDAP frontend rule that converts only the generated Engineering SID
+assertion to binary. Neither application received an extra LDAP member edge.
+The six-field primary-group matrix then passed with Alice's sole Engineering
+grant through `primaryGroupID=2000` and Bob denied. After Alice's primary group
+changed to Domain Users, her original WeKnora JWT lost direct knowledge and
+search access by 08:03:18 UTC; separate DAV and signed-source checks also
+denied her. WeKnora's directory membership, Nextcloud's group view and a
+fresh topology/login matrix confirmed the removal by 08:03:20 UTC. This is a
+synthetic AD-like query simulation; real AD primary groups and LDAP-backed
+Team-folder ACLs remain unverified. See [the disposable fixture](synthetic-ldap-compose.md).
+
+A fresh direct-group fixture also exercised the complete file-path lifecycle
+against candidate image
+`sha256:b75fbae3386625c213d7ae49f701c69d34884508aec0951f70928236e7a24056`.
+The same Nextcloud file ID 242 was created (event 21), renamed (22), moved out
+of the binding (23), moved back (24), moved out and back before delivery
+(final event 26), sent to trash (27), and restored (28). Both services'
+applied watermarks reached every target event. Rename updated the indexed
+path/name without replacing its candidate; each confirmed withdrawal became
+a tombstone with zero visible candidates after the connector's second full
+scan. Move-back and restore created new candidates, and rapid movement ended
+with the currently authorized source published. Source bytes and Alice/Bob
+allow/deny checks passed after restoration. The isolated project's containers,
+volumes, network, and private scratch directory were removed. The
+[reproducible probe](../scripts/ops/README.md) covers a synthetic direct share,
+not production Team Folder or enterprise AD behavior.
+
+A separate owned two-binding synthetic fixture used the source-65 backend
+image `sha256:eb558b7ab6d8ae53d3165263bea577ad4d6d12c62dcd75c62aa394c473d4625b`
+to move a nested directory with three descendants (file IDs 167, 168 and
+169) from A to B and back. Each source binding produced three tombstones;
+each target binding published three new candidates while file IDs stayed
+stable. The corresponding A/B event watermarks reached 12 initially, then
+13/14 and 15/16 across the two moves. Alice's current source and direct
+knowledge were readable and her ask returned 200; Bob's direct read and ask
+were denied. Alice's unauthorized DAV DELETE returned 403 without any new
+delete or subtree-delete hint, and the original file and candidate remained.
+The fixture's containers, volumes and network were removed. This verifies the
+synthetic two-binding event path; production ACL and load remain open.
+
+## Failed-candidate recovery
+
+The two pinned WeKnora patches now store a per-file failed-candidate retry
+intent. A five-second dispatcher scans active paired Nextcloud sources, using
+keyset pages rather than a fixed first page, and claims one exact failed
+generation for a bounded 24-hour automatic window. Retry delay grows from one
+minute with stable jitter. Each task carries the source ETag, failed candidate,
+pair operation and epoch, source config hash and one-use lease token. The worker
+rechecks these selectors before reading source bytes and before Stage; a stale
+queued task cannot replace a newer candidate. The administrator-only API can
+inspect the exact file's retry state and restart an exhausted window with a
+compare-and-swap request. No parser error text or source credential is exposed
+through that status response.
+
+A retry of an unchanged ETag downloads only the failed file after a complete
+metadata preflight. A separate event retry still refreshes the full metadata
+manifest when its changes page has become empty; this advances the source's
+reconcile timestamp so a completed event can reach the verified applied
+watermark without re-downloading unchanged file bodies. Fixed and RAG focused
+Go tests cover the retry claim, same-ETag staging, stale task denial and event
+timestamp transition. Both pinned patches apply to clean source archives and
+the SQLite migration-47 upgrade tests pass. At that stage the RAG baseline was
+pinned to
+`b8a34e0bae8fcf0d3c8273bba2e56414abed41e2`; its evaluation-cost Go tests
+and frontend typecheck also pass. The isolated candidate that established the
+automatic retry behavior before the administrator list was added has app image
+`sha256:35dbcdf20a01fe22998da6dbd141bc1375722af1c3f8b3aaa5dbeb1ce37dd727`
+and UI image
+`sha256:2c093023f7522f92614f921af4bc12d6f44760192e856a170344308fd03a1a25`.
+Both carry the pinned source and full patch SHA-256 labels; neither replaced
+the shared WeKnora service.
+
+The earlier loopback-only `--phase full` fault drill used this app image and the
+packaged 0.4.29 Nextcloud app. After a new, same-file V2 WebDAV overwrite
+created outbox upsert event 1, its first candidate failed while only the
+fixture's embedding service was stopped. The V1 recovery copy remained stored
+but its old target, direct document and answer/citation were inaccessible.
+The durable retry job recorded one automatic attempt and a sync-log ID; after
+the model service returned, a distinct V2 candidate published with a current
+ETag, one visible copy, ready chunk and embedding. Alice's file-scoped answer
+cited the original Nextcloud file. Bob's target and direct document returned
+403, and his selected search and answer stream exposed no content or citation.
+The old V1 target, document, selected search and stream remained denied after
+V2 publication. Both services' verified applied watermarks reached the new
+event. The fixture's containers, volumes, network and private scratch data
+were removed. This synthetic direct-share run does not verify enterprise AD,
+production Team Folder ACLs or a performance SLA; reproduce it with the
+[isolated fault probe](../scripts/ops/README.md).
+
+The administrator failed-candidate drawer now lists only current failed
+staging files for an active paired source, one tenant and one knowledge base.
+Its server page is capped at 50 rows and returns only numeric file IDs and
+static retry state codes. Selecting a file fetches the exact candidate and
+ETag; the restart request uses those selectors in a compare-and-swap. A `409`
+clears the stale selection and reloads current status. Ordinary users cannot
+call the list API. PostgreSQL with `en-x-icu` exposed a bug in the original
+prefix upper bound: `~` sorted before numeric file IDs. The query now uses an
+exact prefix check and database-consistent keyset cursor. A dedicated
+PostgreSQL collation test and SQLite malformed-row pagination test pass. The
+earlier retry candidate's fixed and RAG patch hashes were
+`1d60b7db90ae67aefcf7f19f77f11291918dfd071a07fb58b87bdc5bac8bc78e`
+and `2883e0d64518c3bb0da04d74136545677dbfc29f71d907d41065bc80e87901d5`.
+The RAG source is pinned to
+`77c97fd72f26e84435503d24eeed88cb5dfe1f01`, which also includes the
+evaluation selected-model guard. The isolated backend image is
+`sha256:1a6d27d3a35f6056552449aadb1e14c34840fb7dd9afc9e4f13eb6dd5ebc27dc`
+and the UI image is
+`sha256:861693296338a30560d3353916ceb9bc3b6a428ef8dc77bdb8bfadf7649ac951`.
+Both labels contain that source revision and the full patch hash; neither is
+used by the shared WeKnora stack. A fresh loopback-only `--phase full` run with
+this backend image passed: V2 produced a new outbox event and one failed file
+(`file_id=92`); the administrator list returned exactly that file and its
+active operation ID, while Alice and Bob each received HTTP 403. After one
+durable automatic retry, a distinct V2 candidate published, the list became
+empty, and its desired and visible ETags matched the new source ETag. One
+visible copy had at least one ready chunk and embedding containing the V2
+marker. Alice's answer cited the original Nextcloud file. Bob's target and
+direct document returned 403; selected search and answer stream exposed no
+V2 content. The old V1 target returned 404, direct document 403, and selected
+search and stream exposed no V1 content both before and after V2 publication.
+The receiver's durable receipt and both sides' applied watermarks reached
+event 1. These watermarks prove event processing, while the separate current
+ETag, ready chunk, embedding, answer and citation checks prove actual
+publication. The owned project, volumes and network
+were removed. The first 77-image attempt timed out on an isolated PostgreSQL
+read while other Docker builds and fixtures were active; the serial rerun
+passed all assertions and removed its owned resources. A separate real
+Chromium run used an isolated failed V2 candidate with the current editor:
+the administrator list showed file ID 92, the exact drawer showed attempts
+and next attempt, an injected `409` reloaded both list and exact status, and
+the real retry POST returned `202`. A file-count probe returning `403` did
+not hide the knowledge-base editor and displayed a disabled storage selector.
+The later backend and frontend guard fix prevents that disabled selector from
+silently rebinding a legacy knowledge base; its focused tests cover files,
+deleting rows and count errors. Alice saw no settings menu and received `403`
+from the list API. The browser run used separate candidate images and cleaned
+its own fixture.
+All eight GitHub checks on the earlier `30de4d5` pinned-source commit passed, including
+both patch applications, new frontend retry tests, PostgreSQL collation tests,
+direct upgrade and local smoke.
+
+The WeKnora-facing OpenAPI contract now records 27 Nextcloud integration
+methods across 22 paths, including event receipt/status, pairing, failed
+candidates, source authorization and file-scoped ask. A standard-library
+contract checker runs after each pinned patch is applied in CI. On both clean
+source archives it verified all 27 routes, 26 success response shapes and 11
+Go JSON structures. Deliberate route-method, cursor-key and ETag-tag drift
+were rejected by the checker. This freezes the implemented interface shape;
+the live enterprise network and identity integration still need acceptance.
+
+## 2026-10-01 candidate stabilization
+
+The preceding fixed c6 and RAG77 full patches had SHA-256 values
+`5611d1c3b562410a5314f1dd82312fb485816d740f5ac603fa25253b619263a8`
+and `045ff1a17b244c90d1263f3e458fabfa0e142268e7b5df7f1f70cbae91a72852`.
+Both apply back to their pinned upstream commits. The combined Go tests for
+read-lease cancellation, knowledge-base settings, and event-key rotation pass
+on RAG77; the 27-route OpenAPI checker passes on both applied patches.
+The isolated RAG77 candidate backend image is
+`sha256:590d91c9d9e963c49c68cbd3b3dd93731d53df0e1eb302858fa1c28d2ff788e3`;
+its UI image is
+`sha256:710bbe26743b809bad18302f1c1722363e781e6a3a257610979a6f86d0b91a21`.
+Both carry the exact RAG77 source revision and full patch hash as OCI labels;
+the shared WeKnora service still uses its earlier image. An immediately
+preceding candidate with identical runtime source, before a Go test-only
+PostgreSQL assertion correction, passed a fresh loopback-only `--phase full`
+probe. File ID 92's V2 parse failed while its V1 recovery bytes stayed
+stored; the administrator list showed one failed candidate, and Alice and Bob
+received `403` from that list. A durable retry with a new sync log published
+a distinct V2 candidate with ready chunk and embedding, and the list became
+empty. Alice's file-scoped answer cited the original Nextcloud file. Bob's
+direct/ask routes denied access, and selected search and streamed answer
+suppressed its content. The old V1 direct/ask routes and answer remained
+denied. Both verified applied watermarks reached event 1. The probe removed
+its owned containers, volumes and network.
+A separate real Chromium run with that preceding backend and UI runtime
+opened the failed-file drawer even when the editor's file-count probe
+returned `403`.
+It showed file ID 92 and its exact manual-retry status, reloaded both list and
+exact status after an injected `409`, and received `202` from the real retry
+POST. Alice had no settings menu and the list API returned `403`. The browser
+fixture also removed its owned containers, volumes and network.
+The same backend runtime, before a test-only PostgreSQL rotation assertion
+was corrected, passed `--cross-bindings-only` with three nested files. A
+forbidden DAV DELETE returned `403` without a deletion hint or lost
+candidate. Moving the subtree A→B→A produced three source tombstones and
+three distinct destination candidates on each leg; event receipt and applied
+watermarks reached 12–16. Alice retained direct and file-scoped answer
+access, while Bob remained denied. This owned fixture was removed. The
+subsequent full-patch hash change touches only that Go test assertion.
+The corrected PostgreSQL event-connection lifecycle test passed against a
+separate PostgreSQL 16 container; its container and network were removed.
+
+A canceled read request now returns its parent context error even when a
+concurrent lease renewal observes a closed database transaction. The original
+cancel/close test and a deterministic renewal-failure test each passed 100
+repetitions on both source baselines. A legacy knowledge base can no longer
+silently adopt the current default storage backend when its file-count probe
+fails. Server-side storage binding and Embedding-model changes check both
+ordinary and deleting knowledge rows and reject a failed count. Focused Go
+tests on both baselines, eight frontend tests, and frontend type checking pass.
+
+The event receiver now keeps the immediately preceding HMAC key for two
+minutes after rotation. A second rotation removes the oldest key, while
+revoke and source withdrawal still disable the connection immediately. Event,
+connection-status and file-status signature checks use the receiver clock
+after taking the connection lock; the file-status response key is rechecked
+at signing. Focused Go tests on both baselines cover the old/new interval,
+expiry, second rotation, replay and scope, and the event smoke script now
+expects the same behavior. This two-minute event-key window is distinct from
+the source machine-key rotation protocol's maximum 24-hour overlap.
+
+## 2026-10-01 isolated follow-up candidate
+
+Nextcloud app 0.4.30 adds a narrow V1 publication ACL gate. A binding can use
+its publisher's local home directory or the verified Team Folders 22.0.6 base
+permission mount with advanced ACL disabled. Creation and resume check the
+publication tree; manifest scans and individual content, authorization and
+Files status reads reject a different nested mount. When an active Team Folder
+enables advanced ACL, an ordinary source read fails closed and persistently
+stops the binding with an audit entry, a new publication epoch and a
+reconciliation hint when the database and outbox are available. An
+administrator must disable that ACL mode and explicitly resume. A fresh,
+owned Nextcloud-only Team Folder smoke checked normal child-file publication,
+the 409 creation/update/resume denials, the exact stop audit and epoch, denied
+content and authorization, diagnostics, and recovery; its resources were
+removed. A separate synthetic LDAP/WeKnora drill had already verified an
+indexed uniform Team Folder and the same stop path. A later disposable
+Nextcloud 34.0.4 fixture enabled `files_external` and mounted local storage
+inside both an active Team Folder binding and an unbound local folder.
+`files:mount:list` and DAV PROPFIND confirmed the nested files were readable.
+New binding creation returned `409 unsupported_source_acl`; the active
+binding's manifest failed closed and persistently stopped it with epoch 1,
+an audit entry and diagnostics. Resume returned 409 until the mount was
+removed; then resume reached epoch 2 and the manifest returned 200. The
+fixture's containers, volumes and temporary files were removed. This policy
+does not establish enterprise AD or arbitrary external-storage ACL parity; see
+[synthetic scope](synthetic-ldap-compose.md). The 0.4.30 runtime package
+contains 75 files and has SHA-256
+`8e8a7355f6a127f4ecf7620d4ffc18e98c64685672306d15c778b1f77f69ec8b`.
+
+The fixed c6 full patch now has SHA-256
+`4f976461f099da9ba6a53ce637b1ae7f285f46b0177ad95fc8bcee6a23b76792`;
+the RAG77 full patch has SHA-256
+`cc6325eac6cb5ef128e32a803cf5610f2a627ab5a6c7119849efda055744214c`.
+PostgreSQL migration 129 and SQLite migration 48 admit append-only source
+revision identities into the private indexed-withdrawal inventory. A hard
+deleted old knowledge row remains represented by its historical candidate
+revision. Fixed and RAG PostgreSQL focused tests, SQLite migration tests,
+exact patch reverse checks and both 27-route OpenAPI checks passed. This
+extends observed evidence only: pre-ledger and external copies are unknown,
+`inventory_complete` remains false, no Nextcloud retirement ACK is sent and
+derived-index physical GC stays disabled.
+
+The RAG77 candidate images were built with AnyDoc and the exact patch hash in
+their OCI labels: backend
+`sha256:c2b78f72f0c352949416b17f649b50271555c4eec2ecbad670264e783bec868c`
+and UI
+`sha256:770e0ed1048bbb7d71f848d481e68110de158a56493a4edfd6fbaab3eb884eec`.
+They are separate from the earlier images still used by the shared WeKnora
+stack. The previous end-to-end failed-candidate and two-binding drills used
+the earlier runtime; this follow-up changed inventory and Nextcloud ACL code,
+so those earlier drills are not claimed as tests of the final image labels.
+The final backend image then passed an owned dual-service physical backup and
+restore drill. Nine checkpoint files included the fixture's state, Compose
+configuration and WeKnora JWT/AES keys; their checksums and private modes were
+verified and those files were restored before container creation. A stale
+published file remained denied before and after two complete reconciliations;
+the source ended as `tombstone` with zero visible candidates. The observed
+checkpoint and restore durations were 31.828 and 64.234 seconds. The fixture
+and volumes were removed. This is local synthetic recovery evidence, not the
+PRD's production RPO/RTO, external-backend recovery or complete historical
+publication ledger; see [restore drill](isolated-dual-service-restore.md).
+
+A further fixed c6 / RAG77 patch revision has SHA-256
+`dd7e09a9df65085d31e99737220dd3a60ff8b2dabfe823f6cc75fabace1b73ee`
+and `f627d20af4edd053163d5f8594f8e75fc55393395d2135701073a1a75df0d475`.
+It adds a read lease and output-boundary source check to global
+`/knowledge/search`; focused tests on both baselines show a live lease blocks
+a GC claim after retirement and a revoked result's title is not sent. Derived
+GC remains disabled because other paths lack coverage. New manual and scheduled
+Nextcloud syncs also derive a stable queue task ID from the persisted log ID.
+If enqueue outcome is uncertain, a static redacted status and task identity
+are available to administrators while the running admission slot stays
+occupied. Two queue fault-injection cases and a repeated cron tick passed on
+both baselines. There is still no automatic recovery for an uncertain enqueue,
+because a missing Asynq task entry is not proof that a task never ran. Older
+ambiguous logs predate stable task IDs and require manual investigation.
+The new RAG77 AnyDoc backend image is
+`sha256:9880ab2b915f0f2ac6a40650370f7698945a540043afed4602cb6823edb6f3ab`;
+the UI image is
+`sha256:f7d1671dcd6c1010f59b5072795cae380327fe4046beadabd643755ecdb7145a`.
+Both carry the pinned source and new patch SHA-256 labels. An owned disposable
+Nextcloud/WeKnora/LDAP Compose fixture booted them, both HTTP health endpoints
+returned 200, and its containers, volumes and network were removed. This is a
+fresh-image startup check, not a repeated answer/revocation or restore drill.
+
+## Consistency and release boundary
+
+The pinned fixed and RAG WeKnora patches now fence PostgreSQL pgvector
+`Save` and `BatchSave` with the current Nextcloud build lease and source
+candidate in the same transaction as each embedding write. A candidate's
+early parse task waits for its committed Stage record before it enters the
+handler; a retired fence or absent Stage fails closed. Two-connection
+PostgreSQL tests cover write versus retirement, Stage versus Tombstone,
+stale Publish, late exact-ID GC inventory, a failed transaction and a Lite
+worker that starts before Stage. Both patches apply to their pinned source
+commits and passed the focused repository, pgvector and router suites.
+The RAG patch was also built into separate backend and frontend Docker images;
+the backend image `sha256:b75fbae3386625c213d7ae49f701c69d34884508aec0951f70928236e7a24056`
+passed a fresh, isolated six-field synthetic primary-group matrix and
+old-JWT revocation drill on 2026-09-30. The drill's containers and volumes
+were removed; [the exact result](synthetic-ldap-compose.md) records its scope.
+The exact-vector delete helper remains dormant and the `derived_index` GC
+blocker remains active because external writers and all readers are not yet
+covered. See [the lease gate](nextcloud-derived-gc-read-lease.md).
+
+The first manifest page scans the bound tree and stores a sorted list for ten minutes. Later pages read that list and reject a changed source or publication revision. A final publication-revision check now also covers a withdrawal that commits after page selection or snapshot persistence. A 207-file smoke covered pagination, a concurrent write, withdrawal between pages without an ETag change, and conditional content reads. This is not a transactional source snapshot; a change during traversal can invalidate a page, and large lists still need performance testing. The connector treats events as hints, recovers an expired cursor by full reconciliation and confirms absence twice. It cannot substitute for a durable publication state machine or a tested backup/recovery protocol.
+
+The Nextcloud app was upgraded in the shared local stack to 0.4.31 and Apache
+restarted after the bind-mounted PHP change. The local API smoke, LAN login
+HTTP 200, authenticated LAN DAV PROPFIND 207, and WeKnora LAN root HTTP 200
+passed. The reproducible 0.4.31 app archive contains 75 runtime files and has
+SHA-256 `110e4b9814c808f2f39f9121f77588ac96f9b114a4d36f913770308226b75876`.
+
+## 2026-10-01 follow-up
+
+A disposable `post-accept` queue pilot found a 74.8-second event-to-dispatch
+sample in the preceding RAG image. An event-only five-second proof-poll
+candidate shortened ordinary applied checks but still measured an 80.0-second
+sample when a second WebDAV write superseded a candidate that was still
+parsing. Both runs used two 256-byte files and three measured events; neither
+is a sustained P95 acceptance. Their exact image IDs, sample values and
+watermark transitions are in the [isolated event queue pilot](isolated-event-queue-pilot.md).
+The PRD's ten-second event-to-task target remains unaccepted.
+
+Nextcloud 0.4.32 accepts a signed, allowlisted
+`failure_code=no_retrievable_content` for a failed current file. The Files
+sidebar shows a specific no-content message and does not create a question
+link. The shared local stack upgraded successfully; maintenance mode is off,
+LAN login returned HTTP 200, authenticated LAN DAV returned 207, and the
+employee file-status HTTP smoke and PHP signature contract passed. Its
+reproducible runtime archive has 75 files and SHA-256
+`df9fb1c261453197183aa2ffbf57b5936ea2e494f3deca45e304ff6e660e5f07`.
+
+Nextcloud 0.4.33 persists the binding-root-relative target path with new
+file upsert and metadata hints and signs it in the event batch. The local
+0.4.32→0.4.33 upgrade and an isolated HTTP smoke covered create, overwrite,
+nested file creation and same-binding rename. The shared LAN stack upgraded
+with maintenance mode off afterward and its login returned HTTP 200; the
+WeKnora receiver's cross-service path proof is recorded below. The
+runtime app archive contains 76 files and has SHA-256
+`cbc989cbac2795f216b2b51d7372e38fb62a7d34c52e0258b05480e8953ce440`.
+
+The fixed c6 full patch SHA-256 is
+`5da6f751906b938db68c014607f2adc22feb151f6d012f527c1400f10608f6e7`;
+the RAG77 patch SHA-256 is
+`251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611`.
+Both applied to clean pinned source archives and passed the 27-route,
+26-response-shape, 11-Go-struct OpenAPI contract. Focused Docker Go tests
+passed on both baselines for zero-text publication/status/ask-target denial,
+completed-sync event fast wake, and knowledge-list/raw-search read leases
+with revocation and GC races. A local fixed-baseline backend image built as
+`sha256:1206e84f0e883492735bfe6efa9690adb0ad8ee6f7cb7d6f15d045d603bc5b91`.
+It was built before the test-fixture-only `sync_logs` schema correction in
+`140c8e1`; the runtime source is otherwise the same. On 2026-10-01, a fresh
+isolated direct-group LDAP fixture (`nc-synldap-72933917`) started this image,
+indexed two chunks and embeddings, and passed the six-field Alice/Bob matrix:
+Alice could log in and access DAV, signed source, knowledge and search; Bob
+could log in but was denied the four protected content paths. Its owned
+containers, volumes and network were destroyed. This is synthetic direct-group
+evidence, not real AD or the latest RAG runtime. The latest RAG AnyDoc,
+browser-skill and Go backend stages compiled, but two final image attempts
+ended on different Debian mirror single-package HTTP 502 responses. The shared
+WeKnora stack still uses an older image.
+
+A separate candidate used the newer WeKnora RAG head
+`3ad3b31f2b3e6409c6a9c196bbab70e2eac6c666` with the same RAG patch SHA
+`251f416a0262fedeea74ef2962664e005122d950670e24792341f7cef5f77611`.
+Using a different Debian mirror, its AnyDoc backend and UI built as
+`sha256:2ec7e6b31463e6764130973cc1d636d2f65c83268376943cbae59713b7156f9e`
+and `sha256:5d9272403683d4fafc0d48c07543ba10c9918041d4d3ece922c4952fb9a21075`.
+Both images carry that exact source and patch in their OCI labels. A fresh
+isolated direct-group LDAP fixture (`nc-synldap-bc78b1d4`) started backend and
+UI healthy; UI returned HTTP 200, bootstrap indexed two chunks and embeddings,
+and the Alice/Bob six-field matrix passed with the same allow/deny pattern.
+Two further owned fixtures tested the same backend: `nc-synldap-f089ff7b`
+confirmed Alice's sole Engineering grant through her AD-shaped primary group,
+then changed that group to Domain Users; her existing WeKnora login could no
+longer read DAV, signed source, knowledge, direct content or search, and a new
+directory snapshot removed the membership. The first denial was observed after
+seven polls, 25.5 seconds after the baseline checkpoint in this fixture.
+`nc-synldap-521230a5` verified a sole nested-group edge and passed the same
+Alice/Bob six-field allow/deny matrix. Each fixture indexed two chunks and
+embeddings, and all owned containers, volumes and networks were destroyed.
+An additional direct-group fixture (`nc-synldap-ce9c73be`) installed the
+digest-checked Team Folders 22.0.6 app inside its owned Nextcloud container,
+paired a real Team Folder root, and indexed two chunks and embeddings. Its
+file-scoped baseline answer carried the synthetic marker and original Files
+citation. After a file-level advanced ACL `-read` rule for Alice, her Files
+status became 404, DAV and signed-source reads failed, ask-target returned
+403, knowledge and direct-content reads failed, search returned no content,
+and the prior history was redacted; Bob remained denied. The first denial was
+observed 8.2 seconds after the ACL mutation in this fixture. Its owned
+containers, volumes and network were destroyed. This is a synthetic Team
+Folder result, not a production revocation SLA.
+This checks the patch against a newer RAG source head, not a runtime image
+built from the repository's pinned `77c97fd7` baseline; it does not prove
+enterprise AD permissions or the PRD load target.
+
+The same newer-head AnyDoc candidate completed two further owned PDF fixtures.
+The natural born-digital PDF path (`nc-synldap-d2d04e24`) indexed the protected
+marker in two ready chunks and embeddings, exposed an available AnyDoc engine
+and connected DocReader, answered a file-scoped question with the original
+Nextcloud file citation, then denied signed source, ask-target, direct content,
+document search and historical citation to Alice's old JWT after source-share
+revocation. The natural primary parse was complete, so the short-text AnyDoc
+recovery branch did not run. A separate controlled short-primary fixture
+(`nc-synldap-65f5b37f`) forced that branch: DocReader yielded 46 primary
+characters, AnyDoc recovered 283, and the same protected text, citation and
+old-JWT revocation checks passed. Both fixtures retained LDAP membership and
+the owner's original file, then destroyed their owned resources. These are
+synthetic PDFs with mock embedding/chat services, not a scanned-PDF OCR or
+enterprise answer-quality acceptance.
+
+The pilot harness now has a `post-accept` event pattern that times an update
+sent just after a previous event enters the queue. Its offline schedule test
+passed. At that point no new Docker load run or PRD 10,000-file/100-GB/P95
+acceptance had been made. The safe dispatch fast wake preserves same-source single flight
+and publication proof; it is not a measured latency guarantee. Derived-row
+physical GC remains disabled because other read and external-write paths lack
+complete coverage. Enterprise AD and production Team Folder acceptance still
+await a real target environment.
+
+## 2026-10-02 signed event proof follow-up
+
+The fixed c6 and RAG77 patches now persist each signed upsert's ETag and
+binding-relative path in the WeKnora event inbox. Applied ACK requires that
+exact file version in the completed source scan and published candidate.
+Broad or excluded-file hints require two complete scans of the same target;
+legacy file hints without a relative path enter manual review. The exact
+patch SHA-256 values are `748866423a51e6aa0d50b151366e80adb5325a9447d499164f9162b821fdaa40`
+and `2542c3f423c2c143191de4d01d508db3761242cfa8e7decd1b3bc43ef98e7d12`.
+Both applied to their pinned clean bases, passed the 27-route OpenAPI
+contract and focused SQLite tests, and passed isolated PostgreSQL event,
+pairing, indexed-withdrawal and rebind tests. No enterprise AD fixture was
+available, as agreed for this phase.
+
+A disposable 0.4.33 Nextcloud and newer-head WeKnora event-only pilot
+observed seven signed inbox hints; all seven carried ETag and relative path.
+For three post-accept updates of two 256-byte synthetic files, the
+event-to-durable-job upper bounds were 5,463.7, 4,938.7 and 4,909.8 ms
+(nearest-rank P95 5,463.7 ms). Event-to-applied-proof bounds were 15,306.3,
+14,820.0 and 15,270.9 ms. The backend binary and migrations were layered
+onto the preceding AnyDoc image solely for this event experiment; this is
+not a rebuilt release image. The original report and image ID are in the
+[pilot record](isolated-event-queue-pilot.md). Three tiny samples do not
+establish the PRD's sustained P95 or 10,000-file/100-GB targets. Bounded
+overlap while a prior parser is still running remains unimplemented, so a
+later sample can still wait behind a parser. At the time of this pilot, the
+shared LAN WeKnora image had not been upgraded to this receiver; the later
+coordinated upgrade is recorded below. Connected sources still require
+watermark and historical-hint review before event delivery is enabled.
+
+The current patch also rechecks every retired knowledge's chunk image
+references at each due GC retry, before any local source-object claim. A
+late image URL is added to the durable inventory; a late malformed
+`image_info` value records `invalid_image_inventory` and blocks the provider
+delete callback. Correcting the value permits an idempotent retry. The
+focused SQLite and isolated tmpfs PostgreSQL GC tests passed on both pinned
+baselines. This closes the previously observed retry gap, but external
+writers can still race the scan and physical claim. Derived-index physical
+GC remains disabled until its full writer and reader lease coverage is
+proved. The three-sample event pilot above used the preceding patch revision;
+its historical hash remains in the pilot report.
+
+## 2026-10-02 pinned RAG77 image and LAN upgrade
+
+The pinned `77c97fd7` source and RAG patch SHA-256
+`2542c3f423c2c143191de4d01d508db3761242cfa8e7decd1b3bc43ef98e7d12`
+produced full arm64 AnyDoc backend and UI images. Their image IDs are
+`sha256:4106172dec93957e94ab8c2e1a23d7844579b4b25a4dc1db644f1cf624d64d3a`
+and `sha256:5f6842d7206558e825d9ac877596caba6a2a5b5cc42c953610a8509241c8d081`.
+The backend contains its binary, migration CLI and browser-skill artifact;
+the isolated parser-engine API reported AnyDoc available.
+
+An owned direct-group LDAP fixture (`nc-synldap-18925d9f`) booted both images
+and indexed two chunks and embeddings. Its six-field access matrix allowed
+Alice's Nextcloud DAV, signed source, WeKnora knowledge and search, while Bob
+could log in but could not read those four resources. A further synthetic file
+upsert carried a matching signed `relative_path` and ETag in the Nextcloud
+outbox and WeKnora inbox. Event #2 reached received, dispatched and applied
+watermarks on WeKnora and received and applied watermarks on Nextcloud; the
+candidate was published with two ready chunks and embeddings. WebDAV deletion
+produced event #3, which reached both applied watermarks and a tombstone with
+no visible candidate. The [redacted event evidence](evidence/rag77-full-image-event-2026-10-02.json)
+records this single functional probe; its 31.7-second upsert and 94.2-second
+delete timings are not P95 acceptance. The owned fixture was destroyed.
+
+A read-only dump of the shared WeKnora database was restored to a disposable
+PostgreSQL 17 container on an internal Docker network. Running only the
+candidate image's migration CLI advanced the clone from schema `127/false` to
+`130/false`, including the event inbox ETag, path and relative-path columns.
+The clone, its volume, network and temporary credentials were removed. Before
+the shared upgrade, both Nextcloud and WeKnora had zero active event
+connections. A verified shared-database backup was saved at
+`dist/backups/weknora-before-rag-20261001T194752Z.dump`, and the old images
+were retained under `pre-rag77-20261002` tags. The coordinated upgrade
+installed the two image IDs above; the shared database is `130/false`, both
+containers are healthy, both LAN entry points return HTTP 200, and an
+authenticated Nextcloud LAN WebDAV `PROPFIND` returns HTTP 207.
+
+The employee Files status lookup now compares the binding publication epoch
+and append-only publication audit revision around a slow signed WeKnora status
+request. A stop/resume or withdraw/republish transition cannot reuse an old
+`ready` observation with the same ETag. A focused PHP contract and CI checks
+pass. Real enterprise AD accounts, sustained 10,000-file/100-GB and P95 load,
+complete parser-overlap admission, and physical derived-index GC remain open.
+
+## 2026-10-02 optional LAN HTTPS entry
+
+The optional Nextcloud Nginx gateway is running on the host's private LAN
+interface at `https://10.106.105.128:18482` with the existing WeKnora LAN
+certificate. The certificate chain and IP SAN verified against
+`../weknora-ldap-local/certs/weknora-lan-ca.crt`. Nextcloud trusts the exact
+gateway container IP, and its CLI browser origin is the HTTPS URL. The stock
+Nextcloud Apache image rewrites `REMOTE_ADDR` from `X-Real-IP`, so the gateway
+explicitly clears that caller-controlled header and sends a reset
+`X-Forwarded-For` chain; Nextcloud can then validate its trusted proxy and
+`X-Forwarded-Proto`. A spoofed forwarded-host, protocol and real-IP request
+still redirected to the configured HTTPS origin.
+
+CA-verified requests returned 200 for the HTTPS login and status endpoints,
+301 with relative `Location` for CardDAV/CalDAV discovery, 401 for anonymous
+WebDAV and 207 for an authenticated WebDAV `PROPFIND`. The login page's
+generated absolute canonical and icon URLs were HTTPS, its CSS and JavaScript
+resources returned 200, and its cookies carried `Secure`. The original
+`http://10.106.105.128:18082` login remained 200 with HTTP canonical URLs.
+The address is assigned to an active host interface, Docker Desktop listens
+on that exact address and port, and the host application firewall is disabled.
+The repeatable HTTPS helper passed nine focused offline cases and two live
+idempotent runs, retaining only the exact current gateway IP in
+`trusted_proxies` and a mode-600 local state file for later recreation.
+These are local requests to the bound LAN interface; a second physical LAN
+client and a trusted-CA browser have not yet been tested. Existing indexed
+citations retain their old HTTP origin until the documents are reindexed.
+
+## 2026-10-02 bounded parser-overlap code follow-up
+
+The parser-overlap fixed-c6 and RAG77 patch SHA-256 values are
+`a7cd69f12332f9f881999038f84df6f6bc7a41141cce875fe3e6ef3499b73fad`
+and `84afeffc37040b2a85c2c795c05600817ea738b7862decc22f0310b4a0b23a2f`.
+These overlap hashes identify the currently running shared RAG77 images; the
+earlier measured pilot used its separately recorded patch. Both overlap
+patches apply to clean
+pinned source bases and pass their Nextcloud repository, service and handler
+Go tests.
+
+The dispatcher may now admit a newer signed, importable upsert for the same
+file while an older version is parsing, after the older source scan completes.
+It requires a changed ETag and binding-relative path and allows only one
+unfinished parser generation or live build lease before the replacement. A
+third generation waits until a slot is genuinely released. Focused race tests
+prove prompt V2 queue admission, denial of late V1 publication and writes,
+no applied ACK during V2 parsing, and ACK only after V2's exact publication
+proof. This narrows the parser wait observed in the earlier three-sample pilot.
+The full pinned arm64 app and UI images were subsequently rebuilt with this
+patch and exercised in an owned, loopback-only synthetic LDAP fixture. The
+[redacted overlap evidence](evidence/rag77-parser-overlap-2026-10-02.json)
+records signed same-file V1 and V2 events: while V1 was still parsing, V2
+reached the receiver dispatched watermark, but neither side advanced its
+applied watermark. After release, V2 alone became visible with two ready
+chunks and embeddings, and both sides applied event #2. Alice's direct
+knowledge read and selected search denied the baseline and stale V1 candidate.
+The old V1 still had one chunk and embedding in the fixture database at the
+final read, so physical derived-index GC remains unproved. The owned fixture,
+its volumes, network and temporary credentials were destroyed. This one-file
+probe is not a latency, scale or real AD acceptance run.
+
+At that stage, the shared LAN stack ran the same full app and UI image IDs,
+`sha256:e0b2b932dca4d988930ac1972ec582ad883e155f4c044f00d9230baa592804f7`
+and `sha256:e9d606d5115dc5c93f2328f671d0fe2c12c8cdc1126ca7c73cd0f64c8d1cd458`.
+Before switching, the receiver had zero active or unknown event connections
+and Nextcloud had zero sender rows. The previous running images remain under
+`pre-overlap-20261002` tags. The verified, mode-600 shared database backup is
+`dist/backups/weknora-before-rag-20261001T225001Z.dump`. Those containers
+were healthy at schema `130/false`; both LAN HTTPS entries returned 200 with
+the local CA, the WeKnora application health endpoint returned 200, the
+original Nextcloud HTTP login returned 200, and an authenticated Nextcloud
+HTTPS WebDAV `PROPFIND` returned 207. All eight PR checks passed at
+`5664b6b`. No fresh shared-service parser-overlap, second physical LAN-client,
+sustained latency or scale acceptance run has been made.
+
+## 2026-10-02 manual and scheduled sync admission recovery candidate
+
+At this checkpoint, the fixed-c6 and RAG77 patch SHA-256 values were
+`08b6f45addf7d753d8df1962bda538444e0290e2acbf5db26d2eb56eebe468d2`
+and `a74bc9739a43cdc668c44201ac8221fed69c85642d46a8ca75533b6e0ce0cee1`.
+They add PostgreSQL migration 131 and SQLite migration 50. Manual and
+scheduled sync logs retain their exact queue task ID, trigger and worker-start
+claim. The worker claims a versioned log before source I/O; an Asynq retry of
+the same task can reclaim that log. After five minutes, a bounded rotating
+scan releases an unstarted slot only when the exact Asynq task is definitively
+absent and a row compare-and-set still proves no worker started. Redis recovery
+requires `WEKNORA_NEXTCLOUD_SYNC_RECOVERY_ENABLED=true` after all queue workers
+have this claim logic; the single-process Lite queue recovers automatically.
+Legacy logs and started attempts still require manual investigation. Both
+patches applied to fresh pinned bases and passed focused Go package tests.
+The patch also classifies ETag-raced HTTP 412, 429/5xx and interrupted source
+content reads as retryable: a failed event log keeps its retry/backoff and
+does not turn an active source into `error`, while 401/403 still indicate
+credential failure. A source-status/cursor compare-and-set protects normal
+and pre-stream completion from a concurrent administrator pause or resume;
+on a missed update, the run cannot yield an applied event ACK. The Agent graph
+tool now holds a KB read lease across answer formatting and checks each
+displayed chunk against current source/version and user scope. Physical
+derived GC remains disabled. The complete RAG77/AnyDoc candidate built as app
+`sha256:d0e695504b503034744b8a08388d0818b14fc3fb04ef30bc59a8d2638357915d`
+and UI
+`sha256:545b6ff7321931f63e8c8ebb85aa2fa0cbca2d29aa953f1fef285f77b0c52f71`.
+Both images carry the pinned RAG source and full patch hash. A read-only dump
+of the shared PostgreSQL 17 database was restored to an isolated container;
+the candidate migration advanced the clone from `130/false` to `131/false`.
+Six new `sync_logs` columns, its index and old-row defaults passed checks,
+while the 20 sync logs, two data sources and three knowledge bases kept their
+row counts. The clone's container, network and volume were removed without
+modifying the shared database.
+
+A fresh owned direct-mode synthetic LDAP fixture used these exact app/UI
+image IDs and installed the pinned groupfolders 22.0.6 package. It published
+one Team Folder document with two ready chunks and two embeddings. The
+six-field HTTP matrix allowed Alice's login, DAV, signed source, WeKnora LDAP
+login, knowledge and search; Bob could log in but could not access the file
+or knowledge. After a real file-level Team Folder `-read` ACL for Alice, her
+old JWT lost DAV, signed source, Files status, ask-target, direct knowledge,
+search and historical answer/citation access on the next poll. Bob remained
+denied. Its owned containers, volumes, network and scratch were destroyed.
+This is isolated AD-shaped LDAP and groupfolders evidence, not real enterprise
+AD or production Team Folder acceptance.
+
+A ten-sample post-accept queue pilot attempt was invalidated by a signed
+source GET HTTP 412 on a same-file update; the captured error was overwritten
+by fixture revocation before a precise receiver error code could be retained.
+The harness now captures receiver state before cleanup. A later two-pair
+minimal rerun completed five applied events and five successful sync logs
+without reproducing 412. Neither run establishes a P95 latency result.
+
+The complete candidate then ran a ten-sample full-image `post-accept` pilot.
+All 21 signed events reached applied, all 21 sync logs succeeded, and the
+source stayed active without a reproduced 412. The ten-file initial sync
+created ten items in 1.448 seconds. The nearest-rank event-to-durable-job P95
+was **10,101.2 ms**, 101.2 ms above the PRD's 10-second target; the
+event-to-applied-proof P95 was 20,467.4 ms. The eighth sample took roughly
+one extra poll interval, but its cause was not established. The full
+[redacted pilot report](evidence/event-queue-pilot-2026-10-02-syncfix-full-image.json)
+contains all samples and limits. Its private environment was destroyed.
+This small run does not accept sustained latency or 10,000-file/100-GB scale.
+
+All eight PR checks passed at `610d2d1`. Before the shared LAN upgrade,
+WeKnora had zero active/unknown event connections and running sync logs;
+Nextcloud had zero sender rows. The script saved and verified the mode-600
+backup `dist/backups/weknora-before-rag-20261002T044132Z.dump`, and prior
+app/UI images remain tagged `pre-syncfix-20261002`. The shared WeKnora app
+and UI now run the exact candidate image IDs above, the database is
+`131/false`, the app health endpoint and both LAN HTTPS login entries return
+200, the original Nextcloud HTTP login returns 200, and authenticated
+Nextcloud HTTPS DAV `PROPFIND` returns 207. After verifying only one shared
+app worker was running, the local Redis admission recovery flag was enabled
+and the app/frontend/gateway restarted healthy. No live uncertain-enqueue
+fault or second physical LAN client was tested on the shared stack.
+
+Use synthetic data only in this local stack. Enterprise documents require the remaining publication, identity, permission, security and operational acceptance work above.
+
+## 2026-10-02 dispatch contrast and file-publication reconciliation
+
+The full RAG77 image passed two disposable ten-sample `post-accept` runs with
+read-only hop diagnostics. At the default five-second dispatcher interval,
+event-to-durable-job nearest-rank P95 was 10,076.4 ms; setting only the
+WeKnora dispatcher interval to one second reduced the isolated P95 to
+5,977.8 ms. Both runs applied all 21 signed events and had 21 successful
+sync logs. Inbox timing around the queued recheck is consistent with a
+missed five-second polling phase, but the short dispatcher claim was not
+sampled. The [pilot record](isolated-event-queue-pilot.md) and its two
+redacted reports carry the samples and limits. App image, host and harness
+were the same, but each run used a new binding/source and only ten samples.
+This is not sustained PRD latency or 10,000-file/100-GB acceptance.
+
+The shared LAN development WeKnora app now has
+`WEKNORA_NEXTCLOUD_EVENT_DISPATCH_INTERVAL=1s` in its local override. The
+upgrade script saved a verified private PostgreSQL dump, kept the candidate
+app image `sha256:d0e695504b503034744b8a08388d0818b14fc3fb04ef30bc59a8d2638357915d`,
+and returned it healthy. The WeKnora and Nextcloud LAN HTTPS entries returned
+200. Faster polling increases idle scan frequency; sustained database load
+has not been measured.
+
+An isolated indexed file exposed a separate reconciliation gap: withdrawing
+one file immediately denied source access but did not append a change hint.
+Two manual syncs within the configured full-scan interval each reported zero
+items and left the old source version published. Nextcloud app 0.4.34 now
+appends a durable, hint-only `reconcile` row after each administrator
+withdrawal or republish, including idempotent retries. A failed append is
+reported without hiding the already committed state. The new PHP failure
+contract and HTTP outbox assertions were added to CI. The shared local app
+was upgraded from 0.4.33 to 0.4.34 after a verified private DB dump;
+maintenance mode is off, its container is healthy, and authenticated LAN DAV
+returned 207. Its runtime archive has SHA-256
+`301e9d529c1e9fd75dc0641969fa8a37692b8597afb64a1a6397923cc8977807`.
+
+The [redacted publication/GC drill](evidence/nextcloud-publication-reconcile-gc-2026-10-02.json)
+has SHA-256 `5be4afcbef61a45a156f278cf0a7a295de75e451b8b7992e4d61b4d202bc9959`.
+In the disposable pair, repeating the withdrawal wrote a broad hint; the
+first manual scan marked the file missing, and the second tombstoned its
+source version. A signed manifest excluded it and signed content returned
+404. After a disposable app restart, the old chunk and enabled embedding
+remained because the derived-index GC job was blocked and the coverage
+marker was absent. Republish restored a new published candidate and signed
+content. This proves the fail-closed deletion gate on one synthetic file,
+not completed physical derived cleanup. The broad hint also updated all ten
+unchanged files. Real AD, sustained load, full read/build coverage and
+physical derived cleanup remain open.
+
+## 2026-10-02 file-scoped publication reconciliation candidate
+
+Nextcloud app 0.4.35 now writes a `reconcile` hint with the affected
+`file_id` after withdraw and republish. WeKnora still reads the complete
+authoritative manifest, but forces content re-read only for that file. A
+binding-wide hint with a null file ID retains the previous full-content
+fallback. The receiver still requires two complete manifests before
+acknowledging these hints; focused fixed and RAG77 Go tests cover both rapid
+withdraw/republish orderings and prevent a one-scan ACK. Both full patches
+apply cleanly to their pinned source archives. The full RAG77/AnyDoc candidate
+backend image is
+`sha256:7bca5e4408bf34849f0aadea989f519ab2537583de0bbd3d3ef2b1bc8e579b06`.
+
+The [redacted targeted publication drill](evidence/nextcloud-publication-targeted-2026-10-02.json)
+has SHA-256 `ea5541c4237d8c2454dc3de0351d9271d0d5ae592fa9c9d6663266b4f5521eb0`.
+Its disposable source held eleven published synthetic files. Withdrawal took
+two manual scans to tombstone the target; each scan processed zero or one
+item instead of updating ten unchanged neighbors. Republish and both rapid
+reversal orderings also processed at most one item per scan, with the target
+eventually published or tombstoned as requested. No broad hints were written.
+After reinstalling a disposable event connection, WeKnora acknowledged the
+replayed baseline through event 16, then the two rapid reversals through 18
+and 20, and the final restore through 21. The observed source version matched
+the final state at each applied watermark. The event credential and both
+isolated stacks were removed. These 256-byte-file checks do not establish
+100-GB throughput, sustained latency, real AD ACLs or physical derived
+cleanup.
+
+The shared LAN stack was upgraded after confirming zero active WeKnora event
+connections, zero Nextcloud sender rows and zero running sync logs. A verified
+mode-0600 WeKnora dump (`weknora-before-rag-20261002T080705Z.dump`, SHA-256
+`338a2b7e3ddc09fa3eb296583e0a01f64ba87f3d553287eb0c4f0c9de2ae826a`)
+preceded the backend/frontend switch; the previous images remain tagged for
+rollback. A verified mode-0600 Nextcloud dump
+(`nextcloud-before-targeted-20261002T080845Z.dump`, SHA-256
+`961a50f3c5b3b8a1d79257091f9c1434372271acba525114fe87e4c51b8ca47e`)
+preceded `occ upgrade` to app 0.4.35. The reproducible app archive has
+SHA-256 `f333a675a5dbc69a3deb613293ecb862b2b79e22fa4edb6d1bfc84cf03bca76f`.
+Nextcloud maintenance mode is off, no DB upgrade is pending, and both app
+containers are healthy. The host-to-LAN-IP HTTPS login pages returned 200,
+authenticated Nextcloud DAV returned 207, and the publication HTTP smoke
+passed with the local CA and a separate login on the Files citation origin.
+A second physical LAN client has not yet been tested.
+
+## 2026-10-02 pending source-pairing recovery guidance
+
+The administrator page in app 0.4.36 now shows operation-specific WeKnora
+status and retry paths only while the selected source pairing is pending. It
+clears them when the binding or state changes, and states that a WeKnora
+tenant administrator must use the approved WeKnora origin. The Nextcloud page
+does not proxy a WeKnora administrator credential, read a one-time token or
+claim that it performed the retry. The headless pairing protocol and
+two-sided reconciliation remain the authority.
+
+Before upgrading the shared local app, a mode-0600 Nextcloud dump
+(`nextcloud-before-pairing-ui-20261002T083701Z.dump`, SHA-256
+`b18e41e206c809f3758e4a4a9034dea929d66355afa65d093eb26156d1cf7e7c`)
+was verified. `occ upgrade` completed to 0.4.36 with maintenance mode off;
+the authenticated administrator page and its JavaScript asset returned 200,
+and the panel markup was present. The reproducible 0.4.36 app archive has
+SHA-256 `36e3ca0cc46ff065da314c88493acca57306ce8fc1b78cba2d6489c4536cb431`.
+This UI check did not create a pending production pairing or test real AD.
+
+## 2026-10-02 synthetic 10,000-entry manifest check
+
+An offline PHP contract now calls the real `ApiController::manifest` and
+`ManifestSnapshotService` with a synthetic 10,000-file metadata tree. The
+[redacted result](evidence/manifest-10k-synthetic-2026-10-02.json) has SHA-256
+`329b807ab9b41afbc0e13b245d11a27cdc3a3aabff16a64ba20ab1350447b79f`.
+All 50 pages had unique, ordered IDs, and stored pages did not rescan the
+tree. The recorded run serialized a 2,600,001-byte snapshot, took 41.27 ms
+for the first page and 574.25 ms for the other 49 pages together, and reached
+35,573,760 bytes of PHP peak memory. Root ETag, withdrawal revision,
+stop/resume epoch, snapshot expiry, invalid cursor, and an unreadable node
+failed closed. A local rerun passed the same assertions.
+
+This uses in-memory file and database substitutes in an isolated PHP
+container. It does not measure Nextcloud filecache or PostgreSQL I/O, HTTP,
+WeKnora indexing, real AD/Team Folder permissions, or 100 GB of content. A
+real 10,000-file/100-GB pilot and sustained latency target remain unaccepted.
+
+## 2026-10-02 derived cleanup safety follow-up
+
+The fixed-c6 and RAG77 full patch SHA-256 values are now
+`02a77dcf42dc28871c344885251c514f834759aa64139fbbfebb7478c2875fa6`
+and `176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`.
+`SaveChunkRevision` now checks a persisted Nextcloud knowledge marker and
+requires an exact live build lease before a chunk edit; its update is scoped
+to the tenant, KB and knowledge ID. The dormant PostgreSQL exact-vector GC
+helper rechecks the persisted job `not_before` while holding its row lock.
+Both baselines passed focused SQLite tests and disposable PostgreSQL vector
+tests, including a regression that failed against the prior vector helper.
+
+Both patches also contain a dormant exact-chunk-and-revision delete helper.
+Its scope, claim, delay, item inventory and atomic receipt passed SQLite and
+disposable PostgreSQL tests, including a forced receipt failure rollback.
+It is not called by the collector, and the migration still creates no
+coverage activation marker. Unknown concurrent writers, unenumerated read
+paths and external stores leave the `derived_index` blocker active. The
+[lease-gate checklist](nextcloud-derived-gc-read-lease.md) records the
+remaining preconditions; these helpers do not establish physical cleanup
+acceptance.
+
+## 2026-10-02 disposable real Nextcloud 10,000-file manifest pilot
+
+An isolated, loopback-only Nextcloud 34.0.4 stack with app 0.4.36 accepted
+10,000 WebDAV `PUT` requests for 19-byte synthetic files and held exactly
+10,000 live matching filecache rows. The five measured upload batches took
+391.815 seconds in total, excluding gaps between batches (25.52 files/s).
+The [redacted pilot result](evidence/manifest-10k-real-2026-10-02.json) has
+SHA-256 `a8e85bf0678ec7f85392ccdc75e6402cc4a45fbe2928a67bea7303de4b8b9eba`.
+
+The real HTTP manifest returned 50 successful pages of 200 unique files.
+The first page took 202.04 ms, the remaining pages took 2,812.21 ms in
+total, and per-page nearest-rank P95 was 82.67 ms. The largest stored
+snapshot JSON was 3,577,448 bytes. A file overwrite and an administrator
+withdrawal each invalidated an old cursor with HTTP 409; the file was then
+republished. The three saved snapshot rows match the three first-page
+requests, although SQL tracing was not performed. The dedicated containers,
+volumes, network and private credentials were removed and the port released.
+
+This is a single small-text-file manifest pilot. It does not test 100 GB of
+originals, WeKnora indexing, mixed file types, real AD/Team Folder ACLs or
+sustained event-to-job P95. Those PRD acceptance gates remain open.
+
+## 2026-10-02 RAG77 image rebuild and LAN switch
+
+The pinned RAG77 build now downloads DuckDB's signed `httpfs`, `spatial`, and
+`excel` archives for the engine's reported version and platform, decompresses
+the official `.duckdb_extension.gz` files, then installs and loads them
+locally with DuckDB's default signature check. Both pinned source patches
+apply cleanly; an arm64 Docker check loaded all three extensions. The first
+full image build reached AnyDoc/Go compilation but an alternate Debian
+mirror lost the `gcc-12` download. A container-network check found a working
+mirror; the retry completed the full AnyDoc backend and frontend builds.
+
+The backend image is
+`sha256:ac6c3a5c975886ada55fbcd0c65058516fa4ac7d245a9a32c656d39e428b9365`
+and the frontend is
+`sha256:b8f0c6dc13847c48f2a5b6e7e08777389b272f1736ad0d45053d7cb3579d1d7b`.
+Both carry pinned source commit `77c97fd72f26e84435503d24eeed88cb5dfe1f01`
+and the exact RAG patch SHA-256
+`176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`.
+Scoped BuildKit cache cleanup after the build preserved images and data
+volumes and restored about 12 GiB of host free space.
+
+Two owned, loopback-only synthetic LDAP/PDF fixtures exercised the new image.
+The forced-short-primary run recovered 46 DocReader characters to 283 AnyDoc
+characters; the normal run kept DocReader's complete text. Each published
+two ready chunks and embeddings, returned a protected answer with the
+original Nextcloud Files citation, and denied the old JWT's source, question,
+direct, search, and historical-citation reads after source-share revocation.
+The fixtures' containers, volumes, and networks were removed. The
+[redacted build and LAN record](evidence/weknora-rag-duckdb-lan-2026-10-02.json)
+has SHA-256 `1a3ad18a5912ff75f1a731070fbd8ba013aa0892f7f913d002c943f96e3ea5b3`.
+
+Before switching the shared WeKnora stack, both databases were healthy,
+schema 131 was not dirty, all seven event connections were revoked, Nextcloud
+had zero sender connections, and no sync logs were running, pending, or
+queued. The old backend/frontend images remain tagged `pre-duckdb-20261002`.
+The switch script made a mode-0600 WeKnora dump, verified its archive list,
+then recreated the app/frontend and restarted the LAN gateway. The dump's
+SHA-256 is `d85509b9e541920170d946c2a32adb8cb5d03c70723a781d7bf82aba29f0ed86`.
+The running containers now use the new exact image IDs, WeKnora remains at
+schema 131/clean, and the local-CA-verified WeKnora and Nextcloud HTTPS
+pages return 200. Nextcloud still runs app 0.4.36 with maintenance mode off;
+authenticated DAV over the LAN URL returns 207. A second physical LAN client,
+real enterprise AD/Team Folder permissions, 100-GB content, sustained task
+latency, and derived-index physical GC remain unaccepted.
+
+## 2026-10-08 local LAN address rotation
+
+Docker Desktop restarted after the host's private address changed from
+`10.106.105.128` to `10.106.105.121`. The existing containers resumed, but
+their old host-IP port bindings were absent. After a mode-0600 backup of the
+local settings and public certificate, the WeKnora leaf certificate was
+reissued under the existing local test CA with `10.106.105.121` in its SAN.
+The local WeKnora gateway and external URL, Nextcloud LAN listener and HTTPS
+gateway, `trusted_domains`, `overwrite.cli.url`, and `weknora_web_url` were
+updated to the new address.
+
+Both HTTPS gateways now publish only on `10.106.105.121` (`18482` for
+Nextcloud, `18443` for WeKnora); Nextcloud HTTP also publishes there on
+`18082` and on loopback. CA-verified HTTPS login/root and WeKnora health
+requests returned 200, Nextcloud HTTP login returned 200, and an
+authenticated Nextcloud HTTPS DAV `PROPFIND` returned 207. Nextcloud remains
+34.0.4 with integration app 0.4.36 and maintenance mode off. The WeKnora
+backend/frontend image digests are unchanged from the 2026-10-02 entry.
+An independent Docker bridge client with the test CA also reached both HTTPS
+endpoints and received 200. A second physical LAN client and enterprise AD
+have not been tested. The later `scripts/rotate-lan-ip.py` helper passed 13
+offline tests and read-only checks against the current Compose overlays,
+running image/config hashes and certificate. Its mutating path has not been
+exercised on the shared stack; this address change was performed manually.
+
+## 2026-10-08 isolated tiny mixed-format timing
+
+An owned, loopback-only synthetic LDAP fixture at Nextcloud commit
+`d1c48929` measured two tiny text PUTs (500/505 bytes) and one born-digital
+PDF PUT (969 bytes), sequentially after the preceding event applied. Each PUT
+created two outbox upsert hints and one successful source sync job. From just
+before each PUT, the first observed durable-job bounds were 3,461.5 / 5,464.5 /
+5,434.5 ms; published, current-ETag, parsed, ready-chunk and embedding bounds
+were 4,678.3 / 7,832.2 / 8,398.9 ms; WeKnora applied-watermark bounds were
+13,406.9 / 15,008.0 / 14,644.7 ms. The PDF's protected synthetic text was in
+a ready chunk. These are host-monotonic upper bounds with 0.5-second status and
+database polling. The three sync logs themselves lasted about 0.17 seconds;
+the 6.25–8.73-second publication-to-applied observation gap is the next
+latency component to isolate.
+
+The fixture used local AD-shaped LDAP and mock embedding. Its Nextcloud
+container ran the repository event-delivery command in an owned, manually
+launched five-second loop because the synthetic fixture has no dedicated
+event-worker service. The existing WeKnora image carries patch SHA-256
+`176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`,
+while the fixture checkout at `d1c48929` had `integration/weknora.patch` SHA-256
+`b81174da65cbfcc4bebe72d9b49e78a60bfc58e56c97d500236c32f2f70b07c2`.
+The [redacted per-file evidence](evidence/isolated-mixed-format-load-2026-10-08.json)
+has SHA-256 `2bd5f8fd12b5e4c58e6aedb0ff68c48e5c0efb25785341e2a6682c4b40610863`.
+The owned containers, volumes, network and private scratch were removed.
+This three-file run does not accept the current RAG patch or the PRD's
+sustained P95, 10,000-file/100-GB, upload-latency, scanned-PDF or real-AD targets.
+
+A subsequent read-only scheduler trace found that the tested image queues
+applied-proof work for five seconds after dispatch commits, while its default
+dispatcher ticks every five seconds. A queue commit just after a tick can miss
+the next tick and wait nearly ten seconds for proof evaluation, consistent
+with this run's 9.21–9.95-second dispatched-to-applied observations and older
+five-second-poll samples. The fixture did not record its dispatcher setting,
+so that attribution remains an inference. The shared LAN overlay explicitly
+uses a one-second dispatcher interval, and an older isolated comparison
+observed about six seconds with that setting; see the
+[event queue pilot](isolated-event-queue-pilot.md). The PRD's separate event-to-job
+and tiny-text publication targets do not impose a ten-second applied-watermark
+limit. A future isolated A/B run should record the configured interval and
+safe tick/due/proof timestamps before changing the scheduler.
+
+## 2026-10-08 pinned patch safety and complete frontend checks
+
+Both pinned WeKnora patches now recheck the persisted coverage marker and
+active exact/KB leases inside the dormant exact-chunk delete transaction.
+The generated-profile repository write also requires
+`ever_had_nextcloud_source=false`, so a source registration that commits while
+the model is running prevents the stale profile from being saved. Focused
+SQLite and disposable PostgreSQL race tests passed on both source baselines;
+these guards do not activate physical derived-index deletion.
+
+The full frontend suites exposed missing failed-candidate translations in
+Korean, Japanese and Russian and one theme-token fallback. After repair, the
+RAG77 suite had 1,217 passes, zero failures and one skipped browser-harness
+case; the fixed baseline had 1,213 passes, zero failures and the same skip.
+Both passed type checking and production builds. An opt-in PostgreSQL
+migration test now verifies the full 0→131 chain and agent-history plan in
+its terminal database, then tests the legacy 106→105→106 concurrent-index
+roundtrip in a separate schema. The intentional 126/129 rollback guards were
+not changed. Both pinned baselines passed this PostgreSQL and the relevant
+SQLite migration/pairing tests; both CI jobs now run the PostgreSQL check.
+
+The fixed-baseline patch SHA-256 is
+`db842d71468fd663347e70898e20db982293a34af599df400bf368abe19a5021`;
+the RAG77 patch SHA-256 is
+`34c560e03bbc20d4eff3c4ce9d652389f2a4f6056e738d01b8cdc0c05ee2c877`.
+These are source and test results. The shared LAN WeKnora containers still
+run the 2026-10-02 image built from patch SHA-256
+`176a514658adbe949ec5f12490fda4f48655cda5abd65e3e943c5ca21720acef`;
+no current patch image switch or full production acceptance is claimed.
+
+## 2026-10-08 local publication-decision audit pointer (proposed 0.4.37)
+
+Nextcloud migration 21 adds `decision_audit_id` to each current file
+publication state. A withdraw or republish now writes its audit row and updates
+the current-state pointer in the same database transaction, under the existing
+publication ordering lock. The administrator state response exposes that local
+audit ID; a point read rejects a missing or mismatched audit row (source,
+action, actor, or timestamp). Existing rows retain `0`, meaning that their
+current decision has no proven audit link; the next administrator action
+establishes one. The migration
+does not infer history from old audit rows.
+
+`weknora_pub_audit` currently has no retention job. Its current referenced
+row must remain available for the pointer check. Any future 90-day metadata
+retention implementation must preserve referenced rows or replace the pointer
+and its verification in one safe migration; the PRD's 90-day policy is not
+implemented here. The controller still appends its reconciliation hint after
+the state transaction; a hint failure leaves a committed withdrawal in place,
+and an exact retry can append another hint. The outbox remains a separately
+retained hint feed, and its consumer watermark is not this decision ID. This
+local link does not record automatic source deletion, permission generations,
+document content revisions, consumer publication, or a restore checkpoint.
+Backup recovery still requires an external post-checkpoint withdrawal record
+and full reconciliation while reads remain denied.
+
+The migration and real writer/reader transaction contract passed in an
+isolated, networkless PHP container with an in-memory SQLite database,
+including legacy `0`, rollback after either audit or pointer write failure,
+and mismatch rejection. The existing controller hint-failure contract also
+passed. After a private 7 MB PostgreSQL dump, the shared local Nextcloud test
+stack upgraded successfully to integration app 0.4.37. `occ status` reported
+maintenance off and no pending DB upgrade, the new PostgreSQL column existed,
+and the LAN HTTPS status endpoint returned 200 with a valid test-CA chain.
+This shared upgrade did not exercise a live withdrawal/republish transition or
+change the WeKnora runtime image.
+
+## 2026-10-08 ordinary empty-result chat guard correction (source patches)
+
+An isolated diagnosis of a normal document-KB chat found that an empty
+`search_knowledge` result was treated as missing source identity and stopped
+the live answer before the model request. The current fixed/RAG patches now
+accept only the producer's explicit empty search/list shape or a diagnostic-only
+tool failure. They still run the current message/reference and KB-grant check,
+and continue to deny opaque or nonempty content without document identity.
+The incremental fix had focused access/service/session and complete session
+package tests on merged-main plus the preceding RAG patch source. Both pinned
+combined patches passed static apply checks and the GitHub patch suites; the
+`c1c45cf` run passed all eight CI jobs, including the isolated Nextcloud
+Docker smoke and direct upgrade. At that source-only stage the shared image
+predated the correction. The subsequent deployment and runtime checks are
+recorded below.
+
+## 2026-10-08 built and running RAG77 chat correction
+
+The shared local app and UI now run the complete pinned RAG77 + patch
+`7f9c7f6a0027e42a4dd01b33366051ee7533aeddb9369653b83653165d5b5517`:
+app `sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d`,
+UI `sha256:42649eebce2a6f4b55b6dff59b9e9170a8ee73534523b666ceb932bf56128e54`.
+The normal backend build links AnyDoc and includes the BrowserSkill daemon;
+the normal frontend build uses its exact verified Nginx base. Runtime system
+info reports `77c97fd72f26e84435503d24eeed88cb5dfe1f01+nextcloud.7f9c7f6a0027`.
+PostgreSQL remains `131/false`. This is the pinned RAG baseline, not newer main.
+
+An owned isolated manual-document fixture completed two zero-result turns in
+one session and a third diagnostic-only tool-failure turn. All three emitted
+answer and complete frames with no source-stop or error; six local chat-stub
+calls were observed and the fixture was removed. The [redacted HTTP evidence](
+evidence/rag77-empty-chat-http-2026-10-08.json) identifies the exact image.
+After deployment a new, empty manual KB and local mock model also completed
+an actual shared-stack question; its four temporary resources were removed.
+The existing administrator authenticated, both LAN HTTPS chains verified, and
+Nextcloud authenticated DAV returned 207. Its app remains 0.4.37 with maintenance
+off and no pending database upgrade. [Runtime evidence](
+evidence/rag77-chatfix-shared-runtime-2026-10-08.json) records the observed scope.
+
+Before the image switch, the corrected cold-checkpoint helper captured both
+databases, eight cold volumes, runtime inputs and app code: 16 private artifacts,
+1,594,309,659 bytes. Independent SHA and permission checks passed; the manifest
+SHA-256 is `3ad12fbd4edbefb33b3986ab375c0d85deb6bd7a4518d74e16f79f068f9c7bae`.
+Two earlier attempts refused stopped-port metadata and produced no usable
+backup. Their original services were restored before the validated lifecycle
+fix and final capture. The old app/UI images remain under `pre-chatfix-20261008`
+tags. Capture integrity does not prove restoration or withdrawal replay.
+
+This running revision does not include subsequent Agent-history, source-lineage
+schema132 or frontend dependency updates. Full source/version/history coverage,
+derived GC, real AD/Team Folder and sustained 100GB acceptance remain open.
+
+## 2026-10-08 isolated original-volume pilot harness
+
+The [original-volume harness](../scripts/ops/PILOT-original-volume.md) now
+creates 20 local synthetic staff users, two ten-member department groups and
+two independent normal-folder publication scopes. Both scopes use one isolated
+publisher, preserving the app's current rejection of unverified cross-owner
+bindings. Its opt-in full preset streams exactly 10,000 synthetic binary files
+of 10,000,000 bytes each, with host and Docker data capacity preflights,
+64-KiB generation chunks, native-file/filecache/manifest count and byte checks,
+permission samples, and exact ownership checks for teardown. It can separately
+measure matched app-disabled/enabled PUT phases in a temporary unbound folder.
+
+The [small runtime report](evidence/pilot-original-volume-small-2026-10-08.json)
+has SHA-256 `df912a1a9485e589a5cb9176866305194435ad0a5d612f4b40a6bfd752c71d52`.
+On Nextcloud 34.0.4/app 0.4.37, 402 new 1-KiB originals produced exactly 411,648
+logical bytes. Native files, filecache and four total manifest pages agreed;
+four original hashes matched. All 20 local staff principals were allowed for
+one sample in their own department and denied for one sample in the other;
+both sibling machine-key reads were denied. Uploading the corpus took 79.803
+seconds with two workers. The separate 20-sample PUT phases measured P95
+510.892 ms disabled and 376.176 ms enabled, with unresolved phase-order/cache
+effects and no concurrent signed event sender or parser. Seventeen offline
+safety tests passed. A post-run Docker inventory found no owned containers,
+volumes or networks, and the private credentials had been removed.
+
+The full 100-GB preset has not run. This small synthetic binary result does
+not accept AI parsing/indexing throughput, mixed document distributions, real
+AD/Team Folder ACLs, twenty-user concurrency, sustained upload or event P95,
+physical derived cleanup, or coordinated restore. Shared stacks and WeKnora
+source patches were not changed by this pilot.
+
+## 2026-10-08 frontend dependency security in the combined source patches
+
+The pinned source patches now include the frontend dependency updates on top
+of the interim history guards and dormant lineage foundation. Production npm
+audit findings fell from 13 to zero; the full dependency audit fell from 14 to
+zero, including the development-only shell-quote finding. KaTeX 0.18.2 is
+shared by the direct, Markdown-extension and Mermaid consumers through a
+targeted override; Mermaid remains at 11.16.1. A persistent regression rejects
+inherited `trust` and verifies all three consumers resolve the same package.
+
+Combined-source frontend suites, type checks, builds, audit results and the
+limited synthetic browser rendering comparison are recorded in
+[frontend dependency validation](weknora-frontend-dependency-security-2026-10-08.md).
+These are source and frontend validation results. The frozen 7f images and
+schema 131 runtime do not contain this source update. No new full image build,
+shared migration, physical GC activation or complete V1 acceptance is claimed
+by this dependency integration.
+
+## 2026-10-08 complete isolated original-volume preset
+
+The [full original-volume report](evidence/pilot-original-volume-100gb-2026-10-08.json)
+records 10,000 new 10-MB synthetic originals: exactly 100,000,000,000 bytes.
+Native regular files, PostgreSQL filecache and 50 complete manifest pages
+agreed on counts and bytes, with 10,000 unique file IDs and four sample digest
+matches. Two local department groups of ten staff users had 20 own-department
+allows, 20 cross-department denials and two cross-binding machine denials.
+The two upload workers completed the corpus in 2,520.502 seconds; a separate
+UI build near the end makes corpus timings observational. The earlier
+20-sample disabled/enabled comparison also retains phase-order/cache limits.
+See the [harness record](../scripts/ops/PILOT-original-volume.md) for exact
+image IDs, capacity samples and metric scope. All owned resources and private
+credentials were removed, verified by a second Docker inventory.
+
+This closes the isolated original count/storage preset. It does not accept
+WeKnora parsing/indexing, event latency, real AD/Team Folder ACLs, sustained
+upload impact, 20 concurrent users, physical derived cleanup or complete
+recovery. Earlier entries stating that the preset was unexecuted describe
+their earlier verification dates.
+
+## 2026-10-08 frontend dependency candidate deployed
+
+The shared UI now runs `sha256:3e5feb7e70f4fda72f270435a85a60656615689df14a02572e57e6996586d1ca`,
+built with the normal pinned frontend Dockerfile from RAG77 plus source patch
+`ea5b19f668308ba54330a380493e6bf771dd4e0889c317738ac87e9a1769bcea`.
+Compared with the previously running 7f frontend, only package.json,
+package-lock.json and the dependency security regression differ; application
+page source is unchanged. The old UI remains under `pre-security-20261008`.
+Static artifacts and an isolated Nginx frame-policy contract passed, including
+200 with exact CSP for the allowed page and 403 for the denied page.
+
+The fresh hidden browser rendered the login page and its local/AD selectors.
+LAN HTTPS login/status and the local administrator's API authentication
+returned 200 with CA validation. [Runtime evidence](
+evidence/weknora-frontend-security-runtime-2026-10-08.json) binds these checks
+to the actual image. The backend remains
+`sha256:be9fa7b1514edbbe97e99253aaeb4f38f138c964a4317e414732711c63f5b46d`
+(RAG77 + 7f), with schema131. This frontend deployment does not activate the
+new Agent-history backend or schema132 lineage producers/readers.
+
+## 2026-10-08 prebuilt local service digest references
+
+The RAG local overlay now pins PostgreSQL, Redis, DocReader, OpenLDAP and the
+LAN gateway to the exact digest artifacts previously running. DocReader uses
+a digest-only reference; no floating latest tag remains for that service.
+The source-built app/UI remain local candidate aliases, whose actual image
+IDs and distinct source hashes are recorded separately. Full source release
+locking remains a deployment gate for subsequent built candidates.
+
+Before changing the references, both local stacks produced a matched private
+cold checkpoint with 16 artifacts totaling 1,528,644,011 bytes. Its independent
+SHA/mode verification passed; manifest SHA-256 is
+`7911dff3dff8a8f8586c0c0facbbff91b01e0354a44691eda03559d1ac2a8248`.
+The five prebuilt containers were recreated from the same immutable images,
+and both stacks returned healthy. Nextcloud remained 34.0.4/app0.4.37 with
+maintenance off and no DB upgrade. CA-verified LAN checks returned 200, local
+WeKnora authentication returned 200, and authenticated Nextcloud DAV returned
+207. WeKnora remains schema131/false with the same RAG77 backend and updated
+security UI. [Pinning evidence](
+evidence/weknora-prebuilt-runtime-pins-2026-10-08.json) records exact references
+and IDs. The new checkpoint was captured and verified, not restored; it does
+not establish external replay or complete application recovery.
+
+## 2026-10-08 ranked raw search and response denial correction
+
+The current pinned complete c6/RAG77 patches now accept only the two finite
+reranking diagnostics (`base_score` and `model_score`) in addition to exact
+persisted source metadata. Every persisted key, channel, knowledge base,
+publication and durable read lease remains checked. A response latches its
+first authorization or lease denial, so later success cannot release its
+protected JSON. The original false-403 and transient-denial counterexamples
+are covered by persistent regressions.
+
+Both complete pinned trees passed the entire session package independently
+with local model stubs. Clean application reconstructs the exact frozen tree
+for each profile, and reverse application reconstructs its exact base. CI now
+explicitly includes the raw-search regressions. See the [correction record](
+nextcloud-raw-search-ranked-metadata-2026-10-08.md) for source hashes and scope.
+These are source checks; the shared backend remains RAG77 + 7f/schema131.
+No new image deployment, live event acceptance, full lineage rollout or
+physical derived cleanup is implied.
+
+## 2026-10-08 stream poll-error authorization correction
+
+A real `ContinueStream` counterexample reproduced a protected buffered tail
+being emitted after withdrawal during an event-store read failure. The error
+branch now rechecks the message's current publication before releasing that
+tail; denial, unavailable authorization and cancellation discard it, while a
+still-authorized request retains its tail. The original controls and all three
+negative cases were reused, red before the correction and green afterwards.
+Both pinned complete source profiles passed their whole session package
+(370 test/subtest results, zero fail/skip) and vet. Full patch reconstruction
+and reverse checks passed. [Source evidence](
+nextcloud-stream-poll-failure-authorization-2026-10-08.md) records the exact
+hashes. Runtime and full lineage/GC acceptance remain unchanged.
+
+## 2026-10-08 bootstrap job-registration ordering
+
+The stream-fix commit `29bc245` had seven successful CI jobs and one failing
+PR-triggered local smoke. The failing assertion expected exactly one installed
+OutboxRetentionJob; its old message did not report the observed count. The
+other complete run on that same commit passed, but does not replace the failure.
+Pinned Nextcloud source registers jobs before final app activation and removes
+an unresolved job class. Running cron concurrently with initial app enable is
+a possible class-resolution race; that inference is recorded without claiming
+the missing count was observed.
+
+Bootstrap now stops cron and integration workers before enabling the app,
+checks exactly one retention job after the route is ready, then starts the
+workers. The HTTP assertion remains strict and now includes the observed
+count. [Failure record](
+evidence/nextcloud-bootstrap-job-registration-2026-10-08.json) preserves the
+original job and log digest. A new full CI run must verify this ordering; the
+shared local runtime was not bootstrapped by this source change.
+
+
+## 2026-10-08 captured application recovery and RAG baseline
+
+The [captured application restore drill](shared-application-restore-drill.md)
+now passed actual Nextcloud, WeKnora and LDAP startup in owned closed resources.
+All eight volume archives were compared before database startup; application
+identity, bindings and source versions remained unchanged. Thirty containers,
+ten volumes and one internal network were precisely removed. External
+withdrawal/ACL ledger replay and reopening remain unaccepted. The imported
+implementation passed 82 offline safety contracts; one optional Docker test
+is skipped by default.
+
+The [RAG build baseline](weknora-rag-adaptation.md) now pins b6ea8b56, including
+the upstream runtime-package retry fix and explicit evaluation model selection.
+The complete integration patch is byte-identical to the preceding 77c97 patch
+and has exact-tree apply/reverse proof on the new baseline. Local focused
+checks passed 149 tests/subtests with one optional PostgreSQL fixture skipped.
+New baseline remote CI and an actual candidate image are separate checks.
+The shared schema-131 backend and the private Phase 3 candidates remain separate.
+
+
+## 2026-10-09 external publication journal candidate
+
+App 0.4.38 adds an atomic metadata-only recovery journal and external signed
+retention with database-prefix and witnessed-head fork detection. A pinned
+external record can be attached before coordinated shutdown after matching
+the live instance/stream/prefix. Actual isolated Nextcloud installation, admin
+publication, simulated backup rollback and maintenance-only replay/retry passed;
+bindings stayed stopped, withdrawn files stayed excluded and original DAV bytes
+remained intact. The fixture was removed. [Implementation and boundary](publication-recovery-journal.md)
+and [measured evidence](evidence/publication-recovery-journal-2026-10-09.json)
+record the exact package and post-measurement validation change. Shared runtime
+still uses app 0.4.37. WeKnora closure, authoritative full reconciliation and
+reopening remain separate incomplete gates.
+
+## 2026-10-09 reproducible WeKnora development candidates
+
+Two separately pinned complete candidate patches are now submitted under
+`integration/candidates/`, with an exact-tree verifier and their own CI matrix.
+The [candidate description](weknora-development-candidates.md) separates the
+measured source gates from outstanding full-app, physical-GC, capacity and
+performance acceptance. FAQ/enrichment tests passed 317 cases per profile,
+with no failures or skips, and both complete source trees compiled. The final
+recovery/default-prompt gate passed another 17 cases per profile and full compile.
+The shared schema131 stack and default build selections are unchanged.
+
+The [live joint recovery evidence](evidence/coordinated-recovery-live-20261009.json)
+records actual dual PostgreSQL rollback, exact external plan replay, closed
+receipts and fresh signed source reconciliation using live Nextcloud and nested
+synthetic LDAP. Its WeKnora parser/index rows are fixtures; global ingress
+reopening and full external-index/application recovery remain unaccepted.
+
+## 2026-10-09 selected-KB FAQ/tag HTTP lease update
+
+The complete candidate patches now hold selected-KB read fences through FAQ/tag
+input capture and actual response writes, and knowledge collection requests
+refuse a missing durable lease store. The two candidate combinations passed
+367 tests each with no failures/skips and complete Go compilation; owned PG
+resources were removed. A malformed FAQ filter still returns 400 before lease
+admission, correcting the first combination's one failed fixture per profile.
+
+The preceding submitted candidate `324425d` passed both complete CI runs
+(37827990151 and 37827979194): all 12 jobs green, including 337 candidate cases
+and frontend builds per profile. The newer source is separately pinned in the
+[candidate manifest](../integration/candidates/manifest.json). Cross-KB parent
+read coverage and the actual local-object `RunDue` adapter remain pending; this
+update does not enable physical derived GC or change the shared runtime.
+
+## 2026-10-09 running Nextcloud source isolated from development
+
+LAN verification observed `needsDbUpgrade=true`: the source checkout had
+advanced to app0.4.38 through its direct bind while the database stayed0.4.37.
+Earlier shared-runtime observations described their check time and did not
+account for this later bind-source drift. The running app and all three workers
+now use an exact separate0.4.37 snapshot, matching the database; no migration
+was run. Maintenance is off, no DB upgrade is pending, and CA-verified DAV207
+passed. The cold checkpoint now fingerprints/archives the actual source bind,
+with all app processes required to agree. See [source isolation and evidence](
+nextcloud-runtime-app-source.md). New candidate deployment remains pending.
+
+## 2026-10-09 local capacity write-intent candidate
+
+The isolated capacity148/SQLite67 module is included in both candidate patches.
+Actual local partial files, registration/staging failures, two concurrent writers
+and subprocess crashes are recovered through durable write/inode receipts and
+the owner CLI. Unknown/legacy objects remain unavailable; orphan bytes stay
+charged to the target KB. The root combination passed398 cases per profile and
+full Go compilation, with four failure nodes caused by an old HTTP fixture not
+loading schema67. Loading that migration resolved all eight tests in the affected
+HTTP class on each profile; production code did not change for that repair.
+
+The sourcepin commit0cb7738 PR CI passed all six jobs, but its push RAG candidate
+failed the10,000-entry HTTP fixture with context cancellation around a heartbeat.
+The fixture now uses production WAL/busy settings, and actual concurrent capture
+and lease renewal plus the10,000-entry response passed on both profiles. The
+original failure is retained; rollback-journal contention is an inference from
+the observed timing, not yet an isolated reproduction of that exact CI failure.
+The new matrix adds actual PG/SQLite capacity intents and owner CLI checks.
+Actual objectGC fencing, full parent/read coverage and complete backend capacity
+remain pending; the shared app is the fixed0.4.37 runtime snapshot.
+
+## 2026-10-09 template, FAQ all-parent and actual object-GC combination
+
+Both separately pinned candidates passed529 test/subtest cases, zero failures
+and zero skips, plus complete Go compilation in owned PG/SQLite fixtures. The
+code includes actual-admin/code/derived KB template writers and guarded reads,
+original FAQ progress/results, metadata-only all-parent read plans, transaction-
+bound single-connection authority checks, and actual RunDue local-object content
+fences/provider ACK. The [candidate evidence](evidence/weknora-development-candidates-2026-10-09.json)
+retains the original smaller-PG failure and duplicate fixture DDL failures, and
+the final successful combination. All owned resources were removed; caches kept.
+
+The ordinary build script still selects the default adaptation; the explicit
+`WEKNORA_RAG_CANDIDATE=1` path verifies the candidate manifest/tree and builds
+separate app/UI image tags without starting services. Candidate deployment and
+full normal machine-ingestion acceptance remain pending. No production coverage
+marker or global recovery ingress is enabled. Local derived/vector inventory,
+remaining readers/history and the PRD performance requirements are still open.
+
+
+## 2026-10-09 candidate CI and local derived follow-up
+
+Submission `beb2646` passed all 12 push/PR jobs. Retained artifacts contain547
+producer/recovery test and subtest cases per candidate with zero failures/skips,
+complete Go compile and frontend checks. Later candidate sources add exact local
+backend writer/retirement inventory, atomic native SQLite/PG row receipts, local
+path replacement/crash fences and mandatory Wiki source policy. Current
+verification results and original failed fixture runs are separately pinned in
+[candidate evidence](evidence/weknora-development-candidates-2026-10-09.json).
+
+PRD §7.4 allows90-day retention only for body-free metadata/audit. Original
+JSON body purge, external backend inventory, machine first-ingestion, complete
+saved-history readers, candidate app recovery and measured performance remain
+open. Global physical coverage remains closed. Shared Nextcloud stays on its
+separate0.4.37 source snapshot.
+
+
+## 2026-10-09 guarded admin cleanup candidate
+
+The selected-KB administrator panel now has expiry, bounded task paging,
+category/count preview, readable deferrals, retry and immediate guarded
+collection.32 actual PG/SQLite/operator/HTTP cases passed, including true local
+unlink and late admin revocation; coverage and retention remain enforced.
+Body purge and full external inventory remain incomplete. See [admin scope](
+nextcloud-gc-admin.md). Submission8426485 passed all12 jobs, including566/35/11
+producer/local-derived/native-vector cases per profile with no failures/skips.
+The previous frontend typecheck selected only the empty root configuration;
+new CI explicitly checks the app project, which passed in the new owned source.
+Full personal history/machine pipeline modules and candidate application
+build/restore/performance are still open; shared services remain pinned.
+
+
+## 2026-10-09 original saved-message core candidate
+
+151/70 message origins, material receipts, owner/body/membership counters and
+metadata-only parent read sets now connect the actual message service, saved
+HTTP reads and queued history-to-knowledge indexing. Current actor/share checks
+use transaction-local repositories, and saved output holds source leases and
+rechecks current authorization. Both integrated candidates passed285 selected
+cases with0fail/skip across actual PG/SQLite/message/HTTP/FAQ/collection/local
+GC paths. The owner's broader core compile passed154 packages; two old PG
+negative skips in its earlier log are explicitly retained, and the root run
+executed them. [Core paths and remaining consumers](source-lineage-saved-message-materials.md)
+list Agent/model lifetime, Continue/cache, clone/steer/memory/artifact and partial
+field writers still underway.152 is only a hook until its actual module freezes.
+The candidate is not deployed or accepted as full V1.
+
+
+## 2026-10-09 actual machine input integration and image probe
+
+150/69 machine original upload/name controls and final Summary/Question→Auto
+origins are integrated with same-transaction production DI. Two candidates
+passed84 affected actualmachine/HTTPspan/SQLitemigration cases after concrete
+fixture repairs; original309pass/60fail combinations and CI migration-tail
+failures remain in the evidence. The [machine gate](knowledge-machine-original-input-validation-20261009.md)
+includes queue/model/tenant/source/actor/body negatives and credentials excluded
+from immutable JSON and ordinary summary logs. Durable completion→queue handoff
+is the next work package, using the existing pending-op mechanism.
+
+Normal AnyDoc core app/UI images were built and an owned nested LDAP/NC/WK
+stack performed real signed sync/indexing. Personal knowledge access failed403
+with an attached tag lacking display origin; this is a retained failed probe,
+not a release acceptance. All owned resources were cleaned. The new machine
+image is being built for the repaired personal positive. Original body152 and
+complete Agent/Continue/partial-field lifetimes remain in independent worktrees.
+
+
+## 2026-10-12 no-event original epoch validation
+
+The clean callback statement repair on `5eaa2498` passes the new SQLite13
+and PostgreSQL4 nodes plus the existing75 regressions on the same exact source.
+All157 packages compile, with zero business RUN in the compiler. Root verifies
+39 runtime and3 compiler resource absences. The original setup rejection and
+13 initialization failures remain in the evidence; no constraints or deadlines
+were weakened. The callback oracle proves one actual generation insert with
+the original producer statement preserved. See the [actual92 record](evidence/NoEvent-current-epoch-callback-fixed-actual17-old75-GREEN-20261012.json)
+and [source proposal](../integration/proposals/weknora-noevent-current-publication-epoch-originals-20261012.json).
+
+SQLite verifies the explicit signed no-event SDK/native-save component.
+PostgreSQL verifies original epoch/body/catalogue gates; it does not qualify
+PostgreSQL vector SDK/save. Normal registry and pending93/172 startup adoption,
+whole coordinated restore and normal concurrent availability remain open.
+Personal sourced query/completion is a separate source candidate under review,
+including immutable upload input and a final local authority/fence union.
+Its admin fixture cannot establish the PRD source-only nonmember access matrix.
+
+
+## 2026-10-12 personal sourced query/completion first runtime
+
+`559e70fb` integrates the independently reviewed personal source candidate
+onto the verified no-event source without changing its17 paths. All565 changed
+Go files format and157 packages compile. The first real personal8 run has
+5PASS/3FAIL including the parent, with no skips. Its complete positive goes
+through actual signed source publication, real human message/query SDK, native
+retrieval, answer SDK and saved typed completion. Actual source lease, KB fence,
+exact fence identity and user-revocation leaves pass. Source grant and epoch
+mutations fail the observer prerequisites and do not qualify final refusal or
+rollback. Failed owned SQL/data/logs remain stopped and retained, Go is absent.
+See the [first actual8 record](evidence/personal-source-query-completion-first-actual5PASS3FAIL-20261012.json)
+and [source proposal](../integration/proposals/weknora-personal-source-query-completion-20261012.json).
+
+The current fixture uses WebAdmin and GraphRequired=false. A virtual scoped
+viewer from source grants is a separate PRD permission matrix: same-tenant
+model authority needs exact configured KB/model purposes before current or
+historical model hydration. That source-only boundary is under development.
+Normal application binding and sourced saved history remain closed.
+
+The same `559e70fb` source also passes existing NoEvent17 and old75 across
+five serial windows, with39 resources independently absent. That regression
+does not qualify the two failed personal fault prerequisites. See the
+[matched existing92 record](evidence/personal-source-candidate-existing-NoEvent17-old75-actual92-GREEN-20261012.json).
+
+
+## 2026-10-12 personal source completion fault producer validation
+
+The sole-test clean-statement correction `5ac10a32` passes all8 exact personal
+nodes with zero failures/skips, after565 Go files format and157 packages compile.
+Both grant and signed current-epoch mutations now reach actual public producers,
+full readbacks, refusal and completion rollback. Root verifies7 runtime and3
+compiler resource absences. The Go parent takes12.47s; the container stage51.149s
+and whole owned window58.919s include setup/runner overhead. The first5PASS/3FAIL
+raw evidence remains retained. See the [actual8 record](evidence/personal-source-query-completion-fault-producer-fixed-actual8-GREEN-20261012.json)
+and [current proposal](../integration/proposals/weknora-personal-source-query-completion-20261012.json).
+
+Only the new personal test changes from `559e70fb`; production, SQL and the old92
+test sources are byte-exact to that parent, where92 regressions passed. These
+separate source windows are not100 nodes run on one head or a release test.
+The verified component uses WebAdmin, linked GUID and GraphRequired=false
+through explicit private producers. True JWT/middleware personal QA and the
+source-only nonmember current/historical/answer model namespace matrix remain
+under development, together with normal startup/registry and sourced history.
+
+
+## 2026-10-12 normal original-query startup dependency audit
+
+Current source witnesses enumerate exactly9 joint modules per dialect. The
+canonical source verifier rejects additional module files without their exact
+path/version/SHA witness. PendingSQLite90/91/93 andPG172 remain outside that
+canonical inventory; the read-only Ready checks qualify existing selected routes.
+Static and dynamic SQLite factories both still use the legacy adapter. Moving
+the pending files or changing the registry alone cannot qualify normal original
+query/epoch startup. See the [source dependency audit](evidence/normal-original-query-startup-pending90-91-93-SOURCE-dependency-audit-20261012.json).
+
+The next startup integration requires genuine route/source/catalogue/body
+wrapper and actual-pool Ready qualification, including fresh/prefix upgrades,
+partial/dirty/tampered histories and DOWN/restart. Existing canonical and peer
+SQL bytes must remain intact. This audit runs noSQL/business test and enables
+no registry, Ready or deployment capability.
+
+
+## 2026-10-12 original-query store access bridge
+
+`1bff7738` exposes the original adapter store through actual SQLite/KV/Composite
+instances after trusted KB/store selection. It retains the configured source
+factory and validates the same three DB pools, allowing legitimate different
+DI instances. Nil/zero/typed-nil dependencies now refuse before unsafe DB calls.
+The unique vector candidate may coexist with keyword-only engines; neither the
+getter nor those engines gain query grants. All566 files format and157 packages
+compile in284.453s, zero business RUN;3 resources are independently absent.
+See the [compile-only record](evidence/normal-original-query-actual-store-bridge-full157-compile-PASS-20261012.json)
+and [source proposal](../integration/proposals/weknora-normal-original-query-actual-store-bridge-20261012.json).
+Normal query context propagation, genuine startup qualification and default
+registry integration remain open.
+
+
+## 2026-10-12 A10 first real JWT runtime failure
+
+`c6747061` formats571 files and compiles157 packages, but real JWT13 has7PASS/6FAIL
+and the existing personal8 has0PASS/8FAIL. The configured positive fails before
+query SDK with original-body availability changed; bare refusal cases alone
+do not qualify functioning scoped access. Source diagnosis finds real model
+leases merged after initial payload capture without capture before the query
+producer clock. A minimal same-TX capture correction is under review, preserving
+all leases/proofs/clock predicates. Failed owners are stopped with Go absent
+and original data/raw evidence retained. See the [first runtime record](evidence/A10-JWT13-first7PASS6FAIL-personal8-allFAIL-model-payload-order-20261012.json)
+and [unaccepted source proposal](../integration/proposals/weknora-scoped-knowledge-model-purpose-JWT-matrix-20261012.json).
+
+
+## 2026-10-12 A10 held-model payload ordering repair
+
+`e2274d13` captures the already held model lease payload baselines in the query
+input transaction before the original joined clock. It creates no new lease or
+proof and leaves every current/model/body/epoch/expiry predicate intact. All571
+files format and157 packages compile. The realJWT13 and existingpersonal8 now
+pass21 exact nodes with zero failures/skips;14 runtime and3 compiler resources
+are independently absent. Earlier13/8 failures remain recorded. See the
+[actual21 record](evidence/A10-JWT13-model-held-payload-fixed-personal8-actual21-GREEN-20261012.json).
+The remaining92 same-source regressions are being run separately; no outcome
+is inferred before their terminal checks. True normal QA context propagation,
+registry/startup, sourced history/inheritance and graph-required inputs remain
+open.
+
+The same `e2274d13` source also passes all remaining92 regression nodes with
+39 additional runtime resources absent. Together withJWT13/personal8,113 exact
+selected nodes pass across7 serial owned component windows atone frozen source;
+53 runtime and3 compiler resources are independently absent. These are not a
+whole application or V1 acceptance. See the [matched113 record](evidence/A10-held-model-payload-fix-JWT13-personal8-old92-sameHEAD113-GREEN-20261012.json).

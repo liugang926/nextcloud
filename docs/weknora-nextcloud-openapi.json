@@ -1,0 +1,2373 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "WeKnora Nextcloud integration API",
+    "version": "1.0.0",
+    "description": "Routed contract for both pinned WeKnora patch baselines. Machine receipt, dispatch and application are distinct. Administrator controls require an interactive tenant Admin session; API keys are denied. Failed-candidate lists omit exact generation selectors, which the per-file status route returns."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/api/v1/datasource/nextcloud-gc-jobs": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "listNextcloudGCJobs",
+        "summary": "List tenant-scoped GC job status",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "List tenant-scoped GC job status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GCJobs"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/datasource/nextcloud-gc-jobs/{id}/retry": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "retryNextcloudGCJob",
+        "summary": "Retry a tenant-scoped GC job",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "202",
+        "responses": {
+          "202": {
+            "description": "Retry a tenant-scoped GC job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GCRetry"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "pairNextcloudSource",
+        "summary": "Commit a prepared Nextcloud source pair",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "201",
+        "responses": {
+          "201": {
+            "description": "Commit a prepared Nextcloud source pair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Idempotent active pair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Commit outcome uncertain; source remains paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingRequest"
+              }
+            }
+          }
+        },
+        "x-contract-response-helper": "commitPending"
+      }
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/by-datasource/{id}/failed-candidates": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "listNextcloudFailedCandidates",
+        "summary": "List current failed candidates for one active source",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "List current failed candidates for one active source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailedCandidatePage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 25
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "description": "Opaque keyset cursor"
+          }
+        ]
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudSourcePairingStatus",
+        "summary": "Read source pairing status",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read source pairing status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/abort": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "abortNextcloudSourcePairing",
+        "summary": "Abort pending source pairing",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Abort pending source pairing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Abort outcome uncertain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/candidates/{file_id}/retry": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudFailedCandidateRetryStatus",
+        "summary": "Read exact failed-candidate selectors",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read exact failed-candidate selectors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailedCandidateRetryEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "retryNextcloudFailedCandidate",
+        "summary": "Schedule exact candidate compare-and-swap retry",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "202",
+        "responses": {
+          "202": {
+            "description": "Schedule exact candidate compare-and-swap retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetryScheduled"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FailedCandidateRetryRequest"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "file_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/decommission": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudEmptySourceDecommissionStatus",
+        "summary": "Read empty-source decommission state",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read empty-source decommission state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecommissionEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "decommissionEmptyNextcloudSource",
+        "summary": "Acknowledge proven never-touched source",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Acknowledge proven never-touched source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecommissionEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Local acknowledgement pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/DecommissionEnvelope"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationRequest"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/health": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudPairedSourceHealth",
+        "summary": "Read paired-source database observations",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read paired-source database observations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/indexed-withdrawal": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudIndexedWithdrawalStatus",
+        "summary": "Read non-final indexed-source withdrawal",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read non-final indexed-source withdrawal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WithdrawalEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "beginNextcloudIndexedWithdrawal",
+        "summary": "Pause indexed source and record incomplete inventory",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "202",
+        "responses": {
+          "202": {
+            "description": "Pause indexed source and record incomplete inventory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WithdrawalEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationRequest"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/retry": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "retryNextcloudSourcePairing",
+        "summary": "Retry pending exact source pair",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Retry pending exact source pair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Remote outcome uncertain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/rotations": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "rotateNextcloudSourceKey",
+        "summary": "Start exact source-key rotation",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "201",
+        "responses": {
+          "201": {
+            "description": "Start exact source-key rotation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Idempotent finalized rotation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Outcome uncertain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotationRequest"
+              }
+            }
+          }
+        },
+        "x-contract-response-helper": "continueRotation"
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/rotations/{rotation_id}": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudSourceRotationStatus",
+        "summary": "Read source-key rotation",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read source-key rotation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "rotation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/rotations/{rotation_id}/abort": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "abortNextcloudSourceRotation",
+        "summary": "Abort uncommitted source-key rotation",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Abort uncommitted source-key rotation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Abort outcome uncertain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "rotation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/nextcloud-source-pairings/{operation_id}/rotations/{rotation_id}/retry": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "retryNextcloudSourceRotation",
+        "summary": "Retry exact source-key rotation",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Retry exact source-key rotation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Outcome uncertain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "operation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "rotation_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/{id}/nextcloud-event-connection": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudEventConnectionStatus",
+        "summary": "Read redacted event connection status",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read redacted event connection status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventConnectionStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "pairNextcloudEventConnection",
+        "summary": "Issue one-time event receiver secret",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "201",
+        "responses": {
+          "201": {
+            "description": "Issue one-time event receiver secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventConnectionCredential"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-contract-response-helper": "nextcloudConnectionIssued",
+        "x-contract-dynamic-status": true
+      },
+      "delete": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "revokeNextcloudEventConnection",
+        "summary": "Revoke event receiver credential",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "204",
+        "responses": {
+          "204": {
+            "description": "Revoke event receiver credential"
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/{id}/nextcloud-event-connection/rebind": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "rebindNextcloudEventConnection",
+        "summary": "Rebind after exact source-key rotation",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Rebind after exact source-key rotation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventConnectionRebind"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationRequest"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/datasource/{id}/nextcloud-event-connection/rotate": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "rotateNextcloudEventConnection",
+        "summary": "Replace event receiver credential",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Replace event receiver credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventConnectionCredential"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-contract-response-helper": "nextcloudConnectionIssued",
+        "x-contract-dynamic-status": true
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/integrations/nextcloud/ask-target": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "resolveNextcloudAskTarget",
+        "summary": "Resolve file handoff for an interactive user",
+        "security": [
+          {
+            "WebSession": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Resolve file handoff for an interactive user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskTarget"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "binding_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source_etag",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/integrations/nextcloud/events": {
+      "post": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "receiveNextcloudEvents",
+        "summary": "Durably accept a signed event batch",
+        "security": [
+          {
+            "NextcloudHMAC": []
+          }
+        ],
+        "x-contract-primary-status": "202",
+        "responses": {
+          "202": {
+            "description": "Durably accept a signed event batch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventReceipt"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventBatch"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Nextcloud-Connection-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Key-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Timestamp",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Nonce",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/integrations/nextcloud/events/status": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudEventStatus",
+        "summary": "Read signed receipt and applied watermarks",
+        "security": [
+          {
+            "NextcloudHMAC": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read signed receipt and applied watermarks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact HMAC-scoped connection ID"
+          },
+          {
+            "name": "X-Nextcloud-Connection-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Key-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Timestamp",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Nonce",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/integrations/nextcloud/files/status": {
+      "get": {
+        "tags": [
+          "Nextcloud integration"
+        ],
+        "operationId": "nextcloudFileStatus",
+        "summary": "Read signed exact-ETag publication status",
+        "security": [
+          {
+            "NextcloudHMAC": []
+          }
+        ],
+        "x-contract-primary-status": "200",
+        "responses": {
+          "200": {
+            "description": "Read signed exact-ETag publication status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileStatus"
+                }
+              }
+            },
+            "headers": {
+              "X-WeKnora-Status-Signature": {
+                "required": true,
+                "description": "HMAC over the exact response and request signature",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request denied or service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Canonical positive decimal"
+          },
+          {
+            "name": "source_etag",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact current source ETag"
+          },
+          {
+            "name": "X-Nextcloud-Connection-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Key-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Timestamp",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Nextcloud-Nonce",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-contract-response-struct": "FileStatus"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "NextcloudHMAC": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Nextcloud-Signature",
+        "description": "Connection-scoped HMAC also requires X-Nextcloud-Connection-Id, X-Nextcloud-Key-Id, X-Nextcloud-Timestamp and X-Nextcloud-Nonce; canonical method, path, query and body hash are signed."
+      },
+      "WebSession": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Interactive web user; pair, connection and GC controls require tenant Admin."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "EventHint": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "type"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "file_id": {
+            "type": "integer",
+            "nullable": true
+          },
+          "old_path": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "etag": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          }
+        },
+        "x-go-struct": "internal/handler/nextcloud_events.go:nextcloudEventHintJSON"
+      },
+      "EventBatch": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "nextcloud_instance_id",
+          "binding_id",
+          "after_event_id",
+          "events"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "nextcloud_instance_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "after_event_id": {
+            "type": "string"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventHint"
+            }
+          }
+        },
+        "x-go-struct": "internal/handler/nextcloud_events.go:nextcloudEventRequest"
+      },
+      "EventReceipt": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "received_through_event_id",
+          "durable_receipt_only"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "received_through_event_id": {
+            "type": "string"
+          },
+          "durable_receipt_only": {
+            "type": "boolean"
+          }
+        },
+        "description": "A durable inbox receipt is not an applied or publication acknowledgement."
+      },
+      "EventStatus": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "nextcloud_instance_id",
+          "binding_id",
+          "status",
+          "received_through_event_id",
+          "dispatched_through_event_id",
+          "applied_through_event_id",
+          "backlog_count",
+          "undispatched_count",
+          "dispatch_state"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "nextcloud_instance_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "received_through_event_id": {
+            "type": "string"
+          },
+          "dispatched_through_event_id": {
+            "type": "string"
+          },
+          "applied_through_event_id": {
+            "type": "string"
+          },
+          "backlog_count": {
+            "type": "integer"
+          },
+          "undispatched_count": {
+            "type": "integer"
+          },
+          "dispatch_state": {
+            "type": "string"
+          },
+          "last_error_code": {
+            "type": "string"
+          },
+          "last_sync_log_id": {
+            "type": "string"
+          }
+        }
+      },
+      "FileStatus": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "nextcloud_instance_id",
+          "binding_id",
+          "tenant_id",
+          "knowledge_base_id",
+          "data_source_id",
+          "file_id",
+          "source_etag",
+          "knowledge_state",
+          "published_source_etag",
+          "knowledge_ready_at",
+          "qa_available"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "nextcloud_instance_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "knowledge_base_id": {
+            "type": "string"
+          },
+          "data_source_id": {
+            "type": "string"
+          },
+          "file_id": {
+            "type": "string"
+          },
+          "source_etag": {
+            "type": "string"
+          },
+          "knowledge_state": {
+            "type": "string"
+          },
+          "published_source_etag": {
+            "type": "string",
+            "nullable": true
+          },
+          "knowledge_ready_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "qa_available": {
+            "type": "boolean"
+          }
+        },
+        "description": "Signed exact-ETag publication status; not a human retrieval grant.",
+        "x-go-struct": "internal/application/repository/nextcloud_file_status.go:NextcloudFileStatus"
+      },
+      "PairingRequest": {
+        "type": "object",
+        "required": [
+          "knowledge_base_id",
+          "base_url",
+          "binding_id",
+          "operation_id",
+          "instance_id",
+          "publication_epoch",
+          "key_id",
+          "token"
+        ],
+        "properties": {
+          "knowledge_base_id": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "publication_epoch": {
+            "type": "integer"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "x-go-struct": "internal/handler/nextcloud_source_pairing.go:sourcePairingRequest"
+      },
+      "Pairing": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "knowledge_base_id",
+          "data_source_id",
+          "instance_id",
+          "binding_id",
+          "base_url",
+          "publication_epoch",
+          "key_id",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "knowledge_base_id": {
+            "type": "string"
+          },
+          "data_source_id": {
+            "type": "string"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "publication_epoch": {
+            "type": "integer"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_error_code": {
+            "type": "string"
+          }
+        },
+        "x-go-struct": "internal/application/repository/nextcloud_source_pairing.go:NextcloudSourcePairing"
+      },
+      "PairingEnvelope": {
+        "type": "object",
+        "required": [
+          "pairing"
+        ],
+        "properties": {
+          "pairing": {
+            "$ref": "#/components/schemas/Pairing"
+          }
+        }
+      },
+      "SourceHealth": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "checked_at",
+          "source_status",
+          "event_inbox",
+          "sync_logs",
+          "current_versions"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_status": {
+            "type": "string"
+          },
+          "event_inbox": {
+            "type": "object",
+            "nullable": true
+          },
+          "sync_logs": {
+            "type": "object"
+          },
+          "current_versions": {
+            "type": "object"
+          }
+        },
+        "description": "Database observations, not proof of per-file publication.",
+        "x-go-struct": "internal/application/repository/nextcloud_source_health.go:NextcloudSourceHealth"
+      },
+      "HealthEnvelope": {
+        "type": "object",
+        "required": [
+          "health"
+        ],
+        "properties": {
+          "health": {
+            "$ref": "#/components/schemas/SourceHealth"
+          }
+        }
+      },
+      "FailedCandidateItem": {
+        "type": "object",
+        "required": [
+          "file_id",
+          "state",
+          "attempt_count",
+          "last_error_code"
+        ],
+        "properties": {
+          "file_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "attempt_count": {
+            "type": "integer"
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "last_error_code": {
+            "type": "string"
+          }
+        },
+        "description": "No document content or generation selectors.",
+        "x-go-struct": "internal/application/repository/nextcloud_candidate_retry_jobs.go:NextcloudFailedCandidateListItem"
+      },
+      "FailedCandidatePage": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "candidates",
+          "next_cursor"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FailedCandidateItem"
+            }
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        }
+      },
+      "FailedCandidateRetry": {
+        "type": "object",
+        "required": [
+          "file_id",
+          "source_etag",
+          "candidate_id",
+          "state",
+          "attempt_count",
+          "first_staged_at",
+          "next_attempt_at",
+          "last_error_code"
+        ],
+        "properties": {
+          "file_id": {
+            "type": "string"
+          },
+          "source_etag": {
+            "type": "string"
+          },
+          "candidate_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "attempt_count": {
+            "type": "integer"
+          },
+          "first_staged_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_error_code": {
+            "type": "string"
+          }
+        },
+        "x-go-struct": "internal/application/repository/nextcloud_candidate_retry_jobs.go:NextcloudCandidateRetryStatus"
+      },
+      "FailedCandidateRetryEnvelope": {
+        "type": "object",
+        "required": [
+          "retry"
+        ],
+        "properties": {
+          "retry": {
+            "$ref": "#/components/schemas/FailedCandidateRetry"
+          }
+        }
+      },
+      "FailedCandidateRetryRequest": {
+        "type": "object",
+        "required": [
+          "source_etag",
+          "candidate_id"
+        ],
+        "properties": {
+          "source_etag": {
+            "type": "string"
+          },
+          "candidate_id": {
+            "type": "string"
+          }
+        },
+        "x-go-struct": "internal/handler/nextcloud_source_pairing.go:nextcloudFailedCandidateRetryRequest"
+      },
+      "RetryScheduled": {
+        "type": "object",
+        "required": [
+          "state",
+          "file_id",
+          "source_etag",
+          "candidate_id"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "retry_scheduled"
+            ]
+          },
+          "file_id": {
+            "type": "string"
+          },
+          "source_etag": {
+            "type": "string"
+          },
+          "candidate_id": {
+            "type": "string"
+          }
+        }
+      },
+      "EventConnectionStatus": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "nextcloud_instance_id",
+          "binding_id",
+          "key_id",
+          "status",
+          "received_through_event_id",
+          "dispatched_through_event_id",
+          "applied_through_event_id",
+          "backlog_count",
+          "undispatched_count",
+          "dispatch_state",
+          "receiver_url"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "nextcloud_instance_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "received_through_event_id": {
+            "type": "string"
+          },
+          "dispatched_through_event_id": {
+            "type": "string"
+          },
+          "applied_through_event_id": {
+            "type": "string"
+          },
+          "backlog_count": {
+            "type": "integer"
+          },
+          "undispatched_count": {
+            "type": "integer"
+          },
+          "dispatch_state": {
+            "type": "string"
+          },
+          "receiver_url": {
+            "type": "string"
+          },
+          "last_error_code": {
+            "type": "string"
+          },
+          "last_sync_log_id": {
+            "type": "string"
+          }
+        },
+        "description": "Secret is not returned on status reads."
+      },
+      "EventConnectionCredential": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "nextcloud_instance_id",
+          "binding_id",
+          "key_id",
+          "secret",
+          "receiver_url",
+          "status"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "nextcloud_instance_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string",
+            "readOnly": true
+          },
+          "receiver_url": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "description": "Secret is returned once by pair or rotation."
+      },
+      "EventConnectionRebind": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "rotation_id",
+          "rebound",
+          "status",
+          "key_id",
+          "received_through_event_id",
+          "dispatched_through_event_id",
+          "applied_through_event_id",
+          "dispatch_state"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "rotation_id": {
+            "type": "string"
+          },
+          "rebound": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "received_through_event_id": {
+            "type": "string"
+          },
+          "dispatched_through_event_id": {
+            "type": "string"
+          },
+          "applied_through_event_id": {
+            "type": "string"
+          },
+          "dispatch_state": {
+            "type": "string"
+          },
+          "last_error_code": {
+            "type": "string"
+          }
+        }
+      },
+      "OperationRequest": {
+        "type": "object",
+        "required": [
+          "operation_id"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "x-go-struct": "internal/handler/nextcloud_source_decommission.go:sourceDecommissionRequest"
+      },
+      "RotationRequest": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "new_key_id",
+          "token"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "new_key_id": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "x-go-struct": "internal/handler/nextcloud_source_rotation.go:sourceRotationRequest"
+      },
+      "RotationEnvelope": {
+        "type": "object",
+        "required": [
+          "rotation"
+        ],
+        "properties": {
+          "rotation": {
+            "type": "object"
+          }
+        }
+      },
+      "DecommissionEnvelope": {
+        "type": "object",
+        "required": [
+          "decommission"
+        ],
+        "properties": {
+          "decommission": {
+            "type": "object"
+          }
+        }
+      },
+      "WithdrawalEnvelope": {
+        "type": "object",
+        "required": [
+          "withdrawal"
+        ],
+        "properties": {
+          "withdrawal": {
+            "type": "object"
+          }
+        }
+      },
+      "GCJobs": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "GCRetry": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "retry_scheduled"
+            ]
+          }
+        }
+      },
+      "AskTargetData": {
+        "type": "object",
+        "required": [
+          "knowledge_id",
+          "knowledge_base_id",
+          "title",
+          "source_etag"
+        ],
+        "properties": {
+          "knowledge_id": {
+            "type": "string"
+          },
+          "knowledge_base_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "source_etag": {
+            "type": "string"
+          }
+        }
+      },
+      "AskTarget": {
+        "type": "object",
+        "required": [
+          "success",
+          "data"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "$ref": "#/components/schemas/AskTargetData"
+          }
+        }
+      }
+    }
+  }
+}

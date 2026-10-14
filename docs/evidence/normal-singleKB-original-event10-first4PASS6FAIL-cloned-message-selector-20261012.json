@@ -1,0 +1,67 @@
+{
+  "classification": "NORMAL_SINGLEKB_ORIGINAL_EVENT10_FIRST_ACTUAL_FAILURE",
+  "head": "fe207502ea5e6ae2fcc0d68bc2e21e920a571179",
+  "tree": "7c8e60d753089026ccd981a129d011c8f89eb1e4",
+  "source_proposal": "integration/proposals/weknora-normal-singleKB-original-event-pipeline-20261012.json",
+  "compile_evidence": "docs/evidence/normal-singleKB-original-event-pipeline-full157-compile-PASS-20261012.json",
+  "actual_counts": {
+    "pass": 4,
+    "fail": 6,
+    "skip": 0
+  },
+  "selected_RUN": 10,
+  "raw_SHA256": "29b09691c409c04fccdfef0b15993fc1c9b1e2081678e14e6459fde1d3160fed",
+  "whole_seconds": 57.778,
+  "OOM": false,
+  "Root_independent_failed_owner_checks": {
+    "head": "fe207502ea5e6ae2fcc0d68bc2e21e920a571179",
+    "tree": "7c8e60d753089026ccd981a129d011c8f89eb1e4",
+    "stage": "normal-event-10",
+    "terminal": 1,
+    "counts": {
+      "pass": 4,
+      "fail": 6,
+      "skip": 0
+    },
+    "raw_SHA256": "29b09691c409c04fccdfef0b15993fc1c9b1e2081678e14e6459fde1d3160fed",
+    "resource_terminal_checks": [
+      {
+        "kind": "pg",
+        "id": "f21e9e5099c5c0edcd3bea463c59261de3ef8f66b1db1978d0fabc80d5c4481a",
+        "image": "sha256:58bf87d2a6f1e72f56590b0f0ae1467e82c3f99ca203dde646672c8ac13148b2",
+        "nonce_matches": true,
+        "running": false,
+        "retained": true
+      },
+      {
+        "kind": "redis",
+        "id": "3ad1d710694a51417d633486cb3bb8fdf9a69de2ff5df4195159354899be5a18",
+        "image": "sha256:c9d92d840fd011c908f040592857c724ae6d877f2aba5c40ad963276507386b2",
+        "nonce_matches": true,
+        "running": false,
+        "retained": true
+      },
+      {
+        "kind": "go",
+        "id": "6c28417ad6eddbe8e58fb6bc4d6f88f40bb598ef476a77deae4ad9d291795354",
+        "independently_absent": true
+      }
+    ],
+    "network_volumes_data_and_raw_retained": true,
+    "never_reuse_this_owner_or_subnet105": true,
+    "accepted": false,
+    "full_V1": false
+  },
+  "actual_observations": [
+    "configured positive fails at KnowledgeQA event return with knowledge_sqlite_embedding_original_unavailable; raw SearchParallel records chunk search refusal",
+    "actor/cancel leaves assert query hook faultApplied=false; late grant/lease leaves assert saveAttempted=false; do not count intended fault refusal as accepted",
+    "four early refusal leaves pass; full functional original event chain remains unaccepted"
+  ],
+  "source_diagnosis": "ChatManage.Clone reconstructs PipelineRequest/PipelineState without PipelineContext. SearchParallel clone therefore drops UserMessageID, and the strict normal original turn guard rejects it before query SDK. This source diagnosis and its fix still require fresh actual validation.",
+  "repair_status": "SOURCE implementation in progress; no guard/assertion/budget weakened",
+  "selected_runtime_accepted": false,
+  "normal_QA_adoption": false,
+  "default_registry_adoption": false,
+  "startup_adoption": false,
+  "full_V1": false
+}

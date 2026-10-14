@@ -1,0 +1,935 @@
+diff --git a/internal/application/service/model_original_download_os_kill_actual_test.go b/internal/application/service/model_original_download_os_kill_actual_test.go
+new file mode 100644
+index 00000000..85b51f03
+--- /dev/null
++++ b/internal/application/service/model_original_download_os_kill_actual_test.go
+@@ -0,0 +1,929 @@
++package service
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/google/uuid"
++	ollamaapi "github.com/ollama/ollama/api"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++	gormlogger "gorm.io/gorm/logger"
++	"io"
++	"math"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"sort"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"syscall"
++	"testing"
++	"time"
++)
++
++// These opt-in helpers are independent OS processes in one exact owned runtime.
++// They never run the app or rebuild the binary. Child receives storage/routing,
++// not a Caller, proof, Snapshot or memory-only release capability.
++const originalCrashModeEnv = "WEKNORA_ORIGINAL_DOWNLOAD_CRASH_CHILD_MODE"
++const originalCrashManifestEnv = "WEKNORA_ORIGINAL_DOWNLOAD_CRASH_MANIFEST"
++
++type originalCrashManifest struct {
++	Version                                                                int
++	Nonce, SourceHead, BinarySHA, DBPath, RunDir, ModelID                  string
++	BinaryBytes                                                            int64
++	ExpectedEUID                                                           int
++	DeadlineMS                                                             int64
++	SchemaSHA, JournalID, JournalDirectory, JournalKeyPath, JournalPinPath string
++	JournalKeySHA, JournalPinSHA, AESKeySHA                                string
++}
++type originalCrashRuntimeIdentity struct {
++	Nonce, ContainerID, ImageID, SourceHead, BinarySHA string
++	Entrypoint, Command, Mounts                        []string
++	EnvironmentSHA                                     string
++	ParentPID                                          int
++}
++type originalCrashKillIdentity struct {
++	Nonce, ContainerID, BinarySHA string
++	ParentPID, ChildPID           int
++}
++type originalCrashLease struct {
++	LeaseID, BodyID, OwnerID, Kind string
++	Epoch, ExpiresAtMS             int64
++	ReleasedAtMS                   *int64
++}
++type originalCrashOwner struct {
++	LeaseID, AttemptID, AttemptDigest, BodyID, OwnerID, Kind, Digest string
++	Epoch                                                            int64
++}
++type originalCrashSnapshot struct {
++	PID                                                                                                                        int
++	OriginalFactsSHA, OriginalBodiesSHA                                                                                        string
++	ModelID, DispatchID, DispatchDigest, InputStateID, ProofDigest, ProofSHA, RecipeDigest, AttemptID, AttemptDigest, ResultID string
++	LeaseUntilMS, AttemptExpiresMS, SQLNowMS                                                                                   int64
++	Attempts                                                                                                                   uint64
++	Owners                                                                                                                     []originalCrashOwner
++	Leases                                                                                                                     []originalCrashLease
++	Status                                                                                                                     types.ModelStatus
++}
++
++func originalCrashSHA(v []byte) string { d := sha256.Sum256(v); return hex.EncodeToString(d[:]) }
++func originalCrashFileSHA(path string) (string, int64, error) {
++	f, e := os.Open(path)
++	if e != nil {
++		return "", 0, e
++	}
++	defer f.Close()
++	h := sha256.New()
++	n, e := io.Copy(h, f)
++	if e != nil {
++		return "", n, e
++	}
++	return hex.EncodeToString(h.Sum(nil)), n, nil
++}
++func originalCrashWriteJSON(path string, v interface{}) error {
++	data, e := json.MarshalIndent(v, "", "  ")
++	if e != nil {
++		return e
++	}
++	temp := path + ".tmp"
++	if e = os.WriteFile(temp, append(data, '\n'), 0600); e != nil {
++		return e
++	}
++	return os.Rename(temp, path)
++}
++func originalCrashReadJSON(path string, v interface{}) error {
++	b, e := os.ReadFile(path)
++	if e != nil {
++		return e
++	}
++	return json.Unmarshal(b, v)
++}
++func originalCrashEmit(kind, nonce, path string, v interface{}) error {
++	if e := originalCrashWriteJSON(path, v); e != nil {
++		return e
++	}
++	sha, _, e := originalCrashFileSHA(path)
++	if e != nil {
++		return e
++	}
++	// Metadata-only stdout: no DSN/key/plaintext/model body or assumed success.
++	b, e := json.Marshal(map[string]interface{}{"event": kind, "nonce": nonce, "pid": os.Getpid(), "metadata_sha256": sha})
++	if e != nil {
++		return e
++	}
++	_, e = fmt.Fprintln(os.Stdout, string(b))
++	return e
++}
++func originalCrashOpenDB(path string) (*gorm.DB, error) {
++	if !filepath.IsAbs(path) {
++		return nil, fmt.Errorf("crash fixture DB must be absolute")
++	}
++	db, e := gorm.Open(sqlite.Open("file:"+filepath.ToSlash(path)+"?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on"), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
++	if e != nil {
++		return nil, e
++	}
++	pool, e := db.DB()
++	if e != nil {
++		return nil, e
++	}
++	pool.SetMaxOpenConns(1)
++	pool.SetMaxIdleConns(1)
++	if e = repository.InstallOriginalBodyRetentionCallbacks(db); e != nil {
++		_ = pool.Close()
++		return nil, e
++	}
++	return db, nil
++}
++func originalCrashSchemaSHA(db *gorm.DB) (string, error) {
++	var schema []struct{ Type, Name, SQL string }
++	e := db.Raw("SELECT type,name,sql FROM sqlite_master WHERE type IN ('table','index','trigger') AND name NOT LIKE 'sqlite_%' ORDER BY type,name").Scan(&schema).Error
++	if e != nil {
++		return "", e
++	}
++	b, e := json.Marshal(schema)
++	return originalCrashSHA(b), e
++}
++func originalCrashSQLNow(db *gorm.DB) (int64, error) {
++	var n int64
++	e := db.Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&n).Error
++	return n, e
++}
++func originalCrashServices(db *gorm.DB) (interfaces.ModelRepository, interfaces.ModelService, *repository.KnowledgeInputProvenanceStore) {
++	store := repository.NewKnowledgeInputProvenanceStore(db)
++	groups := NewGroupAccessService(repository.NewGroupAccessRepository(db))
++	repository.ConfigureKnowledgeInputActorGroupAccess(store, groups)
++	repo := repository.NewModelRepository(db)
++	ConfigureModelOriginalAuthority(repo, store, groups, nil)
++	return repo, NewModelService(repo, nil, nil, nil, nil, nil), store
++}
++func originalCrashSnapshotInDB(ctx context.Context, db *gorm.DB, id string) (originalCrashSnapshot, error) {
++	s := originalCrashSnapshot{PID: os.Getpid(), ModelID: id}
++	fresh := func() *gorm.DB { return db.Session(&gorm.Session{NewDB: true, Context: ctx}) }
++	var d struct {
++		ID, InputStateID, ProofJSON, ProofDigest, RecipeDigest, Digest, AttemptID, ResultID string
++		LeaseUntilMS                                                                        int64
++		Attempts                                                                            uint64
++	}
++	if e := fresh().Table("model_download_dispatches").Where("model_id=?", id).Take(&d).Error; e != nil {
++		return s, e
++	}
++	s.DispatchID, s.DispatchDigest, s.InputStateID, s.ProofDigest, s.ProofSHA, s.RecipeDigest, s.AttemptID, s.ResultID, s.LeaseUntilMS, s.Attempts = d.ID, d.Digest, d.InputStateID, d.ProofDigest, originalCrashSHA([]byte(d.ProofJSON)), d.RecipeDigest, d.AttemptID, d.ResultID, d.LeaseUntilMS, d.Attempts
++	var proof types.ModelOriginalProof
++	if e := json.Unmarshal([]byte(d.ProofJSON), &proof); e != nil {
++		return s, e
++	}
++	if !proof.Valid() || proof.Digest != d.ProofDigest || proof.StateID != d.InputStateID {
++		return s, fmt.Errorf("persisted creation proof mismatch")
++	}
++	var definition types.ModelDefinitionOriginal
++	var credential types.ModelCredentialOriginal
++	var state types.ModelStateOriginal
++	if e := fresh().Where("id=?", proof.DefinitionID).Take(&definition).Error; e != nil {
++		return s, e
++	}
++	if e := fresh().Where("id=?", proof.CredentialID).Take(&credential).Error; e != nil {
++		return s, e
++	}
++	if e := fresh().Where("id=?", proof.StateID).Take(&state).Error; e != nil {
++		return s, e
++	}
++	dd, cd, sd := definition, credential, state
++	dd.Digest = ""
++	cd.Digest = ""
++	sd.Digest = ""
++	dd.CreatedAt = dd.CreatedAt.UTC()
++	cd.CreatedAt = cd.CreatedAt.UTC()
++	sd.CreatedAt = sd.CreatedAt.UTC()
++	defSHA, e := repository.KnowledgeInputDigest(dd)
++	if e != nil {
++		return s, e
++	}
++	credSHA, e := repository.KnowledgeInputDigest(cd)
++	if e != nil {
++		return s, e
++	}
++	stateSHA, e := repository.KnowledgeInputDigest(sd)
++	if e != nil {
++		return s, e
++	}
++	if defSHA != definition.Digest || defSHA != proof.DefinitionDigest || credSHA != credential.Digest || credSHA != proof.CredentialDigest || stateSHA != state.Digest || stateSHA != proof.StateDigest || state.DefinitionID != definition.ID || state.CredentialID != credential.ID || state.Status != types.ModelStatusDownloading {
++		return s, fmt.Errorf("immutable creation fact digest mismatch")
++	}
++	var receipts []types.ModelOriginalBodyReceipt
++	if e := fresh().Where("origin_id IN ?", []string{proof.DefinitionID, proof.CredentialID}).Order("origin_id").Find(&receipts).Error; e != nil {
++		return s, e
++	}
++	if len(receipts) != 2 {
++		return s, fmt.Errorf("creation body receipt count")
++	}
++	bodyIDs := []string{}
++	for _, receipt := range receipts {
++		value := receipt
++		value.Digest = ""
++		value.CreatedAt = value.CreatedAt.UTC()
++		actual, e := repository.KnowledgeInputDigest(value)
++		if e != nil {
++			return s, e
++		}
++		expected := proof.DefinitionBodyReceiptDigest
++		if receipt.OriginID == proof.CredentialID {
++			expected = proof.CredentialBodyReceiptDigest
++		}
++		if actual != receipt.Digest || actual != expected {
++			return s, fmt.Errorf("creation body receipt digest mismatch")
++		}
++		bodyIDs = append(bodyIDs, receipt.BodyID)
++	}
++	facts, e := json.Marshal(struct {
++		Definition types.ModelDefinitionOriginal
++		Credential types.ModelCredentialOriginal
++		State      types.ModelStateOriginal
++		Receipts   []types.ModelOriginalBodyReceipt
++	}{definition, credential, state, receipts})
++	if e != nil {
++		return s, e
++	}
++	s.OriginalFactsSHA = originalCrashSHA(facts)
++	var payloads []struct {
++		ID, BodySHA256, State, StorageKind string
++		TenantID                           uint64
++		Payload                            *string
++		PurgeEpoch, BodyBytes              int64
++	}
++	if e := fresh().Table("original_body_payloads").Where("id IN ?", bodyIDs).Order("id").Find(&payloads).Error; e != nil {
++		return s, e
++	}
++	if len(payloads) != 2 {
++		return s, fmt.Errorf("creation payload count")
++	}
++	for _, body := range payloads {
++		var receipt *types.ModelOriginalBodyReceipt
++		for i := range receipts {
++			if receipts[i].BodyID == body.ID {
++				if receipt != nil {
++					return s, fmt.Errorf("ambiguous creation body receipt")
++				}
++				receipt = &receipts[i]
++			}
++		}
++		if receipt == nil {
++			return s, fmt.Errorf("creation body receipt absent")
++		}
++		table, column, raw := "model_definition_originals", "definition_json", definition.DefinitionJSON
++		originID, originDigest, originKind := definition.ID, definition.Digest, "definition"
++		if receipt.OriginID == credential.ID {
++			table, column, raw = "model_credential_originals", "credential_json", credential.CredentialJSON
++			originID, originDigest, originKind = credential.ID, credential.Digest, "credential"
++		}
++		if receipt.OriginID != originID || receipt.OriginKind != originKind || receipt.OriginDigest != originDigest || receipt.TenantID != proof.OwnerTenantID || receipt.BodyID != body.ID {
++			return s, fmt.Errorf("creation receipt/source identity mismatch")
++		}
++		var head struct {
++			SlotID, SourceTable, RowKey, ColumnName, OwnerKind, OwnerID, SourceIdentitySHA256, BodyID, KnowledgeBaseID, KnowledgeID, OriginalBodyRef string
++			TenantID                                                                                                                                 uint64
++			Revision                                                                                                                                 int64
++		}
++		if e := fresh().Table("original_body_field_heads").Where("source_table=? AND row_key=? AND column_name=?", table, originID, column).Take(&head).Error; e != nil {
++			return s, e
++		}
++		if head.SourceTable != table || head.RowKey != originID || head.ColumnName != column || head.OwnerKind != table || head.OwnerID != originID || head.TenantID != proof.OwnerTenantID || head.KnowledgeBaseID != "" || head.KnowledgeID != "" || head.SlotID != receipt.SlotID || head.BodyID != body.ID || head.Revision != receipt.HeadRevision || head.SourceIdentitySHA256 != receipt.SourceIdentitySHA256 {
++			return s, fmt.Errorf("creation captured head binding mismatch")
++		}
++		var ref struct {
++			Version int    `json:"_original_body_version"`
++			SlotID  string `json:"slot_id"`
++			BodyID  string `json:"body_id"`
++			SHA     string `json:"sha256"`
++		}
++		if e := json.Unmarshal([]byte(head.OriginalBodyRef), &ref); e != nil {
++			return s, e
++		}
++		sourceSHA := originalCrashSHA([]byte(raw))
++		if ref.Version != 1 || ref.SlotID != head.SlotID || ref.BodyID != body.ID || ref.SHA != sourceSHA || receipt.BodyDigest != sourceSHA || body.BodySHA256 != sourceSHA || body.BodyBytes != int64(len([]byte(raw))) || body.TenantID != proof.OwnerTenantID || body.State != "live" || body.StorageKind != "inline" {
++			return s, fmt.Errorf("creation inline source bytes/metadata unavailable")
++		}
++		// Actual inline representation lives in the original source column. Payload
++		// is normally nil; an observed nonnil copy still must match those exact bytes.
++		if body.Payload != nil && (*body.Payload != raw || originalCrashSHA([]byte(*body.Payload)) != sourceSHA) {
++			return s, fmt.Errorf("creation inline payload copy mismatch")
++		}
++	}
++	bodies, e := json.Marshal(payloads)
++	if e != nil {
++		return s, e
++	}
++	s.OriginalBodiesSHA = originalCrashSHA(bodies)
++
++	if d.AttemptID != "" {
++		var a struct {
++			ID, Digest  string
++			ExpiresAtMS int64
++		}
++		if e := fresh().Table("model_download_attempts").Where("id=? AND dispatch_id=? AND dispatch_digest=?", d.AttemptID, d.ID, d.Digest).Take(&a).Error; e != nil {
++			return s, e
++		}
++		s.AttemptDigest, s.AttemptExpiresMS = a.Digest, a.ExpiresAtMS
++	}
++	if e := fresh().Table("model_download_lease_owners").Where("attempt_id IN (SELECT id FROM model_download_attempts WHERE dispatch_id=?)", d.ID).Order("lease_id").Find(&s.Owners).Error; e != nil {
++		return s, e
++	}
++	ids := []string{}
++	for _, o := range s.Owners {
++		ids = append(ids, o.LeaseID)
++	}
++	if len(ids) > 0 {
++		if e := fresh().Table("original_body_leases").Where("lease_id IN ?", ids).Order("lease_id").Find(&s.Leases).Error; e != nil {
++			return s, e
++		}
++	}
++	var model struct{ Status types.ModelStatus }
++	if e := fresh().Table("models").Select("status").Where("id=?", id).Take(&model).Error; e != nil {
++		return s, e
++	}
++	s.Status = model.Status
++	n, e := originalCrashSQLNow(fresh())
++	s.SQLNowMS = n
++	return s, e
++}
++func originalCrashValidReady(s originalCrashSnapshot) error {
++	if s.ResultID != "" || s.Status != types.ModelStatusDownloading || s.AttemptID == "" || s.Attempts != 1 || s.LeaseUntilMS != s.AttemptExpiresMS || s.SQLNowMS >= s.AttemptExpiresMS || len(s.Owners) != 2 || len(s.Leases) != 2 {
++		return fmt.Errorf("first ready must contain the real committed first claim and two unreleased leases")
++	}
++	for _, o := range s.Owners {
++		if o.AttemptID != s.AttemptID || o.AttemptDigest != s.AttemptDigest || o.OwnerID != "model-original-read/download/"+s.AttemptID || o.Kind != "read" {
++			return fmt.Errorf("first owner fact does not bind the real attempt")
++		}
++		found := false
++		for _, l := range s.Leases {
++			if l.LeaseID == o.LeaseID {
++				found = l.BodyID == o.BodyID && l.OwnerID == o.OwnerID && l.Kind == o.Kind && l.Epoch == o.Epoch && l.ReleasedAtMS == nil && l.ExpiresAtMS > s.SQLNowMS
++			}
++		}
++		if !found {
++			return fmt.Errorf("first owner/lease tuple mismatch")
++		}
++	}
++	return nil
++}
++
++func TestOriginalLocalDownloadCrashChild(t *testing.T) {
++	mode := os.Getenv(originalCrashModeEnv)
++	if mode == "" {
++		t.Skip("dedicated subprocess only")
++	}
++	require.Contains(t, []string{"first", "recover"}, mode)
++	var m originalCrashManifest
++	require.NoError(t, originalCrashReadJSON(os.Getenv(originalCrashManifestEnv), &m))
++	require.Equal(t, 1, m.Version)
++	require.NotEmpty(t, m.Nonce)
++	require.Equal(t, m.ExpectedEUID, os.Geteuid())
++	executable, e := os.Executable()
++	require.NoError(t, e)
++	sha, bytes, e := originalCrashFileSHA(executable)
++	require.NoError(t, e)
++	require.Equal(t, m.BinarySHA, sha)
++	require.Equal(t, m.BinaryBytes, bytes)
++	require.Equal(t, m.JournalDirectory, os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY"))
++	require.Equal(t, m.JournalKeyPath, os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_KEY"))
++	require.Equal(t, m.JournalPinPath, os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_PIN"))
++	require.Equal(t, m.AESKeySHA, originalCrashSHA([]byte(os.Getenv("SYSTEM_AES_KEY"))))
++	keySHA, _, e := originalCrashFileSHA(m.JournalKeyPath)
++	require.NoError(t, e)
++	require.Equal(t, m.JournalKeySHA, keySHA)
++	pinSHA, _, e := originalCrashFileSHA(m.JournalPinPath)
++	require.NoError(t, e)
++	require.Equal(t, m.JournalPinSHA, pinSHA)
++	db, e := originalCrashOpenDB(m.DBPath)
++	require.NoError(t, e)
++	pool, e := db.DB()
++	require.NoError(t, e)
++	defer pool.Close()
++	var journalMode string
++	require.NoError(t, db.Raw("PRAGMA journal_mode").Scan(&journalMode).Error)
++	require.Equal(t, "wal", strings.ToLower(journalMode))
++	schema, e := originalCrashSchemaSHA(db)
++	require.NoError(t, e)
++	require.Equal(t, m.SchemaSHA, schema)
++	var anchor struct{ JournalID string }
++	require.NoError(t, db.Table("original_body_journal_heads").Select("journal_id").Where("id=1").Take(&anchor).Error)
++	require.Equal(t, m.JournalID, anchor.JournalID)
++	require.NoError(t, repository.NewOriginalBodyRetentionStore(db).VerifyJournalReady()) // No Initialize/new anchor in child.
++	utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++	defer utils.ResetSSRFWhitelistForTest()
++	repo, models, _ := originalCrashServices(db)
++	life := models.(interfaces.ModelOriginalDownloadLifecycle)
++	cleanup := models.(interfaces.ModelOriginalDownloadCleanupLifecycle)
++	deadline := time.UnixMilli(m.DeadlineMS)
++	ctx, cancel := context.WithDeadline(context.Background(), deadline)
++	defer cancel()
++	// First has no graceful defer: the parent must kill this exact OS process.
++	// Recovery has an explicit final join after the real output is proved.
++	life.StartOriginalDownloads()
++	actual := models.(*modelService)
++	actual.downloads.mu.Lock()
++	started := actual.downloads.recoveryReady
++	actual.downloads.mu.Unlock()
++	select {
++	case <-started:
++	case <-ctx.Done():
++		t.Fatal("real startup recovery exceeded parent window")
++	}
++	ticker := time.NewTicker(100 * time.Millisecond)
++	defer ticker.Stop()
++	for {
++		s, e := originalCrashSnapshotInDB(ctx, db, m.ModelID)
++		require.NoError(t, e)
++		if mode == "first" && originalCrashValidReady(s) == nil {
++			require.NoError(t, originalCrashEmit("first_ready_observation", m.Nonce, filepath.Join(m.RunDir, "first.ready.private.json"), s))
++			<-ctx.Done()
++			t.Fatal("first child was not SIGKILLed before fixed parent deadline")
++		}
++		if mode == "recover" && s.ResultID != "" {
++			require.NoError(t, life.WaitOriginalDownload(ctx, m.ModelID))
++			_, p, done, e := repo.(interfaces.ModelOriginalDownloadDispatcher).ClaimModelOriginalDownload(ctx, m.ModelID)
++			require.NoError(t, e)
++			require.True(t, done)
++			require.Nil(t, p)
++			require.NoError(t, cleanup.StopOriginalDownloadsWithErrors())
++			s, e = originalCrashSnapshotInDB(ctx, db, m.ModelID)
++			require.NoError(t, e)
++			require.NoError(t, originalCrashEmit("recovery_receipt_observation", m.Nonce, filepath.Join(m.RunDir, "recovered.private.json"), s))
++			return
++		}
++		select {
++		case <-ctx.Done():
++			if mode == "recover" {
++				_ = cleanup.StopOriginalDownloadsWithErrors()
++			}
++			t.Fatal("child recovery exceeded original parent window")
++		case <-ticker.C:
++		}
++	}
++}
++
++type originalCrashProcess struct {
++	cmd  *exec.Cmd
++	done chan struct{}
++	mu   sync.Mutex
++	err  error
++	log  *os.File
++}
++
++func originalCrashStartProcess(ctx context.Context, m originalCrashManifest, manifestPath, mode string) (*originalCrashProcess, error) {
++	executable, e := os.Executable()
++	if e != nil {
++		return nil, e
++	}
++	log, e := os.OpenFile(filepath.Join(m.RunDir, mode+".child.private.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if e != nil {
++		return nil, e
++	}
++	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestOriginalLocalDownloadCrashChild$", "-test.count=1", "-test.timeout=1200s", "-test.v")
++	environment := []string{}
++	for _, entry := range os.Environ() {
++		if !strings.HasPrefix(entry, originalCrashModeEnv+"=") && !strings.HasPrefix(entry, originalCrashManifestEnv+"=") {
++			environment = append(environment, entry)
++		}
++	}
++	cmd.Env = append(environment, originalCrashModeEnv+"="+mode, originalCrashManifestEnv+"="+manifestPath)
++	cmd.Stdout = log
++	cmd.Stderr = log
++	p := &originalCrashProcess{cmd: cmd, done: make(chan struct{}), log: log}
++	if e = cmd.Start(); e != nil {
++		_ = log.Close()
++		return nil, e
++	}
++	go func() {
++		e := cmd.Wait()
++		p.mu.Lock()
++		p.err = e
++		p.mu.Unlock()
++		_ = log.Close()
++		close(p.done)
++	}()
++	return p, nil
++}
++func (p *originalCrashProcess) wait(ctx context.Context) error {
++	select {
++	case <-ctx.Done():
++		return ctx.Err()
++	case <-p.done:
++		p.mu.Lock()
++		defer p.mu.Unlock()
++		return p.err
++	}
++}
++func (p *originalCrashProcess) joinCleanup(ctx context.Context) error {
++	select {
++	case <-p.done:
++		return nil
++	default:
++	}
++	if e := p.cmd.Process.Signal(syscall.SIGKILL); e != nil && !errors.Is(e, os.ErrProcessDone) {
++		return e
++	}
++	select {
++	case <-p.done:
++		return nil
++	case <-ctx.Done():
++		return ctx.Err()
++	}
++}
++func originalCrashWaitFile(ctx context.Context, path string, v interface{}) error {
++	tick := time.NewTicker(200 * time.Millisecond)
++	defer tick.Stop()
++	for {
++		e := originalCrashReadJSON(path, v)
++		if e == nil {
++			return nil
++		}
++		if !errors.Is(e, os.ErrNotExist) {
++			return e
++		}
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case <-tick.C:
++		}
++	}
++}
++func originalCrashAuditChild(m originalCrashManifest, p *originalCrashProcess, owner originalCrashRuntimeIdentity) error {
++	if p.cmd.Process.Pid <= 0 || owner.Nonce != m.Nonce || owner.BinarySHA != m.BinarySHA || owner.SourceHead != m.SourceHead || owner.ParentPID != os.Getpid() || owner.ContainerID == "" || owner.ImageID == "" || len(owner.Entrypoint)+len(owner.Command) == 0 || len(owner.Mounts) == 0 || owner.EnvironmentSHA == "" {
++		return fmt.Errorf("exact owner runtime identity is incomplete")
++	}
++	executable, e := os.Executable()
++	if e != nil {
++		return e
++	}
++	sha, size, e := originalCrashFileSHA(executable)
++	if e != nil {
++		return e
++	}
++	if sha != m.BinarySHA || size != m.BinaryBytes {
++		return fmt.Errorf("owned binary changed")
++	}
++	// Linux owned-container run: actual target executable/argv/environment are
++	// checked before signal. The Root driver checks the outer image/mount identity.
++	target, e := os.Readlink(fmt.Sprintf("/proc/%d/exe", p.cmd.Process.Pid))
++	if e != nil {
++		return e
++	}
++	targetSHA, _, e := originalCrashFileSHA(target)
++	if e != nil {
++		return e
++	}
++	if targetSHA != m.BinarySHA {
++		return fmt.Errorf("child executable mismatch")
++	}
++	argv, e := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", p.cmd.Process.Pid))
++	if e != nil {
++		return e
++	}
++	if !strings.Contains(string(argv), "-test.run=^TestOriginalLocalDownloadCrashChild$") {
++		return fmt.Errorf("child command mismatch")
++	}
++	env, e := os.ReadFile(fmt.Sprintf("/proc/%d/environ", p.cmd.Process.Pid))
++	if e != nil {
++		return e
++	}
++	if !strings.Contains(string(env), originalCrashManifestEnv+"="+filepath.Join(m.RunDir, "manifest.private.json")) {
++		return fmt.Errorf("child manifest identity mismatch")
++	}
++	private := map[string]interface{}{"nonce": m.Nonce, "parent_pid": os.Getpid(), "child_pid": p.cmd.Process.Pid, "binary_sha256": targetSHA, "binary_bytes": m.BinaryBytes, "argv_sha256": originalCrashSHA(argv), "environment_sha256": originalCrashSHA(env), "container_id": owner.ContainerID, "image_id": owner.ImageID, "runtime_identity": owner}
++	return originalCrashWriteJSON(filepath.Join(m.RunDir, "before-kill.identity.private.json"), private)
++}
++
++func TestOriginalLocalDownloadOSKillActualSQLite(t *testing.T) {
++	if os.Getenv("WEKNORA_ORIGINAL_DOWNLOAD_OSKILL_ACTUAL") != "1" {
++		t.Skip("requires Root-owned exact resource/identity fixture and prebuilt test binary")
++	}
++	runDir := os.Getenv("WEKNORA_ORIGINAL_DOWNLOAD_CRASH_RUN_DIR")
++	require.True(t, filepath.IsAbs(runDir))
++	require.NoError(t, os.MkdirAll(runDir, 0700))
++	nonce := os.Getenv("WEKNORA_ORIGINAL_DOWNLOAD_CRASH_NONCE")
++	require.NotEmpty(t, nonce)
++	_, existing := os.Stat(filepath.Join(runDir, "manifest.private.json"))
++	require.True(t, errors.Is(existing, os.ErrNotExist), "run directory must not contain an earlier helper manifest")
++	require.NoError(t, originalCrashWriteJSON(filepath.Join(runDir, "parent.started.private.json"), map[string]interface{}{"nonce": nonce, "pid": os.Getpid()}))
++	externalValue := os.Getenv("NC_POLICY_COORDINATED_DEADLINE_UNIX")
++	require.NotEmpty(t, externalValue)
++	externalSeconds, e := strconv.ParseFloat(externalValue, 64)
++	require.NoError(t, e)
++	require.False(t, math.IsNaN(externalSeconds) || math.IsInf(externalSeconds, 0))
++	require.Greater(t, externalSeconds, float64(0))
++	externalWhole, externalFraction := math.Modf(externalSeconds)
++	externalDeadline := time.Unix(int64(externalWhole), int64(externalFraction*float64(time.Second)))
++	chosenDeadline := time.Now().Add(1200 * time.Second)
++	if externalDeadline.Before(chosenDeadline) {
++		chosenDeadline = externalDeadline
++	}
++	require.True(t, time.Now().Before(chosenDeadline), "external coordinated window already exhausted")
++	ctx, cancel := context.WithDeadline(context.Background(), chosenDeadline)
++	defer cancel()
++	f := newMemAtomicSQLFixture(t, false)
++	dbPath := filepath.Join(runDir, "crash.sqlite")
++	require.NoError(t, f.db.Exec("VACUUM INTO ?", dbPath).Error)
++	db, e := originalCrashOpenDB(dbPath)
++	require.NoError(t, e)
++	pool, e := db.DB()
++	require.NoError(t, e)
++	var processes []*originalCrashProcess
++	var server *httptest.Server
++	t.Cleanup(func() {
++		cancel()
++		cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
++		defer c()
++		var failures []error
++		for _, p := range processes {
++			failures = append(failures, p.joinCleanup(cleanup))
++		}
++		if server != nil {
++			server.Close()
++		}
++		_ = pool.Close()
++		if err := errors.Join(failures...); err != nil {
++			t.Errorf("owned crash helper cleanup: %v", err)
++		}
++	})
++	require.NoError(t, repository.NewOriginalBodyRetentionStore(db).VerifyJournalReady())
++	var journalMode string
++	require.NoError(t, db.Raw("PRAGMA journal_mode").Scan(&journalMode).Error)
++	require.Equal(t, "wal", strings.ToLower(journalMode))
++	schema, e := originalCrashSchemaSHA(db)
++	require.NoError(t, e)
++	var anchor struct{ JournalID string }
++	require.NoError(t, db.Table("original_body_journal_heads").Select("journal_id").Where("id=1").Take(&anchor).Error)
++	executable, e := os.Executable()
++	require.NoError(t, e)
++	binarySHA, binaryBytes, e := originalCrashFileSHA(executable)
++	require.NoError(t, e)
++	keySHA, _, e := originalCrashFileSHA(os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_KEY"))
++	require.NoError(t, e)
++	pinSHA, _, e := originalCrashFileSHA(os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_PIN"))
++	require.NoError(t, e)
++	deadline, _ := ctx.Deadline()
++	m := originalCrashManifest{Version: 1, Nonce: nonce, SourceHead: os.Getenv("WEKNORA_ORIGINAL_DOWNLOAD_CRASH_SOURCE_HEAD"), BinarySHA: binarySHA, BinaryBytes: binaryBytes, DBPath: dbPath, RunDir: runDir, ModelID: "os-kill-local-" + uuid.NewString()[:12], ExpectedEUID: os.Geteuid(), DeadlineMS: deadline.UnixMilli(), SchemaSHA: schema, JournalID: anchor.JournalID, JournalDirectory: os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_DIRECTORY"), JournalKeyPath: os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_KEY"), JournalPinPath: os.Getenv("WEKNORA_ORIGINAL_BODY_JOURNAL_PIN"), JournalKeySHA: keySHA, JournalPinSHA: pinSHA, AESKeySHA: originalCrashSHA([]byte(os.Getenv("SYSTEM_AES_KEY")))}
++	require.NotEmpty(t, m.SourceHead)
++	var calls atomic.Int64
++	firstStarted, firstDisconnected := make(chan struct{}), make(chan struct{})
++	var firstOnce, disconnectOnce sync.Once
++	var wireMu sync.Mutex
++	var wires [][]byte
++	var providerErr error
++	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/api/pull" || r.Header.Get("X-Original-Crash-Nonce") != nonce || r.Header.Get("Authorization") != "Bearer synthetic-crash-"+nonce {
++			wireMu.Lock()
++			providerErr = fmt.Errorf("explicit captured provider endpoint/header/credential mismatch")
++			wireMu.Unlock()
++			w.WriteHeader(400)
++			return
++		}
++		raw, e := io.ReadAll(r.Body)
++		if e != nil {
++			wireMu.Lock()
++			providerErr = e
++			wireMu.Unlock()
++			return
++		}
++		count := calls.Add(1)
++		wireMu.Lock()
++		wires = append(wires, append([]byte(nil), raw...))
++		wireMu.Unlock()
++		if count == 1 {
++			firstOnce.Do(func() { close(firstStarted) })
++			<-r.Context().Done()
++			disconnectOnce.Do(func() { close(firstDisconnected) })
++			return
++		}
++		if count != 2 {
++			wireMu.Lock()
++			providerErr = fmt.Errorf("unexpected provider replay")
++			wireMu.Unlock()
++			w.WriteHeader(400)
++			return
++		}
++		w.Header().Set("Content-Type", "application/x-ndjson")
++		_, _ = io.WriteString(w, "{\"status\":\"success\"}\n")
++	}))
++	utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++	t.Cleanup(utils.ResetSSRFWhitelistForTest)
++	repo, models, store := originalCrashServices(db)
++	// Keep only identity from the trusted actual fixture. Cached grants/roles,
++	// body callbacks and bound repositories from the in-memory DB are not copied.
++	authenticated := types.CallerFromContext(f.ctx)
++	principal, ok := types.PrincipalFromContext(f.ctx)
++	require.True(t, ok)
++	require.Equal(t, types.PrincipalWebUser, principal.Type)
++	creator := types.WithPrincipal(types.WithCaller(context.Background(), types.Caller{TenantID: authenticated.TenantID, UserID: authenticated.UserID, Role: types.TenantRoleViewer}), principal)
++	creator = types.WithExecutionTenant(creator, authenticated.TenantID)
++	creator, e = store.RefreshCurrentReadActor(creator)
++	require.NoError(t, e)
++	model := &types.Model{ID: m.ModelID, TenantID: authenticated.TenantID, Name: "nomic-embed-text:real-process-crash", Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{BaseURL: server.URL, APIKey: "synthetic-crash-" + nonce, CustomHeaders: map[string]string{"X-Original-Crash-Nonce": nonce}, EmbeddingParameters: types.EmbeddingParameters{Dimension: 2}}}
++	createCtx, createCancel := context.WithTimeout(creator, 8*time.Second)
++	createErr := models.CreateModel(createCtx, model)
++	createCancel()
++	require.NoError(t, createErr)
++	require.NotNil(t, model.OriginalProof)
++	require.True(t, model.OriginalProof.Valid())
++	require.Zero(t, calls.Load())
++	initial, e := originalCrashSnapshotInDB(ctx, db, m.ModelID)
++	require.NoError(t, e)
++	require.Empty(t, initial.AttemptID)
++	require.Empty(t, initial.ResultID)
++	require.Empty(t, initial.Owners)
++	manifestPath := filepath.Join(runDir, "manifest.private.json")
++	require.NoError(t, originalCrashWriteJSON(manifestPath, m))
++	first, e := originalCrashStartProcess(ctx, m, manifestPath, "first")
++	require.NoError(t, e)
++	processes = append(processes, first)
++	var ready originalCrashSnapshot
++	require.NoError(t, originalCrashWaitFile(ctx, filepath.Join(runDir, "first.ready.private.json"), &ready))
++	require.Equal(t, first.cmd.Process.Pid, ready.PID)
++	require.NoError(t, originalCrashValidReady(ready))
++	select {
++	case <-firstStarted:
++	case <-ctx.Done():
++		t.Fatal("first real provider request did not arrive")
++	}
++	observed, e := originalCrashSnapshotInDB(ctx, db, m.ModelID)
++	require.NoError(t, e)
++	require.NoError(t, originalCrashValidReady(observed))
++	require.Equal(t, initial.ProofSHA, observed.ProofSHA)
++	require.Equal(t, initial.DispatchDigest, observed.DispatchDigest)
++	require.Equal(t, initial.OriginalFactsSHA, observed.OriginalFactsSHA)
++	require.Equal(t, initial.OriginalBodiesSHA, observed.OriginalBodiesSHA)
++	require.Equal(t, ready.AttemptID, observed.AttemptID)
++	require.Equal(t, ready.AttemptDigest, observed.AttemptDigest)
++	require.Equal(t, ready.Owners, observed.Owners)
++	require.Equal(t, ready.Leases, observed.Leases)
++	require.NoError(t, originalCrashEmit("parent_before_kill_facts", nonce, filepath.Join(runDir, "before-kill.facts.private.json"), observed))
++	// This is an automated owner identity audit gate, not user approval. Root's
++	// driver fills it from actual container inspect after reading the ready facts.
++	var owner originalCrashRuntimeIdentity
++	require.NoError(t, originalCrashWaitFile(ctx, filepath.Join(runDir, "owner.runtime.private.json"), &owner))
++	require.NoError(t, originalCrashAuditChild(m, first, owner))
++	var kill originalCrashKillIdentity
++	require.NoError(t, originalCrashWaitFile(ctx, filepath.Join(runDir, "kill.identity-audit.private.json"), &kill))
++	require.Equal(t, nonce, kill.Nonce)
++	require.Equal(t, owner.ContainerID, kill.ContainerID)
++	require.Equal(t, binarySHA, kill.BinarySHA)
++	require.Equal(t, os.Getpid(), kill.ParentPID)
++	require.Equal(t, first.cmd.Process.Pid, kill.ChildPID)
++	require.NoError(t, originalCrashAuditChild(m, first, owner))
++	require.NoError(t, first.cmd.Process.Signal(syscall.SIGKILL))
++	killedErr := first.wait(ctx)
++	require.Error(t, killedErr)
++	var exit *exec.ExitError
++	require.True(t, errors.As(killedErr, &exit))
++	status, ok := exit.Sys().(syscall.WaitStatus)
++	require.True(t, ok)
++	require.True(t, status.Signaled())
++	require.Equal(t, syscall.SIGKILL, status.Signal())
++	require.NoError(t, originalCrashEmit("actual_child_SIGKILL_terminal", nonce, filepath.Join(runDir, "kill.terminal.private.json"), map[string]interface{}{"child_pid": first.cmd.Process.Pid, "signal": int(status.Signal()), "exit_error_type": "exec.ExitError", "process_terminal": true}))
++	disconnectDeadline := time.NewTimer(5 * time.Second)
++	select {
++	case <-firstDisconnected:
++		if !disconnectDeadline.Stop() {
++			<-disconnectDeadline.C
++		}
++	case <-disconnectDeadline.C:
++		t.Fatal("provider did not observe actual killed process disconnect within cleanup bound")
++	case <-ctx.Done():
++		disconnectDeadline.Stop()
++		t.Fatal("fixed run window ended before killed peer disconnect")
++	}
++	afterKill, e := originalCrashSnapshotInDB(ctx, db, m.ModelID)
++	require.NoError(t, e)
++	require.Equal(t, observed.AttemptID, afterKill.AttemptID)
++	require.Equal(t, observed.Owners, afterKill.Owners)
++	require.Equal(t, observed.Leases, afterKill.Leases)
++	require.Equal(t, observed.OriginalFactsSHA, afterKill.OriginalFactsSHA)
++	require.Equal(t, observed.OriginalBodiesSHA, afterKill.OriginalBodiesSHA)
++	require.Empty(t, afterKill.ResultID)
++	require.Equal(t, types.ModelStatusDownloading, afterKill.Status)
++	dispatcher := repo.(interfaces.ModelOriginalDownloadDispatcher)
++	// Probe exactly once while safely far from the genuine SQL deadline. Repeated
++	// Claim near the edge could legitimately acquire attempt2 in the parent after
++	// its initial clock read, hiding the real recovery child's ownership.
++	probeBefore, e := originalCrashSQLNow(db.Session(&gorm.Session{NewDB: true, Context: ctx}))
++	require.NoError(t, e)
++	require.Greater(t, observed.AttemptExpiresMS-probeBefore, int64(30000), "unexpired probe requires actual remaining budget for its bounded authority/SQL operation")
++	probeCtx, probeCancel := context.WithTimeout(ctx, 20*time.Second)
++	_, probe, probeDone, probeErr := dispatcher.ClaimModelOriginalDownload(probeCtx, m.ModelID)
++	probeCancel()
++	require.NoError(t, probeErr)
++	require.False(t, probeDone)
++	require.Nil(t, probe)
++	probeAfter, e := originalCrashSnapshotInDB(ctx, db, m.ModelID)
++	require.NoError(t, e)
++	require.Less(t, probeAfter.SQLNowMS, observed.AttemptExpiresMS)
++	require.Equal(t, afterKill.AttemptID, probeAfter.AttemptID)
++	require.Equal(t, afterKill.AttemptDigest, probeAfter.AttemptDigest)
++	require.Equal(t, afterKill.Attempts, probeAfter.Attempts)
++	require.Equal(t, afterKill.Owners, probeAfter.Owners)
++	require.EqualValues(t, 1, calls.Load())
++	require.NoError(t, originalCrashEmit("actual_unexpired_claim_probe_once", nonce, filepath.Join(runDir, "unexpired-probe.private.json"), probeAfter))
++	tick := time.NewTicker(2 * time.Second)
++	defer tick.Stop()
++	for {
++		now, e := originalCrashSQLNow(db.Session(&gorm.Session{NewDB: true, Context: ctx}))
++		require.NoError(t, e)
++		if now >= observed.AttemptExpiresMS {
++			break
++		}
++		select {
++		case <-ctx.Done():
++			t.Fatal("real immutable 11-minute SQL claim deadline did not arrive in external coordinated window")
++		case <-tick.C:
++		}
++	}
++	second, e := originalCrashStartProcess(ctx, m, manifestPath, "recover")
++	require.NoError(t, e)
++	processes = append(processes, second)
++	require.NoError(t, second.wait(ctx))
++	var recovered originalCrashSnapshot
++	require.NoError(t, originalCrashReadJSON(filepath.Join(runDir, "recovered.private.json"), &recovered))
++	require.Equal(t, second.cmd.Process.Pid, recovered.PID)
++	require.NotEmpty(t, recovered.ResultID)
++	require.Equal(t, types.ModelStatusActive, recovered.Status)
++	require.EqualValues(t, 2, recovered.Attempts)
++	require.Equal(t, initial.ProofSHA, recovered.ProofSHA)
++	require.Equal(t, initial.ProofDigest, recovered.ProofDigest)
++	require.Equal(t, initial.InputStateID, recovered.InputStateID)
++	require.Equal(t, initial.RecipeDigest, recovered.RecipeDigest)
++	require.Equal(t, initial.OriginalFactsSHA, recovered.OriginalFactsSHA)
++	require.Equal(t, initial.OriginalBodiesSHA, recovered.OriginalBodiesSHA)
++	require.Len(t, recovered.Owners, 4)
++	require.Len(t, recovered.Leases, 4)
++	for _, l := range recovered.Leases {
++		require.NotNil(t, l.ReleasedAtMS)
++	}
++	for _, old := range observed.Owners {
++		foundOwner, foundLease := false, false
++		for _, owner := range recovered.Owners {
++			if owner.LeaseID == old.LeaseID {
++				require.Equal(t, old, owner)
++				foundOwner = true
++			}
++		}
++		for _, lease := range recovered.Leases {
++			if lease.LeaseID == old.LeaseID {
++				require.Equal(t, old.BodyID, lease.BodyID)
++				require.Equal(t, old.OwnerID, lease.OwnerID)
++				require.Equal(t, old.Kind, lease.Kind)
++				require.Equal(t, old.Epoch, lease.Epoch)
++				require.NotNil(t, lease.ReleasedAtMS)
++				foundLease = true
++			}
++		}
++		require.True(t, foundOwner)
++		require.True(t, foundLease)
++	}
++	var attemptIDs []string
++	for _, o := range recovered.Owners {
++		attemptIDs = append(attemptIDs, o.AttemptID)
++	}
++	sort.Strings(attemptIDs)
++	require.NotEqual(t, attemptIDs[0], attemptIDs[len(attemptIDs)-1])
++	var output types.ModelDownloadOriginal
++	require.NoError(t, db.Session(&gorm.Session{NewDB: true, Context: ctx}).Where("id=?", recovered.ResultID).Take(&output).Error)
++	require.Equal(t, initial.InputStateID, output.InputStateID)
++	require.Equal(t, initial.ProofDigest, output.InputProofDigest)
++	require.Equal(t, initial.RecipeDigest, output.RecipeDigest)
++	require.Equal(t, types.ModelStatusActive, output.Status)
++	var transcript types.ModelOriginalDownloadTranscript
++	require.NoError(t, json.Unmarshal([]byte(output.TranscriptJSON), &transcript))
++	stream := model.Parameters.OriginalDownload.Stream
++	expected, e := json.Marshal(ollamaapi.PullRequest{Model: model.Parameters.OriginalDownload.RemoteModel, Stream: &stream})
++	require.NoError(t, e)
++	wireMu.Lock()
++	wireCopy := append([][]byte(nil), wires...)
++	actualProviderErr := providerErr
++	wireMu.Unlock()
++	require.NoError(t, actualProviderErr)
++	require.Len(t, wireCopy, 2)
++	require.Equal(t, expected, wireCopy[0])
++	require.Equal(t, expected, wireCopy[1])
++	require.Equal(t, expected, transcript.Request)
++	require.Equal(t, []byte("{\"status\":\"success\"}\n"), transcript.Response)
++	require.Equal(t, types.MemoryOriginalBytesDigest([]byte(output.TranscriptJSON)), output.TranscriptDigest)
++	_, p, done, e := dispatcher.ClaimModelOriginalDownload(ctx, m.ModelID)
++	require.NoError(t, e)
++	require.True(t, done)
++	require.Nil(t, p)
++	require.EqualValues(t, 2, calls.Load())
++	require.NoError(t, originalCrashEmit("parent_result_receipt_verified", nonce, filepath.Join(runDir, "result.verified.private.json"), recovered))
++}

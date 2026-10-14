@@ -1,0 +1,44 @@
+diff --git a/internal/application/service/memory_joint_generated22_sql_actual_test.go b/internal/application/service/memory_joint_generated22_sql_actual_test.go
+new file mode 100644
+index 000000000..c1abcf758
+--- /dev/null
++++ b/internal/application/service/memory_joint_generated22_sql_actual_test.go
+@@ -0,0 +1,26 @@
++package service
++
++import "testing"
++
++// These named entries use the complete production joint migration fixture.
++// Existing component entries remain unchanged. A shared source tenant stays
++// authorized by the genuine organization/Agent share, without direct membership.
++func TestJointMemoryGeneratedConsolidationOriginalActualSQLite(t *testing.T) {
++	t.Setenv(memoryJointSchemaOptin, "1")
++	TestMemoryGeneratedConsolidationOriginalActualSQLite(t)
++}
++
++func TestPostgresJointMemoryGeneratedConsolidationOriginalActual(t *testing.T) {
++	t.Setenv(memoryJointSchemaOptin, "1")
++	TestPostgresMemoryGeneratedConsolidationOriginalActual(t)
++}
++
++func TestJointMemoryGeneratedMultipleClustersActualSQLite(t *testing.T) {
++	t.Setenv(memoryJointSchemaOptin, "1")
++	TestMemoryGeneratedMultipleClustersActualSQLite(t)
++}
++
++func TestPostgresJointMemoryGeneratedMultipleClustersActual(t *testing.T) {
++	t.Setenv(memoryJointSchemaOptin, "1")
++	TestPostgresMemoryGeneratedMultipleClustersActual(t)
++}
+diff --git a/internal/database/migration_peer_prefix_sql_actual_test.go b/internal/database/migration_peer_prefix_sql_actual_test.go
+index bcdf98f83..727cd222c 100644
+--- a/internal/database/migration_peer_prefix_sql_actual_test.go
++++ b/internal/database/migration_peer_prefix_sql_actual_test.go
+@@ -68,6 +68,7 @@ func runPeerPrefixUnwiredActual(t *testing.T, pg bool) {
+ 			}
+ 			db, dsn, opts := jointLineageFixture(t, pg)
+ 			root := sqliteRepoRoot(t)
++			chdirAndRestore(t, root)
+ 			dialect, common, latest, next := "sqlite", uint(73), uint(80), uint(81)
+ 			if pg {
+ 				dialect, common, latest, next = "versioned", 154, 161, 162

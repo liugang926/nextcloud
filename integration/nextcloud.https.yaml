@@ -1,0 +1,16 @@
+# Opt-in LAN TLS terminator. Start only this profile service after the base
+# Nextcloud stack is healthy; it does not change the existing HTTP listeners.
+services:
+  nextcloud-https:
+    image: nginx:1.30.3-alpine@sha256:cf6caa384debc325efa6818a8bc6fa91783ee2621cd124b90b0e661a4834be10
+    profiles: [lan-https]
+    ports:
+      - "${NEXTCLOUD_LAN_HOST:?set the private LAN IPv4 address}:${NEXTCLOUD_HTTPS_PORT:-18482}:443"
+    volumes:
+      - ./integration/nextcloud-https.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${NEXTCLOUD_HTTPS_CERT_FILE:-../weknora-ldap-local/certs/weknora-lan-signed.crt}:/etc/nginx/tls/server.crt:ro
+      - ${NEXTCLOUD_HTTPS_KEY_FILE:-../weknora-ldap-local/certs/weknora-lan.key}:/etc/nginx/tls/server.key:ro
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped

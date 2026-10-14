@@ -1,0 +1,74 @@
+diff --git a/internal/application/repository/knowledge_sqlite_nextcloud_union.go b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
+index cb0cdefa6..19af6883e 100644
+--- a/internal/application/repository/knowledge_sqlite_nextcloud_union.go
++++ b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
+@@ -92,19 +92,20 @@ func (r *nextcloudOriginalUploadRead) checkInTx(tx *gorm.DB, remote bool) error
+ }
+ 
+ type nextcloudOriginalFinalRow struct {
+-	Category                                      string
+-	LeaseID, Kind, OwnerID                        string
+-	BodyID                                        string `gorm:"column:lease_body_id"`
+-	Epoch, ExpiresAtMS, FinalClockMS              int64
+-	ReleasedAtMS                                  *int64
+-	TenantID                                      uint64
+-	KnowledgeBaseID, KnowledgeID                  string
+-	FenceEpoch, KBEpoch                           int64
+-	FenceState, KBState, DataSourceID, ExternalID string
+-	DirectoryEnabled                              bool
+-	DirectoryLastSyncMS                           *int64
+-	DirectoryLastSyncError                        string
+-	Body                                          originalBodyPayload `gorm:"embedded;embeddedPrefix:body_"`
++	Category                         string
++	LeaseID, Kind, OwnerID           string
++	BodyID                           string `gorm:"column:lease_body_id"`
++	Epoch, ExpiresAtMS, FinalClockMS int64
++	ReleasedAtMS                     *int64
++	TenantID                         uint64
++	KnowledgeBaseID, KnowledgeID     string
++	FenceEpoch, KBEpoch              int64
++	FenceState, KBState, ExternalID  string
++	DataSourceID                     string `gorm:"column:datasource_id"`
++	DirectoryEnabled                 bool
++	DirectoryLastSyncMS              *int64
++	DirectoryLastSyncError           string
++	Body                             originalBodyPayload `gorm:"embedded;embeddedPrefix:body_"`
+ }
+ 
+ // The caller has completed all remote, model, journal, physical and native-index
+diff --git a/internal/application/repository/nextcloud_original_final_row_schema_test.go b/internal/application/repository/nextcloud_original_final_row_schema_test.go
+new file mode 100644
+index 000000000..b9a268d0d
+--- /dev/null
++++ b/internal/application/repository/nextcloud_original_final_row_schema_test.go
+@@ -0,0 +1,30 @@
++package repository
++
++import (
++	"sync"
++	"testing"
++
++	"gorm.io/gorm/schema"
++)
++
++// Parse the actual final-union scan type with the real pinned GORM naming
++// strategy; this is a pure mapping oracle, not a content-lease grant.
++func TestNextcloudOriginalFinalRowUsesExactSQLColumns(t *testing.T) {
++	parsed, err := schema.Parse(&nextcloudOriginalFinalRow{}, &sync.Map{}, schema.NamingStrategy{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	expected := map[string]string{"DataSourceID": "datasource_id", "BodyID": "lease_body_id", "KBEpoch": "kb_epoch", "KBState": "kb_state", "FenceEpoch": "fence_epoch", "FenceState": "fence_state", "KnowledgeBaseID": "knowledge_base_id", "FinalClockMS": "final_clock_ms"}
++	for field, column := range expected {
++		actual := parsed.FieldsByName[field]
++		if actual == nil || actual.DBName != column {
++			t.Fatalf("actual final-union field %s must bind SQL column %s", field, column)
++		}
++	}
++	if actual := parsed.FieldsByDBName["datasource_id"]; actual == nil || actual.Name != "DataSourceID" {
++		t.Fatal("content datasource_id SQL alias has no actual scan field")
++	}
++	if actual := parsed.FieldsByDBName["body_id"]; actual == nil || actual.Name != "ID" || len(actual.BindNames) != 2 || actual.BindNames[0] != "Body" {
++		t.Fatal("payload body_id must remain separate from actual lease_body_id")
++	}
++}

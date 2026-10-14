@@ -1,0 +1,641 @@
+diff --git a/internal/application/repository/model_original.go b/internal/application/repository/model_original.go
+index 4640f9b9..b92a1afb 100644
+--- a/internal/application/repository/model_original.go
++++ b/internal/application/repository/model_original.go
+@@ -117,12 +117,12 @@ func readModelOriginalInTx(tx *gorm.DB, model *types.Model) (*modelOriginalFacts
+ 			return nil, err
+ 		}
+ 	}
+-	definition, err := types.ModelDefinitionBytes(model)
++	definitionMatches, err := types.ModelDefinitionMatchesOriginal(model, facts.Definition.DefinitionJSON)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	defDigest, err := modelDefinitionFactDigest(facts.Definition)
+-	if err != nil || defDigest != facts.Definition.Digest || facts.Definition.TenantID != model.TenantID || facts.Definition.DefinitionJSON != string(definition) || facts.Definition.DefinitionDigest != types.MemoryOriginalBytesDigest(definition) {
++	if err != nil || !definitionMatches || defDigest != facts.Definition.Digest || facts.Definition.TenantID != model.TenantID || facts.Definition.DefinitionDigest != types.MemoryOriginalBytesDigest([]byte(facts.Definition.DefinitionJSON)) {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
+ 	cipher, plain, err := modelCredentialCipherInTx(tx, model)
+@@ -145,6 +145,9 @@ func readModelOriginalInTx(tx *gorm.DB, model *types.Model) (*modelOriginalFacts
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if err = types.RestoreModelOriginalChatSettings(model, facts.Definition.DefinitionJSON); err != nil {
++		return nil, err
++	}
+ 	facts.Proof = types.ModelOriginalProof{ModelID: model.ID, OwnerTenantID: model.TenantID, IsBuiltin: model.IsBuiltin, DefinitionID: facts.Definition.ID, DefinitionDigest: defDigest, DefinitionBodyReceiptDigest: defBody.Receipt.Digest, DefinitionRevision: control.DefinitionRevision, CredentialID: facts.Credential.ID, CredentialDigest: credDigest, CredentialBodyReceiptDigest: credBody.Receipt.Digest, CredentialRevision: control.CredentialRevision, StateID: facts.State.ID, StateDigest: stateDigest, StateEpoch: control.StateEpoch}
+ 	facts.Proof.Digest, err = modelProofDigest(facts.Proof)
+ 	return facts, err
+@@ -255,6 +258,31 @@ func (r *modelRepository) writeModelOriginalMutation(ctx context.Context, reques
+ 		if err = modelchat.NormalizeAuthoredChatDefinition(&copy); err != nil {
+ 			return err
+ 		}
++		if copy.Parameters.OriginalChat != nil {
++			preserveOriginal := false
++			if old != nil && mode != "replace" {
++				preserveOriginal, err = types.ModelDefinitionMatchesOriginal(&copy, old.Definition.DefinitionJSON)
++				if err != nil {
++					return err
++				}
++			}
++			if preserveOriginal {
++				// The old fact, SHA/body/receipt were checked by readModelOriginalInTx.
++				// Keep its exact text before SQLite semantic controls compare it; a
++				// credential/state-only edit must not advance the definition revision.
++				if err = types.RestoreModelOriginalChatSettings(&copy, old.Definition.DefinitionJSON); err != nil {
++					return err
++				}
++			} else {
++				recipe := *copy.Parameters.OriginalChat
++				settings, err := types.ModelOriginalChatSettingsBytes(&recipe)
++				if err != nil {
++					return err
++				}
++				recipe.Settings = settings
++				copy.Parameters.OriginalChat = &recipe
++			}
++		}
+ 		if copy.Source == types.ModelSourceLocal {
+ 			// Only author input creates this recipe. Credential rotation or partial
+ 			// edits cannot fill a legacy definition from process configuration.
+@@ -332,7 +360,13 @@ func (r *modelRepository) writeModelOriginalMutation(ctx context.Context, reques
+ 		observeModelOriginalStep(ctx, "control_loaded")
+ 		// A same-byte human full replacement still creates a new authored
+ 		// revision. Only this transaction may mint the successor facts.
+-		retainDefinition := old != nil && mode != "replace" && string(persisted) == old.Definition.DefinitionJSON
++		retainDefinition := false
++		if old != nil && mode != "replace" {
++			retainDefinition, err = types.ModelDefinitionMatchesOriginal(&actual, old.Definition.DefinitionJSON)
++			if err != nil {
++				return err
++			}
++		}
+ 		if retainDefinition && control.DefinitionRevision != beforeControl.DefinitionRevision {
+ 			return types.ErrMemoryOriginalUnavailable
+ 		}
+diff --git a/internal/application/repository/model_original_history.go b/internal/application/repository/model_original_history.go
+index 24548223..98854970 100644
+--- a/internal/application/repository/model_original_history.go
++++ b/internal/application/repository/model_original_history.go
+@@ -133,8 +133,8 @@ func currentHistoricalModelFacts(tx *gorm.DB, id string) (*modelOriginalFacts, e
+ 		return nil, err
+ 	}
+ 	model := &types.Model{ID: row.ID, TenantID: row.TenantID, Name: row.Name, DisplayName: row.DisplayName, Description: row.Description, Type: types.ModelType(row.Type), Source: types.ModelSource(row.Source), Parameters: parameters, IsBuiltin: row.IsBuiltin}
+-	bytes, err := types.ModelDefinitionBytes(model)
+-	if err != nil || string(bytes) != definition.DefinitionJSON || string(cipher) != credential.CredentialJSON || state.Status != types.ModelStatus(row.Status) || state.IsDefault != row.IsDefault || state.ManagedBy != row.ManagedBy {
++	definitionMatches, err := types.ModelDefinitionMatchesOriginal(model, definition.DefinitionJSON)
++	if err != nil || !definitionMatches || definition.DefinitionDigest != types.MemoryOriginalBytesDigest([]byte(definition.DefinitionJSON)) || string(cipher) != credential.CredentialJSON || state.Status != types.ModelStatus(row.Status) || state.IsDefault != row.IsDefault || state.ManagedBy != row.ManagedBy {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
+ 	defBody, err := modelOriginalBodyHeadInTx(tx, "definition", definition.ID, row.TenantID, definition.Digest, definition.DefinitionJSON)
+diff --git a/internal/application/service/joint_model_chat_settings_jsonb_sql_actual_test.go b/internal/application/service/joint_model_chat_settings_jsonb_sql_actual_test.go
+new file mode 100644
+index 00000000..d750a066
+--- /dev/null
++++ b/internal/application/service/joint_model_chat_settings_jsonb_sql_actual_test.go
+@@ -0,0 +1,112 @@
++package service
++
++import (
++	"encoding/json"
++	"sort"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++)
++
++func TestPostgresJointOriginalChatSettingsJSONBActual(t *testing.T) {
++	for _, mode := range []string{"current", "same_representation", "changed_settings"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newJointOriginalUpgradeFixture(t, true)
++			repo := repository.NewModelRepository(f.db)
++			ConfigureModelOriginalAuthority(repo, f.store, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil)
++			models := NewModelService(repo, nil, nil, nil, nil, nil)
++			model := actualModelLiteral(uuid.NewString(), 7)
++			require.NoError(t, models.CreateModel(f.ctx, model))
++			require.NotNil(t, model.OriginalProof)
++			require.True(t, model.OriginalProof.Valid())
++			proof := *model.OriginalProof
++			var origin types.ModelDefinitionOriginal
++			require.NoError(t, f.db.Where("id=?", proof.DefinitionID).Take(&origin).Error)
++			require.Equal(t, types.MemoryOriginalBytesDigest([]byte(origin.DefinitionJSON)), origin.DefinitionDigest)
++			reader := models.(interfaces.ModelOriginalLifetimeReader)
++			read, err := reader.BeginModelOriginalRead(f.ctx, model.ID, &proof)
++			require.NoError(t, err)
++			t.Cleanup(func() {
++				if err := read.Close(); err != nil {
++					t.Error("owned current model hold cleanup failed")
++				}
++			})
++			before, _, err := read.Snapshot()
++			require.NoError(t, err)
++			require.NotNil(t, before.Parameters.OriginalChat)
++			if mode != "current" {
++				var row struct{ Parameters string }
++				require.NoError(t, f.db.Table("models").Select("CAST(parameters AS TEXT) AS parameters").Where("id=?", model.ID).Take(&row).Error)
++				var params map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal([]byte(row.Parameters), &params))
++				var chat map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(params["original_chat"], &chat))
++				var settings map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(chat["Settings"], &settings))
++				if mode == "changed_settings" {
++					var enabled bool
++					require.NoError(t, json.Unmarshal(settings["SupportsTemperature"], &enabled))
++					settings["SupportsTemperature"], err = json.Marshal(!enabled)
++					require.NoError(t, err)
++				}
++				keys := []string{}
++				for key := range settings {
++					keys = append(keys, key)
++				}
++				sort.Sort(sort.Reverse(sort.StringSlice(keys)))
++				parts := []string{}
++				for _, key := range keys {
++					quoted, err := json.Marshal(key)
++					require.NoError(t, err)
++					parts = append(parts, string(quoted)+" : "+string(settings[key]))
++				}
++				chat["Settings"] = json.RawMessage("{ " + strings.Join(parts, ", ") + " }")
++				params["original_chat"], err = json.Marshal(chat)
++				require.NoError(t, err)
++				wire, err := json.Marshal(params)
++				require.NoError(t, err)
++				write := f.db.Exec("UPDATE models SET parameters=CAST(? AS JSONB) WHERE id=?", string(wire), model.ID)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var after struct{ Parameters string }
++				require.NoError(t, f.db.Table("models").Select("CAST(parameters AS TEXT) AS parameters").Where("id=?", model.ID).Take(&after).Error)
++				var readParams types.ModelParameters
++				require.NoError(t, json.Unmarshal([]byte(after.Parameters), &readParams))
++				var actualSettings map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(readParams.OriginalChat.Settings, &actualSettings))
++				var actual bool
++				require.NoError(t, json.Unmarshal(actualSettings["SupportsTemperature"], &actual))
++				var expected bool
++				require.NoError(t, json.Unmarshal(settings["SupportsTemperature"], &expected))
++				require.Equal(t, expected, actual)
++			}
++			if mode == "changed_settings" {
++				require.Error(t, read.Recheck())
++				snapshot, bound, err := read.Snapshot()
++				require.Error(t, err)
++				require.Nil(t, snapshot)
++				require.Nil(t, bound)
++			} else {
++				require.NoError(t, read.Recheck())
++				after, bound, err := read.Snapshot()
++				require.NoError(t, err)
++				require.Equal(t, proof, *bound)
++				require.Equal(t, string(before.Parameters.OriginalChat.Settings), string(after.Parameters.OriginalChat.Settings))
++				historical, err := repo.(interfaces.HistoricalModelOriginalReader).BeginHistoricalModelOriginalRead(f.ctx, proof)
++				require.NoError(t, err)
++				require.NoError(t, historical.Recheck())
++				require.NoError(t, historical.Close())
++			}
++			var retained types.ModelDefinitionOriginal
++			require.NoError(t, f.db.Where("id=?", proof.DefinitionID).Take(&retained).Error)
++			require.Equal(t, origin, retained, "raw origin bytes/digest/ID were not rewritten or resigned")
++			require.NoError(t, read.Close())
++			jointOriginalLeaseState(t, f, false)
++		})
++	}
++}
+diff --git a/internal/application/service/model_original_legacy_sdk_settings_test.go b/internal/application/service/model_original_legacy_sdk_settings_test.go
+new file mode 100644
+index 00000000..a5aae1c5
+--- /dev/null
++++ b/internal/application/service/model_original_legacy_sdk_settings_test.go
+@@ -0,0 +1,58 @@
++package service
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/models/catalog"
++	modelchat "github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++// Serialization contract only: these bytes are not SQL origins/receipts,
++// proofs or read grants. Actual old-producer -> new-reader SQL remains a gate.
++func TestModelOriginalLegacySDKSettingsProjection(t *testing.T) {
++	for _, mode := range []string{"SDK_struct_order_HTML", "legal_surrogate", "different_number"} {
++		t.Run(mode, func(t *testing.T) {
++			model := actualModelLiteral("legacy-sdk-serialization", 7)
++			model.Name = "original <authored> name"
++			require.NoError(t, modelchat.NormalizeAuthoredChatDefinition(model))
++			settings := catalog.DefaultOpenAICompletions()
++			settings.ExtraBody = map[string]interface{}{"literal": "<safe>🚀</safe>", "precision": json.Number("9007199254740993"), "ordered": []interface{}{"first", "second"}}
++			ordered, err := json.Marshal(settings)
++			require.NoError(t, err)
++			if mode == "legal_surrogate" {
++				ordered = []byte(strings.ReplaceAll(string(ordered), "🚀", `\ud83d\ude80`))
++			}
++			model.Parameters.OriginalChat.Settings = ordered
++			require.NoError(t, modelchat.ValidateOriginalChatDefinition(model.Parameters.OriginalChat), "real SDK fullSettings schema stays required")
++			params := model.Parameters
++			params.APIKey = ""
++			params.AppSecret = ""
++			legacy, err := json.Marshal(types.ModelOriginalDefinition{model.ID, model.TenantID, model.Name, model.DisplayName, model.Description, model.Type, model.Source, model.IsBuiltin, params})
++			require.NoError(t, err)
++			require.Contains(t, string(legacy), `\u003c`)
++			before := append([]byte(nil), legacy...)
++			var currentSettings map[string]json.RawMessage
++			require.NoError(t, json.Unmarshal(ordered, &currentSettings))
++			if mode == "different_number" {
++				var extra map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(currentSettings["ExtraBody"], &extra))
++				extra["precision"] = json.RawMessage("9007199254740992")
++				currentSettings["ExtraBody"], err = json.Marshal(extra)
++				require.NoError(t, err)
++			}
++			recipe := *model.Parameters.OriginalChat
++			recipe.Settings, err = json.Marshal(currentSettings)
++			require.NoError(t, err)
++			current := *model
++			current.Parameters.OriginalChat = &recipe
++			match, err := types.ModelDefinitionMatchesOriginal(&current, string(legacy))
++			require.NoError(t, err)
++			require.Equal(t, mode != "different_number", match)
++			require.Equal(t, before, legacy, "legacy raw bytes/digest input not rewritten")
++		})
++	}
++}
+diff --git a/internal/types/model_original.go b/internal/types/model_original.go
+index 67cf54bf..efcae13b 100644
+--- a/internal/types/model_original.go
++++ b/internal/types/model_original.go
+@@ -24,6 +24,15 @@ func ModelDefinitionBytes(model *Model) ([]byte, error) {
+ 	params := model.Parameters
+ 	params.APIKey = ""
+ 	params.AppSecret = ""
++	if params.OriginalChat != nil {
++		recipe := *params.OriginalChat
++		settings, err := ModelOriginalChatSettingsBytes(&recipe)
++		if err != nil {
++			return nil, err
++		}
++		recipe.Settings = settings
++		params.OriginalChat = &recipe
++	}
+ 	return json.Marshal(ModelOriginalDefinition{model.ID, model.TenantID, model.Name, model.DisplayName, model.Description, model.Type, model.Source, model.IsBuiltin, params})
+ }
+ 
+diff --git a/internal/types/model_original_settings.go b/internal/types/model_original_settings.go
+new file mode 100644
+index 00000000..68455d0d
+--- /dev/null
++++ b/internal/types/model_original_settings.go
+@@ -0,0 +1,272 @@
++package types
++
++import (
++	"bytes"
++	"encoding/json"
++	"io"
++	"strconv"
++	"strings"
++	"unicode/utf8"
++)
++
++// Only the four established chat Settings objects have representation freedom.
++// Strings and arrays retain values/order; exact decimal numbers never pass
++// through float64. Duplicate keys/trailing values/non-object roots are closed.
++// Existing SDK completeSettings field/schema/type validation is still required.
++func ModelOriginalChatSettingsBytes(recipe *ModelOriginalChatDefinition) (json.RawMessage, error) {
++	if recipe == nil || recipe.Version != 1 {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	switch recipe.Recipe {
++	case "chat/openai-completions/full-v1", "chat/openai-responses/full-v1", "chat/anthropic-messages/full-v1", "chat/google-generative-ai/full-v1":
++	default:
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	if !validModelSettingsStrings(recipe.Settings) {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	d := json.NewDecoder(bytes.NewReader(recipe.Settings))
++	d.UseNumber()
++	numberBudget := 1 << 20 // Bound total decimal expansion; no precision rounding.
++	value, err := readModelSettingsJSON(d, 0, &numberBudget)
++	if err != nil {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	if _, ok := value.(map[string]interface{}); !ok {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	if _, err = d.Token(); err != io.EOF {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	data, err := json.Marshal(value)
++	if err != nil {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	return data, nil
++}
++func validModelSettingsStrings(raw []byte) bool {
++	if !utf8.Valid(raw) {
++		return false
++	}
++	inside := false
++	for i := 0; i < len(raw); i++ {
++		if raw[i] == '"' {
++			inside = !inside
++			continue
++		}
++		if !inside || raw[i] != '\\' {
++			continue
++		}
++		i++
++		if i >= len(raw) {
++			return false
++		}
++		if raw[i] != 'u' {
++			continue
++		}
++		if i+4 >= len(raw) {
++			return false
++		}
++		code, err := strconv.ParseUint(string(raw[i+1:i+5]), 16, 16)
++		if err != nil {
++			return false
++		}
++		i += 4
++		if code >= 0xDC00 && code <= 0xDFFF {
++			return false
++		}
++		if code >= 0xD800 && code <= 0xDBFF {
++			if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
++				return false
++			}
++			low, err := strconv.ParseUint(string(raw[i+3:i+7]), 16, 16)
++			if err != nil || low < 0xDC00 || low > 0xDFFF {
++				return false
++			}
++			i += 6
++		}
++	}
++	return true
++}
++func readModelSettingsJSON(d *json.Decoder, depth int, numberBudget *int) (interface{}, error) {
++	if depth > 10000 {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	token, err := d.Token()
++	if err != nil {
++		return nil, err
++	}
++	switch value := token.(type) {
++	case json.Delim:
++		switch value {
++		case '{':
++			object := map[string]interface{}{}
++			for d.More() {
++				keyToken, err := d.Token()
++				if err != nil {
++					return nil, err
++				}
++				key, ok := keyToken.(string)
++				if !ok {
++					return nil, ErrMemoryOriginalUnavailable
++				}
++				if _, exists := object[key]; exists {
++					return nil, ErrMemoryOriginalUnavailable
++				}
++				child, err := readModelSettingsJSON(d, depth+1, numberBudget)
++				if err != nil {
++					return nil, err
++				}
++				object[key] = child
++			}
++			end, err := d.Token()
++			if err != nil || end != json.Delim('}') {
++				return nil, ErrMemoryOriginalUnavailable
++			}
++			return object, nil
++		case '[':
++			array := []interface{}{}
++			for d.More() {
++				child, err := readModelSettingsJSON(d, depth+1, numberBudget)
++				if err != nil {
++					return nil, err
++				}
++				array = append(array, child)
++			}
++			end, err := d.Token()
++			if err != nil || end != json.Delim(']') {
++				return nil, ErrMemoryOriginalUnavailable
++			}
++			return array, nil
++		}
++	case json.Number:
++		canonical, err := modelSettingsDecimal(value.String(), numberBudget)
++		if err != nil {
++			return nil, err
++		}
++		return json.Number(canonical), nil
++	case string, bool, nil:
++		return value, nil
++	}
++	return nil, ErrMemoryOriginalUnavailable
++}
++func modelSettingsDecimal(value string, budget *int) (string, error) {
++	sign := ""
++	if strings.HasPrefix(value, "-") {
++		sign = "-"
++		value = value[1:]
++	}
++	exponent := int64(0)
++	if at := strings.IndexAny(value, "eE"); at >= 0 {
++		parsed, err := strconv.ParseInt(value[at+1:], 10, 32)
++		if err != nil {
++			return "", ErrMemoryOriginalUnavailable
++		}
++		exponent = parsed
++		value = value[:at]
++	}
++	fraction := 0
++	if at := strings.IndexByte(value, '.'); at >= 0 {
++		fraction = len(value) - at - 1
++		value = value[:at] + value[at+1:]
++	}
++	value = strings.TrimLeft(value, "0")
++	if value == "" {
++		if *budget < 1 {
++			return "", ErrMemoryOriginalUnavailable
++		}
++		*budget--
++		return "0", nil
++	}
++	trailing := len(value) - len(strings.TrimRight(value, "0"))
++	value = strings.TrimRight(value, "0")
++	scale := exponent - int64(fraction) + int64(trailing)
++	// Bound expansion, never round/coerce. This covers PostgreSQL JSONB's
++	// numeric range; unsupported enormous exponents fail without huge allocation.
++	if scale > 131072 || scale < -131072 {
++		return "", ErrMemoryOriginalUnavailable
++	}
++	point := int64(len(value)) + scale
++	size := int64(len(sign) + len(value))
++	if scale >= 0 {
++		size += scale
++	} else if point > 0 {
++		size++
++	} else {
++		size += 2 - point
++	}
++	if size > int64(*budget) {
++		return "", ErrMemoryOriginalUnavailable
++	}
++	*budget -= int(size)
++	if scale >= 0 {
++		return sign + value + strings.Repeat("0", int(scale)), nil
++	}
++	if point > 0 {
++		return sign + value[:int(point)] + "." + value[int(point):], nil
++	}
++	return sign + "0." + strings.Repeat("0", int(-point)) + value, nil
++}
++
++// Re-marshalling WITHOUT Settings normalization must reproduce all stored
++// bytes exactly. No other field/representation is granted equivalence. Old
++// genuine encodings and hashes stay untouched; unknown fields remain closed.
++func decodeModelDefinitionOriginal(raw string) (*ModelOriginalDefinition, error) {
++	if !utf8.ValidString(raw) {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	d := json.NewDecoder(strings.NewReader(raw))
++	d.UseNumber()
++	d.DisallowUnknownFields()
++	var definition ModelOriginalDefinition
++	if d.Decode(&definition) != nil {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	if _, err := d.Token(); err != io.EOF {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	legacy, err := json.Marshal(definition)
++	if err != nil || string(legacy) != raw {
++		return nil, ErrMemoryOriginalUnavailable
++	}
++	return &definition, nil
++}
++
++// No proof/digest is generated here. Callers still verify raw fact digest,
++// SHA256(raw DefinitionJSON), exact body head/receipt and current controls.
++func ModelDefinitionMatchesOriginal(model *Model, raw string) (bool, error) {
++	definition, err := decodeModelDefinitionOriginal(raw)
++	if err != nil {
++		return false, err
++	}
++	original := &Model{ID: definition.ID, TenantID: definition.TenantID, Name: definition.Name, DisplayName: definition.DisplayName, Description: definition.Description, Type: definition.Type, Source: definition.Source, IsBuiltin: definition.IsBuiltin, Parameters: definition.Parameters}
++	originalBytes, err := ModelDefinitionBytes(original)
++	if err != nil {
++		return false, err
++	}
++	currentBytes, err := ModelDefinitionBytes(model)
++	if err != nil {
++		return false, err
++	}
++	return bytes.Equal(originalBytes, currentBytes), nil
++}
++
++// After raw fact/body verification, restore only exact original Settings to
++// the current proved snapshot. No historical credential is hydrated, no
++// provider constructed and no current state/authority changed by this helper.
++func RestoreModelOriginalChatSettings(model *Model, raw string) error {
++	definition, err := decodeModelDefinitionOriginal(raw)
++	if err != nil {
++		return err
++	}
++	if definition.Parameters.OriginalChat == nil {
++		return nil
++	}
++	if model == nil || model.Parameters.OriginalChat == nil {
++		return ErrMemoryOriginalUnavailable
++	}
++	recipe := *model.Parameters.OriginalChat
++	recipe.Settings = append(json.RawMessage(nil), definition.Parameters.OriginalChat.Settings...)
++	model.Parameters.OriginalChat = &recipe
++	return nil
++}
+diff --git a/internal/types/model_original_settings_test.go b/internal/types/model_original_settings_test.go
+new file mode 100644
+index 00000000..254ced9e
+--- /dev/null
++++ b/internal/types/model_original_settings_test.go
+@@ -0,0 +1,64 @@
++package types
++
++import (
++	"bytes"
++	"encoding/json"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestOriginalChatSettingsStableJSON(t *testing.T) {
++	canonical := func(raw string) (json.RawMessage, error) {
++		return ModelOriginalChatSettingsBytes(&ModelOriginalChatDefinition{Version: 1, Recipe: "chat/openai-completions/full-v1", Settings: json.RawMessage(raw)})
++	}
++	first, err := canonical(`{"z":[1,"literal",true],"large":9007199254740993,"decimal":1.2500,"exp":1e2,"a":{"b":false,"a":null}}`)
++	require.NoError(t, err)
++	second, err := canonical(` { "a":{"a":null,"b":false}, "exp":100.00,"decimal":1.25,"large":9007199254740993,"z":[1.0,"literal",true] } `)
++	require.NoError(t, err)
++	require.Equal(t, string(first), string(second))
++	for _, changed := range []string{`{"z":["literal",1,true],"large":9007199254740993,"decimal":1.25,"exp":100,"a":{"b":false,"a":null}}`, `{"z":[1,"literal",true],"large":9007199254740992,"decimal":1.25,"exp":100,"a":{"b":false,"a":null}}`, `{"z":[1,"different",true],"large":9007199254740993,"decimal":1.25,"exp":100,"a":{"b":false,"a":null}}`} {
++		value, err := canonical(changed)
++		require.NoError(t, err)
++		require.NotEqual(t, string(first), string(value))
++	}
++	for _, invalid := range []string{`{"a":1,"a":2}`, `{"a":{"b":true,"b":false}}`, `{} {}`, `[]`, `{"text":"\ud800"}`, `{"text":"\udc00"}`, `{"number":1e2147483647}`} {
++		_, err := canonical(invalid)
++		require.Error(t, err)
++	}
++	_, err = ModelOriginalChatSettingsBytes(&ModelOriginalChatDefinition{Version: 1, Recipe: "unknown", Settings: json.RawMessage(`{}`)})
++	require.Error(t, err)
++}
++
++// A serialization comparison oracle is not a seeded SQL origin or grant. The
++// repository additionally retains the real raw digest/body/receipt checks.
++func TestOriginalChatSettingsLegacyDefinitionProjection(t *testing.T) {
++	params := ModelParameters{OriginalChat: &ModelOriginalChatDefinition{Version: 1, Recipe: "chat/openai-completions/full-v1", Settings: json.RawMessage(`{"z":[1,2],"a":9007199254740993}`)}, BaseURL: "https://explicit.invalid", Provider: "openai"}
++	model := &Model{ID: "authored-model", TenantID: 7, Name: "authored name", Type: ModelTypeKnowledgeQA, Source: ModelSourceRemote, Parameters: params}
++	legacy, err := json.Marshal(ModelOriginalDefinition{model.ID, model.TenantID, model.Name, model.DisplayName, model.Description, model.Type, model.Source, model.IsBuiltin, params})
++	require.NoError(t, err)
++	retained := append([]byte(nil), legacy...)
++	current := *model
++	recipe := *params.OriginalChat
++	recipe.Settings = json.RawMessage(`{"a":9007199254740993,"z":[1.0,2.0]}`)
++	current.Parameters.OriginalChat = &recipe
++	match, err := ModelDefinitionMatchesOriginal(&current, string(legacy))
++	require.NoError(t, err)
++	require.True(t, match)
++	require.True(t, bytes.Equal(retained, legacy))
++	require.NoError(t, RestoreModelOriginalChatSettings(&current, string(legacy)))
++	require.Equal(t, string(params.OriginalChat.Settings), string(current.Parameters.OriginalChat.Settings))
++	require.True(t, bytes.Equal(retained, legacy))
++	current.Name = "different name"
++	match, err = ModelDefinitionMatchesOriginal(&current, string(legacy))
++	require.NoError(t, err)
++	require.False(t, match)
++	current.Name = model.Name
++	recipe.Settings = json.RawMessage(`{"a":9007199254740992,"z":[1,2]}`)
++	current.Parameters.OriginalChat = &recipe
++	match, err = ModelDefinitionMatchesOriginal(&current, string(legacy))
++	require.NoError(t, err)
++	require.False(t, match)
++	_, err = ModelDefinitionMatchesOriginal(model, string(legacy[:len(legacy)-1])+`,"Unknown":1}`)
++	require.Error(t, err)
++}

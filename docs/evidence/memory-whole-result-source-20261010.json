@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "classification": "source_only_whole_result_refusal_integrated_with_model_lifetime",
+  "source": {
+    "head": "674e77cc6b984af240ea241189ed638390b49a6e",
+    "tree": "24984809eb78be8ed1e3d3677e2cb57b0d2ad751",
+    "parents": [
+      "dd7f6e240fc44a89da735406be58792b338fd6cc",
+      "947c04098db54b9bec0a941eff8734be85ca6379"
+    ],
+    "candidate_manifest_changed": false
+  },
+  "problem": "Unsupported or invalid derived-memory decisions were silently dropped while successful partial/empty result receipts could advance the session cursor.",
+  "change": "Reject the whole parsed result on unsupported/empty action, invalid/missing target, invalid kind, invalid content, mostly-sensitive output, repeated key or repeated target. Preserve explicit none/noop and snapshot-proved duplicate/tombstone suppression.",
+  "source_verification": {
+    "merge_conflicts": 0,
+    "genuine_derived_model_reader_fixture_preserved": true,
+    "full_core_patch_bytes": 863677,
+    "full_core_patch_sha256": "2e0836813347c781c5fd0eae00fa2e8e5c585a8603e9188155d3a36abaaaf030",
+    "exact_forward_reverse_roundtrip": true,
+    "integration_metadata_sha256": "6838f90720dbc45c1879bff6a23350e2cb3d84a93e95854796d7ecc42dec93e6",
+    "whole_result_child_metadata_sha256": "bc32a79feb1c31ca1799b2c917d8fcccfc3459869e2e814e42e5ced8c35eb873"
+  },
+  "test_source": {
+    "new_parents": 2,
+    "new_leaf_cases": 4,
+    "new_declared_nodes": 6,
+    "executed_nodes": 0,
+    "scope": "Genuine Schedule/SQL dispatch/relay/Handle; one valid add plus one unsupported action or invalid target; require model1, error, zero effects/checkpoints, unchanged pending cursor/input/task and released leases",
+    "matched_test_only_baseline_head": "de962df8f4e1a2eb14bf65a009a7b5e4f95ab885",
+    "matched_test_only_baseline_tree": "e7e1a3ec7edbc117b9e40719af93f263a2698c51",
+    "test_same_SHA256_on_baseline_and_fix": "fb39953fe8af615270b49c6a1709400619516c8aacc70f1129696d83c67a50d5",
+    "baseline_preparation_metadata_sha256": "3f07038a3abb8a4da397c32f6d2f4deb51e1f9a8dfafbfe7c7c7024f4b1b279e",
+    "actual_RED_GREEN": false
+  },
+  "acceptance": {
+    "formatted": false,
+    "compiled": false,
+    "business_execution": false,
+    "whole_result_accepted": false,
+    "model_provider_ordinary_lifetime_accepted": false,
+    "full_V1": false
+  },
+  "remaining_required": [
+    "Actual matched baseline/fix regression and legal NoOp/dedup/tombstone/delete coverage",
+    "Full model/derived/native/policy component reruns on the final source",
+    "Builtins/default/Ollama/embedding constructors and generated workflows",
+    "Full migrations, durable broker, normal application and restore"
+  ],
+  "privacy": {
+    "raw_content_credentials_private_paths_omitted": true
+  }
+}

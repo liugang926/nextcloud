@@ -1,0 +1,95 @@
+# Failed Nextcloud candidate retry
+
+The WeKnora patch keeps a source file's current `nextcloud_source_versions`
+row in `staging` when parsing fails. Its old published generation remains
+retained but hidden. A failed row never becomes visible merely because an
+earlier candidate finishes late.
+
+The app dispatcher scans current failed staging rows every five seconds by
+default, including rows whose source event was already acknowledged. It
+persists a retry job for each tenant, knowledge base, data source, and external
+file ID. The scan filters active sources and pairings, pages beyond malformed
+rows, and continues other files if one row is invalid. The first retry waits
+one minute plus jitter after parse failure; later attempts use capped
+exponential backoff (1, 2, 4, …, 128 minutes) with 0–20% stable per-file,
+per-candidate jitter. The automatic window ends 24 hours after the **first staging of the same ETag**. A replacement
+candidate with that ETag retains the original timestamp and retry count.
+After the window, the job moves to `manual` with
+`candidate_retry_exhausted`. A stale running sync lasting 150 minutes also
+requires manual review (`sync_stale_manual_review`). These are static codes;
+parser output and credentials are not copied into the retry job.
+
+The queue task carries the exact failed candidate, source tuple, ETag,
+instance, binding, source configuration SHA-256, pairing operation/epoch,
+sync log ID, and a database lease token. At task start and before source reads, WeKnora checks the current failed generation, active
+source pair, source configuration fingerprint, and lease. A revoked, replaced,
+or expired task cannot start or renew. A key rotation revokes the old claim;
+Stage locks and rechecks the claimed failed generation, lease, current source
+configuration, and pairing before replacing it, even if the fresh source fetch
+has a newer ETag. A newer version committed by an ordinary sync makes the old
+retry claim invalid. A lease cannot extend the 24-hour window; an expired job moves to manual review even when its next backoff time
+is still in the future. The connector fetches a complete authoritative
+manifest and re-downloads **that file** even when its ETag equals the stored
+cursor; other unchanged files are skipped. After validating the complete
+manifest, a retry task skips every other file before content GET, including
+newly changed neighbors whose content endpoint fails. It also suppresses
+unrelated deletion callbacks and leaves the shared
+source cursor unchanged so the next ordinary sync still sees them. An ordinary
+full sync or changed-file hint skips a failed file with the same ETag before
+storing bytes or enqueuing a parser. Stage checks the exact leased retry again
+in its transaction. The usual content API and Stage checks still compare the
+live source. File-hash deduplication only matches the
+current source-version candidate with the desired ETag, so a failed generation
+or an older identical body cannot be reused. Stage atomically retires the old
+generation before the new one becomes the current candidate. Publication
+requires completed parsing and fresh source checks.
+
+The administrator-only routes are:
+
+```text
+GET  /api/v1/datasource/nextcloud-source-pairings/by-datasource/{datasource_id}/failed-candidates?limit=25&cursor=...
+GET  /api/v1/datasource/nextcloud-source-pairings/{operation_id}/candidates/{file_id}/retry
+POST /api/v1/datasource/nextcloud-source-pairings/{operation_id}/candidates/{file_id}/retry
+```
+
+The WeKnora data source settings page offers a failed-file drawer for an
+active paired Nextcloud source. The first route discovers its operation ID and
+lists only current failed staging files from that exact tenant, knowledge
+base, data source, and active pairing. It returns at most 50 static-code rows
+per keyset page, with an opaque cursor. No file title, path, content, or
+credential is returned. Selecting a file calls the exact status `GET`; the
+page keeps its ETag and candidate ID in memory only and sends them unchanged
+to `POST`. A `409` clears that snapshot and reloads the list and status.
+
+`GET` returns the current failed candidate ID, ETag, retry state, attempts,
+next attempt, first staging time, and static reason code. `POST` accepts
+`{"source_etag":"...","candidate_id":"..."}`. It compare-and-swaps these
+selectors against the current failed candidate, checks the exact active pair,
+and restarts the retry window. A fresh source fetch and a **new** knowledge ID
+are still required. The route requires an interactive tenant administrator
+with edit access to the paired knowledge base; API keys cannot invoke it.
+
+A transient fetch or ingest failure is recorded on the retry sync log and
+leaves the paired data source active. After backoff, the same failed candidate
+can be claimed again with a new lease. The endpoint does not manually publish
+a failed candidate. A source that is deleted, moved outside the binding, paused, or no longer paired must be fixed
+at the source before retry. A later ETag creates a new version and resets its
+own retry window. The signed file-status response remains `failed` while the
+current candidate has failed; the admin retry route gives the reason code.
+
+Focused tests cover an event-free failed-candidate scan, durable lease and
+candidate fencing, scan isolation beyond 64 invalid rows, a 24-hour cutoff
+and administrator restart, unchanged-ETag content refetch, pre-create skip for
+ordinary syncs, exact-file retry scope and unchanged shared cursor, transient
+fetch failure recovery, key-rotation revocation, a distinct second generation,
+and late completion of the old generation. A loopback-only dual-service fault
+drill passed with an induced failed V2 parse, one exact administrator list
+entry, HTTP 403 for both ordinary users, an automatic fresh-candidate retry,
+an empty list after publication, Alice's restored answer and original-file
+citation, Bob's denial, and verified applied watermarks. A separate Chromium
+drill opened the administrator drawer against a failed candidate, showed the
+exact retry status, reloaded after a simulated stale-selection `409`, and
+received `202` from the real retry route. It also verified that a file-count
+probe `403` did not hide the entire knowledge-base editor, and that an ordinary
+user saw neither the settings entry nor the failed-candidate list. The [V1
+status](v1-status.md) records the candidate image and remaining scope.

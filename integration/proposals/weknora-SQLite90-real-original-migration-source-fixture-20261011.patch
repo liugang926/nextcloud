@@ -1,0 +1,38 @@
+diff --git a/internal/application/service/knowledge_sqlite_embedding_original_sql_http_actual_test.go b/internal/application/service/knowledge_sqlite_embedding_original_sql_http_actual_test.go
+index b5a7900c060330657078c899b51c48ebe78265ce..d603c51651f3d3034437bcc7edb23500190e5fd4 100644
+--- a/internal/application/service/knowledge_sqlite_embedding_original_sql_http_actual_test.go
++++ b/internal/application/service/knowledge_sqlite_embedding_original_sql_http_actual_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"errors"
+ 	"net/http"
+ 	"net/http/httptest"
++	"os"
+ 	"path/filepath"
+ 	"reflect"
+ 	"runtime"
+@@ -40,7 +41,24 @@ func installKnowledgeSQLiteOriginal90ForTest(t *testing.T, db *gorm.DB) {
+ 	require.NotEmpty(t, path)
+ 	root, e := filepath.Abs("../../..")
+ 	require.NoError(t, e)
+-	m, e := migrate.New("file://"+filepath.Join(root, "migrations/pending/knowledge-sqlite-embedding-originals-000090"), "sqlite3://"+path)
++	// migrate resolves the actual current87 UP/DOWN too. Copy the complete
++	// canonical source unchanged, then append the exact pending90 pair.88/89
++	// belong to peer history and are not fabricated as no-op aliases here.
++	source := t.TempDir()
++	canonical, e := filepath.Glob(filepath.Join(root, "migrations/sqlite", "*.sql"))
++	require.NoError(t, e)
++	require.NotEmpty(t, canonical)
++	for _, file := range canonical {
++		data, e := os.ReadFile(file)
++		require.NoError(t, e)
++		require.NoError(t, os.WriteFile(filepath.Join(source, filepath.Base(file)), data, 0600))
++	}
++	for _, name := range []string{"000090_knowledge_sqlite_embedding_originals.up.sql", "000090_knowledge_sqlite_embedding_originals.down.sql"} {
++		data, e := os.ReadFile(filepath.Join(root, "migrations/pending/knowledge-sqlite-embedding-originals-000090", name))
++		require.NoError(t, e)
++		require.NoError(t, os.WriteFile(filepath.Join(source, name), data, 0600))
++	}
++	m, e := migrate.New("file://"+source, "sqlite3://"+path)
+ 	require.NoError(t, e)
+ 	require.NoError(t, m.Migrate(90))
+ 	sourceClose, databaseClose := m.Close()

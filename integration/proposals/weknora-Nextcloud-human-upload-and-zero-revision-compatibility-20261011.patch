@@ -1,0 +1,416 @@
+diff --git a/internal/application/repository/knowledge_sqlite_nextcloud_union.go b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
+index a8acd72f3..cb0cdefa6 100644
+--- a/internal/application/repository/knowledge_sqlite_nextcloud_union.go
++++ b/internal/application/repository/knowledge_sqlite_nextcloud_union.go
+@@ -158,7 +158,7 @@ func (r *nextcloudOriginalUploadRead) finalClockInTx(tx *gorm.DB, extra map[stri
+ 	// Payload columns use their exact embedded prefix; lease_body_id cannot
+ 	// collide with the payload primary key in GORM's row scanner.
+ 	var rows []nextcloudOriginalFinalRow
+-	if err := bodyInternal(tx).Raw(query, r.operation.ActorDirectoryID, bodyIDs, contentIDs).Scan(&rows).Error; err != nil {
++	if err := bodyInternal(tx).Raw(query, r.sourceDirectoryID(), bodyIDs, contentIDs).Scan(&rows).Error; err != nil {
+ 		return err
+ 	}
+ 	if len(rows) != len(bodyIDs)+len(contentIDs) {
+diff --git a/internal/application/repository/nextcloud_embedding_model_caller.go b/internal/application/repository/nextcloud_embedding_model_caller.go
+index 19415556e..656a8d8cb 100644
+--- a/internal/application/repository/nextcloud_embedding_model_caller.go
++++ b/internal/application/repository/nextcloud_embedding_model_caller.go
+@@ -21,7 +21,7 @@ func SameNextcloudEmbeddingModelReadCaller(ctx context.Context, reader interface
+ 		return false
+ 	}
+ 	holder := nextcloudOriginalUploadInContext(ctx)
+-	if holder == nil || holder.ctx == nil || holder.ctx.Err() != nil || !holder.needsEmbedding || !SameNextcloudEmbeddingPurposeCaller(ctx, read.ctx) {
++	if holder == nil || holder.purposeMode != "machine" || holder.ctx == nil || holder.ctx.Err() != nil || !holder.needsEmbedding || !SameNextcloudEmbeddingPurposeCaller(ctx, read.ctx) {
+ 		return false
+ 	}
+ 	proof := read.hold.Proof
+@@ -42,6 +42,12 @@ func NextcloudEmbeddingPurposePresent(ctx context.Context) bool {
+ 	if ctx == nil {
+ 		return false
+ 	}
+-	_, present := ctx.Value(nextcloudOriginalUploadReadKey{}).(*nextcloudOriginalUploadRead)
+-	return present
++	holder, present := ctx.Value(nextcloudOriginalUploadReadKey{}).(*nextcloudOriginalUploadRead)
++	if !present {
++		return false
++	}
++	if holder == nil {
++		return true
++	}
++	return holder.purposeMode != "human"
+ }
+diff --git a/internal/application/repository/nextcloud_embedding_purpose.go b/internal/application/repository/nextcloud_embedding_purpose.go
+index fc2c195c9..0bfd9ce11 100644
+--- a/internal/application/repository/nextcloud_embedding_purpose.go
++++ b/internal/application/repository/nextcloud_embedding_purpose.go
+@@ -17,9 +17,21 @@ func (r *nextcloudOriginalUploadRead) capturePurposeInTx(tx *gorm.DB) error {
+ 	if r.actual.PairOperation == "" {
+ 		return ErrNextcloudOnboardingDenied
+ 	}
+-	if err := tx.Where("operation_id=? AND state='active'", r.actual.PairOperation).Take(&r.operation).Error; err != nil {
++	err := tx.Where("operation_id=?", r.actual.PairOperation).Take(&r.operation).Error
++	if err == gorm.ErrRecordNotFound {
++		if !r.authenticatedCaller {
++			return ErrNextcloudOnboardingDenied
++		}
++		r.purposeMode = "human"
++		return r.checkHumanUploadActorInTx(tx)
++	}
++	if err != nil {
+ 		return err
+ 	}
++	if r.operation.State != "active" {
++		return ErrNextcloudOnboardingDenied
++	}
++	r.purposeMode = "machine"
+ 	if err := tx.Where("id=? AND enabled=?", r.operation.CredentialID, true).Take(&r.credential).Error; err != nil {
+ 		return err
+ 	}
+@@ -29,6 +41,12 @@ func (r *nextcloudOriginalUploadRead) capturePurposeInTx(tx *gorm.DB) error {
+ // Re-run the actual onboarding actor semantics against this transaction. The
+ // GUID-only delegation is a scoped machine purpose, never a WebUser principal.
+ func (r *nextcloudOriginalUploadRead) checkActorInTx(tx *gorm.DB) error {
++	if r.purposeMode == "human" {
++		return r.checkHumanUploadActorInTx(tx)
++	}
++	if r.purposeMode != "machine" {
++		return ErrNextcloudOnboardingDenied
++	}
+ 	var op types.NextcloudOnboardingOperation
+ 	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("operation_id=? AND state='active'", r.operation.OperationID).Take(&op).Error; err != nil {
+ 		return err
+@@ -291,7 +309,7 @@ func (r *nextcloudOriginalUploadRead) checkInheritedGUIDGrantInTx(tx *gorm.DB, s
+ 	// DELETE may bypass ApplyGrantSnapshot's op-row fence, but must still
+ 	// contend with these exact current grant-row SHARE locks.
+ 	var grants []types.NextcloudSourceGrant
+-	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("tenant_id=? AND knowledge_base_id=? AND operation_id=? AND directory_id=?", source.TenantID, source.KnowledgeBaseID, source.PairOperationID, r.operation.ActorDirectoryID).Find(&grants).Error; err != nil {
++	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("tenant_id=? AND knowledge_base_id=? AND operation_id=? AND directory_id=?", source.TenantID, source.KnowledgeBaseID, source.PairOperationID, r.sourceDirectoryID()).Find(&grants).Error; err != nil {
+ 		return err
+ 	}
+ 	var count int64
+@@ -304,7 +322,7 @@ func (r *nextcloudOriginalUploadRead) checkInheritedGUIDGrantInTx(tx *gorm.DB, s
+  WHERE sg.tenant_id=? AND sg.knowledge_base_id=? AND sg.operation_id=? AND sg.directory_id=?
+  AND sg.permission_version=o.permission_version AND sg.permission_version>0
+  AND sg.publication_epoch=COALESCE((SELECT MAX(e.publication_epoch) FROM nextcloud_source_status_epochs e JOIN nextcloud_event_connections c ON c.connection_id=e.connection_id AND c.status='active' WHERE e.pair_operation_id=p.operation_id AND c.datasource_id=ds.id),p.publication_epoch)
+- AND ((sg.kind='user' AND sg.principal_id=i.id) OR (sg.kind='group' AND EXISTS(SELECT 1 FROM directory_group_memberships gm JOIN directory_groups g ON g.id=gm.group_id AND g.directory_id=d.id AND g.status='active' AND g.snapshot_version=d.snapshot_version WHERE gm.directory_id=d.id AND gm.identity_id=i.id AND gm.group_id=sg.principal_id AND gm.snapshot_version=d.snapshot_version)))`, r.operation.ActorObjectGUID, source.TenantID, source.KnowledgeBaseID, source.PairOperationID, r.operation.ActorDirectoryID).Scan(&count).Error
++ AND ((sg.kind='user' AND sg.principal_id=i.id) OR (sg.kind='group' AND EXISTS(SELECT 1 FROM directory_group_memberships gm JOIN directory_groups g ON g.id=gm.group_id AND g.directory_id=d.id AND g.status='active' AND g.snapshot_version=d.snapshot_version WHERE gm.directory_id=d.id AND gm.identity_id=i.id AND gm.group_id=sg.principal_id AND gm.snapshot_version=d.snapshot_version)))`, r.sourceObjectGUID(), source.TenantID, source.KnowledgeBaseID, source.PairOperationID, r.sourceDirectoryID()).Scan(&count).Error
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -314,6 +332,13 @@ func (r *nextcloudOriginalUploadRead) checkInheritedGUIDGrantInTx(tx *gorm.DB, s
+ 	return nil
+ }
+ func (r *nextcloudOriginalUploadRead) checkRemoteSourceInTx(tx *gorm.DB, ds *types.DataSource, k *types.Knowledge, instance, binding, file, etag, revision string) error {
++	// Original v1 artifact/lineage digests omit zero as an empty string; the
++	// signed authorization response normalizes that same version to "0".
++	// Compare its canonical value without changing any captured original bytes.
++	currentRevision, err := types.NormalizeNextcloudContentRevision(revision)
++	if err != nil {
++		return ErrKnowledgeInputChanged
++	}
+ 	cfg, err := ds.ParseConfig()
+ 	if err != nil {
+ 		return err
+@@ -331,11 +356,11 @@ func (r *nextcloudOriginalUploadRead) checkRemoteSourceInTx(tx *gorm.DB, ds *typ
+ 		return err
+ 	}
+ 	ctx := types.WithNextcloudContentRevision(r.ctx, revision)
+-	decision, err := nextcloud.AuthorizeCurrentFile(ctx, cfg, instance, binding, r.operation.ActorDirectoryID, r.operation.ActorObjectGUID, id)
++	decision, err := nextcloud.AuthorizeCurrentFile(ctx, cfg, instance, binding, r.sourceDirectoryID(), r.sourceObjectGUID(), id)
+ 	if err != nil {
+ 		return err
+ 	}
+-	if !decision.Allow || decision.SourceETag != etag || decision.SourceContentRevision != revision {
++	if !decision.Allow || decision.SourceETag != etag || decision.SourceContentRevision != currentRevision {
+ 		return ErrNextcloudOnboardingDenied
+ 	}
+ 	return nextcloud.CheckCurrentPublication(ctx, cfg, instance, binding, id, etag, path)
+@@ -355,6 +380,20 @@ func CheckNextcloudEmbeddingModelPurposeInTx(ctx context.Context, tx *gorm.DB, p
+ 	if r == nil {
+ 		return true, ErrKnowledgeInputChanged
+ 	}
++	if r.purposeMode == "human" {
++		if err = r.start(); err != nil {
++			return true, err
++		}
++		err = r.checkInTx(tx, true)
++		err = r.finish(err)
++		if err != nil {
++			return true, err
++		}
++		return false, nil
++	}
++	if r.purposeMode != "machine" {
++		return true, ErrNextcloudOnboardingDenied
++	}
+ 	if err = r.start(); err != nil {
+ 		return true, err
+ 	}
+@@ -504,3 +543,89 @@ func lockNextcloudOnboardingActorInTx(tx *gorm.DB, c types.NextcloudOnboardingCr
+ 	}
+ 	return nil
+ }
++
++func (r *nextcloudOriginalUploadRead) sourceDirectoryID() string {
++	if r.purposeMode == "human" {
++		return r.humanDirectoryID
++	}
++	return r.operation.ActorDirectoryID
++}
++func (r *nextcloudOriginalUploadRead) sourceObjectGUID() string {
++	if r.purposeMode == "human" {
++		return r.humanObjectGUID
++	}
++	return r.operation.ActorObjectGUID
++}
++
++// An authenticated legacy source upload is not an onboarding machine grant.
++// It retains its real human principal, current KB edit permission and mapped
++// directory identity; all signed source/body/build checks still apply.
++func (r *nextcloudOriginalUploadRead) checkHumanUploadActorInTx(tx *gorm.DB) error {
++	if !r.authenticatedCaller {
++		return ErrNextcloudOnboardingDenied
++	}
++	// A captured human holder is never reclassified into a newly created
++	// onboarding operation, regardless of that operation's state or scope.
++	var operation types.NextcloudOnboardingOperation
++	err := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Select("operation_id").Where("operation_id=?", r.actual.PairOperation).Take(&operation).Error
++	if err == nil {
++		return ErrNextcloudOnboardingDenied
++	}
++	if err != gorm.ErrRecordNotFound {
++		return err
++	}
++	authority, err := knowledgeSQLiteEmbeddingAuthority(tx, r.store)
++	if err != nil {
++		return err
++	}
++	fresh, err := authority.RefreshCurrentReadActor(r.ctx)
++	if err != nil {
++		return err
++	}
++	if !sameOriginalModelCallerInRepository(fresh, r.ctx) {
++		return ErrNextcloudOnboardingDenied
++	}
++	caller := types.CallerFromContext(fresh)
++	principal, ok := types.PrincipalFromContext(fresh)
++	if !ok || principal.Type != types.PrincipalWebUser || principal.ID != caller.UserID || caller.TenantID != r.payload.TenantID || caller.UserID == "" || types.IsSyntheticUserID(caller.UserID) {
++		return ErrNextcloudOnboardingDenied
++	}
++	var kb types.KnowledgeBase
++	if err = tx.Where("id=? AND tenant_id=? AND deleted_at IS NULL", r.payload.KnowledgeBaseID, r.payload.TenantID).Take(&kb).Error; err != nil {
++		return err
++	}
++	if _, err = authority.authorizeKnowledgeActorWrite(fresh, &kb); err != nil {
++		return err
++	}
++	identities, snapshot, err := NewDirectoryRepository(tx).GetUserLoginSnapshot(fresh, caller.UserID)
++	if err != nil || snapshot == nil || snapshot.Directory == nil || snapshot.Identity == nil || len(identities) != 1 {
++		return ErrNextcloudOnboardingDenied
++	}
++	identity := snapshot.Identity
++	directory := snapshot.Directory
++	if identity.UserID == nil || *identity.UserID != caller.UserID || identity.DirectoryID != directory.ID || identity.Status != types.DirectoryObjectActive || identity.SnapshotVersion != directory.SnapshotVersion {
++		return ErrNextcloudOnboardingDenied
++	}
++	now, err := nextcloudLeaseNowMS(tx)
++	if err != nil {
++		return err
++	}
++	if err = directoryUsable(tx, directory.ID, time.UnixMilli(now).UTC()); err != nil {
++		return err
++	}
++	if r.humanDirectoryID == "" {
++		r.humanDirectoryID = identity.DirectoryID
++		r.humanObjectGUID = identity.ObjectGUID
++	} else if r.humanDirectoryID != identity.DirectoryID || r.humanObjectGUID != identity.ObjectGUID {
++		return ErrNextcloudOnboardingDenied
++	}
++	var locked types.Directory
++	if err = tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=?", directory.ID).Take(&locked).Error; err != nil {
++		return err
++	}
++	var lockedIdentity types.DirectoryIdentity
++	if err = tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND directory_id=? AND object_guid=? AND user_id=? AND status=? AND snapshot_version=?", identity.ID, directory.ID, identity.ObjectGUID, caller.UserID, types.DirectoryObjectActive, locked.SnapshotVersion).Take(&lockedIdentity).Error; err != nil {
++		return ErrNextcloudOnboardingDenied
++	}
++	return r.ctx.Err()
++}
+diff --git a/internal/application/repository/nextcloud_original_upload_read.go b/internal/application/repository/nextcloud_original_upload_read.go
+index 5f6254e30..5b289b415 100644
+--- a/internal/application/repository/nextcloud_original_upload_read.go
++++ b/internal/application/repository/nextcloud_original_upload_read.go
+@@ -38,6 +38,9 @@ type nextcloudOriginalUploadRead struct {
+ 	actual              nextcloudOriginalUploadActual
+ 	operation           types.NextcloudOnboardingOperation
+ 	credential          types.NextcloudOnboardingCredential
++	purposeMode         string
++	humanDirectoryID    string
++	humanObjectGUID     string
+ 	authenticatedCaller bool
+ 	configuredModel     string
+ 	needsEmbedding      bool
+@@ -304,7 +307,7 @@ func (r *nextcloudOriginalUploadRead) samePool(tx *gorm.DB) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if pool != r.pool || !SameNextcloudEmbeddingPurposeCaller(tx.Statement.Context, r.ctx) {
++	if pool != r.pool || !sameNextcloudUploadCaller(tx.Statement.Context, r.ctx) {
+ 		return ErrKnowledgeInputChanged
+ 	}
+ 	return r.ctx.Err()
+diff --git a/internal/application/repository/nextcloud_upload_read_preflight.go b/internal/application/repository/nextcloud_upload_read_preflight.go
+index 666efca7d..e34e6e390 100644
+--- a/internal/application/repository/nextcloud_upload_read_preflight.go
++++ b/internal/application/repository/nextcloud_upload_read_preflight.go
+@@ -117,6 +117,17 @@ func (r *nextcloudOriginalUploadRead) bodyReadPreflightInTx(tx *gorm.DB) error {
+ // or execution authorization. Actual model/body/source checks remain required.
+ // Ordinary callers/historical readers continue to use their existing helpers.
+ func SameNextcloudEmbeddingPurposeCaller(ctx, other context.Context) bool {
++	if ctx == nil || other == nil || ctx.Err() != nil || other.Err() != nil {
++		return false
++	}
++	r := nextcloudOriginalUploadInContext(ctx)
++	if r == nil || r.purposeMode != "machine" {
++		return false
++	}
++	return sameNextcloudUploadCaller(ctx, other)
++}
++
++func sameNextcloudUploadCaller(ctx, other context.Context) bool {
+ 	if ctx == nil || other == nil || ctx.Err() != nil || other.Err() != nil {
+ 		return false
+ 	}
+@@ -163,7 +174,7 @@ func SameNextcloudEmbeddingPurposeCaller(ctx, other context.Context) bool {
+ 
+ func sameKnowledgeSQLiteEmbeddingCaller(ctx, other context.Context) bool {
+ 	if nextcloudOriginalUploadInContext(ctx) != nil || nextcloudOriginalUploadInContext(other) != nil {
+-		return SameNextcloudEmbeddingPurposeCaller(ctx, other)
++		return sameNextcloudUploadCaller(ctx, other)
+ 	}
+ 	return sameOriginalModelCallerInRepository(ctx, other)
+ }
+diff --git a/internal/application/service/normal_references_http_fixture_test.go b/internal/application/service/normal_references_http_fixture_test.go
+index d7950f27c..8749ca0e0 100644
+--- a/internal/application/service/normal_references_http_fixture_test.go
++++ b/internal/application/service/normal_references_http_fixture_test.go
+@@ -77,6 +77,9 @@ func newNormalReferencesHTTPFixtureForTest(t *testing.T, pg bool, final chat.Cha
+ 	}
+ 	joint := mode == "joint-normal-original-model" || mode == "joint-memory-publication" || mode == "directory-periodic" && os.Getenv("WEKNORA_TEST_JOINT_DIRECTORY_SCHEMA") == "1"
+ 	m := newMachinePipelineFixtureWithDocument(t, pg, "Current employee policy: read the approved record, then ask before changing another department's access.", true, mode == "directory-periodic", joint)
++	if mode == "joint-normal-original-model" {
++		m.authenticated = true
++	} // existing real authenticated actor; no new machine grant
+ 	k := m.ingest(t)
+ 	for i := 0; i < len(m.f.queue.tasks); i++ {
+ 		require.NoError(t, m.run(t, m.f.queue.tasks[i]))
+diff --git a/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go b/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
+index 022c558b5..1d89c8d90 100644
+--- a/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
++++ b/internal/application/service/owned_nextcloud_machine_embedding_build_sql_http_actual_test.go
+@@ -177,26 +177,29 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			template.ExtractConfig = nil
+ 			template.IndexingStrategy = types.IndexingStrategy{VectorEnabled: true}
+ 			require.NoError(t, f.store.UpdateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(f.ctx), &template))
+-			const guid = "aabbccdd-0011-2233-4455-667788990011"
+-			require.NoError(t, f.db.Create(&types.DirectoryIdentity{ID: uuid.NewString(), DirectoryID: "machine-ad", ObjectGUID: guid, Status: types.DirectoryObjectActive, SnapshotVersion: 1}).Error)
+-			require.NoError(t, f.db.Create(&types.NextcloudOnboardingDelegation{TenantID: 7, DirectoryID: "machine-ad", ObjectGUID: guid}).Error)
++			guid := "aabbccdd-0011-2233-4455-667788990011"
+ 			if mode == "bare_machine_BatchEmbed_refuses" {
++				// The full fixture already owns one real identity for this user.
++				// Reuse it instead of creating a second same-directory user link.
+ 				operator := types.CallerFromContext(f.ctx).UserID
+ 				require.NotEmpty(t, operator)
+-				link := f.db.Model(&types.DirectoryIdentity{}).Where("directory_id=? AND object_guid=? AND user_id IS NULL", "machine-ad", guid).Update("user_id", operator)
+-				require.NoError(t, link.Error)
+-				require.EqualValues(t, 1, link.RowsAffected)
+ 				var linked types.DirectoryIdentity
+-				require.NoError(t, f.db.Where("directory_id=? AND object_guid=?", "machine-ad", guid).Take(&linked).Error)
++				require.NoError(t, f.db.Where("directory_id=? AND user_id=? AND status=?", "machine-ad", operator, types.DirectoryObjectActive).Take(&linked).Error)
+ 				require.NotNil(t, linked.UserID)
+ 				require.Equal(t, operator, *linked.UserID)
++				require.EqualValues(t, 1, linked.SnapshotVersion)
++				require.NotEmpty(t, linked.ObjectGUID)
++				guid = linked.ObjectGUID
++			} else {
++				require.NoError(t, f.db.Create(&types.DirectoryIdentity{ID: uuid.NewString(), DirectoryID: "machine-ad", ObjectGUID: guid, Status: types.DirectoryObjectActive, SnapshotVersion: 1}).Error)
+ 			}
++			require.NoError(t, f.db.Create(&types.NextcloudOnboardingDelegation{TenantID: 7, DirectoryID: "machine-ad", ObjectGUID: guid}).Error)
+ 			base := sourceHTTP.URL
+ 			var err error
+ 			token := strings.Repeat("owned-onboarding-token-", 3)
+ 			// Operator-provisioned credential and directory delegation are authorization
+ 			// setup; no input/original receipt is directly inserted by this fixture.
+-			credential := types.NextcloudOnboardingCredential{ID: uuid.NewString(), InstanceID: "instance", BaseURL: base, TenantID: 7, DirectoryID: "machine-ad", TemplateKBID: template.ID, Enabled: true, MaxKnowledgeBases: 2}
++			credential := types.NextcloudOnboardingCredential{ID: uuid.NewString(), InstanceID: "owned-machine-instance", BaseURL: base, TenantID: 7, DirectoryID: "machine-ad", TemplateKBID: template.ID, Enabled: true, MaxKnowledgeBases: 2}
+ 			// Use the real Credential lookup's hash contract, retaining the token only
+ 			// in this private test process rather than any argv or diagnostic record.
+ 			tokenSHA := sha256.Sum256([]byte(token))
+@@ -208,7 +211,7 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			var provisionedUsers, provisionedMembers int64
+ 			require.NoError(t, f.db.Model(&types.User{}).Count(&provisionedUsers).Error)
+ 			require.NoError(t, f.db.Model(&types.TenantMember{}).Count(&provisionedMembers).Error)
+-			operation, err = onboarding.Reserve(f.ctx, actualCredential, types.NextcloudOnboardingRequest{OperationID: uuid.NewString(), TenantID: 7, InstanceID: "instance", BindingID: "binding", ActorDirectoryID: "machine-ad", ActorObjectGUID: guid, Mode: "create", Name: "actual delegated build", ProcessingTemplateID: template.ID})
++			operation, err = onboarding.Reserve(f.ctx, actualCredential, types.NextcloudOnboardingRequest{OperationID: uuid.NewString(), TenantID: 7, InstanceID: "owned-machine-instance", BindingID: "owned-machine-binding", ActorDirectoryID: "machine-ad", ActorObjectGUID: guid, Mode: "create", Name: "actual delegated build", ProcessingTemplateID: template.ID})
+ 			require.NoError(t, err)
+ 			if mode == "bare_machine_BatchEmbed_refuses" {
+ 				require.Equal(t, types.CallerFromContext(f.ctx).UserID, operation.ActorUserID)
+@@ -220,7 +223,7 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			require.NoError(t, f.db.Model(&types.TenantMember{}).Count(&membersReserved).Error)
+ 			require.Equal(t, provisionedUsers, usersReserved)
+ 			require.Equal(t, provisionedMembers, membersReserved)
+-			pair := repository.NextcloudSourcePairing{OperationID: operation.OperationID, TenantID: 7, KnowledgeBaseID: operation.KnowledgeBaseID, InstanceID: "instance", BindingID: "binding", BaseURL: base, PublicationEpoch: 1, KeyID: "local-key"}
++			pair := repository.NextcloudSourcePairing{OperationID: operation.OperationID, TenantID: 7, KnowledgeBaseID: operation.KnowledgeBaseID, InstanceID: "owned-machine-instance", BindingID: "owned-machine-binding", BaseURL: base, PublicationEpoch: 1, KeyID: "local-key"}
+ 			pairs := repository.NewNextcloudSourcePairingRepository(f.db)
+ 			// Use the same real name-authority factory installed by the existing source
+ 			// fixture; its current actor/producer hooks are not substituted with nil.
+@@ -248,6 +251,10 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 			require.NoError(t, f.db.Model(&types.TenantMember{}).Count(&membersBefore).Error)
+ 			knowledge := m.ingest(t)
+ 			actualKnowledgeID = knowledge.ID
++			require.Equal(t, "owned-machine-instance", knowledge.GetMetadata()["nextcloud_instance_id"])
++			require.Equal(t, "owned-machine-binding", knowledge.GetMetadata()["nextcloud_binding_id"])
++			require.Equal(t, "177", knowledge.GetMetadata()["nextcloud_file_id"])
++			require.Equal(t, "1", knowledge.GetMetadata()["nextcloud_publication_epoch"])
+ 			require.Greater(t, signedRequests.Load(), int64(0))
+ 			require.NoError(t, sourceError())
+ 			var payload types.DocumentProcessPayload
+@@ -262,7 +269,7 @@ func TestOwnedNextcloudMachineEmbeddingBuildActualSQLiteHTTP(t *testing.T) {
+ 				}
+ 			}
+ 			require.True(t, found)
+-			scope := repository.NextcloudContentScope{TenantID: 7, KnowledgeBaseID: operation.KnowledgeBaseID, KnowledgeID: knowledge.ID, DataSourceID: m.ds.ID, ExternalID: "nextcloud:instance:77"}
++			scope := repository.NextcloudContentScope{TenantID: 7, KnowledgeBaseID: operation.KnowledgeBaseID, KnowledgeID: knowledge.ID, DataSourceID: m.ds.ID, ExternalID: "nextcloud:owned-machine-instance:177"}
+ 			content := repository.NewNextcloudContentLeaseStore(f.db)
+ 			intent := types.WithExecutionTenant(context.Background(), 7)
+ 			if mode == "bare_machine_BatchEmbed_refuses" {
+@@ -657,11 +664,11 @@ func ownedMachineSourceTransport(t *testing.T, artifact string) (*httptest.Serve
+ 		count.Add(1)
+ 		switch {
+ 		case strings.HasSuffix(r.URL.Path, "/capabilities"):
+-			fmt.Fprint(w, `{"protocol_version":"1","instance_id":"instance"}`)
++			fmt.Fprint(w, `{"protocol_version":"1","instance_id":"owned-machine-instance"}`)
+ 		case strings.HasSuffix(r.URL.Path, "/bindings"):
+-			fmt.Fprint(w, `{"bindings":[{"id":"binding","name":"owned delegated source","root_file_id":7,"publication_state":"active","publication_epoch":1}]}`)
++			fmt.Fprint(w, `{"bindings":[{"id":"owned-machine-binding","name":"owned delegated source","root_file_id":107,"publication_state":"active","publication_epoch":1}]}`)
+ 		case strings.HasSuffix(r.URL.Path, "/manifest"):
+-			fmt.Fprintf(w, `{"generation":"owned-generation","complete":true,"next_cursor":null,"items":[{"file_id":77,"etag":"actual-etag","name":"source.md","path":"source.md","mime_type":"text/markdown","size":%d,"mtime":1700000000}]}`, len(artifact))
++			fmt.Fprintf(w, `{"generation":"owned-generation","complete":true,"next_cursor":null,"items":[{"file_id":177,"etag":"actual-etag","name":"source.md","path":"source.md","mime_type":"text/markdown","size":%d,"mtime":1700000000}]}`, len(artifact))
+ 		case strings.HasSuffix(r.URL.Path, "/changes"):
+ 			http.NotFound(w, r)
+ 		case strings.HasSuffix(r.URL.Path, "/content"):
+@@ -697,8 +704,12 @@ func ownedMachineSourceTransport(t *testing.T, artifact string) (*httptest.Serve
+ 				w.WriteHeader(400)
+ 				return
+ 			}
+-			permitted := allow.Load() && p.DirectoryID == "machine-ad" && p.ObjectGUID == "aabbccdd-0011-2233-4455-667788990011" && p.FileID == 77 && p.ContentRevision == "0"
+-			_ = json.NewEncoder(w).Encode(map[string]any{"allow": permitted, "reason": "owned-current-source-policy", "policy_revision": "owned-policy-1", "source_etag": "actual-etag", "source_content_revision": "0", "checked_at": time.Now().Unix()})
++			permitted := allow.Load() && p.DirectoryID == "machine-ad" && (p.ObjectGUID == "aabbccdd-0011-2233-4455-667788990011" || p.ObjectGUID == "00112233-4455-6677-8899-aabbccddeeff") && p.FileID == 177 && p.ContentRevision == "0"
++			reason := "withdrawn"
++			if permitted {
++				reason = "authorized"
++			}
++			_ = json.NewEncoder(w).Encode(map[string]any{"allow": permitted, "reason": reason, "policy_revision": "owned-policy-1", "source_etag": "actual-etag", "source_content_revision": "0", "checked_at": time.Now().Unix()})
+ 		default:
+ 			record(errors.New("unexpected owned source endpoint"))
+ 			http.NotFound(w, r)

@@ -1,0 +1,379 @@
+diff --git a/internal/application/repository/original_body_message_scopes.go b/internal/application/repository/original_body_message_scopes.go
+index 481e03943..fbe5f3039 100644
+--- a/internal/application/repository/original_body_message_scopes.go
++++ b/internal/application/repository/original_body_message_scopes.go
+@@ -254,6 +254,9 @@ func (s *KnowledgeInputProvenanceStore) AcquireMessageBodyReadLeases(ctx context
+ 	}
+ 	ids := []string{}
+ 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if e := reserveMessageBodyLeaseWriterInTx(tx); e != nil {
++			return e
++		}
+ 		if e := s.checkMessageMaterialPlanInTx(tx, plan.Request); e != nil {
+ 			return e
+ 		}
+@@ -351,6 +354,9 @@ func (s *OriginalBodyRetentionStore) RenewLease(ctx context.Context, id string,
+ 		return ErrOriginalBodyUnavailable
+ 	}
+ 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if e := reserveMessageBodyLeaseWriterInTx(tx); e != nil {
++			return e
++		}
+ 		if e := s.checkJournalInTx(tx); e != nil {
+ 			return e
+ 		}
+@@ -427,3 +433,27 @@ func bodyLeaseScopesComplete(rows []originalBodyLeaseScope, tenant uint64) bool
+ 	}
+ 	return false
+ }
++
++// These two lease operations are writers, even though their authority/journal
++// work first reads metadata. SQLite's deferred read snapshot must not precede
++// acquiring the single writer. WHERE 1=0 changes no row and fires no row trigger;
++// it creates neither a lease nor authorization. PG keeps its existing locks.
++// A nested caller still executes this write: an old outer read snapshot may
++// refuse with actual Busy/BusySnapshot. Never assume it already owns a writer,
++// start another pool transaction, weaken checks or retry that outer snapshot.
++func reserveMessageBodyLeaseWriterInTx(tx *gorm.DB) error {
++	if tx.Dialector.Name() != "sqlite" {
++		return nil
++	}
++	if err := tx.Statement.Context.Err(); err != nil {
++		return err
++	}
++	result := bodyInternal(tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context})).Exec("UPDATE original_body_leases SET expires_at_ms=expires_at_ms WHERE 1=0")
++	if result.Error != nil {
++		return result.Error
++	}
++	if result.RowsAffected != 0 {
++		return ErrOriginalBodyUnavailable
++	}
++	return nil
++}
+diff --git a/internal/application/service/message_body_lease_sqlite_writer_actual_test.go b/internal/application/service/message_body_lease_sqlite_writer_actual_test.go
+new file mode 100644
+index 000000000..f21fcdfa6
+--- /dev/null
++++ b/internal/application/service/message_body_lease_sqlite_writer_actual_test.go
+@@ -0,0 +1,321 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"github.com/mattn/go-sqlite3"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++type messageLeaseWriterProbeKey struct{}
++type messageLeaseWriterFact struct {
++	LeaseID, BodyID, Kind, OwnerID string
++	Epoch, ExpiresAtMS             int64
++	ReleasedAtMS                   *int64
++}
++
++func messageLeaseWriterFacts(t *testing.T, db *gorm.DB) []messageLeaseWriterFact {
++	t.Helper()
++	var rows []messageLeaseWriterFact
++	require.NoError(t, db.Session(&gorm.Session{NewDB: true}).Table("original_body_leases").Order("lease_id").Find(&rows).Error)
++	return rows
++}
++func messageLeaseWriterFixture(t *testing.T) (*memAtomicSQLFixture, *types.MessageMaterialReadPlan, []string) {
++	t.Helper()
++	f := newMemAtomicSQLFixture(t, false)
++	pool, err := f.db.DB()
++	require.NoError(t, err)
++	pool.SetMaxOpenConns(2)
++	pool.SetMaxIdleConns(2)
++	var mode string
++	require.NoError(t, f.db.Raw("PRAGMA journal_mode").Scan(&mode).Error)
++	require.Equal(t, "wal", mode)
++	plan, err := f.machine.f.store.PeekMessageMaterialReadPlan(f.ctx, types.MessageMaterialReadRequest{TenantID: f.scope.TenantID, SessionID: f.session.ID, AllSession: true, CompletedOnly: true})
++	require.NoError(t, err)
++	require.NotNil(t, plan)
++	f.ctx, err = repository.WithMessageMaterialReadPlan(f.ctx, plan)
++	require.NoError(t, err)
++	leases, err := f.machine.f.store.AcquireMessageBodyReadLeases(f.ctx, plan, "owned-original-baseline/"+uuid.NewString(), 2*time.Minute)
++	require.NoError(t, err)
++	require.NotEmpty(t, leases)
++	t.Cleanup(func() {
++		cleanup, cancel := context.WithTimeout(context.WithoutCancel(f.ctx), 5*time.Second)
++		defer cancel()
++		for _, id := range leases {
++			if err := f.machine.f.store.ReleaseMessageBodyReadLease(cleanup, id); err != nil {
++				t.Error("owned baseline body lease cleanup failed")
++			}
++		}
++	})
++	return f, plan, leases
++}
++func messageLeaseWriterSecondConnection(t *testing.T, f *memAtomicSQLFixture, ctx context.Context) *gorm.DB {
++	t.Helper()
++	pool, err := f.db.DB()
++	require.NoError(t, err)
++	connection, err := pool.Conn(ctx)
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		if err := connection.Close(); err != nil {
++			t.Error("owned second WAL connection close failed")
++		}
++	})
++	writer, err := gorm.Open(sqlite.New(sqlite.Config{Conn: connection}), &gorm.Config{})
++	require.NoError(t, err)
++	require.NotSame(t, f.db.Callback().Raw(), writer.Callback().Raw())
++	var original, other []struct {
++		Seq        int
++		Name, File string
++	}
++	require.NoError(t, f.db.Raw("PRAGMA database_list").Scan(&original).Error)
++	require.NoError(t, writer.Raw("PRAGMA database_list").Scan(&other).Error)
++	require.Equal(t, original, other, "the explicit second connection uses the same actual owned WAL database")
++	require.NoError(t, writer.Exec("PRAGMA busy_timeout=5000").Error)
++	return writer
++}
++func messageLeaseWriterBusy(err error) bool {
++	var actual sqlite3.Error
++	return errors.As(err, &actual) && actual.Code == sqlite3.ErrBusy
++}
++func TestMessageBodyScopeSQLiteWriterReservationActual(t *testing.T) {
++	t.Setenv(memoryJointSchemaOptin, "1")
++	t.Run("zero_row_changes_no_fact_and_no_row_trigger", func(t *testing.T) {
++		f, plan, _ := messageLeaseWriterFixture(t)
++		before := messageLeaseWriterFacts(t, f.db)
++		// A genuine row guard would reject ANY updated lease. The reservation
++		// matches no row; this test never drops a production trigger.
++		const trigger = "owned_message_lease_row_guard"
++		require.NoError(t, f.db.Exec("CREATE TRIGGER "+trigger+" BEFORE UPDATE ON original_body_leases BEGIN SELECT RAISE(ABORT,'owned test row guard'); END").Error)
++		guardActive := true
++		t.Cleanup(func() {
++			if guardActive {
++				if err := f.db.Exec("DROP TRIGGER " + trigger).Error; err != nil {
++					t.Error("owned test row guard cleanup failed")
++				}
++			}
++		})
++		ctx := context.WithValue(f.ctx, messageLeaseWriterProbeKey{}, new(int))
++		observed := false
++		name := "test:actual-message-lease-zero-row"
++		require.NoError(t, f.db.Callback().Raw().After("gorm:raw").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Context.Value(messageLeaseWriterProbeKey{}) != ctx.Value(messageLeaseWriterProbeKey{}) || tx.Statement.SQL.String() != "UPDATE original_body_leases SET expires_at_ms=expires_at_ms WHERE 1=0" {
++				return
++			}
++			if tx.Error != nil {
++				return
++			}
++			observed = true
++			require.Zero(t, tx.RowsAffected)
++			require.Equal(t, before, messageLeaseWriterFacts(t, tx), "reservation does not change any existing lease tuple")
++		}))
++		t.Cleanup(func() {
++			if err := f.db.Callback().Raw().Remove(name); err != nil {
++				t.Error("owned zero-row observer cleanup failed")
++			}
++		})
++		ids, err := f.machine.f.store.AcquireMessageBodyReadLeases(ctx, plan, "owned-zero-row/"+uuid.NewString(), 2*time.Minute)
++		require.NoError(t, err)
++		require.True(t, observed)
++		require.NotEmpty(t, ids)
++		// The row-level negative guard is really active; matching the actual
++		// baseline ID must fail while the no-row reservation succeeded.
++		changed := f.db.Session(&gorm.Session{NewDB: true}).Table("original_body_leases").Where("lease_id=?", before[0].LeaseID).Update("expires_at_ms", before[0].ExpiresAtMS+1)
++		require.Error(t, changed.Error)
++		require.NoError(t, f.db.Exec("DROP TRIGGER "+trigger).Error)
++		guardActive = false
++		for _, id := range ids {
++			require.NoError(t, f.machine.f.store.ReleaseMessageBodyReadLease(f.ctx, id))
++		}
++		require.Equal(t, f.originals, actualMemoryFacts(t, f.db, f.user.ID))
++	})
++	t.Run("acquire_serializes_actual_renew_on_two_connections", func(t *testing.T) {
++		f, plan, baseline := messageLeaseWriterFixture(t)
++		operation, cancel := context.WithTimeout(f.ctx, 10*time.Second)
++		defer cancel()
++		writer := messageLeaseWriterSecondConnection(t, f, operation)
++		token := new(int)
++		ctx := context.WithValue(operation, messageLeaseWriterProbeKey{}, token)
++		held := make(chan struct{}, 1)
++		release := make(chan struct{})
++		var once sync.Once
++		acquireDone := make(chan struct {
++			ids []string
++			err error
++		}, 1)
++		renewDone := make(chan error, 1)
++		acquireJoined, renewStarted, renewJoined := false, false, false
++		writerObserverRegistered := false
++		writerName := "test:actual-owned-renew-attempt"
++		name := "test:actual-message-lease-writer-held"
++		require.NoError(t, f.db.Callback().Raw().After("gorm:raw").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Context.Value(messageLeaseWriterProbeKey{}) != token || tx.Statement.SQL.String() != "UPDATE original_body_leases SET expires_at_ms=expires_at_ms WHERE 1=0" || tx.Error != nil {
++				return
++			}
++			if tx.RowsAffected != 0 {
++				t.Error("actual writer reservation changed a lease row")
++			}
++			held <- struct{}{}
++			select {
++			case <-release:
++			case <-operation.Done():
++			}
++		}))
++		t.Cleanup(func() {
++			once.Do(func() { close(release) })
++			cancel()
++			cleanup, cleanupCancel := context.WithTimeout(context.WithoutCancel(f.ctx), 5*time.Second)
++			defer cleanupCancel()
++			if !acquireJoined {
++				select {
++				case result := <-acquireDone:
++					acquireJoined = true
++					if result.err == nil {
++						for _, id := range result.ids {
++							if err := f.machine.f.store.ReleaseMessageBodyReadLease(cleanup, id); err != nil {
++								t.Error("owned acquired lease cleanup failed")
++							}
++						}
++					}
++				case <-cleanup.Done():
++					t.Error("owned acquire cleanup did not join")
++				}
++			}
++			if renewStarted && !renewJoined {
++				select {
++				case <-renewDone:
++					renewJoined = true
++				case <-cleanup.Done():
++					t.Error("owned renew cleanup did not join")
++				}
++			}
++			if writerObserverRegistered {
++				if err := writer.Callback().Raw().Remove(writerName); err != nil {
++					t.Error("owned renew observer cleanup failed")
++				}
++			}
++			if err := f.db.Callback().Raw().Remove(name); err != nil {
++				t.Error("owned writer observer cleanup failed")
++			}
++		})
++		go func() {
++			ids, err := f.machine.f.store.AcquireMessageBodyReadLeases(ctx, plan, "owned-concurrent-acquire/"+uuid.NewString(), 2*time.Minute)
++			acquireDone <- struct {
++				ids []string
++				err error
++			}{ids, err}
++		}()
++		select {
++		case <-held:
++		case <-operation.Done():
++			t.Fatal("actual acquisition writer reservation was not reached")
++		}
++		// This is a real second-connection lock probe, not a sleep/order guess.
++		require.NoError(t, writer.Exec("PRAGMA busy_timeout=0").Error)
++		probe := writer.Exec("UPDATE original_body_leases SET expires_at_ms=expires_at_ms WHERE 1=0")
++		require.True(t, messageLeaseWriterBusy(probe.Error), "zero-row first statement must actually hold the WAL writer")
++		require.NoError(t, writer.Exec("PRAGMA busy_timeout=5000").Error)
++		attempted := make(chan struct{}, 1)
++		require.NoError(t, writer.Callback().Raw().Before("gorm:raw").Register(writerName, func(tx *gorm.DB) {
++			if tx.Statement.SQL.String() == "UPDATE original_body_leases SET expires_at_ms=expires_at_ms WHERE 1=0" {
++				attempted <- struct{}{}
++			}
++		}))
++		writerObserverRegistered = true
++		renewStarted = true
++		go func() {
++			renewDone <- repository.NewOriginalBodyRetentionStore(writer).RenewLease(operation, baseline[0], 2*time.Minute)
++		}()
++		select {
++		case <-attempted:
++		case <-operation.Done():
++			t.Fatal("actual second-connection Renew reservation did not start")
++		}
++		once.Do(func() { close(release) })
++		var acquired []string
++		select {
++		case result := <-acquireDone:
++			acquireJoined = true
++			require.NoError(t, result.err)
++			acquired = result.ids
++		case <-operation.Done():
++			t.Fatal("actual scope acquisition did not finish")
++		}
++		select {
++		case err := <-renewDone:
++			renewJoined = true
++			require.NoError(t, err)
++		case <-operation.Done():
++			t.Fatal("actual competing lease renewal did not finish")
++		}
++		require.NotEmpty(t, acquired)
++		require.Equal(t, f.originals, actualMemoryFacts(t, f.db, f.user.ID))
++		var renewed messageLeaseWriterFact
++		require.NoError(t, writer.Session(&gorm.Session{NewDB: true, Context: operation}).Table("original_body_leases").Where("lease_id=?", baseline[0]).Take(&renewed).Error)
++		require.Equal(t, baseline[0], renewed.LeaseID)
++		require.Equal(t, "read", renewed.Kind)
++		require.Nil(t, renewed.ReleasedAtMS)
++		var sqlNow int64
++		require.NoError(t, writer.Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&sqlNow).Error)
++		require.Greater(t, renewed.ExpiresAtMS, sqlNow, "actual renewal remains live after the writer serializes")
++		for _, id := range acquired {
++			require.NoError(t, f.machine.f.store.ReleaseMessageBodyReadLease(f.ctx, id))
++		}
++	})
++	t.Run("changed_original_plan_refuses_without_claim", func(t *testing.T) {
++		f, plan, _ := messageLeaseWriterFixture(t)
++		before := messageLeaseWriterFacts(t, f.db)
++		mutation := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Exec("UPDATE messages SET content=? WHERE id=?", "UNADMITTED_CURRENT_EDIT", f.user.ID)
++		require.NoError(t, mutation.Error)
++		require.EqualValues(t, 1, mutation.RowsAffected)
++		ids, err := f.machine.f.store.AcquireMessageBodyReadLeases(f.ctx, plan, "owned-refused/"+uuid.NewString(), 2*time.Minute)
++		require.Error(t, err)
++		require.Empty(t, ids)
++		require.Equal(t, before, messageLeaseWriterFacts(t, f.db))
++		require.Equal(t, f.originals, actualMemoryFacts(t, f.db, f.user.ID), "raw changed material never becomes an original")
++	})
++	t.Run("nested_read_snapshot_never_assumed_writer", func(t *testing.T) {
++		f, plan, baseline := messageLeaseWriterFixture(t)
++		operation, cancel := context.WithTimeout(f.ctx, 10*time.Second)
++		defer cancel()
++		writer := messageLeaseWriterSecondConnection(t, f, operation)
++		var nestedErr error
++		err := f.db.WithContext(operation).Transaction(func(tx *gorm.DB) error {
++			var count int64
++			if err := tx.Table("original_body_leases").Count(&count).Error; err != nil {
++				return err
++			}
++			if count == 0 {
++				return fmt.Errorf("actual outer read snapshot has no baseline lease")
++			}
++			// Commit a real renewal after the outer read snapshot exists.
++			if err := repository.NewOriginalBodyRetentionStore(writer).RenewLease(operation, baseline[0], 2*time.Minute); err != nil {
++				return err
++			}
++			bound := repository.MemoryOriginalTransactionStore(f.machine.f.store, tx)
++			if bound == nil {
++				return fmt.Errorf("actual nested provenance store unavailable")
++			}
++			ids, err := bound.AcquireMessageBodyReadLeases(operation, plan, "owned-nested-read/"+uuid.NewString(), 2*time.Minute)
++			nestedErr = err
++			if len(ids) != 0 {
++				return fmt.Errorf("failed outer snapshot minted lease IDs")
++			}
++			return err
++		})
++		require.Error(t, err)
++		require.True(t, messageLeaseWriterBusy(nestedErr), "nested stale read must really refuse at reservation, not pretend to own a writer")
++		var claims int64
++		require.NoError(t, f.db.Table("original_body_leases").Where("owner_id LIKE 'owned-nested-read/%'").Count(&claims).Error)
++		require.Zero(t, claims)
++	})
++}

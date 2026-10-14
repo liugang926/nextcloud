@@ -1,0 +1,98 @@
+diff --git a/internal/application/service/memory_query_embedding_concurrency_sql_actual_test.go b/internal/application/service/memory_query_embedding_concurrency_sql_actual_test.go
+index 9d041cb5..19bc1d66 100644
+--- a/internal/application/service/memory_query_embedding_concurrency_sql_actual_test.go
++++ b/internal/application/service/memory_query_embedding_concurrency_sql_actual_test.go
+@@ -100,6 +100,14 @@ func runMemoryQuerySinglePoolHTTPActual(t *testing.T, pg bool) {
+ 	c.pipelineCancel()
+ 	c.releaseProducer()
+ 	require.NoError(t, result.Context().Err())
++	slot := c.http.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	slot.mu.Lock()
++	guards := append([]*MessageMaterialGuard(nil), slot.Guards...)
++	slot.mu.Unlock()
++	require.NotEmpty(t, guards, "the real consumed human message guard must remain registered")
++	for _, guard := range guards {
++		require.NoError(t, guard.Context().Err(), "HTTP ownership must outlive the completed producer operation")
++	}
+ 	require.NoError(t, c.checkHTTP())
+ 	var open int64
+ 	require.NoError(t, c.f.db.Table("original_body_leases").Where("lease_id IN ? AND released_at_ms IS NULL", ids).Count(&open).Error)
+@@ -179,6 +187,9 @@ func runMemoryQuerySinglePoolHTTPActual(t *testing.T, pg bool) {
+ 	}
+ 	require.NoError(t, result.Recheck())
+ 	c.releaseHTTP()
++	for _, guard := range guards {
++		require.ErrorIs(t, guard.Context().Err(), context.Canceled, "last HTTP release must cancel the actual message guard")
++	}
+ 	_, err = result.Snapshot()
+ 	require.Error(t, err, "last HTTP reference must actually close query input/result/model/source holds")
+ 	assertMemAtomicSQLLeasesClosed(t, c.f)
+diff --git a/internal/application/service/message_material_guard.go b/internal/application/service/message_material_guard.go
+index dcab0050..1609e777 100644
+--- a/internal/application/service/message_material_guard.go
++++ b/internal/application/service/message_material_guard.go
+@@ -20,6 +20,7 @@ type MessageMaterialGuard struct {
+ 	plan          *types.MessageMaterialReadPlan
+ 	ctx           context.Context
+ 	cancel        context.CancelFunc
++	releaseOwner  func()
+ 	leases        []repository.NextcloudContentLease
+ 	bodyLeases    []string
+ 	stop          sync.WaitGroup
+@@ -168,6 +169,9 @@ func (g *MessageMaterialGuard) Close() {
+ 		return
+ 	}
+ 	g.once.Do(func() {
++		if g.releaseOwner != nil {
++			defer g.releaseOwner()
++		}
+ 		g.cancel()
+ 		g.stop.Wait()
+ 		g.mu.Lock()
+diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
+index 1ed2f58c..306b1433 100644
+--- a/internal/application/service/message_material_output.go
++++ b/internal/application/service/message_material_output.go
+@@ -317,10 +317,21 @@ func (s *messageService) admittedMessagePage(ctx context.Context, sessionID stri
+ 	return s.admittedMessages(ctx, request)
+ }
+ func (s *messageService) admittedMessages(ctx context.Context, request types.MessageMaterialReadRequest) ([]*types.Message, error) {
+-	guard, err := s.beginMessageMaterialRead(ctx, request)
++	// A producer operation may finish while HTTP still owns its consumed user
++	// and history material. Acquisition remains cancellable by that operation;
++	// only a successfully captured guard can transfer to the existing boundary.
++	ownerCtx, releaseOwner, transferOwner, err := originalModelAcquisitionContext(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	guard, err := s.beginMessageMaterialRead(ownerCtx, request)
++	if err != nil {
++		if releaseOwner != nil {
++			releaseOwner()
++		}
++		return nil, err
++	}
++	guard.releaseOwner = releaseOwner
+ 	if slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot); ok {
+ 		body, err := messageBoundaryBodyDigest(guard.snapshot.Messages)
+ 		if err != nil {
+@@ -328,11 +339,18 @@ func (s *messageService) admittedMessages(ctx context.Context, request types.Mes
+ 			return nil, err
+ 		}
+ 		slot.mu.Lock()
+-		if slot.Closed {
++		if slot.Closed || slot.Failed != nil {
+ 			slot.mu.Unlock()
+ 			guard.Close()
+ 			return nil, access.ErrNextcloudPublicationUnavailable
+ 		}
++		if transferOwner != nil {
++			if err := transferOwner(); err != nil {
++				slot.mu.Unlock()
++				guard.Close()
++				return nil, err
++			}
++		}
+ 		slot.Guards = append(slot.Guards, guard)
+ 		slot.Bodies = append(slot.Bodies, string(body))
+ 		slot.mu.Unlock()

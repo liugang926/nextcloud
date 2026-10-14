@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "classification": "peer_prefix_readonly_interface_root_DB_ABI_full_compile_failure",
+  "raw_source": "280f1c868298f3a88db691abdb3d23f2c15b84c5",
+  "head": "b5d1e4124cef90d0ec08a57d095de3fa9cb7bf2c",
+  "tree": "903a8c262b7df60837914908d089a10f049cff72",
+  "terminal": 1,
+  "compile_seconds": 236.148,
+  "window_seconds": 241.607022041,
+  "business_RUN": 0,
+  "raw_SHA256": "a615024d3777bc5c60e94ed604764f631eed30050c5a21e4fc2c4e86d80a9e19",
+  "compiler_errors": [
+    "internal/database/migration_joint_catalogue.go:1142:49: cannot use db (variable of interface type jointCatalogueReadConnection) as *sql.DB value in argument to jointLineageObjectSets: need type assertion",
+    "internal/database/migration_joint_catalogue.go:1153:54: cannot use db (variable of interface type jointCatalogueReadConnection) as *sql.DB value in argument to jointLineageIntroducedColumn: need type assertion",
+    "internal/database/migration_joint_catalogue.go:1193:56: cannot use db (variable of interface type jointCatalogueReadConnection) as *sql.DB value in argument to jointLineageObjectSets: need type assertion"
+  ],
+  "OOM": false,
+  "owned_actor_independent_terminal": {
+    "actor": "689b98cba7acbae05a4712120f9de1dbdb932d542b46554653120abe911a9f47",
+    "running": false,
+    "terminal": 1,
+    "OOM": false,
+    "failed_volume_retained": "nc-memory-compile-041cef909ed4293ff3a68fa9-tmp",
+    "no_business_RUN": true
+  },
+  "corrective_source_child": "8a6cf8877c81e747d904df889dd52bafa1807215",
+  "source_correction": "Restore only root verifyJointRootCatalogue *sql.DB signature. Peer uses separate transaction verifier and8 query-only helpers, so rootlineage helper signatures stay unchanged.",
+  "runtime_accepted": false,
+  "full_V1": false
+}

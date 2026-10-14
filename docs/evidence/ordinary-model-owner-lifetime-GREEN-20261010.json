@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "classification": "actual_matched_ordinary_HTTP_original_model_owner_GREEN",
+  "source": {
+    "head": "e8b2dd63f901a2b98e702b05bf9c36faeee3992e",
+    "tree": "c3176094ea333789ce0a9aeeb59d4401afbceab9",
+    "baseline": "5a1f189655f74ae61c1a781d78d163d69adfe3d0",
+    "business_test_SHA256": "b4906dbac19e141dc5279a53fd7cab72740a5cff0435837611a3f9a1ce07c56a",
+    "diagnostic_fixture_SHA256": "cccbee0558355a0a790122a8854e404a2234d86c136d2f1da5f1726d21db5f15",
+    "paired_tests_byte_exact": true,
+    "candidate_manifest_changed": false
+  },
+  "baseline": {
+    "RUN": 10,
+    "PASS": 4,
+    "FAIL": 6,
+    "SKIP": 0,
+    "raw_SHA256": "b2f7b24b6f79f5a0143583a246059c9096e6bfea1ef5c09aaf1781d16babb675",
+    "seconds": 77.537,
+    "cause_observed": "Actual constructor context cancels while HTTP slot still refs1/notclosed; concrete owned client and its read prematurely close despite autoClosefalse"
+  },
+  "green": {
+    "RUN_PASS": 10,
+    "FAIL": 0,
+    "SKIP": 0,
+    "terminal": 0,
+    "OOMKilled": false,
+    "seconds": 81.001,
+    "whole_seconds": 86.35,
+    "raw_SHA256": "f55c6a0603327044f6b017e558f81fe6d4f387e995f6107f7a4dacc5806ec681",
+    "raw_bytes": 786445,
+    "all_exact_required_RUN_PASS": true,
+    "legal_constructor_cancel_states": [
+      {
+        "test": "TestNormalOriginalModelActualHTTPSQLite/current",
+        "static_observation": "phase=constructor_ctx_cancel concrete=true ctx_err=true owner=true auto_close=false closed=false read_ctx_err=false slot_refs=1 slot_closed=false"
+      },
+      {
+        "test": "TestNormalOriginalModelActualHTTPSQLite/done_open",
+        "static_observation": "phase=constructor_ctx_cancel concrete=true ctx_err=true owner=true auto_close=false closed=false read_ctx_err=false slot_refs=1 slot_closed=false"
+      },
+      {
+        "test": "TestPostgresNormalOriginalModelActualHTTP/current",
+        "static_observation": "phase=constructor_ctx_cancel concrete=true ctx_err=true owner=true auto_close=false closed=false read_ctx_err=false slot_refs=1 slot_closed=false"
+      },
+      {
+        "test": "TestPostgresNormalOriginalModelActualHTTP/done_open",
+        "static_observation": "phase=constructor_ctx_cancel concrete=true ctx_err=true owner=true auto_close=false closed=false read_ctx_err=false slot_refs=1 slot_closed=false"
+      }
+    ],
+    "original_HTTP_seconds": 8,
+    "original_package_timeout": "20m"
+  },
+  "repair": "Original values/caller identity remain; Begin/Snapshot/constructor/last current recheck remain tied to stage cancellation until live owner transfers under slot mutex. Owned original model read then follows HTTP boundary owner, while provider calls keep their original cancellation. Last release closes actual read and hooks.",
+  "behavior": "Both SQL profiles current and Done-before-HTTP-EOF legally publish answer/references/complete, exactly one completed assistant and original input manifest, no error. Actor/model revocation still cancels/joins actual provider, emits error, creates0 completed assistants/manifests. Original source/body leases allclose.",
+  "resources": {
+    "seven_exact_success_identities_independently_absent": true,
+    "baseline_go_absent_SQL_stopped_three_volumes_network_raw_retained": true,
+    "independent_audit_SHA256": "d5c0486eb076e6490295ec417657362f388b8229c9105f13a0ec67606eb055fa"
+  },
+  "acceptance": {
+    "ordinary_current_model_HTTP_selected": true,
+    "broader_embedding_native_derived_migration_gates": false,
+    "full_V1": false
+  },
+  "privacy": {
+    "raw_request_response_body_credentials_private_paths_omitted": true
+  }
+}

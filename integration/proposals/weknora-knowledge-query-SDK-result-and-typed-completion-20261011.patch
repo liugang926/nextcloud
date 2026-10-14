@@ -1,0 +1,2638 @@
+diff --git a/internal/application/repository/knowledge_embedding_completion.go b/internal/application/repository/knowledge_embedding_completion.go
+new file mode 100644
+index 000000000..4a651d3f2
+--- /dev/null
++++ b/internal/application/repository/knowledge_embedding_completion.go
+@@ -0,0 +1,463 @@
++package repository
++
++import (
++	"context"
++	"fmt"
++	"math"
++	"reflect"
++	"sort"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++type actualKnowledgeCompletionKey struct{}
++type knowledgeCompletionClockPhaseKey struct{}
++
++func knowledgeConsumptionDigest(c *types.KnowledgeEmbeddingConsumption) (string, error) {
++	copy := *c
++	copy.Digest = ""
++	return KnowledgeInputDigest(copy)
++}
++func knowledgeNativeWhere(p types.RetrieveParams) (string, []interface{}) {
++	where := "(e.is_enabled IS NULL OR e.is_enabled=1) AND e.dimension=?"
++	args := []interface{}{len(p.Embedding)}
++	for _, f := range []struct {
++		column string
++		ids    []string
++	}{{"knowledge_base_id", p.KnowledgeBaseIDs}, {"knowledge_id", p.KnowledgeIDs}, {"tag_id", p.TagIDs}} {
++		if len(f.ids) > 0 {
++			where += " AND e." + f.column + " IN ?"
++			args = append(args, f.ids)
++		}
++	}
++	return where, args
++}
++
++// Replays the actual vec0 selection in the same physical transaction. DTO hit
++// lists are never accepted as a producer receipt or current read authority.
++func knowledgeNativeHitsInTx(tx *gorm.DB, r *KnowledgeSQLiteEmbeddingVectorRead, p types.RetrieveParams) ([]types.KnowledgeEmbeddingHit, error) {
++	if p.TopK < 1 || p.TopK > 4096 || math.IsNaN(p.Threshold) || math.IsInf(p.Threshold, 0) {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	where, args := knowledgeNativeWhere(p)
++	var ids []uint64
++	if err := tx.Table("lite_embeddings AS e").Select("e.id").Where(where, args...).Order("e.id").Limit(4097).Scan(&ids).Error; err != nil {
++		return nil, err
++	}
++	expected := []uint64{}
++	for id := range r.receipts {
++		expected = append(expected, id)
++	}
++	sort.Slice(expected, func(i, j int) bool { return expected[i] < expected[j] })
++	if !reflect.DeepEqual(ids, expected) {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	blob, err := knowledgeSQLiteVectorBytes(p.Embedding)
++	if err != nil {
++		return nil, err
++	}
++	nativeArgs := []interface{}{blob, p.TopK}
++	nativeArgs = append(nativeArgs, args...)
++	var hits []types.KnowledgeEmbeddingHit
++	sql := fmt.Sprintf("SELECT v.rowid AS row_id,v.distance FROM vec_embeddings_%d v WHERE v.embedding MATCH ? AND k=? AND v.rowid IN (SELECT e.id FROM lite_embeddings e WHERE %s) ORDER BY v.distance ASC", len(p.Embedding), where)
++	if err = tx.Raw(sql, nativeArgs...).Scan(&hits).Error; err != nil {
++		return nil, err
++	}
++	count := p.TopK
++	if count > len(ids) {
++		count = len(ids)
++	}
++	if len(hits) != count {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	seen := map[uint64]bool{}
++	for _, h := range hits {
++		if seen[h.RowID] || r.receipts[h.RowID].ID == "" || math.IsNaN(h.Distance) || math.IsInf(h.Distance, 0) {
++			return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		seen[h.RowID] = true
++	}
++	return hits, nil
++}
++func cloneKnowledgeSearch(p types.RetrieveParams) types.RetrieveParams {
++	p.Embedding = append([]float32(nil), p.Embedding...)
++	p.KnowledgeBaseIDs = append([]string(nil), p.KnowledgeBaseIDs...)
++	p.KnowledgeIDs = append([]string(nil), p.KnowledgeIDs...)
++	p.TagIDs = append([]string(nil), p.TagIDs...)
++	extra := map[string]interface{}{}
++	for k, v := range p.AdditionalParams {
++		extra[k] = v
++	}
++	p.AdditionalParams = extra
++	return p
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) makeConsumptionInTx(tx *gorm.DB, p types.RetrieveParams) (*types.KnowledgeEmbeddingConsumption, error) {
++	q := r.query
++	if q == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if _, err := CheckKnowledgeQueryVectorInTx(q.Context(), tx, p); err != nil {
++		return nil, err
++	}
++	if err := r.CheckInTx(tx.Statement.Context, tx); err != nil {
++		return nil, err
++	}
++	hits, err := knowledgeNativeHitsInTx(tx, r, p)
++	if err != nil {
++		return nil, err
++	}
++	v := q.read.view()
++	f, s := v.input, v.result
++	lineage, _ := types.NewCompleteSourceLineage()
++	c := &types.KnowledgeEmbeddingConsumption{Version: 1, Recipe: "knowledge.query-native-vector-consumer.v1", QueryInputID: f.ID, QueryInputDigest: f.Digest, QueryReceiptID: s.ID, QueryReceiptDigest: s.Digest, KnowledgeBaseID: f.KnowledgeBaseID, SpaceDigest: f.SpaceDigest, TenantID: f.TenantID, Hits: hits, SourceLineage: lineage}
++	ids := []uint64{}
++	for id := range r.receipts {
++		ids = append(ids, id)
++	}
++	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
++	for _, id := range ids {
++		input, receipt := r.originals[id], r.receipts[id]
++		if input.KnowledgeBaseID != f.KnowledgeBaseID || input.SpaceDigest != f.SpaceDigest {
++			return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		body := r.body[id]
++		if body.Proof.SourceLineage.RequireComplete() != nil || len(body.Proof.SourceLineage.Sources) != 0 {
++			return nil, types.ErrSourceLineageUnknown
++		}
++		c.Candidates = append(c.Candidates, types.KnowledgeEmbeddingCandidate{RowID: id, InputID: input.ID, InputDigest: input.Digest, ReceiptID: receipt.ID, ReceiptDigest: receipt.Digest, ModelProofJSON: input.ModelProofJSON, Revision: receipt.Revision})
++	}
++	// Threshold, shape and exact returned material are bound alongside all
++	// selected and absence candidates. The caller cannot substitute text/hits.
++	output := []*types.IndexWithScore{}
++	for _, h := range hits {
++		score := 1 - h.Distance
++		if p.Threshold > 0 && score < p.Threshold {
++			continue
++		}
++		i := r.body[h.RowID].Info
++		output = append(output, &types.IndexWithScore{ID: fmt.Sprintf("%d", h.RowID), SourceID: i.SourceID, SourceType: i.SourceType, ChunkID: i.ChunkID, KnowledgeID: i.KnowledgeID, KnowledgeBaseID: i.KnowledgeBaseID, TagID: i.TagID, Content: i.Content, Score: score, MatchType: types.MatchTypeEmbedding, IsEnabled: i.IsEnabled})
++	}
++	c.OutputDigest, err = KnowledgeInputDigest([]*types.RetrieveResult{{Results: output, RetrieverEngineType: types.SQLiteRetrieverEngineType, RetrieverType: types.VectorRetrieverType}})
++	if err != nil {
++		return nil, err
++	}
++	c.Digest, err = knowledgeConsumptionDigest(c)
++	return c, err
++}
++func CaptureKnowledgeVectorConsumptionInTx(ctx context.Context, tx *gorm.DB, r *KnowledgeSQLiteEmbeddingVectorRead, p types.RetrieveParams) error {
++	q, err := KnowledgeQueryEmbeddingResultFromContext(ctx)
++	if err != nil {
++		return err
++	}
++	if q == nil {
++		return nil
++	}
++	if r == nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	r.mu.Lock()
++	already := r.consumption != nil
++	r.mu.Unlock()
++	if already {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	r.query = q
++	c, err := r.makeConsumptionInTx(tx, p)
++	if err != nil {
++		return err
++	}
++	r.mu.Lock()
++	r.search = cloneKnowledgeSearch(p)
++	r.consumption = c
++	r.mu.Unlock()
++	return RecheckKnowledgeEmbeddingConsumerInTx(ctx, tx, r, q)
++}
++func RecheckKnowledgeEmbeddingConsumerInTx(ctx context.Context, tx *gorm.DB, r *KnowledgeSQLiteEmbeddingVectorRead, q *KnowledgeQueryEmbeddingResultRead) error {
++	if r == nil || q == nil || !sameOriginalModelCallerInRepository(ctx, r.ctx) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := r.start(); err != nil {
++		return err
++	}
++	if err := q.read.start(); err != nil {
++		return r.finish(err)
++	}
++	v := q.read.view()
++	err := v.checkInTx(tx, true)
++	if err == nil {
++		err = r.checkInTx(tx.WithContext(r.ctx))
++	}
++	if err == nil && r.consumption != nil {
++		hits, e := knowledgeNativeHitsInTx(tx, r, r.search)
++		err = e
++		if err == nil && !reflect.DeepEqual(hits, r.consumption.Hits) {
++			err = ErrKnowledgeInputChanged
++		}
++	}
++	if err == nil {
++		err = checkOriginalBodyAvailableBatchForCapturedInTx(ctx, tx, r.rows, r.heads)
++	}
++	if err == nil {
++		all := map[string]originalBodyLease{}
++		payloads := map[string]originalBodyPayload{}
++		err = mergeMemoryFinalLeaseBindings(all, v.leases)
++		if err == nil {
++			err = mergeMemoryFinalLeaseBindings(all, r.leases)
++		}
++		for id, b := range v.payloads {
++			payloads[id] = b
++		}
++		for id, b := range r.payloads {
++			if before, ok := payloads[id]; ok && !reflect.DeepEqual(before, b) {
++				err = ErrOriginalBodyUnavailable
++			}
++			payloads[id] = b
++		}
++		if err == nil {
++			err = NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx)
++		}
++		if err == nil {
++			err = knowledgeQueryFinalClockInTx(tx, all, payloads, v.content)
++		}
++	}
++	err = q.read.finish(err)
++	return r.finish(err)
++}
++func RecheckKnowledgeEmbeddingConsumer(r *KnowledgeSQLiteEmbeddingVectorRead, q *KnowledgeQueryEmbeddingResultRead) error {
++	if r == nil || q == nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return r.store.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error { return RecheckKnowledgeEmbeddingConsumerInTx(r.ctx, tx, r, q) }, memoryWriteOptions(r.store.db))
++}
++
++// Only actual concrete readers enter the current completion context. Saved
++// dependency DTOs alone cannot install this private operation capability.
++func WithActualKnowledgeCompletionReads(ctx context.Context, queries []*KnowledgeQueryEmbeddingResultRead, reads []*KnowledgeSQLiteEmbeddingVectorRead) (context.Context, []*types.KnowledgeEmbeddingConsumption, error) {
++	if len(queries) == 0 && len(reads) == 0 {
++		return ctx, nil, nil
++	}
++	if len(queries) != 1 || len(reads) == 0 || queries[0] == nil {
++		return ctx, nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	actual := []*KnowledgeSQLiteEmbeddingVectorRead{}
++	metadata := []*types.KnowledgeEmbeddingConsumption{}
++	for _, r := range reads {
++		if r == nil || r.query == nil || r.query.read != queries[0].read || r.consumption == nil || !sameOriginalModelCallerInRepository(ctx, r.ctx) {
++			return ctx, nil, ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err := RecheckKnowledgeEmbeddingConsumer(r, r.query); err != nil {
++			return ctx, nil, err
++		}
++		actual = append(actual, r)
++		copy := *r.consumption
++		copy.Candidates = append([]types.KnowledgeEmbeddingCandidate(nil), copy.Candidates...)
++		copy.Hits = append([]types.KnowledgeEmbeddingHit(nil), copy.Hits...)
++		metadata = append(metadata, &copy)
++	}
++	return context.WithValue(ctx, actualKnowledgeCompletionKey{}, actual), metadata, nil
++}
++func checkActualKnowledgeCompletionReadsInTx(tx *gorm.DB, captured []*types.KnowledgeEmbeddingConsumption) error {
++	reads, _ := tx.Statement.Context.Value(actualKnowledgeCompletionKey{}).([]*KnowledgeSQLiteEmbeddingVectorRead)
++	if len(reads) != len(captured) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	for i, r := range reads {
++		if r == nil || captured[i] == nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		c, err := r.makeConsumptionInTx(tx, r.search)
++		if err != nil {
++			return err
++		}
++		if !reflect.DeepEqual(c, captured[i]) || !reflect.DeepEqual(c, r.consumption) {
++			return ErrKnowledgeInputChanged
++		}
++	}
++	return nil
++}
++
++// This first supported completion is one genuinely read initial human message.
++// Extra history/steer/memory inputs must not be omitted from a successful union.
++func checkKnowledgeCompletionMessageParents(tx *gorm.DB, m *types.MessageCompletionInputManifest) error {
++	reads, _ := tx.Statement.Context.Value(actualKnowledgeCompletionKey{}).([]*KnowledgeSQLiteEmbeddingVectorRead)
++	if len(reads) == 0 {
++		if len(m.KnowledgeConsumptions) != 0 {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		return nil
++	}
++	if m.Initial == nil || len(m.Steers) != 0 || len(m.Inputs) == 0 || len(m.RecallConsumptions) != 0 || len(m.SemanticConsumptions) != 0 {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	for _, r := range reads {
++		v := r.query.read.view()
++		f := v.input
++		if m.Initial.AdmissionID != f.AdmissionID || m.Initial.GenerationID != f.GenerationID || m.Initial.MessageID != f.MessageID || m.Initial.BodyDigest != f.MessageBodyDigest || m.TenantID != f.TenantID {
++			return ErrKnowledgeInputChanged
++		}
++		for _, input := range m.Inputs {
++			if input == nil || input.MetadataDigest != f.PlanDigest || input.Request.AllSession || len(input.Request.MessageIDs) != 1 || input.Request.MessageIDs[0] != f.MessageID {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++		}
++	}
++	return nil
++}
++
++// This hook is last in the actual message producer after its native material
++// receipt, completion manifest and producer-advance writes have all finished.
++func checkActualKnowledgeCompletionFinalInTx(tx *gorm.DB) (finalErr error) {
++	reads, _ := tx.Statement.Context.Value(actualKnowledgeCompletionKey{}).([]*KnowledgeSQLiteEmbeddingVectorRead)
++	if len(reads) == 0 {
++		return nil
++	}
++	memory, _ := tx.Statement.Context.Value(actualMemoryRecallCompletionsKey{}).([]actualMemoryRecallCompletion)
++	semantic, _ := tx.Statement.Context.Value(actualMemorySemanticCompletionsKey{}).([]actualMemorySemanticCompletion)
++	if len(memory) > 0 || len(semantic) > 0 {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	all := map[string]originalBodyLease{}
++	payloads := map[string]originalBodyPayload{}
++	content := []NextcloudContentLease{}
++	contexts := []context.Context{tx.Statement.Context}
++	finishes := []func(error) error{}
++	defer func() {
++		for i := len(finishes) - 1; i >= 0; i-- {
++			err := finishes[i](finalErr)
++			if finalErr == nil {
++				finalErr = err
++			}
++		}
++	}()
++	mergePayload := func(in map[string]originalBodyPayload) error {
++		for id, b := range in {
++			if old, ok := payloads[id]; ok && !reflect.DeepEqual(old, b) {
++				return ErrOriginalBodyUnavailable
++			}
++			payloads[id] = b
++		}
++		return nil
++	}
++	for _, r := range reads {
++		if r == nil || r.query == nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err := r.start(); err != nil {
++			return err
++		}
++		finishes = append(finishes, r.finish)
++		q := r.query.read
++		if err := q.start(); err != nil {
++			return err
++		}
++		finishes = append(finishes, q.finish)
++		v := q.view()
++		c, err := r.makeConsumptionInTx(tx, r.search)
++		if err != nil || !reflect.DeepEqual(c, r.consumption) {
++			return ErrKnowledgeInputChanged
++		}
++		if err = mergeMemoryFinalLeaseBindings(all, r.leases); err != nil {
++			return err
++		}
++		if err = mergeMemoryFinalLeaseBindings(all, v.leases); err != nil {
++			return err
++		}
++		if err = mergePayload(r.payloads); err != nil {
++			return err
++		}
++		if err = mergePayload(v.payloads); err != nil {
++			return err
++		}
++		content = append(content, v.content...)
++		contexts = append(contexts, r.ctx, q.ctx)
++	}
++	if err := checkActualModelOriginalReadsInTx(tx); err != nil {
++		return err
++	}
++	models, _ := tx.Statement.Context.Value(actualModelOriginalReadsKey{}).([]*modelOriginalRead)
++	for _, m := range models {
++		if m == nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err := m.startCheck(); err != nil {
++			return err
++		}
++		finishes = append(finishes, m.finishCheck)
++		if err := mergeMemoryFinalLeaseBindings(all, m.hold.Leases); err != nil {
++			return err
++		}
++		contexts = append(contexts, m.ctx)
++		for _, body := range m.hold.Bodies {
++			var b originalBodyPayload
++			if err := bodyInternal(tx).Where("id=?", body.Head.BodyID).Take(&b).Error; err != nil {
++				return err
++			}
++			if b.TenantID != m.hold.Proof.OwnerTenantID || b.BodySHA256 != body.Receipt.BodyDigest || b.State != "live" || b.Payload != nil && (bodySHA([]byte(*b.Payload)) != b.BodySHA256 || int64(len([]byte(*b.Payload))) != b.BodyBytes) {
++				return ErrOriginalBodyUnavailable
++			}
++			if err := mergePayload(map[string]originalBodyPayload{b.ID: b}); err != nil {
++				return err
++			}
++		}
++	}
++	// ALL current captured heads and authenticated journal precede the final
++	// joined tuple/payload/content-fence/SQLclock statement. No entity IO follows.
++	for _, r := range reads {
++		if err := checkOriginalBodyAvailableBatchForCapturedInTx(r.ctx, tx, r.rows, r.heads); err != nil {
++			return err
++		}
++		v := r.query.read.view()
++		if err := checkOriginalBodyAvailableBatchForCapturedInTx(v.ctx, tx, v.rows, v.heads); err != nil {
++			return err
++		}
++	}
++	if err := NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx); err != nil {
++		return err
++	}
++	if err := knowledgeQueryFinalClockInTx(tx.WithContext(context.WithValue(tx.Statement.Context, knowledgeCompletionClockPhaseKey{}, true)), all, payloads, content); err != nil {
++		return err
++	}
++	for _, ctx := range contexts {
++		if ctx == nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// Fixed test observation of the genuine completion union. No names, tuples,
++// permission or lease capability are manufactured by this boolean observer.
++func KnowledgeCompletionSQLClockObserved(ctx context.Context, tx *gorm.DB) bool {
++	if ctx == nil || tx == nil {
++		return false
++	}
++	phase, _ := ctx.Value(knowledgeCompletionClockPhaseKey{}).(bool)
++	if !phase {
++		return false
++	}
++	if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return false
++	}
++	reads, _ := ctx.Value(actualKnowledgeCompletionKey{}).([]*KnowledgeSQLiteEmbeddingVectorRead)
++	if len(reads) == 0 {
++		return false
++	}
++	pool, err := tx.DB()
++	if err != nil {
++		return false
++	}
++	for _, r := range reads {
++		if r == nil || r.query == nil || !sameOriginalModelCallerInRepository(ctx, r.ctx) {
++			return false
++		}
++		actual, e := r.store.db.DB()
++		if e != nil || actual != pool {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/internal/application/repository/knowledge_query_embedding_clock.go b/internal/application/repository/knowledge_query_embedding_clock.go
+new file mode 100644
+index 000000000..7c31d9600
+--- /dev/null
++++ b/internal/application/repository/knowledge_query_embedding_clock.go
+@@ -0,0 +1,87 @@
++package repository
++
++import (
++	"encoding/json"
++	"reflect"
++	"sort"
++
++	"gorm.io/gorm"
++)
++
++// One final SQLite statement observes all private lease tuples, complete body
++// payloads and content fences with the same DB clock, after all previous IO.
++// Missing payload baselines are rejected, never discovered as new authority.
++func knowledgeQueryFinalClockInTx(tx *gorm.DB, all map[string]originalBodyLease, payloads map[string]originalBodyPayload, content []NextcloudContentLease) error {
++	if tx.Dialector.Name() != "sqlite" || len(all) == 0 {
++		return ErrOriginalBodyUnavailable
++	}
++	ids := []string{}
++	for id, l := range all {
++		if id == "" || l.LeaseID != id || l.Kind != "read" {
++			return ErrOriginalBodyUnavailable
++		}
++		if _, ok := payloads[l.BodyID]; !ok {
++			return ErrOriginalBodyUnavailable
++		}
++		ids = append(ids, id)
++	}
++	sort.Strings(ids)
++	contentIDs := []string{}
++	expectedContent := map[string]NextcloudContentLease{}
++	for _, l := range content {
++		if previous, ok := expectedContent[l.ID]; ok && previous != l {
++			return ErrNextcloudContentLeaseExpired
++		}
++		if l.ID == "" || l.Kind != NextcloudContentReadLease {
++			return ErrNextcloudContentLeaseExpired
++		}
++		if _, ok := expectedContent[l.ID]; !ok {
++			contentIDs = append(contentIDs, l.ID)
++		}
++		expectedContent[l.ID] = l
++	}
++	sort.Strings(contentIDs)
++	type row struct {
++		Domain, ID, BodyID, OwnerID, Kind, PayloadJSON, KB, Knowledge, BroadState, ExactState string
++		Tenant                                                                                uint64
++		Epoch, ExpiresAtMS, ClockMS, BroadEpoch, ExactEpoch                                   int64
++		ReleasedAtMS                                                                          *int64
++	}
++	sql := `SELECT 'body' AS domain,l.lease_id AS id,l.body_id,l.owner_id,l.kind,l.epoch,l.expires_at_ms,l.released_at_ms,0 AS tenant,'' AS kb,'' AS knowledge,'' AS broad_state,0 AS broad_epoch,'' AS exact_state,0 AS exact_epoch,
++ json_object('ID',p.id,'TenantID',p.tenant_id,'BodySHA256',p.body_sha256,'OriginDomainSHA256',p.origin_domain_sha256,'Payload',p.payload,'BodyBytes',p.body_bytes,'StorageKind',p.storage_kind,'State',p.state,'CreatedAtMS',p.created_at_ms,'LastCheckedAtMS',p.last_checked_at_ms,'RetiredAtMS',p.retired_at_ms,'BodyDeadlineMS',p.body_deadline_ms,'MetadataDeadlineMS',p.metadata_deadline_ms,'PurgeToken',p.purge_token,'PurgeEpoch',p.purge_epoch) AS payload_json,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) AS clock_ms
++ FROM original_body_leases l JOIN original_body_payloads p ON p.id=l.body_id WHERE l.lease_id IN ?
++ UNION ALL SELECT 'content' AS domain,l.lease_id AS id,'' AS body_id,l.owner_id,l.kind,l.epoch,l.expires_at_ms,l.released_at_ms,l.tenant_id AS tenant,l.knowledge_base_id AS kb,l.knowledge_id AS knowledge,b.state AS broad_state,b.epoch AS broad_epoch,COALESCE(e.state,'') AS exact_state,COALESCE(e.epoch,0) AS exact_epoch,'' AS payload_json,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) AS clock_ms
++ FROM nextcloud_content_leases l JOIN nextcloud_content_fences b ON b.tenant_id=l.tenant_id AND b.knowledge_base_id=l.knowledge_base_id AND b.knowledge_id='' LEFT JOIN nextcloud_content_fences e ON e.tenant_id=l.tenant_id AND e.knowledge_base_id=l.knowledge_base_id AND e.knowledge_id=l.knowledge_id AND l.knowledge_id<>'' WHERE l.lease_id IN ?`
++	var rows []row
++	if err := bodyInternal(tx).Raw(sql, ids, contentIDs).Scan(&rows).Error; err != nil {
++		return err
++	}
++	if len(rows) != len(ids)+len(contentIDs) {
++		return ErrOriginalBodyUnavailable
++	}
++	seen := map[string]bool{}
++	for _, r := range rows {
++		if seen[r.Domain+r.ID] || r.ReleasedAtMS != nil || r.ExpiresAtMS <= r.ClockMS {
++			return ErrOriginalBodyUnavailable
++		}
++		seen[r.Domain+r.ID] = true
++		if r.Domain == "body" {
++			l, ok := all[r.ID]
++			if !ok || l.BodyID != r.BodyID || l.OwnerID != r.OwnerID || l.Kind != r.Kind || l.Epoch != r.Epoch {
++				return ErrOriginalBodyUnavailable
++			}
++			var b originalBodyPayload
++			if json.Unmarshal([]byte(r.PayloadJSON), &b) != nil || !reflect.DeepEqual(payloads[r.BodyID], b) || b.State != "live" || b.PurgeEpoch != r.Epoch {
++				return ErrOriginalBodyUnavailable
++			}
++		} else if r.Domain == "content" {
++			l, ok := expectedContent[r.ID]
++			if !ok || l.OwnerID != r.OwnerID || l.TenantID != r.Tenant || l.KnowledgeBaseID != r.KB || l.KnowledgeID != r.Knowledge || l.Epoch != r.Epoch || string(l.Kind) != r.Kind || r.BroadState != "open" || r.Knowledge == "" && r.BroadEpoch != r.Epoch || r.Knowledge != "" && (r.ExactState != "open" || r.ExactEpoch != r.Epoch) {
++				return ErrNextcloudContentLeaseExpired
++			}
++		} else {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	return tx.Statement.Context.Err()
++}
+diff --git a/internal/application/repository/knowledge_query_embedding_original.go b/internal/application/repository/knowledge_query_embedding_original.go
+new file mode 100644
+index 000000000..4b9319124
+--- /dev/null
++++ b/internal/application/repository/knowledge_query_embedding_original.go
+@@ -0,0 +1,534 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"reflect"
++	"sort"
++	"sync"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/logprivacy"
++	modelembedding "github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++)
++
++type knowledgeQueryPlanKey struct{}
++type knowledgeQueryParent struct {
++	Plan    *types.MessageMaterialReadPlan
++	Message string
++}
++type knowledgeQueryReadKey struct{}
++type knowledgeQueryProducerKey struct{}
++type knowledgeQueryProducer struct {
++	Table, ID, KB, SHA string
++	Tenant             uint64
++}
++
++// A selector is not a proof. Begin obtains its own physical leases and checks
++// the actual immutable message receipts/current owner before reading text.
++func WithKnowledgeQueryMessagePlan(ctx context.Context, plan *types.MessageMaterialReadPlan, message string) (context.Context, error) {
++	if ctx == nil || ctx.Err() != nil || plan == nil || plan.MetadataDigest == "" || plan.Request.AllSession || len(plan.Request.MessageIDs) != 1 || plan.Request.MessageIDs[0] != message || message == "" || plan.SourceLineage.RequireComplete() != nil || len(plan.SourceLineage.Sources) != 0 || len(plan.ParentPlans) != 0 || len(plan.RecallHistory) != 0 {
++		return ctx, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	data, err := json.Marshal(plan)
++	if err != nil {
++		return ctx, err
++	}
++	var copied types.MessageMaterialReadPlan
++	if err = json.Unmarshal(data, &copied); err != nil {
++		return ctx, err
++	}
++	ctx, err = WithMessageMaterialReadPlan(ctx, &copied)
++	if err != nil {
++		return ctx, err
++	}
++	return context.WithValue(ctx, knowledgeQueryPlanKey{}, knowledgeQueryParent{&copied, message}), nil
++}
++
++type KnowledgeQueryEmbeddingRead struct {
++	store              *KnowledgeSQLiteEmbeddingStore
++	ctx                context.Context
++	cancel             context.CancelFunc
++	parent             knowledgeQueryParent
++	kb                 string
++	model              *modelOriginalRead
++	proof              types.ModelOriginalProof
++	input              *types.KnowledgeQueryEmbeddingInput
++	result             *types.KnowledgeQueryEmbeddingReceipt
++	text               string
++	vector             []float32
++	leases             map[string]originalBodyLease
++	owned              map[string]bool
++	payloads           map[string]originalBodyPayload
++	rows               []originalBodyAvailabilityRow
++	heads              []originalBodyFieldHead
++	content            []NextcloudContentLease
++	mu                 sync.Mutex
++	checks             sync.WaitGroup
++	closed, committing bool
++	failed             error
++	joined             chan struct{}
++}
++
++func knowledgeQueryInputDigest(f types.KnowledgeQueryEmbeddingInput) (string, error) {
++	f.InputJSON = ""
++	f.Digest = ""
++	return KnowledgeInputDigest(f)
++}
++func knowledgeQueryResultDigest(f types.KnowledgeQueryEmbeddingReceipt) (string, error) {
++	f.VectorJSON = ""
++	f.Digest = ""
++	return KnowledgeInputDigest(f)
++}
++func (q *KnowledgeQueryEmbeddingRead) Context() context.Context {
++	return context.WithValue(q.ctx, knowledgeQueryReadKey{}, q)
++}
++func (q *KnowledgeQueryEmbeddingRead) start() error {
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	if q.closed {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if q.failed != nil {
++		return q.failed
++	}
++	if err := q.ctx.Err(); err != nil {
++		return err
++	}
++	q.checks.Add(1)
++	return nil
++}
++func (q *KnowledgeQueryEmbeddingRead) finish(err error) error {
++	q.mu.Lock()
++	if err == nil {
++		err = q.ctx.Err()
++	}
++	if err != nil && q.failed == nil {
++		q.failed = err
++		q.cancel()
++	}
++	q.mu.Unlock()
++	q.checks.Done()
++	return err
++}
++
++// No lock spans SQL or a wait on the pool. The only mutable publication fields
++// are copied while the lifetime lock is held; Commit publishes after commit.
++func (q *KnowledgeQueryEmbeddingRead) view() *KnowledgeQueryEmbeddingRead {
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	v := &KnowledgeQueryEmbeddingRead{store: q.store, ctx: q.ctx, parent: q.parent, kb: q.kb, model: q.model, proof: q.proof, input: q.input, result: q.result, text: q.text, vector: append([]float32(nil), q.vector...), leases: map[string]originalBodyLease{}, owned: map[string]bool{}, payloads: map[string]originalBodyPayload{}, rows: append([]originalBodyAvailabilityRow(nil), q.rows...), heads: append([]originalBodyFieldHead(nil), q.heads...), content: append([]NextcloudContentLease(nil), q.content...)}
++	for id, l := range q.leases {
++		v.leases[id] = l
++	}
++	for id, b := range q.payloads {
++		v.payloads[id] = b
++	}
++	for id, b := range q.owned {
++		v.owned[id] = b
++	}
++	return v
++}
++func (q *KnowledgeQueryEmbeddingRead) checkPool(tx *gorm.DB) error {
++	if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	pool, e := tx.DB()
++	if e != nil {
++		return e
++	}
++	own, e := q.store.db.DB()
++	if e != nil || pool != own || !sameOriginalModelCallerInRepository(tx.Statement.Context, q.ctx) {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return q.ctx.Err()
++}
++func (q *KnowledgeQueryEmbeddingRead) kbInTx(tx *gorm.DB, hydrate bool) (*types.KnowledgeBase, error) {
++	authority, e := knowledgeSQLiteEmbeddingAuthority(tx, q.store.material)
++	if e != nil {
++		return nil, e
++	}
++	fresh, e := authority.RefreshCurrentReadActor(q.ctx)
++	if e != nil {
++		return nil, e
++	}
++	var kb types.KnowledgeBase
++	query := tx.Session(&gorm.Session{NewDB: true})
++	if !hydrate {
++		query = query.Select("id,tenant_id,type,creator_id,is_temporary,embedding_model_id,indexing_strategy,deleted_at")
++	} else {
++		// Query selection consumes configuration, not the mutable KB display name
++		// or description. Those are not body152 entity fields and are not read here.
++		query = query.Select("id,tenant_id,type,creator_id,is_temporary,embedding_model_id,summary_model_id,chunking_config,image_processing_config,vlm_config,asr_config,extract_config,faq_config,question_generation_config,auto_tag_config,profile_config,wiki_config,indexing_strategy,enrichment_templates,deleted_at")
++	}
++	if e = query.Where("id=? AND deleted_at IS NULL", q.kb).Take(&kb).Error; e != nil {
++		return nil, e
++	}
++	if kb.EmbeddingModelID != q.proof.ModelID || !kb.IndexingStrategy.VectorEnabled {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	dummy := &KnowledgeSQLiteEmbeddingVectorRead{}
++	if e = dummy.authorizeKB(authority, fresh, &kb); e != nil {
++		return nil, e
++	}
++	return &kb, nil
++}
++func (q *KnowledgeQueryEmbeddingRead) claimRows(tx *gorm.DB, rows []originalBodyAvailabilityRow) error {
++	if err := checkOriginalBodyAvailableBatchInTx(q.ctx, tx, rows); err != nil {
++		return err
++	}
++	heads, err := originalBodyBatchHeads(tx, rows)
++	if err != nil || len(heads) == 0 {
++		return ErrOriginalBodyUnavailable
++	}
++	seen := map[string]bool{}
++	for _, l := range q.leases {
++		seen[l.BodyID] = true
++	}
++	owner := "knowledge-query/" + uuid.NewString()
++	for _, h := range heads {
++		if !seen[h.BodyID] {
++			id, e := NewOriginalBodyRetentionStore(tx).acquireLeaseInTx(tx, h.BodyID, "read", owner, 15*time.Minute)
++			if e != nil {
++				return e
++			}
++			var l originalBodyLease
++			if e = bodyInternal(tx).Where("lease_id=?", id).Take(&l).Error; e != nil {
++				return e
++			}
++			q.leases[id] = l
++			q.owned[id] = true
++			seen[h.BodyID] = true
++		}
++		q.heads = append(q.heads, h)
++	}
++	q.rows = knowledgeSQLiteUniqueBodyRows(append(q.rows, rows...))
++	return q.capturePayloads(tx)
++}
++func (q *KnowledgeQueryEmbeddingRead) capturePayloads(tx *gorm.DB) error {
++	for _, l := range q.leases {
++		if _, ok := q.payloads[l.BodyID]; ok {
++			continue
++		}
++		var b originalBodyPayload
++		if e := bodyInternal(tx).Where("id=?", l.BodyID).Take(&b).Error; e != nil {
++			return e
++		}
++		q.payloads[l.BodyID] = b
++	}
++	return nil
++}
++func (s *KnowledgeSQLiteEmbeddingStore) BeginKnowledgeQueryEmbedding(ctx context.Context, kbID, modelID string) (*KnowledgeQueryEmbeddingRead, error) {
++	if ctx == nil || ctx.Err() != nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	parent, ok := ctx.Value(knowledgeQueryPlanKey{}).(knowledgeQueryParent)
++	if !ok || s == nil || kbID == "" || modelID == "" || parent.Plan == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	q := &KnowledgeQueryEmbeddingRead{store: s, parent: parent, kb: kbID, leases: map[string]originalBodyLease{}, owned: map[string]bool{}, payloads: map[string]originalBodyPayload{}, joined: make(chan struct{})}
++	q.ctx, q.cancel = context.WithCancel(logprivacy.SuppressContent(ctx))
++	fail := func(err error) (*KnowledgeQueryEmbeddingRead, error) { return nil, errors.Join(err, q.Close()) }
++	read, err := s.models.BeginModelOriginalRead(q.ctx, modelID, nil)
++	if err != nil {
++		return fail(err)
++	}
++	q.model, ok = read.(*modelOriginalRead)
++	if !ok {
++		_ = read.Close()
++		return fail(ErrKnowledgeSQLiteEmbeddingUnknown)
++	}
++	model, proof, err := read.Snapshot()
++	if err != nil {
++		return fail(err)
++	}
++	if model == nil || proof == nil || !proof.Valid() || model.Type != types.ModelTypeEmbedding || modelembedding.ValidateOriginalEmbeddingDefinition(model.Parameters.OriginalEmbedding) != nil {
++		return fail(ErrKnowledgeSQLiteEmbeddingUnknown)
++	}
++	q.proof = *proof
++	q.ctx = read.Context()
++	err = s.db.WithContext(q.ctx).Transaction(func(tx *gorm.DB) error {
++		if e := knowledgeSQLiteEmbeddingSchema(tx); e != nil {
++			return e
++		}
++		if e := knowledgeQuerySchemaInTx(tx); e != nil {
++			return e
++		}
++		_, e := q.kbInTx(tx, false)
++		return e
++	}, memoryWriteOptions(s.db))
++	if err != nil {
++		return fail(err)
++	}
++	for _, l := range q.model.hold.Leases {
++		q.leases[l.LeaseID] = l
++	}
++	owner := "knowledge-query-message/" + uuid.NewString()
++	ids, err := s.material.AcquireMessageBodyReadLeases(q.ctx, parent.Plan, owner, 15*time.Minute)
++	if err != nil {
++		return fail(err)
++	}
++	if len(ids) == 0 {
++		return fail(ErrOriginalBodyUnavailable)
++	}
++	// Immediately retain every actually acquired ID for failure cleanup, even if
++	// a subsequent binding read fails. No current row is used to mint a lease.
++	for _, id := range ids {
++		q.owned[id] = true
++	}
++	err = s.db.WithContext(q.ctx).Transaction(func(tx *gorm.DB) error {
++		for _, id := range ids {
++			var l originalBodyLease
++			if e := bodyInternal(tx).Where("lease_id=?", id).Take(&l).Error; e != nil {
++				return e
++			}
++			if l.OwnerID != owner || l.Kind != "read" {
++				return ErrOriginalBodyUnavailable
++			}
++			q.leases[id] = l
++		}
++		return q.capturePayloads(tx)
++	}, memoryWriteOptions(s.db))
++	if err != nil {
++		return fail(err)
++	}
++	scopes := append([]types.KnowledgeSearchScope{}, parent.Plan.Scopes...)
++	scopes = append(scopes, types.KnowledgeSearchScope{TenantID: parent.Plan.Request.TenantID, KBID: kbID})
++	seen := map[types.KnowledgeSearchScope]bool{}
++	for _, scope := range scopes {
++		if seen[scope] {
++			continue
++		}
++		seen[scope] = true
++		l, e := s.material.ContentLeaseStore().AcquireKBRead(q.ctx, scope.TenantID, scope.KBID, owner, 2*time.Minute)
++		if e != nil {
++			return fail(e)
++		}
++		q.content = append(q.content, l)
++	}
++	q.ctx, err = WithFAQReadLeaseCoverage(q.ctx, q.content)
++	if err != nil {
++		return fail(err)
++	}
++	q.ctx, err = WithMessageMaterialReadPlan(q.ctx, parent.Plan)
++	if err != nil {
++		return fail(err)
++	}
++	err = s.db.WithContext(q.ctx).Transaction(func(tx *gorm.DB) error {
++		// Existing configuration originals are immutable metadata (their exact
++		// current revision/digest is checked below). No nonexistent KB body head is
++		// fabricated, and no display/description plaintext is hydrated by this lane.
++		kb, e := q.kbInTx(tx, true)
++		if e != nil {
++			return e
++		}
++		lineage, e := readKnowledgeConfigurationOrigin(tx, kb)
++		if e != nil || lineage.RequireComplete() != nil || len(lineage.Sources) != 0 {
++			return ErrKnowledgeInputChanged
++		}
++		revision, e := knowledgeConfigurationControlRevision(tx, kb.ID)
++		if e != nil {
++			return e
++		}
++		config, e := knowledgeConfigurationOriginDigest(kb)
++		if e != nil {
++			return e
++		}
++		if e = q.clock(tx, nil); e != nil {
++			return e
++		}
++		actual, e := s.material.captureMessageMaterialInTx(tx.Session(&gorm.Session{NewDB: true}), parent.Plan.Request)
++		if e != nil {
++			return e
++		}
++		if len(actual.Messages) != 1 || len(actual.Proofs) != 1 || actual.MetadataDigest != parent.Plan.MetadataDigest {
++			return ErrKnowledgeInputChanged
++		}
++		m, p := actual.Messages[0], actual.Proofs[0]
++		if m == nil || p == nil || m.ID != parent.Message || m.Role != "user" || !m.IsCompleted || m.Content == "" || p.MessageID != m.ID || p.TenantID != kb.TenantID || p.AdmissionID == "" || p.GenerationID == "" {
++			return ErrKnowledgeInputChanged
++		}
++		body, e := json.Marshal(struct{ Text string }{m.Content})
++		if e != nil {
++			return e
++		}
++		plan, _ := json.Marshal(parent.Plan)
++		modelProof, _ := json.Marshal(q.proof)
++		now, e := nextcloudLeaseNowMS(tx)
++		if e != nil {
++			return e
++		}
++		f := &types.KnowledgeQueryEmbeddingInput{ID: uuid.NewString(), TenantID: kb.TenantID, KnowledgeBaseID: kbID, SessionID: p.SessionID, MessageID: m.ID, AdmissionID: p.AdmissionID, GenerationID: p.GenerationID, MessageBodyDigest: p.BodyDigest, PlanJSON: string(plan), PlanDigest: parent.Plan.MetadataDigest, KBRevision: revision, KBConfigDigest: config, ModelID: modelID, ModelProofJSON: string(modelProof), SpaceDigest: model.Parameters.OriginalEmbedding.SpaceDigest, ExpectedDimensions: model.Parameters.OriginalEmbedding.ExpectedDimensions, InputJSON: string(body), InputSHA256: bodySHA(body), CreatedAtMS: now}
++		f.Digest, e = knowledgeQueryInputDigest(*f)
++		if e != nil {
++			return e
++		}
++		producer := context.WithValue(q.ctx, knowledgeQueryProducerKey{}, knowledgeQueryProducer{f.TableName(), f.ID, kbID, f.InputSHA256, f.TenantID})
++		if e = tx.WithContext(producer).Create(f).Error; e != nil {
++			return e
++		}
++		q.input = f
++		q.text = m.Content
++		if e = q.claimRows(tx, []originalBodyAvailabilityRow{{f.TableName(), f.ID}}); e != nil {
++			return e
++		}
++		return q.checkInTx(tx, false)
++	}, memoryWriteOptions(s.db))
++	if err != nil {
++		return fail(err)
++	}
++	return q, nil
++}
++func (q *KnowledgeQueryEmbeddingRead) checkInTx(tx *gorm.DB, result bool) error {
++	if err := q.checkPool(tx); err != nil {
++		return err
++	}
++	if err := knowledgeQuerySchemaInTx(tx); err != nil {
++		return err
++	}
++	if q.input == nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err := q.clock(tx, nil); err != nil {
++		return err
++	}
++	if err := CheckCurrentModelOriginalHolds(q.model.Context(), tx.Session(&gorm.Session{NewDB: true}), q.proof); err != nil {
++		return err
++	}
++	kb, err := q.kbInTx(tx, true)
++	if err != nil {
++		return err
++	}
++	lineage, err := readKnowledgeConfigurationOrigin(tx, kb)
++	if err != nil || lineage == nil || lineage.RequireComplete() != nil || len(lineage.Sources) != 0 {
++		return ErrKnowledgeInputChanged
++	}
++	revision, err := knowledgeConfigurationControlRevision(tx, kb.ID)
++	if err != nil || revision != q.input.KBRevision {
++		return ErrKnowledgeInputChanged
++	}
++	digest, err := knowledgeConfigurationOriginDigest(kb)
++	if err != nil || digest != q.input.KBConfigDigest {
++		return ErrKnowledgeInputChanged
++	}
++	snapshot, err := q.store.material.captureMessageMaterialInTx(tx.Session(&gorm.Session{NewDB: true}), q.parent.Plan.Request)
++	if err != nil {
++		return err
++	}
++	if len(snapshot.Messages) != 1 || len(snapshot.Proofs) != 1 || snapshot.MetadataDigest != q.input.PlanDigest {
++		return ErrKnowledgeInputChanged
++	}
++	m, p := snapshot.Messages[0], snapshot.Proofs[0]
++	if m == nil || p == nil || m.ID != q.input.MessageID || m.Role != "user" || !m.IsCompleted || m.Content != q.text || p.AdmissionID != q.input.AdmissionID || p.GenerationID != q.input.GenerationID || p.BodyDigest != q.input.MessageBodyDigest {
++		return ErrKnowledgeInputChanged
++	}
++	var input types.KnowledgeQueryEmbeddingInput
++	if err = tx.Where("id=?", q.input.ID).Take(&input).Error; err != nil {
++		return err
++	}
++	if !reflect.DeepEqual(input, *q.input) {
++		return ErrKnowledgeInputChanged
++	}
++	actualDigest, err := knowledgeQueryInputDigest(input)
++	if err != nil || actualDigest != input.Digest || bodySHA([]byte(input.InputJSON)) != input.InputSHA256 {
++		return ErrOriginalBodyUnavailable
++	}
++	if result {
++		if q.result == nil {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		var receipt types.KnowledgeQueryEmbeddingReceipt
++		if err = tx.Where("id=?", q.result.ID).Take(&receipt).Error; err != nil {
++			return err
++		}
++		rd, e := knowledgeQueryResultDigest(receipt)
++		if e != nil || rd != receipt.Digest || !reflect.DeepEqual(receipt, *q.result) {
++			return ErrOriginalBodyUnavailable
++		}
++		data, e := knowledgeSQLiteVectorBytes(q.vector)
++		if e != nil || bodySHA(data) != receipt.VectorSHA256 || bodySHA([]byte(receipt.VectorJSON)) != receipt.BodySHA256 {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	if err = checkOriginalBodyAvailableBatchForCapturedInTx(q.ctx, tx, q.rows, q.heads); err != nil {
++		return err
++	}
++	return q.clock(tx, nil)
++}
++func (q *KnowledgeQueryEmbeddingRead) clock(tx *gorm.DB, extra map[string]originalBodyLease) error {
++	all := map[string]originalBodyLease{}
++	if err := mergeMemoryFinalLeaseBindings(all, q.leases); err != nil {
++		return err
++	}
++	if err := mergeMemoryFinalLeaseBindings(all, extra); err != nil {
++		return err
++	}
++	if err := NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx); err != nil {
++		return err
++	}
++	return knowledgeQueryFinalClockInTx(tx, all, q.payloads, q.content)
++}
++func (q *KnowledgeQueryEmbeddingRead) Snapshot() (*types.KnowledgeQueryEmbeddingInputSnapshot, error) {
++	if err := q.start(); err != nil {
++		return nil, err
++	}
++	v := q.view()
++	err := q.store.db.WithContext(q.ctx).Transaction(func(tx *gorm.DB) error { return v.checkInTx(tx, false) }, memoryWriteOptions(q.store.db))
++	if err = q.finish(err); err != nil {
++		return nil, err
++	}
++	f := v.input
++	return &types.KnowledgeQueryEmbeddingInputSnapshot{OriginalID: f.ID, OriginalDigest: f.Digest, KnowledgeBaseID: f.KnowledgeBaseID, ModelID: f.ModelID, Text: v.text, SpaceDigest: f.SpaceDigest, ExpectedDimensions: f.ExpectedDimensions}, nil
++}
++func (q *KnowledgeQueryEmbeddingRead) Recheck() error {
++	if err := q.start(); err != nil {
++		return err
++	}
++	v := q.view()
++	err := q.store.db.WithContext(q.ctx).Transaction(func(tx *gorm.DB) error { return v.checkInTx(tx, v.result != nil) }, memoryWriteOptions(q.store.db))
++	return q.finish(err)
++}
++func (q *KnowledgeQueryEmbeddingRead) Close() error {
++	q.mu.Lock()
++	if q.closed {
++		joined := q.joined
++		q.mu.Unlock()
++		<-joined
++		q.mu.Lock()
++		err := q.failed
++		q.mu.Unlock()
++		return err
++	}
++	q.closed = true
++	q.cancel()
++	q.mu.Unlock()
++	q.checks.Wait()
++	cleanup, cancel := context.WithTimeout(context.WithoutCancel(q.ctx), 5*time.Second)
++	defer cancel()
++	var err error
++	ids := []string{}
++	for id := range q.owned {
++		ids = append(ids, id)
++	}
++	sort.Strings(ids)
++	for _, id := range ids {
++		err = errors.Join(err, NewOriginalBodyRetentionStore(q.store.db).ReleaseLease(cleanup, id))
++	}
++	for _, l := range q.content {
++		err = errors.Join(err, q.store.material.ContentLeaseStore().ReleaseLease(cleanup, l.ID))
++	}
++	if q.model != nil {
++		err = errors.Join(err, q.model.Close())
++	}
++	q.mu.Lock()
++	if q.failed == nil {
++		q.failed = err
++	}
++	close(q.joined)
++	q.mu.Unlock()
++	return err
++}
+diff --git a/internal/application/repository/knowledge_query_embedding_result.go b/internal/application/repository/knowledge_query_embedding_result.go
+new file mode 100644
+index 000000000..3605f3161
+--- /dev/null
++++ b/internal/application/repository/knowledge_query_embedding_result.go
+@@ -0,0 +1,160 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	modelembedding "github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++)
++
++type KnowledgeQueryEmbeddingResultRead struct{ read *KnowledgeQueryEmbeddingRead }
++
++func (r *KnowledgeQueryEmbeddingResultRead) Context() context.Context { return r.read.Context() }
++func (r *KnowledgeQueryEmbeddingResultRead) Recheck() error           { return r.read.Recheck() }
++func (r *KnowledgeQueryEmbeddingResultRead) Close() error             { return r.read.Close() }
++func (r *KnowledgeQueryEmbeddingResultRead) Snapshot() (*types.KnowledgeQueryEmbeddingVectorSnapshot, error) {
++	q := r.read
++	if err := q.start(); err != nil {
++		return nil, err
++	}
++	v := q.view()
++	err := q.store.db.WithContext(q.ctx).Transaction(func(tx *gorm.DB) error { return v.checkInTx(tx, true) }, memoryWriteOptions(q.store.db))
++	if err = q.finish(err); err != nil {
++		return nil, err
++	}
++	if v.result == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	f, s := v.input, v.result
++	return &types.KnowledgeQueryEmbeddingVectorSnapshot{OriginalID: f.ID, OriginalDigest: f.Digest, ReceiptID: s.ID, ReceiptDigest: s.Digest, KnowledgeBaseID: f.KnowledgeBaseID, ModelID: f.ModelID, SpaceDigest: f.SpaceDigest, Vector: append([]float32(nil), v.vector...)}, nil
++}
++
++// Commit requires the private input capability; it cannot author from a model
++// ID, caller text, digest or an AdditionalParams vector. Its service producer
++// must also supply the opaque actual SDK success capability; an input context
++// with caller floats cannot publish a result receipt.
++func (s *KnowledgeSQLiteEmbeddingStore) CommitKnowledgeQueryEmbedding(ctx context.Context, inputID, inputDigest string, vector []float32) (*KnowledgeQueryEmbeddingResultRead, error) {
++	if ctx == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	q, _ := ctx.Value(knowledgeQueryReadKey{}).(*KnowledgeQueryEmbeddingRead)
++	if q == nil || q.store != s || q.input == nil || q.input.ID != inputID || q.input.Digest != inputDigest || len(vector) != q.input.ExpectedDimensions || !sameOriginalModelCallerInRepository(ctx, q.ctx) {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	binary, err := knowledgeSQLiteVectorBytes(vector)
++	if err != nil {
++		return nil, err
++	}
++	if err = modelembedding.MatchOriginalQuerySDKResult(ctx, q.model, inputID, inputDigest, q.text, q.input.SpaceDigest, q.input.ExpectedDimensions, q.proof, vector); err != nil {
++		return nil, err
++	}
++	if err = q.start(); err != nil {
++		return nil, err
++	}
++	q.mu.Lock()
++	if q.committing || q.result != nil {
++		q.mu.Unlock()
++		return nil, q.finish(ErrKnowledgeSQLiteEmbeddingUnknown)
++	}
++	q.committing = true
++	q.mu.Unlock()
++	v := q.view()
++	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		if e := v.checkInTx(tx, false); e != nil {
++			return e
++		}
++		var count int64
++		if e := tx.Table("knowledge_sqlite_query_receipts").Where("input_id=?", inputID).Count(&count).Error; e != nil {
++			return e
++		}
++		if count != 0 {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		raw, e := json.Marshal(vector)
++		if e != nil {
++			return e
++		}
++		now, e := nextcloudLeaseNowMS(tx)
++		if e != nil {
++			return e
++		}
++		f := v.input
++		r := &types.KnowledgeQueryEmbeddingReceipt{ID: uuid.NewString(), InputID: f.ID, InputDigest: f.Digest, TenantID: f.TenantID, KnowledgeBaseID: f.KnowledgeBaseID, ModelID: f.ModelID, SpaceDigest: f.SpaceDigest, Dimensions: len(vector), VectorJSON: string(raw), BodySHA256: bodySHA(raw), VectorSHA256: bodySHA(binary), CreatedAtMS: now}
++		r.Digest, e = knowledgeQueryResultDigest(*r)
++		if e != nil {
++			return e
++		}
++		producer := context.WithValue(ctx, knowledgeQueryProducerKey{}, knowledgeQueryProducer{r.TableName(), r.ID, r.KnowledgeBaseID, r.BodySHA256, r.TenantID})
++		if e = tx.WithContext(producer).Create(r).Error; e != nil {
++			return e
++		}
++		v.result = r
++		v.vector = append([]float32(nil), vector...)
++		if e = v.claimRows(tx, []originalBodyAvailabilityRow{{r.TableName(), r.ID}}); e != nil {
++			return e
++		}
++		return v.checkInTx(tx, true)
++	}, memoryWriteOptions(s.db))
++	q.mu.Lock()
++	if err == nil {
++		q.result = v.result
++		q.vector = v.vector
++		q.leases = v.leases
++		q.owned = v.owned
++		q.payloads = v.payloads
++		q.rows = v.rows
++		q.heads = v.heads
++	}
++	q.committing = false
++	q.mu.Unlock()
++	if err = q.finish(err); err != nil {
++		return nil, err
++	}
++	return &KnowledgeQueryEmbeddingResultRead{q}, nil
++}
++
++// Getter returns only the genuine captured result capability. It performs no
++// metadata lookup and adds no proof to a context lacking that private result.
++func KnowledgeQueryEmbeddingResultFromContext(ctx context.Context) (*KnowledgeQueryEmbeddingResultRead, error) {
++	if ctx == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	q, _ := ctx.Value(knowledgeQueryReadKey{}).(*KnowledgeQueryEmbeddingRead)
++	if q == nil {
++		return nil, nil
++	}
++	if err := q.start(); err != nil {
++		return nil, err
++	}
++	v := q.view()
++	err := error(nil)
++	if v.result == nil || !sameOriginalModelCallerInRepository(ctx, v.ctx) {
++		err = ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	if err = q.finish(err); err != nil {
++		return nil, err
++	}
++	return &KnowledgeQueryEmbeddingResultRead{q}, nil
++}
++func CheckKnowledgeQueryVectorInTx(ctx context.Context, tx *gorm.DB, params types.RetrieveParams) (bool, error) {
++	result, err := KnowledgeQueryEmbeddingResultFromContext(ctx)
++	if err != nil {
++		return false, err
++	}
++	if result == nil {
++		return false, nil
++	}
++	q := result.read
++	if err = q.start(); err != nil {
++		return false, err
++	}
++	v := q.view()
++	err = v.checkInTx(tx, true)
++	space, _ := params.AdditionalParams["embedding_space_digest"].(string)
++	if err == nil && (len(params.KnowledgeBaseIDs) != 1 || params.KnowledgeBaseIDs[0] != v.input.KnowledgeBaseID || space != v.input.SpaceDigest || !KnowledgeSQLiteVectorsEqual(params.Embedding, v.vector)) {
++		err = ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return true, q.finish(err)
++}
+diff --git a/internal/application/repository/knowledge_query_embedding_schema.go b/internal/application/repository/knowledge_query_embedding_schema.go
+new file mode 100644
+index 000000000..4eea5d89a
+--- /dev/null
++++ b/internal/application/repository/knowledge_query_embedding_schema.go
+@@ -0,0 +1,93 @@
++package repository
++
++import (
++	"gorm.io/gorm"
++	"strings"
++)
++
++var knowledgeQuerySchema = []struct {
++	Table, Body, SQL string
++	Columns          []string
++}{
++	{Table: "knowledge_sqlite_query_inputs", Body: "input_json", Columns: strings.Fields("id tenant_id knowledge_base_id session_id message_id admission_id generation_id message_body_digest plan_json plan_digest kb_revision kb_config_digest model_id model_proof_json space_digest expected_dimensions input_json input_sha256 digest created_at_ms"), SQL: `CREATE TABLE knowledge_sqlite_query_inputs (
++ id TEXT PRIMARY KEY NOT NULL, tenant_id INTEGER NOT NULL CHECK(tenant_id>0),
++ knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
++ session_id TEXT NOT NULL, message_id TEXT NOT NULL,
++ admission_id TEXT NOT NULL REFERENCES message_material_admissions(id),
++ generation_id TEXT NOT NULL REFERENCES message_generation_origins(id),
++ message_body_digest TEXT NOT NULL CHECK(length(message_body_digest)=64),
++ plan_json TEXT NOT NULL, plan_digest TEXT NOT NULL CHECK(length(plan_digest)=64),
++ kb_revision INTEGER NOT NULL CHECK(kb_revision>0), kb_config_digest TEXT NOT NULL CHECK(length(kb_config_digest)=64),
++ model_id TEXT NOT NULL, model_proof_json TEXT NOT NULL,
++ space_digest TEXT NOT NULL CHECK(length(space_digest)=64), expected_dimensions INTEGER NOT NULL CHECK(expected_dimensions BETWEEN 1 AND 65536),
++ input_json TEXT NOT NULL, input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
++ digest TEXT NOT NULL UNIQUE CHECK(length(digest)=64), created_at_ms INTEGER NOT NULL
++);`},
++	{Table: "knowledge_sqlite_query_receipts", Body: "vector_json", Columns: strings.Fields("id input_id input_digest tenant_id knowledge_base_id model_id space_digest dimensions vector_json body_sha256 vector_sha256 digest created_at_ms"), SQL: `CREATE TABLE knowledge_sqlite_query_receipts (
++ id TEXT PRIMARY KEY NOT NULL, input_id TEXT NOT NULL UNIQUE REFERENCES knowledge_sqlite_query_inputs(id),
++ input_digest TEXT NOT NULL CHECK(length(input_digest)=64), tenant_id INTEGER NOT NULL CHECK(tenant_id>0),
++ knowledge_base_id TEXT NOT NULL, model_id TEXT NOT NULL, space_digest TEXT NOT NULL CHECK(length(space_digest)=64),
++ dimensions INTEGER NOT NULL CHECK(dimensions BETWEEN 1 AND 65536), vector_json TEXT NOT NULL,
++ body_sha256 TEXT NOT NULL CHECK(length(body_sha256)=64), vector_sha256 TEXT NOT NULL CHECK(length(vector_sha256)=64),
++ digest TEXT NOT NULL UNIQUE CHECK(length(digest)=64), created_at_ms INTEGER NOT NULL
++);`},
++}
++
++func knowledgeQuerySchemaInTx(tx *gorm.DB) error {
++	if tx.Dialector.Name() != "sqlite" {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	normalize := func(s string) string {
++		return strings.Join(strings.Fields(strings.TrimSuffix(strings.TrimSpace(s), ";")), " ")
++	}
++	for _, spec := range knowledgeQuerySchema {
++		var table struct{ SQL string }
++		if err := bodyInternal(tx).Raw("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", spec.Table).Take(&table).Error; err != nil {
++			return err
++		}
++		if normalize(table.SQL) != normalize(spec.SQL) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		columns, err := bodyInternal(tx).Migrator().ColumnTypes(spec.Table)
++		if err != nil {
++			return err
++		}
++		if len(columns) != len(spec.Columns) {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		for i, c := range columns {
++			if c.Name() != spec.Columns[i] {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++		}
++		eq := []string{}
++		for _, column := range spec.Columns {
++			if column != spec.Body {
++				eq = append(eq, "NEW."+bodyQuoted(column)+" IS OLD."+bodyQuoted(column))
++			}
++		}
++		authority := "EXISTS (SELECT 1 FROM original_body_rewrite_authorities a JOIN original_body_payloads p ON p.id=a.body_id WHERE a.source_table=" + bodySQLLiteral(spec.Table) + " AND a.row_key=CAST(OLD." + bodyQuoted("id") + " AS TEXT) AND a.column_name=" + bodySQLLiteral(spec.Body) + " AND a.old_value=OLD." + bodyQuoted(spec.Body) + " AND a.new_value=NEW." + bodyQuoted(spec.Body) + ")"
++		permit := "(" + strings.Join(eq, " AND ") + " AND " + authority + ")"
++		prefix := "knowledge_sqlite_query_input_"
++		if spec.Body == "vector_json" {
++			prefix = "knowledge_sqlite_query_result_"
++		}
++		for _, event := range []string{"update", "delete"} {
++			name := prefix + event
++			original := "CREATE TRIGGER " + name + " BEFORE " + strings.ToUpper(event) + " ON " + spec.Table + " BEGIN SELECT RAISE(ABORT,'knowledge_query_original_immutable'); END"
++			expected := original
++			if event == "update" {
++				begin := strings.Index(original, " BEGIN")
++				expected = original[:begin] + " WHEN NOT (" + permit + ")" + original[begin:]
++			}
++			var row struct{ SQL string }
++			if err = bodyInternal(tx).Raw("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=? AND tbl_name=?", name, spec.Table).Take(&row).Error; err != nil {
++				return err
++			}
++			if normalize(row.SQL) != normalize(expected) && normalize(row.SQL) != normalize(original) {
++				return ErrKnowledgeSQLiteEmbeddingUnknown
++			}
++		}
++	}
++	return tx.Statement.Context.Err()
++}
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_read.go b/internal/application/repository/knowledge_sqlite_embedding_read.go
+index fe4480abd..e5c4362e5 100644
+--- a/internal/application/repository/knowledge_sqlite_embedding_read.go
++++ b/internal/application/repository/knowledge_sqlite_embedding_read.go
+@@ -43,23 +43,26 @@ func (s *KnowledgeSQLiteEmbeddingStore) CheckSchema() error {
+ }
+ 
+ type KnowledgeSQLiteEmbeddingVectorRead struct {
+-	store     *KnowledgeSQLiteEmbeddingStore
+-	ctx       context.Context
+-	cancel    context.CancelFunc
+-	originals map[uint64]types.KnowledgeSQLiteEmbeddingInput
+-	receipts  map[uint64]types.KnowledgeSQLiteEmbeddingReceipt
+-	body      map[uint64]knowledgeSQLiteEmbeddingInputBody
+-	vectors   map[uint64][]float32
+-	models    map[string]*historicalModelRead
+-	heads     []originalBodyFieldHead
+-	rows      []originalBodyAvailabilityRow
+-	leases    map[string]originalBodyLease
+-	payloads  map[string]originalBodyPayload
+-	mu        sync.Mutex
+-	closed    bool
+-	failed    error
+-	checks    sync.WaitGroup
+-	joined    chan struct{}
++	store       *KnowledgeSQLiteEmbeddingStore
++	ctx         context.Context
++	cancel      context.CancelFunc
++	originals   map[uint64]types.KnowledgeSQLiteEmbeddingInput
++	receipts    map[uint64]types.KnowledgeSQLiteEmbeddingReceipt
++	body        map[uint64]knowledgeSQLiteEmbeddingInputBody
++	vectors     map[uint64][]float32
++	query       *KnowledgeQueryEmbeddingResultRead
++	consumption *types.KnowledgeEmbeddingConsumption
++	search      types.RetrieveParams
++	models      map[string]*historicalModelRead
++	heads       []originalBodyFieldHead
++	rows        []originalBodyAvailabilityRow
++	leases      map[string]originalBodyLease
++	payloads    map[string]originalBodyPayload
++	mu          sync.Mutex
++	closed      bool
++	failed      error
++	checks      sync.WaitGroup
++	joined      chan struct{}
+ }
+ 
+ // Only metadata is read before authorization/leases. Bodies are hydrated below
+diff --git a/internal/application/repository/memory_recall_history.go b/internal/application/repository/memory_recall_history.go
+index c0b972ef0..41952f82c 100644
+--- a/internal/application/repository/memory_recall_history.go
++++ b/internal/application/repository/memory_recall_history.go
+@@ -138,6 +138,11 @@ func (s *KnowledgeInputProvenanceStore) messageRecallDependencyInTx(tx *gorm.DB,
+ 	if json.Unmarshal([]byte(row.ParentManifest), &manifest) != nil || manifest.Recipe != row.Recipe || manifest.Version != 1 || manifest.AssistantAdmissionID != fact.ID || manifest.AssistantGenerationID != fact.GenerationID || manifest.AssistantMessageID != fact.MessageID || manifest.SessionID != fact.SessionID || manifest.TenantID != fact.TenantID || manifest.OwnerID != fact.OwnerID || manifest.OwnerRevision != fact.OwnerRevision || manifest.SourceLineage.RequireComplete() != nil {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
++	// Named knowledge-query/vector reopening is a separate required capability.
++	// Do not silently drop its durable dependencies while admitting old bytes.
++	if len(manifest.KnowledgeConsumptions) > 0 {
++		return nil, types.ErrSourceLineageUnknown
++	}
+ 	if len(manifest.RecallConsumptions) == 0 && len(manifest.SemanticConsumptions) == 0 {
+ 		if hasUsed != 0 {
+ 			return nil, types.ErrSourceLineageUnknown
+diff --git a/internal/application/repository/message_completion_material.go b/internal/application/repository/message_completion_material.go
+index dce005a40..ebb254d18 100644
+--- a/internal/application/repository/message_completion_material.go
++++ b/internal/application/repository/message_completion_material.go
+@@ -59,7 +59,19 @@ func (s *KnowledgeInputProvenanceStore) sealMessageCompletionInputsInTx(tx *gorm
+ 	if err := checkActualMemorySemanticCompletionReadsInTx(tx, manifest.SemanticConsumptions); err != nil {
+ 		return err
+ 	}
++	if err := checkActualKnowledgeCompletionReadsInTx(tx, manifest.KnowledgeConsumptions); err != nil {
++		return err
++	}
++	if err := checkKnowledgeCompletionMessageParents(tx, manifest); err != nil {
++		return err
++	}
+ 	sources := []*types.SourceLineage{message.SourceLineage}
++	for _, consumption := range manifest.KnowledgeConsumptions {
++		if consumption == nil || consumption.SourceLineage.RequireComplete() != nil {
++			return types.ErrSourceLineageUnknown
++		}
++		sources = append(sources, consumption.SourceLineage)
++	}
+ 	for _, consumption := range manifest.SemanticConsumptions {
+ 		if consumption == nil || consumption.SourceLineage.RequireComplete() != nil {
+ 			return types.ErrSourceLineageUnknown
+@@ -132,6 +144,12 @@ func (s *KnowledgeInputProvenanceStore) validateMessageCompletionInputsInTx(tx *
+ 	if err := checkActualMemorySemanticCompletionReadsInTx(tx, boundary.Manifest.SemanticConsumptions); err != nil {
+ 		return err
+ 	}
++	if err := checkActualKnowledgeCompletionReadsInTx(tx, boundary.Manifest.KnowledgeConsumptions); err != nil {
++		return err
++	}
++	if err := checkKnowledgeCompletionMessageParents(tx, boundary.Manifest); err != nil {
++		return err
++	}
+ 	for _, snapshot := range boundary.Manifest.Inputs {
+ 		actual, err := s.captureMessageMaterialInTx(tx, snapshot.Request)
+ 		if err != nil {
+diff --git a/internal/application/repository/message_material.go b/internal/application/repository/message_material.go
+index d87f3a6c9..5e126477d 100644
+--- a/internal/application/repository/message_material.go
++++ b/internal/application/repository/message_material.go
+@@ -274,7 +274,7 @@ func (s *KnowledgeInputProvenanceStore) sealMessageMaterialInTx(tx *gorm.DB, ori
+ 			return err
+ 		}
+ 	}
+-	return nil
++	return checkActualKnowledgeCompletionFinalInTx(tx)
+ }
+ 
+ func ConfigureMessageMaterialWriters(repo interface{}, store *KnowledgeInputProvenanceStore) {
+diff --git a/internal/application/repository/original_body_fields.go b/internal/application/repository/original_body_fields.go
+index dd185107a..5f85b38d3 100644
+--- a/internal/application/repository/original_body_fields.go
++++ b/internal/application/repository/original_body_fields.go
+@@ -21,6 +21,8 @@ type originalBodyFieldDescriptor struct {
+ }
+ 
+ var originalBodyFields = []originalBodyFieldDescriptor{
++	{"knowledge_sqlite_query_inputs", "id", "inline", []string{"input_json"}},
++	{"knowledge_sqlite_query_receipts", "id", "inline", []string{"vector_json"}},
+ 	{"knowledge_sqlite_embedding_inputs", "id", "inline", []string{"input_json"}},
+ 	{"knowledge_sqlite_embedding_receipts", "id", "inline", []string{"vector_json"}},
+ 	{"memory_query_embedding_originals", "id", "inline", []string{"input_json"}},
+diff --git a/internal/application/repository/original_body_message_scopes.go b/internal/application/repository/original_body_message_scopes.go
+index fbe5f3039..1b4016180 100644
+--- a/internal/application/repository/original_body_message_scopes.go
++++ b/internal/application/repository/original_body_message_scopes.go
+@@ -56,6 +56,18 @@ func (s *OriginalBodyRetentionStore) UpgradeLeaseScopeSchema() error {
+ 	})
+ }
+ func (s *OriginalBodyRetentionStore) recordMessageLeaseScopes(tx *gorm.DB, id string, d originalBodyFieldDescriptor, key, raw string, scope originalBodyScope) error {
++	if d.Table == "knowledge_sqlite_query_inputs" || d.Table == "knowledge_sqlite_query_receipts" {
++		boundary, ok := tx.Statement.Context.Value(knowledgeQueryProducerKey{}).(knowledgeQueryProducer)
++		if !ok || boundary.Table != d.Table || boundary.ID != key || boundary.Tenant != scope.Tenant || boundary.KB != scope.KB || boundary.SHA != bodySHA([]byte(raw)) {
++			return ErrOriginalBodyUnavailable
++		}
++		for _, kb := range []string{"", scope.KB} {
++			if err := bodyInternal(tx).Create(&originalBodyLeaseScope{BodyID: id, TenantID: scope.Tenant, KnowledgeBaseID: kb}).Error; err != nil {
++				return err
++			}
++		}
++		return nil
++	}
+ 	if d.Table == "memory_query_embedding_originals" || d.Table == "memory_query_embedding_receipts" {
+ 		boundary, ok := tx.Statement.Context.Value(memoryQueryEmbeddingProducerKey{}).(memoryQueryEmbeddingProducer)
+ 		if !ok || boundary.Table != d.Table || boundary.ID != key || boundary.Tenant != scope.Tenant || boundary.SHA256 != bodySHA([]byte(raw)) {
+diff --git a/internal/application/repository/retriever/sqlite/original_vector_retrieve.go b/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
+index 4e55e4d02..aa5fa91b0 100644
+--- a/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
++++ b/internal/application/repository/retriever/sqlite/original_vector_retrieve.go
+@@ -140,8 +140,23 @@ func (r *sqliteRepository) originalVectorRetrieve(ctx context.Context, params ty
+ 				return apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
+ 			}
+ 		}
++		// A genuine query context binds this native result to its actual SDK receipt.
++		// Space selection and naked vector parameters do not install that capability.
++		if err := apprepo.CaptureKnowledgeVectorConsumptionInTx(held.Context(), tx, held, params); err != nil {
++			return err
++		}
+ 		// All native/cache IO precedes the complete source/body/model final check.
+-		return held.CheckInTx(held.Context(), tx)
++		if err := held.CheckInTx(held.Context(), tx); err != nil {
++			return err
++		}
++		query, err := apprepo.KnowledgeQueryEmbeddingResultFromContext(held.Context())
++		if err != nil {
++			return err
++		}
++		if query != nil {
++			return apprepo.RecheckKnowledgeEmbeddingConsumerInTx(held.Context(), tx, held, query)
++		}
++		return nil
+ 	})
+ 	if err != nil {
+ 		return nil, err
+diff --git a/internal/application/service/knowledge_embedding_consumer_boundary.go b/internal/application/service/knowledge_embedding_consumer_boundary.go
+index 42a420759..038a23842 100644
+--- a/internal/application/service/knowledge_embedding_consumer_boundary.go
++++ b/internal/application/service/knowledge_embedding_consumer_boundary.go
+@@ -13,6 +13,7 @@ import (
+ // is silently omitted from a successful assistant's influencing-input union.
+ type knowledgeEmbeddingBoundaryResource struct {
+ 	read    *repository.KnowledgeSQLiteEmbeddingVectorRead
++	query   *repository.KnowledgeQueryEmbeddingResultRead
+ 	release func()
+ 	once    sync.Once
+ 	err     error
+@@ -22,6 +23,9 @@ func (r *knowledgeEmbeddingBoundaryResource) RecheckOriginal() error {
+ 	if r == nil || r.read == nil {
+ 		return interfaces.ErrKnowledgeEmbeddingConsumerUnavailable
+ 	}
++	if r.query != nil {
++		return repository.RecheckKnowledgeEmbeddingConsumer(r.read, r.query)
++	}
+ 	return r.read.Recheck()
+ }
+ func (r *knowledgeEmbeddingBoundaryResource) CloseOriginal() error {
+@@ -44,6 +48,10 @@ func retainKnowledgeEmbeddingConsumer(ctx context.Context, read interfaces.Knowl
+ 	if !ok || actual == nil || !sameOriginalModelCaller(ctx, actual.Context()) {
+ 		return false, interfaces.ErrKnowledgeEmbeddingConsumerUnavailable
+ 	}
+-	resource := &knowledgeEmbeddingBoundaryResource{read: actual, release: release}
++	query, err := repository.KnowledgeQueryEmbeddingResultFromContext(ctx)
++	if err != nil {
++		return false, err
++	}
++	resource := &knowledgeEmbeddingBoundaryResource{read: actual, query: query, release: release}
+ 	return retainOriginalModelClient(ctx, resource, transfer)
+ }
+diff --git a/internal/application/service/knowledge_query_embedding_sql_http_actual_test.go b/internal/application/service/knowledge_query_embedding_sql_http_actual_test.go
+new file mode 100644
+index 000000000..29dabbe48
+--- /dev/null
++++ b/internal/application/service/knowledge_query_embedding_sql_http_actual_test.go
+@@ -0,0 +1,496 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	migrate "github.com/golang-migrate/migrate/v4"
++	"github.com/stretchr/testify/require"
++	gormsqlite "gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func installKnowledgeQuery91Actual(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	var path string
++	require.NoError(t, db.Raw("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path).Error)
++	require.NotEmpty(t, path)
++	root, err := filepath.Abs("../../..")
++	require.NoError(t, err)
++	source := t.TempDir()
++	for _, dir := range []string{"migrations/sqlite", "migrations/pending/knowledge-sqlite-embedding-originals-000090", "migrations/pending/knowledge-query-embedding-originals-000091"} {
++		files, err := filepath.Glob(filepath.Join(root, dir, "*.sql"))
++		require.NoError(t, err)
++		require.NotEmpty(t, files)
++		for _, file := range files {
++			raw, err := os.ReadFile(file)
++			require.NoError(t, err)
++			require.NoError(t, os.WriteFile(filepath.Join(source, filepath.Base(file)), raw, 0600))
++		}
++	}
++	m, err := migrate.New("file://"+source, "sqlite3://"+path)
++	require.NoError(t, err)
++	require.NoError(t, m.Migrate(91))
++	sc, dc := m.Close()
++	require.NoError(t, sc)
++	require.NoError(t, dc)
++	var version struct {
++		Version uint
++		Dirty   bool
++	}
++	require.NoError(t, db.Table("schema_migrations").Take(&version).Error)
++	require.EqualValues(t, 91, version.Version)
++	require.False(t, version.Dirty)
++	require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(db))
++	require.NoError(t, repository.InstallOriginalBodyRetentionCallbacks(db))
++}
++
++func TestKnowledgeQueryEmbeddingCompletionActualSQLiteHTTP(t *testing.T) {
++	for _, mode := range []string{"genuine_query_native_completion", "naked_vector_completion_refuses", "query_body_unavailable", "current_actor_refuses", "SDK_actual_error_no_result", "held_query_close_refuses", "late_actual_SQL_clock", "foreign_pool_refuses", "current_model_successor_refuses", "bare_commit_no_SDK_refuses", "empty_SDK_token_refuses", "SDK_vector_substitution_refuses"} {
++		t.Run(mode, func(t *testing.T) {
++			knowledgeSQLiteOriginalVecAuto.Do(sqlite_vec.Auto)
++			store, db, base := jointFullSchemaBusinessFixture(t, false)
++			installKnowledgeSQLiteOriginal90ForTest(t, db)
++			installKnowledgeQuery91Actual(t, db)
++			var embeddingCalls, chatCalls atomic.Int64
++			var mu sync.Mutex
++			var observed error
++			const userText = "What does the source say?"
++			const sourceText = "retained-source-body"
++			const indexedText = "query-title\nretained-source-body"
++			failSDK := &atomic.Bool{}
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				var err error
++				if r.Header.Get("Authorization") != "Bearer actual-query-key" {
++					err = errors.New("actual query SDK auth mismatch")
++				}
++				if r.URL.Path == "/embeddings" {
++					embeddingCalls.Add(1)
++					var request struct {
++						Input      []string `json:"input"`
++						Dimensions int      `json:"dimensions"`
++					}
++					if e := json.NewDecoder(r.Body).Decode(&request); e != nil {
++						err = e
++					}
++					if len(request.Input) != 1 || request.Dimensions != 2 || request.Input[0] != indexedText && request.Input[0] != userText {
++						err = errors.Join(err, errors.New("actual query SDK did not receive leased exact text"))
++					}
++					mu.Lock()
++					observed = errors.Join(observed, err)
++					mu.Unlock()
++					if err != nil || failSDK.Load() {
++						w.WriteHeader(503)
++						return
++					}
++					w.Header().Set("Content-Type", "application/json")
++					_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{map[string]interface{}{"index": 0, "embedding": []float32{1, 0}}}})
++					return
++				}
++				if r.URL.Path == "/chat/completions" {
++					chatCalls.Add(1)
++					var request struct {
++						Messages []struct{ Role, Content string } `json:"messages"`
++					}
++					if e := json.NewDecoder(r.Body).Decode(&request); e != nil {
++						err = e
++					}
++					all := ""
++					for _, m := range request.Messages {
++						all += m.Content
++					}
++					if !strings.Contains(all, userText) || !strings.Contains(all, sourceText) {
++						err = errors.Join(err, errors.New("actual answer SDK input lost original query/returned vector material"))
++					}
++					mu.Lock()
++					observed = errors.Join(observed, err)
++					mu.Unlock()
++					if err != nil {
++						w.WriteHeader(400)
++						return
++					}
++					w.Header().Set("Content-Type", "application/json")
++					_ = json.NewEncoder(w).Encode(map[string]interface{}{"choices": []interface{}{map[string]interface{}{"message": map[string]interface{}{"role": "assistant", "content": sourceText}, "finish_reason": "stop"}}})
++					return
++				}
++				mu.Lock()
++				observed = errors.Join(observed, errors.New("unexpected actual SDK endpoint"))
++				mu.Unlock()
++				w.WriteHeader(404)
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			modelRepo := repository.NewModelRepository(db)
++			groups := NewGroupAccessService(repository.NewGroupAccessRepository(db))
++			ConfigureModelOriginalAuthority(modelRepo, store, groups, nil)
++			models := NewModelService(modelRepo, nil, nil, nil, nil, nil)
++			model := &types.Model{ID: "knowledge-query-embedding", TenantID: 7, Name: "genuine query embedding", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "actual-query-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++			require.NoError(t, models.CreateModel(base, model))
++			require.NotNil(t, model.OriginalProof)
++			answer := actualModelLiteral("knowledge-query-answer", 7)
++			answer.Name = "genuine query answer"
++			answer.Parameters.BaseURL = server.URL
++			answer.Parameters.APIKey = "actual-query-key"
++			require.NoError(t, models.CreateModel(base, answer))
++			kb := &types.KnowledgeBase{ID: "knowledge-query-kb", TenantID: 7, Name: "query original KB", EmbeddingModelID: model.ID, ChunkingConfig: types.ChunkingConfig{ChunkSize: 512}, IndexingStrategy: types.IndexingStrategy{VectorEnabled: true}}
++			require.NoError(t, store.CreateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(base), kb))
++			k := &types.Knowledge{ID: "knowledge-query-document", TenantID: 7, KnowledgeBaseID: kb.ID, Type: types.KnowledgeTypeManual, Title: "query-title", ParseStatus: types.ParseStatusCompleted, EnableStatus: "enabled"}
++			require.NoError(t, k.SetManualMetadata(types.NewManualKnowledgeMetadata(sourceText, types.ManualKnowledgeStatusPublish, 1)))
++			proof, err := store.CreateKnowledgeWithInput(repository.WithIndependentKnowledgeInput(base), k, sourceText)
++			require.NoError(t, err)
++			build, err := store.RestoreKnowledgeBuildActor(base, proof)
++			require.NoError(t, err)
++			build = repository.WithKnowledgeBuildInputProof(build, store, proof)
++			c := &types.Chunk{ID: "knowledge-query-chunk", TenantID: 7, KnowledgeBaseID: kb.ID, KnowledgeID: k.ID, Content: sourceText, ChunkType: types.ChunkTypeText, IsEnabled: true}
++			require.NoError(t, repository.NewChunkRepository(db).CreateChunks(build, []*types.Chunk{c}))
++			original := repository.NewKnowledgeSQLiteEmbeddingStore(db, store, modelRepo)
++			index := sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(db, store, modelRepo)
++			engine := retriever.NewKVHybridRetrieveEngine(index, types.SQLiteRetrieverEngineType)
++			op, cancelOp := context.WithTimeout(build, 10*time.Second)
++			defer cancelOp()
++			sdk, err := models.GetEmbeddingModel(op, model.ID)
++			require.NoError(t, err)
++			info := &types.IndexInfo{Content: buildKnowledgeIndexContent(k, c.EmbeddingContent()), SourceID: c.ID, SourceType: types.ChunkSourceType, ChunkID: c.ID, KnowledgeID: k.ID, KnowledgeBaseID: kb.ID, IsEnabled: true}
++			require.NoError(t, engine.BatchIndex(op, sdk, []*types.IndexInfo{info}, []types.RetrieverType{types.VectorRetrieverType}))
++			require.EqualValues(t, 1, embeddingCalls.Load())
++			publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(db), repository.NewDataSourceRepository(db))
++			publication.ConfigureSourcePathResolver(repository.NewNextcloudOnboardingStore(db))
++			knowledge := repository.NewKnowledgeRepository(db)
++			repository.ConfigureKnowledgeCurrentReadActor(knowledge, store)
++			guard := access.NewNextcloudSourceLineageGuard(knowledge.(access.NextcloudLineageSnapshotLookup), enrichmentTestBases{db: db}, nil, nil, groups, publication)
++			messages := &messageService{messageRepo: repository.NewMessageRepository(db), sessionRepo: repository.NewSessionRepository(db), sourceLineageGuard: guard}
++			ConfigureMessageMaterialProvenance(messages, store)
++			session := &types.Session{ID: "actual-knowledge-query-session", TenantID: 7, UserID: types.CallerFromContext(base).UserID}
++			_, err = messages.sessionRepo.Create(base, session)
++			require.NoError(t, err)
++			user, err := messages.CreateMessage(base, &types.Message{SessionID: session.ID, RequestID: "actual-query-request", Role: "user", Content: userText, IsCompleted: true})
++			require.NoError(t, err)
++			assistant, err := messages.CreateMessage(base, &types.Message{SessionID: session.ID, RequestID: user.RequestID, Role: "assistant"})
++			require.NoError(t, err)
++			owner, cancelOwner := context.WithTimeout(base, 8*time.Second)
++			defer cancelOwner()
++			httpctx, attach, check, releaseHTTP := BeginMessageMaterialHTTPBoundary(owner)
++			call, cancelCall := context.WithCancel(attach(httpctx))
++			releaseProducer := RetainMessageMaterialHTTPProducer(call)
++			t.Cleanup(func() {
++				cancelCall()
++				releaseProducer()
++				releaseHTTP()
++				cancelOwner()
++				var remaining int64
++				require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&remaining).Error)
++				if remaining != 0 {
++					var metadata []struct{ LeaseID, SourceTable, RowKey, ColumnName, OwnerID string }
++					require.NoError(t, db.Raw("SELECT l.lease_id,h.source_table,h.row_key,h.column_name,l.owner_id FROM original_body_leases l LEFT JOIN original_body_field_heads h ON h.body_id=l.body_id WHERE l.kind='read' AND l.released_at_ms IS NULL ORDER BY l.lease_id,h.source_table,h.row_key,h.column_name").Scan(&metadata).Error)
++					t.Logf("actual unreleased body lease metadata: %+v", metadata)
++				}
++				require.Zero(t, remaining)
++			})
++			actual, err := messages.GetMessage(call, session.ID, user.ID)
++			require.NoError(t, err)
++			require.Equal(t, userText, actual.Content)
++			originalParents, err := messageMaterialBoundarySnapshots(call)
++			require.NoError(t, err)
++			require.Len(t, originalParents, 1)
++			require.Len(t, originalParents[0].Proofs, 1)
++			require.Equal(t, user.ID, originalParents[0].Proofs[0].MessageID)
++			require.Len(t, originalParents[0].Messages, 1)
++			require.Equal(t, user.ID, originalParents[0].Messages[0].ID)
++			require.Equal(t, session.ID, originalParents[0].Proofs[0].SessionID)
++			require.NotEmpty(t, originalParents[0].Proofs[0].AdmissionID)
++			require.NotEmpty(t, originalParents[0].Proofs[0].GenerationID)
++			require.NotEmpty(t, originalParents[0].Proofs[0].BodyDigest)
++			inputSource, err := types.UnionSourceLineage(originalParents[0].Proofs[0].SourceLineage)
++			require.NoError(t, err)
++			require.NoError(t, inputSource.RequireComplete())
++			require.NoError(t, messages.bindInitialMessageMaterial(call, assistant.ID, user.ID, user.RequestID))
++			call, err = bindKnowledgeQueryMessageOriginal(call, session.ID, user.ID)
++			require.NoError(t, err)
++			if mode == "bare_commit_no_SDK_refuses" || mode == "empty_SDK_token_refuses" || mode == "SDK_vector_substitution_refuses" {
++				input, err := original.BeginKnowledgeQueryEmbedding(call, kb.ID, model.ID)
++				require.NoError(t, err)
++				inputClosed := false
++				t.Cleanup(func() {
++					if !inputClosed {
++						_ = input.Close()
++					}
++				})
++				captured, err := input.Snapshot()
++				require.NoError(t, err)
++				ctx := input.Context()
++				vector := []float32{1, 0}
++				if mode == "empty_SDK_token_refuses" {
++					ctx = (&embedding.OriginalQuerySDKResult{}).Context(ctx)
++				}
++				if mode == "SDK_vector_substitution_refuses" {
++					provider, err := models.GetEmbeddingModel(input.Context(), model.ID)
++					require.NoError(t, err)
++					actual, ok := provider.(*modelOriginalEmbeddingClient)
++					require.True(t, ok)
++					t.Cleanup(func() { _ = actual.CloseOriginal() })
++					opctx, op, end, err := actual.BeginOriginalEmbeddingOperation(input.Context())
++					require.NoError(t, err)
++					t.Cleanup(func() { _ = end() })
++					operation, ok := op.(*modelOriginalEmbeddingOperation)
++					require.True(t, ok)
++					request, cancel := context.WithTimeout(types.WithEmbedQuery(opctx), 2*time.Second)
++					evidence, err := operation.executeOriginalKnowledgeQuery(request, captured.OriginalID, captured.OriginalDigest, captured.Text)
++					cancel()
++					require.NoError(t, err)
++					ctx = evidence.Context(input.Context())
++					vector = evidence.Vector()
++					require.Equal(t, []float32{1, 0}, vector)
++					vector[0] = 0
++					vector[1] = 1
++					result, err := original.CommitKnowledgeQueryEmbedding(ctx, captured.OriginalID, captured.OriginalDigest, vector)
++					require.Error(t, err)
++					require.Nil(t, result)
++					require.NoError(t, end())
++					require.NoError(t, actual.CloseOriginal())
++				} else {
++					result, err := original.CommitKnowledgeQueryEmbedding(ctx, captured.OriginalID, captured.OriginalDigest, vector)
++					require.Error(t, err)
++					require.Nil(t, result)
++					require.EqualValues(t, 1, embeddingCalls.Load(), "only initial document SDK; query Commit must not call or invent SDK output")
++				}
++				var receipts int64
++				require.NoError(t, db.Table("knowledge_sqlite_query_receipts").Count(&receipts).Error)
++				require.Zero(t, receipts)
++				require.NoError(t, input.Close())
++				inputClosed = true
++				return
++			}
++			if mode == "SDK_actual_error_no_result" {
++				failSDK.Store(true)
++			}
++			query, err := EmbedOriginalKnowledgeQuery(call, original, models, kb.ID, model.ID)
++			if mode == "SDK_actual_error_no_result" {
++				require.Error(t, err)
++				require.Nil(t, query)
++				require.Greater(t, embeddingCalls.Load(), int64(1), "failed query must actually reach its SDK endpoint after the document SDK")
++				require.Zero(t, chatCalls.Load())
++				mu.Lock()
++				sdkObserved := observed
++				mu.Unlock()
++				require.NoError(t, sdkObserved)
++				var receipts int64
++				require.NoError(t, db.Table("knowledge_sqlite_query_receipts").Count(&receipts).Error)
++				require.Zero(t, receipts)
++				return
++			}
++			require.NoError(t, err)
++			require.NotNil(t, query)
++			snapshot, err := query.Snapshot()
++			require.NoError(t, err)
++			require.Equal(t, kb.ID, snapshot.KnowledgeBaseID)
++			require.Equal(t, model.Parameters.OriginalEmbedding.SpaceDigest, snapshot.SpaceDigest)
++			require.Equal(t, []float32{1, 0}, snapshot.Vector)
++			require.EqualValues(t, 2, embeddingCalls.Load())
++			resultCtx := query.Context()
++			params := types.RetrieveParams{Embedding: append([]float32(nil), snapshot.Vector...), KnowledgeBaseIDs: []string{kb.ID}, TopK: 1, RetrieverType: types.VectorRetrieverType, AdditionalParams: map[string]interface{}{"embedding_space_digest": snapshot.SpaceDigest}}
++			if mode == "foreign_pool_refuses" {
++				foreign, err := gorm.Open(gormsqlite.Open(filepath.Join(t.TempDir(), "foreign-query.sqlite")), &gorm.Config{})
++				require.NoError(t, err)
++				pool, err := foreign.DB()
++				require.NoError(t, err)
++				t.Cleanup(func() { require.NoError(t, pool.Close()) })
++				err = foreign.WithContext(resultCtx).Transaction(func(tx *gorm.DB) error {
++					_, err := repository.CheckKnowledgeQueryVectorInTx(resultCtx, tx, params)
++					return err
++				})
++				require.Error(t, err)
++				return
++			}
++			if mode == "current_model_successor_refuses" {
++				key := "actual-query-successor-key"
++				updated, err := models.UpdateModelCredentials(base, model.ID, &key, nil)
++				require.NoError(t, err)
++				require.NotNil(t, updated.OriginalProof)
++				require.Greater(t, updated.OriginalProof.CredentialRevision, model.OriginalProof.CredentialRevision)
++				require.Error(t, CheckMessageMaterialOutputBoundary(resultCtx))
++				return
++			}
++			if mode == "naked_vector_completion_refuses" {
++				resultCtx = call
++			}
++			results, err := index.Retrieve(resultCtx, params)
++			require.NoError(t, err)
++			require.Len(t, results, 1)
++			require.Len(t, results[0].Results, 1)
++			require.Equal(t, c.ID, results[0].Results[0].ChunkID)
++			if mode == "held_query_close_refuses" {
++				require.NoError(t, query.Close())
++				require.Error(t, CheckMessageMaterialOutputBoundary(resultCtx))
++				return
++			}
++			if mode == "query_body_unavailable" {
++				var head struct{ BodyID string }
++				require.NoError(t, db.Table("original_body_field_heads").Select("body_id").Where("source_table='knowledge_sqlite_query_receipts' AND row_key=?", snapshot.ReceiptID).Take(&head).Error)
++				write := db.Table("original_body_payloads").Where("id=? AND state='live'", head.BodyID).Update("state", "purged")
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var state string
++				require.NoError(t, db.Table("original_body_payloads").Select("state").Where("id=?", head.BodyID).Scan(&state).Error)
++				require.Equal(t, "purged", state)
++				require.Error(t, CheckMessageMaterialOutputBoundary(resultCtx))
++				return
++			}
++			if mode == "current_actor_refuses" {
++				uid := types.CallerFromContext(base).UserID
++				write := db.Table("users").Where("id=? AND is_active=?", uid, true).Update("is_active", false)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++				var active bool
++				require.NoError(t, db.Table("users").Select("is_active").Where("id=?", uid).Scan(&active).Error)
++				require.False(t, active)
++				require.Error(t, CheckMessageMaterialOutputBoundary(resultCtx))
++				return
++			}
++			client, err := models.GetChatModel(resultCtx, answer.ID)
++			require.NoError(t, err)
++			response, err := client.Chat(resultCtx, []chat.Message{{Role: "user", Content: actual.Content + "\n" + results[0].Results[0].Content, SourceLineage: inputSource}}, &chat.ChatOptions{})
++			require.NoError(t, err)
++			require.Equal(t, sourceText, response.Content)
++			markMessageMaterialReady(httpctx)
++			require.NoError(t, check())
++			assistant.Content = response.Content
++			assistant.IsCompleted = true
++			assistant.SourceLineage, err = types.UnionSourceLineage(inputSource)
++			require.NoError(t, err)
++			var crossed, reached atomic.Bool
++			var expiryObserver error
++			if mode == "late_actual_SQL_clock" {
++				const callback = "knowledge-query-completion-final-clock"
++				require.NoError(t, db.Callback().Row().Before("gorm:row").Register(callback, func(tx *gorm.DB) {
++					if !repository.KnowledgeCompletionSQLClockObserved(tx.Statement.Context, tx) || !strings.Contains(tx.Statement.SQL.String(), "AS clock_ms") || crossed.Load() {
++						return
++					}
++					local := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context})
++					var owned struct {
++						LeaseID, BodyID, OwnerID, Kind string
++						Epoch                          int64
++					}
++					err := local.Raw("SELECT l.lease_id,l.body_id,l.owner_id,l.kind,l.epoch FROM original_body_leases l JOIN original_body_field_heads h ON h.body_id=l.body_id WHERE h.source_table='knowledge_sqlite_query_receipts' AND h.row_key=? AND l.released_at_ms IS NULL AND l.kind='read'", snapshot.ReceiptID).Take(&owned).Error
++					fail := func() {
++						mu.Lock()
++						expiryObserver = errors.Join(expiryObserver, errors.New("actual final owned query expiry observation failed"))
++						mu.Unlock()
++					}
++					if err != nil || owned.LeaseID == "" {
++						fail()
++						return
++					}
++					requested := false
++					for _, v := range tx.Statement.Vars {
++						if id, ok := v.(string); ok && id == owned.LeaseID {
++							requested = true
++						}
++						if ids, ok := v.([]string); ok {
++							for _, id := range ids {
++								if id == owned.LeaseID {
++									requested = true
++								}
++							}
++						}
++					}
++					if !requested {
++						return
++					}
++					if !crossed.CompareAndSwap(false, true) {
++						return
++					}
++					var now int64
++					if local.Session(&gorm.Session{NewDB: true}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error != nil {
++						fail()
++						return
++					}
++					expiry := now + 60
++					update := local.Session(&gorm.Session{NewDB: true}).Table("original_body_leases").Where("lease_id=? AND body_id=? AND owner_id=? AND kind=? AND epoch=? AND released_at_ms IS NULL", owned.LeaseID, owned.BodyID, owned.OwnerID, owned.Kind, owned.Epoch).Update("expires_at_ms", expiry)
++					if update.Error != nil || update.RowsAffected != 1 {
++						fail()
++						return
++					}
++					var after struct {
++						LeaseID, BodyID, OwnerID, Kind string
++						Epoch, ExpiresAtMS             int64
++					}
++					if local.Session(&gorm.Session{NewDB: true}).Table("original_body_leases").Where("lease_id=?", owned.LeaseID).Take(&after).Error != nil || after.LeaseID != owned.LeaseID || after.BodyID != owned.BodyID || after.OwnerID != owned.OwnerID || after.Kind != owned.Kind || after.Epoch != owned.Epoch || after.ExpiresAtMS != expiry {
++						fail()
++						return
++					}
++					time.Sleep(120 * time.Millisecond)
++					if local.Session(&gorm.Session{NewDB: true}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error != nil || now < expiry {
++						fail()
++						return
++					}
++					reached.Store(true)
++				}))
++				t.Cleanup(func() { require.NoError(t, db.Callback().Row().Remove(callback)) })
++			}
++			err = messages.UpdateMessage(resultCtx, assistant)
++			if mode == "naked_vector_completion_refuses" || mode == "late_actual_SQL_clock" {
++				if mode == "late_actual_SQL_clock" {
++					require.True(t, crossed.Load())
++					require.True(t, reached.Load())
++					mu.Lock()
++					observedExpiry := expiryObserver
++					mu.Unlock()
++					require.NoError(t, observedExpiry)
++				}
++				require.Error(t, err)
++				var completed bool
++				require.NoError(t, db.Table("messages").Select("is_completed").Where("id=?", assistant.ID).Scan(&completed).Error)
++				require.False(t, completed)
++				var manifests int64
++				require.NoError(t, db.Table("message_completion_input_manifests").Count(&manifests).Error)
++				require.Zero(t, manifests)
++				return
++			}
++			require.NoError(t, err)
++			var completed bool
++			require.NoError(t, db.Table("messages").Select("is_completed").Where("id=?", assistant.ID).Scan(&completed).Error)
++			require.True(t, completed)
++			var raw struct{ ParentManifest string }
++			require.NoError(t, db.Table("message_completion_input_manifests").Take(&raw).Error)
++			var manifest types.MessageCompletionInputManifest
++			require.NoError(t, json.Unmarshal([]byte(raw.ParentManifest), &manifest))
++			require.Len(t, manifest.KnowledgeConsumptions, 1)
++			require.Equal(t, snapshot.ReceiptID, manifest.KnowledgeConsumptions[0].QueryReceiptID)
++			require.Len(t, manifest.KnowledgeConsumptions[0].Candidates, 1)
++			require.Len(t, manifest.KnowledgeConsumptions[0].Hits, 1)
++			require.Equal(t, c.ID, results[0].Results[0].ChunkID)
++			cancelCall()
++			releaseProducer()
++			require.NoError(t, check())
++			releaseHTTP()
++			var live int64
++			require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++			require.Zero(t, live)
++			require.EqualValues(t, 1, chatCalls.Load())
++			mu.Lock()
++			err = observed
++			mu.Unlock()
++			require.NoError(t, err)
++		})
++	}
++}
+diff --git a/internal/application/service/knowledge_query_message_original.go b/internal/application/service/knowledge_query_message_original.go
+new file mode 100644
+index 000000000..093fa59d9
+--- /dev/null
++++ b/internal/application/service/knowledge_query_message_original.go
+@@ -0,0 +1,181 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/logprivacy"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++// Prepare-only binder: a real preceding GetMessage guard supplies the selector.
++// No normal QA or registry caller is enabled until the Nextcloud union is ready.
++func bindKnowledgeQueryMessageOriginal(ctx context.Context, session, message string) (context.Context, error) {
++	if ctx == nil || ctx.Err() != nil {
++		return ctx, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	if !ok {
++		return ctx, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	slot.mu.Lock()
++	closed, failed := slot.Closed, slot.Failed
++	guards := append([]*MessageMaterialGuard(nil), slot.Guards...)
++	slot.mu.Unlock()
++	if closed || failed != nil {
++		return ctx, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	for _, g := range guards {
++		g.mu.Lock()
++		plan := g.plan
++		chosen := plan != nil && plan.Request.SessionID == session && !plan.Request.AllSession && len(plan.Request.MessageIDs) == 1 && plan.Request.MessageIDs[0] == message && g.snapshot != nil && len(g.snapshot.Messages) == 1 && g.snapshot.Messages[0] != nil && g.snapshot.Messages[0].Role == "user"
++		g.mu.Unlock()
++		if chosen {
++			marked, err := repository.WithKnowledgeQueryMessagePlan(ctx, plan, message)
++			if err != nil {
++				return ctx, err
++			}
++			return withKnowledgeEmbeddingConsumerOwner(marked), nil
++		}
++	}
++	return ctx, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++}
++
++type knowledgeQueryBoundaryResource struct {
++	read     *repository.KnowledgeQueryEmbeddingResultRead
++	release  func()
++	once     sync.Once
++	err      error
++	retained atomic.Bool
++}
++
++func (r *knowledgeQueryBoundaryResource) Context() context.Context { return r.read.Context() }
++func (r *knowledgeQueryBoundaryResource) Snapshot() (*types.KnowledgeQueryEmbeddingVectorSnapshot, error) {
++	return r.read.Snapshot()
++}
++func (r *knowledgeQueryBoundaryResource) Recheck() error         { return r.read.Recheck() }
++func (r *knowledgeQueryBoundaryResource) RecheckOriginal() error { return r.Recheck() }
++func (r *knowledgeQueryBoundaryResource) Close() error {
++	r.once.Do(func() {
++		r.err = r.read.Close()
++		if r.release != nil {
++			r.release()
++		}
++	})
++	return r.err
++}
++func (r *knowledgeQueryBoundaryResource) CloseOriginal() error            { return r.Close() }
++func (r *knowledgeQueryBoundaryResource) EmbeddingConsumerRetained() bool { return r.retained.Load() }
++
++// Exact text comes exclusively from the leased human original. The outer read
++// survives SDK timeout/provider Done, result publication and the last HTTP ref.
++func EmbedOriginalKnowledgeQuery(ctx context.Context, store *repository.KnowledgeSQLiteEmbeddingStore, models interfaces.ModelService, kb, model string) (result interfaces.KnowledgeQueryEmbeddingResultRead, resultErr error) {
++	if store == nil || models == nil {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	owner, release, transfer, err := interfaces.AcquireKnowledgeEmbeddingConsumerContext(ctx)
++	if err != nil {
++		return nil, err
++	}
++	releaseFailure := true
++	defer func() {
++		if releaseFailure && release != nil {
++			release()
++		}
++	}()
++	input, err := store.BeginKnowledgeQueryEmbedding(logprivacy.SuppressContent(owner), kb, model)
++	if err != nil {
++		return nil, err
++	}
++	closeFailure := true
++	defer func() {
++		if closeFailure {
++			resultErr = errors.Join(resultErr, input.Close())
++			if resultErr != nil {
++				result = nil
++			}
++		}
++	}()
++	snapshot, err := input.Snapshot()
++	if err != nil {
++		return nil, err
++	}
++	provider, err := models.GetEmbeddingModel(input.Context(), snapshot.ModelID)
++	if err != nil {
++		return nil, err
++	}
++	actual, ok := provider.(*modelOriginalEmbeddingClient)
++	if !ok || actual == nil || provider.GetDimensions() != snapshot.ExpectedDimensions {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	clientClosed := false
++	defer func() {
++		if !clientClosed {
++			resultErr = errors.Join(resultErr, actual.CloseOriginal())
++			if resultErr != nil {
++				result = nil
++			}
++		}
++	}()
++	operationCtx, operation, closeOperation, err := actual.BeginOriginalEmbeddingOperation(input.Context())
++	if err != nil {
++		return nil, err
++	}
++	queryOperation, ok := operation.(*modelOriginalEmbeddingOperation)
++	if !ok || queryOperation == nil {
++		return nil, repository.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	operationClosed := false
++	defer func() {
++		if !operationClosed {
++			resultErr = errors.Join(resultErr, closeOperation())
++			if resultErr != nil {
++				result = nil
++			}
++		}
++	}()
++	call, cancel := context.WithTimeout(types.WithEmbedQuery(operationCtx), 2*time.Second)
++	stop := context.AfterFunc(ctx, cancel)
++	evidence, err := queryOperation.executeOriginalKnowledgeQuery(call, snapshot.OriginalID, snapshot.OriginalDigest, snapshot.Text)
++	stop()
++	cancel()
++	if err != nil {
++		return nil, err
++	}
++	if err = input.Recheck(); err != nil {
++		return nil, err
++	}
++	// Actual immutable result evidence survives the short SDK context, but stays
++	// bound to this exact still-live input/model and actual returned vector bytes.
++	read, err := store.CommitKnowledgeQueryEmbedding(evidence.Context(input.Context()), snapshot.OriginalID, snapshot.OriginalDigest, evidence.Vector())
++	if err != nil {
++		return nil, err
++	}
++	err = closeOperation()
++	operationClosed = true
++	if err != nil {
++		cleanup := read.Close()
++		return nil, errors.Join(err, cleanup)
++	}
++	err = actual.CloseOriginal()
++	clientClosed = true
++	if err != nil {
++		cleanup := read.Close()
++		return nil, errors.Join(err, cleanup)
++	}
++	wrapped := &knowledgeQueryBoundaryResource{read: read, release: release}
++	closeFailure = false
++	releaseFailure = false
++	retained, err := retainOriginalModelClient(ctx, wrapped, transfer)
++	if err != nil {
++		cleanup := wrapped.Close()
++		return nil, errors.Join(err, cleanup)
++	}
++	wrapped.retained.Store(retained)
++	return wrapped, nil
++}
+diff --git a/internal/application/service/message_completion_material.go b/internal/application/service/message_completion_material.go
+index 90201a243..7588f068e 100644
+--- a/internal/application/service/message_completion_material.go
++++ b/internal/application/service/message_completion_material.go
+@@ -92,6 +92,8 @@ func (s *messageService) markCompletionInputsLocked(ctx context.Context, slot *m
+ 	manifest := &types.MessageCompletionInputManifest{Version: 1, Recipe: "history-initial-and-consumed-steer-v1", AssistantMessageID: binding.Assistant, AssistantGenerationID: binding.Generation, SessionID: initial.SessionID, RequestID: binding.Request, OwnerID: initial.OwnerID, TenantID: initial.TenantID, OwnerRevision: initial.OwnerRevision, Initial: initial, Steers: binding.Steers, Inputs: snapshots, SourceLineage: source}
+ 	reads := []interfaces.ModelOriginalRead{}
+ 	memoryReads := []interfaces.MemoryEmbeddingConsumerRead{}
++	knowledgeQueries := []*repository.KnowledgeQueryEmbeddingResultRead{}
++	knowledgeReads := []*repository.KnowledgeSQLiteEmbeddingVectorRead{}
+ 	for _, client := range slot.Models {
+ 		switch actual := client.(type) {
+ 		case *modelOriginalChatClient:
+@@ -99,6 +101,16 @@ func (s *messageService) markCompletionInputsLocked(ctx context.Context, slot *m
+ 				return ctx, types.ErrMemoryOriginalUnavailable
+ 			}
+ 			reads = append(reads, actual.read)
++		case *knowledgeQueryBoundaryResource:
++			if actual == nil || actual.read == nil {
++				return ctx, types.ErrMemoryOriginalUnavailable
++			}
++			knowledgeQueries = append(knowledgeQueries, actual.read)
++		case *knowledgeEmbeddingBoundaryResource:
++			if actual == nil || actual.read == nil || actual.query == nil {
++				return ctx, types.ErrMemoryOriginalUnavailable
++			}
++			knowledgeReads = append(knowledgeReads, actual.read)
+ 		case *memoryEmbeddingBoundaryResource:
+ 			if actual == nil || actual.read == nil {
+ 				return ctx, types.ErrMemoryOriginalUnavailable
+@@ -108,6 +120,10 @@ func (s *messageService) markCompletionInputsLocked(ctx context.Context, slot *m
+ 			return ctx, types.ErrMemoryOriginalUnavailable
+ 		}
+ 	}
++	ctx, manifest.KnowledgeConsumptions, err = repository.WithActualKnowledgeCompletionReads(ctx, knowledgeQueries, knowledgeReads)
++	if err != nil {
++		return ctx, err
++	}
+ 	ctx, manifest.RecallConsumptions, manifest.SemanticConsumptions, err = repository.WithActualMemoryCompletionReads(ctx, memoryReads)
+ 	if err != nil {
+ 		return ctx, err
+diff --git a/internal/application/service/model_original_embedding_operation.go b/internal/application/service/model_original_embedding_operation.go
+index 4848dc874..f4358713b 100644
+--- a/internal/application/service/model_original_embedding_operation.go
++++ b/internal/application/service/model_original_embedding_operation.go
+@@ -222,3 +222,14 @@ func (o *modelOriginalEmbeddingOperation) BindOriginalIndexOutputs(ctx context.C
+ }
+ 
+ var _ embedding.OriginalIndexOperation = (*modelOriginalEmbeddingOperation)(nil)
++
++// Query evidence is produced by the fixed original SDK executor, never by a
++// caller-output binder. The existing actual operation owns its call/watch/WG.
++func (o *modelOriginalEmbeddingOperation) executeOriginalKnowledgeQuery(ctx context.Context, inputID, inputDigest, text string) (*embedding.OriginalQuerySDKResult, error) {
++	call, finish, err := o.begin(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finish()
++	return embedding.ExecuteOriginalQuerySDK(call, o.parent.life.read, inputID, inputDigest, text)
++}
+diff --git a/internal/models/embedding/original_query_result.go b/internal/models/embedding/original_query_result.go
+new file mode 100644
+index 000000000..9be4a8d7c
+--- /dev/null
++++ b/internal/models/embedding/original_query_result.go
+@@ -0,0 +1,147 @@
++package embedding
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"math"
++	"reflect"
++	"sync"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// This structural read accepts no grant by itself. The repository additionally
++// requires the token's reader to be its own private actual model read object.
++type OriginalQueryModelRead interface {
++	Context() context.Context
++	Snapshot() (*types.Model, *types.ModelOriginalProof, error)
++	Recheck() error
++}
++type originalQuerySDKResultKey struct{}
++
++// Private fields are created only after ExecuteOriginalQuerySDK completes a
++// genuine constructor/SDK response/current recheck. No DTO/signer can fill them.
++type OriginalQuerySDKResult struct {
++	read                                          OriginalQueryModelRead
++	inputID, inputDigest, text, space, recipeJSON string
++	proof                                         types.ModelOriginalProof
++	dimensions                                    int
++	vector                                        []float32
++}
++
++func (r *OriginalQuerySDKResult) Vector() []float32 {
++	if r == nil {
++		return nil
++	}
++	return append([]float32(nil), r.vector...)
++}
++
++// Moving a real capability to its still-live parent operation is not minting
++// one. Commit still compares all private input/model/response identities.
++func (r *OriginalQuerySDKResult) Context(ctx context.Context) context.Context {
++	return context.WithValue(ctx, originalQuerySDKResultKey{}, r)
++}
++func MatchOriginalQuerySDKResult(ctx context.Context, read OriginalQueryModelRead, inputID, inputDigest, text, space string, dimensions int, proof types.ModelOriginalProof, vector []float32) error {
++	r, _ := ctx.Value(originalQuerySDKResultKey{}).(*OriginalQuerySDKResult)
++	if r == nil || r.read != read || r.inputID != inputID || r.inputDigest != inputDigest || r.text != text || r.space != space || r.dimensions != dimensions || r.proof != proof || len(r.vector) != len(vector) {
++		return errors.New("original query SDK result is unavailable")
++	}
++	for i, v := range vector {
++		if math.Float32bits(v) != math.Float32bits(r.vector[i]) {
++			return errors.New("original query SDK result bytes changed")
++		}
++	}
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	return read.Context().Err()
++}
++
++// There is no caller-supplied Embedder/HTTP transport or successful callback.
++// The held snapshot constructs the same strict original remote/local SDK. The
++// input string is unchanged by this query path; query-specific protocol fields,
++// dimension/truncate settings and all endpoint/auth facts come from its recipe.
++func ExecuteOriginalQuerySDK(ctx context.Context, read OriginalQueryModelRead, inputID, inputDigest, text string) (result *OriginalQuerySDKResult, resultErr error) {
++	if ctx == nil || read == nil || inputID == "" || inputDigest == "" || text == "" || !types.IsEmbedQuery(ctx) {
++		return nil, errors.New("original query SDK input is unavailable")
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	model, proof, err := read.Snapshot()
++	if err != nil {
++		return nil, err
++	}
++	if model == nil || proof == nil || !proof.Valid() || model.Type != types.ModelTypeEmbedding || model.Parameters.OriginalEmbedding == nil {
++		return nil, errors.New("original query SDK model is unavailable")
++	}
++	recipe := model.Parameters.OriginalEmbedding
++	if err = ValidateOriginalEmbeddingDefinition(recipe); err != nil {
++		return nil, err
++	}
++	recipeWire, err := json.Marshal(recipe)
++	if err != nil {
++		return nil, err
++	}
++	provider, err := NewOriginalEmbedder(model, nil)
++	if err != nil {
++		return nil, err
++	}
++	call, cancel := context.WithCancel(ctx)
++	stopModel := context.AfterFunc(read.Context(), cancel)
++	var watcherErr error
++	var mu sync.Mutex
++	joined := make(chan struct{})
++	go func() {
++		defer close(joined)
++		ticker := time.NewTicker(100 * time.Millisecond)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-call.Done():
++				return
++			case <-ticker.C:
++				if err := read.Recheck(); err != nil {
++					mu.Lock()
++					watcherErr = err
++					mu.Unlock()
++					cancel()
++					return
++				}
++			}
++		}
++	}()
++	defer func() { cancel(); stopModel(); <-joined }()
++	vector, callErr := provider.Embed(call, text)
++	cancel()
++	stopModel()
++	<-joined
++	mu.Lock()
++	watchErr := watcherErr
++	mu.Unlock()
++	if callErr != nil || watchErr != nil {
++		return nil, errors.Join(callErr, watchErr)
++	}
++	if err = ctx.Err(); err != nil {
++		return nil, err
++	}
++	if err = read.Recheck(); err != nil {
++		return nil, err
++	}
++	current, currentProof, err := read.Snapshot()
++	if err != nil {
++		return nil, err
++	}
++	currentWire, err := json.Marshal(current.Parameters.OriginalEmbedding)
++	if err != nil || !reflect.DeepEqual(currentProof, proof) || string(currentWire) != string(recipeWire) || provider.GetDimensions() != recipe.ExpectedDimensions || len(vector) != recipe.ExpectedDimensions {
++		return nil, errors.New("original query SDK model or recipe changed")
++	}
++	for _, v := range vector {
++		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
++			return nil, errors.New("original query SDK response is not finite")
++		}
++	}
++	return &OriginalQuerySDKResult{read: read, inputID: inputID, inputDigest: inputDigest, text: text, space: recipe.SpaceDigest, recipeJSON: string(recipeWire), proof: *proof, dimensions: recipe.ExpectedDimensions, vector: append([]float32(nil), vector...)}, nil
++}
+diff --git a/internal/types/interfaces/knowledge_query_embedding_original.go b/internal/types/interfaces/knowledge_query_embedding_original.go
+new file mode 100644
+index 000000000..19b62e669
+--- /dev/null
++++ b/internal/types/interfaces/knowledge_query_embedding_original.go
+@@ -0,0 +1,19 @@
++package interfaces
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++type KnowledgeQueryEmbeddingInputRead interface {
++	Context() context.Context
++	Snapshot() (*types.KnowledgeQueryEmbeddingInputSnapshot, error)
++	Recheck() error
++	Close() error
++}
++type KnowledgeQueryEmbeddingResultRead interface {
++	Context() context.Context
++	Snapshot() (*types.KnowledgeQueryEmbeddingVectorSnapshot, error)
++	Recheck() error
++	Close() error
++}
+diff --git a/internal/types/knowledge_query_embedding_original.go b/internal/types/knowledge_query_embedding_original.go
+new file mode 100644
+index 000000000..62ea81d8e
+--- /dev/null
++++ b/internal/types/knowledge_query_embedding_original.go
+@@ -0,0 +1,58 @@
++package types
++
++// Immutable actual human-query computation, separate from memory policy.
++type KnowledgeQueryEmbeddingInput struct {
++	ID                                                               string `gorm:"primaryKey"`
++	TenantID                                                         uint64
++	KnowledgeBaseID, SessionID, MessageID, AdmissionID, GenerationID string
++	MessageBodyDigest, PlanJSON, PlanDigest                          string
++	KBRevision                                                       uint64
++	KBConfigDigest, ModelID, ModelProofJSON, SpaceDigest             string
++	ExpectedDimensions                                               int
++	InputJSON, InputSHA256, Digest                                   string
++	CreatedAtMS                                                      int64
++}
++
++func (KnowledgeQueryEmbeddingInput) TableName() string { return "knowledge_sqlite_query_inputs" }
++
++type KnowledgeQueryEmbeddingReceipt struct {
++	ID                                           string `gorm:"primaryKey"`
++	InputID, InputDigest                         string
++	TenantID                                     uint64
++	KnowledgeBaseID, ModelID, SpaceDigest        string
++	Dimensions                                   int
++	VectorJSON, BodySHA256, VectorSHA256, Digest string
++	CreatedAtMS                                  int64
++}
++
++func (KnowledgeQueryEmbeddingReceipt) TableName() string { return "knowledge_sqlite_query_receipts" }
++
++type KnowledgeQueryEmbeddingInputSnapshot struct {
++	OriginalID, OriginalDigest, KnowledgeBaseID, ModelID, Text, SpaceDigest string
++	ExpectedDimensions                                                      int
++}
++type KnowledgeQueryEmbeddingVectorSnapshot struct {
++	OriginalID, OriginalDigest, ReceiptID, ReceiptDigest, KnowledgeBaseID, ModelID, SpaceDigest string
++	Vector                                                                                      []float32
++}
++
++// Selection metadata is an influencing-input dependency, never a read grant.
++// Current completion requires the private live query/vector readers too.
++type KnowledgeEmbeddingCandidate struct {
++	RowID                                                          uint64
++	InputID, InputDigest, ReceiptID, ReceiptDigest, ModelProofJSON string
++	Revision                                                       int64
++}
++type KnowledgeEmbeddingHit struct {
++	RowID    uint64
++	Distance float64
++}
++type KnowledgeEmbeddingConsumption struct {
++	Version                                                                                                  int
++	Recipe, QueryInputID, QueryInputDigest, QueryReceiptID, QueryReceiptDigest, KnowledgeBaseID, SpaceDigest string
++	TenantID                                                                                                 uint64
++	Candidates                                                                                               []KnowledgeEmbeddingCandidate
++	Hits                                                                                                     []KnowledgeEmbeddingHit
++	OutputDigest, Digest                                                                                     string
++	SourceLineage                                                                                            *SourceLineage
++}
+diff --git a/internal/types/message_completion_material.go b/internal/types/message_completion_material.go
+index 8b30a5cb7..5c13006bf 100644
+--- a/internal/types/message_completion_material.go
++++ b/internal/types/message_completion_material.go
+@@ -11,9 +11,10 @@ type MessageCompletionSteerParent struct {
+ 	SelectionDigest     string
+ }
+ type MessageCompletionInputManifest struct {
+-	SemanticConsumptions                                                                           []*MemorySemanticConsumption `json:"SemanticConsumptions,omitempty"`
+-	RecallConsumptions                                                                             []*MemoryRecallConsumption   `json:"RecallConsumptions,omitempty"`
+-	ModelInputs                                                                                    []ModelOriginalProof         `json:"ModelInputs,omitempty"`
++	KnowledgeConsumptions                                                                          []*KnowledgeEmbeddingConsumption `json:"KnowledgeConsumptions,omitempty"`
++	SemanticConsumptions                                                                           []*MemorySemanticConsumption     `json:"SemanticConsumptions,omitempty"`
++	RecallConsumptions                                                                             []*MemoryRecallConsumption       `json:"RecallConsumptions,omitempty"`
++	ModelInputs                                                                                    []ModelOriginalProof             `json:"ModelInputs,omitempty"`
+ 	Version                                                                                        int
+ 	Recipe                                                                                         string
+ 	AssistantMessageID, AssistantGenerationID, AssistantAdmissionID, SessionID, RequestID, OwnerID string
+diff --git a/migrations/pending/knowledge-query-embedding-originals-000091/000091_knowledge_query_embedding_originals.down.sql b/migrations/pending/knowledge-query-embedding-originals-000091/000091_knowledge_query_embedding_originals.down.sql
+new file mode 100644
+index 000000000..f2923a42f
+--- /dev/null
++++ b/migrations/pending/knowledge-query-embedding-originals-000091/000091_knowledge_query_embedding_originals.down.sql
+@@ -0,0 +1,10 @@
++-- Refuse all removal before the first DROP while genuine query facts remain.
++CREATE TEMP TABLE knowledge_query_down_guard(ok INTEGER NOT NULL CHECK(ok=1));
++INSERT INTO knowledge_query_down_guard SELECT CASE WHEN EXISTS(SELECT 1 FROM knowledge_sqlite_query_inputs) OR EXISTS(SELECT 1 FROM knowledge_sqlite_query_receipts) THEN 0 ELSE 1 END;
++DROP TABLE knowledge_query_down_guard;
++DROP TRIGGER knowledge_sqlite_query_result_delete;
++DROP TRIGGER knowledge_sqlite_query_result_update;
++DROP TRIGGER knowledge_sqlite_query_input_delete;
++DROP TRIGGER knowledge_sqlite_query_input_update;
++DROP TABLE knowledge_sqlite_query_receipts;
++DROP TABLE knowledge_sqlite_query_inputs;
+diff --git a/migrations/pending/knowledge-query-embedding-originals-000091/000091_knowledge_query_embedding_originals.up.sql b/migrations/pending/knowledge-query-embedding-originals-000091/000091_knowledge_query_embedding_originals.up.sql
+new file mode 100644
+index 000000000..946eb48d5
+--- /dev/null
++++ b/migrations/pending/knowledge-query-embedding-originals-000091/000091_knowledge_query_embedding_originals.up.sql
+@@ -0,0 +1,27 @@
++-- Independent not-yet-adopted SQLite91. Canonical/peer routes are not changed.
++CREATE TABLE knowledge_sqlite_query_inputs (
++ id TEXT PRIMARY KEY NOT NULL, tenant_id INTEGER NOT NULL CHECK(tenant_id>0),
++ knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
++ session_id TEXT NOT NULL, message_id TEXT NOT NULL,
++ admission_id TEXT NOT NULL REFERENCES message_material_admissions(id),
++ generation_id TEXT NOT NULL REFERENCES message_generation_origins(id),
++ message_body_digest TEXT NOT NULL CHECK(length(message_body_digest)=64),
++ plan_json TEXT NOT NULL, plan_digest TEXT NOT NULL CHECK(length(plan_digest)=64),
++ kb_revision INTEGER NOT NULL CHECK(kb_revision>0), kb_config_digest TEXT NOT NULL CHECK(length(kb_config_digest)=64),
++ model_id TEXT NOT NULL, model_proof_json TEXT NOT NULL,
++ space_digest TEXT NOT NULL CHECK(length(space_digest)=64), expected_dimensions INTEGER NOT NULL CHECK(expected_dimensions BETWEEN 1 AND 65536),
++ input_json TEXT NOT NULL, input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
++ digest TEXT NOT NULL UNIQUE CHECK(length(digest)=64), created_at_ms INTEGER NOT NULL
++);
++CREATE TABLE knowledge_sqlite_query_receipts (
++ id TEXT PRIMARY KEY NOT NULL, input_id TEXT NOT NULL UNIQUE REFERENCES knowledge_sqlite_query_inputs(id),
++ input_digest TEXT NOT NULL CHECK(length(input_digest)=64), tenant_id INTEGER NOT NULL CHECK(tenant_id>0),
++ knowledge_base_id TEXT NOT NULL, model_id TEXT NOT NULL, space_digest TEXT NOT NULL CHECK(length(space_digest)=64),
++ dimensions INTEGER NOT NULL CHECK(dimensions BETWEEN 1 AND 65536), vector_json TEXT NOT NULL,
++ body_sha256 TEXT NOT NULL CHECK(length(body_sha256)=64), vector_sha256 TEXT NOT NULL CHECK(length(vector_sha256)=64),
++ digest TEXT NOT NULL UNIQUE CHECK(length(digest)=64), created_at_ms INTEGER NOT NULL
++);
++CREATE TRIGGER knowledge_sqlite_query_input_update BEFORE UPDATE ON knowledge_sqlite_query_inputs BEGIN SELECT RAISE(ABORT,'knowledge_query_original_immutable'); END;
++CREATE TRIGGER knowledge_sqlite_query_input_delete BEFORE DELETE ON knowledge_sqlite_query_inputs BEGIN SELECT RAISE(ABORT,'knowledge_query_original_immutable'); END;
++CREATE TRIGGER knowledge_sqlite_query_result_update BEFORE UPDATE ON knowledge_sqlite_query_receipts BEGIN SELECT RAISE(ABORT,'knowledge_query_original_immutable'); END;
++CREATE TRIGGER knowledge_sqlite_query_result_delete BEFORE DELETE ON knowledge_sqlite_query_receipts BEGIN SELECT RAISE(ABORT,'knowledge_query_original_immutable'); END;

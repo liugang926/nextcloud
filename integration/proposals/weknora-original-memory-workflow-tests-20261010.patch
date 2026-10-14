@@ -1,0 +1,535 @@
+diff --git a/internal/application/service/memory_current_bound_workflow_sql_actual_test.go b/internal/application/service/memory_current_bound_workflow_sql_actual_test.go
+new file mode 100644
+index 00000000..ae682c05
+--- /dev/null
++++ b/internal/application/service/memory_current_bound_workflow_sql_actual_test.go
+@@ -0,0 +1,269 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"github.com/hibiken/asynq"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// This independent current-bound runner keeps the historical515 function and
++// its parent tests byte-exact. It carries the same twelve business cases and
++// expectations, while genuine producer/DI/outbox setup replaces old raw rows
++// and the unbound constructor. No production legacy fallback is installed.
++// Provider transport is bounded; all current definition/credential and source
++// checks are genuine. This is not full migration/broker/application acceptance.
++type currentBoundMemoryWorkflow struct {
++	interfaces.MemoryService
++	fixture *memAtomicSQLFixture
++	t       *testing.T
++}
++
++// Schedule commits the real original/pending/intent first. The test adapter
++// then waits the actual captured product deadline and calls real RelayOne;
++// returning a queued task never fabricates or rewrites an authoritative task.
++func (w *currentBoundMemoryWorkflow) ScheduleExtraction(ctx context.Context, sessionID, messageID, modelID string) {
++	w.t.Helper()
++	f := w.fixture
++	w.MemoryService.ScheduleExtraction(ctx, sessionID, messageID, modelID)
++	var progress types.MemoryExtractionSession
++	require.NoError(w.t, f.db.Where("tenant_id=? AND subject_id=? AND session_id=?", f.scope.TenantID, f.scope.SubjectID, sessionID).Take(&progress).Error)
++	require.True(w.t, progress.Pending)
++	require.NotEmpty(w.t, progress.OriginalAdmissionID)
++	input, err := f.admissions.LoadMemoryOriginalAdmission(ctx, progress.OriginalAdmissionID)
++	require.NoError(w.t, err)
++	var intent types.MemoryOriginalDispatch
++	require.NoError(w.t, f.db.Where("admission_id=?", input.ID).Take(&intent).Error)
++	require.Equal(w.t, input.ID, intent.AdmissionID)
++	require.Equal(w.t, types.MemoryOriginalBytesDigest([]byte(intent.Payload)), intent.PayloadDigest)
++	require.True(w.t, intent.NotBefore.Equal(input.Request.DispatchNotBefore))
++	var payload types.MemoryExtractPayload
++	require.NoError(w.t, json.Unmarshal([]byte(intent.Payload), &payload))
++	require.Equal(w.t, input.Request.SessionID, payload.SessionID)
++	require.Equal(w.t, messageID, payload.MessageID)
++	require.Equal(w.t, input.Digest, payload.OriginalDigest)
++	require.Nil(w.t, f.queue.task)
++	delay := time.Until(intent.NotBefore)
++	require.LessOrEqual(w.t, delay, time.Duration(types.MinMemoryExtractDelaySeconds+2)*time.Second)
++	if delay > 0 {
++		time.Sleep(delay + 10*time.Millisecond)
++	}
++	operation, cancel := context.WithTimeout(ctx, 15*time.Second)
++	claimed, err := f.relay.RelayOne(operation, input.ID)
++	cancel()
++	require.NoError(w.t, err)
++	require.True(w.t, claimed)
++	require.NotNil(w.t, f.queue.task)
++	var actual types.MemoryExtractPayload
++	require.NoError(w.t, json.Unmarshal(f.queue.task.Payload(), &actual))
++	require.Equal(w.t, payload, actual, "relay returns the genuine immutable original payload")
++}
++
++func newCurrentBoundMemoryWorkflowFixture(t *testing.T, pg bool) (*memAtomicSQLFixture, *currentBoundMemoryWorkflow, interfaces.MemoryPolicyOriginalWriter, *types.Tenant) {
++	t.Helper()
++	// This fixture uses the real authorized model Create, complete pending
++	// protocol DDL, original material reader and original-bound production DI.
++	f := newMemAtomicSQLFixture(t, pg)
++	tenantRepo, writer, _ := actualPolicyRepository(t, f)
++	tenant, err := tenantRepo.GetTenantByID(f.ctx, f.scope.TenantID)
++	require.NoError(t, err)
++	cfg := *tenant.MemoryConfig
++	cfg.ExtractDelaySeconds = types.MinMemoryExtractDelaySeconds
++	// A valid one-second product interval lets the real primer and subsequent
++	// admission each honor NotBefore without a synthetic SQL/clock override.
++	cfg.ExtractMinIntervalSeconds = 1
++	_, _, err = writer.ReplaceMemoryPolicyOriginal(f.ctx, f.scope.TenantID, cfg)
++	require.NoError(t, err)
++	tenant, err = tenantRepo.GetTenantByID(f.ctx, f.scope.TenantID)
++	require.NoError(t, err)
++	require.Empty(t, tenant.MemoryConfig.ExtractInstructions)
++	require.True(t, tenant.MemoryConfig.AutoExtractEnabled())
++	w := &currentBoundMemoryWorkflow{MemoryService: f.service, fixture: f, t: t}
++	return f, w, writer, tenant
++}
++
++func runCurrentBoundMemoryOriginalWorkflow(t *testing.T, pg bool) {
++	for _, mode := range []string{"legal_baseline", "unadmitted_content_after_queue", "actor_withdrawn_after_queue", "legal_prior_context", "unadmitted_prior_after_queue", "task_tenant_tampered", "task_subject_tampered", "task_session_tampered", "unproved_cursor_after_queue", "legal_current_modelconfig", "actor_withdrawn_after_model", "model_withdrawn_after_model"} {
++		t.Run(mode, func(t *testing.T) {
++			f, memories, policyWriter, tenant := newCurrentBoundMemoryWorkflowFixture(t, pg)
++			messages, ctx, db := f.messages, f.ctx, f.db
++			model := f.model.actualMemoryModel
++			queue := &f.queue.actualMemoryQueue
++			scope := f.scope
++			var err error
++			var session *types.Session
++			var user, assistant, priorUser *types.Message
++			var priorFacts actualMemoryOriginalFacts
++			priorCase := mode == "legal_prior_context" || mode == "unadmitted_prior_after_queue"
++			if priorCase {
++				// Prime the cursor only by a real completed extraction. The prior
++				// source remains an admitted completed turn, not a SQL cursor seed.
++				session, user, assistant = createActualMemoryTurn(t, messages, ctx)
++				priorUser = user
++				priorFacts = actualMemoryFacts(t, db, user.ID)
++				model.noop = true
++				memories.ScheduleExtraction(ctx, session.ID, assistant.ID, model.GetModelID())
++				require.NotNil(t, queue.task)
++				primerCtx, primerCancel := context.WithTimeout(context.Background(), 10*time.Second)
++				require.NoError(t, memories.Handle(primerCtx, queue.task))
++				primerCancel()
++				require.Equal(t, 1, model.calls)
++				primed := actualMemoryProgress(t, db, scope, session.ID)
++				require.False(t, primed.Pending)
++				require.False(t, primed.Cursor.At.IsZero())
++				require.NotEmpty(t, primed.Cursor.ID)
++				model.noop, model.calls, model.prompts = false, 0, nil
++				queue.task, queue.options = nil, nil
++				user, assistant = appendActualMemoryTurn(t, messages, ctx, session, actualMemoryPriorText)
++			} else {
++				session, user, assistant = createActualMemoryTurn(t, messages, ctx)
++			}
++			original := actualMemoryFacts(t, db, user.ID)
++			var completedInputs int64
++			require.NoError(t, db.Table("message_completion_input_manifests c").Joins("JOIN message_material_admissions a ON a.id=c.assistant_admission_id").Where("a.message_id=?", assistant.ID).Count(&completedInputs).Error)
++			require.EqualValues(t, 1, completedInputs, "the ordinary producer commits a real completion input manifest")
++			memories.ScheduleExtraction(ctx, session.ID, assistant.ID, model.GetModelID())
++			require.NotNil(t, queue.task, "the real scheduler must enqueue; no authoritative task is constructed")
++			require.NotEmpty(t, queue.options)
++			var payload types.MemoryExtractPayload
++			require.NoError(t, json.Unmarshal(queue.task.Payload(), &payload))
++			require.Equal(t, scope.TenantID, payload.TenantID)
++			require.Equal(t, scope.SubjectID, payload.SubjectID)
++			require.Equal(t, session.ID, payload.SessionID)
++			require.Equal(t, assistant.ID, payload.MessageID)
++			before := actualMemoryProgress(t, db, scope, session.ID)
++			require.True(t, before.Pending)
++			if !priorCase {
++				require.True(t, before.Cursor.At.IsZero())
++				require.Empty(t, before.Cursor.ID)
++			}
++			delivered := queue.task
++			faultApplied := false
++			switch mode {
++			case "unadmitted_content_after_queue":
++				require.NoError(t, db.Exec("UPDATE messages SET content=? WHERE id=?", actualMemoryUnadmittedText, user.ID).Error)
++				_, err = messages.GetMessage(ctx, session.ID, user.ID)
++				require.Error(t, err, "the actual original reader refuses the negative raw body edit")
++			case "actor_withdrawn_after_queue":
++				require.NoError(t, db.Model(&types.User{}).Where("id=?", session.UserID).Update("is_active", false).Error)
++				_, err = messages.GetMessage(ctx, session.ID, user.ID)
++				require.Error(t, err)
++			case "unadmitted_prior_after_queue":
++				require.NoError(t, db.Exec("UPDATE messages SET content=? WHERE id=?", actualMemoryUnadmittedText, priorUser.ID).Error)
++				require.Equal(t, priorFacts, actualMemoryFacts(t, db, priorUser.ID))
++				_, err = messages.GetMessage(ctx, session.ID, priorUser.ID)
++				require.Error(t, err, "prior context is model input even though it is not itself re-extracted")
++			case "task_tenant_tampered", "task_subject_tampered", "task_session_tampered":
++				// Corrupt a copy of the genuine queued payload without writing an
++				// admission or changing the actual pending-session owner facts.
++				if mode == "task_tenant_tampered" {
++					payload.TenantID++
++				} else if mode == "task_subject_tampered" {
++					payload.SubjectID += ":unadmitted-subject"
++				} else {
++					payload.SessionID = uuid.NewString()
++				}
++				bad, marshalErr := json.Marshal(payload)
++				require.NoError(t, marshalErr)
++				delivered = asynq.NewTask(queue.task.Type(), bad)
++			case "unproved_cursor_after_queue":
++				// This impossible cursor has no real message or successful
++				// extraction receipt. A legitimate completed cursor is the primer.
++				require.NoError(t, db.Model(&types.MemoryExtractionSession{}).Where("tenant_id=? AND subject_id=? AND session_id=?", scope.TenantID, scope.SubjectID, session.ID).Updates(map[string]interface{}{"cursor_at": time.Now().Add(24 * time.Hour), "cursor_id": "unadmitted-no-message-cursor"}).Error)
++				before = actualMemoryProgress(t, db, scope, session.ID)
++			case "legal_current_modelconfig":
++				// Existing product policy resolves current workspace rules at
++				// execution. A legitimate settings change alone is not revocation.
++				tenant.MemoryConfig.ExtractInstructions = actualMemoryCurrentRules
++				_, _, policyErr := policyWriter.ReplaceMemoryPolicyOriginal(ctx, scope.TenantID, *tenant.MemoryConfig)
++				require.NoError(t, policyErr)
++			case "actor_withdrawn_after_model", "model_withdrawn_after_model":
++				model.afterCall = func() error {
++					if model.calls != 1 {
++						return fmt.Errorf("after-model fault requires one actual provider invocation")
++					}
++					result := db.Model(&types.User{}).Where("id=?", session.UserID)
++					if mode == "model_withdrawn_after_model" {
++						result = db.Model(&types.Model{}).Where("id=? AND tenant_id=?", model.GetModelID(), scope.TenantID).Update("status", types.ModelStatusDownloadFailed)
++					} else {
++						result = result.Update("is_active", false)
++					}
++					if result.Error != nil {
++						return result.Error
++					}
++					if result.RowsAffected != 1 {
++						return fmt.Errorf("actual authority withdrawal did not update exactly one row")
++					}
++					faultApplied = true
++					return nil
++				}
++			}
++			require.Equal(t, original, actualMemoryFacts(t, db, user.ID), "no queued fault creates a fresh original admission/body")
++			worker, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++			defer cancel()
++			handleErr := memories.Handle(worker, delivered)
++			after := actualMemoryProgress(t, db, scope, session.ID)
++			var written, allWritten int64
++			require.NoError(t, db.Model(&types.MemoryItem{}).Where("tenant_id=? AND subject_id=?", scope.TenantID, scope.SubjectID).Count(&written).Error)
++			require.NoError(t, db.Model(&types.MemoryItem{}).Count(&allWritten).Error)
++			positive := mode == "legal_baseline" || mode == "legal_prior_context" || mode == "legal_current_modelconfig"
++			if positive {
++				require.NoError(t, handleErr)
++				require.Equal(t, 1, model.calls)
++				require.Len(t, model.prompts, 1)
++				if priorCase {
++					require.Contains(t, model.prompts[0], "Earlier in this conversation")
++					require.Contains(t, model.prompts[0], actualMemoryAuthoredText)
++					require.Contains(t, model.prompts[0], actualMemoryPriorText)
++				} else {
++					require.Contains(t, model.prompts[0], actualMemoryAuthoredText)
++				}
++				if mode == "legal_current_modelconfig" {
++					require.Contains(t, model.prompts[0], actualMemoryCurrentRules)
++				}
++				require.EqualValues(t, 1, written)
++				require.EqualValues(t, 1, allWritten)
++				items, total, listErr := memories.ListItems(ctx, types.MemoryStatusActive, 10, 0)
++				require.NoError(t, listErr)
++				require.EqualValues(t, 1, total)
++				require.Equal(t, actualMemoryStoredText, items[0].Content)
++				require.Equal(t, user.ID, items[0].SourceMessageID)
++				require.Equal(t, session.ID, items[0].SourceSessionID)
++				require.False(t, after.Pending)
++				require.True(t, after.Cursor.After(before.Cursor))
++			} else {
++				wantCalls := 0
++				if mode == "actor_withdrawn_after_model" || mode == "model_withdrawn_after_model" {
++					assert.True(t, faultApplied, "the real provider return applied the actual authority withdrawal")
++					wantCalls = 1
++				}
++				assert.Error(t, handleErr, "unadmitted/revoked original or task control is explicitly refused")
++				assert.Equal(t, wantCalls, model.calls, "refusal occurs at the actual intended producer boundary")
++				assert.Zero(t, written, "no unproven memory may be committed")
++				assert.Zero(t, allWritten, "a corrupt task cannot leak a derived write into a different tenant or subject")
++				assert.Equal(t, before.Cursor, after.Cursor, "refusal cannot advance or normalize an unproven watermark")
++				assert.True(t, after.Pending)
++			}
++			var body, source int64
++			require.NoError(t, db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&body).Error)
++			require.NoError(t, db.Table("nextcloud_content_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&source).Error)
++			assert.Zero(t, body)
++			assert.Zero(t, source)
++		})
++	}
++}
++
++func TestMemoryCurrentBoundOriginalWorkflowActualSQLite(t *testing.T) {
++	runCurrentBoundMemoryOriginalWorkflow(t, false)
++}
++func TestPostgresMemoryCurrentBoundOriginalWorkflowActual(t *testing.T) {
++	runCurrentBoundMemoryOriginalWorkflow(t, true)
++}
+diff --git a/internal/application/service/memory_generated_multicluster_sql_actual_test.go b/internal/application/service/memory_generated_multicluster_sql_actual_test.go
+new file mode 100644
+index 00000000..854c4cc3
+--- /dev/null
++++ b/internal/application/service/memory_generated_multicluster_sql_actual_test.go
+@@ -0,0 +1,254 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	memoryservice "github.com/Tencent/WeKnora/internal/application/service/memory"
++	"github.com/Tencent/WeKnora/internal/logprivacy"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// Source-only draft: real model construction, actor/policy/source/body holds,
++// actual worker A and public manual producers create both input clusters.
++// This file proves no final-clock boundary by model callback expiry; that is
++// a separate test. Only provider roundtrips are replaced by bounded replies.
++type memoryMultiClusterMarker struct{}
++type memoryMultiClusterChat struct {
++	*actualMemoryModel
++	secondInvalid bool
++	messages      [][]byte
++	responses     []string
++	modelLeaseIDs [][]string
++}
++
++func (m *memoryMultiClusterChat) Chat(ctx context.Context, input []chat.Message, options *chat.ChatOptions) (*types.ChatResponse, error) {
++	if len(input) == 0 || input[0].Content != types.MemoryConsolidationOriginalPrompt {
++		return m.actualMemoryModel.Chat(ctx, input, options)
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if !logprivacy.ContentSuppressed(ctx) {
++		return nil, fmt.Errorf("actual generated input lost its content protection marker")
++	}
++	ids, err := repository.ModelOriginalLeaseIDs(ctx)
++	if err != nil {
++		return nil, err
++	}
++	if len(ids) != 2 {
++		return nil, fmt.Errorf("expected the actual current model's two acquired body leases")
++	}
++	wire, err := json.Marshal(input)
++	if err != nil {
++		return nil, err
++	}
++	m.messages = append(m.messages, wire)
++	m.modelLeaseIDs = append(m.modelLeaseIDs, append([]string(nil), ids...))
++	index := len(m.messages) - 1
++	if index > 1 {
++		return nil, fmt.Errorf("bounded fixture accepts exactly two consolidation calls")
++	}
++	statement := memoryGeneratedMergedText
++	if !strings.Contains(input[1].Content, actualMemoryStoredText) {
++		statement = "The user's ongoing task is refactoring payment workflows using Go."
++	}
++	if m.secondInvalid && index == 1 {
++		// Valid recipe-shaped JSON reaches the real transaction. The first cluster
++		// has actual SQL writes before the complete second decision is refused.
++		statement = "Access token is sk-" + strings.Repeat("a", 32)
++	}
++	response, err := json.Marshal(map[string]string{"statement": statement})
++	if err != nil {
++		return nil, err
++	}
++	m.responses = append(m.responses, string(response))
++	return &types.ChatResponse{Content: string(response)}, nil
++}
++
++type memoryMultiClusterModels struct {
++	actualMemoryModels
++	transport *memoryMultiClusterChat
++}
++
++func (m memoryMultiClusterModels) GetChatModel(ctx context.Context, id string) (chat.Chat, error) {
++	if _, err := m.actualMemoryModels.GetChatModel(ctx, id); err != nil {
++		return nil, err
++	}
++	return m.transport, nil
++}
++func attachMemoryMultiCluster(t *testing.T, f *memAtomicSQLFixture, invalid bool) *memoryMultiClusterChat {
++	t.Helper()
++	transport := &memoryMultiClusterChat{actualMemoryModel: f.model.actualMemoryModel, secondInvalid: invalid}
++	_, svc, _, _ := actualOriginalModelServices(t, f)
++	originals, ok := svc.(interfaces.ModelOriginalLifetimeReader)
++	require.True(t, ok)
++	require.NotNil(t, originals)
++	models := memoryMultiClusterModels{actualMemoryModels: actualMemoryModels{model: f.model.actualMemoryModel, db: f.db, originals: originals}, transport: transport}
++	f.service = memoryservice.NewOriginalBoundMemoryService(f.repo, repository.NewTenantRepository(f.db), repository.NewMessageRepository(f.db), models, f.queue, nil, f.reader, f.admissions)
++	memoryservice.ConfigureOriginalMemoryOutbox(f.service, f.outbox)
++	return transport
++}
++func runMemoryGeneratedMultiClusterSQL(t *testing.T, pg bool) {
++	for _, mode := range []string{"two_clusters_exact_complete", "second_cluster_invalid_complete_rollback"} {
++		t.Run(mode, func(t *testing.T) {
++			f, _, _ := newMemSharedAgentNoKBFixture(t, pg)
++			f.ctx = context.WithValue(f.ctx, memoryMultiClusterMarker{}, uuid.NewString())
++			invalid := mode == "second_cluster_invalid_complete_rollback"
++			transport := attachMemoryMultiCluster(t, f, invalid)
++			f.service.ScheduleExtraction(f.ctx, f.session.ID, f.assistant.ID, transport.GetModelID())
++			relayMemAtomicSQLScheduled(t, f)
++			require.NoError(t, handleMemDerivedSQL(t, f))
++			require.Equal(t, 1, transport.calls)
++			var first types.MemoryItem
++			require.NoError(t, f.db.Where("tenant_id=? AND subject_id=? AND kind=? AND status=?", f.scope.TenantID, f.scope.SubjectID, types.MemoryKindFact, types.MemoryStatusActive).Take(&first).Error)
++			require.Equal(t, actualMemoryStoredText, first.Content)
++			second, err := f.service.Remember(f.ctx, types.MemoryItem{Kind: types.MemoryKindFact, Topic: "daily coding editor", Content: memoryGeneratedSecondText, Importance: 5, Origin: types.MemoryOriginManual})
++			require.NoError(t, err)
++			require.NoError(t, f.db.Where("id=?", second.ID).Take(second).Error)
++			now := time.Now().UTC().Truncate(time.Microsecond)
++			taskA := createMemoryStaleSQLTask(t, f, memoryStaleTaskText, "payment refactoring task", now.Add(-time.Hour), nil, nil, 4, false)
++			taskB := createMemoryStaleSQLTask(t, f, memoryFreshTaskText, "payment workflows task", now.Add(-time.Minute), nil, nil, 4, false)
++			inputs := map[string]types.MemoryItem{first.ID: first, second.ID: *second, taskA.ID: *taskA, taskB.ID: *taskB}
++			require.Len(t, inputs, 4)
++			beforePublications := memAtomicSQLCount(t, f, "memory_derived_publications")
++			beforeReceipts := memAtomicSQLCount(t, f, "memory_generated_receipts")
++			var beforeSubject types.MemorySubject
++			require.NoError(t, f.db.Where("tenant_id=? AND subject_id=?", f.scope.TenantID, f.scope.SubjectID).Take(&beforeSubject).Error)
++			own := f.ctx.Value(memoryMultiClusterMarker{})
++			actualResultInserts := 0
++			actualResultPublications := 0
++			observer := "actual-generated-multicluster-sql-" + uuid.NewString()
++			require.NoError(t, f.db.Callback().Create().After("gorm:create").Register(observer, func(tx *gorm.DB) {
++				if tx.Error != nil || tx.RowsAffected != 1 || tx.Statement.Context.Value(memoryMultiClusterMarker{}) != own {
++					return
++				}
++				if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++					return
++				}
++				if tx.Statement.Table == "memory_items" {
++					if item, ok := tx.Statement.Dest.(*types.MemoryItem); ok && item.Origin == types.MemoryOriginExtracted && item.TenantID == f.scope.TenantID && item.SubjectID == f.scope.SubjectID {
++						actualResultInserts++
++					}
++				}
++				if tx.Statement.Table == "memory_derived_publications" {
++					if fact, ok := tx.Statement.Dest.(*types.MemoryDerivedPublication); ok && fact.ProducerKind == "generated" && fact.TenantID == f.scope.TenantID && fact.SubjectID == f.scope.SubjectID {
++						actualResultPublications++
++					}
++				}
++			}))
++			t.Cleanup(func() { require.NoError(t, f.db.Callback().Create().Remove(observer)) })
++			result, callErr := f.service.ConsolidateNow(f.ctx)
++			require.Len(t, transport.messages, 2)
++			require.Len(t, transport.responses, 2)
++			require.Len(t, transport.modelLeaseIDs, 2)
++			var original types.MemoryGeneratedOriginal
++			require.NoError(t, f.db.Where("tenant_id=? AND subject_id=?", f.scope.TenantID, f.scope.SubjectID).Take(&original).Error)
++			require.Equal(t, types.MemoryConsolidationOriginalRecipe, original.Recipe)
++			require.NotEmpty(t, original.ModelProofJSON)
++			require.Len(t, original.ModelDigest, 64)
++			var body struct {
++				Prompts     []string
++				Maintenance []types.MemoryItem
++			}
++			require.NoError(t, json.Unmarshal([]byte(original.InputJSON), &body))
++			require.Len(t, body.Prompts, 2)
++			require.Empty(t, body.Maintenance)
++			require.Equal(t, types.MemoryOriginalBytesDigest([]byte(original.InputJSON)), original.InputSHA256)
++			var command types.MemoryConsolidationCommand
++			require.NoError(t, json.Unmarshal([]byte(original.RequestJSON), &command))
++			require.Len(t, command.Clusters, 2)
++			require.Empty(t, command.Demotions)
++			consumed := map[string]bool{}
++			for index, prompt := range body.Prompts {
++				require.Equal(t, []byte(prompt), transport.messages[index], "every admitted serialized message byte must be the byte actually transmitted for this cluster")
++				var actual []chat.Message
++				require.NoError(t, json.Unmarshal(transport.messages[index], &actual))
++				require.Len(t, actual, 2)
++				require.Equal(t, types.MemoryConsolidationOriginalPrompt, actual[0].Content)
++				var expected strings.Builder
++				for _, id := range command.Clusters[index] {
++					item, known := inputs[id]
++					require.True(t, known)
++					require.False(t, consumed[id])
++					consumed[id] = true
++					fmt.Fprintf(&expected, "- (%s) %s\n", item.ValidFrom.Format("2006-01-02"), types.SanitizeMemoryContent(item.Content))
++				}
++				require.Equal(t, []byte(expected.String()), []byte(actual[1].Content), "dates, order, full leased content and delimiters must all match")
++			}
++			require.Len(t, consumed, 4)
++			require.Equal(t, transport.modelLeaseIDs[0], transport.modelLeaseIDs[1], "all calls use the same actual captured current model hold")
++			require.Positive(t, actualResultInserts, "at least the first cluster reached real SQL Create inside the output transaction")
++			require.Positive(t, actualResultPublications, "at least the first cluster reached real immutable publication inside that same transaction")
++			if invalid {
++				require.Error(t, callErr)
++				require.Equal(t, 1, actualResultInserts)
++				require.Equal(t, beforePublications, memAtomicSQLCount(t, f, "memory_derived_publications"))
++				require.Equal(t, beforeReceipts, memAtomicSQLCount(t, f, "memory_generated_receipts"))
++				var rows []types.MemoryItem
++				require.NoError(t, f.db.Where("tenant_id=? AND subject_id=?", f.scope.TenantID, f.scope.SubjectID).Find(&rows).Error)
++				require.Len(t, rows, 4)
++				for _, item := range rows {
++					before, known := inputs[item.ID]
++					require.True(t, known)
++					require.Equal(t, before, item)
++				}
++				var subject types.MemorySubject
++				require.NoError(t, f.db.Where("id=?", beforeSubject.ID).Take(&subject).Error)
++				require.Equal(t, beforeSubject.BlockText, subject.BlockText)
++				require.Equal(t, beforeSubject.ItemCount, subject.ItemCount)
++				require.Equal(t, beforeSubject.ForcedConsolidatedAt, subject.ForcedConsolidatedAt)
++			} else {
++				require.NoError(t, callErr)
++				require.Equal(t, 2, result.Merged)
++				require.Equal(t, 0, result.Demoted)
++				require.Equal(t, 2, actualResultInserts)
++				var receipt types.MemoryGeneratedReceipt
++				require.NoError(t, f.db.Where("original_id=?", original.ID).Take(&receipt).Error)
++				require.Equal(t, original.Digest, receipt.OriginalDigest)
++				var decisions []types.MemoryGeneratedDecision
++				require.NoError(t, json.Unmarshal([]byte(receipt.ResponseJSON), &decisions))
++				require.Len(t, decisions, 2)
++				for index, decision := range decisions {
++					require.Equal(t, index, decision.ClusterIndex)
++					require.Equal(t, transport.responses[index], decision.RawResponse)
++					require.Equal(t, transport.responses[index], decision.ResponseJSON)
++				}
++				var effects []types.MemoryGeneratedEffect
++				require.NoError(t, json.Unmarshal([]byte(receipt.EffectManifest), &effects))
++				actions := map[string]int{}
++				for _, effect := range effects {
++					actions[effect.Action]++
++				}
++				require.Equal(t, 2, actions["merge_add"])
++				require.Equal(t, 4, actions["merge_supersede"])
++				for id := range inputs {
++					var item types.MemoryItem
++					require.NoError(t, f.db.Where("id=?", id).Take(&item).Error)
++					require.Equal(t, types.MemoryStatusSuperseded, item.Status)
++					require.NotEmpty(t, item.SupersededBy)
++				}
++				var active int64
++				require.NoError(t, f.db.Model(&types.MemoryItem{}).Where("tenant_id=? AND subject_id=? AND status=?", f.scope.TenantID, f.scope.SubjectID, types.MemoryStatusActive).Count(&active).Error)
++				require.EqualValues(t, 2, active)
++			}
++			assertMemAtomicSQLLeasesClosed(t, f)
++		})
++	}
++}
++func TestMemoryGeneratedMultipleClustersActualSQLite(t *testing.T) {
++	runMemoryGeneratedMultiClusterSQL(t, false)
++}
++func TestPostgresMemoryGeneratedMultipleClustersActual(t *testing.T) {
++	runMemoryGeneratedMultiClusterSQL(t, true)
++}

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "status": "PASS_WITH_EXPLICIT_SCOPE",
+  "live_receipt": "coordinated-recovery-ad-12.json",
+  "live_receipt_sha256": "f30bcbd846982b5c00a5e6577d0b4c135e1ec44e3c08e36214e03548db5d68ec",
+  "weknora_commit": "06c6bfd45708e6e0ccbc518bb95a54e2fc99aa42",
+  "nextcloud_base_commit": "0475dbb37f230e018273befa23b0b8e41e411a65",
+  "nextcloud_tested_working_files_sha256": {
+    "apps/integration_weknora/appinfo/recovery-console.php": "a6af696f8d8473a4d3d4bb8af448f944c7fca1e4a509d79a6e52ecb76d13b955",
+    "apps/integration_weknora/lib/Command/ReplayRecoveryLedger.php": "7864e37a3c8e23fe55c47263ebc349edc5bccd33e0611aa88e48f871c6e8854e",
+    "apps/integration_weknora/lib/Service/PublicationRecoveryLedger.php": "2222a11d26036cc1aa112ccf0229f311ce6a1874994b7f9741df42df580b486c",
+    "apps/integration_weknora/lib/Service/PublicationRecoveryReplay.php": "dfe4368364580a9f78e70bc271fd8e3a11e316c9b30798a60cec236de422991b",
+    "scripts/ops/isolated-coordinated-recovery-smoke.py": "10163d441f806f331c029463eeaf7042c6f383c772a5591faac4b556c78c309b",
+    "scripts/ops/publication-recovery-journal.py": "15834b2e441bef73c274f14887acd16eb3f9fb031c3f1932ed833064cfc0d567",
+    "scripts/ops/synthetic-ldap-e2e.py": "20352bf422063c6c94b16dd2a6043835c987ec2db9f40d78f464d706b922e876",
+    "scripts/ops/test_publication_recovery_journal.py": "4994f6d0379e2e3d9fd4462163fa23e64007b280de8d7b2517e93f20183c68a7",
+    "apps/integration_weknora/tests/recovery_journal_restore_runtime.php": "42ab8595fdf2a85ff7b6bfe2045c016ddb348572cbec3d7a87926518c7f313ab"
+  },
+  "checks": {
+    "python_journal_tests": 17,
+    "php_journal_restore_transaction": "PASS",
+    "go_recovery_regression": "PASS",
+    "live_dual_pg_restore_and_ldaps": "PASS",
+    "candidate_apply_reverse": "PASS"
+  },
+  "logs_sha256": {
+    "recovery-journal-php.log": "e01b921d4bde3cbfb5e3ab2983df1eff9f61b7ba454111c02f2c03ab0f2b3a81",
+    "recovery-journal-go-complete.log": "0292576a359074ebee519b99b9551d15299d6daf352d3cf08558d67cffb2029b",
+    "recovery-candidate-verification.log": "c1eefc3dbdfaed2c5fccbb719649b849043fd1bfb0d967beedd7f3b10104139e",
+    "coordinated-recovery-ad-12.go.log": "01273e67b9c7e7f4b56fd0ae6491c4a9f25add6b31b8d6e15f1eca33946b164d"
+  },
+  "historical_failures_retained": [
+    "ad-7: global control gate blocks premature source resume",
+    "ad-8: maintenance LDAP backend absent",
+    "ad-9: external journal tail mismatch",
+    "ad-10: ACL probe omitted current content revision",
+    "ad-11: outdated source_not_readable assertion; actual live audience rejection confirmed"
+  ],
+  "scope": "real live Nextcloud + disposable Samba AD LDAPS; WK actual CLI/repository on stock PG, mock relational indexed chunks; full app and external index backend acceptance remains required",
+  "full_prd_acceptance": false,
+  "shared_runtime_changed": false
+}

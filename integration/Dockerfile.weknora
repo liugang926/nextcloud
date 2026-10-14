@@ -1,0 +1,7 @@
+FROM weknora-ldap-app:final
+
+# The local baseline image contains the existing runtime dependencies. Keep
+# the compiled binary and its SQL migration set from the same patched source;
+# copying only the binary would leave newly added tables/columns unapplied.
+COPY --chown=appuser:appuser nextcloud-integration-bin /app/WeKnora
+COPY --chown=appuser:appuser migrations/ /app/migrations/

@@ -1,0 +1,1025 @@
+diff --git a/internal/application/repository/model_original_body.go b/internal/application/repository/model_original_body.go
+index ff54709a0..89ae8972f 100644
+--- a/internal/application/repository/model_original_body.go
++++ b/internal/application/repository/model_original_body.go
+@@ -386,9 +386,38 @@ func (r *modelOriginalRead) Recheck() error {
+ 	if err := r.startCheck(); err != nil {
+ 		return err
+ 	}
+-	err := r.db.WithContext(r.ctx).Transaction(r.checkInTx, memoryWriteOptions(r.db))
++	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
++		if err := reserveModelOriginalRecheckWriterInTx(tx); err != nil {
++			return err
++		}
++		return r.checkInTx(tx)
++	}, memoryWriteOptions(r.db))
+ 	return r.finishCheck(err)
+ }
++
++// Recheck refreshes the current actor through a real permission-version
++// INSERT, even when the existing version makes ON CONFLICT a no-op. Reserve
++// SQLite's writer before that transaction's first read, without changing any
++// permission row or minting an original/lease. Caller-owned checkInTx paths and
++// PostgreSQL keep their existing behavior; a nested stale snapshot still has
++// to perform this real write and may refuse rather than being replayed.
++func reserveModelOriginalRecheckWriterInTx(tx *gorm.DB) error {
++	if tx.Dialector.Name() != "sqlite" {
++		return nil
++	}
++	if err := tx.Statement.Context.Err(); err != nil {
++		return err
++	}
++	result := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Exec("UPDATE directory_permission_versions SET version=version WHERE 1=0")
++	if result.Error != nil {
++		return result.Error
++	}
++	if result.RowsAffected != 0 {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	return nil
++}
++
+ func (r *modelOriginalRead) startCheck() error {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+diff --git a/internal/application/service/model_original_embedding.go b/internal/application/service/model_original_embedding.go
+index d7a2fb446..e35512ab7 100644
+--- a/internal/application/service/model_original_embedding.go
++++ b/internal/application/service/model_original_embedding.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"context"
++	"sync"
+ 
+ 	"github.com/Tencent/WeKnora/internal/application/repository"
+ 	"github.com/Tencent/WeKnora/internal/models/embedding"
+@@ -13,8 +14,11 @@ import (
+ // they only own read/cancel/watch/join state. No Chat or nil-inner metadata
+ // method is called here, and the original chat/SSE source remains unchanged.
+ type modelOriginalEmbeddingClient struct {
+-	inner embedding.Embedder
+-	life  *modelOriginalChatClient
++	inner       embedding.Embedder
++	life        *modelOriginalChatClient
++	operationMu sync.Mutex
++	directCalls int
++	delegated   bool
+ }
+ 
+ func (w *modelOriginalEmbeddingClient) GetModelName() string   { return w.inner.GetModelName() }
+@@ -23,6 +27,11 @@ func (w *modelOriginalEmbeddingClient) GetDimensions() int     { return w.inner.
+ func (w *modelOriginalEmbeddingClient) RecheckOriginal() error { return w.life.RecheckOriginal() }
+ func (w *modelOriginalEmbeddingClient) CloseOriginal() error   { return w.life.CloseOriginal() }
+ func (w *modelOriginalEmbeddingClient) Embed(ctx context.Context, text string) (vector []float32, resultErr error) {
++	release, err := w.claimOriginalEmbeddingCall()
++	if err != nil {
++		return nil, err
++	}
++	defer release()
+ 	call, finish, _, err := w.life.begin(ctx)
+ 	if err != nil {
+ 		if w.life.autoClose {
+@@ -49,6 +58,11 @@ func (w *modelOriginalEmbeddingClient) Embed(ctx context.Context, text string) (
+ 	return vector, nil
+ }
+ func (w *modelOriginalEmbeddingClient) BatchEmbed(ctx context.Context, texts []string) (vectors [][]float32, resultErr error) {
++	release, err := w.claimOriginalEmbeddingCall()
++	if err != nil {
++		return nil, err
++	}
++	defer release()
+ 	call, finish, _, err := w.life.begin(ctx)
+ 	if err != nil {
+ 		if w.life.autoClose {
+diff --git a/internal/application/service/model_original_embedding_operation.go b/internal/application/service/model_original_embedding_operation.go
+new file mode 100644
+index 000000000..d051d22f9
+--- /dev/null
++++ b/internal/application/service/model_original_embedding_operation.go
+@@ -0,0 +1,157 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"sync"
++
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// An operation uses the very same immutable model/credential reader and carrier
++// as its constructor. No current-row reconstruction or new authoring occurs.
++type modelOriginalEmbeddingOperation struct {
++	parent   *modelOriginalEmbeddingClient
++	ctx      context.Context
++	finish   func()
++	mu       sync.Mutex
++	closed   bool
++	closeErr error
++	joined   chan struct{}
++	calls    sync.WaitGroup
++}
++
++func (w *modelOriginalEmbeddingClient) claimOriginalEmbeddingCall() (func(), error) {
++	w.operationMu.Lock()
++	if w.delegated {
++		w.operationMu.Unlock()
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	w.directCalls++
++	w.operationMu.Unlock()
++	return func() {
++		w.operationMu.Lock()
++		w.directCalls--
++		w.operationMu.Unlock()
++	}, nil
++}
++
++func (w *modelOriginalEmbeddingClient) BeginOriginalEmbeddingOperation(ctx context.Context) (context.Context, embedding.Embedder, func() error, error) {
++	w.operationMu.Lock()
++	if w.life.owner && (w.delegated || w.directCalls != 0) {
++		w.operationMu.Unlock()
++		return ctx, nil, nil, types.ErrMemoryOriginalUnavailable
++	}
++	if w.life.owner {
++		w.delegated = true
++	}
++	w.operationMu.Unlock()
++	call, finish, _, err := w.life.begin(ctx)
++	if err != nil {
++		if w.life.owner {
++			err = errors.Join(err, w.CloseOriginal())
++		}
++		return ctx, nil, nil, err
++	}
++	op := &modelOriginalEmbeddingOperation{parent: w, ctx: call, finish: finish, joined: make(chan struct{})}
++	return call, op, op.CloseOriginal, nil
++}
++
++func (o *modelOriginalEmbeddingOperation) GetModelName() string { return o.parent.GetModelName() }
++func (o *modelOriginalEmbeddingOperation) GetModelID() string   { return o.parent.GetModelID() }
++func (o *modelOriginalEmbeddingOperation) GetDimensions() int   { return o.parent.GetDimensions() }
++
++func (o *modelOriginalEmbeddingOperation) begin(ctx context.Context) (context.Context, func(), error) {
++	o.mu.Lock()
++	if o.closed || o.ctx.Err() != nil {
++		o.mu.Unlock()
++		return ctx, nil, types.ErrMemoryOriginalUnavailable
++	}
++	o.calls.Add(1)
++	o.mu.Unlock()
++	child, cancel := context.WithCancel(ctx)
++	stop := context.AfterFunc(o.ctx, cancel)
++	call, finish, _, err := o.parent.life.begin(child)
++	if err != nil {
++		stop()
++		cancel()
++		o.calls.Done()
++		return ctx, nil, err
++	}
++	if err := o.ctx.Err(); err != nil {
++		finish()
++		stop()
++		cancel()
++		o.calls.Done()
++		return ctx, nil, err
++	}
++	return call, func() { finish(); stop(); cancel(); o.calls.Done() }, nil
++}
++
++func (o *modelOriginalEmbeddingOperation) Embed(ctx context.Context, text string) ([]float32, error) {
++	call, finish, err := o.begin(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finish()
++	vector, err := o.parent.inner.Embed(call, text)
++	if err != nil {
++		return nil, err
++	}
++	if err = o.parent.life.read.Recheck(); err != nil {
++		return nil, err
++	}
++	return vector, nil
++}
++
++func (o *modelOriginalEmbeddingOperation) BatchEmbed(ctx context.Context, texts []string) ([][]float32, error) {
++	call, finish, err := o.begin(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finish()
++	vectors, err := o.parent.inner.BatchEmbed(call, texts)
++	if err != nil {
++		return nil, err
++	}
++	if err = o.parent.life.read.Recheck(); err != nil {
++		return nil, err
++	}
++	return vectors, nil
++}
++
++func (o *modelOriginalEmbeddingOperation) BatchEmbedWithPool(ctx context.Context, _ embedding.Embedder, texts []string) ([][]float32, error) {
++	return o.BatchEmbed(ctx, texts)
++}
++
++func (o *modelOriginalEmbeddingOperation) CloseOriginal() error {
++	o.mu.Lock()
++	if o.closed {
++		joined := o.joined
++		o.mu.Unlock()
++		<-joined
++		o.mu.Lock()
++		err := o.closeErr
++		o.mu.Unlock()
++		return err
++	}
++	o.closed = true
++	o.mu.Unlock()
++	// Cancel and join the actual factory watcher and all SDK child calls before
++	// closing an owned reader. Borrowed outer readers remain alive for commit.
++	o.finish()
++	o.calls.Wait()
++	err := o.parent.life.RecheckOriginal()
++	if o.parent.life.owner {
++		err = errors.Join(err, o.parent.CloseOriginal())
++	}
++	o.mu.Lock()
++	o.closeErr = err
++	close(o.joined)
++	o.mu.Unlock()
++	return err
++}
++
++var _ embedding.OriginalOperationFactory = (*modelOriginalEmbeddingClient)(nil)
++var _ embedding.Embedder = (*modelOriginalEmbeddingOperation)(nil)
+diff --git a/internal/application/service/model_original_embedding_operation_sql_http_actual_test.go b/internal/application/service/model_original_embedding_operation_sql_http_actual_test.go
+new file mode 100644
+index 000000000..1c7dbee3a
+--- /dev/null
++++ b/internal/application/service/model_original_embedding_operation_sql_http_actual_test.go
+@@ -0,0 +1,279 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// This sink persists actual vectors for the existing BatchIndex entry. It is
++// not an original publisher, proof stub, or a real external vector backend.
++type originalOperationVectorForTest struct {
++	SourceID string `gorm:"primaryKey"`
++	Vector   string
++}
++type originalOperationIndexForTest struct {
++	interfaces.RetrieveEngineRepository
++	db          *gorm.DB
++	modelBodies []string
++}
++
++func (r *originalOperationIndexForTest) BatchSave(ctx context.Context, list []*types.IndexInfo, params map[string]any) error {
++	var live int64
++	if err := r.db.WithContext(ctx).Table("original_body_leases").Where("body_id IN ? AND kind='read' AND released_at_ms IS NULL", r.modelBodies).Count(&live).Error; err != nil {
++		return err
++	}
++	if live != 2 {
++		return fmt.Errorf("actual model operation lost its two body holds before SQL save")
++	}
++	vectors, ok := params["embedding"].(map[string][]float32)
++	if !ok {
++		return fmt.Errorf("actual index vector map missing")
++	}
++	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++		for _, item := range list {
++			vector, ok := vectors[item.SourceID]
++			if !ok || len(vector) != 3 {
++				return fmt.Errorf("actual index vector dimension missing")
++			}
++			wire, err := json.Marshal(vector)
++			if err != nil {
++				return err
++			}
++			if err := tx.Create(&originalOperationVectorForTest{SourceID: item.SourceID, Vector: string(wire)}).Error; err != nil {
++				return err
++			}
++		}
++		return nil
++	})
++}
++
++func runOriginalEmbeddingOperationActual(t *testing.T, pg bool) {
++	for _, mode := range []string{"retry_then_real_SQL_save", "wiki_two_real_batches", "actor_between_batches", "borrowed_reader_retained", "close_active_HTTP_joins"} {
++		t.Run(mode, func(t *testing.T) {
++			t.Setenv(memoryJointSchemaOptin, "1")
++			f := newMemAtomicSQLFixture(t, pg)
++			_, svc, _, reader := actualOriginalModelServices(t, f)
++			var calls, failUntil atomic.Int64
++			started, providerJoined := make(chan struct{}), make(chan struct{})
++			var startOnce, joinOnce sync.Once
++			var mu sync.Mutex
++			requests := [][]string{}
++			var observerErr error
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				call := calls.Add(1)
++				startOnce.Do(func() { close(started) })
++				wire, err := io.ReadAll(r.Body)
++				var body struct {
++					Input []string `json:"input"`
++				}
++				if err == nil {
++					err = json.Unmarshal(wire, &body)
++				}
++				if err == nil && (r.URL.Path != "/embeddings" || r.Header.Get("Authorization") != "Bearer fixture-operation-key") {
++					err = fmt.Errorf("actual proved endpoint/auth binding changed")
++				}
++				mu.Lock()
++				if err != nil {
++					observerErr = err
++				}
++				requests = append(requests, append([]string(nil), body.Input...))
++				mu.Unlock()
++				if err != nil {
++					w.WriteHeader(400)
++					return
++				}
++				if mode == "close_active_HTTP_joins" {
++					<-r.Context().Done()
++					joinOnce.Do(func() { close(providerJoined) })
++					return
++				}
++				if mode == "retry_then_real_SQL_save" && call <= failUntil.Load() {
++					w.WriteHeader(http.StatusServiceUnavailable)
++					_, _ = w.Write([]byte(`{"error":{"message":"owned temporary failure"}}`))
++					return
++				}
++				data := []map[string]any{}
++				for i := range body.Input {
++					data = append(data, map[string]any{"index": i, "embedding": []float32{1, 0, 0}})
++				}
++				w.Header().Set("Content-Type", "application/json")
++				_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			model := &types.Model{ID: "actual-embedding-operation", TenantID: 7, Name: "actual-operation-embedding", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "fixture-operation-key", EmbeddingParameters: types.EmbeddingParameters{Dimension: 3, SupportsDimensionOverride: true}}}
++			require.NoError(t, svc.CreateModel(f.ctx, model))
++			require.NotNil(t, model.OriginalProof)
++			require.True(t, model.OriginalProof.Valid())
++			current, proof := actualModelProof(t, reader, f.ctx, model.ID)
++			require.NotNil(t, current.Parameters.OriginalEmbedding)
++			if mode == "retry_then_real_SQL_save" {
++				// A genuine full author update pins zero inner retries so the
++				// real outer backoff gets exactly one HTTP503 then one success.
++				current.Parameters.OriginalEmbedding.RetryMaxRetries = 0
++				var err error
++				current.Parameters.OriginalEmbedding.SpaceDigest, err = types.ModelOriginalEmbeddingDigest(current.Parameters.OriginalEmbedding)
++				require.NoError(t, err)
++				require.NoError(t, svc.UpdateModel(f.ctx, current))
++				current, proof = actualModelProof(t, reader, f.ctx, model.ID)
++				require.Zero(t, current.Parameters.OriginalEmbedding.RetryMaxRetries)
++			}
++			// Exhaust the pinned SDK's whole retry budget once, so the second
++			// healthy call belongs to the real outer batchEmbedWithBackoff.
++			failUntil.Store(int64(current.Parameters.OriginalEmbedding.RetryMaxRetries + 1))
++			var defBody types.ModelOriginalBodyReceipt
++			var credentialBody types.ModelOriginalBodyReceipt
++			require.NoError(t, f.db.Where("origin_id=?", proof.DefinitionID).Take(&defBody).Error)
++			require.NoError(t, f.db.Where("origin_id=?", proof.CredentialID).Take(&credentialBody).Error)
++			ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
++			defer cancel()
++			if mode == "wiki_two_real_batches" {
++				pool := [][]string{}
++				for i := 0; i <= wikiTaxonomyFeedAllMaxFolders; i++ {
++					pool = append(pool, []string{"owned", fmt.Sprintf("folder-%02d", i)})
++				}
++				wiki := &wikiIngestService{modelService: svc}
++				result := wiki.selectRelevantFolders(ctx, &types.KnowledgeBase{EmbeddingModelID: model.ID}, []wikiTaxonomyItem{{title: "genuine operation item", about: "owned item input"}}, pool)
++				require.EqualValues(t, 2, calls.Load())
++				require.Less(t, len(result), len(pool), "both successful batches must feed actual similarity selection, not fallback-all")
++				mu.Lock()
++				captured := append([][]string(nil), requests...)
++				err := observerErr
++				mu.Unlock()
++				require.NoError(t, err)
++				require.Len(t, captured[0], len(pool))
++				require.Equal(t, []string{"genuine operation item owned item input"}, captured[1])
++			} else {
++				var outer interfaces.ModelOriginalRead
++				if mode == "borrowed_reader_retained" {
++					var err error
++					outer, err = reader.BeginModelOriginalRead(ctx, model.ID, &proof)
++					require.NoError(t, err)
++					defer outer.Close()
++					ctx = outer.Context()
++				}
++				client, err := svc.GetEmbeddingModel(ctx, model.ID)
++				require.NoError(t, err)
++				if mode == "retry_then_real_SQL_save" {
++					require.NoError(t, f.db.Migrator().CreateTable(&originalOperationVectorForTest{}))
++					sink := &originalOperationIndexForTest{db: f.db, modelBodies: []string{defBody.BodyID, credentialBody.BodyID}}
++					engine := retriever.NewKVHybridRetrieveEngine(sink, types.PostgresRetrieverEngineType)
++					inputs := []*types.IndexInfo{{SourceID: "operation-input-a", Content: "owned first exact input"}, {SourceID: "operation-input-b", Content: "owned second exact input"}}
++					require.NoError(t, engine.BatchIndex(ctx, client, inputs, []types.RetrieverType{types.VectorRetrieverType}))
++					require.Equal(t, failUntil.Load()+1, calls.Load(), "whole first SDK attempt fails, then the outer retry succeeds")
++					var saved []originalOperationVectorForTest
++					require.NoError(t, f.db.Order("source_id").Find(&saved).Error)
++					require.Len(t, saved, 2)
++					mu.Lock()
++					captured := append([][]string(nil), requests...)
++					err := observerErr
++					mu.Unlock()
++					require.NoError(t, err)
++					for _, text := range captured {
++						require.Equal(t, []string{inputs[0].Content, inputs[1].Content}, text)
++					}
++				} else {
++					call, operation, end, err := embedding.BeginOperation(ctx, client)
++					require.NoError(t, err)
++					ended := false
++					t.Cleanup(func() {
++						cancel()
++						if !ended {
++							_ = end()
++						}
++					})
++					if mode == "close_active_HTTP_joins" {
++						returned := make(chan error, 1)
++						go func() { _, e := operation.BatchEmbed(call, []string{"owned active input"}); returned <- e }()
++						select {
++						case <-started:
++						case <-ctx.Done():
++							t.Fatal("actual provider did not start")
++						}
++						closed := make(chan error, 1)
++						lifetime := client.(interfaces.ModelOriginalClientLifetime)
++						go func() { closed <- lifetime.CloseOriginal() }()
++						select {
++						case e := <-returned:
++							require.Error(t, e)
++						case <-ctx.Done():
++							t.Fatal("actual SDK did not cancel and join")
++						}
++						require.Error(t, end())
++						ended = true
++						select {
++						case e := <-closed:
++							require.NoError(t, e)
++						case <-ctx.Done():
++							t.Fatal("owned model Close did not join")
++						}
++						select {
++						case <-providerJoined:
++						case <-ctx.Done():
++							t.Fatal("actual HTTP handler did not join")
++						}
++					} else {
++						first, err := operation.BatchEmbed(call, []string{"owned first batch"})
++						require.NoError(t, err)
++						require.Len(t, first, 1)
++						if mode == "actor_between_batches" {
++							write := f.db.Model(&types.User{}).Where("id=?", types.CallerFromContext(f.ctx).UserID).Update("is_active", false)
++							require.NoError(t, write.Error)
++							require.EqualValues(t, 1, write.RowsAffected)
++							var actual types.User
++							require.NoError(t, f.db.Where("id=?", types.CallerFromContext(f.ctx).UserID).Take(&actual).Error)
++							require.False(t, actual.IsActive)
++						}
++						second, err := operation.BatchEmbed(call, []string{"owned second batch"})
++						if mode == "actor_between_batches" {
++							require.Error(t, err)
++							require.Nil(t, second)
++							require.EqualValues(t, 1, calls.Load())
++							require.Error(t, end())
++						} else {
++							require.NoError(t, err)
++							require.Len(t, second, 1)
++							require.EqualValues(t, 2, calls.Load())
++							require.NoError(t, end())
++						}
++						ended = true
++						_, err = operation.BatchEmbed(call, []string{"closed operation"})
++						require.Error(t, err)
++						if outer != nil {
++							require.NoError(t, outer.Recheck())
++							require.NoError(t, outer.Close())
++							outer = nil
++						}
++					}
++				}
++			}
++			var live int64
++			require.NoError(t, f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++			require.Zero(t, live)
++		})
++	}
++}
++
++func TestModelOriginalEmbeddingOperationActualSQLiteHTTP(t *testing.T) {
++	runOriginalEmbeddingOperationActual(t, false)
++}
++func TestPostgresModelOriginalEmbeddingOperationActualHTTP(t *testing.T) {
++	runOriginalEmbeddingOperationActual(t, true)
++}
+diff --git a/internal/application/service/model_recheck_sqlite_writer_actual_test.go b/internal/application/service/model_recheck_sqlite_writer_actual_test.go
+new file mode 100644
+index 000000000..83927e639
+--- /dev/null
++++ b/internal/application/service/model_recheck_sqlite_writer_actual_test.go
+@@ -0,0 +1,282 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++type modelRecheckWriterKey struct{}
++
++const modelRecheckReservationSQL = "UPDATE directory_permission_versions SET version=version WHERE 1=0"
++
++func modelRecheckWriterFixture(t *testing.T, ctxToken interface{}) (*memAtomicSQLFixture, interfaces.ModelService, interfaces.ModelOriginalRead, *types.Model, types.ModelOriginalProof) {
++	t.Helper()
++	f := newMemAtomicSQLFixture(t, false)
++	pool, err := f.db.DB()
++	require.NoError(t, err)
++	pool.SetMaxOpenConns(2)
++	pool.SetMaxIdleConns(2)
++	var mode string
++	require.NoError(t, f.db.Raw("PRAGMA journal_mode").Scan(&mode).Error)
++	require.Equal(t, "wal", mode)
++	_, svc, _, reader := actualOriginalModelServices(t, f)
++	ctx := context.WithValue(f.ctx, modelRecheckWriterKey{}, ctxToken)
++	read, err := reader.BeginModelOriginalRead(ctx, f.model.GetModelID(), nil)
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		if err := read.Close(); err != nil {
++			t.Error("owned model read cleanup failed")
++		}
++	})
++	model, proof, err := read.Snapshot()
++	require.NoError(t, err)
++	require.NotNil(t, proof)
++	require.True(t, proof.Valid())
++	return f, svc, read, model, *proof
++}
++
++func modelRecheckPermissionVersion(t *testing.T, db *gorm.DB, tenant uint64) types.PermissionVersion {
++	t.Helper()
++	var version types.PermissionVersion
++	require.NoError(t, db.Session(&gorm.Session{NewDB: true}).Where("tenant_id=?", tenant).Take(&version).Error)
++	return version
++}
++
++func modelRecheckAssertClosed(t *testing.T, f *memAtomicSQLFixture, read interfaces.ModelOriginalRead) {
++	t.Helper()
++	require.NoError(t, read.Close())
++	var live int64
++	require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Table("original_body_leases").Where("kind=? AND released_at_ms IS NULL", "read").Count(&live).Error)
++	require.Zero(t, live)
++	require.Zero(t, f.model.calls, "SQL recheck never calls a provider")
++}
++
++func TestModelOriginalRecheckSQLiteWriterReservationActual(t *testing.T) {
++	t.Setenv(memoryJointSchemaOptin, "1")
++	t.Run("zero_row_preserves_permission_facts_and_row_guard", func(t *testing.T) {
++		token := new(int)
++		f, _, read, _, _ := modelRecheckWriterFixture(t, token)
++		before := modelRecheckPermissionVersion(t, f.db, f.scope.TenantID)
++		leases := messageLeaseWriterFacts(t, f.db)
++		const trigger = "owned_model_recheck_permission_row_guard"
++		require.NoError(t, f.db.Exec("CREATE TRIGGER "+trigger+" BEFORE UPDATE ON directory_permission_versions BEGIN SELECT RAISE(ABORT,'owned permission row guard'); END").Error)
++		active := true
++		t.Cleanup(func() {
++			if active {
++				if err := f.db.Exec("DROP TRIGGER " + trigger).Error; err != nil {
++					t.Error("owned permission guard cleanup failed")
++				}
++			}
++		})
++		observed := false
++		name := "test:model-recheck-zero-row"
++		require.NoError(t, f.db.Callback().Raw().After("gorm:raw").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Context.Value(modelRecheckWriterKey{}) == token && tx.Statement.SQL.String() == modelRecheckReservationSQL && tx.Error == nil {
++				observed = true
++				require.Zero(t, tx.RowsAffected)
++				require.Equal(t, before, modelRecheckPermissionVersion(t, tx, f.scope.TenantID))
++			}
++		}))
++		t.Cleanup(func() {
++			if err := f.db.Callback().Raw().Remove(name); err != nil {
++				t.Error("owned zero-row observer cleanup failed")
++			}
++		})
++		require.NoError(t, read.Recheck())
++		require.True(t, observed)
++		require.Equal(t, before, modelRecheckPermissionVersion(t, f.db, f.scope.TenantID))
++		require.Equal(t, leases, messageLeaseWriterFacts(t, f.db))
++		matching := f.db.Session(&gorm.Session{NewDB: true}).Model(&types.PermissionVersion{}).Where("tenant_id=?", f.scope.TenantID).Update("version", before.Version+1)
++		require.Error(t, matching.Error, "the actual matching-row trigger is active")
++		require.NoError(t, f.db.Exec("DROP TRIGGER "+trigger).Error)
++		active = false
++		modelRecheckAssertClosed(t, f, read)
++	})
++	t.Run("recheck_serializes_real_permission_producer_on_two_connections", func(t *testing.T) {
++		token := new(int)
++		f, _, read, _, proof := modelRecheckWriterFixture(t, token)
++		operation, cancel := context.WithTimeout(f.ctx, 10*time.Second)
++		defer cancel()
++		writer := messageLeaseWriterSecondConnection(t, f, operation)
++		before := modelRecheckPermissionVersion(t, f.db, f.scope.TenantID)
++		held, attempted := make(chan struct{}, 1), make(chan struct{}, 1)
++		release := make(chan struct{})
++		var releaseOnce sync.Once
++		var pauseOnce sync.Once
++		recheckDone, writerDone := make(chan error, 1), make(chan error, 1)
++		recheckJoined, writerStarted, writerJoined := false, false, false
++		name, writerName := "test:model-recheck-held", "test:model-permission-producer-attempt"
++		require.NoError(t, f.db.Callback().Raw().After("gorm:raw").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Context.Value(modelRecheckWriterKey{}) != token || tx.Statement.SQL.String() != modelRecheckReservationSQL || tx.Error != nil {
++				return
++			}
++			if tx.RowsAffected != 0 {
++				t.Error("model reservation changed a permission row")
++			}
++			pauseOnce.Do(func() {
++				held <- struct{}{}
++				select {
++				case <-release:
++				case <-operation.Done():
++				}
++			})
++		}))
++		require.NoError(t, writer.Callback().Create().Before("gorm:create").Register(writerName, func(tx *gorm.DB) {
++			if tx.Statement.Table == "resource_access_policies" {
++				attempted <- struct{}{}
++			}
++		}))
++		t.Cleanup(func() {
++			releaseOnce.Do(func() { close(release) })
++			cancel()
++			if err := read.Close(); err != nil {
++				t.Error("owned model read cleanup failed")
++			}
++			cleanup, stop := context.WithTimeout(context.WithoutCancel(f.ctx), 5*time.Second)
++			defer stop()
++			if !recheckJoined {
++				select {
++				case <-recheckDone:
++					recheckJoined = true
++				case <-cleanup.Done():
++					t.Error("owned model recheck did not join")
++				}
++			}
++			if writerStarted && !writerJoined {
++				select {
++				case <-writerDone:
++					writerJoined = true
++				case <-cleanup.Done():
++					t.Error("owned permission producer did not join")
++				}
++			}
++			if err := writer.Callback().Create().Remove(writerName); err != nil {
++				t.Error("owned permission observer cleanup failed")
++			}
++			if err := f.db.Callback().Raw().Remove(name); err != nil {
++				t.Error("owned model observer cleanup failed")
++			}
++		})
++		go func() { recheckDone <- read.Recheck() }()
++		select {
++		case <-held:
++		case <-operation.Done():
++			t.Fatal("real model writer reservation was not reached")
++		}
++		require.NoError(t, writer.Exec("PRAGMA busy_timeout=0").Error)
++		probe := writer.Exec(modelRecheckReservationSQL)
++		require.True(t, messageLeaseWriterBusy(probe.Error), "real second WAL connection must observe the reserved writer")
++		require.NoError(t, writer.Exec("PRAGMA busy_timeout=5000").Error)
++		writerStarted = true
++		go func() {
++			writerDone <- NewGroupAccessService(repository.NewGroupAccessRepository(writer)).SetResourceAccessPolicy(operation, &types.ResourceAccessPolicy{TenantID: f.scope.TenantID, ResourceType: types.GroupResourceTypeKnowledgeBase, ResourceID: "kb", Mode: types.ResourceAccessInherit, UpdatedBy: types.CallerFromContext(f.ctx).UserID})
++		}()
++		select {
++		case <-attempted:
++		case <-operation.Done():
++			t.Fatal("real permission producer did not attempt its SQL write")
++		}
++		select {
++		case <-writerDone:
++			writerJoined = true
++			t.Fatal("permission producer unexpectedly finished while another connection held the WAL writer")
++		default:
++		}
++		releaseOnce.Do(func() { close(release) })
++		select {
++		case err := <-recheckDone:
++			recheckJoined = true
++			require.NoError(t, err)
++		case <-operation.Done():
++			t.Fatal("real model recheck did not finish")
++		}
++		select {
++		case err := <-writerDone:
++			writerJoined = true
++			require.NoError(t, err)
++		case <-operation.Done():
++			t.Fatal("real permission producer did not finish")
++		}
++		require.Equal(t, before.Version+1, modelRecheckPermissionVersion(t, writer, f.scope.TenantID).Version)
++		require.NoError(t, read.Recheck(), "a lawful permission-version successor is freshly reauthorized")
++		_, after, err := read.Snapshot()
++		require.NoError(t, err)
++		require.Equal(t, proof, *after)
++		modelRecheckAssertClosed(t, f, read)
++	})
++	for _, mode := range []string{"actor_changed_refuses", "model_successor_refuses", "held_body_purged_refuses"} {
++		t.Run(mode, func(t *testing.T) {
++			f, svc, read, model, proof := modelRecheckWriterFixture(t, new(int))
++			switch mode {
++			case "actor_changed_refuses":
++				write := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.User{}).Where("id=? AND is_active=?", types.CallerFromContext(f.ctx).UserID, true).Update("is_active", false)
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++			case "model_successor_refuses":
++				model.Description = "genuine new definition after held snapshot"
++				require.NoError(t, svc.UpdateModel(f.ctx, model))
++				_, _, _, reader := actualOriginalModelServices(t, f)
++				_, next := actualModelProof(t, reader, f.ctx, model.ID)
++				require.NotEqual(t, proof.DefinitionID, next.DefinitionID)
++			case "held_body_purged_refuses":
++				var body types.ModelOriginalBodyReceipt
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Where("origin_kind=? AND origin_id=?", "definition", proof.DefinitionID).Take(&body).Error)
++				write := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Table("original_body_payloads").Where("id=? AND state=?", body.BodyID, "live").Update("state", "purged")
++				require.NoError(t, write.Error)
++				require.EqualValues(t, 1, write.RowsAffected)
++			}
++			refusal := read.Recheck()
++			require.Error(t, refusal)
++			_, _, err := read.Snapshot()
++			require.ErrorIs(t, err, refusal)
++			modelRecheckAssertClosed(t, f, read)
++		})
++	}
++	t.Run("caller_owned_transaction_keeps_actual_actor_check", func(t *testing.T) {
++		f, _, read, _, proof := modelRecheckWriterFixture(t, new(int))
++		var refusal error
++		err := f.db.WithContext(f.ctx).Transaction(func(tx *gorm.DB) error {
++			write := tx.Session(&gorm.Session{NewDB: true}).Model(&types.User{}).Where("id=? AND is_active=?", types.CallerFromContext(f.ctx).UserID, true).Update("is_active", false)
++			if write.Error != nil {
++				return write.Error
++			}
++			if write.RowsAffected != 1 {
++				return errors.New("owned actor control fault did not affect its actual row")
++			}
++			refusal = repository.CheckCurrentModelOriginalHolds(read.Context(), tx, proof)
++			return refusal
++		})
++		require.Error(t, refusal)
++		require.ErrorIs(t, err, refusal)
++		var actor types.User
++		require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Where("id=?", types.CallerFromContext(f.ctx).UserID).Take(&actor).Error)
++		require.True(t, actor.IsActive, "the refused caller-owned transaction rolls back its real mutation")
++		require.ErrorIs(t, read.Recheck(), refusal, "a refused held reader stays isolated after SQL rollback")
++		_, _, sticky := read.Snapshot()
++		require.ErrorIs(t, sticky, refusal)
++		modelRecheckAssertClosed(t, f, read)
++		_, _, _, reader := actualOriginalModelServices(t, f)
++		fresh, err := reader.BeginModelOriginalRead(f.ctx, proof.ModelID, &proof)
++		require.NoError(t, err, "rollback restored the actual actor; only a newly authorized reader may use the same immutable proof")
++		t.Cleanup(func() {
++			if err := fresh.Close(); err != nil {
++				t.Error("owned fresh model read cleanup failed")
++			}
++		})
++		require.NoError(t, fresh.Recheck())
++		_, after, err := fresh.Snapshot()
++		require.NoError(t, err)
++		require.NotNil(t, after)
++		require.Equal(t, proof, *after)
++		modelRecheckAssertClosed(t, f, fresh)
++	})
++}
+diff --git a/internal/application/service/retriever/keywords_vector_hybrid_indexer.go b/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
+index efb6d5824..beb2ee5b2 100644
+--- a/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
++++ b/internal/application/service/retriever/keywords_vector_hybrid_indexer.go
+@@ -2,6 +2,7 @@ package retriever
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"regexp"
+ 	"slices"
+@@ -10,6 +11,7 @@ import (
+ 	"unicode/utf8"
+ 
+ 	"github.com/Tencent/WeKnora/internal/logger"
++	"github.com/Tencent/WeKnora/internal/logprivacy"
+ 	"github.com/Tencent/WeKnora/internal/models/embedding"
+ 	"github.com/Tencent/WeKnora/internal/models/utils"
+ 	"github.com/Tencent/WeKnora/internal/types"
+@@ -87,12 +89,27 @@ func (v *KeywordsVectorHybridRetrieveEngineService) Index(ctx context.Context,
+ // in batches for efficiency. Uses concurrent batch saving to improve performance.
+ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Context,
+ 	embedder embedding.Embedder, indexInfoList []*types.IndexInfo, retrieverTypes []types.RetrieverType,
+-) error {
++) (resultErr error) {
+ 	if len(indexInfoList) == 0 {
+ 		return nil
+ 	}
+ 
+ 	if slices.Contains(retrieverTypes, types.VectorRetrieverType) {
++		var endOperation func() error
++		var err error
++		ctx, embedder, endOperation, err = embedding.BeginOperation(ctx, embedder)
++		if err != nil {
++			return err
++		}
++		defer func() {
++			if err := endOperation(); err != nil {
++				if resultErr == nil {
++					resultErr = err
++				} else {
++					resultErr = errors.Join(resultErr, err)
++				}
++			}
++		}()
+ 		var contentList []string
+ 		for _, indexInfo := range indexInfoList {
+ 			contentList = append(contentList, sanitizeForEmbedding(ctx, indexInfo.Content))
+@@ -129,7 +146,21 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
+ // batchEmbedWithBackoff calls BatchEmbedWithPool with exponential backoff on
+ // transient failures (200 / 400 / 800 / 1600 / 3200 ms). It returns the last
+ // embedding result on success or the last error if every attempt failed.
+-func batchEmbedWithBackoff(ctx context.Context, embedder embedding.Embedder, contentList []string) ([][]float32, error) {
++func batchEmbedWithBackoff(ctx context.Context, embedder embedding.Embedder, contentList []string) (vectors [][]float32, resultErr error) {
++	ctx, embedder, endOperation, beginErr := embedding.BeginOperation(ctx, embedder)
++	if beginErr != nil {
++		return nil, beginErr
++	}
++	defer func() {
++		if err := endOperation(); err != nil {
++			vectors = nil
++			if resultErr == nil {
++				resultErr = err
++			} else {
++				resultErr = errors.Join(resultErr, err)
++			}
++		}
++	}()
+ 	delay := embedRetryBaseDelay
+ 	var (
+ 		embeddings [][]float32
+@@ -140,7 +171,11 @@ func batchEmbedWithBackoff(ctx context.Context, embedder embedding.Embedder, con
+ 		if err == nil {
+ 			return embeddings, nil
+ 		}
+-		logger.Errorf(ctx, "BatchEmbedWithPool attempt %d/%d failed: %v", attempt+1, embedRetryAttempts, err)
++		if logprivacy.ContentSuppressed(ctx) {
++			logger.Errorf(ctx, "BatchEmbedWithPool attempt %d/%d failed", attempt+1, embedRetryAttempts)
++		} else {
++			logger.Errorf(ctx, "BatchEmbedWithPool attempt %d/%d failed: %v", attempt+1, embedRetryAttempts, err)
++		}
+ 		if attempt+1 < embedRetryAttempts {
+ 			select {
+ 			case <-time.After(delay):
+diff --git a/internal/application/service/wiki_ingest_taxonomy.go b/internal/application/service/wiki_ingest_taxonomy.go
+index 940618f57..5a69db482 100644
+--- a/internal/application/service/wiki_ingest_taxonomy.go
++++ b/internal/application/service/wiki_ingest_taxonomy.go
+@@ -10,7 +10,9 @@ import (
+ 
+ 	"github.com/Tencent/WeKnora/internal/agent"
+ 	"github.com/Tencent/WeKnora/internal/logger"
++	"github.com/Tencent/WeKnora/internal/logprivacy"
+ 	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
+ 	"github.com/Tencent/WeKnora/internal/types"
+ )
+ 
+@@ -148,7 +150,7 @@ func (s *wikiIngestService) resolvePlannedFolders(
+ // fall back to a capped feed-all.
+ func (s *wikiIngestService) selectRelevantFolders(
+ 	ctx context.Context, kb *types.KnowledgeBase, items []wikiTaxonomyItem, pool [][]string,
+-) [][]string {
++) (result [][]string) {
+ 	if len(pool) <= wikiTaxonomyFeedAllMaxFolders {
+ 		return pool
+ 	}
+@@ -179,10 +181,22 @@ func (s *wikiIngestService) selectRelevantFolders(
+ 
+ 	embedder, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+ 	if err != nil {
+-		logger.Warnf(ctx, "wiki ingest: taxonomy plan embed model unavailable, feeding all folders: %v", err)
++		wikiTaxonomyEmbeddingFailure(ctx, "wiki ingest: taxonomy plan embed model unavailable, feeding all folders", err)
+ 		return capFolders(pool, wikiTaxonomyPromptMaxPaths)
+ 	}
+ 
++	ctx, embedder, endOperation, err := embedding.BeginOperation(ctx, embedder)
++	if err != nil {
++		wikiTaxonomyEmbeddingFailure(ctx, "wiki ingest: taxonomy embedding operation unavailable, feeding all folders", err)
++		return capFolders(pool, wikiTaxonomyPromptMaxPaths)
++	}
++	defer func() {
++		if err := endOperation(); err != nil {
++			wikiTaxonomyEmbeddingFailure(ctx, "wiki ingest: taxonomy embedding operation ended unavailable, feeding all folders", err)
++			result = capFolders(pool, wikiTaxonomyPromptMaxPaths)
++		}
++	}()
++
+ 	folderTexts := make([]string, len(deeper))
+ 	for i, p := range deeper {
+ 		folderTexts[i] = strings.Join(p, " / ")
+@@ -199,12 +213,12 @@ func (s *wikiIngestService) selectRelevantFolders(
+ 	// (#3390).
+ 	folderVecs, err := embedder.BatchEmbedWithPool(ctx, embedder, folderTexts)
+ 	if err != nil {
+-		logger.Warnf(ctx, "wiki ingest: taxonomy plan folder embed failed, feeding all folders: %v", err)
++		wikiTaxonomyEmbeddingFailure(ctx, "wiki ingest: taxonomy plan folder embed failed, feeding all folders", err)
+ 		return capFolders(pool, wikiTaxonomyPromptMaxPaths)
+ 	}
+ 	itemVecs, err := embedder.BatchEmbedWithPool(ctx, embedder, itemTexts)
+ 	if err != nil {
+-		logger.Warnf(ctx, "wiki ingest: taxonomy plan item embed failed, feeding all folders: %v", err)
++		wikiTaxonomyEmbeddingFailure(ctx, "wiki ingest: taxonomy plan item embed failed, feeding all folders", err)
+ 		return capFolders(pool, wikiTaxonomyPromptMaxPaths)
+ 	}
+ 
+@@ -326,3 +340,13 @@ func parseTaxonomyAssignments(raw string) map[string][]string {
+ 	}
+ 	return out
+ }
++
++// Protected model errors may contain a provider response body. The static event
++// remains diagnostic without exporting that original content.
++func wikiTaxonomyEmbeddingFailure(ctx context.Context, event string, err error) {
++	if logprivacy.ContentSuppressed(ctx) {
++		logger.Warn(ctx, event)
++		return
++	}
++	logger.Warnf(ctx, "%s: %v", event, err)
++}
+diff --git a/internal/models/embedding/original_operation.go b/internal/models/embedding/original_operation.go
+new file mode 100644
+index 000000000..47c87d91f
+--- /dev/null
++++ b/internal/models/embedding/original_operation.go
+@@ -0,0 +1,28 @@
++package embedding
++
++import (
++	"context"
++	"errors"
++)
++
++// OriginalOperationFactory is implemented by the proved model client. It keeps
++// its existing original reader alive across all calls in one operation.
++type OriginalOperationFactory interface {
++	BeginOriginalEmbeddingOperation(context.Context) (context.Context, Embedder, func() error, error)
++}
++
++// BeginOperation preserves direct SDK providers' existing behaviour. It does
++// not create an original, an input proof, or permission for an unbound provider.
++// The returned end must run after calls have joined and outside a SQL transaction.
++func BeginOperation(ctx context.Context, model Embedder) (context.Context, Embedder, func() error, error) {
++	if ctx == nil || model == nil {
++		return ctx, nil, nil, errors.New("embedding operation unavailable")
++	}
++	if err := ctx.Err(); err != nil {
++		return ctx, nil, nil, err
++	}
++	if original, ok := model.(OriginalOperationFactory); ok {
++		return original.BeginOriginalEmbeddingOperation(ctx)
++	}
++	return ctx, model, func() error { return nil }, nil
++}

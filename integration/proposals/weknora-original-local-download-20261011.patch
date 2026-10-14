@@ -1,0 +1,2908 @@
+diff --git a/cmd/desktop/app.go b/cmd/desktop/app.go
+index b1ac5f26..fbe038c5 100644
+--- a/cmd/desktop/app.go
++++ b/cmd/desktop/app.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"context"
+ 	"strings"
++	"sync"
+ )
+ 
+ // App holds Wails-bound state for the desktop shell.
+@@ -13,12 +14,15 @@ type App struct {
+ 	apiLanBaseURL string
+ 	listenPublic  bool
+ 	shutdownCh    chan struct{}
++	shutdownDone  chan struct{}
++	shutdownOnce  sync.Once
+ }
+ 
+ // NewApp creates a new App application struct.
+ func NewApp() *App {
+ 	return &App{
+-		shutdownCh: make(chan struct{}, 1),
++		shutdownCh:   make(chan struct{}),
++		shutdownDone: make(chan struct{}),
+ 	}
+ }
+ 
+@@ -28,7 +32,10 @@ func (a *App) startup(ctx context.Context) {
+ }
+ 
+ func (a *App) shutdown(ctx context.Context) {
+-	a.shutdownCh <- struct{}{}
++	a.shutdownOnce.Do(func() { close(a.shutdownCh) })
++	// Menu Quit and Wails OnShutdown must not return before actual backend
++	// cleanup has canceled and joined the owned downloads.
++	<-a.shutdownDone
+ }
+ 
+ // GetAPIBaseURL returns the local HTTP base URL for REST API calls (e.g. http://127.0.0.1:PORT/api/v1).
+diff --git a/cmd/desktop/app_shutdown_test.go b/cmd/desktop/app_shutdown_test.go
+new file mode 100644
+index 00000000..5f9831a4
+--- /dev/null
++++ b/cmd/desktop/app_shutdown_test.go
+@@ -0,0 +1,125 @@
++package main
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/shutdown"
++	"github.com/stretchr/testify/require"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestDesktopShutdownJoinsExpiredHTTPDrainCleanup(t *testing.T) {
++	app := NewApp()
++	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
++	defer cancel()
++	handlerStarted, handlerRelease := make(chan struct{}), make(chan struct{})
++	var startOnce, handlerReleaseOnce sync.Once
++	cleanerEntered, cleanerRelease := make(chan struct{}), make(chan struct{})
++	var cleanerReleaseOnce sync.Once
++	var tasks sync.WaitGroup
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		startOnce.Do(func() { close(handlerStarted) })
++		select {
++		case <-r.Context().Done():
++		case <-handlerRelease:
++		}
++		w.WriteHeader(204)
++	}))
++	cleaner := shutdown.NewResourceCleaner()
++	cleaner.Register(func() error { close(cleanerEntered); <-cleanerRelease; return nil })
++	t.Cleanup(func() {
++		handlerReleaseOnce.Do(func() { close(handlerRelease) })
++		cleanerReleaseOnce.Do(func() { close(cleanerRelease) })
++		cancel()
++		_ = server.Config.Close()
++		tasks.Wait()
++		server.Close()
++	})
++	tasks.Add(1)
++	go func() {
++		defer tasks.Done()
++		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
++		if err != nil {
++			return
++		}
++		response, _ := server.Client().Do(request)
++		if response != nil {
++			_ = response.Body.Close()
++		}
++	}()
++	select {
++	case <-handlerStarted:
++	case <-ctx.Done():
++		t.Fatal("actual desktop HTTP drain handler did not start")
++	}
++	backendResult := make(chan error, 1)
++	tasks.Add(1)
++	go func() {
++		defer tasks.Done()
++		<-app.shutdownCh
++		defer close(app.shutdownDone)
++		drain, cancelDrain := context.WithTimeout(context.Background(), 500*time.Millisecond)
++		defer cancelDrain()
++		err := server.Config.Shutdown(drain)
++		_ = server.Config.Close()
++		if err != context.DeadlineExceeded {
++			backendResult <- err
++			return
++		}
++		errs := shutdown.CleanupAfterHTTPDrain(drain, 500*time.Millisecond, nil, cleaner)
++		if len(errs) != 0 {
++			backendResult <- errs[0]
++			return
++		}
++		backendResult <- nil
++	}()
++	firstReturned, secondReturned, secondStarted := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	tasks.Add(2)
++	go func() { defer tasks.Done(); app.shutdown(context.Background()); close(firstReturned) }()
++	select {
++	case <-cleanerEntered:
++	case <-ctx.Done():
++		t.Fatal("expired drain skipped actual cleanup callback")
++	}
++	go func() {
++		defer tasks.Done()
++		close(secondStarted)
++		app.shutdown(context.Background())
++		close(secondReturned)
++	}()
++	select {
++	case <-secondStarted:
++	case <-ctx.Done():
++		t.Fatal("second shutdown caller did not start")
++	}
++	select {
++	case <-firstReturned:
++		t.Fatal("desktop quit returned before actual cleanup completed")
++	default:
++	}
++	select {
++	case <-secondReturned:
++		t.Fatal("repeated desktop shutdown returned before actual cleanup completed")
++	default:
++	}
++	cleanerReleaseOnce.Do(func() { close(cleanerRelease) })
++	select {
++	case <-firstReturned:
++	case <-ctx.Done():
++		t.Fatal("desktop shutdown did not join cleanup")
++	}
++	select {
++	case <-secondReturned:
++	case <-ctx.Done():
++		t.Fatal("repeated desktop shutdown did not join the same cleanup")
++	}
++	select {
++	case err := <-backendResult:
++		require.NoError(t, err)
++	case <-ctx.Done():
++		t.Fatal("backend cleanup did not finish")
++	}
++}
+diff --git a/cmd/desktop/main.go b/cmd/desktop/main.go
+index 8d1f17ae..4abe221d 100644
+--- a/cmd/desktop/main.go
++++ b/cmd/desktop/main.go
+@@ -32,6 +32,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/handler"
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/runtime"
++	"github.com/Tencent/WeKnora/internal/shutdown"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ 	"github.com/joho/godotenv"
+ 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+@@ -204,6 +205,7 @@ func main() {
+ 			cfg *config.Config,
+ 			router *gin.Engine,
+ 			resourceCleaner interfaces.ResourceCleaner,
++			models interfaces.ModelService,
+ 		) error {
+ 			server := &http.Server{Handler: router}
+ 
+@@ -232,6 +234,7 @@ func main() {
+ 			// Handle graceful shutdown from Wails OnShutdown hook
+ 			go func() {
+ 				<-app.shutdownCh
++				defer close(app.shutdownDone)
+ 				logger.Infof(context.Background(), "Wails shutting down, stopping Go backend...")
+ 
+ 				listener.Close()
+@@ -245,7 +248,7 @@ func main() {
+ 				if err := server.Shutdown(shutdownCtx); err != nil {
+ 					server.Close()
+ 				}
+-				resourceCleaner.Cleanup(shutdownCtx)
++				shutdown.CleanupAfterHTTPDrain(shutdownCtx, shutdownTimeout, models, resourceCleaner)
+ 			}()
+ 
+ 			// Also listen for OS signals just in case
+@@ -253,7 +256,7 @@ func main() {
+ 			signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+ 			go func() {
+ 				<-signals
+-				app.shutdownCh <- struct{}{} // trigger shutdown
++				app.shutdown(context.Background()) // request and join backend cleanup
+ 			}()
+ 
+ 			logger.Infof(context.Background(), "Server is running at %s (proxy -> %s)", tcpAddr.String(), app.backendURL)
+@@ -357,6 +360,9 @@ func main() {
+ 			WindowIsTranslucent:  false,
+ 		},
+ 	})
++	// Wails can return on initialization error without OnShutdown. Request
++	// the same idempotent backend join before this host exits in either path.
++	app.shutdown(context.Background())
+ 	if err != nil {
+ 		println("Error:", err.Error())
+ 	}
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 9f008d68..0fcbd5ee 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -36,6 +36,7 @@ import (
+ 	"github.com/Tencent/WeKnora/internal/container"
+ 	"github.com/Tencent/WeKnora/internal/logger"
+ 	"github.com/Tencent/WeKnora/internal/runtime"
++	"github.com/Tencent/WeKnora/internal/shutdown"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ )
+ 
+@@ -66,6 +67,7 @@ func main() {
+ 		cfg *config.Config,
+ 		router *gin.Engine,
+ 		resourceCleaner interfaces.ResourceCleaner,
++		models interfaces.ModelService,
+ 		systemSettingSvc interfaces.SystemSettingService,
+ 	) error {
+ 		// Create HTTP server
+@@ -120,7 +122,7 @@ func main() {
+ 			}
+ 
+ 			logger.Info(context.Background(), "Cleaning up resources...")
+-			errs := resourceCleaner.Cleanup(shutdownCtx)
++			errs := shutdown.CleanupAfterHTTPDrain(shutdownCtx, shutdownTimeout, models, resourceCleaner)
+ 			if len(errs) > 0 {
+ 				logger.Errorf(context.Background(), "Errors occurred during resource cleanup: %v", errs)
+ 			}
+diff --git a/internal/application/repository/model_original.go b/internal/application/repository/model_original.go
+index c9f2a144..b2e154f8 100644
+--- a/internal/application/repository/model_original.go
++++ b/internal/application/repository/model_original.go
+@@ -253,6 +253,38 @@ func (r *modelRepository) writeModelOriginalMutation(ctx context.Context, reques
+ 		if err = modelchat.NormalizeAuthoredChatDefinition(&copy); err != nil {
+ 			return err
+ 		}
++		if copy.Source == types.ModelSourceLocal {
++			// Only author input creates this recipe. Credential rotation or partial
++			// edits cannot fill a legacy definition from process configuration.
++			if mode != "create" && mode != "replace" && oldRow.Parameters.OriginalDownload == nil {
++				return ErrModelOriginalUnknown
++			}
++		}
++		if mode == "update" && copy.Source == types.ModelSourceLocal && oldRow.Parameters.OriginalDownload != nil {
++			oldWire, _ := json.Marshal(oldRow.Parameters.OriginalDownload)
++			newWire, _ := json.Marshal(copy.Parameters.OriginalDownload)
++			if string(oldWire) == string(newWire) {
++				recipe := *copy.Parameters.OriginalDownload
++				recipe.BaseURL = strings.TrimRight(strings.TrimSpace(copy.Parameters.BaseURL), "/")
++				recipe.URL = recipe.BaseURL + "/api/pull"
++				recipe.RemoteModel = copy.Name
++				if remote := copy.Parameters.ExtraConfig["remote_model_name"]; remote != "" {
++					recipe.RemoteModel = remote
++				}
++				recipe.Headers = map[string]string{}
++				for k, v := range copy.Parameters.CustomHeaders {
++					recipe.Headers[k] = v
++				}
++				recipe.Digest, err = types.ModelOriginalDownloadDigest(&recipe)
++				if err != nil {
++					return err
++				}
++				copy.Parameters.OriginalDownload = &recipe
++			}
++		}
++		if err = modelembedding.NormalizeAuthoredDownloadDefinition(&copy); err != nil {
++			return err
++		}
+ 		copy.UpdatedAt = memoryFactTime()
+ 		if mode == "create" {
+ 			err = tx.Create(&copy).Error
+diff --git a/internal/application/repository/model_original_body.go b/internal/application/repository/model_original_body.go
+index b2566ff3..8e450580 100644
+--- a/internal/application/repository/model_original_body.go
++++ b/internal/application/repository/model_original_body.go
+@@ -8,6 +8,8 @@ import (
+ 	"github.com/google/uuid"
+ 	"gorm.io/gorm"
+ 	"gorm.io/gorm/clause"
++	"reflect"
++	"sort"
+ 	"sync"
+ 	"time"
+ )
+@@ -114,7 +116,7 @@ func checkModelOriginalHoldsInTx(tx *gorm.DB, proof types.ModelOriginalProof) er
+ 	if err != nil {
+ 		return err
+ 	}
+-	locked := []originalBodyLease{}
++	verifiedPayloads := map[string]originalBodyPayload{}
+ 	for _, body := range hold.Bodies {
+ 		var receipt types.ModelOriginalBodyReceipt
+ 		if err = tx.Where("origin_id=?", body.Receipt.OriginID).Take(&receipt).Error; err != nil {
+@@ -144,7 +146,6 @@ func checkModelOriginalHoldsInTx(tx *gorm.DB, proof types.ModelOriginalProof) er
+ 		if lease.Kind != "read" || lease.BodyID != bound.BodyID || lease.OwnerID != bound.OwnerID || lease.Epoch != bound.Epoch || lease.ReleasedAtMS != nil || lease.ExpiresAtMS <= now {
+ 			return ErrOriginalBodyUnavailable
+ 		}
+-		locked = append(locked, lease)
+ 		var payload originalBodyPayload
+ 		if err = bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("id=?", head.BodyID).Take(&payload).Error; err != nil {
+ 			return err
+@@ -152,6 +153,7 @@ func checkModelOriginalHoldsInTx(tx *gorm.DB, proof types.ModelOriginalProof) er
+ 		if payload.State != "live" || payload.PurgeEpoch != lease.Epoch || payload.BodySHA256 != receipt.BodyDigest {
+ 			return ErrOriginalBodyUnavailable
+ 		}
++		verifiedPayloads[head.BodyID] = payload
+ 		if err = checkOriginalBodyAvailableForHeads(tx.Statement.Context, tx, head.SourceTable, head.RowKey, []originalBodyFieldHead{head}); err != nil {
+ 			return err
+ 		}
+@@ -159,11 +161,60 @@ func checkModelOriginalHoldsInTx(tx *gorm.DB, proof types.ModelOriginalProof) er
+ 	if err = retention.checkJournalInTx(tx); err != nil {
+ 		return err
+ 	}
++	// Every physical/body/journal read precedes this exact final union. A SHARE
++	// lock prevents another TX from replacing rows, but cannot prevent a later
++	// own-TX write; reload every captured tuple rather than trusting early rows.
++	leaseIDs, bodyIDs := []string{}, []string{}
++	byLease := map[string]originalBodyLease{}
++	byBody := map[string]modelOriginalBody{}
++	for _, body := range hold.Bodies {
++		bound, ok := hold.Leases[body.Head.BodyID]
++		if !ok || bound.LeaseID == "" || bound.BodyID != body.Head.BodyID || byLease[bound.LeaseID].LeaseID != "" {
++			return ErrOriginalBodyUnavailable
++		}
++		if _, seen := byBody[bound.BodyID]; seen {
++			return ErrOriginalBodyUnavailable
++		}
++		byLease[bound.LeaseID] = bound
++		byBody[bound.BodyID] = body
++		leaseIDs = append(leaseIDs, bound.LeaseID)
++		bodyIDs = append(bodyIDs, bound.BodyID)
++	}
++	sort.Strings(leaseIDs)
++	sort.Strings(bodyIDs)
++	var finalLeases []originalBodyLease
++	if err = bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("lease_id IN ?", leaseIDs).Order("lease_id").Find(&finalLeases).Error; err != nil {
++		return err
++	}
++	if len(finalLeases) != len(leaseIDs) {
++		return ErrOriginalBodyUnavailable
++	}
++	var finalPayloads []originalBodyPayload
++	if err = bodyInternal(tx).Clauses(clause.Locking{Strength: "SHARE"}).Where("id IN ?", bodyIDs).Order("id").Find(&finalPayloads).Error; err != nil {
++		return err
++	}
++	if len(finalPayloads) != len(bodyIDs) {
++		return ErrOriginalBodyUnavailable
++	}
++	for _, lease := range finalLeases {
++		bound, ok := byLease[lease.LeaseID]
++		if !ok || lease.Kind != "read" || lease.Kind != bound.Kind || lease.BodyID != bound.BodyID || lease.OwnerID != bound.OwnerID || lease.Epoch != bound.Epoch || lease.ReleasedAtMS != nil {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	for _, payload := range finalPayloads {
++		body, ok := byBody[payload.ID]
++		verified, verifiedOK := verifiedPayloads[payload.ID]
++		bound := hold.Leases[payload.ID]
++		if !ok || !verifiedOK || payload.TenantID != body.Receipt.TenantID || payload.State != "live" || payload.PurgeEpoch != bound.Epoch || payload.BodySHA256 != body.Receipt.BodyDigest || !reflect.DeepEqual(verified, payload) {
++			return ErrOriginalBodyUnavailable
++		}
++	}
+ 	finalNow, err := nextcloudLeaseNowMS(bodyInternal(tx))
+ 	if err != nil {
+ 		return err
+ 	}
+-	for _, lease := range locked {
++	for _, lease := range finalLeases {
+ 		if lease.ExpiresAtMS <= finalNow {
+ 			return ErrOriginalBodyUnavailable
+ 		}
+@@ -172,6 +223,7 @@ func checkModelOriginalHoldsInTx(tx *gorm.DB, proof types.ModelOriginalProof) er
+ }
+ 
+ type modelOriginalRead struct {
++	download    bool
+ 	db          *gorm.DB
+ 	ctx         context.Context
+ 	cancel      context.CancelFunc
+@@ -196,6 +248,9 @@ func cloneOriginalModel(model *types.Model) (*types.Model, error) {
+ 	return &result, err
+ }
+ func beginModelOriginalRead(ctx context.Context, db *gorm.DB, id string, expected *types.ModelOriginalProof, authorize ModelOriginalHistoricalAuthorizer) (interfaces.ModelOriginalRead, error) {
++	return beginModelOriginalReadMode(ctx, db, id, expected, authorize, false)
++}
++func beginModelOriginalReadMode(ctx context.Context, db *gorm.DB, id string, expected *types.ModelOriginalProof, authorize ModelOriginalHistoricalAuthorizer, download bool) (interfaces.ModelOriginalRead, error) {
+ 	tenant, ok := types.TenantIDFromContext(ctx)
+ 	if !ok || tenant == 0 || id == "" {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+@@ -203,7 +258,7 @@ func beginModelOriginalRead(ctx context.Context, db *gorm.DB, id string, expecte
+ 	if authorize == nil {
+ 		return nil, types.ErrMemoryOriginalUnavailable
+ 	}
+-	read := &modelOriginalRead{db: db, authorize: authorize, hold: modelOriginalHold{Leases: map[string]originalBodyLease{}}, closeJoined: make(chan struct{})}
++	read := &modelOriginalRead{download: download, db: db, authorize: authorize, hold: modelOriginalHold{Leases: map[string]originalBodyLease{}}, closeJoined: make(chan struct{})}
+ 	read.ctx, read.cancel = context.WithCancel(ctx)
+ 	err := db.WithContext(read.ctx).Transaction(func(tx *gorm.DB) error {
+ 		var routing struct {
+@@ -222,7 +277,7 @@ func beginModelOriginalRead(ctx context.Context, db *gorm.DB, id string, expecte
+ 		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND (tenant_id=? OR is_builtin=?)", id, tenant, true).Take(&model).Error; err != nil {
+ 			return err
+ 		}
+-		if model.Status != types.ModelStatusActive {
++		if (!download && model.Status != types.ModelStatusActive) || (download && (model.Source != types.ModelSourceLocal || model.Status != types.ModelStatusDownloading || expected == nil)) {
+ 			return types.ErrMemoryOriginalUnavailable
+ 		}
+ 		facts, err := readModelOriginalInTx(tx, &model)
+@@ -307,7 +362,7 @@ func (r *modelOriginalRead) checkInTx(tx *gorm.DB) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if model.Status != types.ModelStatusActive || facts.Proof != r.hold.Proof {
++	if (!r.download && model.Status != types.ModelStatusActive) || (r.download && (model.Source != types.ModelSourceLocal || model.Status != types.ModelStatusDownloading)) || facts.Proof != r.hold.Proof {
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
+ 	return checkModelOriginalHoldsInTx(tx, facts.Proof)
+@@ -400,14 +455,14 @@ type modelOriginalSnapshotKey struct{}
+ 
+ func OriginalModelSnapshotFromContext(ctx context.Context, id string) (*types.Model, *types.ModelOriginalProof, error) {
+ 	read, ok := ctx.Value(modelOriginalSnapshotKey{}).(*modelOriginalRead)
+-	if !ok || read.hold.Proof.ModelID != id {
++	if !ok || read.download || read.hold.Proof.ModelID != id {
+ 		return nil, nil, types.ErrMemoryOriginalUnavailable
+ 	}
+ 	return read.Snapshot()
+ }
+ func OriginalModelReadFromContext(ctx context.Context, id string) (interfaces.ModelOriginalRead, bool) {
+ 	read, ok := ctx.Value(modelOriginalSnapshotKey{}).(*modelOriginalRead)
+-	return read, ok && read.hold.Proof.ModelID == id
++	return read, ok && !read.download && read.hold.Proof.ModelID == id
+ }
+ 
+ type actualModelOriginalReadsKey struct{}
+@@ -416,7 +471,7 @@ func WithActualModelOriginalReads(ctx context.Context, reads []interfaces.ModelO
+ 	actual := []*modelOriginalRead{}
+ 	for _, read := range reads {
+ 		r, ok := read.(*modelOriginalRead)
+-		if !ok || !r.hold.Proof.Valid() {
++		if !ok || r.download || !r.hold.Proof.Valid() {
+ 			return ctx, types.ErrMemoryOriginalUnavailable
+ 		}
+ 		actual = append(actual, r)
+@@ -431,7 +486,7 @@ func CheckCurrentModelOriginalHolds(ctx context.Context, tx *gorm.DB, proof type
+ 		return err
+ 	}
+ 	read, ok := ctx.Value(modelOriginalSnapshotKey{}).(*modelOriginalRead)
+-	if !ok || read.hold.Proof != proof {
++	if !ok || read.download || read.hold.Proof != proof {
+ 		return types.ErrMemoryOriginalUnavailable
+ 	}
+ 	marked, err := WithActualModelOriginalReads(ctx, []interfaces.ModelOriginalRead{read})
+diff --git a/internal/application/repository/model_original_download.go b/internal/application/repository/model_original_download.go
+new file mode 100644
+index 00000000..670438b6
+--- /dev/null
++++ b/internal/application/repository/model_original_download.go
+@@ -0,0 +1,139 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/google/uuid"
++	"gorm.io/gorm"
++)
++
++type modelOriginalDownloadRead struct{ read *modelOriginalRead }
++
++func (r *modelOriginalDownloadRead) Context() context.Context { return r.read.Context() }
++func (r *modelOriginalDownloadRead) Snapshot() (*types.Model, *types.ModelOriginalProof, error) {
++	return r.read.Snapshot()
++}
++func (r *modelOriginalDownloadRead) Recheck() error { return r.read.Recheck() }
++func (r *modelOriginalDownloadRead) Close() error   { return r.read.Close() }
++func (r *modelRepository) BeginModelOriginalDownload(ctx context.Context, id string, expected types.ModelOriginalProof) (interfaces.ModelOriginalDownloadRead, error) {
++	if !expected.Valid() || expected.ModelID != id {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	// Creation and continued download require the live author's write permission,
++	// not merely permission to invoke a shared/builtin model.
++	authority := func(ctx context.Context, tx *gorm.DB, p types.ModelOriginalProof) (context.Context, error) {
++		return r.authorizeModelOriginal(ctx, tx, p.OwnerTenantID, p.IsBuiltin)
++	}
++	raw, err := beginModelOriginalReadMode(ctx, r.db, id, &expected, authority, true)
++	if err != nil {
++		return nil, err
++	}
++	actual, ok := raw.(*modelOriginalRead)
++	if !ok {
++		_ = raw.Close()
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	if err = embedding.ValidateOriginalDownloadDefinition(actual.model.Parameters.OriginalDownload); err != nil {
++		_ = raw.Close()
++		return nil, err
++	}
++	return &modelOriginalDownloadRead{actual}, nil
++}
++func modelDownloadFactDigest(value types.ModelDownloadOriginal) (string, error) {
++	return types.ModelDownloadOriginalDigest(value)
++}
++func (r *modelRepository) CommitModelOriginalDownload(read interfaces.ModelOriginalDownloadRead, status types.ModelStatus, transcript string) (*types.ModelDownloadOriginal, error) {
++	actual, ok := read.(*modelOriginalDownloadRead)
++	if !ok || !actual.read.download || status != types.ModelStatusActive && status != types.ModelStatusDownloadFailed || !json.Valid([]byte(transcript)) {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	held := actual.read
++	if err := embedding.ValidateOriginalDownloadTranscript(held.model.Parameters.OriginalDownload, transcript, status); err != nil {
++		return nil, err
++	}
++	pool, err := r.db.DB()
++	if err != nil {
++		return nil, err
++	}
++	heldPool, err := held.db.DB()
++	if err != nil || pool != heldPool {
++		return nil, types.ErrMemoryOriginalUnavailable
++	}
++	if err = held.startCheck(); err != nil {
++		return nil, err
++	}
++	var receipt *types.ModelDownloadOriginal
++	err = r.db.WithContext(held.ctx).Transaction(func(tx *gorm.DB) error {
++		// Both producer and read use tenant/actor -> model -> original-head/body.
++		// Check the creation proof before producing any status/result effect.
++		if err := held.checkInTx(tx); err != nil {
++			return err
++		}
++		tx = tx.Session(&gorm.Session{NewDB: true, Context: held.ctx})
++		if err := tx.Clauses(forUpdateClause()).Where("id=?", held.hold.Proof.ModelID).Take(&types.Model{}).Error; err != nil {
++			return err
++		}
++		model, err := cloneOriginalModel(held.model)
++		if err != nil {
++			return err
++		}
++		fresh, err := r.authorizeModelOriginal(held.ctx, tx, model.TenantID, model.IsBuiltin)
++		if err != nil {
++			return err
++		}
++		tx = tx.Session(&gorm.Session{NewDB: true, Context: fresh})
++		update := tx.Model(&types.Model{}).Where("id=? AND status=?", model.ID, types.ModelStatusDownloading).Updates(map[string]interface{}{"status": status, "updated_at": memoryFactTime()})
++		if update.Error != nil {
++			return update.Error
++		}
++		if update.RowsAffected != 1 {
++			return types.ErrMemoryOriginalUnavailable
++		}
++		control, err := modelControls(tx.Session(&gorm.Session{NewDB: true}), model.ID)
++		if err != nil {
++			return err
++		}
++		actor, err := captureKnowledgeActorSelector(fresh, "")
++		if err != nil {
++			return err
++		}
++		selector, err := json.Marshal(actor)
++		if err != nil {
++			return err
++		}
++		state := types.ModelStateOriginal{ID: uuid.NewString(), ModelID: model.ID, TenantID: model.TenantID, Epoch: control.StateEpoch, DefinitionID: held.hold.Proof.DefinitionID, CredentialID: held.hold.Proof.CredentialID, Status: status, IsDefault: model.IsDefault, ManagedBy: model.ManagedBy, AuthorSelector: string(selector), CreatedAt: memoryFactTime()}
++		state.Digest, err = modelStateFactDigest(state)
++		if err != nil {
++			return err
++		}
++		if err = tx.Session(&gorm.Session{NewDB: true}).Create(&state).Error; err != nil {
++			return err
++		}
++		out := &types.ModelDownloadOriginal{ID: uuid.NewString(), ModelID: model.ID, TenantID: model.TenantID, InputStateID: held.hold.Proof.StateID, InputProofDigest: held.hold.Proof.Digest, DefinitionID: held.hold.Proof.DefinitionID, CredentialID: held.hold.Proof.CredentialID, OutputStateID: state.ID, OutputStateDigest: state.Digest, RecipeDigest: model.Parameters.OriginalDownload.Digest, Status: status, TranscriptJSON: transcript, TranscriptDigest: bodySHA([]byte(transcript)), AuthorSelector: string(selector), CreatedAt: memoryFactTime()}
++		out.Digest, err = modelDownloadFactDigest(*out)
++		if err != nil {
++			return err
++		}
++		if err = tx.Session(&gorm.Session{NewDB: true}).Create(out).Error; err != nil {
++			return err
++		}
++		// Native body152 capture and all IO precede the final original hold clock.
++		if err = CheckOriginalBodyAvailableInTx(fresh, tx.Session(&gorm.Session{NewDB: true}), out.TableName(), out.ID); err != nil {
++			return err
++		}
++		if err = checkModelOriginalHoldsInTx(tx.Session(&gorm.Session{NewDB: true, Context: fresh}), held.hold.Proof); err != nil {
++			return err
++		}
++		receipt = out
++		return fresh.Err()
++	}, memoryWriteOptions(r.db))
++	if err = held.finishCheck(err); err != nil {
++		return nil, err
++	}
++	return receipt, nil
++}
++
++var _ interfaces.ModelOriginalDownloader = (*modelRepository)(nil)
+diff --git a/internal/application/repository/original_body_fields.go b/internal/application/repository/original_body_fields.go
+index 2e91c6f5..3fecc53e 100644
+--- a/internal/application/repository/original_body_fields.go
++++ b/internal/application/repository/original_body_fields.go
+@@ -26,6 +26,7 @@ var originalBodyFields = []originalBodyFieldDescriptor{
+ 	{"memory_embedding_originals", "id", "inline", []string{"input_json"}},
+ 	{"memory_embedding_receipts", "id", "inline", []string{"vector_json"}},
+ 	{"memory_embedding_rank_receipts", "id", "inline", []string{"rank_json"}},
++	{"model_download_originals", "id", "inline", []string{"transcript_json"}},
+ 	{"model_definition_originals", "id", "inline", []string{"definition_json"}},
+ 	{"model_credential_originals", "id", "inline", []string{"credential_json"}},
+ 	{"memory_generated_originals", "id", "inline", []string{"input_json"}},
+diff --git a/internal/application/service/model.go b/internal/application/service/model.go
+index 0822d62b..48ee19b0 100644
+--- a/internal/application/service/model.go
++++ b/internal/application/service/model.go
+@@ -26,6 +26,7 @@ var ErrModelNotFound = errors.New("model not found")
+ 
+ // modelService implements the model service interface
+ type modelService struct {
++	downloads     originalModelDownloads
+ 	repo          interfaces.ModelRepository
+ 	kbRepo        interfaces.KnowledgeBaseRepository
+ 	agentRepo     interfaces.CustomAgentRepository
+@@ -124,6 +125,10 @@ func (s *modelService) CreateModel(ctx context.Context, model *types.Model) erro
+ 		return nil
+ 	}
+ 
++	if err := s.checkOriginalDownloadsAccepting(); err != nil {
++		return err
++	}
++
+ 	// Handle local models (e.g., Ollama)
+ 	logger.Info(ctx, "Local model detected, setting status to downloading")
+ 	model.Status = types.ModelStatusDownloading
+@@ -143,44 +148,9 @@ func (s *modelService) CreateModel(ctx context.Context, model *types.Model) erro
+ 		return err
+ 	}
+ 
+-	// Start asynchronous model download
+-	logger.Infof(ctx, "Starting background download for model: %s", model.Name)
+-	newCtx := logger.CloneContext(ctx)
+-	downloadName := model.Name
+-	var original *types.ModelOriginalProof
+-	if model.OriginalProof != nil {
+-		copy := *model.OriginalProof
+-		original = &copy
++	if err = s.queueOriginalModelDownload(ctx, model); err != nil {
++		return err
+ 	}
+-	go func() {
+-		logger.Info(newCtx, "Background download started")
+-		if s.ollamaService == nil {
+-			return
+-		}
+-		err := s.ollamaService.PullModel(newCtx, downloadName)
+-		status := types.ModelStatusActive
+-		if err != nil {
+-			logger.ErrorWithFields(newCtx, err, map[string]interface{}{
+-				"model_name": model.Name,
+-			})
+-			status = types.ModelStatusDownloadFailed
+-		} else {
+-			logger.Infof(newCtx, "Model download completed successfully: %s", model.Name)
+-			status = types.ModelStatusActive
+-		}
+-		logger.Infof(newCtx, "Updating model status to: %s", status)
+-		if writer, ok := s.repo.(interfaces.ModelOriginalWriter); ok {
+-			if original == nil {
+-				return
+-			}
+-			if err := writer.SetModelOriginalStatus(newCtx, original.ModelID, *original, status); err != nil {
+-				logger.Warnf(newCtx, "original model download status publication refused")
+-			}
+-			return
+-		}
+-		model.Status = status
+-		s.repo.Update(newCtx, model)
+-	}()
+ 
+ 	logger.Infof(ctx, "Model creation initiated successfully: %s", model.ID)
+ 	return nil
+diff --git a/internal/application/service/model_original_download.go b/internal/application/service/model_original_download.go
+new file mode 100644
+index 00000000..8e219c92
+--- /dev/null
++++ b/internal/application/service/model_original_download.go
+@@ -0,0 +1,259 @@
++package service
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"github.com/Tencent/WeKnora/internal/logprivacy"
++	"github.com/Tencent/WeKnora/internal/models/api"
++	"github.com/Tencent/WeKnora/internal/models/embedding"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	ollamaapi "github.com/ollama/ollama/api"
++	"io"
++	"net/http"
++	"sync"
++	"time"
++)
++
++type originalModelDownloadJob struct {
++	cancel context.CancelFunc
++	done   chan struct{}
++	err    error
++}
++type originalModelDownloads struct {
++	mu               sync.Mutex
++	enabled, stopped bool
++	jobs             map[string]*originalModelDownloadJob
++	active           sync.WaitGroup
++}
++
++func (s *modelService) StartOriginalDownloads() {
++	s.downloads.mu.Lock()
++	defer s.downloads.mu.Unlock()
++	if !s.downloads.stopped {
++		s.downloads.enabled = true
++	}
++}
++func (s *modelService) StopOriginalDownloads() {
++	s.downloads.mu.Lock()
++	s.downloads.stopped = true
++	for _, j := range s.downloads.jobs {
++		j.cancel()
++	}
++	s.downloads.mu.Unlock()
++	s.downloads.active.Wait()
++}
++func (s *modelService) WaitOriginalDownload(ctx context.Context, id string) error {
++	s.downloads.mu.Lock()
++	j := s.downloads.jobs[id]
++	s.downloads.mu.Unlock()
++	if j == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	select {
++	case <-ctx.Done():
++		return ctx.Err()
++	case <-j.done:
++		return j.err
++	}
++}
++func (s *modelService) checkOriginalDownloadsAccepting() error {
++	s.downloads.mu.Lock()
++	defer s.downloads.mu.Unlock()
++	if s.downloads.stopped {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	return nil
++}
++func (s *modelService) queueOriginalModelDownload(ctx context.Context, model *types.Model) error {
++	s.downloads.mu.Lock()
++	defer s.downloads.mu.Unlock()
++	if s.downloads.stopped {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if !s.downloads.enabled {
++		return nil
++	}
++	if model.OriginalProof == nil || !model.OriginalProof.Valid() {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if _, ok := s.repo.(interfaces.ModelOriginalDownloader); !ok {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if s.downloads.jobs == nil {
++		s.downloads.jobs = map[string]*originalModelDownloadJob{}
++	}
++	if _, exists := s.downloads.jobs[model.ID]; exists {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	// The HTTP create owns the already committed creation authorization. Request
++	// completion does not cancel its explicitly requested background operation;
++	// process Stop and the captured finite download recipe own cancellation.
++	intentCtx, cancel := context.WithCancel(logprivacy.SuppressContent(context.WithoutCancel(ctx)))
++	proof := *model.OriginalProof
++	job := &originalModelDownloadJob{cancel: cancel, done: make(chan struct{})}
++	s.downloads.jobs[model.ID] = job
++	s.downloads.active.Add(1)
++	go func() {
++		defer s.downloads.active.Done()
++		defer close(job.done)
++		defer cancel()
++		job.err = s.runOriginalModelDownload(intentCtx, proof)
++	}()
++	return nil
++}
++func (s *modelService) runOriginalModelDownload(ctx context.Context, proof types.ModelOriginalProof) (resultErr error) {
++	repo, ok := s.repo.(interfaces.ModelOriginalDownloader)
++	if !ok {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	read, err := repo.BeginModelOriginalDownload(ctx, proof.ModelID, proof)
++	if err != nil {
++		return err
++	}
++	defer func() {
++		if e := read.Close(); e != nil && resultErr == nil {
++			resultErr = e
++		}
++	}()
++	model, actual, err := read.Snapshot()
++	if err != nil {
++		return err
++	}
++	if actual == nil || *actual != proof || model == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	r := model.Parameters.OriginalDownload
++	if err = embedding.ValidateOriginalDownloadDefinition(r); err != nil {
++		return err
++	}
++	call, cancel := context.WithTimeout(read.Context(), time.Duration(r.RequestTimeoutSeconds)*time.Second)
++	defer cancel()
++	stream := r.Stream
++	request := ollamaapi.PullRequest{Model: r.RemoteModel, Stream: &stream}
++	headers := map[string]string{}
++	for k, v := range r.Headers {
++		headers[k] = v
++	}
++	auth := api.NoAuth()
++	if model.Parameters.APIKey != "" {
++		auth = api.BearerAuth(model.Parameters.APIKey)
++	}
++	// No Client.do/process endpoint/signing environment, heartbeat, tags or
++	// implicit ensure/pull. This one /api/pull is the creation request itself.
++	transport := &http.Transport{DialContext: utils.SSRFSafeDialContext, TLSHandshakeTimeout: 10 * time.Second, IdleConnTimeout: 90 * time.Second, MaxIdleConnsPerHost: 1}
++	defer transport.CloseIdleConnections()
++	client := utils.NewSSRFSafeHTTPClientWithTransport(utils.SSRFSafeHTTPClientConfig{Timeout: 0, MaxRedirects: 0}, transport)
++	client.CheckRedirect = func(*http.Request, []*http.Request) error { return utils.ErrSSRFRedirectBlocked }
++	endpoint := api.Endpoint{BaseURL: r.BaseURL, URL: r.URL, Model: r.RemoteModel, ModelID: model.ID, Headers: headers, Auth: auth, Client: client}
++	req, requestBytes, err := endpoint.NewRequest(call, r.URL, &request, false)
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Accept", "application/x-ndjson")
++	if err = read.Recheck(); err != nil {
++		return err
++	}
++	stopWatch := make(chan struct{})
++	watchJoined := make(chan struct{})
++	var watchErr error
++	go func() {
++		defer close(watchJoined)
++		ticker := time.NewTicker(time.Duration(r.WatchIntervalMillis) * time.Millisecond)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-stopWatch:
++				return
++			case <-call.Done():
++				return
++			case <-ticker.C:
++				if e := read.Recheck(); e != nil {
++					watchErr = e
++					cancel()
++					return
++				}
++			}
++		}
++	}()
++	var responseBytes []byte
++	var providerErr error
++	response, err := endpoint.Do(req)
++	if err != nil {
++		providerErr = err
++	} else {
++		responseBytes, providerErr = io.ReadAll(io.LimitReader(response.Body, int64(r.MaxResponseBytes)+1))
++		closeErr := response.Body.Close()
++		if providerErr == nil {
++			providerErr = closeErr
++		}
++		if len(responseBytes) > r.MaxResponseBytes {
++			providerErr = types.ErrMemoryOriginalUnavailable
++			responseBytes = nil
++		}
++	}
++	close(stopWatch)
++	<-watchJoined
++	if watchErr != nil {
++		return watchErr
++	}
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	status := types.ModelStatusDownloadFailed
++	failure := "transport"
++	if providerErr == nil {
++		decoder := json.NewDecoder(bytes.NewReader(responseBytes))
++		success := false
++		count := 0
++		for {
++			var wire struct {
++				ollamaapi.ProgressResponse
++				Error string `json:"error"`
++			}
++			e := decoder.Decode(&wire)
++			if errors.Is(e, io.EOF) {
++				break
++			}
++			if e != nil || success || wire.Error != "" || wire.Status == "" || wire.Total < 0 || wire.Completed < 0 || wire.Total > 0 && wire.Completed > wire.Total {
++				providerErr = types.ErrMemoryOriginalUnavailable
++				break
++			}
++			count++
++			if wire.Status == "success" {
++				success = true
++			}
++		}
++		if providerErr == nil && success && count > 0 {
++			status = types.ModelStatusActive
++			failure = ""
++		} else {
++			failure = "protocol"
++		}
++	}
++	// A short deadline/stop or authority failure cannot publish success, or
++	// manufacture an authorized failure transition after cancellation.
++	if err = read.Recheck(); err != nil {
++		return err
++	}
++	transcript, err := json.Marshal(types.ModelOriginalDownloadTranscript{Request: requestBytes, Response: responseBytes, Failure: failure})
++	if err != nil {
++		return err
++	}
++	_, err = repo.CommitModelOriginalDownload(read, status, string(transcript))
++	if err != nil {
++		return err
++	}
++	if status != types.ModelStatusActive {
++		if providerErr != nil {
++			return providerErr
++		}
++		return types.ErrMemoryOriginalUnavailable
++	}
++	return nil
++}
++
++var _ interfaces.ModelOriginalDownloadLifecycle = (*modelService)(nil)
+diff --git a/internal/application/service/model_original_download_host_shutdown_actual_test.go b/internal/application/service/model_original_download_host_shutdown_actual_test.go
+new file mode 100644
+index 00000000..38bc9aca
+--- /dev/null
++++ b/internal/application/service/model_original_download_host_shutdown_actual_test.go
+@@ -0,0 +1,186 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/shutdown"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func runOriginalDownloadExpiredHTTPDrain(t *testing.T, pg bool) {
++	f := newMemAtomicSQLFixture(t, pg)
++	_, models, _, _ := actualOriginalModelServices(t, f)
++	life, ok := models.(interfaces.ModelOriginalDownloadLifecycle)
++	require.True(t, ok)
++	ctx, cancel := context.WithTimeout(f.ctx, 8*time.Second)
++	pullStarted, pullJoined, pullRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	var pullStartOnce, pullJoinOnce, pullReleaseOnce sync.Once
++	var calls atomic.Int64
++	var tasks sync.WaitGroup
++	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/api/pull" {
++			w.WriteHeader(400)
++			return
++		}
++		calls.Add(1)
++		_, _ = io.Copy(io.Discard, r.Body)
++		w.Header().Set("Content-Type", "application/x-ndjson")
++		_, _ = io.WriteString(w, "{\"status\":\"pulling manifest\"}\n")
++		w.(http.Flusher).Flush()
++		pullStartOnce.Do(func() { close(pullStarted) })
++		defer pullJoinOnce.Do(func() { close(pullJoined) })
++		select {
++		case <-r.Context().Done():
++		case <-pullRelease:
++		}
++	}))
++	handlerStarted, handlerRelease := make(chan struct{}), make(chan struct{})
++	var handlerStartOnce, handlerReleaseOnce sync.Once
++	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		handlerStartOnce.Do(func() { close(handlerStarted) })
++		select {
++		case <-r.Context().Done():
++		case <-handlerRelease:
++		}
++		w.WriteHeader(204)
++	}))
++	t.Cleanup(func() {
++		handlerReleaseOnce.Do(func() { close(handlerRelease) })
++		pullReleaseOnce.Do(func() { close(pullRelease) })
++		cancel()
++		life.StopOriginalDownloads()
++		_ = host.Config.Close()
++		tasks.Wait()
++		host.Close()
++		provider.Close()
++	})
++	utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++	t.Cleanup(utils.ResetSSRFWhitelistForTest)
++	life.StartOriginalDownloads()
++	model := &types.Model{ID: "actual-expired-http-drain-original-pull", TenantID: 7, Name: "nomic-embed-text:actual-drain", Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{BaseURL: provider.URL, EmbeddingParameters: types.EmbeddingParameters{Dimension: 2}}}
++	require.NoError(t, models.CreateModel(ctx, model))
++	require.NotNil(t, model.OriginalProof)
++	require.True(t, model.OriginalProof.Valid())
++	select {
++	case <-pullStarted:
++	case <-ctx.Done():
++		t.Fatal("genuine creation download did not reach owned HTTP")
++	}
++	httpDone := make(chan error, 1)
++	tasks.Add(1)
++	go func() {
++		defer tasks.Done()
++		req, err := http.NewRequestWithContext(ctx, http.MethodGet, host.URL, nil)
++		if err != nil {
++			httpDone <- err
++			return
++		}
++		response, err := host.Client().Do(req)
++		if response != nil {
++			_ = response.Body.Close()
++		}
++		httpDone <- err
++	}()
++	select {
++	case <-handlerStarted:
++	case <-ctx.Done():
++		t.Fatal("real active HTTP handler did not start")
++	}
++	// The handler actually consumes the small drain deadline. The host helper
++	// must continue from this terminal HTTP result without renewing user input.
++	drain, cancelDrain := context.WithTimeout(context.Background(), 500*time.Millisecond)
++	defer cancelDrain()
++	err := host.Config.Shutdown(drain)
++	require.ErrorIs(t, err, context.DeadlineExceeded)
++	require.ErrorIs(t, drain.Err(), context.DeadlineExceeded)
++	require.NoError(t, host.Config.Close())
++	cleaner := shutdown.NewResourceCleaner()
++	var dependenciesReleased atomic.Bool
++	// Register in this order intentionally: ordinary LIFO would invoke dependent
++	// cleanup first. The host's mandatory join precedes the entire ordinary chain.
++	cleaner.RegisterWithName("OriginalModelDownloads", func() error { life.StopOriginalDownloads(); return nil })
++	cleaner.RegisterWithName("DependentSQLResource", func() error {
++		select {
++		case <-pullJoined:
++		case <-ctx.Done():
++			return fmt.Errorf("owned original pull did not observe cancellation before dependent cleanup: %w", ctx.Err())
++		}
++		if err := life.WaitOriginalDownload(ctx, model.ID); !errors.Is(err, context.Canceled) {
++			return fmt.Errorf("expected real canceled download terminal before cleanup: %v", err)
++		}
++		clean := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx})
++		var leases int64
++		if err := clean.Table("original_body_leases").Where("kind=? AND released_at_ms IS NULL", "read").Count(&leases).Error; err != nil {
++			return err
++		}
++		if leases != 0 {
++			return fmt.Errorf("%d actual input-body leases remain before dependent cleanup", leases)
++		}
++		var outputs int64
++		if err := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.ModelDownloadOriginal{}).Where("model_id=?", model.ID).Count(&outputs).Error; err != nil {
++			return err
++		}
++		if outputs != 0 {
++			return fmt.Errorf("canceled original download published %d output facts", outputs)
++		}
++		dependenciesReleased.Store(true)
++		return nil
++	})
++	// Exercise the reported old host call chain against the same actual task:
++	// ordinary cleanup refuses this expired HTTP context and skips callbacks.
++	oldErrors := cleaner.Cleanup(drain)
++	require.Len(t, oldErrors, 1)
++	require.ErrorIs(t, oldErrors[0], context.DeadlineExceeded)
++	require.False(t, dependenciesReleased.Load())
++	select {
++	case <-pullJoined:
++		t.Fatal("the old expired-context path unexpectedly canceled the still-owned download")
++	default:
++	}
++	var definition types.ModelOriginalBodyReceipt
++	require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Where("origin_id=?", model.OriginalProof.DefinitionID).Take(&definition).Error)
++	var held int64
++	require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Table("original_body_leases").Where("body_id=? AND kind=? AND released_at_ms IS NULL", definition.BodyID, "read").Count(&held).Error)
++	require.Equal(t, int64(1), held, "the actual created model still owns its original input lease")
++	cleanupDone := make(chan []error, 1)
++	tasks.Add(1)
++	go func() {
++		defer tasks.Done()
++		cleanupDone <- shutdown.CleanupAfterHTTPDrain(drain, 500*time.Millisecond, models, cleaner)
++	}()
++	select {
++	case errs := <-cleanupDone:
++		require.Empty(t, errs)
++	case <-ctx.Done():
++		t.Fatal("expired-drain host cleanup failed to join its actual download")
++	}
++	require.True(t, dependenciesReleased.Load(), "fresh ordinary cleanup must follow the actual mandatory download join")
++	require.Equal(t, int64(1), calls.Load())
++	select {
++	case <-httpDone:
++	case <-ctx.Done():
++		t.Fatal("forced-close HTTP request did not finish")
++	}
++	var stored types.Model
++	require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Where("id=?", model.ID).Take(&stored).Error)
++	require.Equal(t, types.ModelStatusDownloading, stored.Status)
++	assertMemAtomicSQLLeasesClosed(t, f)
++}
++func TestSQLiteOriginalDownloadExpiredHTTPDrainActual(t *testing.T) {
++	runOriginalDownloadExpiredHTTPDrain(t, false)
++}
++func TestPostgresOriginalDownloadExpiredHTTPDrainActual(t *testing.T) {
++	runOriginalDownloadExpiredHTTPDrain(t, true)
++}
+diff --git a/internal/application/service/model_original_download_sql_http_actual_test.go b/internal/application/service/model_original_download_sql_http_actual_test.go
+new file mode 100644
+index 00000000..6076c215
+--- /dev/null
++++ b/internal/application/service/model_original_download_sql_http_actual_test.go
+@@ -0,0 +1,375 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func runOriginalModelDownloadSQLHTTP(t *testing.T, pg bool) {
++	for _, mode := range []string{"create_pull_publish", "request_done_download_continues", "embed_no_extra_pull", "credential_after_http", "actor_after_http", "endpoint_after_http", "raw_endpoint_ABA", "body_after_http", "status_CAS_after_http", "provider_failure", "lease_after_http", "stop_cancel_join", "download_not_execution_grant", "actor_before_download"} {
++		t.Run(mode, func(t *testing.T) {
++			f := newMemAtomicSQLFixture(t, pg)
++			repo, models, writer, _ := actualOriginalModelServices(t, f)
++			life, ok := models.(interfaces.ModelOriginalDownloadLifecycle)
++			require.True(t, ok)
++			downloader, ok := repo.(interfaces.ModelOriginalDownloader)
++			require.True(t, ok)
++			ctx, cancel := context.WithTimeout(f.ctx, 8*time.Second)
++			defer cancel()
++			var pulls, embeds, other, decoyCalls atomic.Int64
++			var faultApplied atomic.Bool
++			var mu sync.Mutex
++			var request, reply []byte
++			var faultErr error
++			started, serverJoined, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
++			var startOnce, joinOnce, releaseOnce sync.Once
++			id := "genuine-original-local-pull"
++			name := "nomic-embed-text:created-original"
++			var model *types.Model
++			decoy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { decoyCalls.Add(1); w.WriteHeader(500) }))
++			t.Cleanup(decoy.Close)
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.URL.Path == "/api/embed" {
++					embeds.Add(1)
++					_ = json.NewEncoder(w).Encode(map[string]interface{}{"model": name, "embeddings": [][]float32{{1, 2}}})
++					return
++				}
++				if r.URL.Path != "/api/pull" {
++					other.Add(1)
++					w.WriteHeader(400)
++					return
++				}
++				pulls.Add(1)
++				defer joinOnce.Do(func() { close(serverJoined) })
++				raw, err := io.ReadAll(r.Body)
++				mu.Lock()
++				request = append([]byte(nil), raw...)
++				mu.Unlock()
++				if err != nil {
++					mu.Lock()
++					faultErr = err
++					mu.Unlock()
++					w.WriteHeader(400)
++					return
++				}
++				if r.Header.Get("Authorization") != "Bearer explicit-original-pull-key" || r.Header.Get("X-Download-Origin") != "created-only" {
++					mu.Lock()
++					faultErr = fmt.Errorf("download credential/header differs from original")
++					mu.Unlock()
++					w.WriteHeader(400)
++					return
++				}
++				startOnce.Do(func() { close(started) })
++				if mode == "request_done_download_continues" {
++					select {
++					case <-r.Context().Done():
++						return
++					case <-release:
++					}
++				}
++				if mode == "stop_cancel_join" {
++					select {
++					case <-r.Context().Done():
++					case <-release:
++					}
++					return
++				}
++				clean := func() *gorm.DB { return f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}) }
++				switch mode {
++				case "credential_after_http":
++					key := "explicit-original-pull-successor-key"
++					_, err = writer.UpdateModelCredentialOriginal(f.ctx, id, &key, nil, false)
++					faultApplied.Store(err == nil)
++				case "actor_after_http":
++					write := clean().Model(&types.User{}).Where("id=?", types.CallerFromContext(f.ctx).UserID).Update("is_active", false)
++					err = write.Error
++					if err == nil && write.RowsAffected != 1 {
++						err = fmt.Errorf("actor fault changed %d rows", write.RowsAffected)
++					}
++					faultApplied.Store(err == nil)
++				case "endpoint_after_http":
++					copy := *model
++					copy.Parameters = model.Parameters
++					copy.Parameters.BaseURL = decoy.URL
++					copy.Parameters.OriginalEmbedding = nil
++					copy.Parameters.OriginalDownload = nil
++					err = writer.UpdateModelOriginal(f.ctx, &copy)
++					faultApplied.Store(err == nil)
++				case "raw_endpoint_ABA":
++					params := model.Parameters
++					params.BaseURL = decoy.URL
++					write := clean().Model(&types.Model{}).Where("id=?", id).Update("parameters", params)
++					err = write.Error
++					if err == nil && write.RowsAffected != 1 {
++						err = fmt.Errorf("raw route fault changed %d rows", write.RowsAffected)
++					}
++					if err == nil {
++						write = clean().Model(&types.Model{}).Where("id=?", id).Update("parameters", model.Parameters)
++						err = write.Error
++						if err == nil && write.RowsAffected != 1 {
++							err = fmt.Errorf("raw ABA restore changed %d rows", write.RowsAffected)
++						}
++					}
++					faultApplied.Store(err == nil)
++				case "body_after_http":
++					var body types.ModelOriginalBodyReceipt
++					err = clean().Where("origin_id=?", model.OriginalProof.DefinitionID).Take(&body).Error
++					if err == nil {
++						write := clean().Table("original_body_payloads").Where("id=?", body.BodyID).Update("state", "purged")
++						err = write.Error
++						if err == nil && write.RowsAffected != 1 {
++							err = fmt.Errorf("body fault changed %d rows", write.RowsAffected)
++						}
++					}
++					faultApplied.Store(err == nil)
++				case "lease_after_http":
++					var receipt types.ModelOriginalBodyReceipt
++					err = clean().Where("origin_id=?", model.OriginalProof.DefinitionID).Take(&receipt).Error
++					if err == nil {
++						var leases []struct {
++							LeaseID, BodyID, OwnerID, Kind string
++							Epoch                          int64
++							ExpiresAtMS                    int64
++						}
++						err = clean().Table("original_body_leases").Where("body_id=? AND kind=? AND owner_id LIKE ? AND released_at_ms IS NULL", receipt.BodyID, "read", "model-original-read/%").Find(&leases).Error
++						if err == nil && len(leases) != 1 {
++							err = fmt.Errorf("expected this download's one actual definition lease, got %d", len(leases))
++						}
++						if err == nil {
++							bound := leases[0]
++							var now int64
++							clock := "SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)"
++							if pg {
++								clock = "SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint"
++							}
++							err = clean().Raw(clock).Scan(&now).Error
++							target := now - 1
++							if err == nil {
++								write := clean().Table("original_body_leases").Where("lease_id=? AND body_id=? AND owner_id=? AND epoch=? AND kind=?", bound.LeaseID, bound.BodyID, bound.OwnerID, bound.Epoch, bound.Kind).Update("expires_at_ms", target)
++								err = write.Error
++								if err == nil && write.RowsAffected != 1 {
++									err = fmt.Errorf("requested actual download lease update changed %d rows", write.RowsAffected)
++								}
++							}
++							if err == nil {
++								var back struct{ ExpiresAtMS int64 }
++								err = clean().Table("original_body_leases").Select("expires_at_ms").Where("lease_id=?", bound.LeaseID).Take(&back).Error
++								if err == nil && back.ExpiresAtMS != target {
++									err = fmt.Errorf("actual requested lease expiry was not changed")
++								}
++							}
++							if err == nil {
++								err = clean().Raw(clock).Scan(&now).Error
++								if err == nil && now <= target {
++									err = fmt.Errorf("actual SQL clock did not cross requested lease expiry")
++								}
++							}
++						}
++					}
++					faultApplied.Store(err == nil)
++				case "status_CAS_after_http":
++					err = writer.SetModelOriginalStatus(f.ctx, id, *model.OriginalProof, types.ModelStatusDownloadFailed)
++					faultApplied.Store(err == nil)
++				}
++				if err != nil {
++					mu.Lock()
++					faultErr = err
++					mu.Unlock()
++					w.WriteHeader(500)
++					return
++				}
++				wire := []byte("{\"status\":\"pulling manifest\"}\n{\"status\":\"success\"}\n")
++				if mode == "provider_failure" {
++					wire = []byte("{\"error\":\"owned fixture refused model\"}\n")
++				}
++				mu.Lock()
++				reply = append([]byte(nil), wire...)
++				mu.Unlock()
++				w.Header().Set("Content-Type", "application/x-ndjson")
++				_, _ = w.Write(wire)
++			}))
++			// Cleanup releases the owned handler before joining tasks, even when a
++			// preceding assertion fails. It does not replace the successful join oracle.
++			t.Cleanup(func() {
++				releaseOnce.Do(func() { close(release) })
++				cancel()
++				life.StopOriginalDownloads()
++				server.Close()
++			})
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			t.Setenv("OLLAMA_BASE_URL", decoy.URL)
++			model = &types.Model{ID: id, TenantID: 7, Name: name, Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{BaseURL: server.URL, APIKey: "explicit-original-pull-key", CustomHeaders: map[string]string{"X-Download-Origin": "created-only"}, EmbeddingParameters: types.EmbeddingParameters{Dimension: 2}}}
++			if mode != "download_not_execution_grant" && mode != "actor_before_download" {
++				life.StartOriginalDownloads()
++			}
++			requestCtx, requestCancel := context.WithCancel(ctx)
++			defer requestCancel()
++			require.NoError(t, models.CreateModel(requestCtx, model))
++			require.NotNil(t, model.OriginalProof)
++			require.True(t, model.OriginalProof.Valid())
++			if mode == "actor_before_download" {
++				write := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.User{}).Where("id=?", types.CallerFromContext(f.ctx).UserID).Update("is_active", false)
++				require.NoError(t, write.Error)
++				require.Equal(t, int64(1), write.RowsAffected)
++				held, err := downloader.BeginModelOriginalDownload(ctx, id, *model.OriginalProof)
++				require.Error(t, err)
++				require.Nil(t, held)
++				require.Zero(t, pulls.Load())
++				require.Zero(t, other.Load())
++				assertMemAtomicSQLLeasesClosed(t, f)
++				return
++			}
++			if mode == "download_not_execution_grant" {
++				held, err := downloader.BeginModelOriginalDownload(ctx, id, *model.OriginalProof)
++				require.NoError(t, err)
++				t.Cleanup(func() { _ = held.Close() })
++				_, err = models.GetEmbeddingModel(held.Context(), id)
++				require.Error(t, err)
++				_, err = models.GetChatModel(held.Context(), id)
++				require.Error(t, err)
++				_, borrowed := repository.OriginalModelReadFromContext(held.Context(), id)
++				require.False(t, borrowed)
++				err = repository.CheckCurrentModelOriginalHolds(held.Context(), f.db, *model.OriginalProof)
++				require.Error(t, err)
++				require.Zero(t, pulls.Load())
++				require.NoError(t, held.Close())
++				assertMemAtomicSQLLeasesClosed(t, f)
++				return
++			}
++			if mode == "request_done_download_continues" {
++				select {
++				case <-started:
++				case <-ctx.Done():
++					t.Fatal("explicit creation download did not start")
++				}
++				requestCancel()
++				releaseOnce.Do(func() { close(release) })
++			}
++			if mode == "stop_cancel_join" {
++				select {
++				case <-started:
++				case <-ctx.Done():
++					t.Fatal("owned original pull did not start")
++				}
++				stopped := make(chan struct{})
++				go func() { life.StopOriginalDownloads(); close(stopped) }()
++				select {
++				case <-stopped:
++				case <-ctx.Done():
++					t.Fatal("download Stop did not join")
++				}
++				select {
++				case <-serverJoined:
++				case <-ctx.Done():
++					t.Fatal("owned pull server did not observe cancellation")
++				}
++			}
++			err := life.WaitOriginalDownload(ctx, id)
++			success := mode == "create_pull_publish" || mode == "request_done_download_continues" || mode == "embed_no_extra_pull"
++			mu.Lock()
++			actualRequest := append([]byte(nil), request...)
++			actualReply := append([]byte(nil), reply...)
++			actualFaultErr := faultErr
++			mu.Unlock()
++			require.NoError(t, actualFaultErr)
++			require.Equal(t, int64(1), pulls.Load())
++			require.Zero(t, other.Load())
++			require.Zero(t, decoyCalls.Load())
++			require.Equal(t, []byte(`{"model":"nomic-embed-text:created-original","username":"","password":"","stream":true,"name":""}`), actualRequest)
++			if success {
++				require.NoError(t, err)
++			} else {
++				require.Error(t, err)
++			}
++			fault := mode == "credential_after_http" || mode == "actor_after_http" || mode == "endpoint_after_http" || mode == "raw_endpoint_ABA" || mode == "body_after_http" || mode == "status_CAS_after_http" || mode == "lease_after_http"
++			if fault {
++				require.True(t, faultApplied.Load(), "real SQL fault must complete before refusal")
++			}
++			var outputs []types.ModelDownloadOriginal
++			require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Where("model_id=?", id).Find(&outputs).Error)
++			if success || mode == "provider_failure" {
++				require.Len(t, outputs, 1)
++				out := outputs[0]
++				digest, digestErr := types.ModelDownloadOriginalDigest(out)
++				require.NoError(t, digestErr)
++				require.Equal(t, digest, out.Digest)
++				require.Equal(t, model.OriginalProof.Digest, out.InputProofDigest)
++				require.Equal(t, model.OriginalProof.StateID, out.InputStateID)
++				require.Equal(t, model.Parameters.OriginalDownload.Digest, out.RecipeDigest)
++				require.Equal(t, types.MemoryOriginalBytesDigest([]byte(out.TranscriptJSON)), out.TranscriptDigest)
++				var transcript types.ModelOriginalDownloadTranscript
++				require.NoError(t, json.Unmarshal([]byte(out.TranscriptJSON), &transcript))
++				require.Equal(t, actualRequest, transcript.Request)
++				require.Equal(t, actualReply, transcript.Response)
++				var state types.ModelStateOriginal
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Where("id=?", out.OutputStateID).Take(&state).Error)
++				require.Equal(t, out.OutputStateDigest, state.Digest)
++				require.Equal(t, model.OriginalProof.DefinitionID, state.DefinitionID)
++				require.Equal(t, model.OriginalProof.CredentialID, state.CredentialID)
++				require.Greater(t, state.Epoch, model.OriginalProof.StateEpoch)
++				expected := types.ModelStatusActive
++				if !success {
++					expected = types.ModelStatusDownloadFailed
++				}
++				require.Equal(t, expected, state.Status)
++				require.Equal(t, expected, out.Status)
++				var body struct {
++					BodyID   string
++					Revision uint64
++				}
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Table("original_body_field_heads").Select("body_id,revision").Where("source_table=? AND row_key=? AND column_name=?", "model_download_originals", out.ID, "transcript_json").Take(&body).Error)
++				require.NotEmpty(t, body.BodyID)
++				require.Greater(t, body.Revision, uint64(0))
++				require.NoError(t, repository.CheckOriginalBodyAvailableInTx(f.ctx, f.db, "model_download_originals", out.ID))
++				write := f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.ModelDownloadOriginal{}).Where("id=?", out.ID).Update("transcript_digest", out.TranscriptDigest)
++				require.Error(t, write.Error, "retained download original is append-only")
++			} else {
++				require.Empty(t, outputs)
++				var n int64
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.ModelStateOriginal{}).Where("model_id=? AND status=?", id, types.ModelStatusActive).Count(&n).Error)
++				require.Zero(t, n)
++			}
++			if mode == "embed_no_extra_pull" {
++				provider, err := models.GetEmbeddingModel(ctx, id)
++				require.NoError(t, err)
++				vector, err := provider.Embed(ctx, "Original local memory document.")
++				require.NoError(t, err)
++				require.Equal(t, []float32{1, 2}, vector)
++				require.Equal(t, int64(1), pulls.Load())
++				require.Equal(t, int64(1), embeds.Load())
++				require.Zero(t, other.Load())
++			}
++			life.StopOriginalDownloads()
++			if mode == "stop_cancel_join" {
++				next := &types.Model{ID: "refused-after-download-stop", TenantID: 7, Name: name, Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: model.Parameters}
++				require.Error(t, models.CreateModel(ctx, next))
++				var n int64
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.Model{}).Where("id=?", next.ID).Count(&n).Error)
++				require.Zero(t, n)
++				require.Equal(t, int64(1), pulls.Load())
++			}
++			assertMemAtomicSQLLeasesClosed(t, f)
++		})
++	}
++}
++func TestSQLiteModelOriginalCreationDownloadSQLHTTP(t *testing.T) {
++	runOriginalModelDownloadSQLHTTP(t, false)
++}
++func TestPostgresModelOriginalCreationDownloadSQLHTTP(t *testing.T) {
++	runOriginalModelDownloadSQLHTTP(t, true)
++}
+diff --git a/internal/application/service/model_original_final_binding_clock_actual_test.go b/internal/application/service/model_original_final_binding_clock_actual_test.go
+new file mode 100644
+index 00000000..cdc2cc33
+--- /dev/null
++++ b/internal/application/service/model_original_final_binding_clock_actual_test.go
+@@ -0,0 +1,378 @@
++package service
++
++import (
++	"context"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/Tencent/WeKnora/internal/utils"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"runtime"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type actualModelLastIOKey struct{}
++type actualModelLastIO struct {
++	armed            atomic.Bool
++	direct           atomic.Int64
++	reached, applied atomic.Bool
++	mu               sync.Mutex
++	err              error
++	lease            struct {
++		LeaseID, BodyID, OwnerID, Kind string
++		Epoch, ExpiresAtMS             int64
++		ReleasedAtMS                   *int64
++	}
++	payload struct {
++		ID, State, BodySHA256 string
++		PurgeEpoch, BodyBytes int64
++	}
++	expiry, observedClock int64
++}
++
++// This context token selects a test-owned real operation. It carries no
++// actor, proof, model, body or lease authorization and is unknown to production.
++func modelLastIOObserverMatches(tx *gorm.DB, token *actualModelLastIO, lane string) bool {
++	if tx.Statement.Table != "original_body_journal_heads" || tx.Statement.Context.Value(actualModelLastIOKey{}) != token || !token.armed.Load() {
++		return false
++	}
++	pcs := make([]uintptr, 64)
++	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
++	directJournal, foundJournal, wanted, inCheck := false, false, false, false
++	for {
++		frame, more := frames.Next()
++		name := frame.Function
++		if foundJournal && !directJournal {
++			directJournal = strings.HasSuffix(name, ".checkModelOriginalHoldsInTx")
++			foundJournal = false
++		}
++		if strings.HasSuffix(name, ".(*OriginalBodyRetentionStore).checkJournalInTx") {
++			foundJournal = true
++		}
++		if lane == "current" && strings.HasSuffix(name, ".CheckCurrentModelOriginalHolds") {
++			wanted = true
++		}
++		if lane == "download" && strings.Contains(name, ".CommitModelOriginalDownload.func1") {
++			wanted = true
++		}
++		if strings.HasSuffix(name, ".(*modelOriginalRead).checkInTx") {
++			inCheck = true
++		}
++		if !more {
++			break
++		}
++	}
++	return directJournal && wanted && (lane != "download" || !inCheck)
++}
++func runModelOriginalFinalBindingClockActual(t *testing.T, pg bool) {
++	for _, lane := range []string{"current", "download"} {
++		for _, mode := range []string{"legal", "late_expiry", "lease_owner", "lease_epoch", "lease_release", "payload_state", "payload_epoch", "payload_sha", "payload_bytes"} {
++			t.Run(lane+"_"+mode, func(t *testing.T) {
++				f := newMemAtomicSQLFixture(t, pg)
++				_, models, _, reader := actualOriginalModelServices(t, f)
++				token := &actualModelLastIO{}
++				ctx, cancel := context.WithTimeout(context.WithValue(f.ctx, actualModelLastIOKey{}, token), 8*time.Second)
++				var read interfaces.ModelOriginalRead
++				var life interfaces.ModelOriginalDownloadLifecycle
++				var calls atomic.Int64
++				var server *httptest.Server
++				released := make(chan struct{})
++				var releaseOnce sync.Once
++				t.Cleanup(func() {
++					releaseOnce.Do(func() { close(released) })
++					cancel()
++					if life != nil {
++						life.StopOriginalDownloads()
++					}
++					if read != nil {
++						_ = read.Close()
++					}
++					if server != nil {
++						server.Close()
++					}
++				})
++				var proof types.ModelOriginalProof
++				id := f.model.GetModelID()
++				var ids []string
++				if lane == "current" {
++					var err error
++					read, err = reader.BeginModelOriginalRead(ctx, id, nil)
++					require.NoError(t, err)
++					_, actual, err := read.Snapshot()
++					require.NoError(t, err)
++					proof = *actual
++					ids, err = repository.ModelOriginalLeaseIDs(read.Context())
++					require.NoError(t, err)
++					require.Len(t, ids, 2)
++				} else {
++					var ok bool
++					life, ok = models.(interfaces.ModelOriginalDownloadLifecycle)
++					require.True(t, ok)
++					server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++						if r.URL.Path != "/api/pull" {
++							w.WriteHeader(400)
++							return
++						}
++						calls.Add(1)
++						_, _ = io.Copy(io.Discard, r.Body)
++						select {
++						case <-released:
++						case <-r.Context().Done():
++							return
++						}
++						w.Header().Set("Content-Type", "application/x-ndjson")
++						_, _ = io.WriteString(w, "{\"status\":\"success\"}\n")
++					}))
++					utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++					t.Cleanup(utils.ResetSSRFWhitelistForTest)
++					life.StartOriginalDownloads()
++					id = "actual-late-binding-download"
++					model := &types.Model{ID: id, TenantID: 7, Name: "nomic-embed-text:actual-final-binding", Type: types.ModelTypeEmbedding, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{BaseURL: server.URL, EmbeddingParameters: types.EmbeddingParameters{Dimension: 2}}}
++					require.NoError(t, models.CreateModel(ctx, model))
++					require.NotNil(t, model.OriginalProof)
++					proof = *model.OriginalProof
++				}
++				// The genuine current read reports its captured IDs. For download, the
++				// callback selects the real definition lease after acquisition, by the
++				// exact creation receipt; it never fabricates an execution/grant or lease.
++				name := "actual-model-final-journal-binding"
++				require.NoError(t, f.db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
++					if tx.Error != nil || !modelLastIOObserverMatches(tx, token, lane) || token.direct.Add(1) != 2 {
++						return
++					}
++					token.reached.Store(true)
++					clean := func() *gorm.DB {
++						return tx.Session(&gorm.Session{NewDB: true, Context: context.WithValue(tx.Statement.Context, actualModelLastIOKey{}, nil)})
++					}
++					var receipt types.ModelOriginalBodyReceipt
++					err := clean().Where("origin_id=?", proof.DefinitionID).Take(&receipt).Error
++					var candidates []struct {
++						LeaseID, BodyID, OwnerID, Kind string
++						Epoch, ExpiresAtMS             int64
++						ReleasedAtMS                   *int64
++					}
++					if err == nil {
++						query := clean().Table("original_body_leases").Where("body_id=? AND kind=? AND released_at_ms IS NULL", receipt.BodyID, "read")
++						if lane == "current" {
++							query = query.Where("lease_id IN ?", ids)
++						} else {
++							query = query.Where("owner_id LIKE ?", "model-original-read/%")
++						}
++						err = query.Find(&candidates).Error
++						if err == nil && len(candidates) != 1 {
++							err = fmt.Errorf("exact original definition has %d acquired target leases", len(candidates))
++						}
++					}
++					var boundPayload struct {
++						ID, State, BodySHA256 string
++						PurgeEpoch, BodyBytes int64
++					}
++					if err == nil {
++						err = clean().Table("original_body_payloads").Select("id,state,body_sha256,purge_epoch,body_bytes").Where("id=?", receipt.BodyID).Take(&boundPayload).Error
++					}
++					if err == nil {
++						bound := candidates[0]
++						token.lease = bound
++						token.payload = boundPayload
++						clock := func() (int64, error) {
++							var now int64
++							sql := "SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)"
++							if pg {
++								sql = "SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint"
++							}
++							err := clean().Raw(sql).Scan(&now).Error
++							return now, err
++						}
++						if mode != "legal" {
++							table, column, value := "original_body_leases", "", interface{}(nil)
++							switch mode {
++							case "late_expiry":
++								var now int64
++								now, err = clock()
++								token.expiry = now + 25
++								column, value = "expires_at_ms", token.expiry
++							case "lease_owner":
++								column, value = "owner_id", bound.OwnerID+"/actual-owned-tx-fault"
++							case "lease_epoch":
++								column, value = "epoch", bound.Epoch+1
++							case "lease_release":
++								column, value = "released_at_ms", int64(1)
++							case "payload_state":
++								table, column, value = "original_body_payloads", "state", "purged"
++							case "payload_epoch":
++								table, column, value = "original_body_payloads", "purge_epoch", boundPayload.PurgeEpoch+1
++							case "payload_sha":
++								table, column, value = "original_body_payloads", "body_sha256", strings.Repeat("0", 64)
++							case "payload_bytes":
++								table, column, value = "original_body_payloads", "body_bytes", boundPayload.BodyBytes+1
++							}
++							if err == nil {
++								write := clean().Table(table)
++								if table == "original_body_leases" {
++									write = write.Where("lease_id=? AND body_id=? AND owner_id=? AND epoch=? AND kind=?", bound.LeaseID, bound.BodyID, bound.OwnerID, bound.Epoch, bound.Kind)
++								} else {
++									write = write.Where("id=? AND purge_epoch=? AND state=?", boundPayload.ID, boundPayload.PurgeEpoch, boundPayload.State)
++								}
++								result := write.Update(column, value)
++								err = result.Error
++								if err == nil && result.RowsAffected != 1 {
++									err = fmt.Errorf("late owned-TX fault changed %d rows", result.RowsAffected)
++								}
++							}
++							if err == nil {
++								var actual interface{}
++								if table == "original_body_leases" {
++									var back struct {
++										LeaseID, BodyID, OwnerID, Kind string
++										Epoch, ExpiresAtMS             int64
++										ReleasedAtMS                   *int64
++									}
++									err = clean().Table(table).Where("lease_id=?", bound.LeaseID).Take(&back).Error
++									switch mode {
++									case "late_expiry":
++										actual = back.ExpiresAtMS
++									case "lease_owner":
++										actual = back.OwnerID
++									case "lease_epoch":
++										actual = back.Epoch
++									case "lease_release":
++										if back.ReleasedAtMS != nil {
++											actual = *back.ReleasedAtMS
++										}
++									}
++								} else {
++									var back struct {
++										ID, State, BodySHA256 string
++										PurgeEpoch, BodyBytes int64
++									}
++									err = clean().Table(table).Where("id=?", boundPayload.ID).Take(&back).Error
++									switch mode {
++									case "payload_state":
++										actual = back.State
++									case "payload_epoch":
++										actual = back.PurgeEpoch
++									case "payload_sha":
++										actual = back.BodySHA256
++									case "payload_bytes":
++										actual = back.BodyBytes
++									}
++								}
++								if err == nil && actual != value {
++									err = fmt.Errorf("independent actual row readback did not match late %s mutation", column)
++								}
++							}
++							if err == nil && mode == "late_expiry" {
++								for {
++									if tx.Statement.Context.Err() != nil {
++										err = tx.Statement.Context.Err()
++										break
++									}
++									var now int64
++									now, err = clock()
++									if err != nil {
++										break
++									}
++									if now >= token.expiry {
++										token.observedClock = now
++										break
++									}
++								}
++							}
++							token.applied.Store(err == nil)
++						}
++					}
++					token.mu.Lock()
++					token.err = err
++					token.mu.Unlock()
++					// The observer records native SQL failures; it does not AddError to fake a
++					// product refusal. The actual shared helper must see the changed rows.
++				}))
++				t.Cleanup(func() { _ = f.db.Callback().Query().Remove(name) })
++				token.armed.Store(true)
++				var err error
++				if lane == "current" {
++					err = f.db.WithContext(read.Context()).Transaction(func(tx *gorm.DB) error { return repository.CheckCurrentModelOriginalHolds(read.Context(), tx, proof) })
++				} else {
++					releaseOnce.Do(func() { close(released) })
++					err = life.WaitOriginalDownload(ctx, id)
++				}
++				require.True(t, token.reached.Load(), "exact last direct journal IO was reached after both original bodies/leases were read")
++				token.mu.Lock()
++				faultErr := token.err
++				token.mu.Unlock()
++				require.NoError(t, faultErr)
++				if mode != "legal" {
++					require.True(t, token.applied.Load(), "same-TX mutation and independent row readback must succeed before the product error assertion")
++				}
++				if mode == "late_expiry" {
++					require.Positive(t, token.expiry)
++					require.GreaterOrEqual(t, token.observedClock, token.expiry)
++				}
++				if mode == "legal" {
++					require.NoError(t, err)
++				} else {
++					require.ErrorIs(t, err, repository.ErrOriginalBodyUnavailable)
++				}
++				if lane == "download" {
++					require.Equal(t, int64(1), calls.Load())
++					var count int64
++					require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Model(&types.ModelDownloadOriginal{}).Where("model_id=?", id).Count(&count).Error)
++					if mode == "legal" {
++						require.Equal(t, int64(1), count)
++					} else {
++						require.Zero(t, count)
++						var state types.Model
++						require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Where("id=?", id).Take(&state).Error)
++						require.Equal(t, types.ModelStatusDownloading, state.Status)
++					}
++				}
++				if read != nil {
++					require.NoError(t, read.Close())
++				}
++				if life != nil {
++					life.StopOriginalDownloads()
++				}
++				// Failed download result/state and the faulting metadata write roll back in
++				// the same real SQL TX; only the reader's subsequent lease release persists.
++				if mode != "legal" {
++					var payload struct {
++						ID, State, BodySHA256 string
++						PurgeEpoch, BodyBytes int64
++					}
++					require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Table("original_body_payloads").Select("id,state,body_sha256,purge_epoch,body_bytes").Where("id=?", token.payload.ID).Take(&payload).Error)
++					require.Equal(t, token.payload, payload)
++				}
++				if mode != "legal" {
++					var lease struct {
++						LeaseID, BodyID, OwnerID, Kind string
++						Epoch, ExpiresAtMS             int64
++						ReleasedAtMS                   *int64
++					}
++					require.NoError(t, f.db.Session(&gorm.Session{NewDB: true, Context: f.ctx}).Table("original_body_leases").Where("lease_id=?", token.lease.LeaseID).Take(&lease).Error)
++					require.Equal(t, token.lease.BodyID, lease.BodyID)
++					require.Equal(t, token.lease.OwnerID, lease.OwnerID)
++					require.Equal(t, token.lease.Kind, lease.Kind)
++					require.Equal(t, token.lease.Epoch, lease.Epoch)
++					require.Equal(t, token.lease.ExpiresAtMS, lease.ExpiresAtMS)
++					require.NotNil(t, lease.ReleasedAtMS, "the original owner actually releases its restored lease after the failed TX")
++				}
++				assertMemAtomicSQLLeasesClosed(t, f)
++			})
++		}
++	}
++}
++func TestSQLiteModelOriginalFinalBindingClockActual(t *testing.T) {
++	runModelOriginalFinalBindingClockActual(t, false)
++}
++func TestPostgresModelOriginalFinalBindingClockActual(t *testing.T) {
++	runModelOriginalFinalBindingClockActual(t, true)
++}
+diff --git a/internal/container/cleanup.go b/internal/container/cleanup.go
+index fd14357c..e87f6391 100644
+--- a/internal/container/cleanup.go
++++ b/internal/container/cleanup.go
+@@ -1,86 +1,12 @@
+ package container
+ 
+ import (
+-	"context"
+-	"log"
+-	"sync"
+-
+-	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/shutdown"
+ 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+ )
+ 
+-// ResourceCleaner is a resource cleaner that can be used to clean up resources
+-type ResourceCleaner struct {
+-	mu       sync.Mutex
+-	cleanups []types.CleanupFunc
+-}
+-
+-// NewResourceCleaner creates a new resource cleaner
+-func NewResourceCleaner() interfaces.ResourceCleaner {
+-	return &ResourceCleaner{
+-		cleanups: make([]types.CleanupFunc, 0),
+-	}
+-}
+-
+-// Register registers a cleanup function
+-// Note: the cleanup function will be executed in reverse order (the last registered will be executed first)
+-func (c *ResourceCleaner) Register(cleanup types.CleanupFunc) {
+-	if cleanup == nil {
+-		return
+-	}
+-
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-
+-	c.cleanups = append(c.cleanups, cleanup)
+-}
+-
+-// RegisterWithName registers a cleanup function with a name, for logging tracking
+-func (c *ResourceCleaner) RegisterWithName(name string, cleanup types.CleanupFunc) {
+-	if cleanup == nil {
+-		return
+-	}
+-
+-	wrappedCleanup := func() error {
+-		log.Printf("Cleaning up resource: %s", name)
+-		err := cleanup()
+-		if err != nil {
+-			log.Printf("Error cleaning up resource %s: %v", name, err)
+-		} else {
+-			log.Printf("Successfully cleaned up resource: %s", name)
+-		}
+-		return err
+-	}
+-
+-	c.Register(wrappedCleanup)
+-}
+-
+-// Cleanup executes all cleanup functions
+-// Even if a cleanup function fails, other cleanup functions will still be executed
+-func (c *ResourceCleaner) Cleanup(ctx context.Context) (errs []error) {
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-
+-	// Execute cleanup functions in reverse order (the last registered will be executed first)
+-	for i := len(c.cleanups) - 1; i >= 0; i-- {
+-		select {
+-		case <-ctx.Done():
+-			errs = append(errs, ctx.Err())
+-			return errs
+-		default:
+-			if err := c.cleanups[i](); err != nil {
+-				errs = append(errs, err)
+-			}
+-		}
+-	}
+-
+-	return errs
+-}
+-
+-// Reset clears all registered cleanup functions
+-func (c *ResourceCleaner) Reset() {
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
++// Preserve the container constructor/type ABI. The shared implementation keeps
++// the same LIFO and context policy and can be tested with real owned consumers.
++type ResourceCleaner = shutdown.ResourceCleaner
+ 
+-	c.cleanups = make([]types.CleanupFunc, 0)
+-}
++func NewResourceCleaner() interfaces.ResourceCleaner { return shutdown.NewResourceCleaner() }
+diff --git a/internal/container/cleanup_original_model_downloads.go b/internal/container/cleanup_original_model_downloads.go
+new file mode 100644
+index 00000000..8a96f25e
+--- /dev/null
++++ b/internal/container/cleanup_original_model_downloads.go
+@@ -0,0 +1,15 @@
++package container
++
++import (
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++// Invoked after DB construction and all model-authority providers. Stop owns
++// cancellation and joins download/watch operations before cleanup returns.
++// This container does not register a database-close callback.
++func registerOriginalModelDownloads(models interfaces.ModelService, cleaner interfaces.ResourceCleaner) {
++	if life, ok := models.(interfaces.ModelOriginalDownloadLifecycle); ok {
++		life.StartOriginalDownloads()
++		cleaner.RegisterWithName("OriginalModelDownloads", func() error { life.StopOriginalDownloads(); return nil })
++	}
++}
+diff --git a/internal/container/container.go b/internal/container/container.go
+index d5e5c287..3459b336 100644
+--- a/internal/container/container.go
++++ b/internal/container/container.go
+@@ -783,6 +783,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
+ 	must(container.Invoke(startNextcloudSyncAdmissionRecovery))
+ 	must(container.Invoke(startNextcloudEventDispatcher))
+ 
++	must(container.Invoke(registerOriginalModelDownloads))
++
+ 	logger.Infof(ctx, "[Container] Container initialization completed successfully")
+ 	return container
+ }
+diff --git a/internal/database/migration_memory_original_full_chain_test.go b/internal/database/migration_memory_original_full_chain_test.go
+index c8989c8b..d891345d 100644
+--- a/internal/database/migration_memory_original_full_chain_test.go
++++ b/internal/database/migration_memory_original_full_chain_test.go
+@@ -22,14 +22,14 @@ import (
+ var memoryFullMigrationTables = []string{
+ 	"memory_original_admissions", "memory_original_executions", "memory_original_checkpoints", "memory_original_derivations", "memory_original_dispatches",
+ 	"memory_policy_control_versions", "memory_policy_originals", "memory_policy_body_receipts",
+-	"model_original_control_versions", "model_definition_originals", "model_credential_originals", "model_state_originals", "model_original_body_receipts",
++	"model_original_control_versions", "model_definition_originals", "model_credential_originals", "model_state_originals", "model_original_body_receipts", "model_download_originals",
+ 	"memory_derived_collections", "memory_derived_controls", "memory_derived_publications", "memory_derived_body_receipts",
+ 	"memory_generated_originals", "memory_generated_receipts", "memory_generated_body_receipts",
+ 	"memory_embedding_vector_controls", "memory_embedding_originals", "memory_embedding_receipts", "memory_embedding_body_receipts",
+ 	"memory_query_embedding_originals", "memory_query_embedding_receipts", "memory_embedding_rank_receipts",
+ }
+ 
+-var memoryFullMigrationModes = []string{"empty-down", "legacy-unknown-up", "policy-fact-down", "model-fact-down", "embedding-fact-down", "raw-policy-ABA-down", "raw-model-ABA-down"}
++var memoryFullMigrationModes = []string{"empty-down", "legacy-unknown-up", "policy-fact-down", "model-fact-down", "download-fact-down", "embedding-fact-down", "raw-policy-ABA-down", "raw-model-ABA-down"}
+ 
+ func TestSQLiteMemoryOriginalFullMigrationChain(t *testing.T) {
+ 	for _, mode := range memoryFullMigrationModes {
+@@ -125,8 +125,12 @@ func seedMemoryFullMigrationLegacy(t *testing.T, db *sql.DB, dialect, mode strin
+ 	require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO models(id,tenant_id,name,type,source,parameters,status) VALUES('full-schema-model',7,'unproven legacy model','KnowledgeQA','remote','{}','active')"))
+ 	seedPreSteerUnknownHistory(t, db)
+ 	if mode == "legacy-unknown-up" {
+-		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_subjects(id,tenant_id,subject_id) VALUES('full-schema-subject',7,'unproven-schema-subject')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_subjects(id,tenant_id,subject_id,block_text,item_count) VALUES('full-schema-subject',7,'unproven-schema-subject','unproven legacy resident block',1)"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_subjects(id,tenant_id,subject_id) VALUES('full-schema-empty-subject',7,'unproven-empty-subject')"))
+ 		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_items(id,tenant_id,subject_id,kind,content) VALUES('full-schema-item',7,'unproven-schema-subject','fact','unproven legacy memory')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_items(id,tenant_id,subject_id,kind,content,status) VALUES('full-schema-archived-item',7,'unproven-schema-subject','fact','unproven archived memory','archived')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_topic_stats(id,tenant_id,subject_id,normalized_key,topic) VALUES('full-schema-topic',7,'unproven-topic-subject','legacy-topic','unproven legacy topic')"))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO memory_tombstones(id,tenant_id,subject_id,topic,fingerprint) VALUES('full-schema-tombstone',7,'unproven-tombstone-subject','unproven forgotten topic','unproven legacy fingerprint')"))
+ 	}
+ }
+ 
+@@ -166,7 +170,7 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&count))
+ 	}
+-	for _, table := range []string{"memory_original_admissions", "memory_policy_originals", "model_definition_originals", "memory_derived_publications", "memory_generated_originals", "memory_embedding_originals", "memory_query_embedding_originals"} {
++	for _, table := range []string{"memory_original_admissions", "memory_policy_originals", "model_definition_originals", "memory_derived_publications", "memory_derived_body_receipts", "memory_generated_originals", "memory_embedding_originals", "memory_query_embedding_originals"} {
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&count))
+ 		require.Zero(t, count, "complete migrations never authenticate a legacy original")
+@@ -179,6 +183,10 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 	requireMemoryFullForeignKeyViolation(t, dialect, err)
+ 	err = memoryFullExec(db, dialect, "INSERT INTO memory_embedding_rank_receipts(id,receipt_id,receipt_digest,tenant_id,subject_id,item_id,model_id,source_vector_revision,vector_revision,vector_digest,rank_vector_digest,rank_json,digest,created_at) VALUES('invalid-schema-rank','missing-vector-receipt','x',7,'unproven-schema-subject','missing-item','full-schema-model',1,2,'x','x','[0]','x',CURRENT_TIMESTAMP)")
+ 	requireMemoryFullForeignKeyViolation(t, dialect, err)
++
++	// Exact production download FK, not an AutoMigrate approximation.
++	err = memoryFullExec(db, dialect, "INSERT INTO model_download_originals(id,model_id,tenant_id,input_state_id,input_proof_digest,definition_id,credential_id,output_state_id,output_state_digest,recipe_digest,status,transcript_json,transcript_digest,author_selector,digest,created_at) VALUES('invalid-schema-download','full-schema-model',7,'missing-input-state',?,'missing-definition','missing-credential','missing-output-state',?,?,'active','{}',?,'schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64), strings.Repeat("0", 64))
++	requireMemoryFullForeignKeyViolation(t, dialect, err)
+ 	if mode == "legacy-unknown-up" {
+ 		var content string
+ 		require.NoError(t, db.QueryRow("SELECT content FROM memory_items WHERE id='full-schema-item'").Scan(&content))
+@@ -186,7 +194,40 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 		var count int
+ 		require.NoError(t, db.QueryRow("SELECT count(*) FROM memory_derived_controls WHERE object_id='full-schema-item'").Scan(&count))
+ 		require.Equal(t, 1, count, "retained UNKNOWN controls are not body publications")
+-		return
++		for _, object := range []struct{ kind, id, subject string }{
++			{"memory_item", "full-schema-item", "unproven-schema-subject"},
++			{"memory_item", "full-schema-archived-item", "unproven-schema-subject"},
++			{"memory_topic", "full-schema-topic", "unproven-topic-subject"},
++			{"memory_tombstone", "full-schema-tombstone", "unproven-tombstone-subject"},
++			{"memory_block", "full-schema-subject", "unproven-schema-subject"},
++		} {
++			var revision uint64
++			var present bool
++			require.NoError(t, db.QueryRow(lineageMigrationQuery(dialect, "SELECT revision,present FROM memory_derived_controls WHERE tenant_id=7 AND subject_id=? AND object_kind=? AND object_id=?"), object.subject, object.kind, object.id).Scan(&revision, &present))
++			require.Equal(t, uint64(1), revision, "legacy inventory has not observed an authored successor")
++			require.True(t, present, "control presence tracks a physical row, including archived items")
++		}
++		for _, subject := range []string{"unproven-schema-subject", "unproven-topic-subject", "unproven-tombstone-subject", "unproven-empty-subject"} {
++			var revision uint64
++			require.NoError(t, db.QueryRow(lineageMigrationQuery(dialect, "SELECT revision FROM memory_derived_collections WHERE tenant_id=7 AND subject_id=?"), subject).Scan(&revision))
++			require.Equal(t, uint64(1), revision)
++		}
++		require.NoError(t, db.QueryRow("SELECT count(*) FROM memory_derived_controls WHERE object_id='full-schema-empty-subject'").Scan(&count))
++		require.Zero(t, count, "an empty subject has no resident material to authenticate")
++		for _, material := range []struct{ query, value string }{
++			{"SELECT content FROM memory_items WHERE id='full-schema-archived-item'", "unproven archived memory"},
++			{"SELECT topic FROM memory_topic_stats WHERE id='full-schema-topic'", "unproven legacy topic"},
++			{"SELECT fingerprint FROM memory_tombstones WHERE id='full-schema-tombstone'", "unproven legacy fingerprint"},
++			{"SELECT block_text FROM memory_subjects WHERE id='full-schema-subject'", "unproven legacy resident block"},
++		} {
++			var value string
++			require.NoError(t, db.QueryRow(material.query).Scan(&value))
++			require.Equal(t, material.value, value, "initialization does not rewrite legacy material")
++		}
++		require.NoError(t, db.QueryRow("SELECT count(*) FROM original_body_field_heads WHERE source_table IN ('memory_items','memory_topic_stats','memory_tombstones','memory_subjects') AND row_key IN ('full-schema-item','full-schema-archived-item','full-schema-topic','full-schema-tombstone','full-schema-subject')").Scan(&count))
++		require.Zero(t, count, "migration does not turn current bytes into original bodies")
++		// Continue into the same actual refused-DOWN oracle as retained facts:
++		// initialized legacy controls must survive before ANY drop or ALTER.
+ 	}
+ 	err = nil
+ 	switch mode {
+@@ -194,6 +235,20 @@ func checkMemoryFullMigrationTail(t *testing.T, db *sql.DB, m *migrate.Migrate,
+ 		err = memoryFullExec(db, dialect, "INSERT INTO memory_policy_originals(id,tenant_id,revision,policy_json,policy_digest,author_selector,digest,created_at) VALUES('invalid-schema-policy',7,1,'{}',?,'schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", strings.Repeat("0", 64), strings.Repeat("0", 64))
+ 	case "model-fact-down":
+ 		err = memoryFullExec(db, dialect, "INSERT INTO model_definition_originals(id,model_id,tenant_id,revision,definition_json,definition_digest,previous_id,previous_digest,author_selector,digest,created_at) VALUES('invalid-schema-model','full-schema-model',7,1,'{}',?,'','','schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", strings.Repeat("0", 64), strings.Repeat("0", 64))
++	case "download-fact-down":
++		// These are deliberately invalid schema-only facts. They exercise
++		// FK/immutability/global DOWN, and grant no actor/model capability.
++		zero := strings.Repeat("0", 64)
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO model_definition_originals(id,model_id,tenant_id,revision,definition_json,definition_digest,previous_id,previous_digest,author_selector,digest,created_at) VALUES('schema-download-def','full-schema-model',7,1,'{}',?,'','','schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", zero, zero))
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO model_credential_originals(id,model_id,tenant_id,revision,credential_json,plain_digest,previous_id,previous_digest,author_selector,digest,created_at) VALUES('schema-download-cred','full-schema-model',7,1,'{}',?,'','','schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", zero, zero))
++		for index, id := range []string{"schema-download-before", "schema-download-after"} {
++			require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO model_state_originals(id,model_id,tenant_id,epoch,definition_id,credential_id,status,is_default,managed_by,author_selector,digest,created_at) VALUES(?,'full-schema-model',7,?,'schema-download-def','schema-download-cred','active',FALSE,'','schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", id, index+1, zero))
++		}
++		require.NoError(t, memoryFullExec(db, dialect, "INSERT INTO model_download_originals(id,model_id,tenant_id,input_state_id,input_proof_digest,definition_id,credential_id,output_state_id,output_state_digest,recipe_digest,status,transcript_json,transcript_digest,author_selector,digest,created_at) VALUES('schema-download','full-schema-model',7,'schema-download-before',?,'schema-download-def','schema-download-cred','schema-download-after',?,?,'active','{}',?,'schema-placeholder-not-authority',?,CURRENT_TIMESTAMP)", zero, zero, zero, zero, zero))
++		require.Error(t, memoryFullExec(db, dialect, "UPDATE model_download_originals SET transcript_json='{}' WHERE id='schema-download'"))
++		require.Error(t, memoryFullExec(db, dialect, "DELETE FROM model_download_originals WHERE id='schema-download'"))
++		require.NoError(t, db.QueryRow("SELECT digest FROM model_download_originals WHERE id='schema-download'").Scan(&zero))
++		require.Equal(t, strings.Repeat("0", 64), zero)
+ 	case "embedding-fact-down":
+ 		err = memoryFullExec(db, dialect, "INSERT INTO memory_embedding_originals(id,tenant_id,subject_id,item_id,model_id,recipe,item_publication_id,topic_publication_id,derived_inputs_json,derived_inputs_digest,actor_selector,policy_proof_json,model_proof_json,model_digest,space_digest,expected_dimensions,base_vector_revision,base_vector_present,input_json,input_sha256,digest,created_at) VALUES('invalid-schema-embedding',7,'unproven-schema-subject','missing-item','full-schema-model','schema-placeholder-not-authority','missing-publication','','{}','x','{}','{}','{}','x','x',1,0,FALSE,'{}',?,?,CURRENT_TIMESTAMP)", strings.Repeat("0", 64), strings.Repeat("0", 64))
+ 	case "raw-policy-ABA-down":
+diff --git a/internal/models/embedding/original_download.go b/internal/models/embedding/original_download.go
+new file mode 100644
+index 00000000..1da90e92
+--- /dev/null
++++ b/internal/models/embedding/original_download.go
+@@ -0,0 +1,129 @@
++package embedding
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"github.com/Tencent/WeKnora/internal/types"
++	ollamaapi "github.com/ollama/ollama/api"
++	"io"
++	"net/url"
++	"strings"
++)
++
++const OriginalOllamaDownloadRecipe = "model/ollama-pull/explicit-creation-v1"
++const OriginalOllamaPullWire = "ollama/api.PullRequest@v0.23.2/explicit-auth-v1"
++
++func NormalizeAuthoredDownloadDefinition(m *types.Model) error {
++	if m == nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if m.Source != types.ModelSourceLocal {
++		if m.Parameters.OriginalDownload != nil {
++			return fmt.Errorf("remote models cannot author local downloads")
++		}
++		return nil
++	}
++	if m.Parameters.OriginalDownload == nil {
++		base := strings.TrimRight(strings.TrimSpace(m.Parameters.BaseURL), "/")
++		remote := m.Name
++		if v := m.Parameters.ExtraConfig["remote_model_name"]; v != "" {
++			remote = v
++		}
++		r := &types.ModelOriginalDownloadDefinition{Version: 1, Recipe: OriginalOllamaDownloadRecipe, WireRecipe: OriginalOllamaPullWire, BaseURL: base, URL: base + "/api/pull", RemoteModel: remote, Auth: "optional-bearer", Headers: map[string]string{}, Stream: true, RequestTimeoutSeconds: 600, WatchIntervalMillis: 100, MaxResponseBytes: 8 * 1024 * 1024, RetryMaxRetries: 0}
++		for k, v := range m.Parameters.CustomHeaders {
++			r.Headers[k] = v
++		}
++		var err error
++		r.Digest, err = types.ModelOriginalDownloadDigest(r)
++		if err != nil {
++			return err
++		}
++		m.Parameters.OriginalDownload = r
++	}
++	r := m.Parameters.OriginalDownload
++	if err := ValidateOriginalDownloadDefinition(r); err != nil {
++		return err
++	}
++	remote := m.Name
++	if v := m.Parameters.ExtraConfig["remote_model_name"]; v != "" {
++		remote = v
++	}
++	if r.BaseURL != strings.TrimRight(strings.TrimSpace(m.Parameters.BaseURL), "/") || r.RemoteModel != remote {
++		return fmt.Errorf("download fields differ from explicitly authored model")
++	}
++	headers, _ := json.Marshal(m.Parameters.CustomHeaders)
++	captured, _ := json.Marshal(r.Headers)
++	// nil and empty authored header collections have the same no-header effect.
++	if len(m.Parameters.CustomHeaders) != 0 && string(headers) != string(captured) || len(m.Parameters.CustomHeaders) == 0 && len(r.Headers) != 0 {
++		return fmt.Errorf("download headers differ from author input")
++	}
++	return nil
++}
++func ValidateOriginalDownloadDefinition(r *types.ModelOriginalDownloadDefinition) error {
++	if r == nil || r.Version != 1 || r.Recipe != OriginalOllamaDownloadRecipe || r.WireRecipe != OriginalOllamaPullWire || r.RemoteModel == "" || r.Headers == nil || !r.Stream || r.RequestTimeoutSeconds <= 0 || r.RequestTimeoutSeconds > 600 || r.WatchIntervalMillis <= 0 || r.WatchIntervalMillis > 1000 || r.MaxResponseBytes <= 0 || r.MaxResponseBytes > 8*1024*1024 || r.RetryMaxRetries != 0 || r.Auth != "optional-bearer" {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	u, err := url.Parse(r.BaseURL)
++	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "ollama.com" || r.URL != strings.TrimRight(r.BaseURL, "/")+"/api/pull" {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	digest, err := types.ModelOriginalDownloadDigest(r)
++	if err != nil || digest != r.Digest {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	return nil
++}
++
++// The status publisher checks the exact request recipe and the complete reply.
++// A digest or caller-provided success label cannot replace these wire bytes.
++func ValidateOriginalDownloadTranscript(r *types.ModelOriginalDownloadDefinition, raw string, status types.ModelStatus) error {
++	if err := ValidateOriginalDownloadDefinition(r); err != nil {
++		return err
++	}
++	var t types.ModelOriginalDownloadTranscript
++	if json.Unmarshal([]byte(raw), &t) != nil {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	canonical, err := json.Marshal(t)
++	if err != nil || string(canonical) != raw {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	stream := r.Stream
++	expected, err := json.Marshal(ollamaapi.PullRequest{Model: r.RemoteModel, Stream: &stream})
++	if err != nil || !bytes.Equal(t.Request, expected) || len(t.Response) > r.MaxResponseBytes {
++		return types.ErrMemoryOriginalUnavailable
++	}
++	if status == types.ModelStatusDownloadFailed && t.Failure == "transport" {
++		return nil
++	}
++	success := false
++	valid := true
++	count := 0
++	decoder := json.NewDecoder(bytes.NewReader(t.Response))
++	for {
++		var wire struct {
++			ollamaapi.ProgressResponse
++			Error string `json:"error"`
++		}
++		err := decoder.Decode(&wire)
++		if err == io.EOF {
++			break
++		}
++		if err != nil || success || wire.Error != "" || wire.Status == "" || wire.Total < 0 || wire.Completed < 0 || wire.Total > 0 && wire.Completed > wire.Total {
++			valid = false
++			break
++		}
++		count++
++		if wire.Status == "success" {
++			success = true
++		}
++	}
++	if status == types.ModelStatusActive && t.Failure == "" && valid && success && count > 0 {
++		return nil
++	}
++	if status == types.ModelStatusDownloadFailed && t.Failure == "protocol" && (!valid || !success || count == 0) {
++		return nil
++	}
++	return types.ErrMemoryOriginalUnavailable
++}
+diff --git a/internal/shutdown/cleanup.go b/internal/shutdown/cleanup.go
+new file mode 100644
+index 00000000..24b7b9c4
+--- /dev/null
++++ b/internal/shutdown/cleanup.go
+@@ -0,0 +1,86 @@
++package shutdown
++
++import (
++	"context"
++	"log"
++	"sync"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++// ResourceCleaner is a resource cleaner that can be used to clean up resources
++type ResourceCleaner struct {
++	mu       sync.Mutex
++	cleanups []types.CleanupFunc
++}
++
++// NewResourceCleaner creates a new resource cleaner
++func NewResourceCleaner() interfaces.ResourceCleaner {
++	return &ResourceCleaner{
++		cleanups: make([]types.CleanupFunc, 0),
++	}
++}
++
++// Register registers a cleanup function
++// Note: the cleanup function will be executed in reverse order (the last registered will be executed first)
++func (c *ResourceCleaner) Register(cleanup types.CleanupFunc) {
++	if cleanup == nil {
++		return
++	}
++
++	c.mu.Lock()
++	defer c.mu.Unlock()
++
++	c.cleanups = append(c.cleanups, cleanup)
++}
++
++// RegisterWithName registers a cleanup function with a name, for logging tracking
++func (c *ResourceCleaner) RegisterWithName(name string, cleanup types.CleanupFunc) {
++	if cleanup == nil {
++		return
++	}
++
++	wrappedCleanup := func() error {
++		log.Printf("Cleaning up resource: %s", name)
++		err := cleanup()
++		if err != nil {
++			log.Printf("Error cleaning up resource %s: %v", name, err)
++		} else {
++			log.Printf("Successfully cleaned up resource: %s", name)
++		}
++		return err
++	}
++
++	c.Register(wrappedCleanup)
++}
++
++// Cleanup executes all cleanup functions
++// Even if a cleanup function fails, other cleanup functions will still be executed
++func (c *ResourceCleaner) Cleanup(ctx context.Context) (errs []error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++
++	// Execute cleanup functions in reverse order (the last registered will be executed first)
++	for i := len(c.cleanups) - 1; i >= 0; i-- {
++		select {
++		case <-ctx.Done():
++			errs = append(errs, ctx.Err())
++			return errs
++		default:
++			if err := c.cleanups[i](); err != nil {
++				errs = append(errs, err)
++			}
++		}
++	}
++
++	return errs
++}
++
++// Reset clears all registered cleanup functions
++func (c *ResourceCleaner) Reset() {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++
++	c.cleanups = make([]types.CleanupFunc, 0)
++}
+diff --git a/internal/shutdown/cleanup_test.go b/internal/shutdown/cleanup_test.go
+new file mode 100644
+index 00000000..2628c203
+--- /dev/null
++++ b/internal/shutdown/cleanup_test.go
+@@ -0,0 +1,19 @@
++package shutdown
++
++import (
++	"context"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++func TestOrdinaryResourceCleanerStillHonorsCanceledContext(t *testing.T) {
++	cleaner := NewResourceCleaner()
++	called := false
++	cleaner.Register(func() error { called = true; return nil })
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	errs := cleaner.Cleanup(ctx)
++	require.Len(t, errs, 1)
++	require.ErrorIs(t, errs[0], context.Canceled)
++	require.False(t, called)
++}
+diff --git a/internal/shutdown/http_resources.go b/internal/shutdown/http_resources.go
+new file mode 100644
+index 00000000..84539924
+--- /dev/null
++++ b/internal/shutdown/http_resources.go
+@@ -0,0 +1,21 @@
++package shutdown
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"time"
++)
++
++// HTTP drain and resource cleanup have separate cancellation ownership. An
++// expired drain cannot skip the mandatory cancel/join before dependent cleanup.
++// The caller passes its unchanged configured timeout for the fresh cleanup
++// phase. Mandatory owned joins still finish if that phase's context expires;
++// subsequent ordinary callbacks continue to obey ResourceCleaner's policy.
++func CleanupAfterHTTPDrain(drain context.Context, timeout time.Duration, models interfaces.ModelService, cleaner interfaces.ResourceCleaner) []error {
++	ctx, cancel := context.WithTimeout(context.WithoutCancel(drain), timeout)
++	defer cancel()
++	if life, ok := models.(interfaces.ModelOriginalDownloadLifecycle); ok {
++		life.StopOriginalDownloads()
++	}
++	return cleaner.Cleanup(ctx)
++}
+diff --git a/internal/types/interfaces/model_original_download.go b/internal/types/interfaces/model_original_download.go
+new file mode 100644
+index 00000000..c79104dc
+--- /dev/null
++++ b/internal/types/interfaces/model_original_download.go
+@@ -0,0 +1,22 @@
++package interfaces
++
++import (
++	"context"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++type ModelOriginalDownloadRead interface {
++	Context() context.Context
++	Snapshot() (*types.Model, *types.ModelOriginalProof, error)
++	Recheck() error
++	Close() error
++}
++type ModelOriginalDownloader interface {
++	BeginModelOriginalDownload(context.Context, string, types.ModelOriginalProof) (ModelOriginalDownloadRead, error)
++	CommitModelOriginalDownload(ModelOriginalDownloadRead, types.ModelStatus, string) (*types.ModelDownloadOriginal, error)
++}
++type ModelOriginalDownloadLifecycle interface {
++	StartOriginalDownloads()
++	StopOriginalDownloads()
++	WaitOriginalDownload(context.Context, string) error
++}
+diff --git a/internal/types/model.go b/internal/types/model.go
+index bdd4f3a6..0665f816 100644
+--- a/internal/types/model.go
++++ b/internal/types/model.go
+@@ -122,6 +122,7 @@ type EmbeddingParameters struct {
+ }
+ 
+ type ModelParameters struct {
++	OriginalDownload    *ModelOriginalDownloadDefinition  `yaml:"original_download,omitempty" json:"original_download,omitempty"`
+ 	OriginalEmbedding   *ModelOriginalEmbeddingDefinition `yaml:"original_embedding,omitempty" json:"original_embedding,omitempty"`
+ 	OriginalChat        *ModelOriginalChatDefinition      `yaml:"original_chat,omitempty" json:"original_chat,omitempty"`
+ 	BaseURL             string                            `yaml:"base_url"             json:"base_url"`
+diff --git a/internal/types/model_original_download.go b/internal/types/model_original_download.go
+new file mode 100644
+index 00000000..545f552d
+--- /dev/null
++++ b/internal/types/model_original_download.go
+@@ -0,0 +1,55 @@
++package types
++
++import (
++	"encoding/json"
++	"time"
++)
++
++// A creation-authorized download recipe, never a running-model grant.
++type ModelOriginalDownloadDefinition struct {
++	Version                                                      int
++	Recipe, WireRecipe, BaseURL, URL, RemoteModel, Auth          string
++	Headers                                                      map[string]string
++	Stream                                                       bool
++	RequestTimeoutSeconds, WatchIntervalMillis, MaxResponseBytes int
++	RetryMaxRetries                                              int
++	Digest                                                       string
++}
++
++func ModelOriginalDownloadDigest(r *ModelOriginalDownloadDefinition) (string, error) {
++	if r == nil {
++		return "", ErrMemoryOriginalUnavailable
++	}
++	copy := *r
++	copy.Digest = ""
++	wire, err := json.Marshal(copy)
++	return MemoryOriginalBytesDigest(wire), err
++}
++
++// TranscriptJSON records the exact transmitted request and received response,
++// without credentials. Body152 captures it in the same state-publication TX.
++type ModelDownloadOriginal struct {
++	ID                                                         string `gorm:"primaryKey"`
++	ModelID                                                    string
++	TenantID                                                   uint64
++	InputStateID, InputProofDigest, DefinitionID, CredentialID string
++	OutputStateID, OutputStateDigest, RecipeDigest             string
++	Status                                                     ModelStatus
++	TranscriptJSON, TranscriptDigest, AuthorSelector, Digest   string
++	CreatedAt                                                  time.Time
++}
++
++func (ModelDownloadOriginal) TableName() string { return "model_download_originals" }
++
++// []byte preserves exact wire bytes in a canonical, credential-free envelope.
++type ModelOriginalDownloadTranscript struct {
++	Request, Response []byte
++	Failure           string
++}
++
++func ModelDownloadOriginalDigest(value ModelDownloadOriginal) (string, error) {
++	value.Digest = ""
++	value.CreatedAt = value.CreatedAt.UTC()
++	wire, err := json.Marshal(value)
++	return MemoryOriginalBytesDigest(wire), err
++}
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
+index 7560cb3c..049b42a4 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_derived_originals.fragment.sql
+@@ -1,6 +1,23 @@
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), present INTEGER NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql
+index de28bb5e..bb358e5e 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.down.sql
+@@ -1,6 +1,6 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+ CREATE TEMP TABLE all_memory_original_down_guard(value INTEGER CHECK(value=0));
+-INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
++INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
+ DROP TABLE all_memory_original_down_guard;
+ -- Merge this all-facts guard into the GLOBAL ANY-DROP guard before any migration drop.
+ CREATE TEMP TABLE memory_query_embedding_down_guard(value INTEGER CHECK(value=0));
+@@ -26,8 +26,12 @@ DROP TABLE memory_embedding_vector_controls;
+ 
+ 
+ CREATE TEMP TABLE model_original_down_guard(v INTEGER CHECK(v=0));
+-INSERT INTO model_original_down_guard SELECT EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts);
++INSERT INTO model_original_down_guard SELECT EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts);
+ DROP TABLE model_original_down_guard;
++DROP TRIGGER model_download_originals_no_replace;
++DROP TRIGGER model_download_originals_no_delete;
++DROP TRIGGER model_download_originals_no_update;
++DROP TABLE model_download_originals;
+ ALTER TABLE memory_original_executions DROP COLUMN model_proof_json;
+ DROP TRIGGER model_original_insert;
+ DROP TRIGGER model_original_update;
+diff --git a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+index f37ac2a3..e49a4f7f 100644
+--- a/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/sqlite/000075_memory_original_admissions.up.sql
+@@ -148,6 +148,23 @@ CREATE TRIGGER model_original_body_receipts_no_replace BEFORE INSERT ON model_or
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), present INTEGER NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+@@ -320,3 +337,9 @@ CREATE TRIGGER memory_query_embedding_originals_replace BEFORE INSERT ON memory_
+ CREATE TRIGGER memory_query_embedding_receipts_update BEFORE UPDATE ON memory_query_embedding_receipts BEGIN SELECT RAISE(ABORT,'query embedding facts are immutable');END;
+ CREATE TRIGGER memory_query_embedding_receipts_delete BEFORE DELETE ON memory_query_embedding_receipts BEGIN SELECT RAISE(ABORT,'query embedding facts are immutable');END;
+ CREATE TRIGGER memory_query_embedding_receipts_replace BEFORE INSERT ON memory_query_embedding_receipts WHEN EXISTS(SELECT 1 FROM memory_query_embedding_receipts WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'query embedding facts cannot be replaced');END;
++
++-- Creation-request download result and state are one original transaction.
++CREATE TABLE model_download_originals(id TEXT PRIMARY KEY,model_id TEXT NOT NULL,tenant_id INTEGER NOT NULL,input_state_id TEXT NOT NULL REFERENCES model_state_originals(id),input_proof_digest TEXT NOT NULL CHECK(length(input_proof_digest)=64),definition_id TEXT NOT NULL REFERENCES model_definition_originals(id),credential_id TEXT NOT NULL REFERENCES model_credential_originals(id),output_state_id TEXT NOT NULL UNIQUE REFERENCES model_state_originals(id),output_state_digest TEXT NOT NULL CHECK(length(output_state_digest)=64),recipe_digest TEXT NOT NULL CHECK(length(recipe_digest)=64),status TEXT NOT NULL CHECK(status IN('active','download_failed')),transcript_json TEXT NOT NULL,transcript_digest TEXT NOT NULL CHECK(length(transcript_digest)=64),author_selector TEXT NOT NULL,digest TEXT NOT NULL CHECK(length(digest)=64),created_at DATETIME NOT NULL);
++CREATE TRIGGER model_download_originals_no_update BEFORE UPDATE ON model_download_originals BEGIN SELECT RAISE(ABORT,'download originals are immutable'); END;
++CREATE TRIGGER model_download_originals_no_delete BEFORE DELETE ON model_download_originals BEGIN SELECT RAISE(ABORT,'download originals are immutable'); END;
++CREATE TRIGGER model_download_originals_no_replace BEFORE INSERT ON model_download_originals WHEN EXISTS(SELECT 1 FROM model_download_originals WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'download originals cannot be replaced'); END;
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
+index 796a5b07..fbad6ad1 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_derived_originals.fragment.sql
+@@ -1,6 +1,23 @@
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), present BOOLEAN NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision BIGINT NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql
+index c34b414f..d938d1fa 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.down.sql
+@@ -1,5 +1,5 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
+ -- Merge both fact relations into the GLOBAL ANY-DROP guard before any migration drop.
+ DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'query embedding original facts require an explicit durable restore/export path';END IF;END $$;
+ DROP TABLE memory_query_embedding_receipts;
+@@ -17,7 +17,8 @@ DROP TABLE memory_embedding_originals;
+ DROP TABLE memory_embedding_vector_controls;
+ 
+ 
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) THEN RAISE EXCEPTION 'observed model originals prevent DOWN'; END IF; END $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) THEN RAISE EXCEPTION 'observed model originals prevent DOWN'; END IF; END $$;
++DROP TABLE model_download_originals;
+ ALTER TABLE memory_original_executions DROP COLUMN model_proof_json;
+ DROP TRIGGER model_original_insert ON models;
+ DROP TRIGGER model_original_update ON models;
+diff --git a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+index 09ef7ad2..c6a1343c 100644
+--- a/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
++++ b/migrations/pending/memory_original_admissions/versioned/000156_memory_original_admissions.up.sql
+@@ -160,6 +160,23 @@ CREATE TRIGGER model_original_body_receipts_immutable BEFORE UPDATE OR DELETE ON
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), present BOOLEAN NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision BIGINT NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+@@ -279,3 +296,7 @@ CREATE TABLE memory_query_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGI
+ CREATE TABLE memory_query_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_query_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
+ CREATE TRIGGER memory_query_embedding_originals_immutable BEFORE UPDATE OR DELETE ON memory_query_embedding_originals FOR EACH ROW EXECUTE FUNCTION memory_original_admission_immutable();
+ CREATE TRIGGER memory_query_embedding_receipts_immutable BEFORE UPDATE OR DELETE ON memory_query_embedding_receipts FOR EACH ROW EXECUTE FUNCTION memory_original_admission_immutable();
++
++-- Creation-request download result and state are one original transaction.
++CREATE TABLE model_download_originals(id TEXT PRIMARY KEY,model_id TEXT NOT NULL,tenant_id BIGINT NOT NULL,input_state_id TEXT NOT NULL REFERENCES model_state_originals(id),input_proof_digest TEXT NOT NULL CHECK(length(input_proof_digest)=64),definition_id TEXT NOT NULL REFERENCES model_definition_originals(id),credential_id TEXT NOT NULL REFERENCES model_credential_originals(id),output_state_id TEXT NOT NULL UNIQUE REFERENCES model_state_originals(id),output_state_digest TEXT NOT NULL CHECK(length(output_state_digest)=64),recipe_digest TEXT NOT NULL CHECK(length(recipe_digest)=64),status TEXT NOT NULL CHECK(status IN('active','download_failed')),transcript_json TEXT NOT NULL,transcript_digest TEXT NOT NULL CHECK(length(transcript_digest)=64),author_selector TEXT NOT NULL,digest TEXT NOT NULL CHECK(length(digest)=64),created_at TIMESTAMPTZ NOT NULL);
++CREATE TRIGGER model_download_originals_immutable BEFORE UPDATE OR DELETE ON model_download_originals FOR EACH ROW EXECUTE FUNCTION model_original_immutable();
+diff --git a/migrations/pending/model_originals/sqlite/000075_model_originals.down.fragment.sql b/migrations/pending/model_originals/sqlite/000075_model_originals.down.fragment.sql
+index 448996cf..ee6b9003 100644
+--- a/migrations/pending/model_originals/sqlite/000075_model_originals.down.fragment.sql
++++ b/migrations/pending/model_originals/sqlite/000075_model_originals.down.fragment.sql
+@@ -1,6 +1,10 @@
+ CREATE TEMP TABLE model_original_down_guard(v INTEGER CHECK(v=0));
+-INSERT INTO model_original_down_guard SELECT EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts);
++INSERT INTO model_original_down_guard SELECT EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts);
+ DROP TABLE model_original_down_guard;
++DROP TRIGGER model_download_originals_no_replace;
++DROP TRIGGER model_download_originals_no_delete;
++DROP TRIGGER model_download_originals_no_update;
++DROP TABLE model_download_originals;
+ ALTER TABLE memory_original_executions DROP COLUMN model_proof_json;
+ DROP TRIGGER model_original_insert;
+ DROP TRIGGER model_original_update;
+diff --git a/migrations/pending/model_originals/sqlite/000075_model_originals.up.fragment.sql b/migrations/pending/model_originals/sqlite/000075_model_originals.up.fragment.sql
+index af286637..a14a9838 100644
+--- a/migrations/pending/model_originals/sqlite/000075_model_originals.up.fragment.sql
++++ b/migrations/pending/model_originals/sqlite/000075_model_originals.up.fragment.sql
+@@ -25,3 +25,9 @@ CREATE TRIGGER model_state_originals_no_replace BEFORE INSERT ON model_state_ori
+ CREATE TRIGGER model_original_body_receipts_no_update BEFORE UPDATE ON model_original_body_receipts BEGIN SELECT RAISE(ABORT,'model original facts are immutable'); END;
+ CREATE TRIGGER model_original_body_receipts_no_delete BEFORE DELETE ON model_original_body_receipts BEGIN SELECT RAISE(ABORT,'model original facts are immutable'); END;
+ CREATE TRIGGER model_original_body_receipts_no_replace BEFORE INSERT ON model_original_body_receipts WHEN EXISTS(SELECT 1 FROM model_original_body_receipts WHERE origin_id=NEW.origin_id) BEGIN SELECT RAISE(ABORT,'model facts cannot be replaced'); END;
++
++-- Creation-request download result and state are one original transaction.
++CREATE TABLE model_download_originals(id TEXT PRIMARY KEY,model_id TEXT NOT NULL,tenant_id INTEGER NOT NULL,input_state_id TEXT NOT NULL REFERENCES model_state_originals(id),input_proof_digest TEXT NOT NULL CHECK(length(input_proof_digest)=64),definition_id TEXT NOT NULL REFERENCES model_definition_originals(id),credential_id TEXT NOT NULL REFERENCES model_credential_originals(id),output_state_id TEXT NOT NULL UNIQUE REFERENCES model_state_originals(id),output_state_digest TEXT NOT NULL CHECK(length(output_state_digest)=64),recipe_digest TEXT NOT NULL CHECK(length(recipe_digest)=64),status TEXT NOT NULL CHECK(status IN('active','download_failed')),transcript_json TEXT NOT NULL,transcript_digest TEXT NOT NULL CHECK(length(transcript_digest)=64),author_selector TEXT NOT NULL,digest TEXT NOT NULL CHECK(length(digest)=64),created_at DATETIME NOT NULL);
++CREATE TRIGGER model_download_originals_no_update BEFORE UPDATE ON model_download_originals BEGIN SELECT RAISE(ABORT,'download originals are immutable'); END;
++CREATE TRIGGER model_download_originals_no_delete BEFORE DELETE ON model_download_originals BEGIN SELECT RAISE(ABORT,'download originals are immutable'); END;
++CREATE TRIGGER model_download_originals_no_replace BEFORE INSERT ON model_download_originals WHEN EXISTS(SELECT 1 FROM model_download_originals WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'download originals cannot be replaced'); END;
+diff --git a/migrations/pending/model_originals/versioned/000156_model_originals.down.fragment.sql b/migrations/pending/model_originals/versioned/000156_model_originals.down.fragment.sql
+index 293e1ea7..6c5d2b3e 100644
+--- a/migrations/pending/model_originals/versioned/000156_model_originals.down.fragment.sql
++++ b/migrations/pending/model_originals/versioned/000156_model_originals.down.fragment.sql
+@@ -1,4 +1,5 @@
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) THEN RAISE EXCEPTION 'observed model originals prevent DOWN'; END IF; END $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) THEN RAISE EXCEPTION 'observed model originals prevent DOWN'; END IF; END $$;
++DROP TABLE model_download_originals;
+ ALTER TABLE memory_original_executions DROP COLUMN model_proof_json;
+ DROP TRIGGER model_original_insert ON models;
+ DROP TRIGGER model_original_update ON models;
+diff --git a/migrations/pending/model_originals/versioned/000156_model_originals.up.fragment.sql b/migrations/pending/model_originals/versioned/000156_model_originals.up.fragment.sql
+index b6f3a64c..503c4e97 100644
+--- a/migrations/pending/model_originals/versioned/000156_model_originals.up.fragment.sql
++++ b/migrations/pending/model_originals/versioned/000156_model_originals.up.fragment.sql
+@@ -29,3 +29,7 @@ CREATE TRIGGER model_definition_originals_immutable BEFORE UPDATE OR DELETE ON m
+ CREATE TRIGGER model_credential_originals_immutable BEFORE UPDATE OR DELETE ON model_credential_originals FOR EACH ROW EXECUTE FUNCTION model_original_immutable();
+ CREATE TRIGGER model_state_originals_immutable BEFORE UPDATE OR DELETE ON model_state_originals FOR EACH ROW EXECUTE FUNCTION model_original_immutable();
+ CREATE TRIGGER model_original_body_receipts_immutable BEFORE UPDATE OR DELETE ON model_original_body_receipts FOR EACH ROW EXECUTE FUNCTION model_original_immutable();
++
++-- Creation-request download result and state are one original transaction.
++CREATE TABLE model_download_originals(id TEXT PRIMARY KEY,model_id TEXT NOT NULL,tenant_id BIGINT NOT NULL,input_state_id TEXT NOT NULL REFERENCES model_state_originals(id),input_proof_digest TEXT NOT NULL CHECK(length(input_proof_digest)=64),definition_id TEXT NOT NULL REFERENCES model_definition_originals(id),credential_id TEXT NOT NULL REFERENCES model_credential_originals(id),output_state_id TEXT NOT NULL UNIQUE REFERENCES model_state_originals(id),output_state_digest TEXT NOT NULL CHECK(length(output_state_digest)=64),recipe_digest TEXT NOT NULL CHECK(length(recipe_digest)=64),status TEXT NOT NULL CHECK(status IN('active','download_failed')),transcript_json TEXT NOT NULL,transcript_digest TEXT NOT NULL CHECK(length(transcript_digest)=64),author_selector TEXT NOT NULL,digest TEXT NOT NULL CHECK(length(digest)=64),created_at TIMESTAMPTZ NOT NULL);
++CREATE TRIGGER model_download_originals_immutable BEFORE UPDATE OR DELETE ON model_download_originals FOR EACH ROW EXECUTE FUNCTION model_original_immutable();
+diff --git a/migrations/sqlite/000075_memory_original_protocols.down.sql b/migrations/sqlite/000075_memory_original_protocols.down.sql
+index de28bb5e..bb358e5e 100644
+--- a/migrations/sqlite/000075_memory_original_protocols.down.sql
++++ b/migrations/sqlite/000075_memory_original_protocols.down.sql
+@@ -1,6 +1,6 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+ CREATE TEMP TABLE all_memory_original_down_guard(value INTEGER CHECK(value=0));
+-INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
++INSERT INTO all_memory_original_down_guard SELECT EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts);
+ DROP TABLE all_memory_original_down_guard;
+ -- Merge this all-facts guard into the GLOBAL ANY-DROP guard before any migration drop.
+ CREATE TEMP TABLE memory_query_embedding_down_guard(value INTEGER CHECK(value=0));
+@@ -26,8 +26,12 @@ DROP TABLE memory_embedding_vector_controls;
+ 
+ 
+ CREATE TEMP TABLE model_original_down_guard(v INTEGER CHECK(v=0));
+-INSERT INTO model_original_down_guard SELECT EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts);
++INSERT INTO model_original_down_guard SELECT EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts);
+ DROP TABLE model_original_down_guard;
++DROP TRIGGER model_download_originals_no_replace;
++DROP TRIGGER model_download_originals_no_delete;
++DROP TRIGGER model_download_originals_no_update;
++DROP TABLE model_download_originals;
+ ALTER TABLE memory_original_executions DROP COLUMN model_proof_json;
+ DROP TRIGGER model_original_insert;
+ DROP TRIGGER model_original_update;
+diff --git a/migrations/sqlite/000075_memory_original_protocols.up.sql b/migrations/sqlite/000075_memory_original_protocols.up.sql
+index f37ac2a3..e49a4f7f 100644
+--- a/migrations/sqlite/000075_memory_original_protocols.up.sql
++++ b/migrations/sqlite/000075_memory_original_protocols.up.sql
+@@ -148,6 +148,23 @@ CREATE TRIGGER model_original_body_receipts_no_replace BEFORE INSERT ON model_or
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), present INTEGER NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+@@ -320,3 +337,9 @@ CREATE TRIGGER memory_query_embedding_originals_replace BEFORE INSERT ON memory_
+ CREATE TRIGGER memory_query_embedding_receipts_update BEFORE UPDATE ON memory_query_embedding_receipts BEGIN SELECT RAISE(ABORT,'query embedding facts are immutable');END;
+ CREATE TRIGGER memory_query_embedding_receipts_delete BEFORE DELETE ON memory_query_embedding_receipts BEGIN SELECT RAISE(ABORT,'query embedding facts are immutable');END;
+ CREATE TRIGGER memory_query_embedding_receipts_replace BEFORE INSERT ON memory_query_embedding_receipts WHEN EXISTS(SELECT 1 FROM memory_query_embedding_receipts WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'query embedding facts cannot be replaced');END;
++
++-- Creation-request download result and state are one original transaction.
++CREATE TABLE model_download_originals(id TEXT PRIMARY KEY,model_id TEXT NOT NULL,tenant_id INTEGER NOT NULL,input_state_id TEXT NOT NULL REFERENCES model_state_originals(id),input_proof_digest TEXT NOT NULL CHECK(length(input_proof_digest)=64),definition_id TEXT NOT NULL REFERENCES model_definition_originals(id),credential_id TEXT NOT NULL REFERENCES model_credential_originals(id),output_state_id TEXT NOT NULL UNIQUE REFERENCES model_state_originals(id),output_state_digest TEXT NOT NULL CHECK(length(output_state_digest)=64),recipe_digest TEXT NOT NULL CHECK(length(recipe_digest)=64),status TEXT NOT NULL CHECK(status IN('active','download_failed')),transcript_json TEXT NOT NULL,transcript_digest TEXT NOT NULL CHECK(length(transcript_digest)=64),author_selector TEXT NOT NULL,digest TEXT NOT NULL CHECK(length(digest)=64),created_at DATETIME NOT NULL);
++CREATE TRIGGER model_download_originals_no_update BEFORE UPDATE ON model_download_originals BEGIN SELECT RAISE(ABORT,'download originals are immutable'); END;
++CREATE TRIGGER model_download_originals_no_delete BEFORE DELETE ON model_download_originals BEGIN SELECT RAISE(ABORT,'download originals are immutable'); END;
++CREATE TRIGGER model_download_originals_no_replace BEFORE INSERT ON model_download_originals WHEN EXISTS(SELECT 1 FROM model_download_originals WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'download originals cannot be replaced'); END;
+diff --git a/migrations/versioned/000156_memory_original_protocols.down.sql b/migrations/versioned/000156_memory_original_protocols.down.sql
+index c34b414f..d938d1fa 100644
+--- a/migrations/versioned/000156_memory_original_protocols.down.sql
++++ b/migrations/versioned/000156_memory_original_protocols.down.sql
+@@ -1,5 +1,5 @@
+ -- Refuse retained facts or observed control mutations before any destructive DOWN.
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_original_admissions) OR EXISTS(SELECT 1 FROM memory_original_executions) OR EXISTS(SELECT 1 FROM memory_original_checkpoints) OR EXISTS(SELECT 1 FROM memory_original_derivations) OR EXISTS(SELECT 1 FROM memory_original_dispatches) OR EXISTS(SELECT 1 FROM memory_policy_originals) OR EXISTS(SELECT 1 FROM memory_policy_body_receipts) OR EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) OR EXISTS(SELECT 1 FROM memory_derived_controls) OR EXISTS(SELECT 1 FROM memory_derived_publications) OR EXISTS(SELECT 1 FROM memory_derived_body_receipts) OR EXISTS(SELECT 1 FROM memory_generated_originals) OR EXISTS(SELECT 1 FROM memory_generated_receipts) OR EXISTS(SELECT 1 FROM memory_generated_body_receipts) OR EXISTS(SELECT 1 FROM memory_policy_control_versions WHERE revision>1) OR EXISTS(SELECT 1 FROM model_original_control_versions WHERE definition_revision>1 OR credential_revision>1 OR state_epoch>1) OR EXISTS(SELECT 1 FROM memory_derived_collections WHERE revision>1) OR EXISTS(SELECT 1 FROM memory_embedding_rank_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_originals) OR EXISTS(SELECT 1 FROM memory_embedding_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_body_receipts) OR EXISTS(SELECT 1 FROM memory_embedding_vector_controls WHERE revision>0) OR EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'retained original facts or control mutations prevent DOWN'; END IF; END; $$;
+ -- Merge both fact relations into the GLOBAL ANY-DROP guard before any migration drop.
+ DO $$ BEGIN IF EXISTS(SELECT 1 FROM memory_query_embedding_originals) OR EXISTS(SELECT 1 FROM memory_query_embedding_receipts) THEN RAISE EXCEPTION 'query embedding original facts require an explicit durable restore/export path';END IF;END $$;
+ DROP TABLE memory_query_embedding_receipts;
+@@ -17,7 +17,8 @@ DROP TABLE memory_embedding_originals;
+ DROP TABLE memory_embedding_vector_controls;
+ 
+ 
+-DO $$ BEGIN IF EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) THEN RAISE EXCEPTION 'observed model originals prevent DOWN'; END IF; END $$;
++DO $$ BEGIN IF EXISTS(SELECT 1 FROM model_download_originals) OR EXISTS(SELECT 1 FROM model_definition_originals) OR EXISTS(SELECT 1 FROM model_credential_originals) OR EXISTS(SELECT 1 FROM model_state_originals) OR EXISTS(SELECT 1 FROM model_original_body_receipts) THEN RAISE EXCEPTION 'observed model originals prevent DOWN'; END IF; END $$;
++DROP TABLE model_download_originals;
+ ALTER TABLE memory_original_executions DROP COLUMN model_proof_json;
+ DROP TRIGGER model_original_insert ON models;
+ DROP TRIGGER model_original_update ON models;
+diff --git a/migrations/versioned/000156_memory_original_protocols.up.sql b/migrations/versioned/000156_memory_original_protocols.up.sql
+index 09ef7ad2..c6a1343c 100644
+--- a/migrations/versioned/000156_memory_original_protocols.up.sql
++++ b/migrations/versioned/000156_memory_original_protocols.up.sql
+@@ -160,6 +160,23 @@ CREATE TRIGGER model_original_body_receipts_immutable BEFORE UPDATE OR DELETE ON
+ -- Append to the reserved original migration; never activate standalone.
+ CREATE TABLE memory_derived_collections (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), PRIMARY KEY(tenant_id,subject_id));
+ CREATE TABLE memory_derived_controls (tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>0), present BOOLEAN NOT NULL, PRIMARY KEY(tenant_id,subject_id,object_kind,object_id));
++-- Existing physical rows begin at UNKNOWN revision 1. Inventory identities only:
++-- no legacy material is authored, published or given a body receipt.
++INSERT INTO memory_derived_collections(tenant_id,subject_id,revision)
++SELECT tenant_id,subject_id,1 FROM (
++ SELECT tenant_id,subject_id FROM memory_subjects
++ UNION SELECT tenant_id,subject_id FROM memory_items
++ UNION SELECT tenant_id,subject_id FROM memory_topic_stats
++ UNION SELECT tenant_id,subject_id FROM memory_tombstones
++) legacy_scopes;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_item',id,1,TRUE FROM memory_items;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_topic',id,1,TRUE FROM memory_topic_stats;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_tombstone',id,1,TRUE FROM memory_tombstones;
++INSERT INTO memory_derived_controls(tenant_id,subject_id,object_kind,object_id,revision,present)
++SELECT tenant_id,subject_id,'memory_block',id,1,TRUE FROM memory_subjects WHERE block_text<>'' OR item_count<>0;
+ CREATE TABLE memory_derived_publications (
+  id TEXT PRIMARY KEY, tenant_id BIGINT NOT NULL, subject_id TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL,
+  revision BIGINT NOT NULL CHECK(revision>0), producer_kind TEXT NOT NULL, derivation_id TEXT NOT NULL DEFAULT '',
+@@ -279,3 +296,7 @@ CREATE TABLE memory_query_embedding_originals(id TEXT PRIMARY KEY,tenant_id BIGI
+ CREATE TABLE memory_query_embedding_receipts(id TEXT PRIMARY KEY,original_id TEXT NOT NULL UNIQUE REFERENCES memory_query_embedding_originals(id),original_digest TEXT NOT NULL,tenant_id BIGINT NOT NULL,subject_id TEXT NOT NULL,model_id TEXT NOT NULL,space_digest TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_json TEXT NOT NULL,vector_sha256 TEXT NOT NULL,digest TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
+ CREATE TRIGGER memory_query_embedding_originals_immutable BEFORE UPDATE OR DELETE ON memory_query_embedding_originals FOR EACH ROW EXECUTE FUNCTION memory_original_admission_immutable();
+ CREATE TRIGGER memory_query_embedding_receipts_immutable BEFORE UPDATE OR DELETE ON memory_query_embedding_receipts FOR EACH ROW EXECUTE FUNCTION memory_original_admission_immutable();
++
++-- Creation-request download result and state are one original transaction.
++CREATE TABLE model_download_originals(id TEXT PRIMARY KEY,model_id TEXT NOT NULL,tenant_id BIGINT NOT NULL,input_state_id TEXT NOT NULL REFERENCES model_state_originals(id),input_proof_digest TEXT NOT NULL CHECK(length(input_proof_digest)=64),definition_id TEXT NOT NULL REFERENCES model_definition_originals(id),credential_id TEXT NOT NULL REFERENCES model_credential_originals(id),output_state_id TEXT NOT NULL UNIQUE REFERENCES model_state_originals(id),output_state_digest TEXT NOT NULL CHECK(length(output_state_digest)=64),recipe_digest TEXT NOT NULL CHECK(length(recipe_digest)=64),status TEXT NOT NULL CHECK(status IN('active','download_failed')),transcript_json TEXT NOT NULL,transcript_digest TEXT NOT NULL CHECK(length(transcript_digest)=64),author_selector TEXT NOT NULL,digest TEXT NOT NULL CHECK(length(digest)=64),created_at TIMESTAMPTZ NOT NULL);
++CREATE TRIGGER model_download_originals_immutable BEFORE UPDATE OR DELETE ON model_download_originals FOR EACH ROW EXECUTE FUNCTION model_original_immutable();

@@ -1,0 +1,2161 @@
+diff --git a/internal/application/access/nextcloud_source_lineage.go b/internal/application/access/nextcloud_source_lineage.go
+index 7c8cc2f0de73acf9198dd8ff1a02637159a82419..364517a1a7b1d9a0aba07c8bd3258f4754b380c4 100644
+--- a/internal/application/access/nextcloud_source_lineage.go
++++ b/internal/application/access/nextcloud_source_lineage.go
+@@ -57,6 +57,35 @@ func NewNextcloudSourceLineageGuard(snapshots NextcloudLineageSnapshotLookup, kb
+ }
+ 
+ func (g *NextcloudSourceLineageGuard) Check(ctx context.Context, lineage *types.SourceLineage, scope LineageReadScope) error {
++	return g.checkAndCaptureLocal(ctx, lineage, scope, nil)
++}
++
++// This capability is made only after the real remote checks succeed. It retains
++// their exact caller, directory and complete source set for a later local check;
++// neither a saved lineage DTO nor a nil/default value can manufacture it.
++type NextcloudSourceLocalRead struct {
++	guard      *NextcloudSourceLineageGuard
++	ctx        context.Context
++	caller     types.Caller
++	principal  types.Principal
++	directory  *types.DirectoryIdentity
++	lineage    *types.SourceLineage
++	targets    types.SearchTargets
++	controlled map[string]uint64
++	scope      LineageReadScope
++}
++
++func (g *NextcloudSourceLineageGuard) CheckAndCaptureLocal(ctx context.Context, lineage *types.SourceLineage, scope LineageReadScope) (*NextcloudSourceLocalRead, error) {
++	var local *NextcloudSourceLocalRead
++	if err := g.checkAndCaptureLocal(ctx, lineage, scope, &local); err != nil {
++		return nil, err
++	}
++	if local == nil {
++		return nil, ErrNextcloudPublicationUnavailable
++	}
++	return local, nil
++}
++func (g *NextcloudSourceLineageGuard) checkAndCaptureLocal(ctx context.Context, lineage *types.SourceLineage, scope LineageReadScope, capturedLocal **NextcloudSourceLocalRead) error {
+ 	if lineage.RequireComplete() != nil {
+ 		return ErrNextcloudPublicationDenied
+ 	}
+@@ -138,30 +167,30 @@ func (g *NextcloudSourceLineageGuard) Check(ctx context.Context, lineage *types.
+ 			return ErrNextcloudPublicationDenied
+ 		}
+ 	}
+-	// Repeat grants after remote checks; no operation-wide/context grant cache
+-	// may extend a revoked org share, shared Agent or directory permission.
+-	if err := g.checkCurrentKBReads(ctx, caller, targets, controlled, scope); err != nil {
++	// Preserve the original post-remote suffix; capture only after it succeeds.
++	local := &NextcloudSourceLocalRead{guard: g, ctx: ctx, caller: caller, principal: principal, directory: checkedDirectory, lineage: lineage, targets: targets, controlled: controlled, scope: scope}
++	if err := local.recheckAfterRemote(); err != nil {
+ 		return err
+ 	}
+-	if len(lineage.Sources) == 0 {
+-		return g.recheckCurrentReadActor(ctx)
+-	}
+-	currentDirectory, err := g.publication.currentDirectoryIdentity(ctx)
+-	if err != nil {
+-		return err
+-	}
+-	if currentDirectory.ID != checkedDirectory.ID || currentDirectory.DirectoryID != checkedDirectory.DirectoryID ||
+-		currentDirectory.ObjectGUID != checkedDirectory.ObjectGUID || *currentDirectory.UserID != *checkedDirectory.UserID {
+-		return ErrNextcloudPublicationDenied
+-	}
+-	matches, err := g.snapshots.RecheckNextcloudSourceLineage(ctx, lineage)
+-	if err != nil {
+-		return fmt.Errorf("%w: final coherent lineage snapshot", ErrNextcloudPublicationUnavailable)
+-	}
+-	if !matches {
+-		return ErrNextcloudPublicationDenied
++	if capturedLocal != nil {
++		copyLineage := *lineage
++		copyLineage.Sources = append([]types.SourceIdentity{}, lineage.Sources...)
++		local.lineage = &copyLineage
++		copyTargets := types.SearchTargets{}
++		for _, target := range targets {
++			if target == nil {
++				return ErrNextcloudPublicationDenied
++			}
++			copyTarget := *target
++			copyTargets = append(copyTargets, &copyTarget)
++		}
++		local.targets = copyTargets
++		copyScope := scope
++		copyScope.Targets = nil
++		local.scope = copyScope
++		*capturedLocal = local
+ 	}
+-	return g.recheckCurrentReadActor(ctx)
++	return nil
+ }
+ 
+ // Resolve performs both trusted identity resolution and current authorization.
+@@ -292,3 +321,100 @@ func (g *NextcloudSourceLineageGuard) checkCurrentKBReads(ctx context.Context, c
+ 	}
+ 	return nil
+ }
++
++// Recheck accepts no caller/source arguments. Its guard is the same instance
++// that performed remote checks (the personal factory binds it to the same TX).
++// It does only local metadata authorization; no Nextcloud/path call follows it.
++func (local *NextcloudSourceLocalRead) recheckAfterRemote() error {
++	if local == nil || local.guard == nil || local.ctx == nil || local.lineage == nil {
++		return ErrNextcloudPublicationUnavailable
++	}
++	ctx := local.ctx
++	g := local.guard
++	lineage := local.lineage
++	caller := local.caller
++	targets := local.targets
++	controlled := local.controlled
++	scope := local.scope
++	checkedDirectory := local.directory
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	actualCaller, callerOK := ctx.Value(types.CallerContextKey).(types.Caller)
++	actualPrincipal, principalOK := ctx.Value(types.PrincipalContextKey).(types.Principal)
++	if !callerOK || !principalOK || actualCaller != caller || actualPrincipal != local.principal || lineage.RequireComplete() != nil {
++		return ErrNextcloudPublicationDenied
++	}
++	// Repeat grants after remote checks; no operation-wide/context grant cache
++	// may extend a revoked org share, shared Agent or directory permission.
++	if err := g.checkCurrentKBReads(ctx, caller, targets, controlled, scope); err != nil {
++		return err
++	}
++	if len(lineage.Sources) == 0 {
++		return g.recheckCurrentReadActor(ctx)
++	}
++	currentDirectory, err := g.publication.currentDirectoryIdentity(ctx)
++	if err != nil {
++		return err
++	}
++	if currentDirectory.ID != checkedDirectory.ID || currentDirectory.DirectoryID != checkedDirectory.DirectoryID ||
++		currentDirectory.ObjectGUID != checkedDirectory.ObjectGUID || *currentDirectory.UserID != *checkedDirectory.UserID {
++		return ErrNextcloudPublicationDenied
++	}
++	matches, err := g.snapshots.RecheckNextcloudSourceLineage(ctx, lineage)
++	if err != nil {
++		return fmt.Errorf("%w: final coherent lineage snapshot", ErrNextcloudPublicationUnavailable)
++	}
++	if !matches {
++		return ErrNextcloudPublicationDenied
++	}
++	return g.recheckCurrentReadActor(ctx)
++}
++
++// Only the actual snapshot repository implements this projection. It repeats
++// coherent publication/control predicates without hydrating Knowledge bodies.
++type NextcloudLineageMetadataSnapshotLookup interface {
++	RecheckNextcloudSourceLineageMetadata(context.Context, *types.SourceLineage) (bool, error)
++}
++
++func (local *NextcloudSourceLocalRead) Recheck() error {
++	if local == nil || local.guard == nil || local.ctx == nil || local.lineage == nil {
++		return ErrNextcloudPublicationUnavailable
++	}
++	g := local.guard
++	ctx := local.ctx
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	caller, callerOK := ctx.Value(types.CallerContextKey).(types.Caller)
++	principal, principalOK := ctx.Value(types.PrincipalContextKey).(types.Principal)
++	if !callerOK || !principalOK || caller != local.caller || principal != local.principal || local.lineage.RequireComplete() != nil {
++		return ErrNextcloudPublicationDenied
++	}
++	if err := g.checkCurrentKBReads(ctx, caller, local.targets, local.controlled, local.scope); err != nil {
++		return err
++	}
++	if len(local.lineage.Sources) == 0 {
++		return g.recheckCurrentReadActor(ctx)
++	}
++	directory, err := g.publication.currentDirectoryIdentity(ctx)
++	if err != nil {
++		return err
++	}
++	prior := local.directory
++	if prior == nil || directory.ID != prior.ID || directory.DirectoryID != prior.DirectoryID || directory.ObjectGUID != prior.ObjectGUID || directory.UserID == nil || prior.UserID == nil || *directory.UserID != *prior.UserID {
++		return ErrNextcloudPublicationDenied
++	}
++	snapshots, ok := g.snapshots.(NextcloudLineageMetadataSnapshotLookup)
++	if !ok {
++		return ErrNextcloudPublicationUnavailable
++	}
++	matches, err := snapshots.RecheckNextcloudSourceLineageMetadata(ctx, local.lineage)
++	if err != nil {
++		return ErrNextcloudPublicationUnavailable
++	}
++	if !matches {
++		return ErrNextcloudPublicationDenied
++	}
++	return g.recheckCurrentReadActor(ctx)
++}
+diff --git a/internal/application/repository/knowledge_embedding_completion.go b/internal/application/repository/knowledge_embedding_completion.go
+index 4a651d3f2aee73b53dc630e29e6b59349e7732c2..21097ad7cf8fd5b0ebb6fd20403d791964cb7415 100644
+--- a/internal/application/repository/knowledge_embedding_completion.go
++++ b/internal/application/repository/knowledge_embedding_completion.go
+@@ -13,6 +13,7 @@ import (
+ 
+ type actualKnowledgeCompletionKey struct{}
+ type knowledgeCompletionClockPhaseKey struct{}
++type knowledgeCompletionLocalPhaseKey struct{}
+ 
+ func knowledgeConsumptionDigest(c *types.KnowledgeEmbeddingConsumption) (string, error) {
+ 	copy := *c
+@@ -109,7 +110,14 @@ func (r *KnowledgeSQLiteEmbeddingVectorRead) makeConsumptionInTx(tx *gorm.DB, p
+ 	}
+ 	v := q.read.view()
+ 	f, s := v.input, v.result
+-	lineage, _ := types.NewCompleteSourceLineage()
++	if v.parent.Plan == nil || v.parent.Plan.SourceLineage == nil || v.parent.Plan.SourceLineage.RequireComplete() != nil || len(v.parent.Plan.SourceLineage.Sources) != 0 {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	lineage, err := types.UnionSourceLineage(v.parent.Plan.SourceLineage)
++	if err != nil {
++		return nil, err
++	}
++	capturedSources := []*types.SourceLineage{}
+ 	c := &types.KnowledgeEmbeddingConsumption{Version: 1, Recipe: "knowledge.query-native-vector-consumer.v1", QueryInputID: f.ID, QueryInputDigest: f.Digest, QueryReceiptID: s.ID, QueryReceiptDigest: s.Digest, KnowledgeBaseID: f.KnowledgeBaseID, SpaceDigest: f.SpaceDigest, TenantID: f.TenantID, Hits: hits, SourceLineage: lineage}
+ 	ids := []uint64{}
+ 	for id := range r.receipts {
+@@ -122,11 +130,29 @@ func (r *KnowledgeSQLiteEmbeddingVectorRead) makeConsumptionInTx(tx *gorm.DB, p
+ 			return nil, ErrKnowledgeSQLiteEmbeddingUnknown
+ 		}
+ 		body := r.body[id]
+-		if body.Proof.SourceLineage.RequireComplete() != nil || len(body.Proof.SourceLineage.Sources) != 0 {
++		if body.Proof.SourceLineage == nil || body.Proof.SourceLineage.RequireComplete() != nil {
+ 			return nil, types.ErrSourceLineageUnknown
+ 		}
++		// The real private vector CheckInTx above already verifies current
++		// personal actor/source controls and holds this exact original set.
++		capturedSources = append(capturedSources, body.Proof.SourceLineage)
+ 		c.Candidates = append(c.Candidates, types.KnowledgeEmbeddingCandidate{RowID: id, InputID: input.ID, InputDigest: input.Digest, ReceiptID: receipt.ID, ReceiptDigest: receipt.Digest, ModelProofJSON: input.ModelProofJSON, Revision: receipt.Revision})
+ 	}
++	actualSources, err := types.UnionSourceLineage(capturedSources...)
++	if err != nil {
++		return nil, err
++	}
++	if len(actualSources.Sources) != 0 {
++		if r.sourceLineage == nil || !reflect.DeepEqual(actualSources, r.sourceLineage) || len(r.sourceContent) != len(actualSources.Sources) || len(r.sourceKBFences) == 0 {
++			return nil, types.ErrSourceLineageUnknown
++		}
++	} else if r.sourceLineage != nil || len(r.sourceContent) != 0 || len(r.sourceKBFences) != 0 {
++		return nil, types.ErrSourceLineageUnknown
++	}
++	c.SourceLineage, err = types.UnionSourceLineage(lineage, actualSources)
++	if err != nil {
++		return nil, err
++	}
+ 	// Threshold, shape and exact returned material are bound alongside all
+ 	// selected and absence candidates. The caller cannot substitute text/hits.
+ 	output := []*types.IndexWithScore{}
+@@ -195,6 +221,10 @@ func RecheckKnowledgeEmbeddingConsumerInTx(ctx context.Context, tx *gorm.DB, r *
+ 			err = ErrKnowledgeInputChanged
+ 		}
+ 	}
++	var local *knowledgeCompletionSourceLocal
++	if err == nil {
++		local, err = r.captureCompletionSourceLocalInTx(tx.WithContext(r.ctx))
++	}
+ 	if err == nil {
+ 		err = checkOriginalBodyAvailableBatchForCapturedInTx(ctx, tx, r.rows, r.heads)
+ 	}
+@@ -217,8 +247,30 @@ func RecheckKnowledgeEmbeddingConsumerInTx(ctx context.Context, tx *gorm.DB, r *
+ 		if err == nil {
+ 			err = NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx)
+ 		}
++		// Every physical/journal/remote operation above precedes this actual
++		// captured local capability, fresh model/native and complete head checks.
++		if err == nil {
++			err = knowledgeCompletionCurrentModelMetadataInTx(tx, v.model)
++		}
++		if err == nil {
++			err = local.recheckInTx(tx.WithContext(r.ctx))
++		}
++		if err == nil {
++			err = knowledgeCompletionFinalHeadsInTx(tx, r.rows, r.heads)
++		}
++		if err == nil {
++			err = knowledgeCompletionFinalHeadsInTx(tx, v.rows, v.heads)
++		}
++		if err == nil {
++			err = knowledgeCompletionCurrentModelHeadsInTx(tx, v.model)
++		}
+ 		if err == nil {
+-			err = knowledgeQueryFinalClockInTx(tx, all, payloads, v.content)
++			fences := map[string]nextcloudContentFence{}
++			content, e := knowledgeCompletionSourceLeaseUnion(append([]NextcloudContentLease(nil), v.content...), fences, r)
++			err = e
++			if err == nil {
++				err = knowledgeQueryFinalClockWithSourceEpochsInTx(tx, all, payloads, content, fences, local.epochs)
++			}
+ 		}
+ 	}
+ 	err = q.read.finish(err)
+@@ -320,7 +372,10 @@ func checkActualKnowledgeCompletionFinalInTx(tx *gorm.DB) (finalErr error) {
+ 	all := map[string]originalBodyLease{}
+ 	payloads := map[string]originalBodyPayload{}
+ 	content := []NextcloudContentLease{}
++	sourceKBFences := map[string]nextcloudContentFence{}
+ 	contexts := []context.Context{tx.Statement.Context}
++	sourceLocals := []*knowledgeCompletionSourceLocal{}
++	sourceEpochs := map[string]knowledgeCompletionSourceEpoch{}
+ 	finishes := []func(error) error{}
+ 	defer func() {
+ 		for i := len(finishes) - 1; i >= 0; i-- {
+@@ -357,6 +412,17 @@ func checkActualKnowledgeCompletionFinalInTx(tx *gorm.DB) (finalErr error) {
+ 		if err != nil || !reflect.DeepEqual(c, r.consumption) {
+ 			return ErrKnowledgeInputChanged
+ 		}
++		local, e := r.captureCompletionSourceLocalInTx(tx.WithContext(r.ctx))
++		if e != nil {
++			return e
++		}
++		sourceLocals = append(sourceLocals, local)
++		for key, epoch := range local.epochs {
++			if previous, found := sourceEpochs[key]; found && !reflect.DeepEqual(previous, epoch) {
++				return ErrKnowledgeInputChanged
++			}
++			sourceEpochs[key] = epoch
++		}
+ 		if err = mergeMemoryFinalLeaseBindings(all, r.leases); err != nil {
+ 			return err
+ 		}
+@@ -370,6 +436,10 @@ func checkActualKnowledgeCompletionFinalInTx(tx *gorm.DB) (finalErr error) {
+ 			return err
+ 		}
+ 		content = append(content, v.content...)
++		content, err = knowledgeCompletionSourceLeaseUnion(content, sourceKBFences, r)
++		if err != nil {
++			return err
++		}
+ 		contexts = append(contexts, r.ctx, q.ctx)
+ 	}
+ 	if err := checkActualModelOriginalReadsInTx(tx); err != nil {
+@@ -415,7 +485,39 @@ func checkActualKnowledgeCompletionFinalInTx(tx *gorm.DB) (finalErr error) {
+ 	if err := NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx); err != nil {
+ 		return err
+ 	}
+-	if err := knowledgeQueryFinalClockInTx(tx.WithContext(context.WithValue(tx.Statement.Context, knowledgeCompletionClockPhaseKey{}, true)), all, payloads, content); err != nil {
++	// Fixed observation is attached only after the genuine final physical and
++	// journal operations return; it changes no authority, timeout or result.
++	tx = tx.Session(&gorm.Session{NewDB: true, Context: context.WithValue(tx.Statement.Context, knowledgeCompletionLocalPhaseKey{}, true)})
++	// No external IO follows: recheck actual current models, then the
++	// post-remote local user/directory/grants/source/epoch, native vectors and heads.
++	for _, m := range models {
++		if err := knowledgeCompletionCurrentModelMetadataInTx(tx, m); err != nil {
++			return err
++		}
++		if err := knowledgeCompletionCurrentModelHeadsInTx(tx, m); err != nil {
++			return err
++		}
++	}
++	for _, local := range sourceLocals {
++		r := local.read
++		v := r.query.read.view()
++		if err := knowledgeCompletionCurrentModelMetadataInTx(tx, v.model); err != nil {
++			return err
++		}
++		if err := knowledgeCompletionCurrentModelHeadsInTx(tx, v.model); err != nil {
++			return err
++		}
++		if err := local.recheckInTx(tx.WithContext(r.ctx)); err != nil {
++			return err
++		}
++		if err := knowledgeCompletionFinalHeadsInTx(tx, r.rows, r.heads); err != nil {
++			return err
++		}
++		if err := knowledgeCompletionFinalHeadsInTx(tx, v.rows, v.heads); err != nil {
++			return err
++		}
++	}
++	if err := knowledgeQueryFinalClockWithSourceEpochsInTx(tx.WithContext(context.WithValue(tx.Statement.Context, knowledgeCompletionClockPhaseKey{}, true)), all, payloads, content, sourceKBFences, sourceEpochs); err != nil {
+ 		return err
+ 	}
+ 	for _, ctx := range contexts {
+@@ -461,3 +563,35 @@ func KnowledgeCompletionSQLClockObserved(ctx context.Context, tx *gorm.DB) bool
+ 	}
+ 	return true
+ }
++
++// Metadata-only observation of the actual after-journal completion phase.
++func KnowledgeCompletionLocalAuthorityObserved(ctx context.Context, tx *gorm.DB) bool {
++	if ctx == nil || tx == nil {
++		return false
++	}
++	phase, _ := ctx.Value(knowledgeCompletionLocalPhaseKey{}).(bool)
++	if !phase {
++		return false
++	}
++	if _, ok := tx.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return false
++	}
++	reads, _ := ctx.Value(actualKnowledgeCompletionKey{}).([]*KnowledgeSQLiteEmbeddingVectorRead)
++	if len(reads) == 0 {
++		return false
++	}
++	pool, err := tx.DB()
++	if err != nil {
++		return false
++	}
++	for _, r := range reads {
++		if r == nil || r.query == nil || !sameOriginalModelCallerInRepository(ctx, r.ctx) {
++			return false
++		}
++		actual, e := r.store.db.DB()
++		if e != nil || actual != pool {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/internal/application/repository/knowledge_query_embedding_clock.go b/internal/application/repository/knowledge_query_embedding_clock.go
+index 7c31d9600d4742bd85ecafde148a155083891569..a9b5865f626f80c94e1cb2106690e6076f8ba8a6 100644
+--- a/internal/application/repository/knowledge_query_embedding_clock.go
++++ b/internal/application/repository/knowledge_query_embedding_clock.go
+@@ -12,6 +12,12 @@ import (
+ // payloads and content fences with the same DB clock, after all previous IO.
+ // Missing payload baselines are rejected, never discovered as new authority.
+ func knowledgeQueryFinalClockInTx(tx *gorm.DB, all map[string]originalBodyLease, payloads map[string]originalBodyPayload, content []NextcloudContentLease) error {
++	return knowledgeQueryFinalClockWithKBFencesInTx(tx, all, payloads, content, nil)
++}
++func knowledgeQueryFinalClockWithKBFencesInTx(tx *gorm.DB, all map[string]originalBodyLease, payloads map[string]originalBodyPayload, content []NextcloudContentLease, fences map[string]nextcloudContentFence) error {
++	return knowledgeQueryFinalClockWithSourceEpochsInTx(tx, all, payloads, content, fences, nil)
++}
++func knowledgeQueryFinalClockWithSourceEpochsInTx(tx *gorm.DB, all map[string]originalBodyLease, payloads map[string]originalBodyPayload, content []NextcloudContentLease, fences map[string]nextcloudContentFence, sources map[string]knowledgeCompletionSourceEpoch) error {
+ 	if tx.Dialector.Name() != "sqlite" || len(all) == 0 {
+ 		return ErrOriginalBodyUnavailable
+ 	}
+@@ -52,15 +58,71 @@ func knowledgeQueryFinalClockInTx(tx *gorm.DB, all map[string]originalBodyLease,
+  FROM original_body_leases l JOIN original_body_payloads p ON p.id=l.body_id WHERE l.lease_id IN ?
+  UNION ALL SELECT 'content' AS domain,l.lease_id AS id,'' AS body_id,l.owner_id,l.kind,l.epoch,l.expires_at_ms,l.released_at_ms,l.tenant_id AS tenant,l.knowledge_base_id AS kb,l.knowledge_id AS knowledge,b.state AS broad_state,b.epoch AS broad_epoch,COALESCE(e.state,'') AS exact_state,COALESCE(e.epoch,0) AS exact_epoch,'' AS payload_json,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) AS clock_ms
+  FROM nextcloud_content_leases l JOIN nextcloud_content_fences b ON b.tenant_id=l.tenant_id AND b.knowledge_base_id=l.knowledge_base_id AND b.knowledge_id='' LEFT JOIN nextcloud_content_fences e ON e.tenant_id=l.tenant_id AND e.knowledge_base_id=l.knowledge_base_id AND e.knowledge_id=l.knowledge_id AND l.knowledge_id<>'' WHERE l.lease_id IN ?`
++	fenceKeys := []string{}
++	for key, f := range fences {
++		if key == "" || f.KnowledgeID != "" || f.State != "open" {
++			return ErrNextcloudContentLeaseInvalid
++		}
++		fenceKeys = append(fenceKeys, key)
++	}
++	sort.Strings(fenceKeys)
++	args := []interface{}{ids, contentIDs}
++	for _, key := range fenceKeys {
++		f := fences[key]
++		sql += ` UNION ALL SELECT 'fence' AS domain,? AS id,'' AS body_id,'' AS owner_id,state AS kind,epoch,0 AS expires_at_ms,NULL AS released_at_ms,tenant_id AS tenant,knowledge_base_id AS kb,knowledge_id AS knowledge,'' AS broad_state,0 AS broad_epoch,'' AS exact_state,0 AS exact_epoch,'' AS payload_json,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) AS clock_ms FROM nextcloud_content_fences WHERE tenant_id=? AND knowledge_base_id=? AND knowledge_id=''`
++		args = append(args, key, f.TenantID, f.KnowledgeBaseID)
++	}
++	sourceKeys := []string{}
++	for key := range sources {
++		sourceKeys = append(sourceKeys, key)
++	}
++	sort.Strings(sourceKeys)
++	for _, key := range sourceKeys {
++		epoch := sources[key]
++		query, params, err := knowledgeCompletionSourceEpochFinalSQL(key, epoch)
++		if err != nil {
++			return err
++		}
++		sql += " UNION ALL " + query
++		args = append(args, params...)
++	}
+ 	var rows []row
+-	if err := bodyInternal(tx).Raw(sql, ids, contentIDs).Scan(&rows).Error; err != nil {
++	if err := bodyInternal(tx).Raw(sql, args...).Scan(&rows).Error; err != nil {
+ 		return err
+ 	}
+-	if len(rows) != len(ids)+len(contentIDs) {
++	if len(rows) != len(ids)+len(contentIDs)+len(fenceKeys)+len(sourceKeys) {
+ 		return ErrOriginalBodyUnavailable
+ 	}
+ 	seen := map[string]bool{}
+ 	for _, r := range rows {
++		if r.Domain == "publication" {
++			want, ok := sources[r.ID]
++			if !ok || seen[r.Domain+r.ID] {
++				return ErrKnowledgeInputChanged
++			}
++			var actual knowledgeCompletionSourceEpoch
++			if json.Unmarshal([]byte(r.PayloadJSON), &actual) != nil {
++				return ErrKnowledgeInputChanged
++			}
++			actual.Source = want.Source
++			actual.OriginalEpoch = want.OriginalEpoch
++			actual.OriginalPath = want.OriginalPath
++			actual.OriginalInputDigest = want.OriginalInputDigest
++			actual.OriginalArtifactDigest = want.OriginalArtifactDigest
++			if !reflect.DeepEqual(actual, want) || actual.ConnectionID != "" && (actual.VerifiedAt <= 0 || actual.VerifiedAt > r.ClockMS/1000 || r.ClockMS-actual.VerifiedAt*1000 > 300000) {
++				return ErrKnowledgeInputChanged
++			}
++			seen[r.Domain+r.ID] = true
++			continue
++		}
++		if r.Domain == "fence" {
++			f, ok := fences[r.ID]
++			if !ok || seen[r.Domain+r.ID] || r.Tenant != f.TenantID || r.KB != f.KnowledgeBaseID || r.Knowledge != "" || r.Kind != f.State || r.Epoch != f.Epoch {
++				return ErrNextcloudContentLeaseInvalid
++			}
++			seen[r.Domain+r.ID] = true
++			continue
++		}
+ 		if seen[r.Domain+r.ID] || r.ReleasedAtMS != nil || r.ExpiresAtMS <= r.ClockMS {
+ 			return ErrOriginalBodyUnavailable
+ 		}
+diff --git a/internal/application/repository/knowledge_sqlite_embedding_read.go b/internal/application/repository/knowledge_sqlite_embedding_read.go
+index e5c4362e547cc46dee0b94a92af280a4152797cb..738c962ed551efdcb350c0c3a975bed4ce5b9b92 100644
+--- a/internal/application/repository/knowledge_sqlite_embedding_read.go
++++ b/internal/application/repository/knowledge_sqlite_embedding_read.go
+@@ -20,9 +20,11 @@ import (
+ )
+ 
+ type KnowledgeSQLiteEmbeddingStore struct {
+-	db       *gorm.DB
+-	material *KnowledgeInputProvenanceStore
+-	models   *modelRepository
++	db            *gorm.DB
++	material      *KnowledgeInputProvenanceStore
++	models        *modelRepository
++	sourceMu      sync.RWMutex
++	sourceFactory KnowledgeSQLiteVectorSourceAuthorityFactory
+ }
+ 
+ func NewKnowledgeSQLiteEmbeddingStore(db *gorm.DB, material *KnowledgeInputProvenanceStore, models interfaces.ModelRepository) *KnowledgeSQLiteEmbeddingStore {
+@@ -36,33 +38,38 @@ func NewKnowledgeSQLiteEmbeddingStore(db *gorm.DB, material *KnowledgeInputProve
+ 	if e != nil || e2 != nil || e3 != nil || pool != mp || pool != sp {
+ 		return nil
+ 	}
+-	return &KnowledgeSQLiteEmbeddingStore{db, material, actual}
++	return &KnowledgeSQLiteEmbeddingStore{db: db, material: material, models: actual}
+ }
+ func (s *KnowledgeSQLiteEmbeddingStore) CheckSchema() error {
+ 	return knowledgeSQLiteEmbeddingSchema(s.db)
+ }
+ 
+ type KnowledgeSQLiteEmbeddingVectorRead struct {
+-	store       *KnowledgeSQLiteEmbeddingStore
+-	ctx         context.Context
+-	cancel      context.CancelFunc
+-	originals   map[uint64]types.KnowledgeSQLiteEmbeddingInput
+-	receipts    map[uint64]types.KnowledgeSQLiteEmbeddingReceipt
+-	body        map[uint64]knowledgeSQLiteEmbeddingInputBody
+-	vectors     map[uint64][]float32
+-	query       *KnowledgeQueryEmbeddingResultRead
+-	consumption *types.KnowledgeEmbeddingConsumption
+-	search      types.RetrieveParams
+-	models      map[string]*historicalModelRead
+-	heads       []originalBodyFieldHead
+-	rows        []originalBodyAvailabilityRow
+-	leases      map[string]originalBodyLease
+-	payloads    map[string]originalBodyPayload
+-	mu          sync.Mutex
+-	closed      bool
+-	failed      error
+-	checks      sync.WaitGroup
+-	joined      chan struct{}
++	store           *KnowledgeSQLiteEmbeddingStore
++	ctx             context.Context
++	cancel          context.CancelFunc
++	originals       map[uint64]types.KnowledgeSQLiteEmbeddingInput
++	receipts        map[uint64]types.KnowledgeSQLiteEmbeddingReceipt
++	body            map[uint64]knowledgeSQLiteEmbeddingInputBody
++	vectors         map[uint64][]float32
++	query           *KnowledgeQueryEmbeddingResultRead
++	consumption     *types.KnowledgeEmbeddingConsumption
++	search          types.RetrieveParams
++	models          map[string]*historicalModelRead
++	heads           []originalBodyFieldHead
++	rows            []originalBodyAvailabilityRow
++	leases          map[string]originalBodyLease
++	payloads        map[string]originalBodyPayload
++	sourceLineage   *types.SourceLineage
++	sourceOriginals map[string]nextcloudOriginalUploadInput
++	sourceArtifacts map[string]nextcloudOriginalUploadActual
++	sourceContent   []NextcloudContentLease
++	sourceKBFences  map[string]nextcloudContentFence
++	mu              sync.Mutex
++	closed          bool
++	failed          error
++	checks          sync.WaitGroup
++	joined          chan struct{}
+ }
+ 
+ // Only metadata is read before authorization/leases. Bodies are hydrated below
+@@ -170,6 +177,9 @@ func (s *KnowledgeSQLiteEmbeddingStore) BeginVectorRead(ctx context.Context, ids
+ 		if err = r.claimBodyRowsInTx(tx, initial, owner); err != nil {
+ 			return err
+ 		}
++		if err = r.captureSourceReadsInTx(tx, owner); err != nil {
++			return err
++		}
+ 		for _, id := range ids {
+ 			input := r.originals[id]
+ 			receipt := r.receipts[id]
+@@ -199,7 +209,7 @@ func (s *KnowledgeSQLiteEmbeddingStore) BeginVectorRead(ctx context.Context, ids
+ 				return ErrKnowledgeSQLiteEmbeddingUnknown
+ 			}
+ 			var body knowledgeSQLiteEmbeddingInputBody
+-			if json.Unmarshal([]byte(input.InputJSON), &body) != nil || body.Proof.SourceLineage == nil || body.Proof.SourceLineage.RequireComplete() != nil || len(body.Proof.SourceLineage.Sources) != 0 {
++			if json.Unmarshal([]byte(input.InputJSON), &body) != nil || body.Proof.SourceLineage == nil || body.Proof.SourceLineage.RequireComplete() != nil {
+ 				return ErrKnowledgeSQLiteEmbeddingUnknown
+ 			}
+ 			if body.Proof.AdmissionID != input.AdmissionID || body.Info.ChunkID != input.ChunkID || body.Info.KnowledgeID != input.KnowledgeID || body.Info.KnowledgeBaseID != input.KnowledgeBaseID || body.Info.SourceID != input.ChunkID || body.Info.SourceType != types.ChunkSourceType || modelembedding.OriginalIndexText(body.Info.Content) != body.WireText {
+@@ -502,12 +512,32 @@ func (r *KnowledgeSQLiteEmbeddingVectorRead) checkInTx(tx *gorm.DB) error {
+ 			return ErrKnowledgeSQLiteEmbeddingUnknown
+ 		}
+ 	}
++	if e = r.checkSourceReadsInTx(tx); e != nil {
++		return e
++	}
++	return r.finalClockInTx(tx, controls)
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) finalClockInTx(tx *gorm.DB, controls map[string]modelOriginalControl) error {
++	// Finish every remote/path and external journal/body operation before
++	// the last current model controls, native/canonical and complete head checks.
++	if r.sourceLineage != nil {
++		if err := r.checkSourceReadsInTx(tx); err != nil {
++			return err
++		}
++		if err := NewOriginalBodyRetentionStore(tx).checkJournalInTx(tx); err != nil {
++			return err
++		}
++	}
++	authority, e := knowledgeSQLiteEmbeddingAuthority(tx, r.store.material)
++	if e != nil {
++		return e
++	}
+ 	if e = checkOriginalBodyAvailableBatchForCapturedInTx(r.ctx, tx, r.rows, r.heads); e != nil {
+ 		return e
+ 	}
+ 	// Reauthenticate after physical/journal IO, then reload the actual union and
+ 	// compare its one final SQL clock. Historical contexts never authorize calls.
+-	fresh, e = authority.RefreshCurrentReadActor(r.ctx)
++	fresh, e := authority.RefreshCurrentReadActor(r.ctx)
+ 	if e != nil {
+ 		return e
+ 	}
+@@ -520,9 +550,6 @@ func (r *KnowledgeSQLiteEmbeddingVectorRead) checkInTx(tx *gorm.DB) error {
+ 			return e
+ 		}
+ 	}
+-	return r.finalClockInTx(tx, controls)
+-}
+-func (r *KnowledgeSQLiteEmbeddingVectorRead) finalClockInTx(tx *gorm.DB, controls map[string]modelOriginalControl) error {
+ 	for id, want := range controls {
+ 		actual, err := modelControls(tx, id)
+ 		if err != nil {
+@@ -582,7 +609,13 @@ func (r *KnowledgeSQLiteEmbeddingVectorRead) finalClockInTx(tx *gorm.DB, control
+ 			return ErrOriginalBodyUnavailable
+ 		}
+ 	}
+-	if e = knowledgeSQLiteFinalLeaseClockInTx(tx, expected); e != nil {
++	if r.sourceLineage != nil {
++		// All external IO and fresh model/native/head/payload/actor checks are
++		// complete. This captured body/content union remains the last SQL clock.
++		if e = knowledgeQueryFinalClockWithKBFencesInTx(tx, expected, r.payloads, r.sourceContent, r.sourceKBFences); e != nil {
++			return e
++		}
++	} else if e = knowledgeSQLiteFinalLeaseClockInTx(tx, expected); e != nil {
+ 		return e
+ 	}
+ 	for _, m := range r.models {
+@@ -692,6 +725,9 @@ func (r *KnowledgeSQLiteEmbeddingVectorRead) Close() error {
+ 		q := bodyInternal(r.store.db.WithContext(cleanup)).Model(&originalBodyLease{}).Where("lease_id=? AND body_id=? AND owner_id=? AND epoch=? AND kind=? AND released_at_ms IS NULL", l.LeaseID, l.BodyID, l.OwnerID, l.Epoch, l.Kind).Update("released_at_ms", time.Now().UnixMilli())
+ 		err = errors.Join(err, q.Error)
+ 	}
++	for _, l := range r.sourceContent {
++		err = errors.Join(err, r.store.material.ContentLeaseStore().ReleaseLease(cleanup, l.ID))
++	}
+ 	for _, m := range r.models {
+ 		err = errors.Join(err, m.Close())
+ 	}
+diff --git a/internal/application/repository/knowledge_sqlite_vector_completion_local.go b/internal/application/repository/knowledge_sqlite_vector_completion_local.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..215ad3becf65712d2a6329fb9b9029f51a794617
+--- /dev/null
++++ b/internal/application/repository/knowledge_sqlite_vector_completion_local.go
+@@ -0,0 +1,396 @@
++package repository
++
++import (
++	"encoding/json"
++	"fmt"
++	"reflect"
++	"strconv"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++// These are witnesses captured after the genuine private vector source check,
++// not lineage grants. All fields are local metadata; no credential is hydrated.
++type knowledgeCompletionSourcePair struct {
++	OperationID      string
++	TenantID         uint64
++	KnowledgeBaseID  string
++	DataSourceID     string `gorm:"column:datasource_id"`
++	InstanceID       string `gorm:"column:nextcloud_instance_id"`
++	BindingID        string
++	BaseURL          string `gorm:"column:datasource_base_url"`
++	ConfigSHA        string `gorm:"column:datasource_config_sha256"`
++	PublicationEpoch int64
++	KeyID, State     string
++}
++type knowledgeCompletionSourceEpoch struct {
++	Pair                                          knowledgeCompletionSourcePair
++	OperationID, OperationState, PermissionSHA256 string
++	PermissionVersion                             int64
++	ConnectionID                                  string
++	PublicationEpoch, VerifiedAt, OriginalEpoch   int64
++	OriginalPath                                  string
++	Source                                        types.SourceIdentity
++	OriginalInputDigest, OriginalArtifactDigest   string
++	Grants                                        []types.NextcloudSourceGrant
++}
++type knowledgeCompletionSourceLocal struct {
++	read      *KnowledgeSQLiteEmbeddingVectorRead
++	tx        *gorm.DB
++	local     *access.NextcloudSourceLocalRead
++	authority *KnowledgeSQLiteVectorSourceAuthority
++	epochs    map[string]knowledgeCompletionSourceEpoch
++	controls  map[string]modelOriginalControl
++}
++
++func (r *KnowledgeSQLiteEmbeddingVectorRead) completionSourceEpochInTx(tx *gorm.DB, source types.SourceIdentity) (knowledgeCompletionSourceEpoch, error) {
++	var result knowledgeCompletionSourceEpoch
++	result.Grants = []types.NextcloudSourceGrant{}
++	if err := tx.Table("nextcloud_source_pairings").Select("operation_id,tenant_id,knowledge_base_id,datasource_id,nextcloud_instance_id,binding_id,datasource_base_url,datasource_config_sha256,state,publication_epoch,key_id").Where("operation_id=? AND tenant_id=? AND knowledge_base_id=? AND datasource_id=? AND state='active'", source.PairOperationID, source.TenantID, source.KnowledgeBaseID, source.DataSourceID).Take(&result.Pair).Error; err != nil {
++		return result, err
++	}
++	if result.Pair.InstanceID != source.InstanceID || result.Pair.BindingID != source.BindingID {
++		return result, ErrKnowledgeInputChanged
++	}
++	var op struct {
++		OperationID, State, PermissionSHA256 string
++		PermissionVersion                    int64
++	}
++	if err := tx.Table("nextcloud_onboarding_operations").Select("operation_id,state,permission_sha256,permission_version").Where("operation_id=? AND tenant_id=? AND knowledge_base_id=? AND instance_id=? AND binding_id=? AND state='active'", source.PairOperationID, source.TenantID, source.KnowledgeBaseID, source.InstanceID, source.BindingID).Take(&op).Error; err != nil {
++		return result, err
++	}
++	result.OperationID = op.OperationID
++	result.OperationState = op.State
++	result.PermissionSHA256 = op.PermissionSHA256
++	result.PermissionVersion = op.PermissionVersion
++	if err := tx.Where("operation_id=?", source.PairOperationID).Order("source_relation_id,kind,directory_id,object_guid").Find(&result.Grants).Error; err != nil {
++		return result, err
++	}
++	var connections []struct {
++		ConnectionID                                                              string
++		TenantID                                                                  uint64
++		KnowledgeBaseID                                                           string
++		DataSourceID                                                              string `gorm:"column:datasource_id"`
++		NextcloudInstanceID, BindingID, DatasourceBaseURL, DatasourceConfigSHA256 string
++	}
++	if err := tx.Table("nextcloud_event_connections").Select("connection_id,tenant_id,knowledge_base_id,datasource_id,nextcloud_instance_id,binding_id,datasource_base_url,datasource_config_sha256").Where("datasource_id=? AND status='active'", source.DataSourceID).Find(&connections).Error; err != nil {
++		return result, err
++	}
++	result.Source = source
++	originalKey := fmt.Sprintf("%d/%s/%s", source.TenantID, source.KnowledgeBaseID, source.KnowledgeID)
++	original, hasOriginal := r.sourceArtifacts[originalKey]
++	if !hasOriginal || original.PairOperation != source.PairOperationID || original.Artifact.InstanceID != source.InstanceID || original.Artifact.BindingID != source.BindingID || original.Artifact.ExternalID != source.ExternalID || original.Artifact.FileID != source.FileID || original.Artifact.ETag != source.ETag || original.BaseURL != result.Pair.BaseURL || original.ConfigSHA != result.Pair.ConfigSHA || types.NextcloudLineageContentRevision(original.Artifact.ContentRevision) != source.ContentRevision {
++		return result, ErrKnowledgeInputChanged
++	}
++	// This selector is the immutable held upload body captured once at Begin,
++	// never a re-captured current Knowledge.Metadata value after remote IO.
++	rawEpoch := original.Artifact.PublicationEpoch
++	if rawEpoch == "" {
++		if len(connections) != 0 {
++			return result, ErrKnowledgeInputChanged
++		}
++		result.OriginalEpoch = result.Pair.PublicationEpoch
++	} else {
++		epoch, e := strconv.ParseInt(rawEpoch, 10, 64)
++		if e != nil || epoch < 0 || strconv.FormatInt(epoch, 10) != rawEpoch {
++			return result, ErrKnowledgeInputChanged
++		}
++		result.OriginalEpoch = epoch
++	}
++	result.OriginalPath = original.Artifact.Path
++	receipt, found := r.sourceOriginals[originalKey]
++	if !found {
++		return result, ErrKnowledgeInputChanged
++	}
++	result.OriginalInputDigest = receipt.InputDigest
++	result.OriginalArtifactDigest = receipt.ArtifactDigest
++	if len(connections) == 0 {
++		result.PublicationEpoch = result.Pair.PublicationEpoch
++		return result, nil
++	}
++	if len(connections) != 1 {
++		return result, ErrKnowledgeInputChanged
++	}
++	c := connections[0]
++	if c.ConnectionID == "" || c.TenantID != source.TenantID || c.KnowledgeBaseID != source.KnowledgeBaseID || c.DataSourceID != source.DataSourceID || c.NextcloudInstanceID != source.InstanceID || c.BindingID != source.BindingID || c.DatasourceBaseURL != result.Pair.BaseURL || c.DatasourceConfigSHA256 != result.Pair.ConfigSHA {
++		return result, ErrKnowledgeInputChanged
++	}
++	var epoch struct {
++		ConnectionID, PairOperationID string
++		PublicationEpoch, VerifiedAt  int64
++	}
++	if err := tx.Table("nextcloud_source_status_epochs").Where("connection_id=?", c.ConnectionID).Take(&epoch).Error; err != nil {
++		return result, err
++	}
++	if epoch.ConnectionID != c.ConnectionID || epoch.PairOperationID != source.PairOperationID || epoch.PublicationEpoch < 0 || epoch.VerifiedAt <= 0 {
++		return result, ErrKnowledgeInputChanged
++	}
++	result.ConnectionID = epoch.ConnectionID
++	result.PublicationEpoch = epoch.PublicationEpoch
++	result.VerifiedAt = epoch.VerifiedAt
++	now, err := nextcloudLeaseNowMS(tx)
++	if err != nil {
++		return result, err
++	}
++	if epoch.VerifiedAt > now/1000 || now-epoch.VerifiedAt*1000 > 300000 {
++		return result, ErrKnowledgeInputChanged
++	}
++	if result.OriginalEpoch != result.PublicationEpoch {
++		allowed, e := NewNextcloudOnboardingStore(tx).RootMigrationAuthorizesEpoch(tx.Statement.Context, source.TenantID, source.KnowledgeBaseID, source.DataSourceID, result.OriginalPath, result.OriginalEpoch, result.PublicationEpoch)
++		if e != nil || !allowed {
++			return result, ErrKnowledgeInputChanged
++		}
++	}
++	return result, nil
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) captureCompletionSourceLocalInTx(tx *gorm.DB) (*knowledgeCompletionSourceLocal, error) {
++	result := &knowledgeCompletionSourceLocal{read: r, tx: tx, epochs: map[string]knowledgeCompletionSourceEpoch{}, controls: map[string]modelOriginalControl{}}
++	for _, input := range r.originals {
++		control, err := modelControls(tx, input.ModelID)
++		if err != nil {
++			return nil, err
++		}
++		result.controls[input.ModelID] = control
++	}
++	if err := knowledgeCompletionFinalHeadsInTx(tx, r.rows, r.heads); err != nil {
++		return nil, err
++	}
++	if r.sourceLineage == nil {
++		if len(r.sourceContent) != 0 || len(r.sourceKBFences) != 0 {
++			return nil, ErrKnowledgeInputChanged
++		}
++		return result, nil
++	}
++	authority, err := r.sourceAuthority(tx)
++	if err != nil {
++		return nil, err
++	}
++	targets := types.SearchTargets{}
++	for _, input := range r.originals {
++		targets = append(targets, &types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, TenantID: input.TenantID, KnowledgeBaseID: input.KnowledgeBaseID})
++	}
++	result.authority = authority
++	result.local, err = authority.Guard.CheckAndCaptureLocal(r.ctx, r.sourceLineage, access.LineageReadScope{Targets: targets})
++	if err != nil {
++		return nil, err
++	}
++	for _, source := range r.sourceLineage.Sources {
++		key := fmt.Sprintf("%d/%s/%s", source.TenantID, source.KnowledgeBaseID, source.KnowledgeID)
++		epoch, e := r.completionSourceEpochInTx(tx, source)
++		if e != nil {
++			return nil, e
++		}
++		result.epochs[key] = epoch
++	}
++	return result, nil
++}
++func (local *knowledgeCompletionSourceLocal) recheckInTx(tx *gorm.DB) error {
++	if local == nil || local.read == nil || local.tx.Statement.ConnPool != tx.Statement.ConnPool {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	r := local.read
++	if r.sourceLineage != nil {
++		if local.authority == nil || local.authority.Store == nil || local.authority.Store.db.Statement.ConnPool != tx.Statement.ConnPool {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++		if err := local.local.Recheck(); err != nil {
++			return err
++		}
++		for key, want := range r.sourceOriginals {
++			var current nextcloudOriginalUploadInput
++			if err := tx.Select("knowledge_id,tenant_id,knowledge_base_id,datasource_id,source_revision,config_revision,root_revision,routing_revision,tenant_revision,routing_digest,tenant_digest,config_digest,root_digest,artifact_digest,input_digest").Where("knowledge_id=? AND tenant_id=? AND knowledge_base_id=?", want.KnowledgeID, want.TenantID, want.KnowledgeBaseID).Take(&current).Error; err != nil {
++				return err
++			}
++			want.ActualInputs = ""
++			if !reflect.DeepEqual(current, want) || r.sourceArtifacts[key].Artifact.ArtifactSHA256 != want.ArtifactDigest {
++				return ErrKnowledgeInputChanged
++			}
++		}
++		for _, source := range r.sourceLineage.Sources {
++			key := fmt.Sprintf("%d/%s/%s", source.TenantID, source.KnowledgeBaseID, source.KnowledgeID)
++			current, err := r.completionSourceEpochInTx(tx, source)
++			if err != nil {
++				return err
++			}
++			want, ok := local.epochs[key]
++			if !ok || !reflect.DeepEqual(current, want) {
++				return ErrKnowledgeInputChanged
++			}
++		}
++	}
++	authority, err := knowledgeSQLiteEmbeddingAuthority(tx, r.store.material)
++	if err != nil {
++		return err
++	}
++	fresh, err := authority.RefreshCurrentReadActor(r.ctx)
++	if err != nil {
++		return err
++	}
++	for _, input := range r.originals {
++		var kb types.KnowledgeBase
++		if err = tx.Where("id=? AND tenant_id=?", input.KnowledgeBaseID, input.TenantID).Take(&kb).Error; err != nil {
++			return err
++		}
++		if err = r.authorizeKB(authority, fresh, &kb); err != nil {
++			return err
++		}
++	}
++	for id, want := range local.controls {
++		current, e := modelControls(tx, id)
++		if e != nil {
++			return e
++		}
++		if current != want {
++			return ErrKnowledgeSQLiteEmbeddingUnknown
++		}
++	}
++	for id, receipt := range r.receipts {
++		if err = checkKnowledgeSQLiteVectorCurrentInTx(tx, id, receipt.Revision, receipt.Dimension, r.body[id].Info, r.vectors[id]); err != nil {
++			return err
++		}
++	}
++	return r.ctx.Err()
++}
++
++// No external body/journal/remote IO belongs after this metadata-only check.
++// Bodies have already been genuinely held and physically verified above.
++func knowledgeCompletionCurrentModelMetadataInTx(tx *gorm.DB, m *modelOriginalRead) error {
++	if m == nil || m.download || m.model == nil || m.authorize == nil || m.ctx.Err() != nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	fresh, err := m.authorize(withOriginalBodyAvailabilityScope(tx, m.ctx), tx, m.hold.Proof)
++	if err != nil {
++		return err
++	}
++	var current types.Model
++	if err = tx.Session(&gorm.Session{NewDB: true}).WithContext(fresh).Where("id=?", m.hold.Proof.ModelID).Take(&current).Error; err != nil {
++		return err
++	}
++	control, err := modelControls(tx, current.ID)
++	if err != nil {
++		return err
++	}
++	proof := m.hold.Proof
++	if control.DefinitionRevision != proof.DefinitionRevision || control.CredentialRevision != proof.CredentialRevision || control.StateEpoch != proof.StateEpoch || current.Status != types.ModelStatusActive || current.TenantID != proof.OwnerTenantID || current.IsBuiltin != proof.IsBuiltin || current.DeletedAt.Valid || current.IsDefault != m.model.IsDefault || current.ManagedBy != m.model.ManagedBy {
++		return ErrKnowledgeInputChanged
++	}
++	definition, err := types.ModelDefinitionBytes(m.model)
++	if err != nil {
++		return err
++	}
++	matches, err := types.ModelDefinitionMatchesOriginal(&current, string(definition))
++	if err != nil || !matches {
++		return ErrKnowledgeInputChanged
++	}
++	actualCredential, err := types.ModelCredentialPlainDigest(&current)
++	if err != nil {
++		return err
++	}
++	wantCredential, err := types.ModelCredentialPlainDigest(m.model)
++	if err != nil || actualCredential != wantCredential {
++		return ErrKnowledgeInputChanged
++	}
++	return fresh.Err()
++}
++func knowledgeCompletionFinalHeadsInTx(tx *gorm.DB, rows []originalBodyAvailabilityRow, heads []originalBodyFieldHead) error {
++	current, err := originalBodyBatchHeads(tx, rows)
++	if err != nil {
++		return err
++	}
++	if !sameOriginalBodyHeads(heads, current) {
++		return ErrOriginalBodyUnavailable
++	}
++	return nil
++}
++func knowledgeCompletionSourceLeaseUnion(content []NextcloudContentLease, fences map[string]nextcloudContentFence, r *KnowledgeSQLiteEmbeddingVectorRead) ([]NextcloudContentLease, error) {
++	if r == nil {
++		return nil, ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	content = append(content, r.sourceContent...)
++	for key, fence := range r.sourceKBFences {
++		if key != fmt.Sprintf("%d/%s", fence.TenantID, fence.KnowledgeBaseID) || fence.KnowledgeID != "" || fence.State != "open" || fence.Epoch <= 0 {
++			return nil, ErrNextcloudContentLeaseInvalid
++		}
++		if before, ok := fences[key]; ok && !reflect.DeepEqual(before, fence) {
++			return nil, ErrNextcloudContentLeaseInvalid
++		}
++		fences[key] = fence
++	}
++	return content, nil
++}
++func knowledgeCompletionCurrentModelHeadsInTx(tx *gorm.DB, m *modelOriginalRead) error {
++	for _, body := range m.hold.Bodies {
++		var head originalBodyFieldHead
++		if err := bodyInternal(tx).Where("slot_id=?", body.Head.SlotID).Take(&head).Error; err != nil {
++			return err
++		}
++		if head != body.Head {
++			return ErrOriginalBodyUnavailable
++		}
++		var receipt types.ModelOriginalBodyReceipt
++		if err := tx.Where("origin_id=?", body.Receipt.OriginID).Take(&receipt).Error; err != nil {
++			return err
++		}
++		actualTime := receipt.CreatedAt
++		receipt.CreatedAt = body.Receipt.CreatedAt
++		if !reflect.DeepEqual(receipt, body.Receipt) || !actualTime.Equal(body.Receipt.CreatedAt) {
++			return ErrOriginalBodyUnavailable
++		}
++	}
++	return nil
++}
++
++// The same final statement as ALL body/content leases also reloads the exact
++// source epoch, pair, operation and complete grant rows. A changed epoch is not
++// confused with SourceIdentity.Revision (the independent content fence epoch).
++func knowledgeCompletionSourceEpochFinalSQL(key string, w knowledgeCompletionSourceEpoch) (string, []interface{}, error) {
++	if key != fmt.Sprintf("%d/%s/%s", w.Source.TenantID, w.Source.KnowledgeBaseID, w.Source.KnowledgeID) || w.Pair.OperationID != w.Source.PairOperationID {
++		return "", nil, ErrKnowledgeInputChanged
++	}
++	epochSQL := "p.publication_epoch"
++	verifiedSQL := "0"
++	connectionSQL := "''"
++	joins := ""
++	extra := " AND NOT EXISTS(SELECT 1 FROM nextcloud_event_connections ec WHERE ec.datasource_id=p.datasource_id AND ec.status='active')"
++	args := []interface{}{key}
++	if w.ConnectionID != "" {
++		epochSQL = "e.publication_epoch"
++		verifiedSQL = "e.verified_at"
++		connectionSQL = "c.connection_id"
++		joins = ` JOIN nextcloud_event_connections c ON c.datasource_id=p.datasource_id AND c.tenant_id=p.tenant_id AND c.knowledge_base_id=p.knowledge_base_id AND c.status='active' AND c.nextcloud_instance_id=p.nextcloud_instance_id AND c.binding_id=p.binding_id AND c.datasource_base_url=p.datasource_base_url AND c.datasource_config_sha256=p.datasource_config_sha256 JOIN nextcloud_source_status_epochs e ON e.connection_id=c.connection_id AND e.pair_operation_id=p.operation_id`
++		extra = " AND c.connection_id=? AND (SELECT COUNT(*) FROM nextcloud_event_connections ec WHERE ec.datasource_id=p.datasource_id AND ec.status='active')=1"
++	}
++	grants := `COALESCE((SELECT json_group_array(json(grant_json)) FROM (SELECT json_object('OperationID',sg.operation_id,'SourceRelationID',sg.source_relation_id,'Kind',sg.kind,'DirectoryID',sg.directory_id,'ObjectGUID',sg.object_guid,'TenantID',sg.tenant_id,'KnowledgeBaseID',sg.knowledge_base_id,'PrincipalID',sg.principal_id,'PermissionVersion',sg.permission_version,'PublicationEpoch',sg.publication_epoch,'Origin',sg.origin) AS grant_json FROM nextcloud_source_grants sg WHERE sg.operation_id=p.operation_id ORDER BY sg.source_relation_id,sg.kind,sg.directory_id,sg.object_guid)),'[]')`
++	payload := `json_object('Pair',json_object('OperationID',p.operation_id,'TenantID',p.tenant_id,'KnowledgeBaseID',p.knowledge_base_id,'DataSourceID',p.datasource_id,'InstanceID',p.nextcloud_instance_id,'BindingID',p.binding_id,'BaseURL',p.datasource_base_url,'ConfigSHA',p.datasource_config_sha256,'State',p.state,'PublicationEpoch',p.publication_epoch,'KeyID',p.key_id),'OperationID',o.operation_id,'OperationState',o.state,'PermissionSHA256',o.permission_sha256,'PermissionVersion',o.permission_version,'ConnectionID',` + connectionSQL + `,'PublicationEpoch',` + epochSQL + `,'VerifiedAt',` + verifiedSQL + `,'Grants',json(` + grants + `))`
++	query := `SELECT 'publication' AS domain,? AS id,'' AS body_id,'' AS owner_id,'' AS kind,0 AS epoch,0 AS expires_at_ms,NULL AS released_at_ms,0 AS tenant,'' AS kb,'' AS knowledge,'' AS broad_state,0 AS broad_epoch,'' AS exact_state,0 AS exact_epoch,` + payload + ` AS payload_json,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) AS clock_ms FROM nextcloud_source_pairings p JOIN data_sources d ON d.id=p.datasource_id AND d.tenant_id=p.tenant_id AND d.knowledge_base_id=p.knowledge_base_id AND d.type='nextcloud' AND d.status='active' AND d.deleted_at IS NULL JOIN nextcloud_onboarding_operations o ON o.operation_id=p.operation_id AND o.tenant_id=p.tenant_id AND o.knowledge_base_id=p.knowledge_base_id AND o.instance_id=p.nextcloud_instance_id AND o.binding_id=p.binding_id AND o.state='active' JOIN nextcloud_content_fences f ON f.tenant_id=p.tenant_id AND f.knowledge_base_id=p.knowledge_base_id AND f.knowledge_id=? AND f.datasource_id=p.datasource_id AND f.external_id=? AND f.state='open' AND f.epoch=? JOIN nextcloud_original_upload_inputs u ON u.knowledge_id=f.knowledge_id AND u.tenant_id=f.tenant_id AND u.knowledge_base_id=f.knowledge_base_id AND u.datasource_id=f.datasource_id AND u.input_digest=? AND u.artifact_digest=?` + joins + ` WHERE p.operation_id=? AND p.tenant_id=? AND p.knowledge_base_id=? AND p.datasource_id=? AND p.state='active'` + extra
++	args = append(args, w.Source.KnowledgeID, w.Source.ExternalID, int64(w.Source.Revision), w.OriginalInputDigest, w.OriginalArtifactDigest, w.Pair.OperationID, w.Pair.TenantID, w.Pair.KnowledgeBaseID, w.Pair.DataSourceID)
++	if w.ConnectionID != "" {
++		args = append(args, w.ConnectionID)
++	}
++	return query, args, nil
++}
++
++func (r *KnowledgeSQLiteEmbeddingVectorRead) captureCompletionSourceOriginalsInTx(tx *gorm.DB, sources []types.SourceIdentity) error {
++	r.sourceOriginals = map[string]nextcloudOriginalUploadInput{}
++	r.sourceArtifacts = map[string]nextcloudOriginalUploadActual{}
++	for _, source := range sources {
++		var original nextcloudOriginalUploadInput
++		if err := tx.WithContext(r.ctx).Where("knowledge_id=? AND tenant_id=? AND knowledge_base_id=? AND datasource_id=?", source.KnowledgeID, source.TenantID, source.KnowledgeBaseID, source.DataSourceID).Take(&original).Error; err != nil {
++			return err
++		}
++		var actual nextcloudOriginalUploadActual
++		if json.Unmarshal([]byte(original.ActualInputs), &actual) != nil {
++			return ErrKnowledgeInputChanged
++		}
++		digest, err := KnowledgeInputDigest(actual)
++		if err != nil || digest != original.InputDigest || original.ArtifactDigest != actual.Artifact.ArtifactSHA256 || actual.PairOperation != source.PairOperationID || actual.Artifact.InstanceID != source.InstanceID || actual.Artifact.BindingID != source.BindingID || actual.Artifact.ExternalID != source.ExternalID || actual.Artifact.FileID != source.FileID || actual.Artifact.ETag != source.ETag || actual.Artifact.ItemDigest == "" || actual.Artifact.SourceConfigDigest == "" {
++			return ErrKnowledgeInputChanged
++		}
++		key := fmt.Sprintf("%d/%s/%s", source.TenantID, source.KnowledgeBaseID, source.KnowledgeID)
++		r.sourceOriginals[key] = original
++		r.sourceArtifacts[key] = actual
++	}
++	return nil
++}
+diff --git a/internal/application/repository/knowledge_sqlite_vector_sources.go b/internal/application/repository/knowledge_sqlite_vector_sources.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..663d4f78b9046c0f012486cb88453328bbb808bd
+--- /dev/null
++++ b/internal/application/repository/knowledge_sqlite_vector_sources.go
+@@ -0,0 +1,183 @@
++package repository
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"reflect"
++	"sort"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"gorm.io/gorm"
++)
++
++// Configuration supplies the real per-TX public guard; this is not a source
++// grant. The read still requires current actor/DirGUID/ACL/source/body proof.
++type KnowledgeSQLiteVectorSourceAuthority struct {
++	Store        *KnowledgeInputProvenanceStore
++	Guard        *access.NextcloudSourceLineageGuard
++	CheckRuntime func(context.Context) error
++}
++type KnowledgeSQLiteVectorSourceAuthorityFactory func(*gorm.DB) *KnowledgeSQLiteVectorSourceAuthority
++
++func ConfigureKnowledgeSQLiteVectorSourceReads(s *KnowledgeSQLiteEmbeddingStore, factory KnowledgeSQLiteVectorSourceAuthorityFactory) error {
++	if s == nil || factory == nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	s.sourceMu.Lock()
++	defer s.sourceMu.Unlock()
++	if s.sourceFactory != nil {
++		return ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	s.sourceFactory = factory
++	return nil
++}
++func (s *KnowledgeSQLiteEmbeddingStore) sourceReadFactory() KnowledgeSQLiteVectorSourceAuthorityFactory {
++	s.sourceMu.RLock()
++	defer s.sourceMu.RUnlock()
++	return s.sourceFactory
++}
++
++func personalKnowledgeVectorCaller(ctx context.Context) error {
++	caller := types.CallerFromContext(ctx)
++	principal, ok := types.PrincipalFromContext(ctx)
++	if !ok || principal.Type != types.PrincipalWebUser || principal.ID != caller.UserID || caller.UserID == "" || types.IsSyntheticUserID(caller.UserID) || caller.TenantID == 0 || NextcloudEmbeddingPurposePresent(ctx) {
++		return access.ErrNextcloudPublicationDenied
++	}
++	if _, machine := types.TenantAPIKeyScopeFromContext(ctx); machine {
++		return access.ErrNextcloudPublicationDenied
++	}
++	return ctx.Err()
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) sourceAuthority(tx *gorm.DB) (*KnowledgeSQLiteVectorSourceAuthority, error) {
++	if err := personalKnowledgeVectorCaller(r.ctx); err != nil {
++		return nil, err
++	}
++	factory := r.store.sourceReadFactory()
++	if factory == nil {
++		return nil, access.ErrNextcloudPublicationUnavailable
++	}
++	actual := factory(tx.Session(&gorm.Session{NewDB: true}))
++	if actual == nil || actual.Store == nil || actual.Guard == nil || actual.CheckRuntime == nil || actual.Store.db.Statement.ConnPool != tx.Statement.ConnPool {
++		return nil, access.ErrNextcloudPublicationUnavailable
++	}
++	if err := actual.CheckRuntime(r.ctx); err != nil {
++		return nil, err
++	}
++	fresh, err := actual.Store.RefreshCurrentReadActor(r.ctx)
++	if err != nil {
++		return nil, err
++	}
++	if !sameOriginalModelCallerInRepository(fresh, r.ctx) {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	return actual, nil
++}
++
++// Immutable admission metadata selects the source set before index-body
++// hydration. Source rows/content are held and public-authorized before the
++// input JSON is decoded; its authentic proof must then match this exact set.
++func (r *KnowledgeSQLiteEmbeddingVectorRead) captureSourceReadsInTx(tx *gorm.DB, owner string) error {
++	all := []*types.SourceLineage{}
++	for _, input := range r.originals {
++		var admission knowledgeInputAdmission
++		if err := tx.Select("admission_id,tenant_id,knowledge_base_id,knowledge_id,source_lineage").Where("admission_id=? AND tenant_id=? AND knowledge_base_id=? AND knowledge_id=?", input.AdmissionID, input.TenantID, input.KnowledgeBaseID, input.KnowledgeID).Take(&admission).Error; err != nil {
++			return err
++		}
++		var source types.SourceLineage
++		if json.Unmarshal([]byte(admission.SourceLineage), &source) != nil || source.RequireComplete() != nil {
++			return ErrKnowledgeInputChanged
++		}
++		all = append(all, &source)
++	}
++	lineage, err := types.UnionSourceLineage(all...)
++	if err != nil {
++		return err
++	}
++	if len(lineage.Sources) == 0 {
++		return nil
++	}
++	if _, err = r.sourceAuthority(tx); err != nil {
++		return err
++	}
++	r.sourceLineage = lineage
++	sources := append([]types.SourceIdentity(nil), lineage.Sources...)
++	sort.Slice(sources, func(i, j int) bool {
++		a, b := sources[i], sources[j]
++		if a.TenantID != b.TenantID {
++			return a.TenantID < b.TenantID
++		}
++		if a.KnowledgeBaseID != b.KnowledgeBaseID {
++			return a.KnowledgeBaseID < b.KnowledgeBaseID
++		}
++		return a.KnowledgeID < b.KnowledgeID
++	})
++	retentionRows := []originalBodyAvailabilityRow{}
++	r.sourceKBFences = map[string]nextcloudContentFence{}
++	for _, source := range sources {
++		scope := NextcloudContentScope{source.TenantID, source.KnowledgeBaseID, source.KnowledgeID, source.DataSourceID, source.ExternalID}
++		lease, e := r.store.material.ContentLeaseStore().AcquireKnowledgeInTx(r.ctx, tx, scope, NextcloudContentReadLease, owner, 2*time.Minute)
++		if e != nil {
++			return e
++		}
++		if uint64(lease.Epoch) != source.Revision {
++			return ErrKnowledgeInputChanged
++		}
++		r.sourceContent = append(r.sourceContent, lease)
++		var fence nextcloudContentFence
++		if e = tx.Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=''", scope.TenantID, scope.KnowledgeBaseID).Take(&fence).Error; e != nil {
++			return e
++		}
++		r.sourceKBFences[fmt.Sprintf("%d/%s", scope.TenantID, scope.KnowledgeBaseID)] = fence
++		retentionRows = append(retentionRows, originalBodyAvailabilityRow{"knowledges", source.KnowledgeID}, originalBodyAvailabilityRow{"nextcloud_original_upload_inputs", source.KnowledgeID})
++	}
++	// All actual inherited body and source content holds precede hydration.
++	if err = r.claimBodyRowsInTx(tx, retentionRows, owner); err != nil {
++		return err
++	}
++	r.ctx, err = WithFAQReadLeaseCoverage(r.ctx, r.sourceContent)
++	if err != nil {
++		return err
++	}
++	if err = r.captureCompletionSourceOriginalsInTx(tx, sources); err != nil {
++		return err
++	}
++	return r.authorizeCapturedSourcesInTx(tx)
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) checkSourceReadsInTx(tx *gorm.DB) error {
++	all := []*types.SourceLineage{}
++	for _, body := range r.body {
++		all = append(all, body.Proof.SourceLineage)
++	}
++	lineage, err := types.UnionSourceLineage(all...)
++	if err != nil {
++		return err
++	}
++	if len(lineage.Sources) == 0 {
++		if len(r.sourceContent) != 0 || r.sourceLineage != nil {
++			return ErrKnowledgeInputChanged
++		}
++		return nil
++	}
++	if r.sourceLineage == nil || !reflect.DeepEqual(lineage, r.sourceLineage) || len(r.sourceContent) != len(lineage.Sources) {
++		return ErrKnowledgeInputChanged
++	}
++	return r.authorizeCapturedSourcesInTx(tx)
++}
++func (r *KnowledgeSQLiteEmbeddingVectorRead) authorizeCapturedSourcesInTx(tx *gorm.DB) error {
++	authority, err := r.sourceAuthority(tx)
++	if err != nil {
++		return err
++	}
++	lineage := r.sourceLineage
++	if lineage == nil || lineage.RequireComplete() != nil {
++		return ErrKnowledgeInputChanged
++	}
++	targets := types.SearchTargets{}
++	for _, input := range r.originals {
++		targets = append(targets, &types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, TenantID: input.TenantID, KnowledgeBaseID: input.KnowledgeBaseID})
++	}
++	return authority.Guard.Check(r.ctx, lineage, access.LineageReadScope{Targets: targets})
++}
+diff --git a/internal/application/repository/nextcloud_source_lineage.go b/internal/application/repository/nextcloud_source_lineage.go
+index 8d066936b355baf04565d7cdaa520b16a7694c7b..45e15bba79ecdcda7e841376c6b10ae8c683f111 100644
+--- a/internal/application/repository/nextcloud_source_lineage.go
++++ b/internal/application/repository/nextcloud_source_lineage.go
+@@ -56,12 +56,18 @@ func (r *knowledgeRepository) ResolveNextcloudSourceLineage(
+ }
+ 
+ func (r *knowledgeRepository) resolveNextcloudSourceLineageInTx(tx *gorm.DB, tenantID uint64, kbID, knowledgeID string) (*types.Knowledge, types.SourceIdentity, error) {
++	return r.resolveNextcloudSourceLineageModeInTx(tx, tenantID, kbID, knowledgeID, false)
++}
++func (r *knowledgeRepository) resolveNextcloudSourceLineageModeInTx(tx *gorm.DB, tenantID uint64, kbID, knowledgeID string, metadataOnly bool) (*types.Knowledge, types.SourceIdentity, error) {
+ 	var knowledge *types.Knowledge
+ 	var identity types.SourceIdentity
+ 	err := func() error {
+ 		var current types.Knowledge
+-		if err := tx.Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?", knowledgeID, tenantID, kbID).
+-			Take(&current).Error; err != nil {
++		query := tx.Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?", knowledgeID, tenantID, kbID)
++		if metadataOnly {
++			query = bodyInternal(tx).Select("id,tenant_id,knowledge_base_id,channel,parse_status,enable_status,file_type,deleted_at,"+nextcloudLineageSourceMetadataProjection(tx)).Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?", knowledgeID, tenantID, kbID)
++		}
++		if err := query.Take(&current).Error; err != nil {
+ 			return lineageSnapshotReadError(err)
+ 		}
+ 		if current.Channel != types.ConnectorTypeNextcloud || current.ParseStatus != types.ParseStatusCompleted || current.EnableStatus != "enabled" {
+@@ -76,7 +82,7 @@ func (r *knowledgeRepository) resolveNextcloudSourceLineageInTx(tx *gorm.DB, ten
+ 			Take(&kb).Error; err != nil {
+ 			return lineageSnapshotReadError(err)
+ 		}
+-		candidate, ready, err := r.publicationCandidate(tx, knowledgeID, false)
++		candidate, ready, err := r.publicationCandidateModeWithMetadata(tx, knowledgeID, false, false, metadataOnly)
+ 		if err != nil {
+ 			return fmt.Errorf("%w: publication snapshot", ErrNextcloudLineageSnapshotStore)
+ 		}
+@@ -241,3 +247,33 @@ func strictLineageKnowledgeMetadata(data []byte) (map[string]string, error) {
+ 	}
+ 	return out, nil
+ }
++
++// The capability's real full source check already ran and all original source
++// bodies remain held. This final coherent projection reads only local metadata.
++func (r *knowledgeRepository) RecheckNextcloudSourceLineageMetadata(ctx context.Context, lineage *types.SourceLineage) (bool, error) {
++	if r == nil || r.db == nil || ctx == nil || lineage == nil || lineage.RequireComplete() != nil {
++		return false, ErrNextcloudLineageSnapshotDenied
++	}
++	if r.db.Dialector.Name() != "sqlite" {
++		return false, ErrNextcloudLineageSnapshotStore
++	}
++	if _, ok := r.db.Statement.ConnPool.(gorm.TxCommitter); !ok {
++		return false, ErrNextcloudLineageSnapshotStore
++	}
++	for _, saved := range lineage.Sources {
++		_, current, err := r.resolveNextcloudSourceLineageModeInTx(r.db.WithContext(ctx), saved.TenantID, saved.KnowledgeBaseID, saved.KnowledgeID, true)
++		if err != nil {
++			return false, err
++		}
++		if current != saved {
++			return false, nil
++		}
++	}
++	return true, ctx.Err()
++}
++
++func nextcloudLineageSourceMetadataProjection(tx *gorm.DB) string {
++	// Supported only by the explicit original SQLite personal reader. Values
++	// preserve JSON scalar types; explicit null/number never becomes a string.
++	return `json_object('datasource_id',json_extract(metadata,'$.datasource_id'),'external_id',json_extract(metadata,'$.external_id'),'source_resource_id',json_extract(metadata,'$.source_resource_id'),'nextcloud_instance_id',json_extract(metadata,'$.nextcloud_instance_id'),'nextcloud_binding_id',json_extract(metadata,'$.nextcloud_binding_id'),'nextcloud_file_id',json_extract(metadata,'$.nextcloud_file_id'),'nextcloud_etag',json_extract(metadata,'$.nextcloud_etag'),'nextcloud_target_etag',json_extract(metadata,'$.nextcloud_target_etag'),'nextcloud_path',json_extract(metadata,'$.nextcloud_path'),'nextcloud_content_revision',CASE WHEN json_type(metadata,'$.nextcloud_content_revision') IS NULL THEN '' ELSE json_extract(metadata,'$.nextcloud_content_revision') END) AS metadata`
++}
+diff --git a/internal/application/repository/nextcloud_versions.go b/internal/application/repository/nextcloud_versions.go
+index 3f524d1d6ebc6d2fbae6d299dab198010ca51937..439a77aa63dc3ce34e023c34d368e480ecd197b3 100644
+--- a/internal/application/repository/nextcloud_versions.go
++++ b/internal/application/repository/nextcloud_versions.go
+@@ -64,6 +64,9 @@ func withNextcloudCandidateKnowledgeID(tx *gorm.DB, candidateID string) *gorm.DB
+ // Build capture uses the same full persisted tuple/config/pair validation,
+ // while permitting a leased staging/finalizing input before publication.
+ func (r *knowledgeRepository) publicationCandidateMode(tx *gorm.DB, candidateID string, lock, allowBuilding bool) (nextcloudPublicationCandidate, bool, error) {
++	return r.publicationCandidateModeWithMetadata(tx, candidateID, lock, allowBuilding, false)
++}
++func (r *knowledgeRepository) publicationCandidateModeWithMetadata(tx *gorm.DB, candidateID string, lock, allowBuilding, metadataOnly bool) (nextcloudPublicationCandidate, bool, error) {
+ 	var result nextcloudPublicationCandidate
+ 	versionQuery := withNextcloudCandidateKnowledgeID(tx, candidateID).Where("state IN ?",
+ 		[]string{"staging", "published"})
+@@ -84,6 +87,12 @@ func (r *knowledgeRepository) publicationCandidateMode(tx *gorm.DB, candidateID
+ 	if lock {
+ 		candidateQuery = candidateQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+ 	}
++	if metadataOnly {
++		candidateQuery = bodyInternal(tx).Select("id,tenant_id,knowledge_base_id,channel,parse_status,enable_status,file_type,deleted_at,"+nextcloudLineageSourceMetadataProjection(tx)).Where("tenant_id = ? AND knowledge_base_id = ? AND id = ? AND channel = ?", result.version.TenantID, result.version.KnowledgeBaseID, candidateID, types.ConnectorTypeNextcloud)
++		if lock {
++			candidateQuery = candidateQuery.Clauses(clause.Locking{Strength: "UPDATE"})
++		}
++	}
+ 	err = candidateQuery.Take(&candidate).Error
+ 	if err != nil {
+ 		return result, false, err
+@@ -92,7 +101,17 @@ func (r *knowledgeRepository) publicationCandidateMode(tx *gorm.DB, candidateID
+ 		return result, false, nil
+ 	}
+ 	if !allowBuilding {
+-		ready, err := nextcloudRequiredGraphReady(tx, &candidate)
++		var ready bool
++		var err error
++		if metadataOnly {
++			var kb types.KnowledgeBase
++			err = tx.Select("id,tenant_id,indexing_strategy").Where("id=? AND tenant_id=?", candidate.KnowledgeBaseID, candidate.TenantID).Take(&kb).Error
++			// Graph original inputs need their own retained completion union. This
++			// explicit vector slice cannot fabricate that authority from a task state.
++			ready = err == nil && !kb.IndexingStrategy.GraphRequired
++		} else {
++			ready, err = nextcloudRequiredGraphReady(tx, &candidate)
++		}
+ 		if err != nil {
+ 			return result, false, err
+ 		}
+diff --git a/internal/application/repository/retriever/sqlite/original_vector_source_configuration.go b/internal/application/repository/retriever/sqlite/original_vector_source_configuration.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a55bcbf9e920901a914496fa8e20424aff1b3a00
+--- /dev/null
++++ b/internal/application/repository/retriever/sqlite/original_vector_source_configuration.go
+@@ -0,0 +1,16 @@
++package sqlite
++
++import (
++	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++// A mutable model/KB DTO or a legacy backend cannot install this authority.
++// Only this actual original adapter's concrete same-pool store is configured.
++func ConfigureOriginalSQLiteVectorSourceReads(engine interfaces.RetrieveEngineRepository, factory apprepo.KnowledgeSQLiteVectorSourceAuthorityFactory) error {
++	actual, ok := engine.(*sqliteRepository)
++	if !ok || actual == nil || actual.originals == nil || actual.initErr != nil {
++		return apprepo.ErrKnowledgeSQLiteEmbeddingUnknown
++	}
++	return apprepo.ConfigureKnowledgeSQLiteVectorSourceReads(actual.originals, factory)
++}
+diff --git a/internal/application/service/knowledge_sqlite_vector_personal_authority.go b/internal/application/service/knowledge_sqlite_vector_personal_authority.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7e67e7616d4fc013570f6f4f63f6cf34c72191f
+--- /dev/null
++++ b/internal/application/service/knowledge_sqlite_vector_personal_authority.go
+@@ -0,0 +1,58 @@
++package service
++
++import (
++	"context"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"gorm.io/gorm"
++)
++
++// Explicit original constructor configuration only. No normal registry/QA
++// caller is enabled here and no machine purpose is converted to a Web grant.
++func ConfigurePersonalNextcloudSQLiteVectorReads(engine interfaces.RetrieveEngineRepository, groups interfaces.GroupAccessService, directoryRuntime interfaces.DirectoryRuntimeService) error {
++	return sqliteindex.ConfigureOriginalSQLiteVectorSourceReads(engine, func(tx *gorm.DB) *repository.KnowledgeSQLiteVectorSourceAuthority {
++		boundGroups := NewGroupAccessService(repository.NewGroupAccessRepository(tx))
++		var statusReader directoryStatusReader = directoryRuntime
++		if original, ok := groups.(*groupAccessService); ok && directoryRuntime == nil {
++			statusReader = original.directoryRuntime
++		}
++		status, err := newMemoryDirectoryStatusReader(statusReader, tx)
++		if err != nil {
++			return nil
++		}
++		configureGroupAccessDirectoryStatus(boundGroups, status)
++		knowledge := repository.NewKnowledgeRepository(tx)
++		kbs := repository.NewKnowledgeBaseRepository(tx)
++		sources := repository.NewDataSourceRepository(tx)
++		shares := NewKBShareService(repository.NewKBShareRepository(tx), repository.NewOrganizationRepository(tx), kbs, knowledge, sources, repository.NewChunkRepository(tx), nil)
++		agents := NewAgentShareService(repository.NewAgentShareRepository(tx), repository.NewTenantDisabledSharedAgentRepository(tx), repository.NewOrganizationRepository(tx), repository.NewCustomAgentRepository(tx), repository.NewUserRepository(tx), repository.NewWebSearchProviderRepository(tx), kbs, knowledge, sources)
++		store := repository.NewKnowledgeInputProvenanceStore(tx)
++		repository.ConfigureKnowledgeInputActorGroupAccess(store, boundGroups)
++		repository.ConfigureKnowledgeInputActorShares(store, shares)
++		repository.ConfigureMessageMaterialAgentShares(store, agents)
++		repository.ConfigureKnowledgeCurrentReadActor(knowledge, store)
++		snapshots, ok := knowledge.(access.NextcloudLineageSnapshotLookup)
++		if !ok {
++			return nil
++		}
++		publication := access.NewNextcloudPublicationGuard(repository.NewDirectoryRepository(tx), sources)
++		publication.ConfigureSourcePathResolver(repository.NewNextcloudOnboardingStore(tx))
++		guard := access.NewNextcloudSourceLineageGuard(snapshots, &knowledgeBaseService{repo: kbs}, shares, agents, boundGroups, publication, store)
++		runtime := func(ctx context.Context) error {
++			if status != nil {
++				health, err := status.GetStatus(ctx)
++				if err != nil {
++					return err
++				}
++				if health == nil {
++					return access.ErrNextcloudPublicationUnavailable
++				}
++			}
++			return ctx.Err()
++		}
++		return &repository.KnowledgeSQLiteVectorSourceAuthority{Store: store, Guard: guard, CheckRuntime: runtime}
++	})
++}
+diff --git a/internal/application/service/nextcloud_personal_query_completion_source_sql_http_actual_test.go b/internal/application/service/nextcloud_personal_query_completion_source_sql_http_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb5ad28f5d7486371914d9bfe40be22a3322c19d
+--- /dev/null
++++ b/internal/application/service/nextcloud_personal_query_completion_source_sql_http_actual_test.go
+@@ -0,0 +1,694 @@
++package service
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	sqliteindex "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
++	"github.com/Tencent/WeKnora/internal/application/service/retriever"
++	ncconnector "github.com/Tencent/WeKnora/internal/datasource/connector/nextcloud"
++	"github.com/Tencent/WeKnora/internal/models/chat"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/utils"
++	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++const personalQueryText = "What does the published original source say?"
++const personalAnswerText = "Original configuration influence from actual source A."
++
++// Current WebAdmin technical slice. This test does not claim the source-only
++// nonmember/group-role matrix or sourced named-history completion.
++func TestNextcloudPersonalOriginalQueryCompletionActualSQLiteHTTP(t *testing.T) {
++	for _, mode := range []string{"published_source_query_answer_completion", "source_lease_last_SQL_clock", "source_KB_fence_last_SQL_clock", "source_exact_fence_identity_last_SQL_clock", "actor_after_last_journal_IO", "source_grant_after_last_journal_IO", "source_epoch_after_last_journal_IO"} {
++		t.Run(mode, func(t *testing.T) {
++			t.Setenv(memoryJointSchemaOptin, "1")
++			knowledgeSQLiteOriginalVecAuto.Do(sqlite_vec.Auto)
++			aText := strings.Repeat("# Ancestor original\n\nOriginal configuration influence from actual source A. ", 8)
++			bText := strings.Repeat("# Machine original\n\nActual source B retains all ancestor authority. ", 8)
++			m := newMachinePipelineFixtureWithDocument(t, false, aText, true, true, true)
++			f := m.f
++			installKnowledgeSQLiteOriginal90ForTest(t, f.db)
++			ancestorEpoch := &atomic.Int64{}
++			ancestorEpoch.Store(1)
++			sourceHTTP, ancestorAllowed, sourceRequests, sourceErr := ownedAncestorSignedSource(t, aText, bText, ancestorEpoch)
++			t.Setenv("WEKNORA_NEXTCLOUD_ALLOWED_ORIGINS", sourceHTTP.URL)
++			var calls, embeddingCalls, chatCalls atomic.Int64
++			var mu sync.Mutex
++			var callbackErr error
++			transmitted := [][]string{}
++			fail := func(err error) { mu.Lock(); callbackErr = errors.Join(callbackErr, err); mu.Unlock() }
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				calls.Add(1)
++				if r.URL.Path == "/chat/completions" {
++					chatCalls.Add(1)
++					var body struct {
++						Messages []struct{ Role, Content string }
++					}
++					if json.NewDecoder(r.Body).Decode(&body) != nil || r.Header.Get("Authorization") != "Bearer owned-ancestor-embedding" {
++						fail(errors.New("actual personal answer recipe mismatch"))
++						w.WriteHeader(400)
++						return
++					}
++					text := ""
++					for _, message := range body.Messages {
++						text += message.Content
++					}
++					if !strings.Contains(text, personalQueryText) || !strings.Contains(text, "Original configuration influence") {
++						fail(errors.New("actual answer lost original query/source"))
++						w.WriteHeader(400)
++						return
++					}
++					w.Header().Set("Content-Type", "application/json")
++					_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": personalAnswerText}, "finish_reason": "stop"}}})
++					return
++				}
++				embeddingCalls.Add(1)
++				var wire struct {
++					Input      []string `json:"input"`
++					Dimensions int      `json:"dimensions"`
++				}
++				if json.NewDecoder(r.Body).Decode(&wire) != nil || r.URL.Path != "/embeddings" || r.Header.Get("Authorization") != "Bearer owned-ancestor-embedding" || wire.Dimensions != 2 {
++					fail(errors.New("actual ancestor embedding recipe mismatch"))
++					w.WriteHeader(400)
++					return
++				}
++				if len(wire.Input) == 0 {
++					fail(errors.New("empty actual embedding request"))
++					w.WriteHeader(400)
++					return
++				}
++				for _, text := range wire.Input {
++					if text != personalQueryText && !strings.Contains(text, "Original configuration influence") {
++						fail(errors.New("embedding received nonoriginal wire"))
++						w.WriteHeader(400)
++						return
++					}
++				}
++				mu.Lock()
++				transmitted = append(transmitted, append([]string(nil), wire.Input...))
++				mu.Unlock()
++
++				data := []map[string]any{}
++				for i := range wire.Input {
++					data = append(data, map[string]any{"index": i, "embedding": []float32{1, 0}})
++				}
++				w.Header().Set("Content-Type", "application/json")
++				_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
++			}))
++			t.Cleanup(server.Close)
++			utils.SetSSRFWhitelistFromRaw("127.0.0.1")
++			t.Cleanup(utils.ResetSSRFWhitelistForTest)
++			modelRepo := repository.NewModelRepository(f.db)
++			ConfigureModelOriginalAuthority(modelRepo, f.store, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil)
++			models := NewModelService(modelRepo, nil, nil, nil, nil, nil)
++			model := &types.Model{ID: uuid.NewString(), TenantID: 7, Name: "actual ancestor embedding", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Parameters: types.ModelParameters{Provider: "openai", BaseURL: server.URL, APIKey: "owned-ancestor-embedding", EmbeddingParameters: types.EmbeddingParameters{Dimension: 2, SupportsDimensionOverride: true}}}
++			require.NoError(t, models.CreateModel(f.ctx, model))
++			require.NotNil(t, model.OriginalProof)
++			require.True(t, model.OriginalProof.Valid())
++			f.s.modelService = models
++			// Actual production registry selection and the same concrete original
++			// SQLite backend are shared by the plan producer and later index writes.
++			registry := retriever.NewRetrieveEngineRegistry(nil, nil)
++			nativeEngine := retriever.NewKVHybridRetrieveEngine(sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(f.db, f.store, modelRepo), types.SQLiteRetrieverEngineType)
++			require.NoError(t, registry.Register(nativeEngine))
++			var seed types.KnowledgeBase
++			require.NoError(t, f.db.Where("id=? AND tenant_id=?", "kb", 7).Take(&seed).Error)
++			seed.EmbeddingModelID = model.ID
++			seed.AutoTagConfig = nil
++			seed.ExtractConfig = nil
++			seed.IndexingStrategy = types.IndexingStrategy{VectorEnabled: true}
++			require.NoError(t, f.store.UpdateKnowledgeBaseWithInput(repository.WithIndependentKnowledgeInput(f.ctx), &seed))
++			var tenant types.Tenant
++			require.NoError(t, f.db.Where("id=?", 7).Take(&tenant).Error)
++			tenant.RetrieverEngines = types.RetrieverEngines{Engines: []types.RetrieverEngineParams{{RetrieverType: types.VectorRetrieverType, RetrieverEngineType: types.SQLiteRetrieverEngineType}}}
++			require.NoError(t, repository.NewTenantRepository(f.db).UpdateTenant(f.ctx, &tenant))
++			// Summary/QA are explicitly disabled by the actual upload producer and are
++			// sealed into its original task/config. No fake enrichment/model is called.
++			m.source.knowledgeService = autoCompletionZeroEnrichmentSource{f.s}
++			pairs := repository.NewNextcloudSourcePairingRepository(f.db)
++			sources := repository.NewDataSourceRepository(f.db)
++			repository.ConfigureDataSourceNameInputWriters(sources, pairs, func(tx *gorm.DB) *repository.KnowledgeInputProvenanceStore {
++				authority := repository.NewKnowledgeInputProvenanceStore(tx)
++				repository.ConfigureKnowledgeInputActorGroupAccess(authority, NewGroupAccessService(repository.NewGroupAccessRepository(tx)))
++				repository.ConfigureKnowledgeInputActorShares(authority, NewKBShareService(repository.NewKBShareRepository(tx), repository.NewOrganizationRepository(tx), repository.NewKnowledgeBaseRepository(tx), repository.NewKnowledgeRepository(tx), repository.NewDataSourceRepository(tx), repository.NewChunkRepository(tx), nil))
++				return authority
++			})
++			onboarding := repository.NewNextcloudOnboardingStore(f.db)
++			var linked types.DirectoryIdentity
++			require.NoError(t, f.db.Where("directory_id=? AND user_id=? AND status=?", "machine-ad", types.CallerFromContext(f.ctx).UserID, types.DirectoryObjectActive).Take(&linked).Error)
++			require.NotNil(t, linked.UserID)
++			reserve := func(template *types.KnowledgeBase, binding, guid string) (types.NextcloudOnboardingOperation, repository.NextcloudSourcePairing, *types.DataSource) {
++				token := strings.Repeat("owned-ancestor-credential-"+binding, 3)
++				sum := sha256.Sum256([]byte(token))
++				credential := types.NextcloudOnboardingCredential{ID: uuid.NewString(), InstanceID: "owned-ancestor-instance", BaseURL: sourceHTTP.URL, TokenSHA256: hex.EncodeToString(sum[:]), TenantID: 7, DirectoryID: "machine-ad", TemplateKBID: template.ID, Enabled: true, MaxKnowledgeBases: 2}
++				require.NoError(t, f.db.Create(&credential).Error)
++				actualCredential, err := onboarding.Credential(f.ctx, token)
++				require.NoError(t, err)
++				op, err := onboarding.Reserve(f.ctx, actualCredential, types.NextcloudOnboardingRequest{OperationID: uuid.NewString(), TenantID: 7, InstanceID: credential.InstanceID, BindingID: binding, ActorDirectoryID: "machine-ad", ActorObjectGUID: guid, Mode: "create", Name: "actual ancestor build " + binding, ProcessingTemplateID: template.ID})
++				require.NoError(t, err)
++				pair, created, err := pairs.PrepareSourcePairing(f.ctx, repository.NextcloudSourcePairing{OperationID: op.OperationID, TenantID: 7, KnowledgeBaseID: op.KnowledgeBaseID, InstanceID: op.InstanceID, BindingID: binding, BaseURL: sourceHTTP.URL, PublicationEpoch: 1, KeyID: "local-key"}, "isolated-machine")
++				require.NoError(t, err)
++				require.True(t, created)
++				require.NoError(t, pairs.ActivateSourcePairing(f.ctx, pair))
++				require.NoError(t, onboarding.MarkActive(f.ctx, op))
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Where("operation_id=?", op.OperationID).Take(&op).Error)
++				ds, err := sources.FindByID(f.ctx, pair.DataSourceID)
++				require.NoError(t, err)
++				return op, pair, ds
++			}
++			aOp, aPair, aSource := reserve(&seed, "owned-ancestor-a", linked.ObjectGUID)
++			require.Equal(t, types.CallerFromContext(f.ctx).UserID, aOp.ActorUserID)
++			// The grant producer obtains actual current signed binding identity and
++			// persists an event connection; no status epoch or source grant is seeded.
++			pairAndRefresh := func(op types.NextcloudOnboardingOperation, pair repository.NextcloudSourcePairing, ds *types.DataSource) string {
++				cfg, err := ds.ParseConfig()
++				require.NoError(t, err)
++				cfg.Type = ds.Type
++				inspected, err := ncconnector.InspectPairing(f.ctx, cfg)
++				require.NoError(t, err)
++				require.Equal(t, pair.InstanceID, inspected.InstanceID)
++				require.Equal(t, pair.BindingID, inspected.BindingID)
++				require.EqualValues(t, 1, inspected.PublicationEpoch)
++				require.Equal(t, "active", inspected.PublicationState)
++				base, configSHA, binding, err := repository.NextcloudEventDataSourceIdentity(ds.Config)
++				require.NoError(t, err)
++				require.Equal(t, inspected.BaseURL, base)
++				require.Equal(t, inspected.BindingID, binding)
++				event, err := repository.NewNextcloudEventInboxRepository(f.db).Pair(f.ctx, repository.NextcloudEventPairingIdentity{TenantID: op.TenantID, KnowledgeBaseID: op.KnowledgeBaseID, DatasourceID: ds.ID, NextcloudInstanceID: inspected.InstanceID, BindingID: inspected.BindingID, DatasourceBaseURL: inspected.BaseURL, DatasourceConfigSHA: configSHA, PublicationEpoch: inspected.PublicationEpoch, PublicationState: inspected.PublicationState})
++				require.NoError(t, err)
++				require.NotEmpty(t, event.ConnectionID)
++				require.NoError(t, onboarding.RefreshGrantEpoch(f.ctx, op))
++				var observed struct {
++					ConnectionID, PairOperationID string
++					PublicationEpoch, VerifiedAt  int64
++				}
++				require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Table("nextcloud_source_status_epochs").Where("connection_id=? AND pair_operation_id=?", event.ConnectionID, op.OperationID).Take(&observed).Error)
++				require.Equal(t, event.ConnectionID, observed.ConnectionID)
++				require.Equal(t, op.OperationID, observed.PairOperationID)
++				require.EqualValues(t, 1, observed.PublicationEpoch)
++				require.Positive(t, observed.VerifiedAt)
++				return event.ConnectionID
++			}
++			aConnection := pairAndRefresh(aOp, aPair, aSource)
++			grant := types.NextcloudGrantSnapshot{Complete: true, PermissionVersion: 1, PublicationEpoch: 1, Subjects: []types.NextcloudGrantSubject{{Kind: "user", DirectoryID: "machine-ad", ObjectGUID: linked.ObjectGUID, SourceRelationID: "actual-personal-original-read"}}}
++			require.NoError(t, onboarding.ApplyGrantSnapshot(f.ctx, aOp, grant))
++			require.NoError(t, f.db.Session(&gorm.Session{NewDB: true}).Where("operation_id=?", aOp.OperationID).Take(&aOp).Error)
++			require.EqualValues(t, 1, aOp.PermissionVersion)
++			var actualGrant types.NextcloudSourceGrant
++			require.NoError(t, f.db.Where("operation_id=? AND directory_id=? AND object_guid=?", aOp.OperationID, "machine-ad", linked.ObjectGUID).Take(&actualGrant).Error)
++			require.Equal(t, linked.ID, actualGrant.PrincipalID)
++			require.EqualValues(t, 1, actualGrant.PublicationEpoch)
++			m.source.nextcloudSourcePairings = pairs
++			ingest := func(ds *types.DataSource, artifact string) *types.Knowledge {
++				m.ds = ds
++				log := &types.SyncLog{ID: uuid.NewString(), DataSourceID: ds.ID, TenantID: 7, Status: types.SyncLogStatusRunning, StartedAt: time.Now().UTC()}
++				require.NoError(t, m.source.syncLogRepo.Create(f.ctx, log))
++				require.NoError(t, m.source.ProcessSync(f.ctx, enrichmentTask(t, types.TypeDataSourceSync, types.DataSourceSyncPayload{DataSourceID: ds.ID, TenantID: 7, SyncLogID: log.ID, ForceFull: true})))
++				var row types.Knowledge
++				require.NoError(t, f.db.Where("knowledge_base_id=? AND channel=?", ds.KnowledgeBaseID, types.ConnectorTypeNextcloud).Take(&row).Error)
++				require.Equal(t, types.ParseStatusPending, row.ParseStatus)
++				require.NotEmpty(t, row.FilePath)
++				require.NoError(t, sourceErr())
++				return &row
++			}
++			aKnowledge := ingest(aSource, aText)
++			a := ownedAncestorBeginBuild(t, m, aSource, aKnowledge, aText, f.ctx, nil, registry)
++			ownedAncestorWriteIndex(t, m, a, models, nil)
++			require.EqualValues(t, 1, calls.Load())
++			// Only real successful indexed original work is handed to the repository's
++			// normal status/completion/publication producers. No raw completed/head edit.
++			current, err := f.s.repo.GetKnowledgeByID(a.ctx, 7, aKnowledge.ID)
++			require.NoError(t, err)
++			// Match the successful processChunks stage only after the genuine native
++			// index returned success. Completion alone never enables a staged row.
++			finalizeIndexedKnowledgeState(current, a.storageSize, len(a.chunks), false, time.Now())
++			require.NoError(t, f.s.updateKnowledgeUnlessSourceReplaced(a.ctx, current))
++			var indexed types.Knowledge
++			require.NoError(t, f.db.Where("id=?", current.ID).Take(&indexed).Error)
++			require.Equal(t, types.ParseStatusProcessing, indexed.ParseStatus)
++			require.Equal(t, "enabled", indexed.EnableStatus)
++			require.Equal(t, a.storageSize, indexed.StorageSize)
++			require.NotNil(t, indexed.ProcessedAt)
++			var readyChunks int64
++			require.NoError(t, f.db.Model(&types.Chunk{}).Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND chunk_type=? AND is_enabled=? AND index_status=?", 7, a.scope.KnowledgeBaseID, current.ID, types.ChunkTypeText, true, "ready").Count(&readyChunks).Error)
++			require.EqualValues(t, len(a.chunks), readyChunks)
++			completed, err := f.s.repo.CompleteProcessingWithoutSubtasks(a.ctx, current.ID)
++			require.NoError(t, err)
++			require.True(t, completed)
++			require.NoError(t, f.db.Where("id=?", current.ID).Take(current).Error)
++			require.Equal(t, types.ParseStatusCompleted, current.ParseStatus)
++			var published struct {
++				State                string
++				CandidateKnowledgeID string
++			}
++			require.NoError(t, f.db.Table("nextcloud_source_versions").Where("tenant_id=? AND knowledge_base_id=? AND datasource_id=? AND external_id=?", 7, a.scope.KnowledgeBaseID, a.scope.DataSourceID, a.scope.ExternalID).Take(&published).Error)
++			require.Equal(t, "published", published.State)
++			require.Equal(t, current.ID, published.CandidateKnowledgeID)
++			require.NoError(t, a.read.Recheck())
++			require.NoError(t, f.store.RecheckKnowledgeBuildInputs(a.ctx, a.proof))
++			require.Len(t, a.proof.SourceLineage.Sources, 1)
++			require.Equal(t, aKnowledge.ID, a.proof.SourceLineage.Sources[0].KnowledgeID)
++
++			// Finish A's original owned build before the independent personal consumer.
++			// No old context is copied into a new read grant; the real Web request below
++			// reauthorizes user, GUID, source grants, model and all source/body leases.
++			require.NoError(t, a.read.Close())
++			a.closed = true
++			cleanup, finishCleanup := context.WithTimeout(context.WithoutCancel(a.ctx), 5*time.Second)
++			require.NoError(t, repository.NewNextcloudContentLeaseStore(f.db).ReleaseLease(cleanup, a.lease.ID))
++			finishCleanup()
++			installKnowledgeQuery91Actual(t, f.db)
++			repository.ConfigureKnowledgeCurrentReadActor(f.s.repo, f.store)
++			empty, err := types.NewCompleteSourceLineage()
++			require.NoError(t, err)
++			emptyLocal, err := f.guard.CheckAndCaptureLocal(f.ctx, empty, access.LineageReadScope{})
++			require.NoError(t, err)
++			require.NoError(t, emptyLocal.Recheck())
++			var beforeBody int64
++			require.NoError(t, f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&beforeBody).Error)
++			require.Zero(t, beforeBody)
++			index := sqliteindex.NewOriginalSQLiteRetrieveEngineRepository(f.db, f.store, modelRepo)
++			require.NoError(t, ConfigurePersonalNextcloudSQLiteVectorReads(index, NewGroupAccessService(repository.NewGroupAccessRepository(f.db)), nil))
++			original := repository.NewKnowledgeSQLiteEmbeddingStore(f.db, f.store, modelRepo)
++			answer := actualModelLiteral(uuid.NewString(), 7)
++			answer.Name = "actual personal original answer"
++			answer.Parameters.BaseURL = server.URL
++			answer.Parameters.APIKey = "owned-ancestor-embedding"
++			require.NoError(t, models.CreateModel(f.ctx, answer))
++			require.NotNil(t, answer.OriginalProof)
++			require.True(t, answer.OriginalProof.Valid())
++			messages := &messageService{messageRepo: repository.NewMessageRepository(f.db), sessionRepo: repository.NewSessionRepository(f.db), sourceLineageGuard: f.guard}
++			ConfigureMessageMaterialProvenance(messages, f.store)
++			session := &types.Session{ID: uuid.NewString(), TenantID: 7, UserID: types.CallerFromContext(f.ctx).UserID}
++			_, err = messages.sessionRepo.Create(f.ctx, session)
++			require.NoError(t, err)
++			user, err := messages.CreateMessage(f.ctx, &types.Message{SessionID: session.ID, RequestID: uuid.NewString(), Role: "user", Content: personalQueryText, IsCompleted: true})
++			require.NoError(t, err)
++			assistant, err := messages.CreateMessage(f.ctx, &types.Message{SessionID: session.ID, RequestID: user.RequestID, Role: "assistant"})
++			require.NoError(t, err)
++			owner, cancelOwner := context.WithTimeout(f.ctx, 8*time.Second)
++			httpctx, attach, check, releaseHTTP := BeginMessageMaterialHTTPBoundary(owner)
++			call, cancelCall := context.WithCancel(attach(httpctx))
++			releaseProducer := RetainMessageMaterialHTTPProducer(call)
++			t.Cleanup(func() {
++				cancelCall()
++				releaseProducer()
++				releaseHTTP()
++				cancelOwner()
++				var live int64
++				if e := f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error; e != nil {
++					t.Error(e)
++				}
++				if live != 0 {
++					t.Errorf("actual owned body leases remain: %d", live)
++				}
++				if e := sourceErr(); e != nil {
++					t.Error(e)
++				}
++			})
++			actual, err := messages.GetMessage(call, session.ID, user.ID)
++			require.NoError(t, err)
++			require.Equal(t, personalQueryText, actual.Content)
++			parents, err := messageMaterialBoundarySnapshots(call)
++			require.NoError(t, err)
++			require.Len(t, parents, 1)
++			require.Len(t, parents[0].Proofs, 1)
++			require.Equal(t, user.ID, parents[0].Proofs[0].MessageID)
++			inputSources, err := types.UnionSourceLineage(parents[0].Proofs[0].SourceLineage)
++			require.NoError(t, err)
++			require.NoError(t, inputSources.RequireComplete())
++			require.Empty(t, inputSources.Sources)
++			require.NoError(t, messages.bindInitialMessageMaterial(call, assistant.ID, user.ID, user.RequestID))
++			call, err = bindKnowledgeQueryMessageOriginal(call, session.ID, user.ID)
++			require.NoError(t, err)
++			query, err := EmbedOriginalKnowledgeQuery(call, original, models, a.scope.KnowledgeBaseID, model.ID)
++			require.NoError(t, err)
++			require.NotNil(t, query)
++			snapshot, err := query.Snapshot()
++			require.NoError(t, err)
++			require.Equal(t, a.scope.KnowledgeBaseID, snapshot.KnowledgeBaseID)
++			require.Equal(t, model.Parameters.OriginalEmbedding.SpaceDigest, snapshot.SpaceDigest)
++			require.Equal(t, []float32{1, 0}, snapshot.Vector)
++			resultCtx := query.Context()
++			params := types.RetrieveParams{Embedding: append([]float32(nil), snapshot.Vector...), KnowledgeBaseIDs: []string{a.scope.KnowledgeBaseID}, KnowledgeIDs: []string{current.ID}, TopK: 1, RetrieverType: types.VectorRetrieverType, AdditionalParams: map[string]interface{}{"embedding_space_digest": snapshot.SpaceDigest}}
++			results, err := index.Retrieve(resultCtx, params)
++			require.NoError(t, err)
++			require.Len(t, results, 1)
++			require.Len(t, results[0].Results, 1)
++			require.Equal(t, current.ID, results[0].Results[0].KnowledgeID)
++			// Get dependency metadata only by the real concrete held boundary readers;
++			// it is not a raw original-row/lineage DTO used to authorize completion.
++			slot, ok := resultCtx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++			require.True(t, ok)
++			vectors := []*repository.KnowledgeSQLiteEmbeddingVectorRead{}
++			queries := []*repository.KnowledgeQueryEmbeddingResultRead{}
++			slot.mu.Lock()
++			for _, resource := range slot.Models {
++				switch concrete := resource.(type) {
++				case *knowledgeEmbeddingBoundaryResource:
++					vectors = append(vectors, concrete.read)
++				case *knowledgeQueryBoundaryResource:
++					queries = append(queries, concrete.read)
++				}
++			}
++			slot.mu.Unlock()
++			require.Len(t, vectors, 1)
++			require.Len(t, queries, 1)
++			_, consumptions, err := repository.WithActualKnowledgeCompletionReads(resultCtx, queries, vectors)
++			require.NoError(t, err)
++			require.Len(t, consumptions, 1)
++			require.NotNil(t, consumptions[0].SourceLineage)
++			require.NoError(t, consumptions[0].SourceLineage.RequireComplete())
++			require.Len(t, consumptions[0].SourceLineage.Sources, 1)
++			require.Equal(t, current.ID, consumptions[0].SourceLineage.Sources[0].KnowledgeID)
++			sourceUnion, err := types.UnionSourceLineage(inputSources, consumptions[0].SourceLineage)
++			require.NoError(t, err)
++			client, err := models.GetChatModel(resultCtx, answer.ID)
++			require.NoError(t, err)
++			response, err := client.Chat(resultCtx, []chat.Message{{Role: "user", Content: actual.Content + "\n" + results[0].Results[0].Content, SourceLineage: sourceUnion}}, &chat.ChatOptions{})
++			require.NoError(t, err)
++			require.Equal(t, personalAnswerText, response.Content)
++			require.EqualValues(t, 2, embeddingCalls.Load())
++			require.EqualValues(t, 1, chatCalls.Load())
++			mu.Lock()
++			sent := append([][]string(nil), transmitted...)
++			sdkError := callbackErr
++			mu.Unlock()
++			require.NoError(t, sdkError)
++			require.Len(t, sent, 2)
++			require.Equal(t, a.wire, sent[0])
++			require.Equal(t, []string{personalQueryText}, sent[1])
++			markMessageMaterialReady(httpctx)
++			require.NoError(t, check())
++			assistant.Content = response.Content
++			assistant.IsCompleted = true
++			assistant.SourceLineage = sourceUnion
++			beforeFacts := personalCompletionFactsForTest(t, f.db, current.ID, assistant.ID)
++			var faultApplied, reachedExpiry, localObserved, clockObserved atomic.Bool
++			var faultMu sync.Mutex
++			var faultErr error
++			recordFault := func(e error) { faultMu.Lock(); faultErr = errors.Join(faultErr, e); faultMu.Unlock() }
++			if mode != "published_source_query_answer_completion" {
++				const observer = "personal-original-completion-final-source-fault"
++				apply := func(tx *gorm.DB) {
++					if faultApplied.Load() {
++						return
++					}
++					lateClock := mode == "source_lease_last_SQL_clock" || mode == "source_KB_fence_last_SQL_clock" || mode == "source_exact_fence_identity_last_SQL_clock"
++					if lateClock {
++						if !repository.KnowledgeCompletionSQLClockObserved(tx.Statement.Context, tx) || !strings.Contains(tx.Statement.SQL.String(), "AS clock_ms") {
++							return
++						}
++						clockObserved.Store(true)
++					} else {
++						if !repository.KnowledgeCompletionLocalAuthorityObserved(tx.Statement.Context, tx) {
++							return
++						}
++						localObserved.Store(true)
++					}
++					if !faultApplied.CompareAndSwap(false, true) {
++						return
++					}
++					local := tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context})
++					// Completion effects must genuinely exist in this same pending TX first.
++					var manifests int64
++					if e := local.Table("message_completion_input_manifests").Count(&manifests).Error; e != nil || manifests != 1 {
++						recordFault(errors.New("actual pending completion manifest missing"))
++						return
++					}
++					fail := func() { recordFault(errors.New("actual final source mutation observation failed")) }
++					switch mode {
++					case "source_lease_last_SQL_clock":
++						var held struct {
++							LeaseID, OwnerID, Kind       string
++							TenantID                     uint64
++							KnowledgeBaseID, KnowledgeID string
++							Epoch, ExpiresAtMS           int64
++							DataSourceID                 string `gorm:"column:datasource_id"`
++							ExternalID                   string
++						}
++						e := local.Raw("SELECT l.lease_id,l.owner_id,l.kind,l.tenant_id,l.knowledge_base_id,l.knowledge_id,l.epoch,l.expires_at_ms,f.datasource_id,f.external_id FROM nextcloud_content_leases l JOIN nextcloud_content_fences f ON f.tenant_id=l.tenant_id AND f.knowledge_base_id=l.knowledge_base_id AND f.knowledge_id=l.knowledge_id AND f.epoch=l.epoch AND f.state='open' WHERE l.tenant_id=? AND l.knowledge_base_id=? AND l.knowledge_id=? AND l.kind='read' AND l.released_at_ms IS NULL AND f.datasource_id=? AND f.external_id=?", 7, a.scope.KnowledgeBaseID, current.ID, a.scope.DataSourceID, a.scope.ExternalID).Take(&held).Error
++						if e != nil || held.LeaseID == "" {
++							fail()
++							return
++						}
++						requested := false
++						for _, id := range ownedAncestorRequestedLeaseIDs(tx.Statement.Vars) {
++							if id == held.LeaseID {
++								requested = true
++							}
++						}
++						if !requested {
++							recordFault(errors.New("actual source lease absent from final requested union"))
++							return
++						}
++						var now int64
++						if e = local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error; e != nil {
++							fail()
++							return
++						}
++						expiry := now + 60
++						update := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_leases").Where("lease_id=? AND owner_id=? AND kind=? AND tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND epoch=? AND expires_at_ms=? AND released_at_ms IS NULL", held.LeaseID, held.OwnerID, held.Kind, held.TenantID, held.KnowledgeBaseID, held.KnowledgeID, held.Epoch, held.ExpiresAtMS).Update("expires_at_ms", expiry)
++						if update.Error != nil || update.RowsAffected != 1 {
++							fail()
++							return
++						}
++						var after struct {
++							LeaseID, OwnerID, Kind       string
++							TenantID                     uint64
++							KnowledgeBaseID, KnowledgeID string
++							Epoch, ExpiresAtMS           int64
++						}
++						if e = local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_leases").Where("lease_id=?", held.LeaseID).Take(&after).Error; e != nil || after.LeaseID != held.LeaseID || after.OwnerID != held.OwnerID || after.Kind != held.Kind || after.TenantID != held.TenantID || after.KnowledgeBaseID != held.KnowledgeBaseID || after.KnowledgeID != held.KnowledgeID || after.Epoch != held.Epoch || after.ExpiresAtMS != expiry {
++							fail()
++							return
++						}
++						tick := time.NewTicker(5 * time.Millisecond)
++						defer tick.Stop()
++						for {
++							if e = local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Raw("SELECT CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)").Scan(&now).Error; e != nil {
++								fail()
++								return
++							}
++							if now >= expiry {
++								reachedExpiry.Store(true)
++								return
++							}
++							select {
++							case <-tx.Statement.Context.Done():
++								recordFault(errors.New("actual source expiry deadline not reached"))
++								return
++							case <-tick.C:
++							}
++						}
++					case "source_KB_fence_last_SQL_clock":
++						var fence struct {
++							TenantID                            uint64
++							KnowledgeBaseID, KnowledgeID, State string
++							Epoch                               int64
++						}
++						if e := local.Table("nextcloud_content_fences").Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id='' AND state='open'", 7, a.scope.KnowledgeBaseID).Take(&fence).Error; e != nil {
++							fail()
++							return
++						}
++						update := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_fences").Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id='' AND state=? AND epoch=?", fence.TenantID, fence.KnowledgeBaseID, fence.State, fence.Epoch).Update("epoch", fence.Epoch+1)
++						if update.Error != nil || update.RowsAffected != 1 {
++							fail()
++							return
++						}
++						var epoch int64
++						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_fences").Select("epoch").Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=''", 7, a.scope.KnowledgeBaseID).Scan(&epoch).Error; e != nil || epoch != fence.Epoch+1 {
++							fail()
++							return
++						}
++					case "source_exact_fence_identity_last_SQL_clock":
++						var fence struct {
++							TenantID                            uint64
++							KnowledgeBaseID, KnowledgeID, State string
++							Epoch                               int64
++							DataSourceID                        string `gorm:"column:datasource_id"`
++							ExternalID                          string
++						}
++						if e := local.Table("nextcloud_content_fences").Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND state='open'", 7, a.scope.KnowledgeBaseID, current.ID).Take(&fence).Error; e != nil || fence.DataSourceID != a.scope.DataSourceID || fence.ExternalID != a.scope.ExternalID {
++							fail()
++							return
++						}
++						update := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_fences").Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=? AND state=? AND epoch=? AND datasource_id=? AND external_id=?", fence.TenantID, fence.KnowledgeBaseID, fence.KnowledgeID, fence.State, fence.Epoch, fence.DataSourceID, fence.ExternalID).Update("external_id", fence.ExternalID+"/changed")
++						if update.Error != nil || update.RowsAffected != 1 {
++							fail()
++							return
++						}
++						var after struct {
++							Epoch             int64
++							State, ExternalID string
++							DataSourceID      string `gorm:"column:datasource_id"`
++						}
++						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_content_fences").Where("tenant_id=? AND knowledge_base_id=? AND knowledge_id=?", fence.TenantID, fence.KnowledgeBaseID, fence.KnowledgeID).Take(&after).Error; e != nil || after.Epoch != fence.Epoch || after.State != fence.State || after.DataSourceID != fence.DataSourceID || after.ExternalID != fence.ExternalID+"/changed" {
++							fail()
++							return
++						}
++					case "actor_after_last_journal_IO":
++						userID := types.CallerFromContext(f.ctx).UserID
++						update := local.Table("users").Where("id=? AND is_active=?", userID, true).Update("is_active", false)
++						if update.Error != nil || update.RowsAffected != 1 {
++							fail()
++							return
++						}
++						var active bool
++						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("users").Select("is_active").Where("id=?", userID).Scan(&active).Error; e != nil || active {
++							fail()
++							return
++						}
++					case "source_grant_after_last_journal_IO":
++						currentOp := aOp
++						if e := local.Where("operation_id=?", aOp.OperationID).Take(&currentOp).Error; e != nil {
++							recordFault(errors.New("actual grant current-operation lookup failed"))
++							return
++						}
++						if e := repository.NewNextcloudOnboardingStore(personalCompletionMutationProducerDB(local)).ApplyGrantSnapshot(tx.Statement.Context, currentOp, types.NextcloudGrantSnapshot{Complete: true, PermissionVersion: currentOp.PermissionVersion + 1, PublicationEpoch: 1, Subjects: []types.NextcloudGrantSubject{}}); e != nil {
++							recordFault(errors.New("actual grant public producer refused"))
++							return
++						}
++						var remaining int64
++						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Model(&types.NextcloudSourceGrant{}).Where("operation_id=?", aOp.OperationID).Count(&remaining).Error; e != nil || remaining != 0 {
++							recordFault(errors.New("actual grant zero-row readback failed"))
++							return
++						}
++					case "source_epoch_after_last_journal_IO":
++						ancestorEpoch.Store(2)
++						if e := repository.NewNextcloudOnboardingStore(personalCompletionMutationProducerDB(local)).RefreshGrantEpoch(tx.Statement.Context, aOp); e != nil {
++							recordFault(errors.New("actual signed epoch public producer refused"))
++							return
++						}
++						var after struct {
++							PairOperationID              string
++							PublicationEpoch, VerifiedAt int64
++						}
++						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_source_status_epochs").Where("connection_id=?", aConnection).Take(&after).Error; e != nil || after.PairOperationID != aOp.OperationID || after.PublicationEpoch != 2 || after.VerifiedAt <= 0 {
++							recordFault(errors.New("actual signed epoch current-status readback failed"))
++							return
++						}
++						var pairEpoch int64
++						if e := local.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context}).Table("nextcloud_source_pairings").Select("publication_epoch").Where("operation_id=?", aPair.OperationID).Scan(&pairEpoch).Error; e != nil || pairEpoch != 1 {
++							recordFault(errors.New("actual immutable pairing epoch readback failed"))
++							return
++						}
++					}
++				}
++				require.NoError(t, f.db.Callback().Row().Before("gorm:row").Register(observer, apply))
++				require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(observer, apply))
++				t.Cleanup(func() {
++					if e := f.db.Callback().Row().Remove(observer); e != nil {
++						t.Error(e)
++					}
++					if e := f.db.Callback().Query().Remove(observer); e != nil {
++						t.Error(e)
++					}
++				})
++			}
++			err = messages.UpdateMessage(resultCtx, assistant)
++			faultMu.Lock()
++			observerError := faultErr
++			faultMu.Unlock()
++			require.NoError(t, observerError)
++			if mode == "published_source_query_answer_completion" {
++				require.NoError(t, err)
++				var completed bool
++				require.NoError(t, f.db.Table("messages").Select("is_completed").Where("id=?", assistant.ID).Scan(&completed).Error)
++				require.True(t, completed)
++				require.Equal(t, personalAnswerText, response.Content)
++				var saved struct{ ParentManifest string }
++				require.NoError(t, f.db.Table("message_completion_input_manifests").Take(&saved).Error)
++				var manifest types.MessageCompletionInputManifest
++				require.NoError(t, json.Unmarshal([]byte(saved.ParentManifest), &manifest))
++				require.Len(t, manifest.KnowledgeConsumptions, 1)
++				require.Equal(t, snapshot.ReceiptID, manifest.KnowledgeConsumptions[0].QueryReceiptID)
++				require.Len(t, manifest.KnowledgeConsumptions[0].SourceLineage.Sources, 1)
++				require.Equal(t, sourceUnion, manifest.SourceLineage)
++				require.NoError(t, check())
++				var live int64
++				require.NoError(t, f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&live).Error)
++				require.Positive(t, live, "actual output holds last until HTTP owner release")
++			} else {
++				require.True(t, faultApplied.Load())
++				if mode == "source_lease_last_SQL_clock" {
++					require.True(t, reachedExpiry.Load())
++				}
++				if strings.HasSuffix(mode, "last_SQL_clock") {
++					require.True(t, clockObserved.Load())
++				} else {
++					require.True(t, localObserved.Load())
++				}
++				require.Error(t, err)
++				require.Equal(t, beforeFacts, personalCompletionFactsForTest(t, f.db, current.ID, assistant.ID))
++				var completed bool
++				require.NoError(t, f.db.Table("messages").Select("is_completed").Where("id=?", assistant.ID).Scan(&completed).Error)
++				require.False(t, completed)
++				var manifests int64
++				require.NoError(t, f.db.Table("message_completion_input_manifests").Count(&manifests).Error)
++				require.Zero(t, manifests)
++				require.Error(t, check(), "refusal stays latched on real retained resource")
++			}
++			require.EqualValues(t, 2, embeddingCalls.Load())
++			require.EqualValues(t, 1, chatCalls.Load())
++			require.Positive(t, sourceRequests.Load())
++			require.True(t, ancestorAllowed.Load())
++			require.NoError(t, sourceErr())
++			cancelCall()
++			releaseProducer()
++			releaseHTTP()
++			cancelOwner()
++			var leases int64
++			require.NoError(t, f.db.Table("original_body_leases").Where("kind='read' AND released_at_ms IS NULL").Count(&leases).Error)
++			require.Zero(t, leases)
++
++		})
++	}
++}
++
++// Hash only immutable original metadata/receipts and actual completion effects;
++// never print source/model payloads or a plaintext credential.
++func personalCompletionFactsForTest(t *testing.T, db *gorm.DB, knowledge, assistant string) string {
++	t.Helper()
++	facts := map[string]any{}
++	for _, query := range []struct {
++		table, where, columns, order string
++		args                         []any
++	}{
++		{"knowledge_sqlite_embedding_inputs", "knowledge_id=?", "id,admission_id,model_id,space_digest,input_sha256,digest", "id", []any{knowledge}},
++		{"knowledge_sqlite_embedding_receipts", "knowledge_id=?", "id,input_id,input_digest,row_id,revision,vector_sha256,digest", "id", []any{knowledge}},
++		{"nextcloud_original_upload_inputs", "knowledge_id=?", "knowledge_id,input_digest,artifact_digest,root_digest,root_revision,config_digest,config_revision", "knowledge_id", []any{knowledge}},
++		{"message_material_receipts", "message_id=?", "*", "message_id", []any{assistant}},
++		{"message_completion_input_manifests", "assistant_admission_id IN (SELECT id FROM message_material_admissions WHERE message_id=?)", "assistant_admission_id,manifest_digest", "assistant_admission_id", []any{assistant}},
++	} {
++		var rows []map[string]any
++		require.NoError(t, db.Table(query.table).Select(query.columns).Where(query.where, query.args...).Order(query.order).Find(&rows).Error)
++		facts[query.table] = rows
++	}
++	digest, err := repository.KnowledgeInputDigest(facts)
++	require.NoError(t, err)
++	return digest
++}
++
++// This observer invokes public producer APIs from a live Query/Row callback.
++// WithContext alone creates clone2 and would preserve the observed SELECT's
++// SQL/model/select/where. Materialize a same-TX empty statement first, then use
++// NewDB for every internal producer query; no authority or producer is replaced.
++func personalCompletionMutationProducerDB(tx *gorm.DB) *gorm.DB {
++	return tx.Session(&gorm.Session{NewDB: true, Context: tx.Statement.Context, Initialized: true}).Session(&gorm.Session{NewDB: true})
++}

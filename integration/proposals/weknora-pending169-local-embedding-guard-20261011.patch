@@ -1,0 +1,898 @@
+diff --git a/internal/database/migration_joint_125_body_wrapper_coexist_sql_actual_test.go b/internal/database/migration_joint_125_body_wrapper_coexist_sql_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0087968ac3766072c191290feb62e88ec4d3fef
+--- /dev/null
++++ b/internal/database/migration_joint_125_body_wrapper_coexist_sql_actual_test.go
+@@ -0,0 +1,196 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/repository"
++	"github.com/lib/pq"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++	gormlogger "gorm.io/gorm/logger"
++)
++
++// These are actual catalogue tuples, not content or authorization receipts.
++// The current body152 descriptor set intentionally has no legacy embeddings.
++type joint125WrapperTuple struct {
++	TableOID, TriggerOID, FunctionOID                    uint32
++	TableSchema, TableName, FunctionSchema, FunctionName string
++	Body, Language, ReturnType, Enabled, Columns         string
++	Type, Args                                           int
++	Security, Configured, HasWhen                        bool
++}
++
++func joint125ActualWrapperTuple(t *testing.T, db *sql.DB, table, trigger string) joint125WrapperTuple {
++	t.Helper()
++	var out joint125WrapperTuple
++	query := `SELECT c.oid,t.oid,p.oid,n.nspname,c.relname,f.nspname,p.proname,p.prosrc,l.lanname,p.prorettype::regtype::text,
++	 t.tgenabled,t.tgattr::text,t.tgtype,t.tgnargs,p.prosecdef,p.proconfig IS NOT NULL,t.tgqual IS NOT NULL
++	 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
++	 JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace f ON f.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
++	 WHERE n.nspname=current_schema() AND c.relname=$1 AND t.tgname=$2 AND NOT t.tgisinternal`
++	require.NoError(t, db.QueryRow(query, table, trigger).Scan(&out.TableOID, &out.TriggerOID, &out.FunctionOID,
++		&out.TableSchema, &out.TableName, &out.FunctionSchema, &out.FunctionName, &out.Body, &out.Language, &out.ReturnType,
++		&out.Enabled, &out.Columns, &out.Type, &out.Args, &out.Security, &out.Configured, &out.HasWhen))
++	return out
++}
++
++func joint125RequireIssuedBodyWrapper(t *testing.T, db *sql.DB, table, trigger string, spec joint125RepairSpec) joint125WrapperTuple {
++	t.Helper()
++	expected, err := jointExpectedCatalogue("versioned", 168)
++	require.NoError(t, err)
++	descriptor, ok := expected.BodyDescriptors[table]
++	require.True(t, ok)
++	columns, err := jointCatalogueColumns(context.Background(), db, "versioned", table)
++	require.NoError(t, err)
++	known := map[string]bool{}
++	for _, column := range columns {
++		known[column.Name] = true
++	}
++	filtered := jointBodyDescriptor{Key: descriptor.Key}
++	for _, column := range descriptor.Columns {
++		if known[bodyBaseColumn125(column)] {
++			filtered.Columns = append(filtered.Columns, column)
++		}
++	}
++	body, name, err := jointGuardedFunction(spec.FunctionBody, table, trigger, filtered)
++	require.NoError(t, err)
++	actual := joint125ActualWrapperTuple(t, db, table, trigger)
++	require.NotZero(t, actual.TableOID)
++	require.NotZero(t, actual.TriggerOID)
++	require.NotZero(t, actual.FunctionOID)
++	require.Equal(t, actual.TableSchema, actual.FunctionSchema)
++	require.Equal(t, table, actual.TableName)
++	require.Equal(t, name, actual.FunctionName)
++	// The real installer adds exactly one space around the complete function
++	// body. No tokenContains/regex/semantic projection establishes this witness.
++	require.Equal(t, " "+body+" ", actual.Body)
++	require.Equal(t, "plpgsql", actual.Language)
++	require.Equal(t, "trigger", actual.ReturnType)
++	require.Equal(t, "O", actual.Enabled)
++	require.Equal(t, 31, actual.Type)
++	require.Zero(t, actual.Args)
++	require.Empty(t, actual.Columns)
++	require.False(t, actual.Security)
++	require.False(t, actual.Configured)
++	require.False(t, actual.HasWhen)
++	return actual
++}
++
++func bodyBaseColumn125(field string) string {
++	for i := range field {
++		if field[i] == '.' {
++			return field[:i]
++		}
++	}
++	return field
++}
++
++func joint125RequireOnlyTargetExclusiveLock(t *testing.T, db *sql.DB, root string, embeddings uint32, other []uint32) {
++	t.Helper()
++	body, err := os.ReadFile(filepath.Join(root, "migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair.up.sql"))
++	require.NoError(t, err)
++	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
++	defer cancel()
++	tx, err := db.BeginTx(ctx, nil)
++	require.NoError(t, err)
++	defer func() { _ = tx.Rollback() }()
++	_, err = tx.ExecContext(ctx, string(body))
++	require.NoError(t, err)
++	var pid int
++	require.NoError(t, tx.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&pid))
++	var target int
++	require.NoError(t, tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_locks WHERE pid=$1 AND relation=$2 AND locktype='relation' AND mode='AccessExclusiveLock' AND granted`, pid, embeddings).Scan(&target))
++	require.Equal(t, 1, target, "pending169 must lock the actual local embeddings OID")
++	for _, oid := range other {
++		var count int
++		require.NoError(t, tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_locks WHERE pid=$1 AND relation=$2 AND locktype='relation'`, pid, oid).Scan(&count))
++		require.Zero(t, count, "169 must not lock unrelated known body tables or foreign embeddings")
++	}
++	require.NoError(t, tx.Commit())
++}
++
++func TestPostgresJoint125BareTargetWithIssuedBodyWrappersActual(t *testing.T) {
++	for _, mode := range []string{"known_wrappers_coexist", "only_local_target_locked", "other_table_wrapper_bound_to_embeddings", "foreign_wrapper_oid", "changed_canonical_function"} {
++		t.Run(mode, func(t *testing.T) {
++			db, root := joint125ActualFixture(t, true)
++			schema, foreign := joint125ForeignFixture(t, db)
++			foreignBefore := joint125ForeignFingerprint(t, db, foreign)
++			var spec joint125RepairSpec
++			require.NoError(t, json.Unmarshal(joint125RepairSpecJSON, &spec))
++			beforeTarget := joint125ActualWrapperTuple(t, db, "embeddings", "nextcloud_indexed_embedding_guard")
++			require.Equal(t, "nextcloud_indexed_withdrawal_write_guard", beforeTarget.FunctionName)
++			require.Equal(t, spec.FunctionBody, beforeTarget.Body)
++			// This actual fixture owns a lib/pq pool. Naming its real driver avoids
++			// GORM ColumnTypes injecting a pgx-only query-mode value as a SQL parameter.
++			require.IsType(t, &pq.Driver{}, db.Driver())
++			owned, err := gorm.Open(postgres.New(postgres.Config{DriverName: "postgres", Conn: db}), &gorm.Config{Logger: gormlogger.Discard, DisableAutomaticPing: true})
++			require.NoError(t, err)
++			// The real current production installer issues these wrappers; no test
++			// mints an embeddings descriptor or calls it a valid body capability.
++			require.NoError(t, repository.InstallOriginalBodyRetentionTriggers(owned))
++			knowledge := joint125RequireIssuedBodyWrapper(t, db, "knowledges", "nextcloud_indexed_knowledge_guard", spec)
++			chunk := joint125RequireIssuedBodyWrapper(t, db, "chunks", "nextcloud_indexed_chunk_guard", spec)
++			afterTarget := joint125ActualWrapperTuple(t, db, "embeddings", "nextcloud_indexed_embedding_guard")
++			require.Equal(t, beforeTarget, afterTarget, "installer leaves the actual embeddings bare guard and canonical function unchanged")
++			var canonical string
++			require.NoError(t, db.QueryRow(`SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() AND p.proname='nextcloud_indexed_withdrawal_write_guard' AND p.pronargs=0`).Scan(&canonical))
++			require.Equal(t, spec.FunctionBody, canonical)
++			_, err = db.Exec("INSERT INTO embeddings(source_id,source_type,knowledge_base_id,dimension,content) VALUES('owned-body-coexist',1,NULL,2,'native payload preserved')")
++			require.NoError(t, err)
++			var dataBefore string
++			require.NoError(t, db.QueryRow("SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e").Scan(&dataBefore))
++			switch mode {
++			case "other_table_wrapper_bound_to_embeddings":
++				_, err = db.Exec("DROP TRIGGER nextcloud_indexed_embedding_guard ON embeddings")
++				require.NoError(t, err)
++				_, err = db.Exec("CREATE TRIGGER nextcloud_indexed_embedding_guard BEFORE INSERT OR UPDATE OR DELETE ON embeddings FOR EACH ROW EXECUTE FUNCTION " + jointIdentifierQuoted(schema) + "." + jointIdentifierQuoted(knowledge.FunctionName) + "()")
++			case "foreign_wrapper_oid":
++				_, err = db.Exec("CREATE FUNCTION " + jointIdentifierQuoted(foreign) + "." + jointIdentifierQuoted(knowledge.FunctionName) + "() RETURNS trigger LANGUAGE plpgsql AS $owned_wrapper$" + knowledge.Body + "$owned_wrapper$")
++				require.NoError(t, err)
++				_, err = db.Exec("DROP TRIGGER nextcloud_indexed_embedding_guard ON embeddings")
++				require.NoError(t, err)
++				_, err = db.Exec("CREATE TRIGGER nextcloud_indexed_embedding_guard BEFORE INSERT OR UPDATE OR DELETE ON embeddings FOR EACH ROW EXECUTE FUNCTION " + jointIdentifierQuoted(foreign) + "." + jointIdentifierQuoted(knowledge.FunctionName) + "()")
++			case "changed_canonical_function":
++				_, err = db.Exec("CREATE OR REPLACE FUNCTION nextcloud_indexed_withdrawal_write_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
++			}
++			require.NoError(t, err)
++			before := memoryFullSchemaSnapshot(t, db, "versioned")
++			decision, inspectErr := inspectJoint125LocalRepair(context.Background(), db)
++			positive := mode == "known_wrappers_coexist" || mode == "only_local_target_locked"
++			if positive {
++				require.NoError(t, inspectErr)
++				require.Equal(t, joint125GuardCurrent, decision.state)
++				require.Equal(t, beforeTarget.TableOID, decision.tableOID)
++				require.Equal(t, beforeTarget.FunctionOID, decision.functionOID)
++				if mode == "only_local_target_locked" {
++					var foreignOID uint32
++					require.NoError(t, db.QueryRow(`SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname='embeddings'`, foreign).Scan(&foreignOID))
++					joint125RequireOnlyTargetExclusiveLock(t, db, root, decision.tableOID, []uint32{knowledge.TableOID, chunk.TableOID, foreignOID})
++				} else {
++					require.NoError(t, joint125ExecuteComponent(t, db, root, false))
++				}
++				require.Equal(t, beforeTarget, joint125ActualWrapperTuple(t, db, "embeddings", "nextcloud_indexed_embedding_guard"))
++			} else {
++				require.ErrorIs(t, inspectErr, ErrJointSchemaUnknown)
++				require.ErrorContains(t, joint125ExecuteComponent(t, db, root, false), "joint_125_local_guard_unknown")
++			}
++			require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "versioned"), "169 does not degrade or repair unrelated wrappers or unknown bindings")
++			require.Equal(t, knowledge, joint125ActualWrapperTuple(t, db, "knowledges", "nextcloud_indexed_knowledge_guard"))
++			require.Equal(t, chunk, joint125ActualWrapperTuple(t, db, "chunks", "nextcloud_indexed_chunk_guard"))
++			require.Equal(t, foreignBefore, joint125ForeignFingerprint(t, db, foreign))
++			var dataAfter string
++			require.NoError(t, db.QueryRow("SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e").Scan(&dataAfter))
++			require.Equal(t, dataBefore, dataAfter)
++			version, dirty := jointLineageMigrationState(t, db)
++			require.EqualValues(t, 168, version)
++			require.False(t, dirty, "component execution is not a forward-route ledger")
++		})
++	}
++}
+diff --git a/internal/database/migration_joint_125_repair.go b/internal/database/migration_joint_125_repair.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..76e593fbbfbac12def4eb793882a0a1732cce185
+--- /dev/null
++++ b/internal/database/migration_joint_125_repair.go
+@@ -0,0 +1,180 @@
++package database
++
++import (
++	"context"
++	"database/sql"
++	_ "embed"
++	"encoding/json"
++	"reflect"
++)
++
++// This private decision is only a read-only bootstrap eligibility observation.
++// It grants neither source access nor original authoring. The pending 169 SQL
++// repeats the complete catalogue checks after locking the actual local table.
++// Production route selection must bind the complete source and known ledger
++// lineage before it can use this decision; that integration is a separate gate.
++type joint125RepairState uint8
++
++const (
++	joint125OptionalAbsent joint125RepairState = iota + 1
++	joint125GuardCurrent
++	joint125GuardMissing
++)
++
++type joint125RepairDecision struct {
++	state                 joint125RepairState
++	schema                string
++	tableOID, functionOID uint32
++}
++
++type joint125CatalogueReader interface {
++	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
++	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
++}
++
++//go:embed migration_joint_125_repair_spec.json
++var joint125RepairSpecJSON []byte
++
++type joint125RepairColumn struct {
++	Name, Type, Default string
++	NotNull             bool
++}
++type joint125RepairSpec struct {
++	Root125SHA256, Embedding2SHA256, Embedding7SHA256 string
++	FunctionBody                                      string
++	Columns                                           []joint125RepairColumn
++}
++
++func inspectJoint125LocalRepair(ctx context.Context, db joint125CatalogueReader) (joint125RepairDecision, error) {
++	var out joint125RepairDecision
++	if err := ctx.Err(); err != nil {
++		return out, err
++	}
++	var spec joint125RepairSpec
++	if json.Unmarshal(joint125RepairSpecJSON, &spec) != nil || spec.FunctionBody == "" || len(spec.Columns) != 13 {
++		return out, ErrJointSchemaSourceIdentity
++	}
++	var body, language, returns string
++	var args int
++	var security, configured, owner bool
++	query := `SELECT n.nspname,p.oid,p.prosrc,l.lanname,p.prorettype::regtype::text,p.pronargs,p.prosecdef,p.proconfig IS NOT NULL,pg_has_role(current_user,p.proowner,'USAGE')
++	 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
++	 WHERE n.nspname=current_schema() AND p.proname='nextcloud_indexed_withdrawal_write_guard' AND p.pronargs=0`
++	if db.QueryRowContext(ctx, query).Scan(&out.schema, &out.functionOID, &body, &language, &returns, &args, &security, &configured, &owner) != nil {
++		return out, ErrJointSchemaUnknown
++	}
++	if body != spec.FunctionBody || language != "plpgsql" || returns != "trigger" || args != 0 || security || configured || !owner {
++		return out, ErrJointSchemaUnknown
++	}
++	var oid sql.NullInt64
++	tableErr := db.QueryRowContext(ctx, `SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname='embeddings'`).Scan(&oid)
++	if tableErr == sql.ErrNoRows {
++		out.state = joint125OptionalAbsent
++		return finishJoint125RepairObservation(ctx, db, out, spec.FunctionBody)
++	}
++	if tableErr != nil {
++		if err := ctx.Err(); err != nil {
++			return out, err
++		}
++		return out, ErrJointSchemaUnavailable
++	}
++	if !oid.Valid || oid.Int64 <= 0 {
++		return out, ErrJointSchemaUnknown
++	}
++	out.tableOID = uint32(oid.Int64)
++	var kind string
++	var inherited, tableOwner bool
++	if db.QueryRowContext(ctx, `SELECT c.relkind::text,EXISTS(SELECT 1 FROM pg_inherits WHERE inhrelid=c.oid OR inhparent=c.oid),pg_has_role(current_user,c.relowner,'USAGE') FROM pg_class c WHERE c.oid=$1`, out.tableOID).Scan(&kind, &inherited, &tableOwner) != nil || kind != "r" || inherited || !tableOwner {
++		return out, ErrJointSchemaUnknown
++	}
++	rows, err := db.QueryContext(ctx, `SELECT a.attname,format_type(a.atttypid,a.atttypmod),a.attnotnull,CASE WHEN a.attname='id' THEN 'SERIAL' ELSE COALESCE(pg_get_expr(d.adbin,d.adrelid),'') END,a.attidentity::text,a.attgenerated::text
++	 FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`, out.tableOID)
++	if err != nil {
++		return out, ErrJointSchemaUnavailable
++	}
++	actual := []joint125RepairColumn{}
++	for rows.Next() {
++		var column joint125RepairColumn
++		var identity, generated string
++		if rows.Scan(&column.Name, &column.Type, &column.NotNull, &column.Default, &identity, &generated) != nil {
++			rows.Close()
++			return out, ErrJointSchemaUnavailable
++		}
++		if identity != "" || generated != "" {
++			rows.Close()
++			return out, ErrJointSchemaUnknown
++		}
++		actual = append(actual, column)
++	}
++	rowErr, closeErr := rows.Err(), rows.Close()
++	if rowErr != nil || closeErr != nil {
++		return out, ErrJointSchemaUnavailable
++	}
++	if !reflect.DeepEqual(actual, spec.Columns) {
++		return out, ErrJointSchemaUnknown
++	}
++	var serial, primary, unique, halfvec bool
++	if db.QueryRowContext(ctx, joint125HalfvecIdentitySQL, out.tableOID).Scan(&halfvec) != nil || !halfvec {
++		return out, ErrJointSchemaUnknown
++	}
++	if db.QueryRowContext(ctx, joint125SerialIdentitySQL, out.tableOID).Scan(&serial) != nil || !serial {
++		return out, ErrJointSchemaUnknown
++	}
++	if db.QueryRowContext(ctx, `SELECT count(*)=1 AND count(*) FILTER(WHERE contype='p' AND conkey::text='{1}' AND convalidated AND NOT condeferrable AND NOT condeferred)=1 FROM pg_constraint WHERE conrelid=$1`, out.tableOID).Scan(&primary) != nil || !primary {
++		return out, ErrJointSchemaUnknown
++	}
++	if db.QueryRowContext(ctx, joint125UniqueIdentitySQL, out.tableOID).Scan(&unique) != nil || !unique {
++		return out, ErrJointSchemaUnknown
++	}
++	var count int
++	if db.QueryRowContext(ctx, `SELECT count(*) FROM pg_trigger WHERE tgrelid=$1 AND NOT tgisinternal`, out.tableOID).Scan(&count) != nil {
++		return out, ErrJointSchemaUnavailable
++	}
++	if count == 0 {
++		out.state = joint125GuardMissing
++		return finishJoint125RepairObservation(ctx, db, out, spec.FunctionBody)
++	}
++	if count != 1 {
++		return out, ErrJointSchemaUnknown
++	}
++	var current bool
++	if db.QueryRowContext(ctx, `SELECT count(*)=1 FROM pg_trigger WHERE tgrelid=$1 AND NOT tgisinternal AND tgname='nextcloud_indexed_embedding_guard' AND tgfoid=$2 AND tgtype=31 AND tgenabled='O' AND tgnargs=0 AND tgqual IS NULL AND tgattr::text='' AND tgconstraint=0`, out.tableOID, out.functionOID).Scan(&current) != nil || !current {
++		return out, ErrJointSchemaUnknown
++	}
++	out.state = joint125GuardCurrent
++	return finishJoint125RepairObservation(ctx, db, out, spec.FunctionBody)
++}
++
++func finishJoint125RepairObservation(ctx context.Context, db joint125CatalogueReader, out joint125RepairDecision, body string) (joint125RepairDecision, error) {
++	var current bool
++	query := `SELECT count(*)=1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
++	 WHERE p.oid=$1 AND n.nspname=$2 AND n.nspname=current_schema() AND p.proname='nextcloud_indexed_withdrawal_write_guard' AND p.prosrc=$3
++	 AND l.lanname='plpgsql' AND p.prorettype='trigger'::regtype AND p.pronargs=0 AND NOT p.prosecdef AND p.proconfig IS NULL AND pg_has_role(current_user,p.proowner,'USAGE')`
++	if db.QueryRowContext(ctx, query, out.functionOID, out.schema, body).Scan(&current) != nil || !current {
++		if err := ctx.Err(); err != nil {
++			return out, err
++		}
++		return out, ErrJointSchemaUnknown
++	}
++	return out, ctx.Err()
++}
++
++const joint125SerialIdentitySQL = `SELECT EXISTS(
++ SELECT 1 FROM pg_attrdef d JOIN pg_depend x ON x.classid='pg_attrdef'::regclass AND x.objid=d.oid AND x.deptype='n'
++ JOIN pg_class s ON s.oid=x.refobjid AND x.refclassid='pg_class'::regclass JOIN pg_namespace sn ON sn.oid=s.relnamespace
++ JOIN pg_depend own ON own.classid='pg_class'::regclass AND own.objid=s.oid AND own.refclassid='pg_class'::regclass AND own.refobjid=d.adrelid AND own.refobjsubid=1 AND own.deptype='a'
++ WHERE d.adrelid=$1 AND d.adnum=1 AND s.relkind='S' AND sn.nspname=current_schema() AND s.relname='embeddings_id_seq'
++ AND pg_get_expr(d.adbin,d.adrelid) IN ('nextval(''embeddings_id_seq''::regclass)',format('nextval(%L::regclass)',format('%I.%I',sn.nspname,s.relname))))`
++
++const joint125UniqueIdentitySQL = `SELECT EXISTS(
++ SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_am a ON a.oid=c.relam
++ WHERE i.indrelid=$1 AND n.nspname=current_schema() AND c.relname='embeddings_unique_source' AND a.amname='btree'
++ AND i.indisunique AND i.indisvalid AND i.indisready AND i.indnkeyatts=2 AND i.indnatts=2 AND i.indkey::text='4 5' AND i.indoption::text='0 0' AND i.indexprs IS NULL AND i.indpred IS NULL
++ AND i.indclass[0]=(SELECT o.oid FROM pg_opclass o JOIN pg_namespace n ON n.oid=o.opcnamespace WHERE n.nspname='pg_catalog' AND o.opcname='text_ops' AND o.opcmethod=c.relam)
++ AND i.indclass[1]=(SELECT o.oid FROM pg_opclass o JOIN pg_namespace n ON n.oid=o.opcnamespace WHERE n.nspname='pg_catalog' AND o.opcname='int4_ops' AND o.opcmethod=c.relam)
++ AND i.indcollation[0]=(SELECT oid FROM pg_collation WHERE collname='default' AND collnamespace='pg_catalog'::regnamespace) AND i.indcollation[1]=0)`
++
++const joint125HalfvecIdentitySQL = `SELECT EXISTS(
++ SELECT 1 FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_depend d ON d.classid='pg_type'::regclass AND d.objid=t.oid AND d.refclassid='pg_extension'::regclass AND d.deptype='e'
++ JOIN pg_extension e ON e.oid=d.refobjid WHERE a.attrelid=$1 AND a.attnum=11 AND a.attndims=0 AND a.attcollation=0
++ AND t.typname='halfvec' AND t.typtype='b' AND t.typisdefined AND t.typnamespace=e.extnamespace AND e.extname='vector')`
+diff --git a/internal/database/migration_joint_125_repair_spec.json b/internal/database/migration_joint_125_repair_spec.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4f6e34f12c138ddfb6606d254665b3150e49674
+--- /dev/null
++++ b/internal/database/migration_joint_125_repair_spec.json
+@@ -0,0 +1,86 @@
++{
++  "Root125SHA256": "5321f5661f61bf4300ef5d0d16558563eece36d99000a1a4671c644265220e2f",
++  "Embedding2SHA256": "8fa21195be5633c922a37f532a2b074edc09427d4a2dacd16a915b4f9ae91a93",
++  "Embedding7SHA256": "14bacf9b89ffa5fbd774bc2fcd29c21b6a3a42c22fae91c3e09b451178db2582",
++  "FunctionBody": "\nDECLARE\n    kb_id TEXT;\n    prior_kb TEXT;\n    next_kb TEXT;\n    safe_event_revoke BOOLEAN := FALSE;\nBEGIN\n    IF TG_TABLE_NAME = 'nextcloud_event_connections' AND TG_OP = 'UPDATE' THEN\n        -- Emergency revoke remains possible after withdrawal. No identity,\n        -- active key or secret may change; previous-key grace must be cleared.\n        safe_event_revoke := OLD.status = 'active' AND NEW.status = 'revoked'\n            AND NEW.connection_id IS NOT DISTINCT FROM OLD.connection_id\n            AND NEW.tenant_id IS NOT DISTINCT FROM OLD.tenant_id\n            AND NEW.knowledge_base_id IS NOT DISTINCT FROM OLD.knowledge_base_id\n            AND NEW.datasource_id IS NOT DISTINCT FROM OLD.datasource_id\n            AND NEW.nextcloud_instance_id IS NOT DISTINCT FROM OLD.nextcloud_instance_id\n            AND NEW.binding_id IS NOT DISTINCT FROM OLD.binding_id\n            AND NEW.datasource_base_url IS NOT DISTINCT FROM OLD.datasource_base_url\n            AND NEW.datasource_config_sha256 IS NOT DISTINCT FROM OLD.datasource_config_sha256\n            AND NEW.current_key_id IS NOT DISTINCT FROM OLD.current_key_id\n            AND NEW.current_secret_ciphertext IS NOT DISTINCT FROM OLD.current_secret_ciphertext\n            AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at\n            AND NEW.previous_key_id IS NULL\n            AND NEW.previous_secret_ciphertext IS NULL\n            AND NEW.previous_valid_until IS NULL;\n    END IF;\n    IF TG_TABLE_NAME = 'sync_logs' THEN\n        IF TG_OP <> 'INSERT' THEN\n            SELECT p.knowledge_base_id INTO prior_kb FROM nextcloud_source_pairings p\n            WHERE p.datasource_id = OLD.data_source_id;\n        END IF;\n        IF TG_OP <> 'DELETE' THEN\n            SELECT p.knowledge_base_id INTO next_kb FROM nextcloud_source_pairings p\n            WHERE p.datasource_id = NEW.data_source_id;\n        END IF;\n    ELSIF TG_TABLE_NAME IN ('nextcloud_source_versions', 'nextcloud_event_connections') THEN\n        IF TG_OP <> 'INSERT' THEN\n            SELECT p.knowledge_base_id INTO prior_kb FROM nextcloud_source_pairings p\n            WHERE p.datasource_id = OLD.datasource_id;\n        END IF;\n        IF TG_OP <> 'DELETE' THEN\n            SELECT p.knowledge_base_id INTO next_kb FROM nextcloud_source_pairings p\n            WHERE p.datasource_id = NEW.datasource_id;\n        END IF;\n    ELSE\n        IF TG_OP <> 'INSERT' THEN\n            prior_kb := OLD.knowledge_base_id;\n        END IF;\n        IF TG_OP <> 'DELETE' THEN\n            next_kb := NEW.knowledge_base_id;\n        END IF;\n    END IF;\n    -- Lock both sides of a move in stable order. Otherwise an UPDATE could\n    -- move a copy out of a withdrawn source and bypass the old-scope fence.\n    FOR kb_id IN SELECT DISTINCT scope FROM (VALUES (prior_kb), (next_kb)) AS scopes(scope)\n                 WHERE scope IS NOT NULL ORDER BY scope LOOP\n        PERFORM 1 FROM knowledge_bases WHERE id = kb_id FOR UPDATE;\n        IF NOT safe_event_revoke AND EXISTS (\n            SELECT 1 FROM nextcloud_indexed_withdrawals WHERE knowledge_base_id = kb_id) THEN\n            RAISE EXCEPTION 'nextcloud_indexed_source_withdrawn' USING ERRCODE = '23514';\n        END IF;\n    END LOOP;\n    IF TG_OP = 'DELETE' THEN\n        RETURN OLD;\n    END IF;\n    RETURN NEW;\nEND\n",
++  "Columns": [
++    {
++      "Name": "id",
++      "Type": "integer",
++      "NotNull": true,
++      "Default": "SERIAL"
++    },
++    {
++      "Name": "created_at",
++      "Type": "timestamp with time zone",
++      "NotNull": false,
++      "Default": "CURRENT_TIMESTAMP"
++    },
++    {
++      "Name": "updated_at",
++      "Type": "timestamp with time zone",
++      "NotNull": false,
++      "Default": "CURRENT_TIMESTAMP"
++    },
++    {
++      "Name": "source_id",
++      "Type": "character varying(64)",
++      "NotNull": true,
++      "Default": ""
++    },
++    {
++      "Name": "source_type",
++      "Type": "integer",
++      "NotNull": true,
++      "Default": ""
++    },
++    {
++      "Name": "chunk_id",
++      "Type": "character varying(64)",
++      "NotNull": false,
++      "Default": ""
++    },
++    {
++      "Name": "knowledge_id",
++      "Type": "character varying(64)",
++      "NotNull": false,
++      "Default": ""
++    },
++    {
++      "Name": "knowledge_base_id",
++      "Type": "character varying(64)",
++      "NotNull": false,
++      "Default": ""
++    },
++    {
++      "Name": "content",
++      "Type": "text",
++      "NotNull": false,
++      "Default": ""
++    },
++    {
++      "Name": "dimension",
++      "Type": "integer",
++      "NotNull": true,
++      "Default": ""
++    },
++    {
++      "Name": "embedding",
++      "Type": "halfvec",
++      "NotNull": false,
++      "Default": ""
++    },
++    {
++      "Name": "is_enabled",
++      "Type": "boolean",
++      "NotNull": false,
++      "Default": "true"
++    },
++    {
++      "Name": "tag_id",
++      "Type": "character varying(36)",
++      "NotNull": false,
++      "Default": ""
++    }
++  ]
++}
+diff --git a/internal/database/migration_joint_125_repair_sql_actual_test.go b/internal/database/migration_joint_125_repair_sql_actual_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d7f3198aaf4ddced8834ae28d5cb1ac173abbbb
+--- /dev/null
++++ b/internal/database/migration_joint_125_repair_sql_actual_test.go
+@@ -0,0 +1,234 @@
++package database
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/json"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/golang-migrate/migrate/v4"
++	"github.com/stretchr/testify/require"
++)
++
++// This gate exercises the exact pending 169 SQL in a real transaction. It is
++// deliberately not proof that the future early selector/171 peer route exists.
++// Local positives require real halfvec/pg_search support and canonical 002/007;
++// no fixture type/domain or hand-written local embedding schema substitutes it.
++func joint125ActualFixture(t *testing.T, local bool) (*sql.DB, string) {
++	t.Helper()
++	require.NotEmpty(t, os.Getenv("WEKNORA_MIGRATION_TEST_POSTGRES_DSN"), "owned disposable PostgreSQL is required; do not skip")
++	db, dsn, _ := jointLineageFixture(t, true)
++	if local {
++		parsed, err := url.Parse(dsn)
++		require.NoError(t, err)
++		query := parsed.Query()
++		options := strings.ReplaceAll(query.Get("options"), "-c app.skip_embedding=true", "")
++		query.Set("options", strings.TrimSpace(options)+" -c app.skip_embedding=false")
++		parsed.RawQuery = query.Encode()
++		dsn = parsed.String()
++	}
++	root := sqliteRepoRoot(t)
++	m, err := migrate.New("file://"+filepath.Join(root, "migrations/versioned"), dsn)
++	require.NoError(t, err)
++	err = m.Migrate(168)
++	sourceErr, driverErr := m.Close()
++	require.NoError(t, err, "real feature-full local gate needs vector/pg_search; missing extension is not a business pass")
++	require.NoError(t, sourceErr)
++	require.NoError(t, driverErr)
++	version, dirty := jointLineageMigrationState(t, db)
++	require.EqualValues(t, 168, version)
++	require.False(t, dirty)
++	return db, root
++}
++
++func joint125ExecuteComponent(t *testing.T, db *sql.DB, root string, down bool) error {
++	t.Helper()
++	suffix := "up"
++	if down {
++		suffix = "down"
++	}
++	body, err := os.ReadFile(filepath.Join(root, "migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair."+suffix+".sql"))
++	require.NoError(t, err)
++	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
++	defer cancel()
++	tx, err := db.BeginTx(ctx, nil)
++	require.NoError(t, err)
++	_, execErr := tx.ExecContext(ctx, string(body))
++	if execErr != nil {
++		require.NoError(t, tx.Rollback())
++		return execErr
++	}
++	return tx.Commit()
++}
++
++func joint125ForeignFixture(t *testing.T, db *sql.DB) (string, string) {
++	t.Helper()
++	var schema string
++	require.NoError(t, db.QueryRow("SELECT current_schema()").Scan(&schema))
++	foreign := schema + "_foreign"
++	_, err := db.Exec("CREATE SCHEMA " + jointIdentifierQuoted(foreign))
++	require.NoError(t, err)
++	t.Cleanup(func() {
++		_, err := db.Exec("DROP SCHEMA " + jointIdentifierQuoted(foreign) + " CASCADE")
++		if err != nil {
++			t.Error("owned foreign fixture cleanup failed")
++		}
++	})
++	_, err = db.Exec("CREATE TABLE " + jointIdentifierQuoted(foreign) + ".embeddings(id INTEGER PRIMARY KEY,owned_marker TEXT NOT NULL)")
++	require.NoError(t, err)
++	_, err = db.Exec("INSERT INTO " + jointIdentifierQuoted(foreign) + ".embeddings VALUES(1,'retained owned foreign marker')")
++	require.NoError(t, err)
++	_, err = db.Exec("CREATE FUNCTION " + jointIdentifierQuoted(foreign) + ".nextcloud_indexed_withdrawal_write_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
++	require.NoError(t, err)
++	_, err = db.Exec("CREATE TRIGGER nextcloud_indexed_embedding_guard BEFORE INSERT OR UPDATE OR DELETE ON " + jointIdentifierQuoted(foreign) + ".embeddings FOR EACH ROW EXECUTE FUNCTION " + jointIdentifierQuoted(foreign) + ".nextcloud_indexed_withdrawal_write_guard()")
++	require.NoError(t, err)
++	return schema, foreign
++}
++
++func joint125ForeignFingerprint(t *testing.T, db *sql.DB, namespace string) string {
++	t.Helper()
++	var identity struct {
++		TableOID, TriggerOID, FunctionOID uint32
++		Definition, Body, Marker          string
++	}
++	query := `SELECT c.oid,t.oid,p.oid,pg_get_triggerdef(t.oid),p.prosrc,e.owned_marker
++	 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_trigger t ON t.tgrelid=c.oid JOIN pg_proc p ON p.oid=t.tgfoid
++	 JOIN ` + jointIdentifierQuoted(namespace) + `.embeddings e ON e.id=1 WHERE n.nspname=$1 AND c.relname='embeddings' AND NOT t.tgisinternal`
++	require.NoError(t, db.QueryRow(query, namespace).Scan(&identity.TableOID, &identity.TriggerOID, &identity.FunctionOID, &identity.Definition, &identity.Body, &identity.Marker))
++	encoded, err := json.Marshal(identity)
++	require.NoError(t, err)
++	return fmtJoint125SHA(encoded)
++}
++func fmtJoint125SHA(data []byte) string {
++	sum := sha256.Sum256(data)
++	const digits = "0123456789abcdef"
++	out := make([]byte, len(sum)*2)
++	for i, b := range sum {
++		out[i*2] = digits[b>>4]
++		out[i*2+1] = digits[b&15]
++	}
++	return string(out)
++}
++
++func TestPostgresJoint125GuardRepairAbsentActual(t *testing.T) {
++	for _, mode := range []string{"optional_absent_foreign_unchanged", "unknown_local_relation", "unknown_function", "down_refuses"} {
++		t.Run(mode, func(t *testing.T) {
++			db, root := joint125ActualFixture(t, false)
++			_, foreign := joint125ForeignFixture(t, db)
++			foreignBefore := joint125ForeignFingerprint(t, db, foreign)
++			if mode == "unknown_local_relation" {
++				_, err := db.Exec("CREATE TABLE embeddings(owned_unknown TEXT NOT NULL)")
++				require.NoError(t, err)
++			}
++			if mode == "unknown_function" {
++				_, err := db.Exec("CREATE OR REPLACE FUNCTION nextcloud_indexed_withdrawal_write_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
++				require.NoError(t, err)
++			}
++			before := memoryFullSchemaSnapshot(t, db, "versioned")
++			decision, checkErr := inspectJoint125LocalRepair(context.Background(), db)
++			err := joint125ExecuteComponent(t, db, root, mode == "down_refuses")
++			if mode == "optional_absent_foreign_unchanged" {
++				require.NoError(t, checkErr)
++				require.Equal(t, joint125OptionalAbsent, decision.state)
++				require.NoError(t, err)
++			} else if mode == "down_refuses" {
++				require.NoError(t, checkErr)
++				require.Equal(t, joint125OptionalAbsent, decision.state)
++				require.ErrorContains(t, err, "joint_125_local_guard_rollback_forbidden")
++			} else {
++				require.ErrorIs(t, checkErr, ErrJointSchemaUnknown)
++				require.ErrorContains(t, err, "joint_125_local_guard_unknown")
++			}
++			require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "versioned"))
++			require.Equal(t, foreignBefore, joint125ForeignFingerprint(t, db, foreign))
++			version, dirty := jointLineageMigrationState(t, db)
++			require.EqualValues(t, 168, version)
++			require.False(t, dirty, "component does not rewrite a ledger into a fabricated forward route")
++		})
++	}
++}
++
++func TestPostgresJoint125GuardRepairLocalActual(t *testing.T) {
++	for _, mode := range []string{"existing_local_guard", "missing_local_guard", "disabled_local_guard", "foreign_bound_guard", "extra_local_trigger", "changed_local_column", "wrong_unique_index", "wrong_sequence", "narrowing_check"} {
++		t.Run(mode, func(t *testing.T) {
++			db, root := joint125ActualFixture(t, true)
++			schema, foreign := joint125ForeignFixture(t, db)
++			foreignBefore := joint125ForeignFingerprint(t, db, foreign)
++			_, err := db.Exec("INSERT INTO embeddings(source_id,source_type,knowledge_base_id,dimension,content) VALUES('owned-source',1,NULL,2,'native source payload retained')")
++			require.NoError(t, err)
++			var rowsBefore string
++			require.NoError(t, db.QueryRow("SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e").Scan(&rowsBefore))
++			switch mode {
++			case "missing_local_guard":
++				_, err = db.Exec("DROP TRIGGER nextcloud_indexed_embedding_guard ON embeddings")
++			case "disabled_local_guard":
++				_, err = db.Exec("ALTER TABLE embeddings DISABLE TRIGGER nextcloud_indexed_embedding_guard")
++			case "foreign_bound_guard":
++				_, err = db.Exec("DROP TRIGGER nextcloud_indexed_embedding_guard ON embeddings")
++				require.NoError(t, err)
++				_, err = db.Exec("CREATE TRIGGER nextcloud_indexed_embedding_guard BEFORE INSERT OR UPDATE OR DELETE ON embeddings FOR EACH ROW EXECUTE FUNCTION " + jointIdentifierQuoted(foreign) + ".nextcloud_indexed_withdrawal_write_guard()")
++			case "extra_local_trigger":
++				_, err = db.Exec("CREATE TRIGGER owned_extra_guard BEFORE UPDATE ON embeddings FOR EACH ROW EXECUTE FUNCTION nextcloud_indexed_withdrawal_write_guard()")
++			case "changed_local_column":
++				_, err = db.Exec("ALTER TABLE embeddings ADD COLUMN owned_unknown INTEGER")
++			case "wrong_unique_index":
++				_, err = db.Exec("DROP INDEX embeddings_unique_source")
++				require.NoError(t, err)
++				_, err = db.Exec("CREATE INDEX embeddings_unique_source ON embeddings(source_id,source_type)")
++			case "wrong_sequence":
++				_, err = db.Exec("ALTER TABLE embeddings ALTER COLUMN id SET DEFAULT 7")
++			case "narrowing_check":
++				_, err = db.Exec("ALTER TABLE embeddings ADD CONSTRAINT owned_narrow CHECK(dimension::smallint>0)")
++			}
++			require.NoError(t, err)
++			// Snapshot the actual fault, not the earlier clean shape. Every rejected
++			// operation must roll back without repairing an unknown object.
++			before := memoryFullSchemaSnapshot(t, db, "versioned")
++			decision, checkErr := inspectJoint125LocalRepair(context.Background(), db)
++			err = joint125ExecuteComponent(t, db, root, false)
++			positive := mode == "existing_local_guard" || mode == "missing_local_guard"
++			if positive {
++				require.NoError(t, checkErr)
++				require.Equal(t, schema, decision.schema)
++				require.NotZero(t, decision.tableOID)
++				require.NotZero(t, decision.functionOID)
++				if mode == "missing_local_guard" {
++					require.Equal(t, joint125GuardMissing, decision.state)
++				} else {
++					require.Equal(t, joint125GuardCurrent, decision.state)
++				}
++				require.NoError(t, err)
++				after, err := inspectJoint125LocalRepair(context.Background(), db)
++				require.NoError(t, err)
++				require.Equal(t, joint125GuardCurrent, after.state)
++				require.Equal(t, decision.tableOID, after.tableOID)
++				require.Equal(t, decision.functionOID, after.functionOID)
++				if mode == "existing_local_guard" {
++					require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "versioned"))
++				}
++				require.NoError(t, joint125ExecuteComponent(t, db, root, false), "second execution cannot replace a valid trigger")
++			} else {
++				require.ErrorIs(t, checkErr, ErrJointSchemaUnknown)
++				require.ErrorContains(t, err, "joint_125_local_guard_unknown")
++				require.Equal(t, before, memoryFullSchemaSnapshot(t, db, "versioned"))
++			}
++			var rowsAfter string
++			rowQuery := "SELECT jsonb_agg(to_jsonb(e) ORDER BY id)::text FROM embeddings e"
++			if mode == "changed_local_column" {
++				rowQuery = "SELECT jsonb_agg(to_jsonb(e)-'owned_unknown' ORDER BY id)::text FROM embeddings e"
++			}
++			require.NoError(t, db.QueryRow(rowQuery).Scan(&rowsAfter))
++			require.Equal(t, rowsBefore, rowsAfter)
++			require.Equal(t, foreignBefore, joint125ForeignFingerprint(t, db, foreign))
++			version, dirty := jointLineageMigrationState(t, db)
++			require.EqualValues(t, 168, version)
++			require.False(t, dirty)
++		})
++	}
++}
+diff --git a/migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair.down.sql b/migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair.down.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..10222cfda173bd8ad22ae004f3a6901172af8b68
+--- /dev/null
++++ b/migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair.down.sql
+@@ -0,0 +1,2 @@
++-- Never erase installed source write protection on a forward-route rollback.
++DO $$ BEGIN RAISE EXCEPTION 'joint_125_local_guard_rollback_forbidden' USING ERRCODE='23514'; END $$;
+diff --git a/migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair.up.sql b/migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair.up.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..35a7abd6fd660f3094bd7fdcab2886a9cde43624
+--- /dev/null
++++ b/migrations/pending/joint_125_guard_repair/versioned/000169_nextcloud_local_embedding_guard_repair.up.sql
+@@ -0,0 +1,164 @@
++-- Forward-only 169 component: repair the optional LOCAL guard omitted by an
++-- already-applied historical 125. Do not replay 125 or use search_path to adopt
++-- another schema's embeddings. Pending until the complete route/hash witness
++-- is wired before migrate driver creation; this file is not active Root168.
++DO $repair$
++DECLARE
++    local_schema TEXT := current_schema();
++    local_table OID;
++    captured_table OID;
++    local_function OID;
++    actual_body TEXT;
++    actual_language TEXT;
++    actual_returns TEXT;
++    actual_args INTEGER;
++    actual_security BOOLEAN;
++    actual_configured BOOLEAN;
++    actual_owner BOOLEAN;
++    actual_columns JSONB;
++    valid_shape BOOLEAN;
++    trigger_count INTEGER;
++    expected_body TEXT := $canonical$
++DECLARE
++    kb_id TEXT;
++    prior_kb TEXT;
++    next_kb TEXT;
++    safe_event_revoke BOOLEAN := FALSE;
++BEGIN
++    IF TG_TABLE_NAME = 'nextcloud_event_connections' AND TG_OP = 'UPDATE' THEN
++        -- Emergency revoke remains possible after withdrawal. No identity,
++        -- active key or secret may change; previous-key grace must be cleared.
++        safe_event_revoke := OLD.status = 'active' AND NEW.status = 'revoked'
++            AND NEW.connection_id IS NOT DISTINCT FROM OLD.connection_id
++            AND NEW.tenant_id IS NOT DISTINCT FROM OLD.tenant_id
++            AND NEW.knowledge_base_id IS NOT DISTINCT FROM OLD.knowledge_base_id
++            AND NEW.datasource_id IS NOT DISTINCT FROM OLD.datasource_id
++            AND NEW.nextcloud_instance_id IS NOT DISTINCT FROM OLD.nextcloud_instance_id
++            AND NEW.binding_id IS NOT DISTINCT FROM OLD.binding_id
++            AND NEW.datasource_base_url IS NOT DISTINCT FROM OLD.datasource_base_url
++            AND NEW.datasource_config_sha256 IS NOT DISTINCT FROM OLD.datasource_config_sha256
++            AND NEW.current_key_id IS NOT DISTINCT FROM OLD.current_key_id
++            AND NEW.current_secret_ciphertext IS NOT DISTINCT FROM OLD.current_secret_ciphertext
++            AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at
++            AND NEW.previous_key_id IS NULL
++            AND NEW.previous_secret_ciphertext IS NULL
++            AND NEW.previous_valid_until IS NULL;
++    END IF;
++    IF TG_TABLE_NAME = 'sync_logs' THEN
++        IF TG_OP <> 'INSERT' THEN
++            SELECT p.knowledge_base_id INTO prior_kb FROM nextcloud_source_pairings p
++            WHERE p.datasource_id = OLD.data_source_id;
++        END IF;
++        IF TG_OP <> 'DELETE' THEN
++            SELECT p.knowledge_base_id INTO next_kb FROM nextcloud_source_pairings p
++            WHERE p.datasource_id = NEW.data_source_id;
++        END IF;
++    ELSIF TG_TABLE_NAME IN ('nextcloud_source_versions', 'nextcloud_event_connections') THEN
++        IF TG_OP <> 'INSERT' THEN
++            SELECT p.knowledge_base_id INTO prior_kb FROM nextcloud_source_pairings p
++            WHERE p.datasource_id = OLD.datasource_id;
++        END IF;
++        IF TG_OP <> 'DELETE' THEN
++            SELECT p.knowledge_base_id INTO next_kb FROM nextcloud_source_pairings p
++            WHERE p.datasource_id = NEW.datasource_id;
++        END IF;
++    ELSE
++        IF TG_OP <> 'INSERT' THEN
++            prior_kb := OLD.knowledge_base_id;
++        END IF;
++        IF TG_OP <> 'DELETE' THEN
++            next_kb := NEW.knowledge_base_id;
++        END IF;
++    END IF;
++    -- Lock both sides of a move in stable order. Otherwise an UPDATE could
++    -- move a copy out of a withdrawn source and bypass the old-scope fence.
++    FOR kb_id IN SELECT DISTINCT scope FROM (VALUES (prior_kb), (next_kb)) AS scopes(scope)
++                 WHERE scope IS NOT NULL ORDER BY scope LOOP
++        PERFORM 1 FROM knowledge_bases WHERE id = kb_id FOR UPDATE;
++        IF NOT safe_event_revoke AND EXISTS (
++            SELECT 1 FROM nextcloud_indexed_withdrawals WHERE knowledge_base_id = kb_id) THEN
++            RAISE EXCEPTION 'nextcloud_indexed_source_withdrawn' USING ERRCODE = '23514';
++        END IF;
++    END LOOP;
++    IF TG_OP = 'DELETE' THEN
++        RETURN OLD;
++    END IF;
++    RETURN NEW;
++END
++$canonical$;
++    expected_columns JSONB := $columns$[{"Name":"id","Type":"integer","NotNull":true,"Default":"SERIAL"},{"Name":"created_at","Type":"timestamp with time zone","NotNull":false,"Default":"CURRENT_TIMESTAMP"},{"Name":"updated_at","Type":"timestamp with time zone","NotNull":false,"Default":"CURRENT_TIMESTAMP"},{"Name":"source_id","Type":"character varying(64)","NotNull":true,"Default":""},{"Name":"source_type","Type":"integer","NotNull":true,"Default":""},{"Name":"chunk_id","Type":"character varying(64)","NotNull":false,"Default":""},{"Name":"knowledge_id","Type":"character varying(64)","NotNull":false,"Default":""},{"Name":"knowledge_base_id","Type":"character varying(64)","NotNull":false,"Default":""},{"Name":"content","Type":"text","NotNull":false,"Default":""},{"Name":"dimension","Type":"integer","NotNull":true,"Default":""},{"Name":"embedding","Type":"halfvec","NotNull":false,"Default":""},{"Name":"is_enabled","Type":"boolean","NotNull":false,"Default":"true"},{"Name":"tag_id","Type":"character varying(36)","NotNull":false,"Default":""}]$columns$::jsonb;
++BEGIN
++    -- Even optional-absent must retain the real canonical own write guard.
++    SELECT p.oid,p.prosrc,l.lanname,p.prorettype::regtype::text,p.pronargs,p.prosecdef,p.proconfig IS NOT NULL,pg_has_role(current_user,p.proowner,'USAGE')
++    INTO local_function,actual_body,actual_language,actual_returns,actual_args,actual_security,actual_configured,actual_owner
++    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
++    WHERE n.nspname=local_schema AND p.proname='nextcloud_indexed_withdrawal_write_guard' AND p.pronargs=0;
++    IF local_function IS NULL OR actual_body IS DISTINCT FROM expected_body OR actual_language IS DISTINCT FROM 'plpgsql'
++       OR actual_returns IS DISTINCT FROM 'trigger' OR actual_args IS DISTINCT FROM 0 OR actual_security IS DISTINCT FROM FALSE
++       OR actual_configured IS DISTINCT FROM FALSE OR actual_owner IS DISTINCT FROM TRUE THEN
++        RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514';
++    END IF;
++    SELECT c.oid INTO local_table FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
++    WHERE n.nspname=local_schema AND c.relname='embeddings';
++    IF local_table IS NULL THEN RETURN; END IF;
++    captured_table := local_table;
++    EXECUTE format('LOCK TABLE %I.%I IN ACCESS EXCLUSIVE MODE',local_schema,'embeddings');
++    SELECT c.oid INTO local_table FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
++    WHERE n.nspname=local_schema AND c.relname='embeddings' AND c.relkind='r'
++      AND pg_has_role(current_user,c.relowner,'USAGE')
++      AND NOT EXISTS(SELECT 1 FROM pg_inherits WHERE inhrelid=c.oid OR inhparent=c.oid);
++    IF local_table IS DISTINCT FROM captured_table THEN
++        RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514';
++    END IF;
++    SELECT jsonb_agg(jsonb_build_object('Name',a.attname,'Type',format_type(a.atttypid,a.atttypmod),'NotNull',a.attnotnull,
++        'Default',CASE WHEN a.attname='id' THEN 'SERIAL' ELSE COALESCE(pg_get_expr(d.adbin,d.adrelid),'') END) ORDER BY a.attnum)
++      INTO actual_columns
++    FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
++    WHERE a.attrelid=local_table AND a.attnum>0 AND NOT a.attisdropped;
++    IF actual_columns IS DISTINCT FROM expected_columns OR EXISTS(
++        SELECT 1 FROM pg_attribute WHERE attrelid=local_table AND attnum>0 AND NOT attisdropped AND (attidentity<>'' OR attgenerated<>'')) THEN
++        RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514';
++    END IF;
++    SELECT EXISTS(
++ SELECT 1 FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_depend d ON d.classid='pg_type'::regclass AND d.objid=t.oid AND d.refclassid='pg_extension'::regclass AND d.deptype='e'
++ JOIN pg_extension e ON e.oid=d.refobjid WHERE a.attrelid=local_table AND a.attnum=11 AND a.attndims=0 AND a.attcollation=0
++ AND t.typname='halfvec' AND t.typtype='b' AND t.typisdefined AND t.typnamespace=e.extnamespace AND e.extname='vector') INTO valid_shape;
++    IF valid_shape IS DISTINCT FROM TRUE THEN RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514'; END IF;
++    SELECT EXISTS(
++ SELECT 1 FROM pg_attrdef d JOIN pg_depend x ON x.classid='pg_attrdef'::regclass AND x.objid=d.oid AND x.deptype='n'
++ JOIN pg_class s ON s.oid=x.refobjid AND x.refclassid='pg_class'::regclass JOIN pg_namespace sn ON sn.oid=s.relnamespace
++ JOIN pg_depend own ON own.classid='pg_class'::regclass AND own.objid=s.oid AND own.refclassid='pg_class'::regclass AND own.refobjid=d.adrelid AND own.refobjsubid=1 AND own.deptype='a'
++ WHERE d.adrelid=local_table AND d.adnum=1 AND s.relkind='S' AND sn.nspname=current_schema() AND s.relname='embeddings_id_seq'
++ AND pg_get_expr(d.adbin,d.adrelid) IN ('nextval(''embeddings_id_seq''::regclass)',format('nextval(%L::regclass)',format('%I.%I',sn.nspname,s.relname)))) INTO valid_shape;
++    IF valid_shape IS DISTINCT FROM TRUE THEN RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514'; END IF;
++    SELECT EXISTS(
++ SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_am a ON a.oid=c.relam
++ WHERE i.indrelid=local_table AND n.nspname=current_schema() AND c.relname='embeddings_unique_source' AND a.amname='btree'
++ AND i.indisunique AND i.indisvalid AND i.indisready AND i.indnkeyatts=2 AND i.indnatts=2 AND i.indkey::text='4 5' AND i.indoption::text='0 0' AND i.indexprs IS NULL AND i.indpred IS NULL
++ AND i.indclass[0]=(SELECT o.oid FROM pg_opclass o JOIN pg_namespace n ON n.oid=o.opcnamespace WHERE n.nspname='pg_catalog' AND o.opcname='text_ops' AND o.opcmethod=c.relam)
++ AND i.indclass[1]=(SELECT o.oid FROM pg_opclass o JOIN pg_namespace n ON n.oid=o.opcnamespace WHERE n.nspname='pg_catalog' AND o.opcname='int4_ops' AND o.opcmethod=c.relam)
++ AND i.indcollation[0]=(SELECT oid FROM pg_collation WHERE collname='default' AND collnamespace='pg_catalog'::regnamespace) AND i.indcollation[1]=0) INTO valid_shape;
++    IF valid_shape IS DISTINCT FROM TRUE THEN RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514'; END IF;
++    SELECT count(*)=1 AND count(*) FILTER(WHERE contype='p' AND conkey::text='{1}' AND convalidated AND NOT condeferrable AND NOT condeferred)=1
++      INTO valid_shape FROM pg_constraint WHERE conrelid=local_table;
++    IF valid_shape IS DISTINCT FROM TRUE THEN RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514'; END IF;
++    SELECT count(*) INTO trigger_count FROM pg_trigger WHERE tgrelid=local_table AND NOT tgisinternal;
++    IF trigger_count=0 THEN
++        EXECUTE format('CREATE TRIGGER nextcloud_indexed_embedding_guard BEFORE INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION %I.nextcloud_indexed_withdrawal_write_guard()',local_schema,'embeddings',local_schema);
++    ELSIF trigger_count<>1 THEN
++        RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514';
++    END IF;
++    SELECT count(*)=1 INTO valid_shape FROM pg_trigger WHERE tgrelid=local_table AND NOT tgisinternal
++      AND tgname='nextcloud_indexed_embedding_guard' AND tgfoid=local_function AND tgtype=31 AND tgenabled='O'
++      AND tgnargs=0 AND tgqual IS NULL AND tgattr::text='' AND tgconstraint=0;
++    IF valid_shape IS DISTINCT FROM TRUE THEN RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514'; END IF;
++    -- No function replacement and no body/control/grant write occurred. Recheck
++    -- the exact function tuple after all DDL before this transaction commits.
++    IF NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
++      WHERE p.oid=local_function AND n.nspname=local_schema AND p.proname='nextcloud_indexed_withdrawal_write_guard'
++      AND p.prosrc=expected_body AND l.lanname='plpgsql' AND p.prorettype='trigger'::regtype AND p.pronargs=0
++      AND NOT p.prosecdef AND p.proconfig IS NULL AND pg_has_role(current_user,p.proowner,'USAGE')) THEN
++        RAISE EXCEPTION 'joint_125_local_guard_unknown' USING ERRCODE='23514';
++    END IF;
++END
++$repair$;
