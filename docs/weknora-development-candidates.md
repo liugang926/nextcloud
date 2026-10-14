@@ -5,9 +5,12 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
-The current development candidates are RAG `2e52c071` and C6 `21c556d3`.
-They correct the duplicate prompt processor in the actual HTTP fixture and
-encode a complete SSE frame before one guarded Write. Write and Flush each
+The current development candidates are RAG `d5494ed9` and C6 `31cb5eb7`.
+They correct the duplicate prompt processor in the actual HTTP fixture,
+encode a complete SSE frame before one guarded Write, and authorize the
+complete input/result union once at each unchanged pipeline boundary. Every
+later boundary still checks current owner, actor and source authority; unknown
+inputs remain sticky and concurrent source additions are rechecked. Write and Flush each
 retain their independent current authorization and lease checks, and the
 original 8-second HTTP limits remain. Encoding failure performs no HTTP I/O;
 short writes abort without flushing or retrying. The complete source patches

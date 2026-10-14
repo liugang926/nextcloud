@@ -95941,7 +95941,7 @@ index fb8ba98200d3b37b90de50fda3235711b84de53a..6a9b47c4cacb713d0b08ac8b477e601b
  		knowledgeService:     knowledgeService,
 diff --git a/internal/application/service/chat_pipeline/source_lineage.go b/internal/application/service/chat_pipeline/source_lineage.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..81d4d91fb3672c0502336d8507f4659c6864e854
+index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a788ae7bd2
 --- /dev/null
 +++ b/internal/application/service/chat_pipeline/source_lineage.go
 @@ -0,0 +1,154 @@
@@ -96048,10 +96048,10 @@ index 0000000000000000000000000000000000000000..81d4d91fb3672c0502336d8507f4659c
 +		cm.MemoryPrompt != "" || len(cm.UsedMemories) > 0 || cm.GraphResult != nil || len(cm.Entity) > 0 {
 +		_ = turn.Add(types.UnknownSourceLineage())
 +	}
-+	if err := AccountHistory(ctx, cm.History); err != nil {
-+		return err
-+	}
-+	return turn.Check(ctx)
++	// AccountHistory checks the complete union after adding every history
++	// input, including its current material-owner and source checks. Nothing
++	// reads or changes inputs after that boundary here, so do not repeat it.
++	return AccountHistory(ctx, cm.History)
 +}
 +
 +func sourceLineagePluginError(err error) *PluginError {
@@ -96098,6 +96098,186 @@ index 0000000000000000000000000000000000000000..81d4d91fb3672c0502336d8507f4659c
 +// Event data and citations never supply or repair the producer's proof.
 +func EmitSourceLineageEvent(ctx context.Context, bus types.EventBusInterface, evt types.Event) error {
 +	return emitSourceLineageEvent(ctx, bus, evt)
++}
+diff --git a/internal/application/service/chat_pipeline/source_lineage_input_boundary_test.go b/internal/application/service/chat_pipeline/source_lineage_input_boundary_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..22d9b51127e5073091fb49cae64b6918a001bdbc
+--- /dev/null
++++ b/internal/application/service/chat_pipeline/source_lineage_input_boundary_test.go
+@@ -0,0 +1,174 @@
++package chatpipeline
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func inputBoundaryLineageForTest(t *testing.T, file, document string) *types.SourceLineage {
++	t.Helper()
++	lineage, err := types.NewCompleteSourceLineage(types.SourceIdentity{
++		Provider: types.ConnectorTypeNextcloud, TenantID: 7, KnowledgeBaseID: "kb",
++		DataSourceID: "source", PairOperationID: "pair", InstanceID: "instance",
++		BindingID: "binding", FileID: file, ExternalID: "nextcloud:instance:" + file,
++		KnowledgeID: document, Revision: 1, ETag: "etag-" + file,
++	})
++	require.NoError(t, err)
++	return lineage
++}
++
++func TestSourceLineageInputBoundaryCompleteHistoryUnionAndFreshSourceVersion(t *testing.T) {
++	retrieved := inputBoundaryLineageForTest(t, "77", "retrieved")
++	first := inputBoundaryLineageForTest(t, "78", "history-first")
++	second := inputBoundaryLineageForTest(t, "79", "history-second")
++	expected, err := types.UnionSourceLineage(retrieved, first, second)
++	require.NoError(t, err)
++	current := make(map[string]types.SourceIdentity)
++	for _, source := range expected.Sources {
++		current[source.KnowledgeID] = source
++	}
++	ownerChecks, sourceChecks := 0, 0
++	ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error {
++		ownerChecks++
++		return nil
++	}, nil)
++	turn := types.NewRAGSourceLineage(func(ctx context.Context, lineage *types.SourceLineage) error {
++		if err := types.CheckHistoryMaterialLifetime(ctx); err != nil {
++			return err
++		}
++		sourceChecks++
++		require.Equal(t, expected, lineage, "the boundary must authorize every original input, including earlier retrieval")
++		for _, source := range lineage.Sources {
++			if current[source.KnowledgeID] != source {
++				return access.ErrNextcloudPublicationDenied
++			}
++		}
++		return nil
++	})
++	ctx = types.WithRAGSourceLineage(ctx, turn)
++	require.NoError(t, turn.Add(retrieved))
++	cm := &types.ChatManage{History: []*types.History{{SourceLineage: first}, {SourceLineage: second}}}
++	require.NoError(t, CheckSourceLineageInputs(ctx, cm))
++	require.Equal(t, expected, turn.Snapshot())
++	require.Equal(t, 1, sourceChecks, "one unchanged input boundary does not repeat its complete source check")
++	require.Equal(t, 2, ownerChecks, "retain the initial owner check and the complete union's owner check")
++
++	// Removing visible history cannot remove an earlier actual dependency.
++	// The next invocation must freshly reject its changed original revision.
++	cm.History = nil
++	changed := current["history-first"]
++	changed.Revision++
++	current["history-first"] = changed
++	require.ErrorIs(t, CheckSourceLineageInputs(ctx, cm), access.ErrNextcloudPublicationDenied)
++	require.Equal(t, expected, turn.Snapshot())
++	require.Equal(t, 2, sourceChecks)
++}
++
++type inputBoundaryCurrentActorForTest struct {
++	active bool
++}
++
++func (actor *inputBoundaryCurrentActorForTest) RefreshCurrentReadActor(ctx context.Context) (context.Context, error) {
++	if !actor.active {
++		return nil, access.ErrNextcloudPublicationDenied
++	}
++	return ctx, nil
++}
++
++func TestSourceLineageInputBoundaryProductionGuardRefreshesCurrentActor(t *testing.T) {
++	actor := &inputBoundaryCurrentActorForTest{active: true}
++	guard := access.NewNextcloudSourceLineageGuard(nil, nil, nil, nil, nil, nil, actor)
++	manager := NewEventManager()
++	ConfigureSourceLineage(manager, guard)
++	ctx := types.WithCaller(context.Background(), types.Caller{TenantID: 7, UserID: "human", Role: types.TenantRoleAdmin})
++	ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalWebUser, ID: "human"})
++	cm := &types.ChatManage{}
++	ctx, err := manager.BeginSourceLineage(ctx, cm, access.LineageReadScope{})
++	require.NoError(t, err, "the real entry point accepts a current explicit source-independent turn")
++	require.NoError(t, CheckSourceLineageInputs(ctx, cm))
++	actor.active = false
++	require.ErrorIs(t, CheckSourceLineageInputs(ctx, cm), access.ErrNextcloudPublicationDenied,
++		"a previous successful boundary cannot extend a revoked current actor")
++}
++
++func TestSourceLineageInputBoundaryOwnerRevocationKeepsPriorityAndNonRAGChecks(t *testing.T) {
++	for _, rag := range []bool{false, true} {
++		t.Run(map[bool]string{false: "non-rag", true: "rag"}[rag], func(t *testing.T) {
++			ownerErr := errors.New("actual original owner was retired")
++			var currentOwnerError error
++			ctx := types.WithHistoryMaterialLifetime(context.Background(), func() error { return currentOwnerError }, nil)
++			turn := types.NewRAGSourceLineage(func(ctx context.Context, _ *types.SourceLineage) error {
++				return types.CheckHistoryMaterialLifetime(ctx)
++			})
++			if rag {
++				ctx = types.WithRAGSourceLineage(ctx, turn)
++			}
++			require.NoError(t, CheckSourceLineageInputs(ctx, &types.ChatManage{}))
++			currentOwnerError = ownerErr
++			require.ErrorIs(t, CheckSourceLineageInputs(ctx, nil), ownerErr,
++				"owner refusal still precedes source-shape handling")
++			require.NoError(t, turn.Snapshot().RequireComplete(),
++				"the original owner failure must not mutate or recertify the input accumulator")
++		})
++	}
++}
++
++func TestSourceLineageInputBoundaryUnknownInputsStayRejected(t *testing.T) {
++	for _, mode := range []string{"nil-chat", "nil-history", "nil-history-lineage", "unknown-history", "unsupported-input"} {
++		t.Run(mode, func(t *testing.T) {
++			sourceChecks := 0
++			turn := types.NewRAGSourceLineage(func(context.Context, *types.SourceLineage) error {
++				sourceChecks++
++				return nil
++			})
++			ctx := types.WithRAGSourceLineage(context.Background(), turn)
++			cm := &types.ChatManage{}
++			switch mode {
++			case "nil-chat":
++				cm = nil
++			case "nil-history":
++				cm.History = []*types.History{nil}
++			case "nil-history-lineage":
++				cm.History = []*types.History{{}}
++			case "unknown-history":
++				cm.History = []*types.History{{SourceLineage: types.UnknownSourceLineage()}}
++			case "unsupported-input":
++				cm.QuotedContext = "unaccounted earlier input"
++			}
++			require.ErrorIs(t, CheckSourceLineageInputs(ctx, cm), types.ErrSourceLineageUnknown)
++			require.ErrorIs(t, CheckSourceLineageInputs(ctx, &types.ChatManage{}), types.ErrSourceLineageUnknown,
++				"a later empty visible input cannot repair an unknown prefix")
++			require.Zero(t, sourceChecks, "unknown material never obtains source authorization")
++		})
++	}
++}
++
++func TestSourceLineageInputBoundaryConcurrentAdditionChecksEnlargedUnion(t *testing.T) {
++	first := inputBoundaryLineageForTest(t, "77", "first")
++	added := inputBoundaryLineageForTest(t, "78", "concurrent")
++	expected, err := types.UnionSourceLineage(first, added)
++	require.NoError(t, err)
++	var turn *types.RAGSourceLineage
++	checks := 0
++	turn = types.NewRAGSourceLineage(func(_ context.Context, lineage *types.SourceLineage) error {
++		checks++
++		if checks == 1 {
++			require.Equal(t, first, lineage)
++			require.NoError(t, turn.Add(added), "another actual reader grows the union during authorization")
++			return nil
++		}
++		require.Equal(t, expected, lineage)
++		return access.ErrNextcloudPublicationDenied
++	})
++	ctx := types.WithRAGSourceLineage(context.Background(), turn)
++	require.NoError(t, turn.Add(first))
++	require.ErrorIs(t, CheckSourceLineageInputs(ctx, &types.ChatManage{}), access.ErrNextcloudPublicationDenied,
++		"the first stable-looking allow cannot omit a concurrently added refused source")
++	require.Equal(t, expected, turn.Snapshot())
++	require.Equal(t, 2, checks, "the accumulator's real revision retry remains active")
 +}
 diff --git a/internal/application/service/chunk.go b/internal/application/service/chunk.go
 index 8727ca04084ba1b892cbe0ef216ea4d0a1e2ac19..104954a1bfafc5e7ed585f9423bccb8e5b461665 100644
@@ -123230,7 +123410,7 @@ index fab799e6159efc38883a9bde3b320123c36c2a9c..ac0980e9528fe25188d55fb95cac15a2
  
  func TestForkUsesProvidedTitle(t *testing.T) {
 diff --git a/internal/application/service/session_knowledge_qa.go b/internal/application/service/session_knowledge_qa.go
-index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9567975ec 100644
+index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..4ba043aa6788167f529ff5948019d6d95ada565a 100644
 --- a/internal/application/service/session_knowledge_qa.go
 +++ b/internal/application/service/session_knowledge_qa.go
 @@ -7,6 +7,7 @@ import (
@@ -123341,7 +123521,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  		if err := s.revalidateSearchTargets(ctx, chatManage.SearchTargets); err != nil {
  			return err
  		}
-@@ -804,21 +868,41 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -804,21 +868,39 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  		if eventType == types.QUERY_UNDERSTAND && chatpipeline.ShouldEmitQueryUnderstandProgress(chatManage) {
  			understandStart = stageStart
  			understandProgress = chatpipeline.BeginQueryUnderstandProgress(stageCtx, chatManage)
@@ -123371,10 +123551,8 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  		}
  		err := s.eventManager.Trigger(stageCtx, eventType, chatManage)
 +		if err == nil || err == chatpipeline.ErrSearchNothing {
-+			for _, outputs := range [][]*types.SearchResult{chatManage.SearchResult, chatManage.RerankResult, chatManage.MergeResult} {
-+				if inputErr := chatpipeline.AccountResults(stageCtx, outputs); inputErr != nil {
-+					return inputErr
-+				}
++			if inputErr := accountSourceLineageStageBoundary(stageCtx, chatManage.SearchResult, chatManage.RerankResult, chatManage.MergeResult); inputErr != nil {
++				return inputErr
 +			}
 +		}
  		if understandProgress != nil && eventType == types.QUERY_UNDERSTAND {
@@ -123385,7 +123563,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  			understandProgress = nil
  		}
  		// Close the consolidated retrieval progress window as soon as retrieval
-@@ -829,7 +913,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -829,7 +911,9 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  		// tool_call pending — so the frontend keeps spinning on "正在检索知识库"
  		// forever even though the fallback answer has already streamed.
  		if retrievalProgress != nil && chatpipeline.ShouldCloseRetrievalProgress(eventType, lastRetrievalStage, err) {
@@ -123396,7 +123574,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  			retrievalProgress = nil
  		}
  		stageDuration := time.Since(stageStart)
-@@ -868,7 +954,12 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -868,7 +952,12 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  				"reason":      "search_nothing",
  				"strategy":    string(chatManage.FallbackStrategy),
  			})
@@ -123410,7 +123588,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  			return nil
  		}
  
-@@ -888,6 +979,14 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
+@@ -888,6 +977,14 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
  		})
  	}
  
@@ -123425,7 +123603,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  	common.PipelineInfo(ctx, "Pipeline", "all_stages_complete", map[string]interface{}{
  		"session_id":        chatManage.SessionID,
  		"total_stages":      len(eventList),
-@@ -1018,23 +1117,32 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
+@@ -1018,23 +1115,32 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
  }
  
  // handleFallbackResponse handles fallback response based on strategy
@@ -123462,7 +123640,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  	// Check if FallbackPrompt is available
  	if chatManage.FallbackPrompt == "" {
  		logger.Warnf(ctx, "Fallback strategy is 'model' but FallbackPrompt is empty, falling back to fixed response")
-@@ -1194,6 +1302,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
+@@ -1194,6 +1300,11 @@ func (s *sessionService) buildKBDocumentListing(ctx context.Context, chatManage
  		if total >= maxDocuments {
  			break
  		}
@@ -123474,7 +123652,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  		knowledges, err := s.knowledgeService.ListKnowledgeByKnowledgeBaseID(ctx, kbID)
  		if err != nil {
  			logger.Warnf(ctx, "buildKBDocumentListing: failed to list knowledge for KB %s: %v", kbID, err)
-@@ -1296,12 +1409,12 @@ func (s *sessionService) consumeFallbackStream(
+@@ -1296,12 +1407,12 @@ func (s *sessionService) consumeFallbackStream(
  // remain available even when inline citations in the model answer are disabled.
  // Must run before CHAT_COMPLETION_STREAM so the event arrives while the
  // connection is still open (complete closes the stream).
@@ -123490,7 +123668,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  		ID:        generateEventID("references"),
  		Type:      types.EventType(event.EventAgentReferences),
  		SessionID: chatManage.SessionID,
-@@ -1310,20 +1423,25 @@ func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatMan
+@@ -1310,20 +1421,25 @@ func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatMan
  		},
  	}); err != nil {
  		logger.Errorf(ctx, "Failed to emit references event: %v", err)
@@ -123519,7 +123697,7 @@ index 04a5c8d02777a613ef4f2717c6e003642c4c5a06..8cdf2260c094cc9f489ed8351b45cdc9
  		ID:        fallbackID,
  		Type:      types.EventType(event.EventAgentFinalAnswer),
  		SessionID: chatManage.SessionID,
-@@ -1334,9 +1452,11 @@ func (s *sessionService) emitFallbackAnswer(ctx context.Context, chatManage *typ
+@@ -1334,9 +1450,11 @@ func (s *sessionService) emitFallbackAnswer(ctx context.Context, chatManage *typ
  		},
  	}); err != nil {
  		logger.Errorf(ctx, "Failed to emit fallback answer event: %v", err)
@@ -124356,6 +124534,158 @@ index 0000000000000000000000000000000000000000..dc2d62083fbc98f2f6deb6f99b3e77b7
 +		out = append(out, &copy)
 +	}
 +	return out
++}
+diff --git a/internal/application/service/source_lineage_stage_boundary.go b/internal/application/service/source_lineage_stage_boundary.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..27a290a69cbae3bc9cf4bb2b5876d66c5d743b1a
+--- /dev/null
++++ b/internal/application/service/source_lineage_stage_boundary.go
+@@ -0,0 +1,24 @@
++package service
++
++import (
++	"context"
++
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++// All result groups leave one completed pipeline stage together. Accumulate
++// their original receipts in order, then authorize the complete retained union
++// at that same boundary. Empty groups still require a fresh check; nil results
++// remain present so they cannot turn unknown input into a complete receipt.
++func accountSourceLineageStageBoundary(ctx context.Context, groups ...[]*types.SearchResult) error {
++	count := 0
++	for _, group := range groups {
++		count += len(group)
++	}
++	results := make([]*types.SearchResult, 0, count)
++	for _, group := range groups {
++		results = append(results, group...)
++	}
++	return chatpipeline.AccountResults(ctx, results)
++}
+diff --git a/internal/application/service/source_lineage_stage_boundary_test.go b/internal/application/service/source_lineage_stage_boundary_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..781e22370a6156d0724478d2e81c7a226d6641cf
+--- /dev/null
++++ b/internal/application/service/source_lineage_stage_boundary_test.go
+@@ -0,0 +1,116 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/stretchr/testify/require"
++)
++
++func sourceLineageStageProofForTest(t *testing.T, fileID string) *types.SourceLineage {
++	t.Helper()
++	proof, err := types.NewCompleteSourceLineage(types.SourceIdentity{
++		Provider: types.ConnectorTypeNextcloud, TenantID: 7, KnowledgeBaseID: "kb", DataSourceID: "ds",
++		PairOperationID: "pair", InstanceID: "instance", BindingID: "binding", FileID: fileID,
++		ExternalID: "nextcloud:instance:" + fileID, KnowledgeID: "knowledge-" + fileID,
++		Revision: 1, ETag: "original-" + fileID,
++	})
++	require.NoError(t, err)
++	return proof
++}
++
++func TestSourceLineageStageBoundaryKeepsAllResultSetsAndPriorUnion(t *testing.T) {
++	prior := sourceLineageStageProofForTest(t, "1")
++	search := sourceLineageStageProofForTest(t, "2")
++	rerank := sourceLineageStageProofForTest(t, "3")
++	merge := sourceLineageStageProofForTest(t, "4")
++	expected, err := types.UnionSourceLineage(prior, search, rerank, merge)
++	require.NoError(t, err)
++	checks := 0
++	turn := types.NewRAGSourceLineage(func(_ context.Context, actual *types.SourceLineage) error {
++		checks++
++		require.NoError(t, actual.RequireComplete())
++		require.Equal(t, expected, actual, "the actual authorization sees all three result sets and the already retained source")
++		return nil
++	})
++	require.NoError(t, turn.Add(prior))
++	ctx := types.WithRAGSourceLineage(context.Background(), turn)
++	searchResults := []*types.SearchResult{{SourceLineage: search}}
++	rerankResults := []*types.SearchResult{{SourceLineage: rerank}}
++	mergeResults := []*types.SearchResult{{SourceLineage: merge}, {SourceLineage: search}}
++	require.NoError(t, accountSourceLineageStageBoundary(ctx, searchResults, rerankResults, mergeResults))
++	require.Equal(t, expected, turn.Snapshot())
++	require.Equal(t, 1, checks, "one completed stage has one current authorization of its complete union")
++	require.Equal(t, search, searchResults[0].SourceLineage, "accounting does not rewrite the original producer receipt")
++}
++
++func TestSourceLineageStageBoundaryEmptyGroupsRecheckCurrentAuthority(t *testing.T) {
++	for _, revoked := range []string{"source", "actor", "original owner"} {
++		t.Run(revoked, func(t *testing.T) {
++			proof := sourceLineageStageProofForTest(t, "1")
++			denied := errors.New("current " + revoked + " access was withdrawn")
++			sourceAllowed, actorAllowed, ownerAllowed := true, true, true
++			turn := types.NewRAGSourceLineage(func(ctx context.Context, actual *types.SourceLineage) error {
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				require.Equal(t, proof, actual, "an empty new stage still retains the earlier source")
++				if !sourceAllowed || !actorAllowed || !ownerAllowed {
++					return denied
++				}
++				return nil
++			})
++			ctx := types.WithRAGSourceLineage(context.Background(), turn)
++			require.NoError(t, accountSourceLineageStageBoundary(ctx, []*types.SearchResult{{SourceLineage: proof}}))
++			switch revoked {
++			case "source":
++				sourceAllowed = false
++			case "actor":
++				actorAllowed = false
++			case "original owner":
++				ownerAllowed = false
++			}
++			require.ErrorIs(t, accountSourceLineageStageBoundary(ctx, nil, []*types.SearchResult{}, nil), denied,
++				"empty groups cannot reuse the preceding stage's successful authority")
++			require.Equal(t, proof, turn.Snapshot(), "a current denial does not replace the original source identity")
++		})
++	}
++}
++
++func TestSourceLineageStageBoundaryNilAndUnknownCannotBeRepairedByLaterResults(t *testing.T) {
++	for _, invalid := range []string{"nil result", "missing receipt", "unknown receipt"} {
++		t.Run(invalid, func(t *testing.T) {
++			proof := sourceLineageStageProofForTest(t, "1")
++			checks := 0
++			turn := types.NewRAGSourceLineage(func(context.Context, *types.SourceLineage) error {
++				checks++
++				return nil
++			})
++			ctx := types.WithRAGSourceLineage(context.Background(), turn)
++			var bad *types.SearchResult
++			switch invalid {
++			case "missing receipt":
++				bad = &types.SearchResult{}
++			case "unknown receipt":
++				bad = &types.SearchResult{SourceLineage: types.UnknownSourceLineage()}
++			}
++			require.ErrorIs(t, accountSourceLineageStageBoundary(ctx,
++				[]*types.SearchResult{{SourceLineage: proof}}, []*types.SearchResult{bad},
++				[]*types.SearchResult{{SourceLineage: proof}}), types.ErrSourceLineageUnknown)
++			require.ErrorIs(t, turn.Snapshot().RequireComplete(), types.ErrSourceLineageUnknown)
++			require.ErrorIs(t, accountSourceLineageStageBoundary(ctx, []*types.SearchResult{{SourceLineage: proof}}), types.ErrSourceLineageUnknown,
++				"a later complete result must not repair the unknown earlier stage")
++			require.Zero(t, checks, "unknown original input cannot reach the authorizer as a complete union")
++		})
++	}
++}
++
++func TestSourceLineageStageBoundaryCancellationUsesCurrentContext(t *testing.T) {
++	turn := types.NewRAGSourceLineage(func(ctx context.Context, _ *types.SourceLineage) error { return ctx.Err() })
++	ctx, cancel := context.WithCancel(types.WithRAGSourceLineage(context.Background(), turn))
++	require.NoError(t, accountSourceLineageStageBoundary(ctx, nil, nil, nil))
++	cancel()
++	require.ErrorIs(t, accountSourceLineageStageBoundary(ctx, nil, nil, nil), context.Canceled)
 +}
 diff --git a/internal/application/service/span_output_lineage.go b/internal/application/service/span_output_lineage.go
 new file mode 100644
