@@ -1,6 +1,6 @@
 diff --git a/internal/application/service/message_material_idle_raw_original.go b/internal/application/service/message_material_idle_raw_original.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..b16f4f0d8804f7cadb7e2412cd40fd40b9cf70c8
+index 000000000..b16f4f0d8
 --- /dev/null
 +++ b/internal/application/service/message_material_idle_raw_original.go
 @@ -0,0 +1,106 @@
@@ -111,7 +111,7 @@ index 0000000000000000000000000000000000000000..b16f4f0d8804f7cadb7e2412cd40fd40
 +	return err == nil && string(actual) == string(expected)
 +}
 diff --git a/internal/application/service/message_material_output.go b/internal/application/service/message_material_output.go
-index 6e50b411fae3027c246d2c21b544d080d823882f..9f8444d1ea817f206e138d46127a2868ec6bc2f7 100644
+index 6e50b411f..c8f512b49 100644
 --- a/internal/application/service/message_material_output.go
 +++ b/internal/application/service/message_material_output.go
 @@ -20,19 +20,21 @@ var ErrMessageMaterialHTTPInitializing = fmt.Errorf("%w: original message materi
@@ -220,7 +220,7 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..9f8444d1ea817f206e138d46127a2868
  					known = false
  					break
  				}
-@@ -195,17 +215,30 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
+@@ -195,17 +215,34 @@ func MessageMaterialIdleRecheckEligible(ctx context.Context) bool {
  			return false
  		}
  	}
@@ -246,14 +246,18 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..9f8444d1ea817f206e138d46127a2868
  
  func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
 +	span := startOriginalServiceTiming(ctx, originalServiceTimingSlotBoundaryTotal)
++	callerSpan := originalServiceTimingBoundaryCallerSpan(span)
 +	success := false
-+	// Registered before the slot unlock defer: this runs after unlock and all
-+	// unchanged checks, even when the real boundary returns a refusal.
-+	defer func() { span.finish(success) }()
++	// Registered before the slot unlock defer: both overlapping observations
++	// run after unlock and all unchanged checks, including a real refusal.
++	defer func() {
++		callerSpan.finish(success)
++		span.finish(success)
++	}()
  	slot, ok := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
  	if !ok {
  		return access.ErrNextcloudPublicationUnavailable
-@@ -257,6 +290,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
+@@ -257,6 +294,7 @@ func CheckMessageMaterialOutputBoundary(ctx context.Context) error {
  			return access.ErrNextcloudPublicationDenied
  		}
  	}
@@ -261,7 +265,7 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..9f8444d1ea817f206e138d46127a2868
  	return nil
  }
  
-@@ -392,6 +426,9 @@ func (s *messageService) admittedMessages(ctx context.Context, request types.Mes
+@@ -392,6 +430,9 @@ func (s *messageService) admittedMessages(ctx context.Context, request types.Mes
  		slot.mu.Lock()
  		slot.Outputs = append(slot.Outputs, copied)
  		slot.OutputBodies = append(slot.OutputBodies, string(body))
@@ -273,7 +277,7 @@ index 6e50b411fae3027c246d2c21b544d080d823882f..9f8444d1ea817f206e138d46127a2868
  	return copied, nil
 diff --git a/internal/application/service/message_material_raw_idle_actual_test.go b/internal/application/service/message_material_raw_idle_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..f17d44b987541e802c088256b294b830f283cd55
+index 000000000..f17d44b98
 --- /dev/null
 +++ b/internal/application/service/message_material_raw_idle_actual_test.go
 @@ -0,0 +1,111 @@
@@ -389,7 +393,7 @@ index 0000000000000000000000000000000000000000..f17d44b987541e802c088256b294b830
 +	}
 +}
 diff --git a/internal/application/service/model.go b/internal/application/service/model.go
-index 48ee19b07d2872cf3c71ac866729bbead90cbda4..f63eda813e64b4b73feda9d7a8286696b94c827b 100644
+index 48ee19b07..f63eda813 100644
 --- a/internal/application/service/model.go
 +++ b/internal/application/service/model.go
 @@ -570,6 +570,9 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
@@ -449,7 +453,7 @@ index 48ee19b07d2872cf3c71ac866729bbead90cbda4..f63eda813e64b4b73feda9d7a8286696
  
 diff --git a/internal/application/service/normal_original_public_handler_fixture_bridge_test.go b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..00113bca83f14d2d6f8d47788121f834a720f940
+index 000000000..00113bca8
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_fixture_bridge_test.go
 @@ -0,0 +1,294 @@
@@ -749,7 +753,7 @@ index 0000000000000000000000000000000000000000..00113bca83f14d2d6f8d47788121f834
 +}
 diff --git a/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b89235b712ed56bb40386a35d30a91e14d21ffb
+index 000000000..5b89235b7
 --- /dev/null
 +++ b/internal/application/service/normal_original_public_handler_sql_jwt_actual_test.go
 @@ -0,0 +1,380 @@
@@ -1135,10 +1139,10 @@ index 0000000000000000000000000000000000000000..5b89235b712ed56bb40386a35d30a91e
 +}
 diff --git a/internal/application/service/original_service_timing.go b/internal/application/service/original_service_timing.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..8276dea398ee174aa6bff4f61024f0b6c036c226
+index 000000000..088e976d4
 --- /dev/null
 +++ b/internal/application/service/original_service_timing.go
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,87 @@
 +package service
 +
 +import (
@@ -1168,6 +1172,21 @@ index 0000000000000000000000000000000000000000..8276dea398ee174aa6bff4f61024f0b6
 +	originalServiceTimingIdleGuardProofUnknown
 +	originalServiceTimingIdleGuardMessageUnknown
 +	originalServiceTimingIdleOutputRawUncovered
++	originalServiceTimingCallerHTTPWrite
++	originalServiceTimingCallerHTTPFlush
++	originalServiceTimingCallerHTTPHeader
++	originalServiceTimingCallerHTTPPoll
++	originalServiceTimingCallerInputDirect
++	originalServiceTimingCallerHistoryUnion
++	originalServiceTimingCallerResultsUnion
++	originalServiceTimingCallerModelStamp
++	originalServiceTimingCallerEventDirect
++	originalServiceTimingCallerEventUnion
++	originalServiceTimingCallerStreamUnion
++	originalServiceTimingCallerSnapshot
++	originalServiceTimingCallerAgentHistory
++	originalServiceTimingCallerHistoryOther
++	originalServiceTimingCallerUnknown
 +	originalServiceTimingPhaseCount
 +)
 +
@@ -1211,12 +1230,185 @@ index 0000000000000000000000000000000000000000..8276dea398ee174aa6bff4f61024f0b6
 +	defer func() { _ = recover() }()
 +	span.observer.observe(span.phase, duration, success)
 +}
+diff --git a/internal/application/service/original_service_timing_caller.go b/internal/application/service/original_service_timing_caller.go
+new file mode 100644
+index 000000000..80abd4b98
+--- /dev/null
++++ b/internal/application/service/original_service_timing_caller.go
+@@ -0,0 +1,86 @@
++package service
++
++import (
++	"runtime"
++	"strings"
++)
++
++// Caller attribution observes only the existing full-boundary span. It does
++// not retain or expose stack frames, function names, source paths or PCs. The
++// inclusive total and its single caller bucket overlap and cannot be added.
++const originalServiceTimingCallerFrameLimit = 12
++
++func originalServiceTimingBoundaryCallerSpan(span originalServiceTimingSpan) originalServiceTimingSpan {
++	if span.observer == nil || span.observer.observe == nil {
++		// The default-off path reads neither the stack nor another clock.
++		return originalServiceTimingSpan{}
++	}
++	const service = "github.com/Tencent/WeKnora/internal/application/service."
++	const pipeline = "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline."
++	const types = "github.com/Tencent/WeKnora/internal/types."
++	const handler = "github.com/Tencent/WeKnora/internal/handler/session."
++	var pcs [originalServiceTimingCallerFrameLimit]uintptr
++	count := runtime.Callers(2, pcs[:])
++	frames := runtime.CallersFrames(pcs[:count])
++	rag, lifetime := false, false
++	span.phase = originalServiceTimingCallerUnknown
++	for index := 0; index < originalServiceTimingCallerFrameLimit; index++ {
++		frame, more := frames.Next()
++		switch frame.Function {
++		case handler + "(*nativeSavedReplayWriter).Write":
++			span.phase = originalServiceTimingCallerHTTPWrite
++			return span
++		case handler + "(*nativeSavedReplayWriter).Flush":
++			span.phase = originalServiceTimingCallerHTTPFlush
++			return span
++		case handler + "(*nativeSavedReplayWriter).WriteHeaderNow":
++			span.phase = originalServiceTimingCallerHTTPHeader
++			return span
++		case handler + "(*Handler).handleAgentEventsForSSE":
++			span.phase = originalServiceTimingCallerHTTPPoll
++			return span
++		case service + "messageMaterialBoundarySnapshots":
++			span.phase = originalServiceTimingCallerSnapshot
++			return span
++		case service + "messageLineageHistoryAdmission.CheckAgentHistoryReplay", service + "(*messageLineageHistoryAdmission).CheckAgentHistoryReplay":
++			span.phase = originalServiceTimingCallerAgentHistory
++			return span
++		case types + "CheckHistoryMaterialLifetime":
++			lifetime = true
++		case types + "(*RAGSourceLineage).CheckedSnapshot":
++			rag = true
++		case pipeline + "AccountHistory":
++			span.phase = originalServiceTimingCallerHistoryUnion
++			return span
++		case pipeline + "AccountResults":
++			span.phase = originalServiceTimingCallerResultsUnion
++			return span
++		case pipeline + "stampModelInputLineage":
++			span.phase = originalServiceTimingCallerModelStamp
++			return span
++		case pipeline + "emitSourceLineageEvent":
++			span.phase = originalServiceTimingCallerEventDirect
++			if rag {
++				span.phase = originalServiceTimingCallerEventUnion
++			}
++			return span
++		case pipeline + "CheckSourceLineageInputs":
++			span.phase = originalServiceTimingCallerInputDirect
++			return span
++		default:
++			if rag && strings.HasPrefix(frame.Function, pipeline+"(*PluginChatCompletionStream).OnEvent.") {
++				// The response loop and decoder drain are anonymous closures
++				// under this fixed owner; do not infer a finer callsite.
++				span.phase = originalServiceTimingCallerStreamUnion
++				return span
++			}
++		}
++		if !more {
++			break
++		}
++	}
++	if lifetime {
++		span.phase = originalServiceTimingCallerHistoryOther
++	}
++	return span
++}
+diff --git a/internal/application/service/original_service_timing_caller_test.go b/internal/application/service/original_service_timing_caller_test.go
+new file mode 100644
+index 000000000..19e931da9
+--- /dev/null
++++ b/internal/application/service/original_service_timing_caller_test.go
+@@ -0,0 +1,75 @@
++package service
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
++	"github.com/Tencent/WeKnora/internal/types"
++)
++
++func TestOriginalServiceTimingCallerUsesRealClosedOwnerAndCollector(t *testing.T) {
++	if off := originalServiceTimingBoundaryCallerSpan(originalServiceTimingSpan{}); off.observer != nil || !off.started.IsZero() {
++		t.Fatal("default-off caller attribution created an active span")
++	}
++	ctx, _, _, closeHTTP := BeginMessageMaterialHTTPBoundary(context.Background())
++	slot := ctx.Value(messageMaterialOutputKey{}).(*messageMaterialOutputSlot)
++	collector := &originalServiceTimingCollector{}
++	unlocked := true
++	collector.observer = &originalServiceTimingObserver{observe: func(phase originalServiceTimingPhase, duration time.Duration, success bool) {
++		if slot.mu.TryLock() {
++			slot.mu.Unlock()
++		} else {
++			unlocked = false
++		}
++		collector.record(phase, duration, success)
++	}}
++	collector.attach(ctx)
++	defer collector.finish(t, nil, nil)
++	// Use a genuine retired HTTP owner, never an empty success guard or a
++	// fabricated capability. Every route below must retain its real refusal.
++	closeHTTP()
++	lifetime := types.WithHistoryMaterialLifetime(ctx, func() error { return CheckMessageMaterialOutputBoundary(ctx) }, nil)
++	manager := &chatpipeline.EventManager{}
++	bound, err := manager.BeginSourceLineage(lifetime, &types.ChatManage{}, access.LineageReadScope{})
++	if err == nil {
++		t.Fatal("closed original owner was admitted at the real pipeline entry")
++	}
++	if chatpipeline.AccountHistory(bound, nil) == nil || chatpipeline.AccountResults(bound, nil) == nil ||
++		chatpipeline.EmitSourceLineageEvent(bound, nil, types.Event{}) == nil {
++		t.Fatal("caller attribution replaced a real union or event refusal")
++	}
++	if _, err := messageMaterialBoundarySnapshots(ctx); err == nil {
++		t.Fatal("caller attribution replaced a real snapshot refusal")
++	}
++	if types.CheckHistoryMaterialLifetime(bound) == nil || CheckMessageMaterialOutputBoundary(ctx) == nil {
++		t.Fatal("caller attribution replaced a real lifetime or direct refusal")
++	}
++	wanted := map[originalServiceTimingPhase]bool{
++		originalServiceTimingCallerInputDirect:  true,
++		originalServiceTimingCallerHistoryUnion: true,
++		originalServiceTimingCallerResultsUnion: true,
++		originalServiceTimingCallerEventDirect:  true,
++		originalServiceTimingCallerSnapshot:     true,
++		originalServiceTimingCallerHistoryOther: true,
++		originalServiceTimingCallerUnknown:      true,
++	}
++	collector.mu.Lock()
++	buckets := collector.buckets
++	collector.mu.Unlock()
++	if !unlocked || buckets[originalServiceTimingSlotBoundaryTotal].count != uint64(len(wanted)) ||
++		buckets[originalServiceTimingSlotBoundaryTotal].successes != 0 {
++		t.Fatal("overlapping caller observations changed real check counts or ran under the slot mutex")
++	}
++	for phase := originalServiceTimingCallerHTTPWrite; phase < originalServiceTimingPhaseCount; phase++ {
++		count := uint64(0)
++		if wanted[phase] {
++			count = 1
++		}
++		if buckets[phase].count != count || buckets[phase].successes != 0 {
++			t.Fatal("actual closed-owner routes did not produce one fixed caller bucket per full boundary")
++		}
++	}
++}
 diff --git a/internal/application/service/original_service_timing_profile_test.go b/internal/application/service/original_service_timing_profile_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..857084bb15238e6621752b1500c136e732b03642
+index 000000000..665ab99b2
 --- /dev/null
 +++ b/internal/application/service/original_service_timing_profile_test.go
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,302 @@
 +package service
 +
 +import (
@@ -1238,6 +1430,11 @@ index 0000000000000000000000000000000000000000..857084bb15238e6621752b1500c136e7
 +	"idle_turn_unknown", "idle_slot_absent", "idle_slot_state",
 +	"idle_guard_missing", "idle_guard_state", "idle_guard_proof_unknown",
 +	"idle_guard_message_unknown", "idle_output_raw_uncovered",
++	"boundary_caller_http_write", "boundary_caller_http_flush", "boundary_caller_http_header",
++	"boundary_caller_http_poll", "boundary_caller_input_direct", "boundary_caller_history_union",
++	"boundary_caller_results_union", "boundary_caller_model_stamp", "boundary_caller_event_direct",
++	"boundary_caller_event_union", "boundary_caller_stream_union", "boundary_caller_snapshot",
++	"boundary_caller_agent_history", "boundary_caller_history_other", "boundary_caller_unknown",
 +}
 +
 +type originalServiceTimingAggregate struct {
@@ -1516,7 +1713,7 @@ index 0000000000000000000000000000000000000000..857084bb15238e6621752b1500c136e7
 +}
 diff --git a/internal/handler/session/controlled_normal_stop_test.go b/internal/handler/session/controlled_normal_stop_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3bd6606828e31d9d1f1b08fcfe3c7cfb4a2038c7
+index 000000000..3bd660682
 --- /dev/null
 +++ b/internal/handler/session/controlled_normal_stop_test.go
 @@ -0,0 +1,137 @@
@@ -1658,7 +1855,7 @@ index 0000000000000000000000000000000000000000..3bd6606828e31d9d1f1b08fcfe3c7cfb
 +	}
 +}
 diff --git a/internal/handler/session/helpers.go b/internal/handler/session/helpers.go
-index 3b845054d5e77bad6eb9faa75989a0bd000ded06..8b51585b196b446328b5e4b4eff25e6fde5cfa5b 100644
+index 3b845054d..8b51585b1 100644
 --- a/internal/handler/session/helpers.go
 +++ b/internal/handler/session/helpers.go
 @@ -330,10 +330,17 @@ func (h *Handler) setupStopEventHandler(
@@ -1701,7 +1898,7 @@ index 3b845054d5e77bad6eb9faa75989a0bd000ded06..8b51585b196b446328b5e4b4eff25e6f
  // writeAgentQueryEvent writes an agent query event to the stream manager
 diff --git a/internal/handler/session/live_material_raw_control_test.go b/internal/handler/session/live_material_raw_control_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3ddf9f4fc83d2c1c836ebb73aaf2b5f24ce3bd3
+index 000000000..d3ddf9f4f
 --- /dev/null
 +++ b/internal/handler/session/live_material_raw_control_test.go
 @@ -0,0 +1,49 @@
@@ -1755,7 +1952,7 @@ index 0000000000000000000000000000000000000000..d3ddf9f4fc83d2c1c836ebb73aaf2b5f
 +	require.False(t, phase.RawControl)
 +}
 diff --git a/internal/handler/session/qa.go b/internal/handler/session/qa.go
-index 0865fd80cfe03931134c433a655ca87fc07b6d9f..1cefcef1b2fd6e6f96acd17ccbb921a433e8933e 100644
+index 0865fd80c..1cefcef1b 100644
 --- a/internal/handler/session/qa.go
 +++ b/internal/handler/session/qa.go
 @@ -848,7 +848,11 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool, m
@@ -1801,7 +1998,7 @@ index 0865fd80cfe03931134c433a655ca87fc07b6d9f..1cefcef1b2fd6e6f96acd17ccbb921a4
  	go func() {
  		defer close(asyncDone)
 diff --git a/internal/handler/session/resource_urls.go b/internal/handler/session/resource_urls.go
-index 9fe099f1de6c032a063eea5adad359fb064cfc3d..4f57409dc3d3df51e7d8ea5c8824c9ae2a25efe9 100644
+index 9fe099f1d..4f57409dc 100644
 --- a/internal/handler/session/resource_urls.go
 +++ b/internal/handler/session/resource_urls.go
 @@ -10,6 +10,7 @@ import (
@@ -1838,7 +2035,7 @@ index 9fe099f1de6c032a063eea5adad359fb064cfc3d..4f57409dc3d3df51e7d8ea5c8824c9ae
  }
 diff --git a/internal/handler/session/single_sse_frame.go b/internal/handler/session/single_sse_frame.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..47d751f8d9671f39bfb9d06a0a8073d0e8105bf3
+index 000000000..47d751f8d
 --- /dev/null
 +++ b/internal/handler/session/single_sse_frame.go
 @@ -0,0 +1,34 @@
@@ -1878,7 +2075,7 @@ index 0000000000000000000000000000000000000000..47d751f8d9671f39bfb9d06a0a8073d0
 +}
 diff --git a/internal/handler/session/single_sse_frame_test.go b/internal/handler/session/single_sse_frame_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..bfb0c91b39c06775d48301d6b39737c95526f9b7
+index 000000000..bfb0c91b3
 --- /dev/null
 +++ b/internal/handler/session/single_sse_frame_test.go
 @@ -0,0 +1,169 @@
@@ -2052,7 +2249,7 @@ index 0000000000000000000000000000000000000000..bfb0c91b39c06775d48301d6b39737c9
 +	}
 +}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index ebd97716afad89b65ebf407fab2385fd29109fd1..5a6680530372053b09024b77fe16e972ce6a47f3 100644
+index ebd97716a..5a6680530 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -676,10 +676,7 @@ func (h *Handler) handleAgentEventsForSSE(
