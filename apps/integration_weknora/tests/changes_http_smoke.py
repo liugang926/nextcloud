@@ -15,6 +15,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 from machine_auth import signed_headers
+from publication_http_smoke import manifest_item
 
 
 PROJECT = Path(__file__).resolve().parents[3]
@@ -157,6 +158,13 @@ def main():
         status, body = request(child_url, "PUT", dav_headers, b"folder member\n")
         assert status in (201, 204), (status, body[:300])
         child_id = file_id(child_url, dav_headers)
+        child_revision = manifest_item(
+            urllib.request.build_opener(),
+            f"{base}/index.php/apps/integration_weknora/api/v1",
+            "dev-published", child_id, machine_headers)["source_content_revision"]
+        child_content_url = (
+            f"{base}/index.php/apps/integration_weknora/api/v1/bindings/dev-published/files/{child_id}/content?" +
+            urllib.parse.urlencode({"content_revision": child_revision}))
         events, cursor = drain(api_url, machine_headers, cursor)
         assert any(e["type"] == "upsert" and e["file_id"] == child_id and
                    e["relative_path"] == f"changes-folder-{suffix}/child.txt"
@@ -169,9 +177,7 @@ def main():
         assert any(e["type"] == "subtree_deleted" and
                    e["old_path"] and e["old_path"].endswith(f"/changes-folder-{suffix}")
                    for e in events), events
-        status, _ = request(
-            f"{base}/index.php/apps/integration_weknora/api/v1/bindings/dev-published/files/{child_id}/content",
-            headers=machine_headers)
+        status, _ = request(child_content_url, headers=machine_headers)
         assert status == 404, f"moved-out descendant was readable: HTTP {status}"
 
         status, body = request(moved_folder_url, "MOVE", {
@@ -182,9 +188,7 @@ def main():
         assert any(e["type"] == "subtree_scan" and
                    e["path"] and e["path"].endswith(f"/changes-folder-{suffix}")
                    for e in events), events
-        status, body = request(
-            f"{base}/index.php/apps/integration_weknora/api/v1/bindings/dev-published/files/{child_id}/content",
-            headers=machine_headers)
+        status, body = request(child_content_url, headers=machine_headers)
         assert status == 200 and body == b"folder member\n", (status, body[:300])
 
         status, body = request(folder_url, "DELETE", dav_headers)

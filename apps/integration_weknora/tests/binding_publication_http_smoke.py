@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 
 from changes_http_smoke import file_id
-from publication_http_smoke import PROJECT, check, load_env, login, request, run_occ
+from publication_http_smoke import PROJECT, check, load_env, login, manifest_item, request, run_occ
 
 
 def as_json(body):
@@ -48,6 +48,10 @@ def main():
     admin_headers = {"requesttoken": csrf}
     machine = urllib.request.build_opener()
     machine_headers = {"Authorization": f"Bearer {env['WEKNORA_SERVICE_TOKEN']}"}
+    source_revision = manifest_item(machine, api, args.binding, args.file_id,
+                                    machine_headers)["source_content_revision"]
+    content_url = (f"{machine_url}/files/{args.file_id}/content?" +
+                   urllib.parse.urlencode({"content_revision": source_revision}))
     guest_uid = f"stop_smoke_{secrets.token_hex(5)}"
     guest_password = secrets.token_urlsafe(24)
     guest_created = False
@@ -64,7 +68,8 @@ def main():
         return request(admin, f"{binding_url}/{action}", "POST", headers, b"")
 
     def decision(identity):
-        payload = json.dumps({**identity, "file_id": args.file_id}).encode()
+        payload = json.dumps({**identity, "file_id": args.file_id,
+                              "content_revision": source_revision}).encode()
         return request(machine, f"{machine_url}/authorize", "POST",
                        {**machine_headers, "Content-Type": "application/json"}, payload)
 
@@ -92,8 +97,8 @@ def main():
         status, body = decision(identity)
         check(status, 200, "baseline source authorization")
         assert as_json(body)["allow"] is True, body
-        status, body = request(machine, f"{machine_url}/files/{args.file_id}/content",
-                               headers=machine_headers)
+        assert as_json(body)["source_content_revision"] == source_revision, body
+        status, body = request(machine, content_url, headers=machine_headers)
         check(status, 200, "baseline source content")
 
         run_occ("user:add", "--password-from-env", "--no-interaction", guest_uid,
@@ -140,8 +145,7 @@ def main():
         status, body = request(machine, f"{machine_url}/manifest", headers=machine_headers)
         check(status, 423, "stopped manifest is not empty success")
         assert as_json(body)["error"] == "publication_stopped"
-        status, body = request(machine, f"{machine_url}/files/{args.file_id}/content",
-                               headers=machine_headers)
+        status, body = request(machine, content_url, headers=machine_headers)
         check(status, 423, "stopped content")
         status, body = decision(identity)
         check(status, 200, "stopped authorization")
@@ -173,8 +177,7 @@ def main():
         status, body = decision(identity)
         check(status, 200, "authorization after resume")
         assert as_json(body)["allow"] is True
-        status, body = request(machine, f"{machine_url}/files/{args.file_id}/content",
-                               headers=machine_headers)
+        status, body = request(machine, content_url, headers=machine_headers)
         check(status, 200, "source content after resume")
 
         file_url = f"{binding_url}/files/{args.file_id}"

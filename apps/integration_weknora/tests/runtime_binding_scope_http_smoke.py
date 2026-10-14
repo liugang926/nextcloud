@@ -113,6 +113,9 @@ def main():
         status, body = request(machine, f"{api}/bindings/{b_id}/manifest", headers=b_headers)
         check(status, 200, "sibling B baseline manifest")
         assert member in [item["file_id"] for item in json.loads(body)["items"]]
+        source_revision = next(item["source_content_revision"]
+                               for item in json.loads(body)["items"] if item["file_id"] == member)
+        assert isinstance(source_revision, str)
 
         password = secrets.token_urlsafe(24)
         run_occ("user:add", "--password-from-env", "--no-interaction", guest_uid,
@@ -144,7 +147,8 @@ def main():
         mapping_created = True
         authorize_url = f"{api}/bindings/{b_id}/authorize"
         payload = {"directory_id": identity["directory_id"],
-                   "object_guid": identity["object_guid"], "file_id": member}
+                   "object_guid": identity["object_guid"], "file_id": member,
+                   "content_revision": source_revision}
 
         def decision():
             return post_json(machine, authorize_url, payload, b_headers)
@@ -152,6 +156,7 @@ def main():
         status, body = decision()
         check(status, 200, "baseline authorization")
         assert json.loads(body)["allow"] is True, body
+        assert json.loads(body)["source_content_revision"] == source_revision, body
 
         status, body = dav_request(b_url, "MOVE", {
             **dav_headers, "Destination": moved_b_url,

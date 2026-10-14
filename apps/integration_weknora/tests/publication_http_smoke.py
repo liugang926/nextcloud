@@ -69,6 +69,23 @@ def check(status, expected, message):
     assert status == expected, f"{message}: expected {expected}, got {status}"
 
 
+def manifest_item(machine, api, binding_id, file_id, headers):
+    """Capture the indexed file version before exercising authorization gates."""
+    url = f"{api}/bindings/{binding_id}/manifest"
+    cursor = None
+    while True:
+        page_url = url if cursor is None else url + "?" + urllib.parse.urlencode({"cursor": cursor})
+        status, body = request(machine, page_url, headers=headers)
+        check(status, 200, "read source manifest version")
+        manifest = json.loads(body)
+        for item in manifest["items"]:
+            if item["file_id"] == file_id:
+                assert isinstance(item["source_content_revision"], str)
+                return item
+        cursor = manifest["next_cursor"]
+        assert cursor is not None, f"file {file_id} is missing from the source manifest"
+
+
 def issue_machine_key(admin, api, binding_id, csrf):
     """Issue a temporary binding-scoped credential without printing its secret."""
     key_id = "smoke-" + secrets.token_hex(12)

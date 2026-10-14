@@ -282,6 +282,18 @@ def main():
 
         rotation_url = pairing_url + "/rotation"
         aborted_operation = str(uuid.uuid4())
+        # Detecting a moved paired root durably stops publication. Restoring
+        # the path cannot reopen source reads or key rotation by itself.
+        status, body = request(machine, f"{api}/bindings/{binding_id}/manifest",
+                               headers=source_headers)
+        check(status, 423, "restored paired root remains stopped")
+        assert decoded(body)["error"] == "publication_stopped"
+        status, body = admin_json("POST", rotation_url, {"operation_id": aborted_operation})
+        check(status, 423, "stopped paired root cannot prepare source rotation")
+        assert decoded(body)["error"] == "publication_stopped"
+        status, body = admin_json("POST", binding_url + "/resume", {})
+        check(status, 200, "administrator resumes restored paired root")
+        assert decoded(body)["publication_state"] == "active" and decoded(body)["changed"] is True
         status, body = admin_json("POST", rotation_url, {"operation_id": aborted_operation})
         check(status, 201, "prepare abortable source rotation")
         aborted = decoded(body)["rotation"]

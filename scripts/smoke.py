@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -46,7 +47,9 @@ def main():
     files = [item for item in manifest["items"] if item["name"] == "department-notes.md"]
     assert manifest["complete"] and len(files) == 1
     file_id = files[0]["file_id"]
-    content_url = f"{api}/bindings/dev-published/files/{file_id}/content"
+    source_revision = files[0]["source_content_revision"]
+    content_url = (f"{api}/bindings/dev-published/files/{file_id}/content?" +
+                   urllib.parse.urlencode({"content_revision": source_revision}))
     status, body = request(content_url, token)
     assert status == 200 and body == (PROJECT / "fixtures/department-notes.md").read_bytes()
     status, _ = request(content_url, token, {"If-Match": '"wrong-version"'})

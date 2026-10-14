@@ -31,6 +31,7 @@ APP = ROOT / "apps/integration_weknora"
 OLD_APP_COMMIT = "5b97db539155be61541836ba3d67074e78705340"
 OLD_VERSION = "0.4.6"
 FAULT_MARKER = "WEKNORA_UPGRADE_FAILURE_PROBE"
+FAULT_MIGRATION = "Version0028Date20261010000000.php"
 IMAGES = {
     "db": "postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416",
     "redis": "redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065",
@@ -208,7 +209,7 @@ def replace_app(source: Path, target: Path) -> None:
 
 
 def inject_failure(app_dir: Path) -> None:
-    migration = app_dir / "lib/Migration/Version0022Date20261009000000.php"
+    migration = app_dir / "lib/Migration" / FAULT_MIGRATION
     latest = sorted((app_dir / "lib/Migration").glob("Version*.php"))[-1]
     require(latest == migration,
             "the final app migration changed; update the failure injection")
@@ -501,6 +502,9 @@ def main() -> None:
             for table in ("oc_weknora_recovery_head", "oc_weknora_recovery_log", "oc_weknora_recovery_apply"):
                 require(sql("SELECT COUNT(*) FROM pg_tables WHERE tablename='" + table + "';") == "1",
                         "injected final failure did not apply recovery journal schema")
+            for table in ("oc_weknora_recovery_floor", "oc_weknora_control_gate"):
+                require(sql("SELECT COUNT(*) FROM pg_tables WHERE tablename='" + table + "';") == "1",
+                        "injected final failure did not apply the current final migration schema")
             require(sql("SELECT state FROM oc_weknora_pub_state WHERE "
                         f"binding_id='recovery-probe' AND file_id={file_id};") == "withdrawn",
                     "prior plugin row disappeared during failed upgrade")
@@ -580,7 +584,8 @@ def main() -> None:
             report = {
                 "result": "passed", "project": project,
                 "baseline_app": OLD_VERSION, "attempted_app": current_version,
-                "fault": FAULT_MARKER, "failed_upgrade_exit": failed.returncode,
+                "fault": FAULT_MARKER, "fault_migration": FAULT_MIGRATION,
+                "failed_upgrade_exit": failed.returncode,
                 "restored_instance_id_matches": True,
                 "restored_file_id_matches": True,
                 "restored_file_sha256": hashlib.sha256(restored).hexdigest(),

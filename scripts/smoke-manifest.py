@@ -102,7 +102,12 @@ try:
     assert len(ids) >= 207, f"expected sample plus 206 test files, got {len(ids)}"
 
     sample = next(item for item in page["items"] if item["file_id"] in ids)  # valid bound ID
-    status, _ = request("GET", f"{api}/bindings/dev-published/files/{sample['file_id']}/content",
+    content_url = (f"{api}/bindings/dev-published/files/{sample['file_id']}/content?" +
+                   urlencode({"content_revision": sample["source_content_revision"]}))
+    status, _ = request("GET", content_url, f"Bearer {env['WEKNORA_SERVICE_TOKEN']}",
+                        headers={"If-Match": '"' + sample["etag"] + '"'})
+    assert status == 200, f"matching source revision and If-Match returned {status}"
+    status, _ = request("GET", content_url,
                         f"Bearer {env['WEKNORA_SERVICE_TOKEN']}", headers={"If-Match": '"deliberately-wrong"'})
     assert status == 412, f"If-Match returned {status}"
     print(f"Manifest smoke passed: {len(ids)} unique files, content and publication mutations rejected, conditional read checked.")

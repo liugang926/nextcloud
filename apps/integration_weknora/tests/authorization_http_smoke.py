@@ -13,7 +13,7 @@ import uuid
 import urllib.parse
 import urllib.request
 
-from publication_http_smoke import check, load_env, login, request, run_occ
+from publication_http_smoke import check, load_env, login, manifest_item, request, run_occ
 
 
 def as_json(body):
@@ -40,6 +40,8 @@ def main():
     publication = f"{api}/admin/bindings/{args.binding}/files/{args.file_id}"
     machine = urllib.request.build_opener()
     bearer = {"Authorization": f"Bearer {values['WEKNORA_SERVICE_TOKEN']}"}
+    source_revision = manifest_item(machine, api, args.binding, args.file_id,
+                                    bearer)["source_content_revision"]
     admin, csrf = login(base, values["NEXTCLOUD_ADMIN_USER"], values["NEXTCLOUD_ADMIN_PASSWORD"])
     admin_headers = {"requesttoken": csrf}
 
@@ -71,9 +73,11 @@ def main():
     }
     original_state = None
 
-    def decision(identity, file_id=args.file_id, extra_headers=None):
+    def decision(identity, file_id=args.file_id, extra_headers=None,
+                 content_revision=source_revision):
         payload = {"directory_id": identity["directory_id"],
-                   "object_guid": identity["object_guid"], "file_id": file_id}
+                   "object_guid": identity["object_guid"], "file_id": file_id,
+                   "content_revision": content_revision}
         return post_json(machine, authorize, payload,
                          bearer if extra_headers is None else extra_headers)
 
@@ -97,12 +101,17 @@ def main():
         allowed = as_json(body)
         assert allowed["allow"] is True and len(allowed["policy_revision"]) == 64, allowed
         assert isinstance(allowed["source_etag"], str) and allowed["source_etag"], allowed
+        assert allowed["source_content_revision"] == source_revision, allowed
+        status, body = decision(owner_identity, content_revision=str(int(source_revision) + 1))
+        check(status, 200, "mismatched indexed source version is denied")
+        assert as_json(body)["allow"] is False
+        assert as_json(body)["reason"] == "source_version_changed"
 
         unknown = {**owner_identity, "object_guid": str(uuid.uuid4())}
         status, body = decision(unknown)
         check(status, 200, "unmapped identity is denied")
         assert as_json(body)["allow"] is False
-        status, body = decision(owner_identity, file_id=2147483647)
+        status, body = decision(owner_identity, file_id=2147483647, content_revision="0")
         check(status, 200, "unknown file is denied")
         assert as_json(body)["allow"] is False
         status, body = decision({**owner_identity, "object_guid": "admin@example.com"})

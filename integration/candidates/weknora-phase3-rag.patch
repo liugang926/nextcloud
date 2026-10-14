@@ -120390,10 +120390,10 @@ index 0000000000000000000000000000000000000000..c0dd000d9910f19aed78e057e6e1fe01
 +}
 diff --git a/internal/application/service/normal_references_http_fixture_test.go b/internal/application/service/normal_references_http_fixture_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..176813bfee4a9e7dac876dd630306b7538446400
+index 0000000000000000000000000000000000000000..7796361483df0c7d1eb65a7a98d7d2d1e2b81ba4
 --- /dev/null
 +++ b/internal/application/service/normal_references_http_fixture_test.go
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,252 @@
 +package service
 +
 +import (
@@ -120527,8 +120527,8 @@ index 0000000000000000000000000000000000000000..176813bfee4a9e7dac876dd630306b75
 +	chatpipeline.NewPluginMerge(manager, m.f.s.chunkRepo, m.f.s.chunkService)
 +	chatpipeline.ConfigureRAGChunkMergeHydration(manager, kbs)
 +	chatpipeline.NewPluginFilterTopK(manager)
-+	into := chatpipeline.NewPluginIntoChatMessage(manager, messages, m.f.s)
-+	manager.Register(normalReferencesCheckpointForTest{base: into, hook: func(ctx context.Context) {
++	chatpipeline.NewPluginIntoChatMessage(manager, messages, m.f.s)
++	manager.Register(normalReferencesCheckpointForTest{hook: func(ctx context.Context) {
 +		switch mode {
 +		case "source-before-refs":
 +			m.personal.Store(false)
@@ -120577,10 +120577,10 @@ index 0000000000000000000000000000000000000000..176813bfee4a9e7dac876dd630306b75
 +	return &tenant, err
 +}
 +
-+// The checkpoint delegates to the actual prompt producer before changing current
-+// authority. It does not construct an event or replace any source proof.
++// The registered production prompt producer runs before this checkpoint.
++// Observe its actual continuation without invoking that producer a second time;
++// the hook changes current authority without constructing an event or proof.
 +type normalReferencesCheckpointForTest struct {
-+	base *chatpipeline.PluginIntoChatMessage
 +	hook func(context.Context)
 +}
 +
@@ -120588,7 +120588,8 @@ index 0000000000000000000000000000000000000000..176813bfee4a9e7dac876dd630306b75
 +	return []types.EventType{types.INTO_CHAT_MESSAGE}
 +}
 +func (p normalReferencesCheckpointForTest) OnEvent(ctx context.Context, kind types.EventType, cm *types.ChatManage, next func() *chatpipeline.PluginError) *chatpipeline.PluginError {
-+	return p.base.OnEvent(ctx, kind, cm, func() *chatpipeline.PluginError { p.hook(ctx); return next() })
++	p.hook(ctx)
++	return next()
 +}
 +
 +type normalReferencesSessionForTest struct {
