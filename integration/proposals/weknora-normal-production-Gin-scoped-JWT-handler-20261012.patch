@@ -1878,15 +1878,16 @@ index 0000000000000000000000000000000000000000..47d751f8d9671f39bfb9d06a0a8073d0
 +}
 diff --git a/internal/handler/session/single_sse_frame_test.go b/internal/handler/session/single_sse_frame_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..cfa99dab0ba4b08db7d077f13d102290f0fe0f7d
+index 0000000000000000000000000000000000000000..bfb0c91b39c06775d48301d6b39737c95526f9b7
 --- /dev/null
 +++ b/internal/handler/session/single_sse_frame_test.go
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,169 @@
 +package session
 +
 +import (
 +	"bytes"
 +	"context"
++	"encoding/json"
 +	"errors"
 +	"io"
 +	"net/http"
@@ -2035,10 +2036,16 @@ index 0000000000000000000000000000000000000000..cfa99dab0ba4b08db7d077f13d102290
 +}
 +
 +func TestLiveSSESingleFrameSerializationErrorPreservesGinAbort(t *testing.T) {
++	data := map[string]any{"unsupported": make(chan int)}
++	var encoded bytes.Buffer
++	var unsupported *json.UnsupportedTypeError
++	if err := sse.Encode(&encoded, sse.Event{Event: "message", Data: data}); !errors.As(err, &unsupported) {
++		t.Fatal("serialization error fixture did not reach the pinned codec JSON unsupported-type path")
++	}
 +	transport := &singleSSETransportForTest{}
 +	checks := 0
 +	c, _ := singleSSEActualGinContextForTest(t, context.Background(), transport, func() error { checks++; return nil })
-+	c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: make(chan int)}})
++	c.Render(-1, singleSSEFrame{event: sse.Event{Event: "message", Data: data}})
 +	c.Writer.Flush()
 +	if transport.writes != 0 || transport.body.Len() != 0 || transport.flushes != 1 || checks != 1 || len(c.Errors) != 1 || !c.IsAborted() {
 +		t.Fatal("encoding failure emitted a partial event or lost existing Render/Flush semantics")
