@@ -1,5 +1,5 @@
 diff --git a/internal/database/migration_joint_catalogue.go b/internal/database/migration_joint_catalogue.go
-index c5634509b46f6e9aafb7742fd73d7f538d5c3624..b24f8909374645d0c5299fb203ffac1f52173c33 100644
+index c5634509b..b24f89093 100644
 --- a/internal/database/migration_joint_catalogue.go
 +++ b/internal/database/migration_joint_catalogue.go
 @@ -662,10 +662,16 @@ func jointVerifyTable(ctx context.Context, db jointCatalogueReadConnection, dial
@@ -38,10 +38,10 @@ index c5634509b46f6e9aafb7742fd73d7f538d5c3624..b24f8909374645d0c5299fb203ffac1f
  	sort.Strings(want)
 diff --git a/internal/database/migration_joint_verified_bigint_in.go b/internal/database/migration_joint_verified_bigint_in.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..4f876d5f128122e3ce1fe148a16dc0db9dc5c804
+index 000000000..f8eb90ead
 --- /dev/null
 +++ b/internal/database/migration_joint_verified_bigint_in.go
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,170 @@
 +package database
 +
 +import (
@@ -54,7 +54,7 @@ index 0000000000000000000000000000000000000000..4f876d5f128122e3ce1fe148a16dc0db
 +var jointBigintINDollarQuote = regexp.MustCompile(`^\$(?:[a-zA-Z_][a-zA-Z_0-9]*)?\$`)
 +
 +// PostgreSQL turns BIGINT-column IN integer constants into a BIGINT array;
-+// its deparser prints those constants as quoted literals with ::bigint.
++// its deparser may parenthesize each atomic operand before its ::bigint cast.
 +// Only actual columns already matched to their trusted full declarations may
 +// use this equivalence. Column/function/arithmetic/narrowing casts remain exact.
 +func jointCanonicalConstraintWithVerifiedBigintIN(text, namespace string, safeTextColumns, verifiedBigintColumns map[string]bool) string {
@@ -116,12 +116,15 @@ index 0000000000000000000000000000000000000000..4f876d5f128122e3ce1fe148a16dc0db
 +	literal := ""
 +	if len(tokens) == 1 {
 +		literal = tokens[0]
-+	} else if len(tokens) == 3 && tokens[1] == "::" && tokens[2] == "bigint" {
-+		operand := jointTrimParens(tokens[:1])
-+		if len(operand) != 1 || len(operand[0]) < 3 || operand[0][0] != '\'' || operand[0][len(operand[0])-1] != '\'' {
++	} else if len(tokens) >= 3 && tokens[len(tokens)-2] == "::" && tokens[len(tokens)-1] == "bigint" {
++		operand := jointTrimParens(tokens[:len(tokens)-2])
++		if len(operand) != 1 {
 +			return "", false
 +		}
-+		literal = operand[0][1 : len(operand[0])-1]
++		literal = operand[0]
++		if len(literal) >= 2 && literal[0] == '\'' && literal[len(literal)-1] == '\'' {
++			literal = literal[1 : len(literal)-1]
++		}
 +	} else {
 +		return "", false
 +	}
@@ -211,14 +214,15 @@ index 0000000000000000000000000000000000000000..4f876d5f128122e3ce1fe148a16dc0db
 +}
 diff --git a/internal/database/migration_joint_verified_bigint_in_test.go b/internal/database/migration_joint_verified_bigint_in_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b825a6fc3a0459ced9fce5ca47dbdc5b2c5df3b
+index 000000000..8e122a1c5
 --- /dev/null
 +++ b/internal/database/migration_joint_verified_bigint_in_test.go
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,164 @@
 +package database
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"testing"
 +	"time"
 +)
@@ -227,6 +231,12 @@ index 0000000000000000000000000000000000000000..0b825a6fc3a0459ced9fce5ca47dbdc5
 +	wanted := jointCanonicalConstraint("CHECK (present IN (0,1))", "")
 +	verified := map[string]bool{"present": true}
 +	for _, actual := range []string{
++		"CHECK ((present = ANY (ARRAY[(0+0)::bigint,(1)::bigint])))",
++		"CHECK ((present = ANY (ARRAY[((present))::bigint,(1)::bigint])))",
++		"CHECK ((present = ANY (ARRAY[func(0)::bigint,(1)::bigint])))",
++		"CHECK ((present = ANY (ARRAY[((0)::integer)::bigint,(1)::bigint])))",
++		"CHECK ((present = ANY (ARRAY[(0)::bigint,(2)::bigint])))",
++		"CHECK ((present = ANY (ARRAY[(0)::bigint,(9223372036854775808)::bigint])))",
 +		"CHECK ((present::integer = ANY (ARRAY['0'::bigint,'1'::bigint])))",
 +		"CHECK ((abs(present) = ANY (ARRAY['0'::bigint,'1'::bigint])))",
 +		"CHECK ((present+1 = ANY (ARRAY['0'::bigint,'1'::bigint])))",
@@ -293,6 +303,7 @@ index 0000000000000000000000000000000000000000..0b825a6fc3a0459ced9fce5ca47dbdc5
 +			if err != nil || len(columns) != 1 || columns[0] != (jointColumnIdentity{Name: "present", Type: "bigint", NotNull: true}) {
 +				t.Fatal("native BIGINT column did not match its complete trusted declaration")
 +			}
++			logJointFixedNativeBigintConstraintForTest(t, table, definition, native, columns)
 +			wanted := jointCanonicalConstraint("CHECK (present IN (0,1))", "")
 +			if jointCanonicalConstraint(native, "") == wanted {
 +				t.Fatal("actual provider did not exhibit the typed-constant deparser discrepancy under diagnosis")
@@ -342,9 +353,38 @@ index 0000000000000000000000000000000000000000..0b825a6fc3a0459ced9fce5ca47dbdc5
 +		})
 +	}
 +}
++
++// Diagnostics are permitted only for this newly created, fixed, data-free
++// primitive fixture before any negative mutation. Never log app-table or
++// arbitrary source/query rows, DSNs, schema names or provider error text.
++func logJointFixedNativeBigintConstraintForTest(t *testing.T, table, definition, native string, columns []jointColumnIdentity) {
++	t.Helper()
++	if table != "verified_bigint_in_fixture" || definition != "CREATE TABLE verified_bigint_in_fixture (present BIGINT NOT NULL CHECK(present IN(0,1)));" ||
++		len(columns) != 1 || columns[0] != (jointColumnIdentity{Name: "present", Type: "bigint", NotNull: true}) {
++		return
++	}
++	if len(native) > 512 {
++		t.Log("joint_fixed_bigint_native diagnostic_suppressed=oversize")
++		return
++	}
++	record := struct {
++		Native                    string   `json:"native"`
++		Tokens                    []string `json:"tokens"`
++		Original, Current, Wanted string
++	}{Native: native, Tokens: jointSQLTokens(native), Original: jointCanonicalConstraint(native, ""),
++		Current: jointCanonicalConstraintWithVerifiedBigintIN(native, "", nil, map[string]bool{"present": true}),
++		Wanted:  jointCanonicalConstraint("CHECK (present IN (0,1))", "")}
++	data, err := json.Marshal(record)
++	const prefix = "joint_fixed_bigint_native "
++	if err != nil || len(data)+len(prefix) > 2048 {
++		t.Log("joint_fixed_bigint_native diagnostic_suppressed=oversize")
++		return
++	}
++	t.Logf("%s%s", prefix, data)
++}
 diff --git a/internal/database/migration_original_pending_tail_source.go b/internal/database/migration_original_pending_tail_source.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc666d8c924acb45a8e0211a15154b361911d0ae
+index 000000000..bc666d8c9
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_source.go
 @@ -0,0 +1,270 @@
@@ -620,7 +660,7 @@ index 0000000000000000000000000000000000000000..bc666d8c924acb45a8e0211a15154b36
 +}
 diff --git a/internal/database/migration_original_pending_tail_source_test.go b/internal/database/migration_original_pending_tail_source_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..741b68b5dbe1b3af4d24dfe403574adad3cfa310
+index 000000000..741b68b5d
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_source_test.go
 @@ -0,0 +1,119 @@
@@ -745,7 +785,7 @@ index 0000000000000000000000000000000000000000..741b68b5dbe1b3af4d24dfe403574ada
 +}
 diff --git a/internal/database/migration_original_pending_tail_specs.json b/internal/database/migration_original_pending_tail_specs.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..7fd591b610add27bd7f334b7784b0275e0a7849b
+index 000000000..7fd591b61
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_specs.json
 @@ -0,0 +1,231 @@
@@ -982,7 +1022,7 @@ index 0000000000000000000000000000000000000000..7fd591b610add27bd7f334b7784b0275
 +}
 diff --git a/internal/database/migration_original_pending_tail_statements.go b/internal/database/migration_original_pending_tail_statements.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee890f7a650d0cd6cf4133bc6c3a5cb6f67810cf
+index 000000000..ee890f7a6
 --- /dev/null
 +++ b/internal/database/migration_original_pending_tail_statements.go
 @@ -0,0 +1,102 @@
@@ -1090,7 +1130,7 @@ index 0000000000000000000000000000000000000000..ee890f7a650d0cd6cf4133bc6c3a5cb6
 +}
 diff --git a/internal/database/migration_original_root.go b/internal/database/migration_original_root.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..6eb99b169af502cfa29de7ba0eb44648b6edf634
+index 000000000..6eb99b169
 --- /dev/null
 +++ b/internal/database/migration_original_root.go
 @@ -0,0 +1,237 @@
@@ -1333,7 +1373,7 @@ index 0000000000000000000000000000000000000000..6eb99b169af502cfa29de7ba0eb44648
 +}
 diff --git a/internal/database/migration_original_root_catalogue.go b/internal/database/migration_original_root_catalogue.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3ba7d2373d5d297147bfbcf851b9f3e50dbe2683
+index 000000000..3ba7d2373
 --- /dev/null
 +++ b/internal/database/migration_original_root_catalogue.go
 @@ -0,0 +1,209 @@
@@ -1548,7 +1588,7 @@ index 0000000000000000000000000000000000000000..3ba7d2373d5d297147bfbcf851b9f3e5
 +}
 diff --git a/internal/database/migration_original_root_diagnostic.go b/internal/database/migration_original_root_diagnostic.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d66d216ed80cb27912a3332acbc83b7f09d112cc
+index 000000000..d66d216ed
 --- /dev/null
 +++ b/internal/database/migration_original_root_diagnostic.go
 @@ -0,0 +1,56 @@
@@ -1610,7 +1650,7 @@ index 0000000000000000000000000000000000000000..d66d216ed80cb27912a3332acbc83b7f
 +}
 diff --git a/internal/database/migration_original_root_diagnostic_test.go b/internal/database/migration_original_root_diagnostic_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..e7f1eef139fa97af9bea977733fbd48d51fdd52e
+index 000000000..e7f1eef13
 --- /dev/null
 +++ b/internal/database/migration_original_root_diagnostic_test.go
 @@ -0,0 +1,199 @@
@@ -1815,7 +1855,7 @@ index 0000000000000000000000000000000000000000..e7f1eef139fa97af9bea977733fbd48d
 +}
 diff --git a/internal/database/migration_original_root_driver.go b/internal/database/migration_original_root_driver.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..54286e139462c01138049c76249ae59fd660f0ab
+index 000000000..54286e139
 --- /dev/null
 +++ b/internal/database/migration_original_root_driver.go
 @@ -0,0 +1,278 @@
@@ -2099,7 +2139,7 @@ index 0000000000000000000000000000000000000000..54286e139462c01138049c76249ae59f
 +}
 diff --git a/internal/database/migration_original_root_source.go b/internal/database/migration_original_root_source.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..0f560351c4744332154ca31a466254ebc61e2bd6
+index 000000000..0f560351c
 --- /dev/null
 +++ b/internal/database/migration_original_root_source.go
 @@ -0,0 +1,211 @@
@@ -2316,7 +2356,7 @@ index 0000000000000000000000000000000000000000..0f560351c4744332154ca31a466254eb
 +}
 diff --git a/internal/database/migration_original_root_source_test.go b/internal/database/migration_original_root_source_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..1cff7112021fb398734a501d70f67f8bb68211f1
+index 000000000..1cff71120
 --- /dev/null
 +++ b/internal/database/migration_original_root_source_test.go
 @@ -0,0 +1,90 @@
@@ -2412,7 +2452,7 @@ index 0000000000000000000000000000000000000000..1cff7112021fb398734a501d70f67f8b
 +}
 diff --git a/internal/database/migration_original_root_sources.json b/internal/database/migration_original_root_sources.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd4fed381b95d653d5b45b7333e83ab6b57d77b5
+index 000000000..dd4fed381
 --- /dev/null
 +++ b/internal/database/migration_original_root_sources.json
 @@ -0,0 +1,2085 @@
@@ -4503,7 +4543,7 @@ index 0000000000000000000000000000000000000000..dd4fed381b95d653d5b45b7333e83ab6
 +}
 diff --git a/internal/database/migration_original_root_sql_actual_test.go b/internal/database/migration_original_root_sql_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..24cdcaf96e1c1bc25534529b85260f259a72bfde
+index 000000000..24cdcaf96
 --- /dev/null
 +++ b/internal/database/migration_original_root_sql_actual_test.go
 @@ -0,0 +1,211 @@
@@ -4720,7 +4760,7 @@ index 0000000000000000000000000000000000000000..24cdcaf96e1c1bc25534529b85260f25
 +func TestPostgresOriginalRootTailActual(t *testing.T) { runOriginalRootTailActual(t, true) }
 diff --git a/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..0f3016c0b3cf0bb52bce3509451dff517c47f1c9
+index 000000000..0f3016c0b
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_bootstrap_unix_actual_test.go
 @@ -0,0 +1,280 @@
@@ -5006,7 +5046,7 @@ index 0000000000000000000000000000000000000000..0f3016c0b3cf0bb52bce3509451dff51
 +}
 diff --git a/internal/database/migration_original_root_sqlite_canonical.go b/internal/database/migration_original_root_sqlite_canonical.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..8dc941067763306959e131b0427979f0f9c3f83d
+index 000000000..8dc941067
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_canonical.go
 @@ -0,0 +1,197 @@
@@ -5209,7 +5249,7 @@ index 0000000000000000000000000000000000000000..8dc941067763306959e131b0427979f0
 +}
 diff --git a/internal/database/migration_original_root_sqlite_create_unix.go b/internal/database/migration_original_root_sqlite_create_unix.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..dde83c585d8e56c070ac0e111cb9cbe00a7826b2
+index 000000000..dde83c585
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_create_unix.go
 @@ -0,0 +1,23 @@
@@ -5238,7 +5278,7 @@ index 0000000000000000000000000000000000000000..dde83c585d8e56c070ac0e111cb9cbe0
 +}
 diff --git a/internal/database/migration_original_root_sqlite_create_unsupported.go b/internal/database/migration_original_root_sqlite_create_unsupported.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..18477523f1f8f25c542e62cc92e7a9504d42061c
+index 000000000..18477523f
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_create_unsupported.go
 @@ -0,0 +1,7 @@
@@ -5251,7 +5291,7 @@ index 0000000000000000000000000000000000000000..18477523f1f8f25c542e62cc92e7a950
 +}
 diff --git a/internal/database/migration_original_root_sqlite_exclusion.go b/internal/database/migration_original_root_sqlite_exclusion.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..55a8b0a75acf544afca0511950d33a7569b7bb8f
+index 000000000..55a8b0a75
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_exclusion.go
 @@ -0,0 +1,236 @@
@@ -5493,7 +5533,7 @@ index 0000000000000000000000000000000000000000..55a8b0a75acf544afca0511950d33a75
 +}
 diff --git a/internal/database/migration_original_root_sqlite_writer.go b/internal/database/migration_original_root_sqlite_writer.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d0278b7c5dcf808a6be1af5225a54af12eb915ab
+index 000000000..d0278b7c5
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_writer.go
 @@ -0,0 +1,138 @@
@@ -5637,7 +5677,7 @@ index 0000000000000000000000000000000000000000..d0278b7c5dcf808a6be1af5225a54af1
 +}
 diff --git a/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..2edaea8c113a8a7fad28fe3746fc520da5e7ef00
+index 000000000..2edaea8c1
 --- /dev/null
 +++ b/internal/database/migration_original_root_sqlite_writer_fault_unix_actual_test.go
 @@ -0,0 +1,168 @@
@@ -5810,7 +5850,7 @@ index 0000000000000000000000000000000000000000..2edaea8c113a8a7fad28fe3746fc520d
 +	}
 +}
 diff --git a/internal/database/migration_peer_sqlite_exclusive.go b/internal/database/migration_peer_sqlite_exclusive.go
-index 7b689e7220b2a057fd6c10f19543bc0124c303e3..25811d12d95505cc1cdfdd9886b36901a391b93e 100644
+index 7b689e722..25811d12d 100644
 --- a/internal/database/migration_peer_sqlite_exclusive.go
 +++ b/internal/database/migration_peer_sqlite_exclusive.go
 @@ -28,9 +28,19 @@ type jointPeerSQLiteMigrationExclusion struct {
@@ -5835,7 +5875,7 @@ index 7b689e7220b2a057fd6c10f19543bc0124c303e3..25811d12d95505cc1cdfdd9886b36901
  		defer x.mu.Unlock()
 diff --git a/migrations/original-root/checkpoint/sqlite.sql b/migrations/original-root/checkpoint/sqlite.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..67d6fa735ac4372b843401a2af7f86b4f6ff02f2
+index 000000000..67d6fa735
 --- /dev/null
 +++ b/migrations/original-root/checkpoint/sqlite.sql
 @@ -0,0 +1,12 @@
@@ -5853,7 +5893,7 @@ index 0000000000000000000000000000000000000000..67d6fa735ac4372b843401a2af7f86b4
 +CREATE TRIGGER nextcloud_original_root_route_immutable_delete BEFORE DELETE ON nextcloud_original_root_route_origin BEGIN SELECT RAISE(ABORT, 'original_root_route_origin_immutable'); END;
 diff --git a/migrations/original-root/checkpoint/versioned.sql b/migrations/original-root/checkpoint/versioned.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..43e565efa1c871536d82f1a091713eac721c2792
+index 000000000..43e565efa
 --- /dev/null
 +++ b/migrations/original-root/checkpoint/versioned.sql
 @@ -0,0 +1,14 @@
@@ -5873,7 +5913,7 @@ index 0000000000000000000000000000000000000000..43e565efa1c871536d82f1a091713eac
 +CREATE TRIGGER nextcloud_original_root_route_immutable_delete BEFORE DELETE ON nextcloud_original_root_route_origin FOR EACH ROW EXECUTE FUNCTION nextcloud_original_root_route_immutable();
 diff --git a/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.down.sql b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.down.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc24f2b5d69918d2a7cec830153e78cedd4b061a
+index 000000000..fc24f2b5d
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.down.sql
 @@ -0,0 +1,2 @@
@@ -5881,7 +5921,7 @@ index 0000000000000000000000000000000000000000..fc24f2b5d69918d2a7cec830153e78ce
 +SELECT RAISE(ABORT,'recovery graph fence rollback blocked');
 diff --git a/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.up.sql b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.up.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..a762c6c7e46c6a47b80ff6ab190fd0b640273b77
+index 000000000..a762c6c7e
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000087_nextcloud_graph_recovery_fence.up.sql
 @@ -0,0 +1,4 @@
@@ -5891,7 +5931,7 @@ index 0000000000000000000000000000000000000000..a762c6c7e46c6a47b80ff6ab190fd0b6
 +END;
 diff --git a/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.down.sql b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.down.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..d624a04409680d973727073e50b403b39b1ca072
+index 000000000..d624a0440
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.down.sql
 @@ -0,0 +1,26 @@
@@ -5923,7 +5963,7 @@ index 0000000000000000000000000000000000000000..d624a04409680d973727073e50b403b3
 +-- lite_embeddings predates this protocol and is deliberately retained.
 diff --git a/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.up.sql b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.up.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..30338b39a190d8c6575ce49676c3537a0b1ce364
+index 000000000..30338b39a
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000090_knowledge_sqlite_embedding_originals.up.sql
 @@ -0,0 +1,68 @@
@@ -5997,7 +6037,7 @@ index 0000000000000000000000000000000000000000..30338b39a190d8c6575ce49676c3537a
 +END;
 diff --git a/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.down.sql b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.down.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..f2923a42ff969c604460a2d454c9475ae2c9c20a
+index 000000000..f2923a42f
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.down.sql
 @@ -0,0 +1,10 @@
@@ -6013,7 +6053,7 @@ index 0000000000000000000000000000000000000000..f2923a42ff969c604460a2d454c9475a
 +DROP TABLE knowledge_sqlite_query_inputs;
 diff --git a/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.up.sql b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.up.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..946eb48d513cae7af909b97012689775699476eb
+index 000000000..946eb48d5
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000091_knowledge_query_embedding_originals.up.sql
 @@ -0,0 +1,27 @@
@@ -6046,7 +6086,7 @@ index 0000000000000000000000000000000000000000..946eb48d513cae7af909b97012689775
 +CREATE TRIGGER knowledge_sqlite_query_result_delete BEFORE DELETE ON knowledge_sqlite_query_receipts BEGIN SELECT RAISE(ABORT,'knowledge_query_original_immutable'); END;
 diff --git a/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..4479b11f884ae2d44f5f874d875a6aa775b7ece2
+index 000000000..4479b11f8
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.down.sql
 @@ -0,0 +1,7 @@
@@ -6059,7 +6099,7 @@ index 0000000000000000000000000000000000000000..4479b11f884ae2d44f5f874d875a6aa7
 +DROP TABLE nextcloud_epoch_protocol_origins;
 diff --git a/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..af757947780d275351d0fec071d1728b172f72b1
+index 000000000..af7579477
 --- /dev/null
 +++ b/migrations/original-root/sqlite/000093_nextcloud_current_publication_epoch_originals.up.sql
 @@ -0,0 +1,32 @@
@@ -6097,14 +6137,14 @@ index 0000000000000000000000000000000000000000..af757947780d275351d0fec071d1728b
 +CREATE TRIGGER nextcloud_epoch_control_delete BEFORE DELETE ON nextcloud_epoch_current_controls BEGIN SELECT RAISE(ABORT,'nextcloud_epoch_control_changed'); END;
 diff --git a/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.down.sql b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.down.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..e195413a9d3620f5101daff8f6ec903e70739b6f
+index 000000000..e195413a9
 --- /dev/null
 +++ b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.down.sql
 @@ -0,0 +1 @@
 +DO $$ BEGIN RAISE EXCEPTION 'Retain recovery graph fences; audited export is required before rollback'; END $$;
 diff --git a/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.up.sql b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.up.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..bcf4d82789ff71cc4469f6694f517c8819466b69
+index 000000000..bcf4d8278
 --- /dev/null
 +++ b/migrations/original-root/versioned/000168_nextcloud_graph_recovery_fence.up.sql
 @@ -0,0 +1,10 @@
@@ -6120,7 +6160,7 @@ index 0000000000000000000000000000000000000000..bcf4d82789ff71cc4469f6694f517c88
 +CREATE TRIGGER nextcloud_graph_recovery_controls_fence BEFORE INSERT ON nextcloud_graph_records FOR EACH ROW EXECUTE FUNCTION nextcloud_graph_recovery_controls_fence();
 diff --git a/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..a4df8dcedc7e121f90732fea6abdb3137ad62188
+index 000000000..a4df8dced
 --- /dev/null
 +++ b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.down.sql
 @@ -0,0 +1,6 @@
@@ -6132,7 +6172,7 @@ index 0000000000000000000000000000000000000000..a4df8dcedc7e121f90732fea6abdb313
 +DROP FUNCTION nextcloud_epoch_original_immutable();
 diff --git a/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..18e9dce06a9b7719a3b2da9509d8bec8a386a13a
+index 000000000..18e9dce06
 --- /dev/null
 +++ b/migrations/original-root/versioned/000172_nextcloud_current_publication_epoch_originals.up.sql
 @@ -0,0 +1,31 @@
