@@ -5,7 +5,7 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
-The current development candidates are RAG `987a57c2` and C6 `7100aee6`.
+The current development candidates are RAG `628d6de4` and C6 `384b78b2`.
 They correct the duplicate prompt processor in the actual HTTP fixture,
 encode a complete SSE frame before one guarded Write, and authorize the
 complete input/result union once at each unchanged pipeline boundary. Every
@@ -15,7 +15,7 @@ retain their independent current authorization and lease checks, and the
 original 8-second HTTP limits remain. Encoding failure performs no HTTP I/O;
 short writes abort without flushing or retrying. Raw-control flags end with
 their exact query or fixed stop frame, so empty polls use the existing bounded
-idle cadence. Buffered source content retains its separate checks. Model messages and options are detached before one final current-authority check at each SDK boundary. Original-body availability reads current state in bounded metadata batches while retaining per-item journal, head and cancellation checks. The complete source patches
+idle cadence. Buffered source content retains its separate checks. Model messages and options are detached before one final current-authority check at each SDK boundary. Original-body availability reads current state in bounded metadata batches while retaining per-item journal, head and cancellation checks. Each material check renews its held body leases in one transaction after fresh body, lease, epoch and journal validation; PostgreSQL body-lock contention rolls back before a bounded retry, and any failed member rolls back the complete renewal set. The complete source patches
 and exact apply/reverse trees are pinned in the manifest. Service CI uses
 complete, sequential test groups with the original selector and all 42
 required tests; the previously failing actual paths run first as prerequisites.

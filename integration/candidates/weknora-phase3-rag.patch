@@ -83494,6 +83494,726 @@ index 0000000000000000000000000000000000000000..15fe97f6146f19c1c7f87c81e76c935b
 +	}
 +	return s.checkJournalInTx(bodyInternal(s.db))
 +}
+diff --git a/internal/application/repository/original_body_lease_renewal_batch.go b/internal/application/repository/original_body_lease_renewal_batch.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfba3608bfa3ee8a179cbf2edcc6507e5063e49a
+--- /dev/null
++++ b/internal/application/repository/original_body_lease_renewal_batch.go
+@@ -0,0 +1,229 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"sort"
++	"time"
++
++	"github.com/jackc/pgx/v5/pgconn"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++const (
++	originalBodyLeaseRenewalBatchSize   = 256
++	originalBodyLeaseRenewalMaxAttempts = 8
++)
++
++// RenewLeases renews the complete held set in one transaction. Nothing from a
++// previous invocation certifies the current leases, bodies or journal.
++func (s *OriginalBodyRetentionStore) RenewLeases(ctx context.Context, ids []string, ttl time.Duration) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if len(ids) == 0 {
++		return nil
++	}
++	if ttl <= 0 || ttl > 30*time.Minute {
++		return ErrOriginalBodyUnavailable
++	}
++	unique := make(map[string]bool, len(ids))
++	ordered := make([]string, 0, len(ids))
++	for _, id := range ids {
++		if id == "" {
++			return ErrOriginalBodyUnavailable
++		}
++		if !unique[id] {
++			unique[id] = true
++			ordered = append(ordered, id)
++		}
++	}
++	sort.Strings(ordered)
++	renew := func() error {
++		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
++			journal, err := s.leaseRenewalJournalHead(tx)
++			if err != nil {
++				return err
++			}
++			// Discover mappings without locking leases. Old single-lease renewal
++			// locks its body before updating the lease, so reversing that order
++			// here would introduce a body/lease deadlock.
++			initial, err := originalBodyRenewalLeases(ctx, tx, ordered, false)
++			if err != nil {
++				return err
++			}
++			bodyIDs := []string{}
++			bodySet := map[string]bool{}
++			for _, lease := range initial {
++				if !bodySet[lease.BodyID] {
++					bodySet[lease.BodyID] = true
++					bodyIDs = append(bodyIDs, lease.BodyID)
++				}
++			}
++			sort.Strings(bodyIDs)
++			bodies := make(map[string]originalBodyPayload, len(bodyIDs))
++			for offset := 0; offset < len(bodyIDs); offset += originalBodyLeaseRenewalBatchSize {
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				batch := bodyIDs[offset:min(offset+originalBodyLeaseRenewalBatchSize, len(bodyIDs))]
++				var rows []originalBodyPayload
++				locking := clause.Locking{Strength: "UPDATE"}
++				if tx.Dialector.Name() == "postgres" {
++					// Existing native writers/acquirers can lock bodies in head
++					// order. Never wait while holding another body they may need.
++					locking.Options = "NOWAIT"
++				}
++				if err := bodyInternal(tx).Select("id,state,purge_epoch").Clauses(locking).Where("id IN ?", batch).Order(originalBodyRenewalOrder(tx, "id")).Find(&rows).Error; err != nil {
++					return err
++				}
++				if len(rows) != len(batch) {
++					return gorm.ErrRecordNotFound
++				}
++				for _, body := range rows {
++					if !bodySet[body.ID] || bodies[body.ID].ID != "" {
++						return ErrOriginalBodyUnavailable
++					}
++					bodies[body.ID] = body
++				}
++			}
++			current, err := originalBodyRenewalLeases(ctx, tx, ordered, true)
++			if err != nil {
++				return err
++			}
++			// Take database time after all locks, including a concurrent release,
++			// have settled. The UPDATE also checks the live database clock.
++			now, err := nextcloudLeaseNowMS(bodyInternal(tx))
++			if err != nil {
++				return err
++			}
++			for _, id := range ordered {
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				lease, before := current[id], initial[id]
++				if lease.BodyID != before.BodyID || lease.Epoch != before.Epoch || lease.Kind != before.Kind || lease.OwnerID != before.OwnerID || lease.ReleasedAtMS != nil || lease.ExpiresAtMS <= now {
++					return ErrOriginalBodyUnavailable
++				}
++				body, found := bodies[lease.BodyID]
++				if !found || body.State != "live" || body.PurgeEpoch != lease.Epoch {
++					return ErrOriginalBodyUnavailable
++				}
++			}
++			for _, id := range bodyIDs {
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				if err := s.checkExternalBody(id); err != nil {
++					return err
++				}
++			}
++			clock := "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
++			if tx.Dialector.Name() == "postgres" {
++				clock = "floor(extract(epoch from clock_timestamp()) * 1000)::bigint"
++			}
++			for offset := 0; offset < len(ordered); offset += originalBodyLeaseRenewalBatchSize {
++				if err := ctx.Err(); err != nil {
++					return err
++				}
++				batch := ordered[offset:min(offset+originalBodyLeaseRenewalBatchSize, len(ordered))]
++				result := bodyInternal(tx).Model(&originalBodyLease{}).Where("lease_id IN ? AND released_at_ms IS NULL AND expires_at_ms>"+clock, batch).Update("expires_at_ms", gorm.Expr(clock+" + ?", ttl.Milliseconds()))
++				if result.Error != nil {
++					return result.Error
++				}
++				if result.RowsAffected != int64(len(batch)) {
++					return ErrOriginalBodyUnavailable
++				}
++			}
++			finalJournal, err := s.leaseRenewalJournalHead(tx)
++			if err != nil {
++				return err
++			}
++			if journal != finalJournal {
++				return ErrOriginalBodyUnavailable
++			}
++			return ctx.Err()
++		})
++	}
++	for attempt := 0; ; attempt++ {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		err := renew()
++		var pgError *pgconn.PgError
++		if s.db.Dialector.Name() != "postgres" || !errors.As(err, &pgError) || pgError.Code != "55P03" || attempt+1 >= originalBodyLeaseRenewalMaxAttempts {
++			return err
++		}
++		// Transaction has already rolled back every held lock and update.
++		// Retry only lock-not-available, with fresh evidence and bounded delay.
++		timer := time.NewTimer(time.Millisecond * time.Duration(1<<attempt))
++		select {
++		case <-ctx.Done():
++			timer.Stop()
++			return ctx.Err()
++		case <-timer.C:
++		}
++	}
++}
++
++func originalBodyRenewalLeases(ctx context.Context, tx *gorm.DB, ids []string, lock bool) (map[string]originalBodyLease, error) {
++	leases := make(map[string]originalBodyLease, len(ids))
++	for offset := 0; offset < len(ids); offset += originalBodyLeaseRenewalBatchSize {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		batch := ids[offset:min(offset+originalBodyLeaseRenewalBatchSize, len(ids))]
++		requested := make(map[string]bool, len(batch))
++		for _, id := range batch {
++			requested[id] = true
++		}
++		query := bodyInternal(tx).Where("lease_id IN ?", batch).Order(originalBodyRenewalOrder(tx, "lease_id"))
++		if lock {
++			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
++		}
++		var rows []originalBodyLease
++		if err := query.Find(&rows).Error; err != nil {
++			return nil, err
++		}
++		if len(rows) != len(batch) {
++			return nil, gorm.ErrRecordNotFound
++		}
++		for _, row := range rows {
++			if !requested[row.LeaseID] || leases[row.LeaseID].LeaseID != "" {
++				return nil, ErrOriginalBodyUnavailable
++			}
++			leases[row.LeaseID] = row
++		}
++	}
++	return leases, nil
++}
++
++func originalBodyRenewalOrder(tx *gorm.DB, column string) string {
++	if tx.Dialector.Name() == "postgres" {
++		return column + ` COLLATE "C"`
++	}
++	return column + " COLLATE BINARY"
++}
++
++func (s *OriginalBodyRetentionStore) leaseRenewalJournalHead(tx *gorm.DB) (originalBodyJournalHead, error) {
++	var head originalBodyJournalHead
++	if err := bodyInternal(tx).Where("id=1").Take(&head).Error; err != nil {
++		return head, err
++	}
++	if s.journal == nil {
++		return head, ErrOriginalBodyUnavailable
++	}
++	_, pin, err := s.journal.read()
++	if err != nil {
++		return head, err
++	}
++	if pin.JournalID != head.JournalID || pin.Sequence != head.Sequence || pin.HeadSHA256 != head.HeadSHA256 {
++		return head, ErrOriginalBodyUnavailable
++	}
++	return head, nil
++}
++
++func (s *KnowledgeInputProvenanceStore) RenewMessageBodyReadLeases(ctx context.Context, ids []string, ttl time.Duration) error {
++	return NewOriginalBodyRetentionStore(s.db).RenewLeases(ctx, ids, ttl)
++}
+diff --git a/internal/application/repository/original_body_lease_renewal_batch_test.go b/internal/application/repository/original_body_lease_renewal_batch_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..70e5280a4fa5f7d70467ad3e1f36830951e05327
+--- /dev/null
++++ b/internal/application/repository/original_body_lease_renewal_batch_test.go
+@@ -0,0 +1,479 @@
++package repository
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"slices"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5/pgconn"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++type leaseRenewalObservationForTest struct {
++	bodyQueries, discoveryQueries, lockedLeaseQueries, updates int
++	renewedRows                                                int64
++	sequence                                                   []string
++}
++
++func observeLeaseRenewalForTest(t *testing.T, db *gorm.DB) *leaseRenewalObservationForTest {
++	t.Helper()
++	observed := &leaseRenewalObservationForTest{}
++	const name = "actual-body-lease-batch-observation"
++	require.NoError(t, db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
++		switch tx.Statement.Table {
++		case "original_body_payloads":
++			if strings.Join(tx.Statement.Selects, ",") != "id,state,purge_epoch" {
++				return
++			}
++			observed.bodyQueries++
++			observed.sequence = append(observed.sequence, "body-lock")
++			require.LessOrEqual(t, len(tx.Statement.Vars), originalBodyLeaseRenewalBatchSize)
++			rows, ok := tx.Statement.Dest.(*[]originalBodyPayload)
++			require.True(t, ok)
++			for _, row := range *rows {
++				require.Nil(t, row.Payload, "renewal must not fetch original text")
++			}
++		case "original_body_leases":
++			_, locked := tx.Statement.Clauses["FOR"].Expression.(clause.Locking)
++			if locked {
++				observed.lockedLeaseQueries++
++				observed.sequence = append(observed.sequence, "lease-lock")
++			} else {
++				observed.discoveryQueries++
++				observed.sequence = append(observed.sequence, "lease-discovery")
++			}
++			require.LessOrEqual(t, len(tx.Statement.Vars), originalBodyLeaseRenewalBatchSize)
++		}
++		if tx.Dialector.Name() == "postgres" && (tx.Statement.Table == "original_body_payloads" || tx.Statement.Table == "original_body_leases") {
++			if _, locked := tx.Statement.Clauses["FOR"].Expression.(clause.Locking); locked {
++				require.Contains(t, tx.Statement.SQL.String(), "FOR UPDATE", "actual PostgreSQL must take the requested row locks")
++			}
++		}
++	}))
++	require.NoError(t, db.Callback().Update().After("gorm:update").Register(name, func(tx *gorm.DB) {
++		if tx.Statement.Table == "original_body_leases" && tx.Error == nil && strings.Contains(tx.Statement.SQL.String(), "expires_at_ms") {
++			observed.updates++
++			observed.renewedRows += tx.RowsAffected
++		}
++	}))
++	t.Cleanup(func() {
++		db.Callback().Query().Remove(name)
++		db.Callback().Update().Remove(name)
++	})
++	return observed
++}
++
++func leaseRenewalSnapshotForTest(t *testing.T, db *gorm.DB, ids []string) map[string]originalBodyLease {
++	t.Helper()
++	var rows []originalBodyLease
++	// Raw reads do not enter the observed renewal query path.
++	require.NoError(t, bodyInternal(db).Raw("SELECT * FROM original_body_leases WHERE lease_id IN ?", ids).Scan(&rows).Error)
++	result := map[string]originalBodyLease{}
++	for _, row := range rows {
++		result[row.LeaseID] = row
++	}
++	return result
++}
++
++func leaseRenewalNativeFixtureForTest(t *testing.T, db *gorm.DB, store *OriginalBodyRetentionStore) ([]string, []string) {
++	t.Helper()
++	bodies, leases := []string{}, []string{}
++	for index := range 2 {
++		body := bodyProtocolCreate(t, db, fmt.Sprintf("renewal-native-%d", index), "one")
++		lease, err := store.AcquireLease(context.Background(), body, "read", "actual-renewal-owner", time.Minute)
++		require.NoError(t, err)
++		bodies, leases = append(bodies, body), append(leases, lease)
++	}
++	return bodies, leases
++}
++
++func leaseRenewalManyFixtureForTest(t *testing.T, db *gorm.DB, count int) []string {
++	t.Helper()
++	// Private storage rows exercise batching, not source authorization or a
++	// material grant. Native owner and acquired-lease cases are tested above.
++	heads := availabilityBatchMetadataFixtureForTest(t, db, count)
++	now, err := nextcloudLeaseNowMS(bodyInternal(db))
++	require.NoError(t, err)
++	rows := make([]originalBodyLease, 0, count)
++	ids := make([]string, 0, count)
++	for _, head := range heads {
++		id := uuid.NewString()
++		ids = append(ids, id)
++		rows = append(rows, originalBodyLease{LeaseID: id, BodyID: head.BodyID, Kind: "read", OwnerID: "actual-batch-storage", ExpiresAtMS: now + time.Minute.Milliseconds()})
++	}
++	require.NoError(t, bodyInternal(db).CreateInBatches(rows, 32).Error)
++	slices.Sort(ids)
++	return ids
++}
++
++func runOriginalBodyLeaseRenewalBatch(t *testing.T, pg bool) {
++	t.Run("native-held-set-one-update-and-fresh-next-call", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		bodies, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		observed := observeLeaseRenewalForTest(t, db)
++		require.NoError(t, store.RenewLeases(context.Background(), []string{ids[1], ids[0], ids[1]}, 2*time.Minute))
++		after := leaseRenewalSnapshotForTest(t, db, ids)
++		for _, id := range ids {
++			require.Greater(t, after[id].ExpiresAtMS, before[id].ExpiresAtMS)
++			require.Equal(t, before[id].BodyID, after[id].BodyID)
++			require.Equal(t, before[id].Epoch, after[id].Epoch)
++		}
++		require.Equal(t, 1, observed.discoveryQueries)
++		require.Equal(t, 1, observed.bodyQueries)
++		require.Equal(t, 1, observed.lockedLeaseQueries)
++		require.Equal(t, 1, observed.updates)
++		require.Equal(t, int64(2), observed.renewedRows, "one SQL statement still renews both real leases")
++		require.Equal(t, []string{"lease-discovery", "body-lock", "lease-lock"}, observed.sequence)
++		require.NoError(t, bodyInternal(db).Model(&originalBodyPayload{}).Where("id=?", bodies[1]).Update("state", "pending").Error)
++		require.ErrorIs(t, store.RenewLeases(context.Background(), ids, 2*time.Minute), ErrOriginalBodyUnavailable)
++		require.Equal(t, after, leaseRenewalSnapshotForTest(t, db, ids), "the next invocation must freshly reject the changed body without partially renewing another lease")
++	})
++
++	for _, fault := range []string{"missing", "released", "expired", "body-pending", "body-purged", "epoch-mismatch"} {
++		t.Run(fault+"-rolls-back-complete-set", func(t *testing.T) {
++			db, store := bodyProtocolFixture(t, pg)
++			bodies, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++			switch fault {
++			case "missing":
++				require.NoError(t, bodyInternal(db).Where("lease_id=?", ids[1]).Delete(&originalBodyLease{}).Error)
++			case "released":
++				require.NoError(t, store.ReleaseLease(context.Background(), ids[1]))
++			case "expired":
++				require.NoError(t, bodyInternal(db).Model(&originalBodyLease{}).Where("lease_id=?", ids[1]).Update("expires_at_ms", 1).Error)
++			case "epoch-mismatch":
++				require.NoError(t, bodyInternal(db).Model(&originalBodyPayload{}).Where("id=?", bodies[1]).Update("purge_epoch", 1).Error)
++			default:
++				require.NoError(t, bodyInternal(db).Model(&originalBodyPayload{}).Where("id=?", bodies[1]).Update("state", strings.TrimPrefix(fault, "body-")).Error)
++			}
++			before := leaseRenewalSnapshotForTest(t, db, ids)
++			observed := observeLeaseRenewalForTest(t, db)
++			err := store.RenewLeases(context.Background(), ids, 2*time.Minute)
++			if fault == "missing" {
++				require.ErrorIs(t, err, gorm.ErrRecordNotFound)
++			} else {
++				require.ErrorIs(t, err, ErrOriginalBodyUnavailable)
++			}
++			require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
++			require.Zero(t, observed.updates)
++		})
++	}
++
++	t.Run("all-bounded-lock-batches-precede-lease-locks", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		ids := leaseRenewalManyFixtureForTest(t, db, 2*originalBodyLeaseRenewalBatchSize+1)
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		observed := observeLeaseRenewalForTest(t, db)
++		require.NoError(t, store.RenewLeases(context.Background(), ids, 2*time.Minute))
++		require.Equal(t, 3, observed.discoveryQueries)
++		require.Equal(t, 3, observed.bodyQueries)
++		require.Equal(t, 3, observed.lockedLeaseQueries)
++		require.Equal(t, 3, observed.updates)
++		require.Equal(t, int64(len(ids)), observed.renewedRows)
++		require.Equal(t, []string{"lease-discovery", "lease-discovery", "lease-discovery", "body-lock", "body-lock", "body-lock", "lease-lock", "lease-lock", "lease-lock"}, observed.sequence)
++		after := leaseRenewalSnapshotForTest(t, db, ids)
++		for _, id := range ids {
++			require.Greater(t, after[id].ExpiresAtMS, before[id].ExpiresAtMS)
++		}
++	})
++
++	t.Run("real-SQL-failure-rolls-back-earlier-update-batch", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		ids := leaseRenewalManyFixtureForTest(t, db, originalBodyLeaseRenewalBatchSize+1)
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		statement := fmt.Sprintf("CREATE TRIGGER actual_renewal_reject BEFORE UPDATE OF expires_at_ms ON original_body_leases WHEN NEW.lease_id='%s' BEGIN SELECT RAISE(ABORT,'actual renewal SQL failure'); END", ids[len(ids)-1])
++		if pg {
++			statement = fmt.Sprintf("CREATE FUNCTION actual_renewal_reject() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.lease_id='%s' THEN RAISE EXCEPTION 'actual renewal SQL failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER actual_renewal_reject BEFORE UPDATE OF expires_at_ms ON original_body_leases FOR EACH ROW EXECUTE FUNCTION actual_renewal_reject()", ids[len(ids)-1])
++		}
++		require.NoError(t, db.Exec(statement).Error)
++		observed := observeLeaseRenewalForTest(t, db)
++		err := store.RenewLeases(context.Background(), ids, 2*time.Minute)
++		require.ErrorContains(t, err, "actual renewal SQL failure")
++		require.Equal(t, int64(originalBodyLeaseRenewalBatchSize), observed.renewedRows, "the first real SQL batch ran before the second was rejected")
++		require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids), "the transaction must roll back every previously updated lease")
++	})
++
++	t.Run("cancel-after-first-real-update-rolls-back", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		ids := leaseRenewalManyFixtureForTest(t, db, originalBodyLeaseRenewalBatchSize+1)
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		ctx, cancel := context.WithCancel(context.Background())
++		defer cancel()
++		var updated int64
++		const name = "actual-batch-cancel-after-update"
++		require.NoError(t, db.Callback().Update().After("gorm:update").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Table == "original_body_leases" && tx.Error == nil && tx.RowsAffected > 0 {
++				updated += tx.RowsAffected
++				cancel()
++			}
++		}))
++		t.Cleanup(func() { db.Callback().Update().Remove(name) })
++		require.ErrorIs(t, store.RenewLeases(ctx, ids, 2*time.Minute), context.Canceled)
++		require.Equal(t, int64(originalBodyLeaseRenewalBatchSize), updated)
++		require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
++	})
++
++	t.Run("mapping-change-between-discovery-and-lock-is-denied", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		bodies, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		changed := false
++		const name = "actual-batch-mapping-change"
++		require.NoError(t, db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Table == "original_body_leases" && !changed {
++				changed = true
++				require.NoError(t, bodyInternal(tx).Exec("UPDATE original_body_leases SET body_id=? WHERE lease_id=?", bodies[1], ids[0]).Error)
++			}
++		}))
++		t.Cleanup(func() { db.Callback().Query().Remove(name) })
++		require.ErrorIs(t, store.RenewLeases(context.Background(), ids, 2*time.Minute), ErrOriginalBodyUnavailable)
++		require.True(t, changed)
++		require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
++	})
++
++	t.Run("expiry-at-actual-update-cannot-be-revived", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		_, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		expired := false
++		const name = "actual-batch-expiry-at-update"
++		require.NoError(t, db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Table == "original_body_leases" && !expired {
++				expired = true
++				require.NoError(t, bodyInternal(tx).Exec("UPDATE original_body_leases SET expires_at_ms=1 WHERE lease_id=?", ids[1]).Error)
++			}
++		}))
++		t.Cleanup(func() { db.Callback().Update().Remove(name) })
++		require.ErrorIs(t, store.RenewLeases(context.Background(), ids, 2*time.Minute), ErrOriginalBodyUnavailable)
++		require.True(t, expired)
++		require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids), "RowsAffected mismatch rolls back both the update and injected expiry")
++	})
++
++	for _, moment := range []string{"before-call", "after-update"} {
++		t.Run("authenticated-external-journal-"+moment, func(t *testing.T) {
++			db, store := bodyProtocolFixture(t, pg)
++			bodies, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++			before := leaseRenewalSnapshotForTest(t, db, ids)
++			appended := false
++			appendDecision := func() originalBodyJournalEvent {
++				appended = true
++				event, err := store.journal.append(originalBodyJournalEvent{BodyID: bodies[1], TenantID: 7, PurgeEpoch: 1})
++				require.NoError(t, err)
++				return event
++			}
++			if moment == "before-call" {
++				event := appendDecision()
++				// An authenticated external purge decision still denies this
++				// body when the SQL journal binding itself is current.
++				require.NoError(t, bodyInternal(db).Model(&originalBodyJournalHead{}).Where("id=1").Updates(map[string]any{"sequence": event.Sequence, "head_sha256": event.HeadSHA256}).Error)
++			} else {
++				const name = "actual-batch-external-append-after-update"
++				require.NoError(t, db.Callback().Update().After("gorm:update").Register(name, func(tx *gorm.DB) {
++					if tx.Statement.Table == "original_body_leases" && tx.Error == nil && tx.RowsAffected > 0 && !appended {
++						appendDecision()
++					}
++				}))
++				t.Cleanup(func() { db.Callback().Update().Remove(name) })
++			}
++			require.ErrorIs(t, store.RenewLeases(context.Background(), ids, 2*time.Minute), ErrOriginalBodyUnavailable)
++			require.True(t, appended)
++			require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
++		})
++	}
++
++	t.Run("SQL-journal-change-after-update-rolls-back", func(t *testing.T) {
++		db, store := bodyProtocolFixture(t, pg)
++		_, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++		before := leaseRenewalSnapshotForTest(t, db, ids)
++		changed := false
++		const name = "actual-batch-SQL-journal-change"
++		require.NoError(t, db.Callback().Update().After("gorm:update").Register(name, func(tx *gorm.DB) {
++			if tx.Statement.Table == "original_body_leases" && tx.Error == nil && tx.RowsAffected > 0 && !changed {
++				changed = true
++				require.NoError(t, bodyInternal(tx).Exec("UPDATE original_body_journal_heads SET head_sha256='changed' WHERE id=1").Error)
++			}
++		}))
++		t.Cleanup(func() { db.Callback().Update().Remove(name) })
++		require.ErrorIs(t, store.RenewLeases(context.Background(), ids, 2*time.Minute), ErrOriginalBodyUnavailable)
++		require.True(t, changed)
++		require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
++		require.NoError(t, store.checkJournalInTx(db), "the journal SQL mutation must also roll back")
++	})
++
++	t.Run("empty-invalid-and-already-cancelled", func(t *testing.T) {
++		// No DB is needed for an empty set, including the cancelled case.
++		store := &OriginalBodyRetentionStore{}
++		require.NoError(t, store.RenewLeases(context.Background(), nil, time.Minute))
++		ctx, cancel := context.WithCancel(context.Background())
++		cancel()
++		require.ErrorIs(t, store.RenewLeases(ctx, nil, time.Minute), context.Canceled)
++		require.ErrorIs(t, store.RenewLeases(context.Background(), []string{""}, time.Minute), ErrOriginalBodyUnavailable)
++		require.ErrorIs(t, store.RenewLeases(context.Background(), []string{"actual-id"}, 0), ErrOriginalBodyUnavailable)
++		require.ErrorIs(t, store.RenewLeases(context.Background(), []string{"actual-id"}, 31*time.Minute), ErrOriginalBodyUnavailable)
++	})
++	if pg {
++		runPostgresBodyRenewalLockContention(t)
++	}
++}
++
++func runPostgresBodyRenewalLockContention(t *testing.T) {
++	for _, mode := range []string{"live-after-opposing-acquirer", "expired-after-opposing-acquirer", "lock-retry-exhausted", "cancel-lock-retry"} {
++		t.Run(mode, func(t *testing.T) {
++			db, store := bodyProtocolFixture(t, true)
++			bodies, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++			slices.Sort(bodies)
++			before := leaseRenewalSnapshotForTest(t, db, ids)
++			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++			defer cancel()
++			legacy := db.WithContext(ctx).Begin()
++			require.NoError(t, legacy.Error)
++			defer legacy.Rollback()
++			// The real old acquirer holds B first, then will acquire A. The
++			// batch renewal requests A then B and must release A on 55P03.
++			_, err := store.acquireLeaseInTx(legacy, bodies[1], "read", "opposing-native-acquirer", time.Minute)
++			require.NoError(t, err)
++			opposing := make(chan struct{})
++			var once sync.Once
++			lockFailures := 0
++			const name = "actual-batch-PG-lock-conflict"
++			require.NoError(t, db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
++				var pgError *pgconn.PgError
++				if tx.Statement.Table == "original_body_payloads" && errors.As(tx.Error, &pgError) && pgError.Code == "55P03" {
++					lockFailures++
++					once.Do(func() { close(opposing) })
++					if mode == "cancel-lock-retry" {
++						cancel()
++					}
++				}
++			}))
++			t.Cleanup(func() { db.Callback().Query().Remove(name) })
++			var legacyDone chan error
++			if strings.Contains(mode, "opposing-acquirer") {
++				legacyDone = make(chan error, 1)
++				go func() {
++					select {
++					case <-ctx.Done():
++						legacy.Rollback()
++						legacyDone <- ctx.Err()
++						return
++					case <-opposing:
++					}
++					// This lock is acquired only after the failed batch has
++					// actually rolled back, rather than the test releasing B.
++					if _, err := store.acquireLeaseInTx(legacy, bodies[0], "read", "opposing-native-acquirer", time.Minute); err != nil {
++						legacy.Rollback()
++						legacyDone <- err
++						return
++					}
++					if mode == "expired-after-opposing-acquirer" {
++						if err := bodyInternal(legacy).Exec("UPDATE original_body_leases SET expires_at_ms=1 WHERE lease_id=?", ids[1]).Error; err != nil {
++							legacy.Rollback()
++							legacyDone <- err
++							return
++						}
++					}
++					legacyDone <- legacy.Commit().Error
++				}()
++			}
++			err = store.RenewLeases(ctx, ids, 2*time.Minute)
++			require.Positive(t, lockFailures, "the test must encounter a real PostgreSQL NOWAIT conflict")
++			if legacyDone != nil {
++				require.NoError(t, <-legacyDone, "the actual unsorted B→A acquirer must finish without a deadlock")
++			} else {
++				require.NoError(t, legacy.Rollback().Error)
++			}
++			switch mode {
++			case "live-after-opposing-acquirer":
++				require.NoError(t, err)
++				after := leaseRenewalSnapshotForTest(t, db, ids)
++				for _, id := range ids {
++					require.Greater(t, after[id].ExpiresAtMS, before[id].ExpiresAtMS)
++				}
++			case "expired-after-opposing-acquirer":
++				require.ErrorIs(t, err, ErrOriginalBodyUnavailable, "a retry cannot reuse the first attempt's live lease snapshot")
++				after := leaseRenewalSnapshotForTest(t, db, ids)
++				require.Equal(t, before[ids[0]].ExpiresAtMS, after[ids[0]].ExpiresAtMS)
++				require.Equal(t, int64(1), after[ids[1]].ExpiresAtMS)
++			case "lock-retry-exhausted":
++				var pgError *pgconn.PgError
++				require.ErrorAs(t, err, &pgError)
++				require.Equal(t, "55P03", pgError.Code)
++				require.Equal(t, originalBodyLeaseRenewalMaxAttempts, lockFailures)
++				require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
++			case "cancel-lock-retry":
++				require.ErrorIs(t, err, context.Canceled)
++				require.Equal(t, 1, lockFailures)
++				require.Equal(t, before, leaseRenewalSnapshotForTest(t, db, ids))
++			}
++		})
++	}
++	for _, mode := range []string{"released", "expired"} {
++		t.Run("fresh-"+mode+"-after-real-lease-row-wait", func(t *testing.T) {
++			db, store := bodyProtocolFixture(t, true)
++			_, ids := leaseRenewalNativeFixtureForTest(t, db, store)
++			before := leaseRenewalSnapshotForTest(t, db, ids)
++			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++			defer cancel()
++			legacy := db.WithContext(ctx).Begin()
++			require.NoError(t, legacy.Error)
++			defer legacy.Rollback()
++			var blockingPID int
++			require.NoError(t, legacy.Raw("SELECT pg_backend_pid()").Scan(&blockingPID).Error)
++			column := "expires_at_ms"
++			if mode == "released" {
++				column = "released_at_ms"
++			}
++			require.NoError(t, bodyInternal(legacy).Model(&originalBodyLease{}).Where("lease_id=?", ids[1]).Update(column, 1).Error)
++			reached := make(chan struct{})
++			var once sync.Once
++			const name = "actual-batch-lease-row-wait"
++			require.NoError(t, db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
++				if _, locked := tx.Statement.Clauses["FOR"].Expression.(clause.Locking); tx.Statement.Table == "original_body_leases" && locked {
++					once.Do(func() { close(reached) })
++				}
++			}))
++			t.Cleanup(func() { db.Callback().Query().Remove(name) })
++			done := make(chan error, 1)
++			go func() { done <- store.RenewLeases(ctx, ids, 2*time.Minute) }()
++			select {
++			case <-ctx.Done():
++				t.Fatal("renewal did not reach the actual lease lock")
++			case <-reached:
++			}
++			// Verify the lock wait in PostgreSQL itself; a callback alone
++			// cannot prove that the SELECT actually blocked on this owner.
++			require.Eventually(t, func() bool {
++				var waiting bool
++				err := db.WithContext(ctx).Raw("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND ?=ANY(pg_blocking_pids(pid)) AND query LIKE '%original_body_leases%')", blockingPID).Scan(&waiting).Error
++				return err == nil && waiting
++			}, time.Second, time.Millisecond)
++			require.NoError(t, legacy.Commit().Error)
++			require.ErrorIs(t, <-done, ErrOriginalBodyUnavailable)
++			after := leaseRenewalSnapshotForTest(t, db, ids)
++			require.Equal(t, before[ids[0]], after[ids[0]], "another held body must not receive a partial renewal after the wait")
++			if mode == "released" {
++				require.NotNil(t, after[ids[1]].ReleasedAtMS)
++				require.Equal(t, int64(1), *after[ids[1]].ReleasedAtMS)
++				require.Equal(t, before[ids[1]].ExpiresAtMS, after[ids[1]].ExpiresAtMS)
++			} else {
++				require.Equal(t, int64(1), after[ids[1]].ExpiresAtMS)
++			}
++		})
++	}
++}
++
++func TestOriginalBodyLeaseRenewalBatchSQLite(t *testing.T) {
++	runOriginalBodyLeaseRenewalBatch(t, false)
++}
++
++func TestOriginalBodyLeaseRenewalBatchPostgres(t *testing.T) {
++	runOriginalBodyLeaseRenewalBatch(t, true)
++}
 diff --git a/internal/application/repository/original_body_message_scopes.go b/internal/application/repository/original_body_message_scopes.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..f700167c6f50b6d86326e9a2f6a5c2e27cc48f7a
@@ -115643,10 +116363,10 @@ index 0000000000000000000000000000000000000000..cca49eb8db72204b85abe2f4aeff7e2e
 +}
 diff --git a/internal/application/service/message_material_guard.go b/internal/application/service/message_material_guard.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..dcab00508cd9aa413ac1ac9c62ca3d52210cda4d
+index 0000000000000000000000000000000000000000..35bfb4b1ad250ebaf88a3797f3d4dd4656480456
 --- /dev/null
 +++ b/internal/application/service/message_material_guard.go
-@@ -0,0 +1,439 @@
+@@ -0,0 +1,437 @@
 +package service
 +
 +import (
@@ -115780,10 +116500,8 @@ index 0000000000000000000000000000000000000000..dcab00508cd9aa413ac1ac9c62ca3d52
 +			return err
 +		}
 +	}
-+	for _, id := range g.bodyLeases {
-+		if err := g.store.RenewMessageBodyReadLease(g.ctx, id, 2*time.Minute); err != nil {
-+			return err
-+		}
++	if err := g.store.RenewMessageBodyReadLeases(g.ctx, g.bodyLeases, 2*time.Minute); err != nil {
++		return err
 +	}
 +	// Remote/current actor checks happen outside the body SQL transaction.
 +	if len(g.snapshot.Messages) > 0 {
@@ -121250,7 +121968,7 @@ index 0000000000000000000000000000000000000000..222598188431e72e92662d2d2cd5b8c2
 +}
 diff --git a/internal/application/service/normal_references_http_fixture_test.go b/internal/application/service/normal_references_http_fixture_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..7796361483df0c7d1eb65a7a98d7d2d1e2b81ba4
+index 0000000000000000000000000000000000000000..f19a0012f878619f1a804d32cef1fb3f6125f369
 --- /dev/null
 +++ b/internal/application/service/normal_references_http_fixture_test.go
 @@ -0,0 +1,252 @@
@@ -121402,7 +122120,7 @@ index 0000000000000000000000000000000000000000..7796361483df0c7d1eb65a7a98d7d2d1
 +	var bodyLeaseRenewals atomic.Int64
 +	require.NoError(t, m.f.db.Callback().Update().After("gorm:update").Register("actual-idle-body-lease-renewals", func(tx *gorm.DB) {
 +		if tx.Statement.Table == "original_body_leases" && tx.Error == nil && tx.RowsAffected > 0 && strings.Contains(tx.Statement.SQL.String(), "expires_at_ms") {
-+			bodyLeaseRenewals.Add(1)
++			bodyLeaseRenewals.Add(tx.RowsAffected)
 +		}
 +	}))
 +	t.Cleanup(func() { m.f.db.Callback().Update().Remove("actual-idle-body-lease-renewals") })

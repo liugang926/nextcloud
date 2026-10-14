@@ -233,11 +233,13 @@ jobs:
           # Check the previously failing real transport paths before the full
           # selection. Their original per-request deadlines remain unchanged.
           go test -json -tags sqlite_fts5 -p 1 ./internal/application/repository \
-            -run '^Test(OriginalBodyAvailabilityBatch(SQLite|Postgres)|OriginalBodyInlineRowActualSQLite|PostgresOriginalBodyInlineRowActual)$' \
+            -run '^Test(OriginalBodyAvailabilityBatch(SQLite|Postgres)|OriginalBodyLeaseRenewalBatch(SQLite|Postgres)|OriginalBodyInlineRowActualSQLite|PostgresOriginalBodyInlineRowActual)$' \
             -count=1 -timeout 20m > candidate-body-availability-preflight.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-body-availability-preflight.jsonl \
             --require-test TestOriginalBodyAvailabilityBatchSQLite \
             --require-test TestOriginalBodyAvailabilityBatchPostgres \
+            --require-test TestOriginalBodyLeaseRenewalBatchSQLite \
+            --require-test TestOriginalBodyLeaseRenewalBatchPostgres \
             --require-test TestOriginalBodyInlineRowActualSQLite \
             --require-test TestPostgresOriginalBodyInlineRowActual
           go test -json -tags sqlite_fts5 -p 1 ./internal/application/service/chat_pipeline ./internal/application/service \
