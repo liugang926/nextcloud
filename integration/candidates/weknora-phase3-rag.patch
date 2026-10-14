@@ -149611,6 +149611,287 @@ index c33b29dba33607eab97849f8c8e769b2b89ec496..3b845054d5e77bad6eb9faa75989a0bd
  		h.workspaceCheckpointer, h.sandboxIDLookup,
  	)
  	streamHandler.Subscribe()
+diff --git a/internal/handler/session/live_sse_control_phase.go b/internal/handler/session/live_sse_control_phase.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b04fc19b99483cef3fbe41e57eb09ee1a90ead08
+--- /dev/null
++++ b/internal/handler/session/live_sse_control_phase.go
+@@ -0,0 +1,44 @@
++package session
++
++import (
++	"context"
++
++	"github.com/Tencent/WeKnora/internal/storageurl"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++	"github.com/gin-gonic/gin"
++)
++
++// Raw control is an exemption for the current frame's incomplete source prefix,
++// never a grant for a later frame or an empty event-store poll. Actual Write and
++// Flush still run the writer's current original-material and owner checks.
++func withLiveMaterialControlPhase(ctx context.Context, rawControl bool, emit func() bool) bool {
++	if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok {
++		phase.RawControl = rawControl
++		defer func() { phase.RawControl = false }()
++	}
++	return emit()
++}
++
++func emitLiveStreamEvent(ctx context.Context, c *gin.Context, evt interfaces.StreamEvent, requestID string, rewriter *storageurl.StreamRewriter) bool {
++	return withLiveMaterialControlPhase(ctx, evt.Type == types.ResponseTypeAgentQuery, func() bool {
++		return emitStreamEvent(ctx, c, evt, requestID, rewriter)
++	})
++}
++
++func emitLiveStreamStop(ctx context.Context, c *gin.Context, requestID string, rewriter *storageurl.StreamRewriter) bool {
++	return withLiveMaterialControlPhase(ctx, false, func() bool {
++		// A held answer remains derived content even when a raw stop follows it.
++		if !flushHeldStreamContent(ctx, c, requestID, rewriter) {
++			return false
++		}
++		return withLiveMaterialControlPhase(ctx, true, func() bool {
++			return writeSingleSSEFrame(c, "message", &types.StreamResponse{
++				ID:           requestID,
++				ResponseType: "stop",
++				Content:      "Generation stopped by user",
++				Done:         true,
++			})
++		})
++	})
++}
+diff --git a/internal/handler/session/live_sse_control_phase_test.go b/internal/handler/session/live_sse_control_phase_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..41433e8486838de46199a37e5c736397b25bcbb5
+--- /dev/null
++++ b/internal/handler/session/live_sse_control_phase_test.go
+@@ -0,0 +1,225 @@
++package session
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Tencent/WeKnora/internal/application/access"
++	"github.com/Tencent/WeKnora/internal/event"
++	"github.com/Tencent/WeKnora/internal/types"
++	"github.com/Tencent/WeKnora/internal/types/interfaces"
++)
++
++func TestLiveSSERawControlPhaseChecksEveryRawIOAndResets(t *testing.T) {
++	phase := &liveMaterialWritePhase{}
++	ctx := context.WithValue(context.Background(), liveMaterialWritePhaseKey{}, phase)
++	transport := &singleSSETransportForTest{}
++	checks := 0
++	c, _ := singleSSEContextForTest(t, ctx, transport, func() error {
++		checks++
++		if !phase.RawControl {
++			t.Error("the exact query frame lost its raw phase before actual Write or Flush")
++		}
++		return nil
++	})
++	query := createAgentQueryEvent("session", "assistant", "user", time.Time{}, time.Time{})
++	if !emitLiveStreamEvent(ctx, c, query, "request", nil) || phase.RawControl || checks != 2 || transport.writes != 1 || transport.flushes != 1 {
++		t.Fatal("query emission must check each real IO and leave no raw grant")
++	}
++	baseline, recorder := newTestGinContext(t, "")
++	if !emitStreamEvent(context.Background(), baseline, query, "request", nil) || !bytes.Equal(recorder.Body.Bytes(), transport.body.Bytes()) {
++		t.Fatal("scoping the raw phase changed the exact query frame")
++	}
++}
++
++func TestLiveSSERawControlPhaseResetsAfterFailure(t *testing.T) {
++	for _, mode := range []string{"encoding", "write_error", "partial_write", "cancel_before", "cancel_during", "owner_revoked_at_flush"} {
++		t.Run(mode, func(t *testing.T) {
++			phase := &liveMaterialWritePhase{}
++			base, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			ctx := context.WithValue(base, liveMaterialWritePhaseKey{}, phase)
++			transport := &singleSSETransportForTest{}
++			checks := 0
++			c, writer := singleSSEContextForTest(t, ctx, transport, func() error {
++				checks++
++				if !phase.RawControl {
++					t.Error("raw phase ended before the failing frame's actual IO check")
++				}
++				if mode == "owner_revoked_at_flush" && checks == 2 {
++					return access.ErrNextcloudPublicationDenied
++				}
++				return nil
++			})
++			query := createAgentQueryEvent("session", "assistant", "user", time.Time{}, time.Time{})
++			wantChecks, wantWrites := 1, 1
++			switch mode {
++			case "encoding":
++				query.Data["unsupported"] = make(chan int)
++				wantChecks, wantWrites = 0, 0
++			case "write_error":
++				transport.writeErr = errors.New("controlled write failure")
++			case "partial_write":
++				transport.partial = true
++			case "cancel_before":
++				cancel()
++				wantChecks, wantWrites = 0, 0
++			case "cancel_during":
++				transport.afterWrite = cancel
++			case "owner_revoked_at_flush":
++				wantChecks = 2
++			}
++			if emitLiveStreamEvent(ctx, c, query, "request", nil) || phase.RawControl || checks != wantChecks || transport.writes != wantWrites || transport.flushes != 0 || !c.IsAborted() {
++				t.Fatal("failed or cancelled query retained a raw phase, bypassed a current check, or reached extra IO")
++			}
++			if mode == "encoding" && (transport.headerWrites != 0 || writer.denied != nil) {
++				t.Fatal("encoding failure reached HTTP IO")
++			}
++			if mode == "owner_revoked_at_flush" && !errors.Is(writer.denied, access.ErrNextcloudPublicationDenied) {
++				t.Fatal("a raw control exemption bypassed the current owner check at Flush")
++			}
++		})
++	}
++}
++
++func TestLiveSSERawControlPhaseDoesNotAdmitUnknownDerivedFrame(t *testing.T) {
++	phase := &liveMaterialWritePhase{}
++	ctx := context.WithValue(context.Background(), liveMaterialWritePhaseKey{}, phase)
++	transport := &singleSSETransportForTest{}
++	lineage := types.UnknownSourceLineage()
++	checks := 0
++	c, writer := singleSSEContextForTest(t, ctx, transport, func() error {
++		checks++
++		if lineage.RequireComplete() != nil && !phase.RawControl {
++			return access.ErrNextcloudPublicationDenied
++		}
++		return nil
++	})
++	if !emitLiveStreamEvent(ctx, c, createAgentQueryEvent("session", "assistant", "user", time.Time{}, time.Time{}), "request", nil) {
++		t.Fatal("the exact raw query was refused")
++	}
++	before := append([]byte(nil), transport.body.Bytes()...)
++	if emitLiveStreamEvent(ctx, c, interfaces.StreamEvent{Type: types.ResponseTypeAnswer, Content: "unknown derived secret"}, "request", nil) || phase.RawControl || checks != 3 || transport.writes != 1 || transport.flushes != 1 || !bytes.Equal(before, transport.body.Bytes()) || !errors.Is(writer.denied, access.ErrNextcloudPublicationDenied) {
++		t.Fatal("a derived unknown prefix inherited the prior query's raw grant")
++	}
++}
++
++type rawControlPhaseStreamForTest struct {
++	interfaces.StreamManager
++	phase        *liveMaterialWritePhase
++	transport    *singleSSETransportForTest
++	reads        int
++	emptyRaw     bool
++	emptyWrites  int
++	emptyFlushes int
++}
++
++func (s *rawControlPhaseStreamForTest) GetEvents(_ context.Context, _, _ string, offset int) ([]interfaces.StreamEvent, int, error) {
++	s.reads++
++	switch s.reads {
++	case 1:
++		return []interfaces.StreamEvent{createAgentQueryEvent("session", "assistant", "user", time.Time{}, time.Time{})}, offset + 1, nil
++	case 2:
++		s.emptyRaw, s.emptyWrites, s.emptyFlushes = s.phase.RawControl, s.transport.writes, s.transport.flushes
++		return nil, offset, nil
++	default:
++		return []interfaces.StreamEvent{{Type: types.ResponseType(event.EventStop), Done: true, Content: "untrusted stop content", Data: map[string]interface{}{"secret": "untrusted stop metadata"}}}, offset + 1, nil
++	}
++}
++
++func TestLiveSSERawControlPhaseClearsBeforeEmptyPoll(t *testing.T) {
++	phase := &liveMaterialWritePhase{}
++	base, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	ctx := context.WithValue(base, liveMaterialWritePhaseKey{}, phase)
++	transport := &singleSSETransportForTest{}
++	checks, materialChecks := 0, 0
++	phase.MaterialCheck = func() error {
++		materialChecks++
++		if phase.RawControl {
++			t.Error("a poll's material check inherited a prior raw frame")
++		}
++		return nil
++	}
++	c, _ := singleSSEContextForTest(t, ctx, transport, func() error {
++		checks++
++		if !phase.RawControl {
++			return access.ErrNextcloudPublicationDenied
++		}
++		return nil
++	})
++	stream := &rawControlPhaseStreamForTest{phase: phase, transport: transport}
++	h := &Handler{streamManager: stream}
++	h.handleAgentEventsForSSE(ctx, c, "session", "assistant", "request", nil, false, nil, &types.Message{SourceLineage: types.UnknownSourceLineage()})
++	if ctx.Err() != nil || phase.RawControl || stream.reads != 3 || stream.emptyRaw || stream.emptyWrites != 1 || stream.emptyFlushes != 1 || materialChecks != 3 || checks != 4 || transport.writes != 2 || transport.flushes != 2 {
++		t.Fatal("an actual empty poll retained a raw grant, emitted bytes, or lost current checks")
++	}
++	if !strings.Contains(transport.body.String(), "Generation stopped by user") || strings.Contains(transport.body.String(), "untrusted stop") {
++		t.Fatal("raw stop emitted Redis content instead of the fixed code-origin notification")
++	}
++}
++
++func TestLiveSSERawControlPhaseStopSeparatesHeldTail(t *testing.T) {
++	for _, mode := range []string{"no_tail_unknown", "known_tail", "unknown_tail", "revoked_owner"} {
++		t.Run(mode, func(t *testing.T) {
++			phase := &liveMaterialWritePhase{}
++			ctx := context.WithValue(context.Background(), liveMaterialWritePhaseKey{}, phase)
++			transport := &singleSSETransportForTest{}
++			var phases []bool
++			lineage := types.UnknownSourceLineage()
++			if mode == "known_tail" {
++				var err error
++				lineage, err = types.NewCompleteSourceLineage()
++				if err != nil {
++					t.Fatal(err)
++				}
++			}
++			c, writer := singleSSEContextForTest(t, ctx, transport, func() error {
++				phases = append(phases, phase.RawControl)
++				if mode == "revoked_owner" || !phase.RawControl && lineage.RequireComplete() != nil {
++					return access.ErrNextcloudPublicationDenied
++				}
++				return nil
++			})
++			rewriter := publicStreamRewriter()
++			if mode == "known_tail" || mode == "unknown_tail" {
++				buildStreamResponseFor(ctx, interfaces.StreamEvent{ID: "answer", Type: types.ResponseTypeAnswer, Content: "![secret](resource://xifDo7"}, "request", rewriter)
++			}
++			sent := emitLiveStreamStop(ctx, c, "request", rewriter)
++			if phase.RawControl {
++				t.Fatal("stop returned with a raw-control grant")
++			}
++			switch mode {
++			case "no_tail_unknown":
++				if !sent || len(phases) != 2 || !phases[0] || !phases[1] || transport.writes != 1 || transport.flushes != 1 || !strings.Contains(transport.body.String(), "Generation stopped by user") {
++					t.Fatal("source-free fixed stop lost its separate raw Write/Flush scope")
++				}
++				baseline, recorder := newTestGinContext(t, "")
++				baseline.SSEvent("message", &types.StreamResponse{ID: "request", ResponseType: "stop", Content: "Generation stopped by user", Done: true})
++				baseline.Writer.Flush()
++				if !bytes.Equal(recorder.Body.Bytes(), transport.body.Bytes()) {
++					t.Fatal("scoped fixed stop changed the existing SSE wire payload")
++				}
++			case "known_tail":
++				if !sent || len(phases) != 4 || phases[0] || phases[1] || !phases[2] || !phases[3] || transport.writes != 2 || transport.flushes != 2 || !strings.Contains(transport.body.String(), "resource://xifDo7") || !strings.Contains(transport.body.String(), "Generation stopped by user") {
++					t.Fatal("held source tail and fixed stop did not retain distinct current IO checks")
++				}
++				if strings.Index(transport.body.String(), "resource://xifDo7") > strings.Index(transport.body.String(), "Generation stopped by user") {
++					t.Fatal("fixed stop overtook the guarded held source tail")
++				}
++			default:
++				if sent || len(phases) != 1 || phases[0] != (mode == "revoked_owner") || transport.writes != 0 || transport.flushes != 0 || transport.body.Len() != 0 || !errors.Is(writer.denied, access.ErrNextcloudPublicationDenied) {
++					t.Fatal("unknown held content or revoked owner escaped through raw stop")
++				}
++				before := len(phases)
++				if emitLiveStreamStop(ctx, c, "request", nil) || phase.RawControl || len(phases) != before || transport.writes != 0 || transport.flushes != 0 {
++					t.Fatal("raw stop retried or bypassed sticky refusal")
++				}
++			}
++		})
++	}
++}
 diff --git a/internal/handler/session/message_raw_input_lineage_test.go b/internal/handler/session/message_raw_input_lineage_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..5f2c7cef0217986d3898bf3b9e8a5c3817099b28
@@ -153172,7 +153453,7 @@ index 0000000000000000000000000000000000000000..e50cc008ecc609f6f1a36abdf2125209
 +	return &follow, true, true
 +}
 diff --git a/internal/handler/session/stream.go b/internal/handler/session/stream.go
-index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..2986b25bd0ef4c60af2ea0283a547bc73f831ccc 100644
+index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..3f94162973953650aded15be4d4c13e355eec789 100644
 --- a/internal/handler/session/stream.go
 +++ b/internal/handler/session/stream.go
 @@ -7,6 +7,8 @@ import (
@@ -153550,26 +153831,36 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..2986b25bd0ef4c60af2ea0283a547bc7
  				// Check for stop event
  				if evt.Type == types.ResponseType(event.EventStop) {
  					log.Infof("Detected stop event, triggering stop via EventBus for session=%s", sessionID)
-@@ -388,7 +648,9 @@ func (h *Handler) handleAgentEventsForSSE(
- 					// before the stop is still the user's content, and in
- 					// public resource URL mode part of it may be sitting in
- 					// the holdback buffer.
--					flushHeldStreamContent(ctx, c, requestID, resourceRewriter)
-+					if !flushHeldStreamContent(ctx, c, requestID, resourceRewriter) {
-+						return
-+					}
+@@ -384,20 +644,9 @@ func (h *Handler) handleAgentEventsForSSE(
+ 						})
+ 					}
  
- 					// Send stop notification to frontend
- 					c.SSEvent("message", &types.StreamResponse{
-@@ -420,7 +682,17 @@ func (h *Handler) handleAgentEventsForSSE(
+-					// Release any buffered tail first: the answer generated
+-					// before the stop is still the user's content, and in
+-					// public resource URL mode part of it may be sitting in
+-					// the holdback buffer.
+-					flushHeldStreamContent(ctx, c, requestID, resourceRewriter)
+-
+-					// Send stop notification to frontend
+-					c.SSEvent("message", &types.StreamResponse{
+-						ID:           requestID,
+-						ResponseType: "stop",
+-						Content:      "Generation stopped by user",
+-						Done:         true,
+-					})
+-					c.Writer.Flush()
++					// A held answer keeps its source checks; only the fixed
++					// stop notification may use the raw-control phase.
++					emitLiveStreamStop(ctx, c, requestID, resourceRewriter)
+ 					return
+ 				}
+ 
+@@ -420,7 +669,14 @@ func (h *Handler) handleAgentEventsForSSE(
  					return
  				}
  
 -				emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
-+				if phase, ok := ctx.Value(liveMaterialWritePhaseKey{}).(*liveMaterialWritePhase); ok {
-+					phase.RawControl = evt.Type == types.ResponseTypeAgentQuery || evt.Type == types.ResponseType(event.EventStop)
-+				}
-+				sent := emitStreamEvent(ctx, c, evt, requestID, resourceRewriter)
++				sent := emitLiveStreamEvent(ctx, c, evt, requestID, resourceRewriter)
 +				if writer, ok := c.Writer.(*nativeSavedReplayWriter); ok && writer.denied != nil {
 +					emitSafeTerminalGenerationError(c, requestID)
 +					return
@@ -153580,7 +153871,7 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..2986b25bd0ef4c60af2ea0283a547bc7
  			}
  
  			// Update offset
-@@ -449,8 +721,20 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -449,8 +705,20 @@ func (h *Handler) handleAgentEventsForSSE(
  								break titleWaitLoop
  							}
  							if len(events) > 0 {
@@ -153597,13 +153888,13 @@ index 734d618316f1cd71fd5fecb0a89cbf324ff5fdf3..2986b25bd0ef4c60af2ea0283a547bc7
 +											return
 +										}
 +									}
-+									if !emitStreamEvent(ctx, c, evt, requestID, resourceRewriter) {
++									if !emitLiveStreamEvent(ctx, c, evt, requestID, resourceRewriter) {
 +										return
 +									}
  									// If we got the title, we can exit
  									if evt.Type == types.ResponseTypeSessionTitle {
  										log.Infof("Title event received: %s", evt.Content)
-@@ -473,3 +757,330 @@ func (h *Handler) handleAgentEventsForSSE(
+@@ -473,3 +741,330 @@ func (h *Handler) handleAgentEventsForSSE(
  		}
  	}
  }

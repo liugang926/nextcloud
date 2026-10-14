@@ -5,7 +5,7 @@ isolated development. Each patch applies directly to its named upstream commit;
 do not apply it on top of `integration/weknora.patch` or the default RAG patch.
 The ordinary build scripts still select the previously verified default patches.
 
-The current development candidates are RAG `51f276e1` and C6 `d404dac4`.
+The current development candidates are RAG `7a6abfc3` and C6 `2ea25013`.
 They correct the duplicate prompt processor in the actual HTTP fixture,
 encode a complete SSE frame before one guarded Write, and authorize the
 complete input/result union once at each unchanged pipeline boundary. Every
@@ -13,7 +13,9 @@ later boundary still checks current owner, actor and source authority; unknown
 inputs remain sticky and concurrent source additions are rechecked. Write and Flush each
 retain their independent current authorization and lease checks, and the
 original 8-second HTTP limits remain. Encoding failure performs no HTTP I/O;
-short writes abort without flushing or retrying. The complete source patches
+short writes abort without flushing or retrying. Raw-control flags end with
+their exact query or fixed stop frame, so empty polls use the existing bounded
+idle cadence. Buffered source content retains its separate checks. The complete source patches
 and exact apply/reverse trees are pinned in the manifest. Service CI uses
 complete, sequential test groups with the original selector and all 42
 required tests; the previously failing actual paths run first as prerequisites.

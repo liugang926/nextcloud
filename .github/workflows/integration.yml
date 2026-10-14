@@ -245,10 +245,15 @@ jobs:
             --require-test TestSourceLineageStageBoundaryNilAndUnknownCannotBeRepairedByLaterResults \
             --require-test TestSourceLineageStageBoundaryCancellationUsesCurrentContext
           go test -json -p 1 ./internal/handler/session \
-            -run '^TestLiveSSESingleFrame' -count=1 -timeout 20m > candidate-sse-preflight.jsonl
+            -run '^TestLiveSSE(SingleFrame|RawControlPhase)' -count=1 -timeout 20m > candidate-sse-preflight.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-sse-preflight.jsonl \
             --require-test TestLiveSSESingleFrameSerializationFailureHasNoHTTPIO \
-            --require-test TestLiveSSESingleFrameMatchesPinnedGinWireAndChecksEveryIO
+            --require-test TestLiveSSESingleFrameMatchesPinnedGinWireAndChecksEveryIO \
+            --require-test TestLiveSSERawControlPhaseChecksEveryRawIOAndResets \
+            --require-test TestLiveSSERawControlPhaseResetsAfterFailure \
+            --require-test TestLiveSSERawControlPhaseDoesNotAdmitUnknownDerivedFrame \
+            --require-test TestLiveSSERawControlPhaseClearsBeforeEmptyPoll \
+            --require-test TestLiveSSERawControlPhaseStopSeparatesHeldTail
           go test -json -tags sqlite_fts5 -p 1 ./internal/handler \
             -run '^TestSteerOriginalMaterialActualHTTPAgentPromoteCanonicalAndRedisForgery$/^retained_current_source$' \
             -count=1 -timeout 20m > candidate-agent-preflight.jsonl
@@ -315,7 +320,7 @@ jobs:
         working-directory: candidate
         run: |
           go test -json -p 1 ./internal/handler/session \
-            -run '^Test.*(Steer|SetupSSEStream|NativeLive|LiveSSESingleFrame|LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError)' -count=1 > candidate-qa-terminal.jsonl
+            -run '^Test.*(Steer|SetupSSEStream|NativeLive|LiveSSESingleFrame|LiveSSERawControlPhase|LiveSSEProducerError|LiveSSEStopsBeforeRevokedNextChunk|AgentStreamHandlerInternalError|PollFailure|PollError)' -count=1 > candidate-qa-terminal.jsonl
           python3 ../nextcloud/scripts/ops/verify-go-test-evidence.py candidate-qa-terminal.jsonl \
             --require-test TestLiveSSEProducerErrorWithRefusedOriginalMaterialHolder \
             --require-test TestSteerProductionMissingOriginalServiceRejectsCachedInput \
