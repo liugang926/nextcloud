@@ -96111,10 +96111,10 @@ index 0000000000000000000000000000000000000000..05a2b06a7b5fc5b96d1355315409e6a7
 +}
 diff --git a/internal/application/service/chat_pipeline/source_lineage_input_boundary_test.go b/internal/application/service/chat_pipeline/source_lineage_input_boundary_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..22d9b51127e5073091fb49cae64b6918a001bdbc
+index 0000000000000000000000000000000000000000..2d0f5ca9c98f0b9d3823dcad7d9697ec195d5688
 --- /dev/null
 +++ b/internal/application/service/chat_pipeline/source_lineage_input_boundary_test.go
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,175 @@
 +package chatpipeline
 +
 +import (
@@ -96169,7 +96169,8 @@ index 0000000000000000000000000000000000000000..22d9b51127e5073091fb49cae64b6918
 +	})
 +	ctx = types.WithRAGSourceLineage(ctx, turn)
 +	require.NoError(t, turn.Add(retrieved))
-+	cm := &types.ChatManage{History: []*types.History{{SourceLineage: first}, {SourceLineage: second}}}
++	cm := &types.ChatManage{}
++	cm.History = []*types.History{{SourceLineage: first}, {SourceLineage: second}}
 +	require.NoError(t, CheckSourceLineageInputs(ctx, cm))
 +	require.Equal(t, expected, turn.Snapshot())
 +	require.Equal(t, 1, sourceChecks, "one unchanged input boundary does not repeat its complete source check")
