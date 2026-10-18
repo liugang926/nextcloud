@@ -145,6 +145,9 @@ if [[ "$task_office_installed" == 1 ]]; then
     "${task_occ[@]}" config:app:set richdocuments wopi_url --value=http://office:9980 >/dev/null
     "${task_occ[@]}" config:app:set richdocuments public_wopi_url --value="https://$task_domain" >/dev/null
     "${task_compose[@]}" up -d --wait --wait-timeout 600 office
+    # App command namespaces are unavailable in maintenance mode. Schema and
+    # app setup are complete; ingress and ordinary jobs are still fenced.
+    "${task_occ[@]}" maintenance:mode --off
     "${task_occ[@]}" richdocuments:activate-config
     "${task_occ[@]}" config:app:set richdocuments wopi_callback_url --value=http://nextcloud >/dev/null
     "${task_occ[@]}" config:app:set richdocuments wopi_allowlist --value=172.30.55.30 >/dev/null

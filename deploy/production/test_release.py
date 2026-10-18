@@ -286,6 +286,86 @@ class DownloadCacheTests(unittest.TestCase):
         self.assertEqual(list((self.updater.state_dir / 'asset-cache/prod-new').iterdir()), [])
 
 
+class DatabaseRoleTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.root = Path(self.folder.name)
+        self.updater = release.Updater(self.root / 'deployment', self.root / 'data', 'owner/repo')
+        self.backup = self.root / 'checkpoint'
+        self.backup.mkdir()
+        with tarfile.open(self.backup / 'config-customapps.tar', 'w:') as archive:
+            content = b'<?php $CONFIG=["dbuser"=>"oc_admin","dbpassword"=>"private-value"];'
+            member = tarfile.TarInfo('config/config.php')
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        (self.backup / 'SHA256SUMS').write_text('')
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def test_legacy_checkpoint_uses_its_protected_config_and_existing_login_role(self):
+        def inspect_config(directory):
+            config = directory / 'config.php'
+            self.assertTrue(config.is_file())
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            return 'oc_admin'
+        with mock.patch.object(self.updater, 'config_database_role', side_effect=inspect_config), \
+             mock.patch.object(self.updater, 'validate_database_role') as validate:
+            self.assertEqual(self.updater.backup_database_role(self.backup), 'oc_admin')
+        validate.assert_called_once_with('oc_admin')
+        self.assertEqual(list(self.updater.state_dir.glob('database-role-*')), [])
+
+    def test_metadata_must_match_config_and_be_checksummed(self):
+        role_file = self.backup / 'database-role.json'
+        for metadata, checksummed in [({'schema': 1, 'app_role': 'other_role'}, True),
+                                      ({'schema': 1, 'app_role': 'oc_admin'}, False)]:
+            release.write_json(role_file, metadata)
+            (self.backup / 'SHA256SUMS').write_text(('a' * 64 + '  database-role.json\n') if checksummed else '')
+            with self.subTest(metadata=metadata, checksummed=checksummed), \
+                 mock.patch.object(self.updater, 'config_database_role', return_value='oc_admin'), \
+                 mock.patch.object(self.updater, 'validate_database_role') as validate, \
+                 self.assertRaises(release.ReleaseError):
+                self.updater.backup_database_role(self.backup)
+            validate.assert_not_called()
+
+    def test_new_checkpoint_records_only_validated_application_role(self):
+        with mock.patch.object(self.updater, 'config_database_role', return_value='oc_admin'), \
+             mock.patch.object(self.updater, 'validate_database_role') as validate:
+            self.updater.record_database_role(self.backup)
+        validate.assert_called_once_with('oc_admin')
+        self.assertEqual(json.loads((self.backup / 'database-role.json').read_text()),
+                         {'schema': 1, 'app_role': 'oc_admin'})
+        self.assertEqual((self.backup / 'database-role.json').stat().st_mode & 0o777, 0o600)
+
+    def test_invalid_roles_are_rejected_before_any_database_command(self):
+        for role in ('bad-role', 'role"; DROP DATABASE postgres;--', '', 'a' * 64):
+            with self.subTest(role=role), mock.patch.object(self.updater, 'compose') as compose, \
+                 self.assertRaises(release.ReleaseError):
+                self.updater.validate_database_role(role)
+            compose.assert_not_called()
+
+    def test_non_login_role_is_rejected(self):
+        with mock.patch.object(self.updater, 'compose', return_value=b'0\n'), self.assertRaises(release.ReleaseError):
+            self.updater.validate_database_role('oc_admin')
+
+    def test_config_reader_is_isolated_and_sanitizes_errors(self):
+        configuration = json.dumps({'services': {'nextcloud': {'image': 'sha256:' + 'a' * 64}}}).encode()
+        with mock.patch.object(self.updater, 'compose', return_value=configuration), \
+             mock.patch.object(release.subprocess, 'check_output', return_value=b'{"dbuser":"oc_admin"}') as reader:
+            self.assertEqual(self.updater.config_database_role(self.root), 'oc_admin')
+        command = reader.call_args.args[0]
+        self.assertIn('--network=none', command)
+        self.assertIn('--read-only', command)
+        self.assertIn('--memory=64m', command)
+        self.assertNotIn('dbpassword', command[-1])
+        with mock.patch.object(self.updater, 'compose', return_value=configuration), \
+             mock.patch.object(release.subprocess, 'check_output', side_effect=release.subprocess.CalledProcessError(
+                 1, ['php'], output='private-value', stderr='private-value')):
+            with self.assertRaises(release.ReleaseError) as error:
+                self.updater.config_database_role(self.root)
+        self.assertNotIn('private-value', str(error.exception))
+
+
 class ImageReuseTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()

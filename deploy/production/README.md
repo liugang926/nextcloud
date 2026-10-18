@@ -56,6 +56,10 @@ OCI 内容读取使用 `/usr/bin/ctr`，仅支持 `/run/containerd/containerd.so
 
 更新通过 `flock` 串行执行：维护模式 → 关闭代理 → 优雅停止 Office/web/任务并排空写入 → `pg_dump` 与 config/custom_apps 检查点 → 原子切换版本与镜像配置 → 强制重建 bind mount → 迁移/内部健康检查。验证期间入口及 cron/四个 worker 保持关闭。
 
+Office 应用命令需要退出维护模式才能注册。bootstrap 在数据库升级和应用配置完成后、执行 `richdocuments:activate-config` 前退出维护模式；此时代理与任务仍关闭，开放流量仍由原有健康检查和事务边界控制。
+
+检查点另存经验证的实际应用数据库角色 `database-role.json` 并纳入 SHA256 清单，仅提取 config.php 的 `dbuser`，不输出数据库密码。恢复时先核对备份 config 与角色记录，并确认角色存在且可登录，再以该角色作为 Nextcloud 数据库 owner、执行 `pg_restore --no-owner --no-privileges --role=应用角色`。旧检查点缺少记录时从其已校验的 config 归档派生角色；不会假定应用使用 PostgreSQL 管理员账号。恢复后先验证 public schema、应用对象 owner 及应用角色读写权限，成功后才启动 web；不更改全局角色、其他数据库或系统对象。
+
 内部检查成功前失败，会恢复旧源码、升级前 DB 和 config/custom_apps，再验证旧服务。内部检查通过后先记录不可回退边界，再启动任务与生产入口；此后若失败，保留新 DB/文件并要求人工修复，避免覆盖已经接受的用户写入或 WeKnora 事件。只有完整健康检查通过才记录 `success`。检查点、失败版本与事务证据不会自动删除。
 
 自动发布只更新本仓库插件，Nextcloud 核心固定为 34.0.4，且已部署核心 image ID 不允许自动改变。核心/大版本升级需要另行规划，脚本不会自行降级 Nextcloud 核心、删除用户数据或运行 `docker compose down -v`。DB/config 检查点用于部署恢复，灾备还需要另外备份用户 `data`、持久卷及秘密。
@@ -76,3 +80,5 @@ sudo /srv/nextcloud-production/current/deploy/production/healthcheck.sh
 ```
 
 发布器安全测试：`python3 deploy/production/test_release.py`、`python3 deploy/production/test_image_identity.py`。测试覆盖恶意归档、classic/OCI 身份链、descriptor/hash/平台错误、manifest/核心变更、防降级、tag 重写、网络重试、开机中断恢复以及开放流量后禁止回滚 DB；main/PR CI 与生产发布均执行这些检查。
+
+真实数据库恢复回归：`python3 deploy/production/test_restore_roles.py --image postgres:16-alpine --pull=never`。可用已验证的 PG16 镜像内容 ID 替换 tag；测试使用低资源、无网络/端口/宿主机挂载的临时容器，复现旧方式的权限错误，再验证管理员与应用角色不同的正确恢复。生产发布在 PG16 镜像准备后执行此检查。
