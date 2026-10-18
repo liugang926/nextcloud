@@ -1,0 +1,22 @@
+[Unit]
+Description=Apply verified public Nextcloud production release
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Environment=NEXTCLOUD_PRODUCTION_ROOT=/srv/nextcloud-production
+Environment=NEXTCLOUD_DATA_ROOT=/data/nextcloud-production
+Environment=NEXTCLOUD_RELEASE_REPOSITORY=liugang926/nextcloud
+ExecStart=/srv/nextcloud-production/bin/update.sh
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=200%
+MemoryMax=2G
+StandardOutput=journal
+StandardError=journal
