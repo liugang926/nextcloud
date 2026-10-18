@@ -25,6 +25,8 @@ sudo systemctl status nextcloud-production.service nextcloud-production-update.t
 
 管理员默认 `admin`，密码保存在 `secrets/nextcloud_admin_password`；数据库密码保存在 `secrets/nextcloud_db_password`。需要以 root 在服务器读取并安全交接。不要把这些文件提交 Git。`images.env` 可保留 `NC_ADMIN_USER`、`NEXTCLOUD_DOMAIN`、`WEKNORA_HTTPS_ORIGINS` 等配置，自动更新只替换 5 个镜像变量。LDAP 连接和 WeKnora 配对需要管理员根据实际目录/应用配置。
 
+Office 初始化先设置内部与公开 WOPI 地址，仅等待 Office 健康后执行 `richdocuments:activate-config`，加载 discovery 和 capabilities。该命令会重置回调地址，因此随后再设置内部 `wopi_callback_url` 与 WOPI allowlist。此时 Nextcloud 升级可能仍处于维护模式，不能等待其健康检查通过。
+
 ## 确认合并后发布
 
 先让变更进入 GitHub `main`，等待该**精确 commit** 的主分支 `integration.yml` 中 `local-smoke`（Nextcloud 安装/API）与 `direct-upgrade`（升级/恢复）两项成功，再创建新的 `prod-*` tag：
