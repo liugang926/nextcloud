@@ -86,13 +86,22 @@ def safe_extract(archive, target):
             require(not (target / member.name).is_symlink(), 'Symlink at deployment target')
     # Validate the complete directory before creating any file. Re-open to
     # stream the extraction without retaining an unbounded TarInfo list.
+    def runtime_directory(path):
+        path.mkdir(parents=True, exist_ok=True)
+        # The updater deliberately uses umask 077 for secrets/state. Runtime
+        # source is bind-mounted into containers running as unprivileged users;
+        # both explicit and implicit archive directories must be traversable.
+        while path != target:
+            path.chmod(0o755)
+            path = path.parent
+
     with tarfile.open(archive, 'r:gz') as source:
         for member in source:
             path = target / member.name
             if member.isdir():
-                path.mkdir(parents=True, exist_ok=True)
+                runtime_directory(path)
             else:
-                path.parent.mkdir(parents=True, exist_ok=True)
+                runtime_directory(path.parent)
                 with source.extractfile(member) as src, path.open('wb') as dst:
                     shutil.copyfileobj(src, dst, 1024 * 1024)
                 path.chmod(0o755 if member.mode & 0o111 else 0o644)
@@ -133,7 +142,7 @@ def validate_manifest(manifest, repo, release, commit, state):
     require(images['nextcloud'].get('source') == 'nextcloud:34.0.4-apache', 'Nextcloud core release changed')
     require(images['postgres'].get('source') == 'postgres:16-alpine', 'PostgreSQL major changed')
     require(images['redis'].get('source') == 'redis:7-alpine', 'Redis major changed')
-    require(images['office'].get('source') == 'collabora/code:26.04.2.2.1', 'Office release changed')
+    require(images['office'].get('source') == 'collabora/code:26.04.2.4.1', 'Office release changed')
     require(images['proxy'].get('source') == 'nginx:1.30.3-alpine', 'Proxy release changed')
     # Automatic releases deploy this repository's plugin. A core-image change
     # requires a separately planned core upgrade; its filesystem cannot safely

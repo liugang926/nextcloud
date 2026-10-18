@@ -207,7 +207,8 @@ services:
       production:
         ipv4_address: 172.30.55.30
     healthcheck:
-      test: [CMD-SHELL, "curl -fsS --max-time 10 http://127.0.0.1:9980/hosting/discovery >/dev/null"]
+      # CODE 26.04 uses a distroless runtime with no shell or curl.
+      test: [CMD, /usr/bin/coolwsd, --probe, --use-env-vars]
       interval: 30s
       timeout: 15s
       retries: 10

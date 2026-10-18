@@ -38,7 +38,7 @@ git push origin prod-20261018-01
 
 该 tag 工作流检查 commit 是 `origin/main` 的祖先，并要求相同 SHA 的 main push 中上述两项 Nextcloud 检查成功，以及发布器安全自测成功；不等待本次未部署的历史 WeKnora 补丁矩阵，不假设仓库已经配置分支保护。工作流串行发布，不取消正在进行的生产发布。普通 main push、PR 或其他 tag 均不会发布生产版本。发布后不要移动 tag、替换 Release 资产或复用失败 tag；修改后使用新的 `prod-*` tag。
 
-Actions 在 Linux amd64 拉取固定版本的 Nextcloud 34.0.4、PostgreSQL 16、Redis 7、Collabora CODE 26.04.2.2.1 和 nginx 1.30.3，记录真实 registry digest、image config ID 和架构；打包运行源码、Nextcloud 34 兼容的 richdocuments 11.1.2、镜像及 SHA256 清单。镜像 gzip 超过约 1.7 GiB 时分片。所有资产上传至 draft 后才发布，避免服务器读到不完整版本。
+Actions 在 Linux amd64 拉取固定版本的 Nextcloud 34.0.4、PostgreSQL 16、Redis 7、Collabora CODE 26.04.2.4.1 和 nginx 1.30.3，记录真实 registry digest、image config ID 和架构；实际启动 Office，核对运行工具、HTTP discovery 和公开 HTTPS 地址后，打包运行源码、Nextcloud 34 兼容的 richdocuments 11.1.2、镜像及 SHA256 清单。镜像 gzip 超过约 1.7 GiB 时分片。所有资产上传至 draft 后才发布，避免服务器读到不完整版本。
 
 服务器每约 2 分钟只读公开 GitHub Release。该仓库 **Release 发布/资产修改权限就是生产部署权限**；SHA256 校验用于完整性校验，不是独立的代码签名或 workflow attestation。服务器不保存 GitHub token。部署前还验证 tag 的真实 commit/main 祖先关系、已运行版本 commit 的祖先关系、repo/tag/commit、清单、解压路径、镜像 ID 与 amd64 架构。Compose 使用内容寻址 image ID 且禁止隐式 pull，因此导入的镜像可以离线启动。
 
