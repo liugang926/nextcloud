@@ -213,13 +213,21 @@ class Updater:
         require(compare.get('merge_base_commit', {}).get('sha') == before,
                 'Commit is not an ancestor: refusing unmerged release/downgrade')
 
-    def download(self, assets, tag, name, target, max_bytes=MAX_ASSET, expected_sha256=None):
+    def validate_asset(self, assets, tag, name, max_bytes=MAX_ASSET, expected_sha256=None):
         require(name in assets, 'Release asset missing: ' + name)
         asset = assets[name]
         require(asset.get('state') == 'uploaded', 'Release asset not uploaded')
-        require(0 < asset.get('size', 0) <= max_bytes, 'Release asset size invalid: ' + name)
+        size = asset.get('size')
+        require(type(size) is int and 0 < size <= max_bytes, 'Release asset size invalid: ' + name)
         expected = f'https://github.com/{self.repo}/releases/download/{tag}/{name}'
-        require(urllib.parse.unquote(asset['browser_download_url']) == expected, 'Asset URL outside expected release')
+        require(urllib.parse.unquote(asset.get('browser_download_url', '')) == expected, 'Asset URL outside expected release')
+        if expected_sha256 and asset.get('digest'):
+            require(asset['digest'] == 'sha256:' + expected_sha256, 'GitHub asset digest mismatch')
+        return asset
+
+    def download(self, assets, tag, name, target, max_bytes=MAX_ASSET, expected_sha256=None):
+        asset = self.validate_asset(assets, tag, name, max_bytes, expected_sha256)
+        expected = f'https://github.com/{self.repo}/releases/download/{tag}/{name}'
         if asset['size'] > 32 * 1024 * 1024:
             require(expected_sha256 is not None and re.fullmatch(r'[0-9a-f]{64}', expected_sha256),
                     'Large assets require an approved SHA256 before downloading')
@@ -260,6 +268,36 @@ class Updater:
         require(size == asset['size'], 'Incomplete asset download')
         if asset.get('digest'):
             require(asset['digest'] == 'sha256:' + digest(target), 'GitHub asset digest mismatch')
+
+    def verify_local_image(self, image):
+        try:
+            inspected = json.loads(subprocess.check_output(
+                ['docker', 'image', 'inspect', image['id']], text=True, stderr=subprocess.PIPE))
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            raise ReleaseError('Cannot inspect required local Docker image') from None
+        require(isinstance(inspected, list) and len(inspected) == 1 and isinstance(inspected[0], dict),
+                'Invalid local Docker image inspection result')
+        local = inspected[0]
+        require(local.get('Id') == image['id'] and local.get('Os') == 'linux' and local.get('Architecture') == 'amd64',
+                'Local image does not match content ID/platform')
+
+    def local_images_available(self, images):
+        # An inventory distinguishes a genuinely absent image from a daemon or
+        # inspect failure without interpreting Docker's human-readable errors.
+        try:
+            inventory = subprocess.check_output(
+                ['docker', 'image', 'ls', '--all', '--quiet', '--no-trunc'], text=True, stderr=subprocess.PIPE)
+        except (OSError, subprocess.CalledProcessError):
+            raise ReleaseError('Cannot read local Docker image inventory') from None
+        local_ids = set(inventory.split())
+        require(all(DIGEST.fullmatch(image_id) for image_id in local_ids), 'Invalid local Docker image inventory')
+        complete = True
+        for image in images.values():
+            if image['id'] not in local_ids:
+                complete = False
+            else:
+                self.verify_local_image(image)
+        return complete
 
     def run(self, command, **kwargs):
         # Never print environment contents, config files, or passwords.
@@ -408,10 +446,17 @@ class Updater:
                         'Existing manual deployment core differs; manual core upgrade required')
             expected = {'deployment.tar.gz', 'manifest.json', *manifest['image_assets']}
             require(set(sums) == expected, 'Checksum inventory differs from manifest')
+            for name in expected:
+                limit = (1024 * 1024 if name == 'manifest.json' else
+                         MAX_DEPLOYMENT if name == 'deployment.tar.gz' else MAX_ASSET)
+                self.validate_asset(assets, tag, name, limit, sums[name])
             total = sum(assets[name]['size'] for name in expected)
             require(total <= MAX_BUNDLE, 'Release exceeds bundle size limit')
-            require(shutil.disk_usage(self.root).free > total * 3 + 2 * 1024 ** 3, 'Insufficient release staging disk space')
-            for name in sorted(expected - {'manifest.json'}):
+            reuse_images = self.local_images_available(manifest['images'])
+            needed = {'deployment.tar.gz', 'manifest.json'} if reuse_images else expected
+            staged_total = sum(assets[name]['size'] for name in needed)
+            require(shutil.disk_usage(self.root).free > staged_total * 3 + 2 * 1024 ** 3, 'Insufficient release staging disk space')
+            for name in sorted(needed - {'manifest.json'}):
                 self.download(assets, tag, name, cache / name,
                               MAX_DEPLOYMENT if name == 'deployment.tar.gz' else MAX_ASSET,
                               expected_sha256=sums[name])
@@ -424,18 +469,17 @@ class Updater:
                 for required in ('compose.yaml', 'bootstrap.sh', 'healthcheck.sh', 'release.py', 'backup.sh', 'update.sh'):
                     require((destination / 'deploy/production' / required).is_file(), 'Deployment file missing: ' + required)
                 write_json(destination / 'manifest.json', manifest)
-                # Combine split compressed files without shell expansion, then
-                # let Docker import its own supported archive format.
-                combined = cache / 'docker-images.tar.gz'
-                with combined.open('wb') as dst:
-                    for name in manifest['image_assets']:
-                        with (cache / name).open('rb') as src:
-                            shutil.copyfileobj(src, dst, 1024 * 1024)
-                self.run(['docker', 'load', '--input', str(combined)])
+                if not reuse_images:
+                    # Combine split compressed files without shell expansion,
+                    # then let Docker import its own supported archive format.
+                    combined = cache / 'docker-images.tar.gz'
+                    with combined.open('wb') as dst:
+                        for name in manifest['image_assets']:
+                            with (cache / name).open('rb') as src:
+                                shutil.copyfileobj(src, dst, 1024 * 1024)
+                    self.run(['docker', 'load', '--input', str(combined)])
                 for image in manifest['images'].values():
-                    local = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image['id']], text=True))[0]
-                    require(local['Id'] == image['id'] and local['Os'] == 'linux' and local['Architecture'] == 'amd64',
-                            'Loaded image does not match content ID/platform')
+                    self.verify_local_image(image)
             except Exception:
                 # Staging is not a live release. Keep failed staging for evidence
                 # only after mutation begins; otherwise allow the fixed next tag.

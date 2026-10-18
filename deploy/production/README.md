@@ -42,6 +42,8 @@ Actions 在 Linux amd64 拉取固定版本的 Nextcloud 34.0.4、PostgreSQL 16�
 
 服务器每约 2 分钟只读公开 GitHub Release。该仓库 **Release 发布/资产修改权限就是生产部署权限**；SHA256 校验用于完整性校验，不是独立的代码签名或 workflow attestation。服务器不保存 GitHub token。部署前还验证 tag 的真实 commit/main 祖先关系、已运行版本 commit 的祖先关系、repo/tag/commit、清单、解压路径、镜像 ID 与 amd64 架构。Compose 使用内容寻址 image ID 且禁止隐式 pull，因此导入的镜像可以离线启动。
 
+插件发布的 5 个镜像内容 ID 若已全部存在于服务器，并逐一验证为 Linux amd64，则复用这些镜像，跳过镜像包下载、拼接与导入。缺少任一镜像时下载并导入完整镜像包；Docker 库存/inspect 查询失败或已存在镜像架构错误时停止部署。两条路径都检查 Release 附件库存、来源、大小与清单，下载并校验部署源码 SHA256，并在激活前再次验证全部镜像 ID/架构。
+
 ## 更新与恢复边界
 
 更新通过 `flock` 串行执行：维护模式 → 关闭代理 → 优雅停止 Office/web/任务并排空写入 → `pg_dump` 与 config/custom_apps 检查点 → 原子切换版本与镜像配置 → 强制重建 bind mount → 迁移/内部健康检查。验证期间入口及 cron/四个 worker 保持关闭。

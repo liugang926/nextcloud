@@ -286,5 +286,115 @@ class DownloadCacheTests(unittest.TestCase):
         self.assertEqual(list((self.updater.state_dir / 'asset-cache/prod-new').iterdir()), [])
 
 
+class ImageReuseTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.root = Path(self.folder.name)
+        self.updater = release.Updater(self.root / 'deployment', self.root / 'data', 'owner/repo')
+        (self.updater.root / 'secrets').mkdir()
+        self.manifest = sample_manifest()
+        for index, image in enumerate(self.manifest['images'].values(), start=1):
+            image['id'] = 'sha256:' + f'{index:064x}'
+        self.local_ids = {image['id'] for image in self.manifest['images'].values()}
+        self.loaded = False
+        self.wrong_arch = False
+        self.inspect_error = False
+        deployment = io.BytesIO()
+        with tarfile.open(fileobj=deployment, mode='w:gz') as archive:
+            for name in ('compose.yaml', 'bootstrap.sh', 'healthcheck.sh', 'release.py', 'backup.sh', 'update.sh'):
+                content = b'offline staging fixture\n'
+                info = tarfile.TarInfo('deploy/production/' + name)
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+        self.contents = {'deployment.tar.gz': deployment.getvalue(),
+                         'manifest.json': json.dumps(self.manifest).encode(),
+                         'images.tar.gz': b'archive passed to mocked Docker loader'}
+        self.contents['SHA256SUMS'] = ''.join(
+            hashlib.sha256(data).hexdigest() + '  ' + name + '\n'
+            for name, data in sorted(self.contents.items())).encode()
+        self.candidate = dict(sample_release(), assets=[
+            {'name': name, 'state': 'uploaded', 'size': len(data),
+             'browser_download_url': 'https://github.com/owner/repo/releases/download/prod-new/' + name,
+             'digest': 'sha256:' + hashlib.sha256(data).hexdigest()}
+            for name, data in self.contents.items()])
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def inspect(self, command, **kwargs):
+        if command[:3] == ['docker', 'image', 'ls']:
+            return '\n'.join(sorted(self.local_ids))
+        self.assertEqual(command[:3], ['docker', 'image', 'inspect'])
+        if self.inspect_error:
+            raise release.subprocess.CalledProcessError(1, command, stderr='daemon unavailable')
+        image_id = command[3]
+        self.assertTrue(self.loaded or image_id in self.local_ids)
+        return json.dumps([{'Id': image_id, 'Os': 'linux',
+                            'Architecture': 'arm64' if self.wrong_arch else 'amd64'}])
+
+    def download(self, assets, tag, name, target, *args, **kwargs):
+        target.write_bytes(self.contents[name])
+
+    def run_command(self, command, **kwargs):
+        if command[:2] == ['docker', 'load']:
+            self.assertEqual(Path(command[3]).read_bytes(), self.contents['images.tar.gz'])
+            self.loaded = True
+
+    def apply(self):
+        with mock.patch.object(self.updater, 'tag_commit', return_value='a' * 40), \
+             mock.patch.object(self.updater, 'ancestor') as ancestor, \
+             mock.patch.object(self.updater, 'download', side_effect=self.download) as download, \
+             mock.patch.object(self.updater, 'run', side_effect=self.run_command) as run, \
+             mock.patch.object(self.updater, 'compose'), \
+             mock.patch.object(release.subprocess, 'check_output', side_effect=self.inspect):
+            self.updater.apply(self.candidate)
+        ancestor.assert_called_once_with('a' * 40, 'main')
+        return download, run
+
+    def test_all_images_present_skips_image_download_assembly_and_load(self):
+        download, run = self.apply()
+        self.assertEqual({call.args[2] for call in download.call_args_list},
+                         {'SHA256SUMS', 'manifest.json', 'deployment.tar.gz'})
+        self.assertFalse(any(call.args[0][:2] == ['docker', 'load'] for call in run.call_args_list))
+        self.assertFalse(self.loaded)
+        self.assertEqual(self.updater.state['seen']['prod-new']['status'], 'success')
+
+    def test_any_missing_image_downloads_and_loads_complete_archive(self):
+        self.local_ids.remove(self.manifest['images']['redis']['id'])
+        download, run = self.apply()
+        self.assertIn('images.tar.gz', {call.args[2] for call in download.call_args_list})
+        self.assertEqual(sum(call.args[0][:2] == ['docker', 'load'] for call in run.call_args_list), 1)
+        self.assertTrue(self.loaded)
+        self.assertEqual(self.updater.state['seen']['prod-new']['status'], 'success')
+
+    def test_existing_wrong_architecture_is_rejected_without_downloading(self):
+        self.wrong_arch = True
+        with self.assertRaisesRegex(release.ReleaseError, 'content ID/platform'):
+            self.apply()
+        self.assertFalse(self.loaded)
+        self.assertFalse(self.updater.transaction_path.exists())
+
+    def test_inspect_error_is_rejected_instead_of_treated_as_missing(self):
+        self.inspect_error = True
+        with self.assertRaisesRegex(release.ReleaseError, 'Cannot inspect'):
+            self.apply()
+        self.assertFalse(self.loaded)
+        self.assertFalse(self.updater.transaction_path.exists())
+
+    def test_skipped_image_asset_metadata_is_still_validated(self):
+        image_asset = next(asset for asset in self.candidate['assets'] if asset['name'] == 'images.tar.gz')
+        for field, invalid in [('size', release.MAX_ASSET + 1), ('size', 0), ('state', 'pending'),
+                               ('browser_download_url', 'https://evil.example/image'), ('digest', 'sha256:' + 'f' * 64)]:
+            original = image_asset[field]
+            image_asset[field] = invalid
+            try:
+                with self.subTest(field=field, value=invalid), self.assertRaises(release.ReleaseError):
+                    self.apply()
+            finally:
+                image_asset[field] = original
+        self.assertFalse(self.loaded)
+        self.assertFalse(self.updater.transaction_path.exists())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
