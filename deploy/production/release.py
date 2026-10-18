@@ -16,6 +16,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from parallel_download import DownloadError, download_parallel
 
 TAG = re.compile(r'prod-[A-Za-z0-9][A-Za-z0-9._-]{0,100}\Z')
 SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -212,13 +213,38 @@ class Updater:
         require(compare.get('merge_base_commit', {}).get('sha') == before,
                 'Commit is not an ancestor: refusing unmerged release/downgrade')
 
-    def download(self, assets, tag, name, target, max_bytes=MAX_ASSET):
+    def download(self, assets, tag, name, target, max_bytes=MAX_ASSET, expected_sha256=None):
         require(name in assets, 'Release asset missing: ' + name)
         asset = assets[name]
         require(asset.get('state') == 'uploaded', 'Release asset not uploaded')
         require(0 < asset.get('size', 0) <= max_bytes, 'Release asset size invalid: ' + name)
         expected = f'https://github.com/{self.repo}/releases/download/{tag}/{name}'
         require(urllib.parse.unquote(asset['browser_download_url']) == expected, 'Asset URL outside expected release')
+        if asset['size'] > 32 * 1024 * 1024:
+            require(expected_sha256 is not None and re.fullmatch(r'[0-9a-f]{64}', expected_sha256),
+                    'Large assets require an approved SHA256 before downloading')
+            require(TAG.fullmatch(tag), 'Invalid cache release tag')
+            identity = hashlib.sha256((expected + '\n' + str(asset['size']) + '\n' + expected_sha256).encode()).hexdigest()
+            cache_dir = self.state_dir / 'asset-cache' / tag / identity
+            cached = cache_dir / name
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            if cached.exists() and (cached.stat().st_size != asset['size'] or digest(cached) != expected_sha256):
+                # Keep partial chunks inside the downloader; a completed file
+                # with a bad SHA must never seed a subsequent attempt.
+                if cached.stat().st_size == asset['size']:
+                    shutil.rmtree(cache_dir)
+                    cache_dir.mkdir(parents=True)
+            download_parallel(asset['browser_download_url'], cached, asset['size'],
+                              workers=8, chunk_size=4 * 1024 * 1024,
+                              allowed_hosts={'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'})
+            if digest(cached) != expected_sha256:
+                shutil.rmtree(cache_dir)
+                raise ReleaseError('Large release asset checksum mismatch')
+            if asset.get('digest'):
+                require(asset['digest'] == 'sha256:' + expected_sha256, 'GitHub asset digest mismatch')
+            shutil.copyfile(cached, target)
+            require(target.stat().st_size == asset['size'], 'Incomplete cached asset copy')
+            return
         request = urllib.request.Request(asset['browser_download_url'], headers={'User-Agent': 'nextcloud-production-release/1'})
         with urllib.request.urlopen(request, timeout=120) as response, target.open('wb') as dest:
             require(urllib.parse.urlsplit(response.url).hostname in {
@@ -372,7 +398,8 @@ class Updater:
             cache = Path(temporary)
             self.download(assets, tag, 'SHA256SUMS', cache / 'SHA256SUMS', 65536)
             sums = parse_sums((cache / 'SHA256SUMS').read_text())
-            self.download(assets, tag, 'manifest.json', cache / 'manifest.json', 1024 * 1024)
+            self.download(assets, tag, 'manifest.json', cache / 'manifest.json', 1024 * 1024,
+                          expected_sha256=sums['manifest.json'])
             require(digest(cache / 'manifest.json') == sums['manifest.json'], 'Manifest checksum mismatch')
             manifest = json.loads((cache / 'manifest.json').read_text())
             validate_manifest(manifest, self.repo, release, commit, self.state)
@@ -386,7 +413,8 @@ class Updater:
             require(shutil.disk_usage(self.root).free > total * 3 + 2 * 1024 ** 3, 'Insufficient release staging disk space')
             for name in sorted(expected - {'manifest.json'}):
                 self.download(assets, tag, name, cache / name,
-                              MAX_DEPLOYMENT if name == 'deployment.tar.gz' else MAX_ASSET)
+                              MAX_DEPLOYMENT if name == 'deployment.tar.gz' else MAX_ASSET,
+                              expected_sha256=sums[name])
                 require(digest(cache / name) == sums[name], 'Release checksum mismatch: ' + name)
             destination = self.root / 'releases' / tag
             require(not destination.exists(), 'Release directory already exists; investigate before reusing tag')
@@ -456,12 +484,17 @@ class Updater:
                 self.env.pop('NEXTCLOUD_SKIP_WORKERS', None)
                 self.compose('up', '-d', '--force-recreate', '--wait', *WORKERS, 'proxy')
                 self.run(['bash', str(destination / 'deploy/production/healthcheck.sh')])
-                for name in ('release.py', 'update.sh', 'backup.sh'):
-                    source = destination / 'deploy/production' / name
-                    atomic_write(self.root / 'bin' / name, source.read_text(), 0o750)
+                # A legacy application bundle may predate the range transport.
+                # Keep the newer installed updater rather than downgrading its
+                # dependency set while activating that otherwise valid bundle.
+                if (destination / 'deploy/production/parallel_download.py').is_file():
+                    for name in ('parallel_download.py', 'update.sh', 'backup.sh', 'release.py'):
+                        source = destination / 'deploy/production' / name
+                        atomic_write(self.root / 'bin' / name, source.read_text(), 0o750)
                 self.state['success'] = {'tag': tag, 'commit': commit, 'published_at': release['published_at'], 'images': manifest['images']}
                 self.mark(release, commit, 'success', backup=str(backup) if previous else None)
                 self.transaction_path.unlink()
+                shutil.rmtree(self.state_dir / 'asset-cache' / tag, ignore_errors=True)
                 print('Production release healthy: ' + tag + ' ' + commit)
             except Exception:
                 if tx['phase'] == 'traffic_committed':
@@ -498,7 +531,7 @@ class Updater:
             self.apply(release)
         except Exception as error:
             if release['tag_name'] not in self.state['seen']:
-                if isinstance(error, (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError)):
+                if isinstance(error, (DownloadError, urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError)):
                     attempts = self.state.setdefault('download_attempts', {})
                     attempts[release['tag_name']] = attempts.get(release['tag_name'], 0) + 1
                     write_json(self.state_path, self.state)

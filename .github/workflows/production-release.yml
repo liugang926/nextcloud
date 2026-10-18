@@ -46,6 +46,7 @@ jobs:
       - name: Verify production updater safety tests
         run: |
           python3 deploy/production/test_release.py
+          python3 deploy/production/test_parallel_download.py
           for script in deploy/production/*.sh; do bash -n "$script"; done
 
       - name: Fetch the pinned Nextcloud 34 Office app

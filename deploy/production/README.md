@@ -50,7 +50,7 @@ Actions 在 Linux amd64 拉取固定版本的 Nextcloud 34.0.4、PostgreSQL 16�
 
 自动发布只更新本仓库插件，Nextcloud 核心固定为 34.0.4，且已部署核心 image ID 不允许自动改变。核心/大版本升级需要另行规划，脚本不会自行降级 Nextcloud 核心、删除用户数据或运行 `docker compose down -v`。DB/config 检查点用于部署恢复，灾备还需要另外备份用户 `data`、持久卷及秘密。
 
-下载网络错误最多尝试 3 次；验证失败或部署失败不会对同 tag 无限重试。人工手工建立的 `current` 必须包含有效 `manifest.json`，否则拒绝自动接管。事务进入 `manual-recovery` 后会阻止后续自动部署；先根据受保护的 `state/transaction.json`、`release-state.json` 与对应备份调查，确认实际源码、DB 和配置一致后再由管理员解除阻断，避免直接删日志盲目重跑。
+大于 32 MiB 的附件最多使用 8 路、4 MiB 分块下载，严格核对 HTTP 206、Content-Range、HTTPS 来源和最终 SHA256。完整分块留在受保护的 `state/asset-cache`，网络中断后可恢复；成功部署后清理该版本的下载缓存。下载网络错误最多尝试 3 次；验证失败或部署失败不会对同 tag 无限重试。人工手工建立的 `current` 必须包含有效 `manifest.json`，否则拒绝自动接管。事务进入 `manual-recovery` 后会阻止后续自动部署；先根据受保护的 `state/transaction.json`、`release-state.json` 与对应备份调查，确认实际源码、DB 和配置一致后再由管理员解除阻断，避免直接删日志盲目重跑。
 
 ```sh
 # 查看发布状态和日志（不输出秘密）
