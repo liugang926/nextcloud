@@ -1,0 +1,20 @@
+[Unit]
+Description=Nextcloud production, integration workers and Office
+Requires=docker.service nextcloud-production.slice
+After=network-online.target docker.service nextcloud-production.slice
+Wants=network-online.target
+RequiresMountsFor=/data/nextcloud-production /srv/nextcloud-production
+ConditionPathExists=/srv/nextcloud-production/secrets/images.env
+ConditionPathExists=/srv/nextcloud-production/current/deploy/production/compose.yaml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/nextcloud-production/current
+ExecStart=/srv/nextcloud-production/bin/update.sh --start-production
+ExecStop=/usr/bin/docker compose --env-file /srv/nextcloud-production/secrets/images.env -p nextcloud-production -f /srv/nextcloud-production/current/deploy/production/compose.yaml stop --timeout 120
+TimeoutStartSec=1800
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

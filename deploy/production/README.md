@@ -1,0 +1,68 @@
+# 生产部署：cloud.tianjizn.com
+
+服务器先确认 CPU/内存/磁盘、已有 AI 容器、端口和 cgroup 预算，再部署独立 `nextcloud-production` Compose 项目。默认后端为 `http://10.106.1.128:18082`；用户自己的 HTTPS 代理负责 `https://cloud.tianjizn.com`，须保留 Host、转发 `/` 与 Office 的 `/hosting`、`/browser`、`/cool`（含 WebSocket）。宿主 nginx 不需要修改。
+
+## 初次安装与开机启动
+
+需要 Linux amd64、Docker Engine + Compose、Python 3、curl、tar、flock、systemd；无须 GitHub runner 或 GitHub 写入凭据。`install.sh` 创建缺失的随机 DB/管理员密码，已有秘密不覆盖，也不会输出密码。
+
+```sh
+sudo bash deploy/production/install.sh
+sudo systemctl start nextcloud-production-update.service
+sudo systemctl status nextcloud-production.service nextcloud-production-update.timer
+```
+
+`nextcloud-production.service` 与 Docker 随系统启动，10 个容器均设置 restart 策略。独立 slice 限制整个 Nextcloud 项目的 CPU/内存，避免挤占 AI 模型。开机前先检查/恢复中断的事务；存在需要人工恢复的事务时，不自动开放生产入口。
+
+| 路径 | 用途 |
+| --- | --- |
+| `/srv/nextcloud-production/current` | 当前版本的原子符号链接 |
+| `/srv/nextcloud-production/releases/<prod-tag>` | 各版本源码、manifest 和部署脚本 |
+| `/srv/nextcloud-production/secrets/` | 文件秘密与 `images.env`，父目录仅 root 可进入 |
+| `/srv/nextcloud-production/state/` | 版本账本、事务日志和互斥锁 |
+| `/data/nextcloud-production/{html,data,postgres,redis,office}` | 持久数据 |
+| `/data/nextcloud-production/backups/` | 更新前 DB、config、custom_apps 检查点 |
+
+管理员默认 `admin`，密码保存在 `secrets/nextcloud_admin_password`；数据库密码保存在 `secrets/nextcloud_db_password`。需要以 root 在服务器读取并安全交接。不要把这些文件提交 Git。`images.env` 可保留 `NC_ADMIN_USER`、`NEXTCLOUD_DOMAIN`、`WEKNORA_HTTPS_ORIGINS` 等配置，自动更新只替换 5 个镜像变量。LDAP 连接和 WeKnora 配对需要管理员根据实际目录/应用配置。
+
+## 确认合并后发布
+
+先让变更进入 GitHub `main`，等待该**精确 commit** 的主分支 `integration.yml` 中 `local-smoke`（Nextcloud 安装/API）与 `direct-upgrade`（升级/恢复）两项成功，再创建新的 `prod-*` tag：
+
+```sh
+git switch main
+git pull --ff-only
+git tag prod-20261018-01
+git push origin prod-20261018-01
+```
+
+该 tag 工作流检查 commit 是 `origin/main` 的祖先，并要求相同 SHA 的 main push 中上述两项 Nextcloud 检查成功，以及发布器安全自测成功；不等待本次未部署的历史 WeKnora 补丁矩阵，不假设仓库已经配置分支保护。工作流串行发布，不取消正在进行的生产发布。普通 main push、PR 或其他 tag 均不会发布生产版本。发布后不要移动 tag、替换 Release 资产或复用失败 tag；修改后使用新的 `prod-*` tag。
+
+Actions 在 Linux amd64 拉取固定版本的 Nextcloud 34.0.4、PostgreSQL 16、Redis 7、Collabora CODE 26.04.2.2.1 和 nginx 1.30.3，记录真实 registry digest、image config ID 和架构；打包运行源码、Nextcloud 34 兼容的 richdocuments 11.1.2、镜像及 SHA256 清单。镜像 gzip 超过约 1.7 GiB 时分片。所有资产上传至 draft 后才发布，避免服务器读到不完整版本。
+
+服务器每约 2 分钟只读公开 GitHub Release。该仓库 **Release 发布/资产修改权限就是生产部署权限**；SHA256 校验用于完整性校验，不是独立的代码签名或 workflow attestation。服务器不保存 GitHub token。部署前还验证 tag 的真实 commit/main 祖先关系、已运行版本 commit 的祖先关系、repo/tag/commit、清单、解压路径、镜像 ID 与 amd64 架构。Compose 使用内容寻址 image ID 且禁止隐式 pull，因此导入的镜像可以离线启动。
+
+## 更新与恢复边界
+
+更新通过 `flock` 串行执行：维护模式 → 关闭代理 → 优雅停止 Office/web/任务并排空写入 → `pg_dump` 与 config/custom_apps 检查点 → 原子切换版本与镜像配置 → 强制重建 bind mount → 迁移/内部健康检查。验证期间入口及 cron/四个 worker 保持关闭。
+
+内部检查成功前失败，会恢复旧源码、升级前 DB 和 config/custom_apps，再验证旧服务。内部检查通过后先记录不可回退边界，再启动任务与生产入口；此后若失败，保留新 DB/文件并要求人工修复，避免覆盖已经接受的用户写入或 WeKnora 事件。只有完整健康检查通过才记录 `success`。检查点、失败版本与事务证据不会自动删除。
+
+自动发布只更新本仓库插件，Nextcloud 核心固定为 34.0.4，且已部署核心 image ID 不允许自动改变。核心/大版本升级需要另行规划，脚本不会自行降级 Nextcloud 核心、删除用户数据或运行 `docker compose down -v`。DB/config 检查点用于部署恢复，灾备还需要另外备份用户 `data`、持久卷及秘密。
+
+下载网络错误最多尝试 3 次；验证失败或部署失败不会对同 tag 无限重试。人工手工建立的 `current` 必须包含有效 `manifest.json`，否则拒绝自动接管。事务进入 `manual-recovery` 后会阻止后续自动部署；先根据受保护的 `state/transaction.json`、`release-state.json` 与对应备份调查，确认实际源码、DB 和配置一致后再由管理员解除阻断，避免直接删日志盲目重跑。
+
+```sh
+# 查看发布状态和日志（不输出秘密）
+sudo systemctl list-timers nextcloud-production-update.timer
+sudo journalctl -u nextcloud-production-update.service -n 100 --no-pager
+sudo cat /srv/nextcloud-production/state/release-state.json
+
+# 手工一致性检查点；会短暂停止入口和任务，完成后验证并恢复
+sudo /srv/nextcloud-production/bin/backup.sh /data/nextcloud-production/backups/manual-20261018-01
+
+# 健康检查；外部 HTTPS 由用户代理单独验收
+sudo /srv/nextcloud-production/current/deploy/production/healthcheck.sh
+```
+
+发布器安全测试：`python3 deploy/production/test_release.py`。测试覆盖恶意归档、manifest/架构/核心变更、防降级、tag 重写、网络重试、开机中断恢复以及开放流量后禁止回滚 DB。

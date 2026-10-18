@@ -260,11 +260,13 @@ def main():
         check(status, 200, "source capabilities for publication check")
         instance_id = json.loads(body)["instance_id"]
         publication_check = f"{api}/bindings/{args.binding}/files/{args.file_id}/publication-check"
-        exact = {"instance_id": instance_id, "etag": item["etag"], "path": item["path"]}
+        exact = {"instance_id": instance_id, "etag": item["etag"], "path": item["path"],
+                 "content_revision": item["source_content_revision"]}
         status, _ = request(reader, publication_check, "POST",
                             {**bearer, "Content-Type": "application/json"}, json.dumps(exact).encode())
         check(status, 204, "exact current publication")
         for field, changed in (("etag", "stale-etag"), ("path", "other/path.md"),
+                               ("content_revision", str(int(item["source_content_revision"]) + 1)),
                                ("instance_id", "another-instance")):
             status, _ = request(reader, publication_check, "POST",
                                 {**bearer, "Content-Type": "application/json"},
