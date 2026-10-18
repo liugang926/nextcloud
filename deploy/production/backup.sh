@@ -47,6 +47,7 @@ test -d "$DATA/html/config"
 test -d "$DATA/html/custom_apps"
 cp "$ENV_FILE" "$DEST/images.env"
 readlink -f "$ROOT/current" > "$DEST/previous-release.txt"
+python3 "$ROOT/bin/release.py" --record-db-role "$DEST"
 dc exec -T db sh -eu -c 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' > "$DEST/postgres.dump.tmp"
 test -s "$DEST/postgres.dump.tmp"
 mv "$DEST/postgres.dump.tmp" "$DEST/postgres.dump"
@@ -54,7 +55,7 @@ tar --numeric-owner -cpf "$DEST/config-customapps.tar" -C "$DATA/html" config cu
 dc exec -T db sh -eu -c 'exec pg_restore --list' < "$DEST/postgres.dump" > "$DEST/postgres.dump.list"
 (
   cd "$DEST"
-  sha256sum postgres.dump config-customapps.tar images.env > SHA256SUMS
+  sha256sum postgres.dump config-customapps.tar images.env database-role.json > SHA256SUMS
 )
 date -u +%Y-%m-%dT%H:%M:%SZ > "$DEST/COMPLETE"
 sync -f "$DEST" 2>/dev/null || sync

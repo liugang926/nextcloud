@@ -22,6 +22,7 @@ from image_identity import ConfigMismatch, IdentityError, verify_image
 TAG = re.compile(r'prod-[A-Za-z0-9][A-Za-z0-9._-]{0,100}\Z')
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
+DB_ROLE = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,62}\Z')
 ASSET = re.compile(r'(?:deployment\.tar\.gz|manifest\.json|images\.tar\.gz(?:\.part-[0-9]{3})?)\Z')
 IMAGE_KEYS = {'nextcloud': 'NEXTCLOUD_IMAGE', 'postgres': 'POSTGRES_IMAGE',
               'redis': 'REDIS_IMAGE', 'office': 'OFFICE_IMAGE', 'proxy': 'PROXY_IMAGE'}
@@ -370,6 +371,89 @@ class Updater:
             'published_at': release['published_at'], **extra}
         write_json(self.state_path, self.state)
 
+    def config_database_role(self, directory):
+        """Read only dbuser; config.php and its password never reach logs."""
+        configured = json.loads(self.compose('config', '--format', 'json', capture=True))
+        image = configured['services']['nextcloud']['image']
+        require(isinstance(image, str) and DIGEST.fullmatch(image), 'Invalid database-role reader image')
+        script = '''error_reporting(0); $CONFIG=[]; ob_start();
+try { require "/run/nextcloud-config/config.php"; } catch (\\Throwable $e) { ob_end_clean(); exit(1); }
+ob_end_clean(); $role=$CONFIG["dbuser"] ?? null;
+if (!is_string($role) || !preg_match('/\\A[A-Za-z_][A-Za-z0-9_]{0,62}\\z/', $role)) { exit(1); }
+echo json_encode(["dbuser"=>$role], JSON_THROW_ON_ERROR);'''
+        command = ['docker', 'run', '--rm', '--pull=never', '--network=none', '--read-only',
+                   '--cpus=0.25', '--memory=64m', '--pids-limit=64', '--entrypoint=php',
+                   '--mount', 'type=bind,src=' + str(Path(directory).resolve()) + ',dst=/run/nextcloud-config,readonly',
+                   image, '-d', 'display_errors=0', '-d', 'log_errors=0', '-r', script]
+        try:
+            result = json.loads(subprocess.check_output(command, stderr=subprocess.PIPE, timeout=60))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            raise ReleaseError('Cannot read the protected Nextcloud database role') from None
+        role = result.get('dbuser') if isinstance(result, dict) else None
+        require(isinstance(role, str) and DB_ROLE.fullmatch(role), 'Invalid Nextcloud database role')
+        return role
+
+    def validate_database_role(self, role):
+        require(isinstance(role, str) and DB_ROLE.fullmatch(role), 'Invalid Nextcloud database role')
+        query = f"SELECT count(*) FROM pg_roles WHERE rolname = '{role}' AND rolcanlogin;\n".encode()
+        result = self.compose('exec', '-T', 'db', 'sh', '-eu', '-c',
+                              'exec psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres',
+                              capture=True, input=query)
+        require(result.strip() == b'1', 'Nextcloud database role does not exist or cannot log in')
+
+    def record_database_role(self, backup):
+        backup = Path(backup)
+        require(backup.is_dir(), 'Backup directory does not exist')
+        role = self.config_database_role(self.data / 'html/config')
+        self.validate_database_role(role)
+        write_json(backup / 'database-role.json', {'schema': 1, 'app_role': role})
+
+    def backup_database_role(self, backup):
+        # Legacy checkpoints have no role metadata. Their checksummed config
+        # remains authoritative; never assume the PostgreSQL admin is the app.
+        with tempfile.TemporaryDirectory(prefix='database-role-', dir=self.state_dir) as folder:
+            config = Path(folder) / 'config.php'
+            with tarfile.open(backup / 'config-customapps.tar', 'r:') as archive:
+                members = [member for member in archive if PurePosixPath(member.name).as_posix() == 'config/config.php']
+                require(len(members) == 1 and members[0].isfile() and 0 < members[0].size <= 1024 * 1024,
+                        'Backup must contain one bounded Nextcloud config.php')
+                with archive.extractfile(members[0]) as source:
+                    config.write_bytes(source.read())
+            config.chmod(0o600)
+            role = self.config_database_role(Path(folder))
+        metadata = backup / 'database-role.json'
+        if metadata.exists():
+            recorded = json.loads(metadata.read_text())
+            require(recorded == {'schema': 1, 'app_role': role}, 'Backup database role does not match its config')
+            require(any(line.endswith('  database-role.json') for line in (backup / 'SHA256SUMS').read_text().splitlines()),
+                    'Backup database role is not covered by checksums')
+        self.validate_database_role(role)
+        return role
+
+    def verify_restored_database_role(self, role):
+        require(isinstance(role, str) and DB_ROLE.fullmatch(role), 'Invalid Nextcloud database role')
+        sql = f'''DO $verify$
+BEGIN
+ IF NOT has_schema_privilege('{role}', 'public', 'USAGE') OR NOT has_schema_privilege('{role}', 'public', 'CREATE') THEN
+  RAISE EXCEPTION 'Restored application role cannot use the public schema';
+ END IF;
+ IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relkind IN ('r','p','S','i','I','v','m','f')
+            AND pg_get_userbyid(c.relowner) <> '{role}'
+            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e')) THEN
+  RAISE EXCEPTION 'Restored application objects have an unexpected owner';
+ END IF;
+END $verify$;
+BEGIN;
+SET LOCAL ROLE "{role}";
+SELECT 1 FROM public.oc_appconfig LIMIT 1;
+UPDATE public.oc_appconfig SET configvalue=configvalue WHERE false;
+ROLLBACK;
+'''.encode()
+        self.compose('exec', '-T', 'db', 'sh', '-eu', '-c',
+                     'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d nextcloud', input=sql,
+                     stdout=subprocess.DEVNULL)
+
     def recover(self, tx):
         """Recreate old bind mounts and restore DB+config as one checkpoint."""
         backup = Path(tx['backup'])
@@ -384,13 +468,16 @@ class Updater:
         shutil.copyfile(backup / 'images.env', self.env_path)
         self.env_path.chmod(0o600)
         self.compose('up', '-d', '--wait', 'db', 'redis')
+        role = self.backup_database_role(backup)
         self.compose('exec', '-T', 'db', 'sh', '-eu', '-c',
                      'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = \'nextcloud\' AND pid <> pg_backend_pid();"')
         self.compose('exec', '-T', 'db', 'sh', '-eu', '-c',
-                     'dropdb --if-exists --force -U "$POSTGRES_USER" nextcloud && createdb -U "$POSTGRES_USER" -O "$POSTGRES_USER" nextcloud')
+                     'dropdb --if-exists --force -U "$POSTGRES_USER" nextcloud && createdb -T template0 -U "$POSTGRES_USER" -O "$1" nextcloud', 'sh', role)
         with (backup / 'postgres.dump').open('rb') as source:
             self.compose('exec', '-T', 'db', 'sh', '-eu', '-c',
-                         'exec pg_restore --exit-on-error --no-owner --no-privileges -U "$POSTGRES_USER" -d nextcloud', stdin=source)
+                         'exec pg_restore --exit-on-error --no-owner --no-privileges -U "$POSTGRES_USER" --role="$1" -d nextcloud',
+                         'sh', role, stdin=source)
+        self.verify_restored_database_role(role)
         html = self.data / 'html'
         for directory in ('config', 'custom_apps'):
             path = html / directory
@@ -548,7 +635,7 @@ class Updater:
                     # are allowed until the upgrade has passed internal health.
                     self.compose('stop', 'proxy')
                     self.compose('stop', '--timeout', '60', 'office', 'nextcloud', *WORKERS)
-                    self.run(['bash', str(Path(previous) / 'deploy/production/backup.sh'), str(backup), '--quiesced'])
+                    self.run(['bash', str(self.root / 'bin/backup.sh'), str(backup), '--quiesced'])
                 tx['phase'] = 'changing'
                 write_json(self.transaction_path, tx)
                 self.set_current(destination)
@@ -637,11 +724,14 @@ def main():
     parser.add_argument('--data', default=os.environ.get('NEXTCLOUD_DATA_ROOT', '/data/nextcloud-production'))
     parser.add_argument('--repo', default=os.environ.get('NEXTCLOUD_RELEASE_REPOSITORY', 'liugang926/nextcloud'))
     parser.add_argument('--recover-only', action='store_true', help='Recover an interrupted transaction without checking for new releases')
+    parser.add_argument('--record-db-role', metavar='BACKUP_DIR', help='Record only the protected application database role in a checkpoint')
     args = parser.parse_args()
     os.umask(0o077)
     try:
         updater = Updater(args.root, args.data, args.repo)
-        if args.recover_only:
+        if args.record_db_role:
+            updater.record_database_role(args.record_db_role)
+        elif args.recover_only:
             updater.interrupted()
         else:
             updater.check()
