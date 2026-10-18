@@ -107,6 +107,8 @@ def build(args):
     for key, source in IMAGES.items():
         subprocess.run(['docker', 'pull', '--platform', 'linux/amd64', source], check=True)
         data = json.loads(command('docker', 'image', 'inspect', source))[0]
+        if data.get('Descriptor') is not None:
+            raise ValueError('CI requires classic Docker config IDs; refusing to label an OCI runtime digest as a config ID')
         if (data.get('Os'), data.get('Architecture')) != ('linux', 'amd64'):
             raise ValueError('Refusing non-amd64 image: ' + source)
         digests = data.get('RepoDigests', [])

@@ -26,6 +26,9 @@ jobs:
 
       - name: Static checks
         run: |
+          python3 deploy/production/test_image_identity.py
+          python3 deploy/production/test_release.py
+          python3 deploy/production/test_parallel_download.py
           bash -n scripts/*.sh
           bash -n scripts/ops/*.sh
           npm ci --prefix apps/integration_weknora

@@ -296,12 +296,13 @@ class ImageReuseTests(unittest.TestCase):
         for index, image in enumerate(self.manifest['images'].values(), start=1):
             image['id'] = 'sha256:' + f'{index:064x}'
         self.local_ids = {image['id'] for image in self.manifest['images'].values()}
+        self.runtime_ids = {name: image['id'] for name, image in self.manifest['images'].items()}
         self.loaded = False
         self.wrong_arch = False
         self.inspect_error = False
         deployment = io.BytesIO()
         with tarfile.open(fileobj=deployment, mode='w:gz') as archive:
-            for name in ('compose.yaml', 'bootstrap.sh', 'healthcheck.sh', 'release.py', 'backup.sh', 'update.sh'):
+            for name in ('compose.yaml', 'bootstrap.sh', 'healthcheck.sh', 'release.py', 'backup.sh', 'update.sh', 'parallel_download.py'):
                 content = b'offline staging fixture\n'
                 info = tarfile.TarInfo('deploy/production/' + name)
                 info.size = len(content)
@@ -323,7 +324,10 @@ class ImageReuseTests(unittest.TestCase):
 
     def inspect(self, command, **kwargs):
         if command[:3] == ['docker', 'image', 'ls']:
-            return '\n'.join(sorted(self.local_ids))
+            return '\n'.join(json.dumps({'ID': runtime_id,
+                                         'Repository': self.manifest['images'][name]['source'].rsplit(':', 1)[0],
+                                         'Tag': self.manifest['images'][name]['source'].rsplit(':', 1)[1]})
+                             for name, runtime_id in self.runtime_ids.items() if runtime_id in self.local_ids)
         self.assertEqual(command[:3], ['docker', 'image', 'inspect'])
         if self.inspect_error:
             raise release.subprocess.CalledProcessError(1, command, stderr='daemon unavailable')
@@ -339,6 +343,7 @@ class ImageReuseTests(unittest.TestCase):
         if command[:2] == ['docker', 'load']:
             self.assertEqual(Path(command[3]).read_bytes(), self.contents['images.tar.gz'])
             self.loaded = True
+            self.local_ids.update(self.runtime_ids.values())
 
     def apply(self):
         with mock.patch.object(self.updater, 'tag_commit', return_value='a' * 40), \
@@ -366,6 +371,60 @@ class ImageReuseTests(unittest.TestCase):
         self.assertEqual(sum(call.args[0][:2] == ['docker', 'load'] for call in run.call_args_list), 1)
         self.assertTrue(self.loaded)
         self.assertEqual(self.updater.state['seen']['prod-new']['status'], 'success')
+
+    def test_containerd_runtime_ids_are_resolved_but_release_config_ids_remain_pinned(self):
+        self.runtime_ids = {name: 'sha256:' + f'{index + 100:064x}'
+                            for index, name in enumerate(self.manifest['images'])}
+        self.local_ids = set(self.runtime_ids.values())
+
+        def verify(expected, inspected):
+            name = next(name for name, image in self.manifest['images'].items() if image['id'] == expected['id'])
+            self.assertEqual(inspected['Id'], self.runtime_ids[name])
+            return inspected['Id']
+
+        with mock.patch.object(release, 'verify_image', side_effect=verify):
+            download, run = self.apply()
+        self.assertNotIn('images.tar.gz', {call.args[2] for call in download.call_args_list})
+        environment = dict(line.split('=', 1) for line in self.updater.env_path.read_text().splitlines())
+        for name, key in release.IMAGE_KEYS.items():
+            self.assertEqual(environment[key], self.runtime_ids[name])
+            self.assertEqual(self.updater.state['success']['images'][name]['id'], self.manifest['images'][name]['id'])
+        self.assertEqual(self.updater.state['success']['runtime_images'], self.runtime_ids)
+        # This fixture contains the range downloader but predates identity.py.
+        # Activating it must retain the installed compatible updater programs.
+        self.assertFalse((self.updater.root / 'bin/release.py').exists())
+
+    def test_source_tag_with_another_verified_config_requires_archive_import(self):
+        original_verify = release.verify_image
+        calls = 0
+
+        def verify(expected, inspected):
+            nonlocal calls
+            if expected['source'] == 'redis:7-alpine' and not self.loaded:
+                calls += 1
+                raise release.ConfigMismatch('Verified local image has a different config digest')
+            return original_verify(expected, inspected)
+
+        # Only a source tag locates this alternative candidate; its config ID
+        # is not the approved config or a cached mapping for the approved one.
+        self.runtime_ids['redis'] = 'sha256:' + 'f' * 64
+        self.local_ids.remove(self.manifest['images']['redis']['id'])
+        self.local_ids.add(self.runtime_ids['redis'])
+
+        original_run = self.run_command
+
+        def import_images(command, **kwargs):
+            if command[:2] == ['docker', 'load']:
+                self.runtime_ids['redis'] = self.manifest['images']['redis']['id']
+            original_run(command, **kwargs)
+
+        with mock.patch.object(release, 'verify_image', side_effect=verify), \
+             mock.patch.object(self, 'run_command', side_effect=import_images):
+            download, _ = self.apply()
+        self.assertEqual(calls, 1)
+        self.assertTrue(self.loaded)
+        self.assertIn('images.tar.gz', {call.args[2] for call in download.call_args_list})
+
 
     def test_existing_wrong_architecture_is_rejected_without_downloading(self):
         self.wrong_arch = True
