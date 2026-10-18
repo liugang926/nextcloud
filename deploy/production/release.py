@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from parallel_download import DownloadError, download_parallel
+from image_identity import ConfigMismatch, IdentityError, verify_image
 
 TAG = re.compile(r'prod-[A-Za-z0-9][A-Za-z0-9._-]{0,100}\Z')
 SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -269,34 +270,70 @@ class Updater:
         if asset.get('digest'):
             require(asset['digest'] == 'sha256:' + digest(target), 'GitHub asset digest mismatch')
 
-    def verify_local_image(self, image):
+    def verify_local_image(self, image, reference=None):
         try:
             inspected = json.loads(subprocess.check_output(
-                ['docker', 'image', 'inspect', image['id']], text=True, stderr=subprocess.PIPE))
+                ['docker', 'image', 'inspect', reference or image['id']], text=True, stderr=subprocess.PIPE))
         except (OSError, subprocess.CalledProcessError, ValueError):
             raise ReleaseError('Cannot inspect required local Docker image') from None
         require(isinstance(inspected, list) and len(inspected) == 1 and isinstance(inspected[0], dict),
                 'Invalid local Docker image inspection result')
-        local = inspected[0]
-        require(local.get('Id') == image['id'] and local.get('Os') == 'linux' and local.get('Architecture') == 'amd64',
-                'Local image does not match content ID/platform')
+        try:
+            return verify_image(image, inspected[0])
+        except ConfigMismatch:
+            raise
+        except IdentityError:
+            raise ReleaseError('Local image does not match content ID/platform') from None
 
     def local_images_available(self, images):
-        # An inventory distinguishes a genuinely absent image from a daemon or
-        # inspect failure without interpreting Docker's human-readable errors.
+        # Tags only locate candidates. Classic IDs and containerd manifest IDs
+        # must both prove the release config identity before they can be used.
         try:
             inventory = subprocess.check_output(
-                ['docker', 'image', 'ls', '--all', '--quiet', '--no-trunc'], text=True, stderr=subprocess.PIPE)
+                ['docker', 'image', 'ls', '--all', '--no-trunc', '--format', '{{json .}}'],
+                text=True, stderr=subprocess.PIPE)
+            rows = [json.loads(line) for line in inventory.splitlines() if line.strip()]
         except (OSError, subprocess.CalledProcessError):
             raise ReleaseError('Cannot read local Docker image inventory') from None
-        local_ids = set(inventory.split())
-        require(all(DIGEST.fullmatch(image_id) for image_id in local_ids), 'Invalid local Docker image inventory')
+        except ValueError:
+            raise ReleaseError('Invalid local Docker image inventory') from None
+        local_ids, references = set(), {}
+        for row in rows:
+            require(isinstance(row, dict) and DIGEST.fullmatch(row.get('ID', '')),
+                    'Invalid local Docker image inventory')
+            image_id = row['ID']
+            local_ids.add(image_id)
+            repository, tag = row.get('Repository'), row.get('Tag')
+            require(isinstance(repository, str) and isinstance(tag, str), 'Invalid local Docker image reference')
+            if repository != '<none>' and tag != '<none>':
+                repository = repository.removeprefix('docker.io/').removeprefix('library/')
+                references.setdefault(repository + ':' + tag, set()).add(image_id)
+        success = self.state.get('success', {})
+        cached = {name: runtime_id for name, runtime_id in success.get('runtime_images', {}).items()
+                  if name in images and success.get('images', {}).get(name, {}).get('id') == images[name]['id']}
+        self.runtime_images = {}
         complete = True
-        for image in images.values():
-            if image['id'] not in local_ids:
-                complete = False
+        for name, image in images.items():
+            if image['id'] in local_ids:
+                candidate = image['id']
+            elif cached.get(name) in local_ids:
+                candidate = cached[name]
             else:
-                self.verify_local_image(image)
+                candidates = references.get(image['source'], set())
+                require(len(candidates) <= 1, 'Ambiguous local Docker image reference')
+                candidate = next(iter(candidates), None)
+            if candidate is None:
+                complete = False
+                continue
+            try:
+                self.runtime_images[name] = self.verify_local_image(image, candidate)
+            except ConfigMismatch:
+                # A mutable source tag can legitimately still identify the
+                # previous image. Only a fully verified alternative config is
+                # considered missing; malformed content/read errors fail closed.
+                require(candidate != image['id'] and candidate != cached.get(name),
+                        'Cached Docker image config identity changed')
+                complete = False
         return complete
 
     def run(self, command, **kwargs):
@@ -316,11 +353,14 @@ class Updater:
         temporary.symlink_to(Path(path))
         temporary.replace(self.root / 'current')
 
-    def image_env(self, manifest):
+    def image_env(self, manifest, runtime_images):
         old = self.env_path.read_text().splitlines() if self.env_path.exists() else []
         keys = set(IMAGE_KEYS.values())
         lines = [line for line in old if line.split('=', 1)[0].strip() not in keys]
-        lines.extend(key + '=' + manifest['images'][name]['id'] for name, key in IMAGE_KEYS.items())
+        require(set(runtime_images) == set(manifest['images']) and
+                all(DIGEST.fullmatch(image_id) for image_id in runtime_images.values()),
+                'Verified runtime image mapping is incomplete')
+        lines.extend(key + '=' + runtime_images[name] for name, key in IMAGE_KEYS.items())
         if not any(line.startswith('NC_ADMIN_USER=') for line in lines):
             lines.append('NC_ADMIN_USER=admin')
         atomic_write(self.env_path, '\n'.join(lines) + '\n')
@@ -478,8 +518,9 @@ class Updater:
                             with (cache / name).open('rb') as src:
                                 shutil.copyfileobj(src, dst, 1024 * 1024)
                     self.run(['docker', 'load', '--input', str(combined)])
-                for image in manifest['images'].values():
-                    self.verify_local_image(image)
+                    require(self.local_images_available(manifest['images']), 'Required image is missing after import')
+                runtime_images = {name: self.verify_local_image(image, self.runtime_images[name])
+                                  for name, image in manifest['images'].items()}
             except Exception:
                 # Staging is not a live release. Keep failed staging for evidence
                 # only after mutation begins; otherwise allow the fixed next tag.
@@ -497,8 +538,10 @@ class Updater:
                     running = self.compose('ps', '-q', 'nextcloud', capture=True).decode().strip()
                     if running:
                         current_core = subprocess.check_output(['docker', 'inspect', '--format', '{{.Image}}', running], text=True).strip()
-                        require(current_core == manifest['images']['nextcloud']['id'],
-                                'Running Nextcloud core image differs; manual core upgrade required')
+                        try:
+                            self.verify_local_image(manifest['images']['nextcloud'], current_core)
+                        except (ConfigMismatch, ReleaseError):
+                            raise ReleaseError('Running Nextcloud core image differs; manual core upgrade required') from None
                     self.compose('exec', '-T', '--user', 'www-data', 'nextcloud', 'php', 'occ', 'maintenance:mode', '--on')
                     # Fence the ingress, then drain Office/web requests and jobs
                     # before the DB/config checkpoint. No application writes
@@ -509,7 +552,7 @@ class Updater:
                 tx['phase'] = 'changing'
                 write_json(self.transaction_path, tx)
                 self.set_current(destination)
-                self.image_env(manifest)
+                self.image_env(manifest, runtime_images)
                 # Recreate is essential: Docker bind mounts retain the previous
                 # release inode even when the host's current symlink changes.
                 if previous:
@@ -528,14 +571,15 @@ class Updater:
                 self.env.pop('NEXTCLOUD_SKIP_WORKERS', None)
                 self.compose('up', '-d', '--force-recreate', '--wait', *WORKERS, 'proxy')
                 self.run(['bash', str(destination / 'deploy/production/healthcheck.sh')])
-                # A legacy application bundle may predate the range transport.
-                # Keep the newer installed updater rather than downgrading its
-                # dependency set while activating that otherwise valid bundle.
-                if (destination / 'deploy/production/parallel_download.py').is_file():
-                    for name in ('parallel_download.py', 'update.sh', 'backup.sh', 'release.py'):
+                # Older bundles predate OCI identity resolution. Install its
+                # complete dependency set first, or retain the newer updater.
+                updater_files = ('image_identity.py', 'parallel_download.py', 'update.sh', 'backup.sh', 'release.py')
+                if all((destination / 'deploy/production' / name).is_file() for name in updater_files):
+                    for name in updater_files:
                         source = destination / 'deploy/production' / name
                         atomic_write(self.root / 'bin' / name, source.read_text(), 0o750)
-                self.state['success'] = {'tag': tag, 'commit': commit, 'published_at': release['published_at'], 'images': manifest['images']}
+                self.state['success'] = {'tag': tag, 'commit': commit, 'published_at': release['published_at'],
+                                         'images': manifest['images'], 'runtime_images': runtime_images}
                 self.mark(release, commit, 'success', backup=str(backup) if previous else None)
                 self.transaction_path.unlink()
                 shutil.rmtree(self.state_dir / 'asset-cache' / tag, ignore_errors=True)

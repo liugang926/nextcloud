@@ -34,7 +34,7 @@ if not env.exists():
     with os.fdopen(fd,'w') as stream:
         stream.write('NC_ADMIN_USER=admin\nNEXTCLOUD_DOMAIN=cloud.tianjizn.com\nWEKNORA_HTTPS_ORIGINS=https://ai-doc.tianjizn.com\n')
 PY
-for file in parallel_download.py update.sh backup.sh release.py; do
+for file in image_identity.py parallel_download.py update.sh backup.sh release.py; do
   install -m 0750 "$HERE/$file" "$ROOT/bin/$file"
 done
 for unit in nextcloud-production.slice nextcloud-production.service nextcloud-production-update.service nextcloud-production-update.timer; do
