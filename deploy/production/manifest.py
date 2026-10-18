@@ -7,15 +7,17 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tarfile
 import time
+import xml.etree.ElementTree as ET
 
 IMAGES = {
     'nextcloud': 'nextcloud:34.0.4-apache',
     'postgres': 'postgres:16-alpine',
     'redis': 'redis:7-alpine',
-    'office': 'collabora/code:26.04.2.2.1',
+    'office': 'collabora/code:26.04.2.4.1',
     'proxy': 'nginx:1.30.3-alpine',
 }
 RICHDOCUMENTS_SHA256 = '96766a94cf417a716e47ed89c6ff2411c54954caa916afcdddc4d9668dffb557'
@@ -41,6 +43,50 @@ def runtime_file(path):
     if path.name.startswith('test_') or path.name.startswith('test-') or path.suffix in {'.pyc', '.map'}:
         return False
     return parts[0] in {'apps', 'scripts', 'deploy'}
+
+
+def verify_office_image(image, helper_image):
+    """Check the exact Office runtime contract before publishing its image."""
+    # Both CI and production use these helpers; the Office image itself is
+    # distroless and provides neither a shell nor diagnostic command-line tools.
+    contract = runpy.run_path(str(Path(__file__).with_name('verify-api.py')))
+    owner = contract['office_data_owner'](image)
+    if not re.fullmatch(r'[0-9]+:[0-9]+', owner):
+        raise ValueError('Office image has no numeric data-directory owner')
+    domain = 'cloud.tianjizn.com'
+    container = command('docker', 'create', '--pull=never', '--network', 'none', '--cpus', '1',
+                        '--memory', '2g', '--pids-limit', '512', '--shm-size', '512m', '--cap-add', 'MKNOD',
+                        '-e', 'aliasgroup1=https://' + domain + ':443',
+                        '-e', 'aliasgroup2=http://nextcloud:80', '-e', 'server_name=' + domain,
+                        '-e', 'dictionaries=en_US zh_CN',
+                        '-e', 'extra_params=--o:ssl.enable=false --o:ssl.termination=true --o:logging.level=warning --o:net.proto=IPv4 --o:num_prespawn_children=1', image)
+    try:
+        subprocess.run(['docker', 'start', container], check=True, stdout=subprocess.DEVNULL)
+        for _ in range(90):
+            state = json.loads(command('docker', 'inspect', '--format', '{{json .State}}', container))
+            if not state.get('Running'):
+                raise RuntimeError('Office image exited during the production startup contract')
+            if state.get('Health', {}).get('Status') == 'healthy':
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError('Office image failed its native production health check')
+        response = contract['office_curl'](
+            container, helper_image,
+            ['--fail', '--silent', '--show-error', '--max-time', '10',
+             'http://127.0.0.1:9980/hosting/discovery'])
+        if response.returncode != 0:
+            raise RuntimeError('Office image did not serve HTTP discovery')
+        discovery = ET.fromstring(response.stdout)
+        actions = discovery.findall('.//action')
+        if discovery.tag != 'wopi-discovery' or not actions or not all(
+                action.get('urlsrc', '').startswith('https://' + domain + '/') for action in actions):
+            raise ValueError('Office image does not honor the production HTTPS origin')
+        contract['convert_docx'](container, helper_image, contract['synthetic_docx'](), '生产环境 Office 中文验证.docx')
+        print('Office native health, data ownership, HTTP discovery, HTTPS origin and Unicode DOCX conversion verified')
+    finally:
+        subprocess.run(['docker', 'rm', '--force', container], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def build(args):
@@ -70,6 +116,7 @@ def build(args):
             raise ValueError('Invalid config digest')
         images[key] = {'source': source, 'registry_digest': digests[0],
                        'id': data['Id'], 'platform': 'linux/amd64'}
+    verify_office_image(images['office']['id'], images['nextcloud']['id'])
     office_app = root / 'deploy/production/richdocuments-11.1.2.tar.gz'
     if not office_app.is_file() or sha256(office_app) != RICHDOCUMENTS_SHA256:
         raise ValueError('Missing or corrupt pinned richdocuments 11.1.2 asset')

@@ -43,6 +43,22 @@ jobs:
             exit 1
           fi
 
+      - name: Verify production updater safety tests
+        run: |
+          python3 deploy/production/test_release.py
+          for script in deploy/production/*.sh; do bash -n "$script"; done
+
+      - name: Fetch the pinned Nextcloud 34 Office app
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output deploy/production/richdocuments-11.1.2.tar.gz \
+            https://github.com/nextcloud-releases/richdocuments/releases/download/v11.1.2/richdocuments-v11.1.2.tar.gz
+          printf '%s\n' '96766a94cf417a716e47ed89c6ff2411c54954caa916afcdddc4d9668dffb557  deploy/production/richdocuments-11.1.2.tar.gz' | sha256sum --check
+
+      - name: Pull amd64 images and create verified release assets
+        run: python3 deploy/production/manifest.py --repo "$RELEASE_REPO" --tag "$RELEASE_TAG"
+
       - name: Require successful Nextcloud install, API and upgrade checks on main
         shell: bash
         run: |
@@ -67,22 +83,6 @@ jobs:
           done
           echo 'No successful main Nextcloud install/API/upgrade checks for the tagged commit' >&2
           exit 1
-
-      - name: Verify production updater safety tests
-        run: |
-          python3 deploy/production/test_release.py
-          for script in deploy/production/*.sh; do bash -n "$script"; done
-
-      - name: Fetch the pinned Nextcloud 34 Office app
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl --fail --location --retry 3 --output deploy/production/richdocuments-11.1.2.tar.gz \
-            https://github.com/nextcloud-releases/richdocuments/releases/download/v11.1.2/richdocuments-v11.1.2.tar.gz
-          printf '%s\n' '96766a94cf417a716e47ed89c6ff2411c54954caa916afcdddc4d9668dffb557  deploy/production/richdocuments-11.1.2.tar.gz' | sha256sum --check
-
-      - name: Pull amd64 images and create verified release assets
-        run: python3 deploy/production/manifest.py --repo "$RELEASE_REPO" --tag "$RELEASE_TAG"
 
       - name: Publish complete immutable-by-policy release
         shell: bash

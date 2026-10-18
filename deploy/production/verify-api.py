@@ -5,10 +5,11 @@ import hashlib
 from html.parser import HTMLParser
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import subprocess
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,69 @@ class InitialStateParser(HTMLParser):
             self.document = json.loads(base64.b64decode(attributes['value'], validate=True))
 
 
+def synthetic_docx():
+    """A Unicode DOCX exercises the Office runtime's locale and document parser."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+        archive.writestr('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+        archive.writestr('word/document.xml', '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Nextcloud 生产环境 Office 中文验证。</w:t></w:r></w:p></w:body></w:document>')
+    return output.getvalue()
+
+
+def office_data_owner(image):
+    """Inspect a directory without assuming the distroless image has stat."""
+    container = subprocess.check_output(
+        ['docker', 'create', '--pull=never', '--network=none', image], text=True).strip()
+    try:
+        archive = subprocess.check_output(['docker', 'cp', container + ':/opt/cool/child-roots', '-'])
+        with tarfile.open(fileobj=io.BytesIO(archive), mode='r:*') as contents:
+            roots = [member for member in contents
+                     if PurePosixPath(member.name).parts == ('child-roots',) and member.isdir()]
+        if len(roots) != 1:
+            raise RuntimeError('Office image has no unambiguous child-roots directory')
+        return str(roots[0].uid) + ':' + str(roots[0].gid)
+    finally:
+        subprocess.run(['docker', 'rm', '--force', container], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def office_curl(container, helper_image, arguments, data=b'', timeout=90, cgroup_parent=None):
+    """Use the approved Nextcloud image's curl in Office's network namespace.
+
+    No production data or secrets are mounted. Input can contain a WOPI token,
+    so callers receive captured output and must never print curl's response or
+    stderr. Explicit cleanup also removes a helper after a Docker CLI timeout.
+    """
+    name = 'nextcloud-office-probe-' + secrets.token_hex(8)
+    command = ['docker', 'run', '--rm', '--pull=never', '--interactive', '--name', name,
+               '--network=container:' + container, '--user=33:33', '--read-only',
+               '--cap-drop=ALL', '--security-opt=no-new-privileges', '--log-driver=none',
+               '--cpus=0.25', '--memory=128m', '--pids-limit=64']
+    if cgroup_parent:
+        command.append('--cgroup-parent=' + cgroup_parent)
+    command += ['--entrypoint=curl', helper_image, *arguments]
+    try:
+        return subprocess.run(command, input=data, capture_output=True, timeout=timeout)
+    finally:
+        subprocess.run(['docker', 'rm', '--force', name], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def convert_docx(container, helper_image, document, filename, cgroup_parent=None):
+    # curl reads the multipart document directly from stdin. The loopback
+    # conversion route is reached from Office's own network namespace.
+    result = office_curl(container, helper_image,
+                         ['--fail', '--silent', '--show-error', '--max-time', '90',
+                          '--form', 'data=@-;filename=' + filename,
+                          '--form-string', 'format=pdf',
+                          'http://127.0.0.1:9980/cool/convert-to/pdf'],
+                         data=document, timeout=120, cgroup_parent=cgroup_parent)
+    if result.returncode != 0 or not result.stdout.startswith(b'%PDF-') or len(result.stdout) <= 200:
+        raise RuntimeError('Office failed to convert the synthetic Unicode DOCX to PDF')
+    return result.stdout
+
+
 def main():
     root = Path('/srv/nextcloud-production')
     compose = ['docker', 'compose', '--env-file', str(root / 'secrets/images.env'),
@@ -38,6 +102,9 @@ def main():
                str(root / 'current/deploy/production/compose.yaml')]
     config = json.loads(subprocess.check_output(compose + ['config', '--format', 'json']))
     env = config['services']['nextcloud']['environment']
+    helper_image = config['services']['nextcloud']['image']
+    office_container = subprocess.check_output(compose + ['ps', '-q', 'office'], text=True).strip()
+    assert re.fullmatch(r'[0-9a-f]{12,64}', office_container), 'Expected one running Office container'
     user = env['NEXTCLOUD_ADMIN_USER']
     password = (root / 'secrets/nextcloud_admin_password').read_text().strip()
     auth = base64.b64encode((user + ':' + password).encode()).decode()
@@ -71,13 +138,9 @@ def main():
 
     # A real DOCX with harmless synthetic text exercises file persistence and
     # the actual Office parser; it is removed in finally even when a check fails.
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
-        archive.writestr('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
-        archive.writestr('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Nextcloud production Office verification.</w:t></w:r></w:p></w:body></w:document>')
-    document = output.getvalue()
-    path = '/remote.php/dav/files/' + urllib.parse.quote(user, safe='') + '/production-verification-' + secrets.token_hex(8) + '.docx'
+    document = synthetic_docx()
+    filename = '生产环境 Office 中文验证-' + secrets.token_hex(8) + '.docx'
+    path = '/remote.php/dav/files/' + urllib.parse.quote(user, safe='') + '/' + urllib.parse.quote(filename, safe='')
     created = False
     try:
         status, headers, _ = request(path, 'PUT', document, content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
@@ -112,19 +175,14 @@ def main():
         callback_url = 'http://nextcloud/index.php/apps/richdocuments/wopi/files/' + urllib.parse.quote(state['fileId'], safe='')
         callback_url += '?' + urllib.parse.urlencode({'access_token': state['token']})
         callback_config = 'fail\nsilent\nshow-error\nmax-time = 60\nurl = ' + json.dumps(callback_url) + '\n'
-        callback = subprocess.run(compose + ['exec', '-T', 'office', 'curl', '--config', '-'],
-                                  input=callback_config.encode(),
-                                  capture_output=True, timeout=90)
+        callback = office_curl(office_container, helper_image, ['--config', '-'],
+                               data=callback_config.encode(), cgroup_parent='nextcloud-production.slice')
         assert callback.returncode == 0
         info = json.loads(callback.stdout)
         assert info.get('BaseFileName') == urllib.parse.unquote(path.rsplit('/', 1)[1])
         assert info.get('Size') == len(document)
-        # Convert inside the Office container. Conversion is deliberately not
-        # exposed as a new public route for this verification.
-        shell = 'set -eu; f=$(mktemp --suffix=.docx); trap \'rm -f "$f"\' EXIT; cat > "$f"; curl -fsS --max-time 90 -F "data=@$f" -F "format=pdf" http://127.0.0.1:9980/cool/convert-to/pdf'
-        result = subprocess.run(compose + ['exec', '-T', 'office', 'bash', '-c', shell],
-                                input=document, capture_output=True, timeout=120)
-        assert result.returncode == 0 and result.stdout.startswith(b'%PDF-') and len(result.stdout) > 200
+        convert_docx(office_container, helper_image, document, filename,
+                     cgroup_parent='nextcloud-production.slice')
     finally:
         if created:
             status, _, _ = request(path, 'DELETE')
@@ -132,7 +190,8 @@ def main():
     print(json.dumps({'status': 'pass', 'admin_authentication': True, 'webdav_roundtrip': True,
                       'office_discovery': True, 'office_direct_edit_route': True,
                       'office_private_wopi_callback': True,
-                      'office_docx_to_pdf': True, 'synthetic_file_removed': True,
+                      'office_docx_to_pdf': True, 'office_unicode_filename_and_content': True,
+                      'synthetic_file_removed': True,
                       'external_https_browser_edit': 'requires operator reverse proxy'}))
 
 

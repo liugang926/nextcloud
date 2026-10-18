@@ -5,6 +5,7 @@ import gzip
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -20,7 +21,7 @@ spec.loader.exec_module(release)
 
 def sample_manifest():
     sources = {'nextcloud': 'nextcloud:34.0.4-apache', 'postgres': 'postgres:16-alpine',
-               'redis': 'redis:7-alpine', 'office': 'collabora/code:26.04.2.2.1',
+               'redis': 'redis:7-alpine', 'office': 'collabora/code:26.04.2.4.1',
                'proxy': 'nginx:1.30.3-alpine'}
     return {'schema': 1, 'repo': 'owner/repo', 'tag': 'prod-new', 'commit': 'a' * 40,
             'platform': 'linux/amd64', 'nextcloud_major': 34,
@@ -99,6 +100,27 @@ class ArchiveTests(unittest.TestCase):
 
     def test_regular_files_only(self):
         self.assertEqual(self.run_archive(['apps/plugin/appinfo/info.xml']), ['apps/plugin/appinfo/info.xml'])
+
+    def test_runtime_directories_are_readable_with_private_updater_umask(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            archive = base / 'package.tar.gz'
+            with tarfile.open(archive, 'w:gz') as package:
+                for name in ('apps/plugin/lib/Service.php', 'scripts/ops/worker.sh'):
+                    info = tarfile.TarInfo(name)
+                    info.size = 4
+                    package.addfile(info, io.BytesIO(b'test'))
+            target = base / 'release'
+            target.mkdir(mode=0o700)
+            private_umask = os.umask(0o077)
+            try:
+                release.safe_extract(archive, target)
+            finally:
+                os.umask(private_umask)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+            for directory in ('apps', 'apps/plugin', 'apps/plugin/lib', 'scripts', 'scripts/ops'):
+                self.assertEqual((target / directory).stat().st_mode & 0o777, 0o755)
+            self.assertEqual((target / 'apps/plugin/lib/Service.php').stat().st_mode & 0o777, 0o644)
 
     def test_reject_path_traversal_and_unexpected_roots(self):
         for name in ('../../etc/shadow', '/etc/shadow', 'apps/../../../tmp/a', 'secrets/admin'):

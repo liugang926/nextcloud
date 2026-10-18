@@ -51,7 +51,13 @@ task_probe=(docker run --rm --pull=never --network=none --cpus=0.25 --memory=64m
 task_nc_owner=$("${task_probe[@]}" --entrypoint sh "$task_nc_image" -c 'printf "%s:%s" "$(id -u www-data)" "$(id -g www-data)"')
 task_db_owner=$("${task_probe[@]}" --entrypoint sh "$task_db_image" -c 'printf "%s:%s" "$(id -u postgres)" "$(id -g postgres)"')
 task_redis_owner=$("${task_probe[@]}" --entrypoint sh "$task_redis_image" -c 'printf "%s:%s" "$(id -u redis)" "$(id -g redis)"')
-task_office_owner=$("${task_probe[@]}" --entrypoint stat "$task_office_image" -c '%u:%g' /opt/cool/child-roots)
+# CODE 26.04 has no stat or shell. Read the directory's numeric ownership from
+# Docker's archive of a stopped, network-isolated container instead.
+task_office_owner=$(python3 - "$task_release/deploy/production/verify-api.py" "$task_office_image" <<'PY'
+import runpy,sys
+print(runpy.run_path(sys.argv[1])["office_data_owner"](sys.argv[2]))
+PY
+)
 for task_owner in "$task_nc_owner" "$task_db_owner" "$task_redis_owner" "$task_office_owner"; do
     [[ "$task_owner" =~ ^[0-9]+:[0-9]+$ ]] || { printf 'Cannot determine an image data owner\n' >&2; exit 1; }
 done
