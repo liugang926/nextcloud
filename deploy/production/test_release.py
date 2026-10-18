@@ -2,6 +2,7 @@
 """Offline release guardrail and crash-recovery tests. Never starts Docker."""
 import copy
 import gzip
+import hashlib
 import importlib.util
 import io
 import json
@@ -239,6 +240,50 @@ class JournalTests(unittest.TestCase):
         with mock.patch.object(self.updater, 'api', return_value={'object': {'type': 'commit', 'sha': 'b' * 40}}):
             with self.assertRaises(release.ReleaseError):
                 self.updater.tag_commit('prod-new')
+
+    def test_range_transport_failure_uses_bounded_network_retry(self):
+        with mock.patch.object(self.updater, 'api', return_value=[sample_release()]), \
+             mock.patch.object(self.updater, 'apply', side_effect=release.DownloadError('bounded network failure')):
+            with self.assertRaises(release.ReleaseError):
+                self.updater.check()
+        self.assertEqual(self.updater.state['download_attempts']['prod-new'], 1)
+        self.assertNotIn('prod-new', self.updater.state['seen'])
+
+
+class DownloadCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.root = Path(self.folder.name)
+        self.updater = release.Updater(self.root / 'deployment', self.root / 'data', 'owner/repo')
+        self.size = 32 * 1024 * 1024 + 1
+        self.expected = hashlib.sha256(b'\0' * self.size).hexdigest()
+        self.asset = {'state': 'uploaded', 'size': self.size,
+                      'browser_download_url': 'https://github.com/owner/repo/releases/download/prod-new/images.tar.gz'}
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    @staticmethod
+    def sparse_download(url, destination, size, **kwargs):
+        with destination.open('wb') as output:
+            output.truncate(size)
+
+    def test_complete_asset_is_verified_before_copying_from_persistent_cache(self):
+        target = self.root / 'images.tar.gz'
+        with mock.patch.object(release, 'download_parallel', side_effect=self.sparse_download):
+            self.updater.download({'images.tar.gz': self.asset}, 'prod-new', 'images.tar.gz', target,
+                                  expected_sha256=self.expected)
+        self.assertEqual(release.digest(target), self.expected)
+        self.assertTrue(list((self.updater.state_dir / 'asset-cache/prod-new').glob('*/images.tar.gz')))
+
+    def test_bad_complete_asset_is_never_copied_and_cannot_seed_the_next_attempt(self):
+        target = self.root / 'images.tar.gz'
+        with mock.patch.object(release, 'download_parallel', side_effect=self.sparse_download):
+            with self.assertRaises(release.ReleaseError):
+                self.updater.download({'images.tar.gz': self.asset}, 'prod-new', 'images.tar.gz', target,
+                                      expected_sha256='1' * 64)
+        self.assertFalse(target.exists())
+        self.assertEqual(list((self.updater.state_dir / 'asset-cache/prod-new').iterdir()), [])
 
 
 if __name__ == '__main__':
