@@ -143,3 +143,15 @@ docker exec -u www-data "$NC_CONTAINER" php \
 候选尚未完成真实双端验收，未因此批准升级生产。发布前至少验证：实际 PostgreSQL 的 0.6.0→0.6.1 迁移和恢复、manager 元数据 SQL、缺 gate 拒绝、签名关闭创建 closed gate、坏 HMAC/旧 tail/错 pin/缺控制表/无当前 LDAP admin 均拒绝、正确可信对账只打开全局 gate，以及永久删除事实跨恢复仍有效。
 
 纯协议测试、事务回滚 fixture、使用 identity bypass 的测试或受控替身不能证明真实 LDAP、完整配对、WK/NC 双端授权和生产 HTTPS 已验收。每项结果应标明实际数据库、身份/网络边界、候选提交及未覆盖范围。
+
+本候选的独占回归命令为：
+
+```sh
+python3 scripts/ops/isolated-manager-upgrade-smoke.py
+python3 scripts/ops/isolated-manager-upgrade-smoke.py --gate-probe
+COMPOSE_PROGRESS=plain python3 scripts/ops/isolated-upgrade-failure-recovery.py
+```
+
+前两项要求固定的 Nextcloud/PostgreSQL 镜像已缓存，不拉取镜像，不发布端口，不挂载主机业务数据，使用无外部路由的私有容器；结束时删除全部自有容器和卷。第二项还要求已预加载包含 `samba-ad-provision` 的 AD 镜像。默认使用本地验证过的不可变 image ID；在其他机器上，可先使用 `scripts/ops/fixtures/ldaps/Dockerfile` 准备专用测试镜像，再用 `--gate-ad-image=<已预加载镜像>` 指定，脚本会解析并固定其本地 image ID。旧的缺少 AD schema 的缓存镜像不适用。
+
+第三项保留自己的随机 Compose 项目、loopback 端口、临时只读插件副本、匹配冷检查点和资源归属验证；其基线为无配对、无永久删除事实的 0.4.6，仅证明注入 Migration 29 故障后的匹配冷恢复，不证明永久事实的双端重放。

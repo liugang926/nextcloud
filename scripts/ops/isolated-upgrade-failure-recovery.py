@@ -4,6 +4,8 @@
 Creates its own loopback-only Compose project, random credentials and volumes.
 It never accepts a project, volume, credential file or remote origin as input.
 The deliberately broken migration exists only in a temporary app copy.
+This synthetic baseline has no paired targets or permanent deletion facts;
+their authenticated replay is a separate coordinated-recovery requirement.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import base64
 import hashlib
 from http.cookiejar import CookieJar
 import io
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -31,7 +34,23 @@ APP = ROOT / "apps/integration_weknora"
 OLD_APP_COMMIT = "5b97db539155be61541836ba3d67074e78705340"
 OLD_VERSION = "0.4.6"
 FAULT_MARKER = "WEKNORA_UPGRADE_FAILURE_PROBE"
-FAULT_MIGRATION = "Version0028Date20261010000000.php"
+FAULT_MIGRATION = "Version0029Date20261014000000.php"
+MIGRATION29_COLUMNS = {
+    "oc_weknora_target_close": {
+        "operation_id": "character varying:NO", "binding_id": "character varying:NO",
+        "root_key": "character varying:NO", "closure_id": "character varying:NO",
+        "root_file_id": "bigint:NO", "target_json": "text:NO", "recorded_at": "bigint:NO",
+    },
+    "oc_weknora_tenant_close": {
+        "namespace_key": "character varying:NO", "origin_sha256": "character varying:NO",
+        "deletion_id": "character varying:NO", "tenant_id": "bigint:NO",
+        "tenant_json": "text:NO", "recorded_at": "bigint:NO",
+    },
+    "oc_weknora_deletion_probe": {
+        "operation_id": "character varying:NO", "next_check_at": "bigint:NO",
+        "lease_until": "bigint:NO",
+    },
+}
 IMAGES = {
     "db": "postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416",
     "redis": "redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065",
@@ -40,6 +59,14 @@ IMAGES = {
 }
 SERVICES = frozenset(("db", "redis", "nextcloud"))
 VOLUMES = frozenset(("db-data", "redis-data", "nextcloud-html"))
+RESOURCES = {
+    "nextcloud": {"cpus": 1, "mem_limit": 1536 * 1024 * 1024,
+                  "memswap_limit": 1536 * 1024 * 1024},
+    "db": {"cpus": 0.5, "mem_limit": 512 * 1024 * 1024,
+           "memswap_limit": 512 * 1024 * 1024},
+    "redis": {"cpus": 0.25, "mem_limit": 128 * 1024 * 1024,
+              "memswap_limit": 128 * 1024 * 1024},
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -72,11 +99,12 @@ def free_port() -> int:
 
 
 def make_compose(project: str, port: int, app_dir: Path, db_password: str,
-                 admin_password: str) -> dict:
+                 admin_password: str, subnet: str) -> dict:
     return {
         "name": project,
         "services": {
             "db": {
+                **RESOURCES["db"],
                 "image": IMAGES["db"],
                 "environment": {"POSTGRES_DB": "nextcloud", "POSTGRES_USER": "nextcloud",
                                 "POSTGRES_PASSWORD": db_password},
@@ -85,12 +113,14 @@ def make_compose(project: str, port: int, app_dir: Path, db_password: str,
                                 "interval": "5s", "timeout": "5s", "retries": 30},
             },
             "redis": {
+                **RESOURCES["redis"],
                 "image": IMAGES["redis"], "command": ["redis-server", "--appendonly", "yes"],
                 "volumes": ["redis-data:/data"],
                 "healthcheck": {"test": ["CMD", "redis-cli", "ping"],
                                 "interval": "5s", "timeout": "3s", "retries": 20},
             },
             "nextcloud": {
+                **RESOURCES["nextcloud"],
                 "image": IMAGES["nextcloud"],
                 "ports": [{"target": 80, "published": port, "host_ip": "127.0.0.1"}],
                 "environment": {
@@ -114,7 +144,29 @@ def make_compose(project: str, port: int, app_dir: Path, db_password: str,
             },
         },
         "volumes": {name: {} for name in sorted(VOLUMES)},
+        "networks": {"default": {"driver": "bridge",
+                                  "ipam": {"config": [{"subnet": subnet}]}}},
     }
+
+
+def fixture_subnet(cwd: Path) -> str:
+    # Docker's automatic address pools can be exhausted by other local fixtures.
+    # Choose an unused small benchmark-range subnet without pruning any network;
+    # Docker still atomically rejects an allocation race when creating our own.
+    ids = command(["docker", "network", "ls", "-q"], cwd=cwd, timeout=30).stdout.decode().split()
+    networks = (json.loads(command(["docker", "network", "inspect", *ids],
+                                  cwd=cwd, timeout=30).stdout) if ids else [])
+    occupied = [ipaddress.ip_network(entry["Subnet"], strict=False)
+                for network in networks
+                for entry in (network.get("IPAM", {}).get("Config") or [])
+                if entry.get("Subnet")]
+    choices = list(ipaddress.ip_network("198.18.0.0/15").subnets(new_prefix=28))
+    start = secrets.randbelow(len(choices))
+    for offset in range(len(choices)):
+        subnet = choices[(start + offset) % len(choices)]
+        if not any(subnet.overlaps(other) for other in occupied if other.version == 4):
+            return str(subnet)
+    raise RuntimeError("No unused disposable fixture subnet remains")
 
 
 def inspect(kind: str, name: str, cwd: Path) -> dict | None:
@@ -159,6 +211,12 @@ def assert_owned(project: str, directory: Path, config_hash: str,
         require(labels.get("com.docker.compose.project") == project and
                 service in SERVICES and item["Name"] == f"/{project}-{service}-1",
                 "unexpected container in disposable project")
+        limits = RESOURCES[service]
+        host = item.get("HostConfig", {})
+        require(host.get("NanoCpus") == int(limits["cpus"] * 1_000_000_000) and
+                host.get("Memory") == limits["mem_limit"] and
+                host.get("MemorySwap") == limits["memswap_limit"],
+                "disposable container resource limits changed")
         for bindings in (item.get("HostConfig", {}).get("PortBindings") or {}).values():
             for binding in bindings or []:
                 require(binding.get("HostIp") == "127.0.0.1",
@@ -177,8 +235,13 @@ def assert_owned(project: str, directory: Path, config_hash: str,
         require(found == VOLUMES, "disposable project has missing volumes")
     for name in listed("network", project, directory):
         item = inspect("network", name, directory)
+        expected_subnet = json.loads((directory / "compose.json").read_text())[
+            "networks"]["default"]["ipam"]["config"][0]["subnet"]
         require(item["Name"] == f"{project}_default" and
-                (item.get("Labels") or {}).get("com.docker.compose.project") == project,
+                (item.get("Labels") or {}).get("com.docker.compose.project") == project and
+                item.get("Driver") == "bridge" and
+                [entry.get("Subnet") for entry in (item.get("IPAM", {}).get("Config") or [])]
+                == [expected_subnet],
                 "unexpected network in disposable project")
 
 
@@ -372,7 +435,7 @@ def main() -> None:
         shutil.copytree(baseline, app_dir)
         config = directory / "compose.json"
         config.write_text(json.dumps(make_compose(project, port, app_dir, db_password,
-                                                  password), indent=2) + "\n")
+                                                  password, fixture_subnet(directory)), indent=2) + "\n")
         config.chmod(0o600)
         empty_env = directory / "empty.env"
         empty_env.write_text("")
@@ -427,6 +490,28 @@ def main() -> None:
                                       "-At"], cwd=directory,
                            input_bytes=statement.encode(), timeout=60).stdout.decode().strip()
 
+        def assert_migration29_schema(*, present: bool) -> None:
+            for table, columns in MIGRATION29_COLUMNS.items():
+                exists = sql("SELECT COUNT(*) FROM pg_tables WHERE schemaname=current_schema() "
+                             f"AND tablename='{table}';")
+                require(exists == ("1" if present else "0"),
+                        "Migration 29 table state does not match the upgrade/restore boundary")
+                if present:
+                    actual = sql("SELECT column_name || ':' || data_type || ':' || is_nullable "
+                                 "FROM information_schema.columns "
+                                 f"WHERE table_schema=current_schema() AND table_name='{table}' "
+                                 "ORDER BY column_name;").splitlines()
+                    expected = [name + ":" + definition
+                                for name, definition in sorted(columns.items())]
+                    require(actual == expected,
+                            "Migration 29 table columns/types/nullability were not applied")
+            namespace = sql("SELECT data_type || ':' || is_nullable "
+                            "FROM information_schema.columns WHERE table_schema=current_schema() "
+                            "AND table_name='oc_weknora_recovery_log' "
+                            "AND column_name='tenant_namespace';")
+            require(namespace == ("character varying:YES" if present else ""),
+                    "Migration 29 recovery namespace column state differs")
+
         started = False
         report = None
         try:
@@ -436,6 +521,7 @@ def main() -> None:
             occ("app:enable", "integration_weknora")
             require(occ("config:app:get", "integration_weknora", "installed_version") ==
                     OLD_VERSION, "baseline app was not installed as 0.4.6")
+            assert_migration29_schema(present=False)
             status, _ = dav(port, password, "UpgradeRoot", method="MKCOL")
             require(status == 201, "baseline folder creation failed")
             root_id = dav_id(port, password, "UpgradeRoot")
@@ -504,7 +590,10 @@ def main() -> None:
                         "injected final failure did not apply recovery journal schema")
             for table in ("oc_weknora_recovery_floor", "oc_weknora_control_gate"):
                 require(sql("SELECT COUNT(*) FROM pg_tables WHERE tablename='" + table + "';") == "1",
-                        "injected final failure did not apply the current final migration schema")
+                        "injected final failure did not apply the recovery control schema")
+            # The failure is injected into Migration 29's postSchemaChange:
+            # all final DDL must have actually reached this disposable PG DB.
+            assert_migration29_schema(present=True)
             require(sql("SELECT state FROM oc_weknora_pub_state WHERE "
                         f"binding_id='recovery-probe' AND file_id={file_id};") == "withdrawn",
                     "prior plugin row disappeared during failed upgrade")
@@ -560,6 +649,7 @@ def main() -> None:
                     "restored Nextcloud instance identity differs")
             require(occ("config:app:get", "integration_weknora", "installed_version") ==
                     OLD_VERSION, "restored app version differs from checkpoint")
+            assert_migration29_schema(present=False)
             require(occ("config:app:get", "integration_weknora", "recovery_probe") ==
                     app_probe, "restored app configuration differs from checkpoint")
             require(occ("config:app:get", "integration_weknora", "bindings") == bindings,
@@ -586,6 +676,9 @@ def main() -> None:
                 "baseline_app": OLD_VERSION, "attempted_app": current_version,
                 "fault": FAULT_MARKER, "fault_migration": FAULT_MIGRATION,
                 "failed_upgrade_exit": failed.returncode,
+                "migration29_schema_applied_before_fault": True,
+                "migration29_schema_absent_after_cold_restore": True,
+                "permanent_deletion_replay_acceptance": False,
                 "restored_instance_id_matches": True,
                 "restored_file_id_matches": True,
                 "restored_file_sha256": hashlib.sha256(restored).hexdigest(),

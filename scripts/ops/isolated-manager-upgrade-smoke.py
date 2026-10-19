@@ -31,6 +31,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hold-for-probe', action='store_true', help='Keep owned fixture until stdin newline, for a separate gate probe')
     parser.add_argument('--gate-probe', action='store_true', help='Also execute the real LDAP/signed recovery CLI probe')
+    parser.add_argument('--gate-ad-image', help='Preloaded Samba AD image for --gate-probe')
     args = parser.parse_args()
     if args.hold_for_probe and not sys.stdin.isatty():
         parser.error('--hold-for-probe requires an interactive terminal')
@@ -94,8 +95,9 @@ def main():
         print(json.dumps({'fixture_ready': True, 'pg': pg, 'nc': nc, 'label': label,
             'no_host_ports': True, 'no_external_route': True, 'no_host_data': True, 'production_modified': False}), flush=True)
         if args.gate_probe:
-            run('python3', str(ROOT / 'scripts/ops/isolated-manager-gate-probe.py'), '--nc', nc, '--pg', pg, '--label', label, timeout=900)
-            print(json.dumps({'trusted_gate_probe': 'PASS'}), flush=True)
+            gate_args = ['--ad-image', args.gate_ad_image] if args.gate_ad_image else []
+            probe = run('python3', str(ROOT / 'scripts/ops/isolated-manager-gate-probe.py'), '--nc', nc, '--pg', pg, '--label', label, *gate_args, timeout=900)
+            print(probe.strip(), flush=True)
         if args.hold_for_probe:
             sys.stdin.readline()
     finally:
