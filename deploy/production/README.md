@@ -2,6 +2,8 @@
 
 服务器先确认 CPU/内存/磁盘、已有 AI 容器、端口和 cgroup 预算，再部署独立 `nextcloud-production` Compose 项目。默认后端为 `http://10.106.1.128:18082`；用户自己的 HTTPS 代理负责 `https://cloud.tianjizn.com`，须保留 Host、转发 `/` 与 Office 的 `/hosting`、`/browser`、`/cool`（含 WebSocket）。宿主 nginx 不需要修改。
 
+HTTPS 代理的内网地址为 `10.106.1.119`。后端 nginx 仅信任该来源的 `X-Forwarded-For`，递归选择最后一个非可信地址，再用解析后的单一地址覆盖转发给 Nextcloud/Office 的 `X-Real-IP` 与 `X-Forwarded-For`。Nextcloud 继续只信任内部 nginx `172.30.55.40`，不扩大到整个内网。119 应覆盖访客传来的 `X-Forwarded-For`（例如 `proxy_set_header X-Forwarded-For $remote_addr;`），或在现有链尾追加实际连接地址；不要原样透传客户端可伪造的请求头。其他来源直连后端时，提交的转发头不会改变其访问来源。
+
 ## 初次安装与开机启动
 
 需要 Linux amd64、Docker Engine + Compose、Python 3、curl、tar、flock、systemd；无须 GitHub runner 或 GitHub 写入凭据。`install.sh` 创建缺失的随机 DB/管理员密码，已有秘密不覆盖，也不会输出密码。
