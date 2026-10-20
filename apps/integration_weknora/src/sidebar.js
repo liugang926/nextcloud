@@ -126,7 +126,8 @@ class WeknoraFileSidebarTab extends HTMLElement {
         section.append(heading)
         const connected = data.pairing_state === 'active'
             && (!data.operation || data.operation.state === 'active')
-        this.addRow(section, '关联状态', data.inherited ? '继承发布根的知识库'
+        const targetDeleted = data.operation?.state === 'target_deleted' || data.source_state === 'target_deleted'
+        this.addRow(section, '关联状态', targetDeleted ? '目标知识库或工作空间已删除' : data.inherited ? '继承发布根的知识库'
             : data.knowledge_base_id && connected ? '已关联知识库'
                 : data.operation || data.knowledge_base_id ? '待连接' : '未关联')
         if (data.binding_name) this.addRow(section, '发布目录', data.binding_name)
@@ -146,7 +147,10 @@ class WeknoraFileSidebarTab extends HTMLElement {
             if (data.summary.partial) this.addRow(section, '统计范围', '当前页可见文件，更多文件待加载')
             if (data.summary.next_cursor) this.button(section, '加载更多汇总', () => this.loadMoreSummary(data))
         }
-        if (data.inherited) {
+        if (targetDeleted) {
+            this.addRow(section, '处理状态', '发布与自动同步已停止，来源记录和原文件已保留')
+            this.addRow(section, '清理状态', '来源退出与索引清理仍需独立核验')
+        } else if (data.inherited) {
             this.addRow(section, '配置', '子目录沿用发布根配置')
         } else if (data.manageable && data.target_migration && data.target_migration.state !== 'active') {
             this.addRow(section, '知识库迁移', {

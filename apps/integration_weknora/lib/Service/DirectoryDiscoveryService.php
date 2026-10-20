@@ -57,6 +57,7 @@ final class DirectoryDiscoveryService {
         return $done;
     }
     private function hasIntent(Folder $folder): bool {
+        if (DirectoryTargetClosureService::lookup($this->db, 'root_key', DirectoryPublicationService::physicalKey($folder)) !== null) { return true; }
         foreach ($this->bindings->listBindings() as $binding) {
             if ($binding['root_file_id'] === $folder->getId()) { return true; }
         }

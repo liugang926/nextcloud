@@ -72,6 +72,7 @@ final class PublicationRecoveryReplay {
         // No source content/grant/control can reopen from a restored DB alone.
         // Typed external facts establish floors; current bytes are never restamped.
         $this->controls->closeFromPlan($plan);
+        TenantDeletionProtocol::requireTargetCoverage($plan['target_closures'] ?? [], $plan['tenant_deletions'] ?? []);
         $bindingIds = [];
         foreach ($plan['close_bindings'] as $entry) {
             if (!is_array($entry) || !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $entry['binding_id'] ?? '') ||
@@ -114,6 +115,8 @@ final class PublicationRecoveryReplay {
         if ($receipt === false) {
             (new PublicationRecoveryLedger($this->db, $this->config))->restoreTail($plan);
         }
+        $this->restoreTargetClosures($plan);
+        $this->restoreTenantDeletions($plan);
         $this->db->insertIgnoreConflict('weknora_recovery_apply', [
             'recovery_sha256' => $plan['recovery_record_sha256'],
             'checkpoint_sha256' => $plan['checkpoint_record_sha256'], 'plan_sha256' => $planDigest,
@@ -151,6 +154,69 @@ final class PublicationRecoveryReplay {
         return ['closed_bindings' => $closed, 'withdrawn_files' => $withdrawn,
             'external_replay_applied' => true, 'authoritative_reconciliation_required' => true,
             'ingress_reopen_permitted' => false, 'current_state' => $this->inspect($plan)];
+    }
+
+    /** Permanent facts from all independently retained history, including before checkpoint. */
+    private function restoreTenantDeletions(array $plan): void {
+        $facts = $plan['tenant_deletions'] ?? [];
+        if (!is_array($facts) || !array_is_list($facts) || count($facts) > TenantDeletionProtocol::MAX_RECOVERY_FACTS) { throw new \DomainException('Invalid permanent Tenant deletion inventory'); }
+        $checked = []; $previous = null;
+        foreach ($facts as $fact) {
+            $fact = TenantDeletionProtocol::fact($fact); $key = DirectoryTenantDeletionService::namespaceKeyFromFact($fact);
+            if ($fact['tenant']['instance_id'] !== $plan['instance_id'] || isset($checked[$key]) || ($previous !== null && TenantDeletionProtocol::compareFacts($previous, $fact) >= 0)) { throw new \DomainException('Tenant deletion history namespace/order mismatch'); }
+            DirectoryTenantDeletionService::validateLocalAnchor($this->db, $fact); $checked[$key] = $fact; $previous = $fact;
+        }
+        foreach ($plan['journal_events'] ?? [] as $event) {
+            if (($event['kind'] ?? null) !== 'tenant_deleted') { continue; }
+            $fact = TenantDeletionProtocol::fact($event['tenant_deletion'] ?? []); $key = DirectoryTenantDeletionService::namespaceKeyFromFact($fact);
+            if (($checked[$key] ?? null) !== $fact) { throw new \DomainException('Tenant deletion history omitted/replaced its first authenticated anchor'); }
+            // This global fact never adds an old migrated binding to generic
+            // close_bindings. Only its current matching namespace is stopped.
+        }
+        $this->db->beginTransaction();
+        try {
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
+            $q = $this->db->getQueryBuilder(); $r = $q->select('id')->from('weknora_bind_lock')->where($q->expr()->eq('id', $q->createNamedParameter(1)))->forUpdate()->executeQuery();
+            try { if ($r->fetchOne() === false) { throw new \DomainException('Tenant deletion restore lock missing'); } } finally { $r->closeCursor(); }
+            foreach ($checked as $fact) {
+                DirectoryTenantDeletionService::retainInTransaction($this->db, $fact);
+                DirectoryTenantDeletionService::stopNamespaceInTransaction($this->db, $fact, $this->bindings);
+            }
+            $this->db->commit();
+        } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
+    }
+
+    private function restoreTargetClosures(array $plan): void {
+        $facts = $plan['target_closures'] ?? [];
+        if (!is_array($facts) || !array_is_list($facts) || count($facts) > TargetDeletionProtocol::MAX_RECOVERY_CLOSURES) { throw new \DomainException('Invalid permanent target closure inventory'); }
+        $checked = []; $bindings = []; $targets = []; $roots = []; $previousBinding = '';
+        foreach ($facts as $fact) {
+            $fact = TargetDeletionProtocol::fact($fact);
+            if ($fact['target']['instance_id'] !== $plan['instance_id'] || isset($checked[$fact['target']['operation_id']])) { throw new \DomainException('Target closure recovery identity mismatch'); }
+            $target = $fact['target']; $kb = $target['tenant_id'] . "\0" . $target['knowledge_base_id'];
+            if (strcmp($target['binding_id'], $previousBinding) <= 0 || isset($bindings[$target['binding_id']]) || isset($targets[$kb]) || isset($roots[$fact['root_file_id']])) { throw new \DomainException('Permanent target closure identity collision'); }
+            $previousBinding = $target['binding_id']; $bindings[$target['binding_id']] = true; $targets[$kb] = true; $roots[$fact['root_file_id']] = true;
+            $checked[$target['operation_id']] = $fact;
+        }
+        foreach ($plan['journal_events'] ?? [] as $event) {
+            if (($event['kind'] ?? null) === 'target_deleted') {
+                $fact = TargetDeletionProtocol::fact($event['target_closure'] ?? []);
+                if (($checked[$fact['target']['operation_id']] ?? null) !== $fact) { throw new \DomainException('Target closure recovery inventory omitted an authenticated event'); }
+            }
+        }
+        $this->db->beginTransaction();
+        try {
+            $this->db->insertIgnoreConflict('weknora_bind_lock', ['id' => 1]);
+            $q = $this->db->getQueryBuilder();
+            $r = $q->select('id')->from('weknora_bind_lock')->where($q->expr()->eq('id', $q->createNamedParameter(1)))->forUpdate()->executeQuery();
+            try { if ($r->fetchOne() === false) { throw new \RuntimeException('Recovery target closure lock unavailable'); } } finally { $r->closeCursor(); }
+            foreach ($checked as $fact) {
+                DirectoryTargetClosureService::retainInTransaction($this->db, $fact);
+                $this->bindings->setPublicationState($fact['target']['binding_id'], 'stopped', 'recovery-ledger');
+                DirectoryTargetClosureService::closeRestoredIntentInTransaction($this->db, $fact);
+            }
+            $this->db->commit();
+        } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
     }
 
     /** Re-read DB authority under closed maintenance; a receipt alone is insufficient. */

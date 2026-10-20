@@ -173,7 +173,8 @@ namespace {
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->exec('CREATE TABLE weknora_bind_lock (id INTEGER PRIMARY KEY)');
     $pdo->exec('CREATE TABLE weknora_recovery_head(id INTEGER PRIMARY KEY, stream_id TEXT NOT NULL, sequence BIGINT NOT NULL, chain_sha256 TEXT NOT NULL)');
-    $pdo->exec('CREATE TABLE weknora_recovery_log(sequence BIGINT PRIMARY KEY, binding_id TEXT NOT NULL, file_id BIGINT, kind TEXT NOT NULL, source_revision BIGINT NOT NULL, created_at BIGINT NOT NULL, chain_sha256 TEXT NOT NULL)');
+    // Migration0029 adds the nullable selector used by all current journal writes.
+    $pdo->exec('CREATE TABLE weknora_recovery_log(sequence BIGINT PRIMARY KEY, binding_id TEXT NOT NULL, file_id BIGINT, kind TEXT NOT NULL, source_revision BIGINT NOT NULL, created_at BIGINT NOT NULL, chain_sha256 TEXT NOT NULL, tenant_namespace VARCHAR(64))');
     $pdo->exec('CREATE TABLE weknora_pub_state (id INTEGER PRIMARY KEY AUTOINCREMENT,
         binding_id TEXT NOT NULL, file_id BIGINT NOT NULL, state TEXT NOT NULL,
         actor_uid TEXT NOT NULL, updated_at BIGINT NOT NULL,

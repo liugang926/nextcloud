@@ -52,6 +52,10 @@ final class DirectoryOnboardingClient {
         if (!is_string($raw) || strlen($raw) > 65536) {
             throw new \RuntimeException('Onboarding response is unavailable');
         }
+        if ($method === 'GET' && preg_match('~\A/operations/[a-f0-9-]{36}\z~D', $suffix) && $response->getStatusCode() !== 200) {
+            if (in_array($response->getStatusCode(), [400, 401, 403, 404, 409, 422], true)) { throw new \DomainException('Target status could not be verified', $response->getStatusCode()); }
+            throw new \RuntimeException('Target status requires authenticated HTTP 200');
+        }
         $data = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
         if (!is_array($data) || $response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
             // Never forward remote errors (which may contain addresses or credentials).

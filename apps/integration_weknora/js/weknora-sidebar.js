@@ -4564,7 +4564,8 @@ ${message.stack}`;
       heading.textContent = "WeKnora \u76EE\u5F55";
       section.append(heading);
       const connected = data.pairing_state === "active" && (!data.operation || data.operation.state === "active");
-      this.addRow(section, "\u5173\u8054\u72B6\u6001", data.inherited ? "\u7EE7\u627F\u53D1\u5E03\u6839\u7684\u77E5\u8BC6\u5E93" : data.knowledge_base_id && connected ? "\u5DF2\u5173\u8054\u77E5\u8BC6\u5E93" : data.operation || data.knowledge_base_id ? "\u5F85\u8FDE\u63A5" : "\u672A\u5173\u8054");
+      const targetDeleted = data.operation?.state === "target_deleted" || data.source_state === "target_deleted";
+      this.addRow(section, "\u5173\u8054\u72B6\u6001", targetDeleted ? "\u76EE\u6807\u77E5\u8BC6\u5E93\u6216\u5DE5\u4F5C\u7A7A\u95F4\u5DF2\u5220\u9664" : data.inherited ? "\u7EE7\u627F\u53D1\u5E03\u6839\u7684\u77E5\u8BC6\u5E93" : data.knowledge_base_id && connected ? "\u5DF2\u5173\u8054\u77E5\u8BC6\u5E93" : data.operation || data.knowledge_base_id ? "\u5F85\u8FDE\u63A5" : "\u672A\u5173\u8054");
       if (data.binding_name) this.addRow(section, "\u53D1\u5E03\u76EE\u5F55", data.binding_name);
       if (data.space_name) this.addRow(section, "\u7A7A\u95F4", data.space_name);
       if (data.knowledge_base_id) this.addRow(section, "\u77E5\u8BC6\u5E93", data.knowledge_base_id);
@@ -4579,7 +4580,10 @@ ${message.stack}`;
         if (data.summary.partial) this.addRow(section, "\u7EDF\u8BA1\u8303\u56F4", "\u5F53\u524D\u9875\u53EF\u89C1\u6587\u4EF6\uFF0C\u66F4\u591A\u6587\u4EF6\u5F85\u52A0\u8F7D");
         if (data.summary.next_cursor) this.button(section, "\u52A0\u8F7D\u66F4\u591A\u6C47\u603B", () => this.loadMoreSummary(data));
       }
-      if (data.inherited) {
+      if (targetDeleted) {
+        this.addRow(section, "\u5904\u7406\u72B6\u6001", "\u53D1\u5E03\u4E0E\u81EA\u52A8\u540C\u6B65\u5DF2\u505C\u6B62\uFF0C\u6765\u6E90\u8BB0\u5F55\u548C\u539F\u6587\u4EF6\u5DF2\u4FDD\u7559");
+        this.addRow(section, "\u6E05\u7406\u72B6\u6001", "\u6765\u6E90\u9000\u51FA\u4E0E\u7D22\u5F15\u6E05\u7406\u4ECD\u9700\u72EC\u7ACB\u6838\u9A8C");
+      } else if (data.inherited) {
         this.addRow(section, "\u914D\u7F6E", "\u5B50\u76EE\u5F55\u6CBF\u7528\u53D1\u5E03\u6839\u914D\u7F6E");
       } else if (data.manageable && data.target_migration && data.target_migration.state !== "active") {
         this.addRow(section, "\u77E5\u8BC6\u5E93\u8FC1\u79FB", {

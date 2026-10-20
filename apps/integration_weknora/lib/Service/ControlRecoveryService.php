@@ -5,7 +5,7 @@ use OCP\IDBConnection;
 
 /** Recovery restores metadata inventories, never old privileges or source bytes. */
 final class ControlRecoveryService {
- public const TABLES=['weknora_dir_rules','weknora_dir_intent','weknora_dir_discover','weknora_group_identity','weknora_pair_handoff',
+ public const TABLES=['weknora_target_close','weknora_tenant_close','weknora_deletion_probe','weknora_dir_rules','weknora_dir_intent','weknora_dir_discover','weknora_group_identity','weknora_pair_handoff',
   'weknora_binding_id','weknora_machine_key','weknora_src_pair','weknora_src_pair_rot','weknora_src_decom',
   'weknora_root_move','weknora_target_move','weknora_pub_state','weknora_file_status','weknora_status_inbox','weknora_source_file_rev',
   'weknora_event_conn','weknora_identities','weknora_identity_audit','weknora_pub_audit','weknora_bind_pub_audit','weknora_recovery_head','weknora_recovery_log','weknora_recovery_apply','weknora_status_pending','weknora_status_scan','weknora_recovery_floor','weknora_control_gate'];

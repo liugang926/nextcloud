@@ -20,6 +20,7 @@ final class ControlRecoveryReconciler {
    if($gate===false||!hash_equals((string)$gate['plan_sha256'],$originalPlanSHA)){throw new \DomainException('Control closure plan changed');}
    $q=$this->db->getQueryBuilder();$r=$q->select('stream_id','sequence','chain_sha256')->from('weknora_recovery_head')->where($q->expr()->eq('id',$q->createNamedParameter(1)))->executeQuery();try{$head=$r->fetchAssociative();}finally{$r->closeCursor();}
    if($head===false||($tail['instance_id']??null)!==$this->config->getSystemValueString('instanceid')||($tail['stream_id']??null)!==$head['stream_id']||(string)($tail['through_sequence']??'')!==(string)$head['sequence']||!hash_equals((string)$head['chain_sha256'],(string)($tail['through_database_chain_sha256']??''))){throw new \DomainException('Latest independently pinned external tail is required');}
+   DirectoryTenantDeletionService::requireHeldPermanentFacts($this->db,$tail);
    $inventory=$this->controls->metadataInventory();if($inventory['missing_tables']!==[]){throw new \DomainException('Recovery control schema is incomplete');}if(!hash_equals($inventory['sha256'],$inventorySHA)){throw new \DomainException('Current control inventory changed');}
    $checked=[];foreach($this->bindings->listBindings() as $binding){
     if($binding['publication_state']!=='stopped'){throw new \DomainException('Every source must remain stopped during control reconciliation');}

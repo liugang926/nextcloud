@@ -21,12 +21,15 @@ import time
 
 KINDS = {'upsert', 'metadata', 'delete', 'subtree_scan', 'subtree_moved',
          'subtree_deleted', 'reconcile', 'withdrawn', 'eligible', 'binding_stop',
-         'binding_resume', 'binding_retired', 'binding_created', 'content_write_begin', 'content_write_complete'}
+         'binding_resume', 'binding_retired', 'binding_created', 'content_write_begin', 'content_write_complete', 'target_deleted', 'tenant_deleted'}
 PAGE_KEYS = {'schema_version','instance_id','stream_id','after_sequence',
              'next_sequence','head_sequence','after_chain_sha256','next_chain_sha256','head_chain_sha256','items','has_more'}
 ITEM_KEYS = {'sequence','binding_id','file_id','kind','source_revision','created_at'}
 ZERO = '0' * 64
-MAX_PAGE = 256 * 1024
+MAX_PAGE = 512 * 1024
+MAX_TARGET_CLOSURES = 10000
+MAX_TENANT_DELETIONS = 10000
+CLOCK_SKEW_SECONDS = 300
 
 class JournalError(ValueError): pass
 
@@ -41,8 +44,59 @@ def integer(value):
             'invalid decimal sequence')
     result=int(value);require(result <= 2**63-1,'sequence overflow');return result
 
+TARGET_FIELDS = ('schema','state','reason','operation_id','instance_id','binding_id','tenant_id',
+                 'knowledge_base_id','operation_revision','closure_id','deletion_time_ms','closed_at')
+
+def target_closure(value):
+    require(isinstance(value,dict) and set(value)=={'target','root_file_id','root_key'},'invalid target closure fact')
+    target=value['target']
+    require(isinstance(target,dict) and set(target)==set(TARGET_FIELDS) and all(isinstance(target[name],str) for name in TARGET_FIELDS),'invalid target closure fields')
+    require(target['schema']=='weknora-nextcloud-target-v1' and target['state']=='target_deleted' and target['reason'] in {'knowledge_base_deleted','tenant_deleted'},'invalid target closure state')
+    require(re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}',target['operation_id']) is not None,'invalid target closure operation')
+    require(re.fullmatch(r'[A-Za-z0-9_-]{1,64}',target['instance_id']) is not None and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',target['binding_id']) is not None,'invalid target closure scope')
+    require(re.fullmatch(r'[A-Za-z0-9._-]{1,128}',target['knowledge_base_id']) is not None,'invalid target closure knowledge base')
+    require(integer(target['tenant_id'])>0 and integer(target['operation_revision'])>0 and integer(target['deletion_time_ms'])>0 and integer(target['closed_at'])>0,'invalid target closure integer')
+    closed=integer(target['closed_at']);deleted=integer(target['deletion_time_ms'])//1000
+    now=int(time.time())
+    require(closed>=deleted and closed<=now+CLOCK_SKEW_SECONDS and deleted<=now+CLOCK_SKEW_SECONDS,'invalid target closure time')
+    receipt=hashlib.sha256('\n'.join(('weknora-target-deleted-v1',target['operation_id'],target['tenant_id'],target['knowledge_base_id'],target['instance_id'],target['binding_id'],target['operation_revision'],target['reason'],target['deletion_time_ms'])).encode('ascii')).hexdigest()
+    require(receipt==target['closure_id'],'target closure receipt mismatch')
+    root=integer(value['root_file_id']);require(root>0,'invalid target closure root')
+    expected=hashlib.sha256(('nextcloud-filecache-root-v1\0'+str(root)).encode('ascii')).hexdigest()
+    require(value['root_key']==expected,'target closure root mismatch')
+    return value
+
+TENANT_FIELDS = ('schema','state','operation_id','instance_id','binding_id','tenant_id','deletion_id','deletion_time_ms','closed_at')
+
+def tenant_deletion(value):
+    require(isinstance(value,dict) and set(value)=={'tenant','origin_sha256'},'invalid Tenant deletion envelope')
+    require(isinstance(value['origin_sha256'],str) and re.fullmatch(r'[a-f0-9]{64}',value['origin_sha256']) is not None,'invalid Tenant namespace origin')
+    tenant=value['tenant']
+    require(isinstance(tenant,dict) and set(tenant)==set(TENANT_FIELDS) and all(isinstance(tenant[name],str) for name in TENANT_FIELDS),'invalid Tenant deletion fields')
+    require(tenant['schema']=='weknora-nextcloud-tenant-deletion-v1' and tenant['state']=='tenant_deleted','invalid Tenant deletion state')
+    require(re.fullmatch(r'[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}',tenant['operation_id']) is not None and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',tenant['instance_id']) is not None and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',tenant['binding_id']) is not None,'invalid Tenant deletion scope')
+    require(integer(tenant['tenant_id'])>0 and integer(tenant['deletion_time_ms'])>0 and integer(tenant['closed_at'])>0,'invalid Tenant deletion integer')
+    deleted=integer(tenant['deletion_time_ms'])//1000;closed=integer(tenant['closed_at']);now=int(time.time())
+    require(closed>=deleted and closed<=now+CLOCK_SKEW_SECONDS and deleted<=now+CLOCK_SKEW_SECONDS,'invalid Tenant deletion time')
+    receipt=hashlib.sha256('\n'.join(('weknora-tenant-deleted-v1',tenant['tenant_id'],tenant['deletion_time_ms'])).encode('ascii')).hexdigest()
+    require(tenant['deletion_id']==receipt,'Tenant deletion receipt mismatch')
+    return value
+
 def event_hash(previous,item):
     values=[previous,item['sequence'],item['binding_id'],item['file_id'] or '-',item['kind'],item['source_revision'],str(item['created_at'])]
+    if item['kind']=='target_deleted':
+        fact=target_closure(item.get('target_closure'))
+        require(item['file_id'] is None and fact['target']['binding_id']==item['binding_id'] and fact['target']['operation_revision']==item['source_revision'],'target closure journal scope mismatch')
+        require(type(item['created_at']) is int and integer(fact['target']['closed_at'])<=item['created_at']+CLOCK_SKEW_SECONDS,'target closure postdates its journal observation')
+        values.extend([fact['root_file_id'],fact['root_key'],*(fact['target'][name] for name in TARGET_FIELDS)])
+    elif item['kind']=='tenant_deleted':
+        fact=tenant_deletion(item.get('tenant_deletion'))
+        require(item['file_id'] is None and item['source_revision']=='0' and item['binding_id']==fact['tenant']['binding_id'],'Tenant deletion journal scope mismatch')
+        require(type(item['created_at']) is int and integer(fact['tenant']['closed_at'])<=item['created_at']+CLOCK_SKEW_SECONDS,'Tenant deletion postdates journal observation')
+        values.extend([fact['origin_sha256'],*(fact['tenant'][name] for name in TENANT_FIELDS)])
+    else:require('target_closure' not in item and 'tenant_deletion' not in item,'unexpected closure fields')
+    require(item['kind']!='target_deleted' or 'tenant_deletion' not in item,'conflicting closure fields')
+    require(item['kind']!='tenant_deleted' or 'target_closure' not in item,'conflicting closure fields')
     return hashlib.sha256('\n'.join(values).encode('ascii')).hexdigest()
 
 def page(value):
@@ -59,7 +113,7 @@ def page(value):
     require(after!=0 or value['after_chain_sha256']==ZERO,'invalid initial database prefix')
     prefix=value['after_chain_sha256']
     for offset,item in enumerate(value['items'],after+1):
-        require(isinstance(item,dict) and set(item)==ITEM_KEYS,'invalid journal item')
+        require(isinstance(item,dict) and set(item)==(ITEM_KEYS|{'target_closure'} if item.get('kind')=='target_deleted' else ITEM_KEYS|{'tenant_deletion'} if item.get('kind')=='tenant_deleted' else ITEM_KEYS),'invalid journal item')
         require(integer(item['sequence'])==offset,'noncontiguous journal item')
         require(isinstance(item['binding_id'],str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',item['binding_id']) is not None,'invalid binding')
         require(item['file_id'] is None or integer(item['file_id'])>0,'invalid file identity')
@@ -215,9 +269,37 @@ def replay_plan(path,keyfile,anchor,through):
         value=signed['body']['page'];chain=value['after_chain_sha256']
         for event in value['items']:
             chain=event_hash(chain,event);prefix_hashes[event['sequence']]=chain
+    targets={};target_bindings={};target_kbs={};target_roots={}
+    for signed in records[:end+1]:
+        for event in signed['body']['page']['items']:
+            if event['kind']=='target_deleted':
+                fact=target_closure(event['target_closure']);op=fact['target']['operation_id']
+                require(fact['target']['instance_id']==last['instance_id'],'target closure instance mismatch')
+                require(op not in targets or targets[op]==fact,'permanent target closure changed')
+                for index,identity in ((target_bindings,(fact['target']['instance_id'],fact['target']['binding_id'])),(target_kbs,(fact['target']['tenant_id'],fact['target']['knowledge_base_id'])),(target_roots,fact['root_file_id'])):
+                    require(identity not in index or index[identity]==op,'permanent target closure identity collision')
+                    index[identity]=op
+                require(op in targets or len(targets)<MAX_TARGET_CLOSURES,'permanent target closure inventory exceeds protocol limit')
+                targets[op]=fact
+    tenants={}
+    for signed in records[:end+1]:
+        for event in signed['body']['page']['items']:
+            if event['kind']!='tenant_deleted':continue
+            fact=tenant_deletion(event['tenant_deletion']);tenant=fact['tenant'];namespace=(fact['origin_sha256'],integer(tenant['tenant_id']))
+            require(tenant['instance_id']==last['instance_id'],'Tenant deletion instance mismatch')
+            require(namespace not in tenants or tenants[namespace]==fact,'permanent Tenant first anchor changed')
+            require(namespace in tenants or len(tenants)<MAX_TENANT_DELETIONS,'permanent Tenant deletion inventory exceeds protocol limit')
+            tenants.setdefault(namespace,fact)
+    coverage={(fact['tenant']['instance_id'],fact['tenant']['tenant_id'],fact['tenant']['deletion_time_ms']) for fact in tenants.values()}
+    for fact in targets.values():
+        target=fact['target']
+        require(target['reason']!='tenant_deleted' or (target['instance_id'],target['tenant_id'],target['deletion_time_ms']) in coverage,'target Tenant deletion lacks independently retained Tenant history')
     bindings={};files={};content={}
     for item in records[start+1:end+1]:
         for event in item['body']['page']['items']:
+            # A retired original operation may now share its old binding
+            # with a migrated live target. Tenant controls are namespace-only.
+            if event['kind']=='tenant_deleted':continue
             binding=event['binding_id'];bindings[binding]=event['sequence']
             if event['kind'] in {'withdrawn','delete'} and event['file_id'] is not None:
                 files[(binding,event['file_id'])]=event['sequence']
@@ -236,6 +318,8 @@ def replay_plan(path,keyfile,anchor,through):
             'withdraw_files':[{'binding_id':b,'file_id':f,'last_sequence':seq} for (b,f),seq in sorted(files.items())],
             'journal_events':[event for record in records[start+1:end+1] for event in record['body']['page']['items']],
             'database_prefix_hashes':prefix_hashes,'latest_content_revisions':[content[k] for k in sorted(content)],
+            'target_closures':sorted(targets.values(),key=lambda fact:fact['target']['binding_id']),
+            'tenant_deletions':[tenants[key] for key in sorted(tenants)],
             'authoritative_reconciliation_required':True,'ingress_reopen_permitted':False}
 
 def collect(path,keyfile,container,project,max_pages=1000):

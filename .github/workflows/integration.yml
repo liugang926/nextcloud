@@ -17,6 +17,8 @@ jobs:
       WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: '1'
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -90,12 +92,19 @@ jobs:
           docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             php apps/integration_weknora/tests/publication_recovery_ledger_contract.php
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --cpus=.5 --memory=256m -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            sh -ec 'for test in target_deletion tenant_deletion manager_authorization manager_authorization_transport; do php "apps/integration_weknora/tests/${test}_contract.php"; done'
           docker run --rm --network none -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             php -d memory_limit=512M apps/integration_weknora/tests/manifest_10k_synthetic_contract.php
 
       - name: Install packaged app on an empty isolated stack
         run: python3 scripts/ops/isolated-publication-recovery-smoke.py
+
+      - name: Upgrade the production app baseline on isolated PostgreSQL
+        run: python3 scripts/ops/isolated-manager-upgrade-smoke.py
 
       - name: Start isolated Docker stack
         run: ./scripts/dev-up.sh
