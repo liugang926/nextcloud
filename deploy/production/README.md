@@ -29,18 +29,23 @@ sudo systemctl status nextcloud-production.service nextcloud-production-update.t
 
 Office 初始化先设置内部与公开 WOPI 地址，仅等待 Office 健康后执行 `richdocuments:activate-config`，加载 discovery 和 capabilities。该命令会重置回调地址，因此随后再设置内部 `wopi_callback_url` 与 WOPI allowlist。此时 Nextcloud 升级可能仍处于维护模式，不能等待其健康检查通过。
 
-## 确认合并后发布
+## 合并后自动发布
 
-先让变更进入 GitHub `main`，等待该**精确 commit** 的主分支 `integration.yml` 中 `local-smoke`（Nextcloud 安装/API）与 `direct-upgrade`（升级/恢复）两项成功，再创建新的 `prod-*` tag：
+变更进入 GitHub `main` 后，`Production release` 会自动为该提交创建
+`prod-<UTC 日期>-<提交前 12 位>` 版本。工作流先等待相同 **精确 commit**
+的 `integration.yml` 主分支 `local-smoke`（Nextcloud 安装/API）和
+`direct-upgrade`（升级/恢复）成功，再运行发布器安全测试、构建并发布完整
+Release。任一门禁失败、取消或超时都不会生成已发布的 Release，服务器也不会
+部署该提交。
 
-```sh
-git switch main
-git pull --ff-only
-git tag prod-20261018-01
-git push origin prod-20261018-01
-```
+Release 发布后无需登录服务器。120 秒后的首次轮询及之后每约 5 分钟一次的
+定时器会自动发现最新版本，执行检查点、镜像身份校验、迁移/健康检查，全部
+通过后才切换流量。自动标签包含提交 SHA，同一提交重复运行不会生成第二个
+已发布版本。
 
-该 tag 工作流检查 commit 是 `origin/main` 的祖先，并要求相同 SHA 的 main push 中上述两项 Nextcloud 检查成功，以及发布器安全自测成功；不等待本次未部署的历史 WeKnora 补丁矩阵，不假设仓库已经配置分支保护。工作流串行发布，不取消正在进行的生产发布。普通 main push、PR 或其他 tag 均不会发布生产版本。发布后不要移动 tag、替换 Release 资产或复用失败 tag；修改后使用新的 `prod-*` tag。
+人工 `prod-*` tag 仍保留为受控的应急重建/指定提交发布入口；它不是日常开发
+流程的必要步骤。发布后不要移动 tag、替换 Release 资产或复用失败 tag；修复
+后应产生新的 main 提交和新的自动版本。
 
 Actions 在 Linux amd64 拉取固定版本的 Nextcloud 34.0.4、PostgreSQL 16、Redis 7、Collabora CODE 26.04.2.4.1 和 nginx 1.30.3，记录真实 registry digest、image config ID 和架构；实际启动 Office，核对运行工具、HTTP discovery 和公开 HTTPS 地址后，打包运行源码、Nextcloud 34 兼容的 richdocuments 11.1.2、镜像及 SHA256 清单。镜像 gzip 超过约 1.7 GiB 时分片。所有资产上传至 draft 后才发布，避免服务器读到不完整版本。
 
