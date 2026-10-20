@@ -36960,7 +36960,7 @@ new file mode 100644
 index 00000000..fc950cdb
 --- /dev/null
 +++ b/internal/datasource/connector/nextcloud/signature_live_test.go
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,42 @@
 +package nextcloud
 +
 +import (
@@ -36993,9 +36993,12 @@ index 00000000..fc950cdb
 +	if err != nil || capabilities.InstanceID == "" {
 +		t.Fatalf("signed capability request failed: %+v, %v", capabilities, err)
 +	}
++	// Preceding HTTP smokes mutate the sample file's revision ledger. Use a
++	// stable absent file so this signature probe does not depend on that state;
++	// content-revision enforcement is covered by its dedicated live fixture.
 +	decision, err := AuthorizeCurrentFile(context.Background(), source,
 +		capabilities.InstanceID, "dev-published", "unmapped-live-test",
-+		"00112233-4455-6677-8899-aabbccddeeff", 77)
++		"00112233-4455-6677-8899-aabbccddeeff", 2147483647)
 +	if err != nil || decision.Allow || decision.Reason != "identity_unmapped_or_disabled" {
 +		t.Fatalf("signed authorization POST failed: %+v, %v", decision, err)
 +	}
