@@ -9,6 +9,38 @@ style('integration_weknora', 'weknora-admin');
     <h2>WeKnora publication</h2>
     <p>Choose a dedicated Nextcloud folder as the source of files eligible for WeKnora indexing.</p>
 
+    <div class="weknora-admin__panel" id="weknora-connection-setup">
+        <h3>连接 WeKnora</h3>
+        <p>首次连接只需要 WeKnora 地址和管理员连接密钥。密钥仅用于发现和授权空间，不会保存到 Nextcloud。</p>
+        <form id="weknora-setup-form" autocomplete="off">
+            <div class="weknora-admin__fields">
+                <label>WeKnora 地址
+                    <input id="weknora-setup-origin" name="origin" type="url" required
+                        placeholder="https://weknora.example.com" spellcheck="false">
+                </label>
+                <label>管理员连接密钥（仅首次连接使用）
+                    <input id="weknora-setup-token" name="token" type="password" required
+                        autocomplete="off" spellcheck="false">
+                </label>
+            </div>
+            <div class="weknora-admin__actions">
+                <button type="submit" class="button primary" id="weknora-setup-discover">发现空间</button>
+                <button type="button" class="button" id="weknora-setup-disconnect" hidden>断开连接</button>
+            </div>
+        </form>
+        <p>连接密钥支持 WeKnora 平台 API Key（需要空间读取/管理能力）或已登录管理员令牌。空间默认处理方案由 WeKnora 选择，目录用户不需要填写模板 ID。</p>
+        <p id="weknora-setup-message" class="weknora-admin__message" role="status" aria-live="polite"></p>
+        <div id="weknora-setup-spaces" hidden>
+            <p>选择允许 Nextcloud 目录使用的空间：</p>
+            <div id="weknora-setup-space-list"></div>
+            <button type="button" class="button primary" id="weknora-setup-save">保存连接</button>
+        </div>
+        <div id="weknora-setup-current"></div>
+    </div>
+
+    <details class="weknora-admin__panel">
+        <summary><strong>高级：目录规则</strong></summary>
+        <p>普通连接和目录绑定会自动生成内部规则。只有排障或迁移既有配置时才需要编辑下面的字段。</p>
     <div class="weknora-admin__panel">
         <h3>目录自动关联规则</h3>
         <p>登记发布范围、已有工作空间及明确管理委派后，员工可在目录详情中创建或关联专用知识库。自动发现只处理容器的直接子目录。</p>
@@ -35,6 +67,7 @@ style('integration_weknora', 'weknora-admin');
         <pre id="weknora-directory-rules-list"></pre>
         <p>服务端须预置已限定范围的开通凭据与允许的 WeKnora 地址。员工不接触此凭据。暂停同步保留当前权限检查；停止发布立即关闭来源读取。</p>
     </div>
+    </details>
 
     <div class="weknora-admin__notice" role="note">
         <h3>Automatic publication scope</h3>
@@ -70,6 +103,8 @@ style('integration_weknora', 'weknora-admin');
         <p>Pending counts cover only configured local senders, including paused senders. Receipt counts exclude already received hints; application counts include only retained hints above the last verified applied watermark and at or below the durable receipt. Both exclude bindings without an event connection. These source-side figures are not WeKnora's task queue, synchronization delay, parsing health, or per-file publication state. A received or applied watermark alone does not make a file ready.</p>
     </div>
 
+    <details class="weknora-admin__panel">
+        <summary><strong>高级：运维与配对</strong></summary>
     <div class="weknora-admin__panel">
         <div class="weknora-admin__panel-heading">
             <h3>Folder bindings</h3>
@@ -183,4 +218,5 @@ style('integration_weknora', 'weknora-admin');
             <p id="weknora-publication-message" class="weknora-admin__message" role="status" aria-live="polite"></p>
         </form>
     </div>
+    </details>
 </section>

@@ -41,6 +41,25 @@ final class EventReceiverPolicy {
         }
         $approved = getenv('WEKNORA_EVENT_ALLOWED_ORIGINS');
         $origins = is_string($approved) ? explode(',', $approved) : [];
+        try {
+            $config = \OCP\Server::get(\OCP\IConfig::class);
+            $stored = json_decode((string)$config->getAppValue(
+                'integration_weknora',
+                'connection_origins',
+                '[]',
+            ), true);
+            if (is_array($stored)) {
+                foreach ($stored as $storedOrigin) {
+                    if (is_string($storedOrigin)) {
+                        $origins[] = $storedOrigin;
+                    }
+                }
+            }
+        } catch (\Throwable $ignored) {
+            // The environment allow-list remains authoritative if app config
+            // cannot be read during a partially initialized request.
+        }
+        $origins = array_values(array_unique($origins));
         if (!in_array($origin, $origins, true)) {
             throw new \InvalidArgumentException('Receiver origin is not operator approved');
         }

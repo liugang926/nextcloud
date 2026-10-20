@@ -919,6 +919,196 @@
 
 (function () {
     'use strict';
+
+    function initConnectionSetup() {
+        const form = document.getElementById('weknora-setup-form');
+        if (!form) {
+            return;
+        }
+        const origin = document.getElementById('weknora-setup-origin');
+        const token = document.getElementById('weknora-setup-token');
+        const discover = document.getElementById('weknora-setup-discover');
+        const save = document.getElementById('weknora-setup-save');
+        const disconnect = document.getElementById('weknora-setup-disconnect');
+        const message = document.getElementById('weknora-setup-message');
+        const spacesPanel = document.getElementById('weknora-setup-spaces');
+        const spaceList = document.getElementById('weknora-setup-space-list');
+        const current = document.getElementById('weknora-setup-current');
+        const baseUrl = window.OC.generateUrl('/apps/integration_weknora/api/v1/admin/connection');
+        let discovered = [];
+
+        function setMessage(value, kind) {
+            message.textContent = value;
+            if (kind) message.dataset.kind = kind;
+            else delete message.dataset.kind;
+        }
+
+        async function request(method, url, payload) {
+            const headers = {
+                Accept: 'application/json',
+                requesttoken: window.OC.requestToken || '',
+                'X-Requested-With': 'XMLHttpRequest',
+            };
+            if (payload !== undefined) headers['Content-Type'] = 'application/json';
+            const response = await fetch(url, {
+                method,
+                headers,
+                credentials: 'same-origin',
+                cache: 'no-store',
+                body: payload === undefined ? undefined : JSON.stringify(payload),
+            });
+            let data = null;
+            if ((response.headers.get('content-type') || '').includes('application/json')) {
+                data = await response.json();
+            }
+            if (!response.ok) {
+                const error = new Error('connection request failed');
+                error.status = response.status;
+                error.code = data && data.error;
+                throw error;
+            }
+            return data || {};
+        }
+
+        function renderCurrent(data) {
+            current.replaceChildren();
+            disconnect.hidden = !data.connected;
+            if (!data.connected) {
+                return;
+            }
+            const title = document.createElement('p');
+            title.textContent = `已连接：${data.origin}`;
+            current.append(title);
+            const list = document.createElement('ul');
+            for (const space of data.spaces || []) {
+                const item = document.createElement('li');
+                item.textContent = (space.name || `空间 ${space.tenant_id}`) +
+                    (space.processing_template_name ? ` · 默认处理方案：${space.processing_template_name}` : '');
+                list.append(item);
+            }
+            current.append(list);
+        }
+
+        async function loadStatus() {
+            try {
+                const data = await request('GET', baseUrl);
+                renderCurrent(data);
+                if (data.connected && data.origin) origin.value = data.origin;
+            } catch (_) {
+                setMessage('连接状态暂不可用。', 'error');
+            }
+        }
+
+        function renderSpaces(spaces) {
+            discovered = spaces;
+            spaceList.replaceChildren();
+            spacesPanel.hidden = false;
+            save.hidden = false;
+            for (const space of spaces) {
+                const label = document.createElement('label');
+                label.className = 'weknora-admin__space-choice';
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.value = String(space.tenant_id);
+                checkbox.checked = space.eligible === true;
+                checkbox.disabled = space.eligible !== true;
+                const text = document.createElement('span');
+                text.textContent = (space.tenant_name || `空间 ${space.tenant_id}`) +
+                    (space.processing_template_name ? ` · 默认处理方案：${space.processing_template_name}` : '');
+                if (space.eligible !== true) {
+                    text.textContent += `（不可用：${space.reason === 'no_processing_template' ? '缺少可用处理方案' : '未授权'}）`;
+                }
+                label.append(checkbox, text);
+                spaceList.append(label);
+            }
+            if (!spaces.length) {
+                const empty = document.createElement('p');
+                empty.textContent = '没有发现可授权的空间。请确认连接密钥属于平台管理员或空间 Owner/Admin。';
+                spaceList.append(empty);
+                save.hidden = true;
+            }
+        }
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            discover.disabled = true;
+            setMessage('正在读取空间…');
+            try {
+                const data = await request('POST', `${baseUrl}/discover`, {
+                    origin: origin.value.trim(),
+                    token: token.value,
+                });
+                renderSpaces(Array.isArray(data.spaces) ? data.spaces : []);
+                setMessage('已读取空间。勾选需要允许 Nextcloud 使用的空间后保存。');
+            } catch (error) {
+                spacesPanel.hidden = true;
+                setMessage(error.status === 403
+                    ? '连接被拒绝。请确认密钥有效且具有空间管理权限。'
+                    : '无法读取 WeKnora 空间，请检查地址、证书和网络。', 'error');
+            } finally {
+                discover.disabled = false;
+            }
+        });
+
+        save.addEventListener('click', async () => {
+            const spaces = [...spaceList.querySelectorAll('input[type=checkbox]:checked')]
+                .map((input) => input.value);
+            if (!spaces.length) {
+                setMessage('至少选择一个空间。', 'error');
+                return;
+            }
+            save.disabled = true;
+            const original = save.textContent;
+            save.textContent = '正在保存…';
+            try {
+                const data = await request('POST', baseUrl, {
+                    origin: origin.value.trim(),
+                    token: token.value,
+                    spaces,
+                });
+                token.value = '';
+                renderCurrent(data);
+                spacesPanel.hidden = true;
+                setMessage('连接已保存。现在可以在 Nextcloud 目录的 WeKnora 标签中选择空间和知识库。');
+            } catch (error) {
+                setMessage(error.status === 409
+                    ? '空间授权未完成，请检查该空间是否有可用的处理方案。'
+                    : '连接未保存，请检查密钥和管理员权限。', 'error');
+            } finally {
+                save.disabled = false;
+                save.textContent = original;
+            }
+        });
+
+        disconnect.addEventListener('click', async () => {
+            if (!window.confirm('断开连接会停用当前空间的连接凭据，已绑定的目录和知识库不会被删除。继续？')) {
+                return;
+            }
+            disconnect.disabled = true;
+            try {
+                const data = await request('DELETE', baseUrl);
+                renderCurrent(data);
+                spacesPanel.hidden = true;
+                setMessage('连接已断开。');
+            } catch (_) {
+                setMessage('断开失败，请稍后重试。', 'error');
+            } finally {
+                disconnect.disabled = false;
+            }
+        });
+
+        loadStatus();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initConnectionSetup, { once: true });
+    } else {
+        initConnectionSetup();
+    }
+}());
+
+(function () {
+    'use strict';
     function initDirectoryRules() {
         const form = document.getElementById('weknora-directory-rule-form');
         if (!form) return;

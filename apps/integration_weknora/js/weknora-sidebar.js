@@ -4566,6 +4566,7 @@ ${message.stack}`;
       const connected = data.pairing_state === "active" && (!data.operation || data.operation.state === "active");
       this.addRow(section, "\u5173\u8054\u72B6\u6001", data.inherited ? "\u7EE7\u627F\u53D1\u5E03\u6839\u7684\u77E5\u8BC6\u5E93" : data.knowledge_base_id && connected ? "\u5DF2\u5173\u8054\u77E5\u8BC6\u5E93" : data.operation || data.knowledge_base_id ? "\u5F85\u8FDE\u63A5" : "\u672A\u5173\u8054");
       if (data.binding_name) this.addRow(section, "\u53D1\u5E03\u76EE\u5F55", data.binding_name);
+      if (data.space_name) this.addRow(section, "\u7A7A\u95F4", data.space_name);
       if (data.knowledge_base_id) this.addRow(section, "\u77E5\u8BC6\u5E93", data.knowledge_base_id);
       if (data.publication_state) this.addRow(section, "\u53D1\u5E03", data.publication_state === "active" ? connected ? "\u53D1\u5E03\u6709\u6548" : "\u5F85\u8FDE\u63A5\uFF0C\u53D1\u5E03\u5F85\u9A8C\u8BC1" : "\u5DF2\u505C\u6B62\u53D1\u5E03");
       if (typeof data.sync_enabled === "boolean") this.addRow(section, "\u540C\u6B65", data.sync_enabled ? "\u81EA\u52A8\u540C\u6B65" : "\u5DF2\u6682\u505C\u540C\u6B65");
@@ -4609,10 +4610,12 @@ ${message.stack}`;
             this.load();
           });
         }
-      } else if (data.manageable) {
+      } else if (data.manageable || data.can_bind && !data.binding_id) {
         this.button(section, "\u5173\u8054\u77E5\u8BC6\u5E93", () => this.renderAssociation(false));
       }
-      if (data.can_create) this.button(section, "\u65B0\u5EFA\u5173\u8054\u76EE\u5F55", () => this.renderAssociation(true));
+      if (data.can_create) {
+        this.button(section, "\u65B0\u5EFA\u5173\u8054\u76EE\u5F55", () => this.renderAssociation(true));
+      }
       this.button(section, "\u5237\u65B0\u72B6\u6001", () => this.load());
       this.replaceChildren(section);
     }
@@ -4678,7 +4681,7 @@ ${message.stack}`;
       form.append(heading);
       if (migrating) {
         const explanation = document.createElement("p");
-        explanation.textContent = "\u8FC1\u79FB\u4F1A\u5148\u6682\u505C\u65E7\u76EE\u6807\u8BFB\u53D6\uFF0C\u518D\u6838\u9A8C\u65B0\u7684\u4E13\u7528\u77E5\u8BC6\u5E93\u4E0E\u5904\u7406\u6A21\u677F\u3002\u539F\u6587\u4EF6\u4E0E\u5DE5\u4F5C\u7A7A\u95F4\u4FDD\u7559\uFF0C\u5B8C\u6210\u524D\u663E\u793A\u5F85\u8FDE\u63A5\u3002";
+        explanation.textContent = "\u8FC1\u79FB\u4F1A\u5148\u6682\u505C\u65E7\u76EE\u6807\u8BFB\u53D6\uFF0C\u518D\u6838\u9A8C\u65B0\u7684\u77E5\u8BC6\u5E93\u3002\u539F\u6587\u4EF6\u4E0E\u5DE5\u4F5C\u7A7A\u95F4\u4FDD\u7559\uFF0C\u5B8C\u6210\u524D\u663E\u793A\u5F85\u8FDE\u63A5\u3002";
         form.append(explanation);
       }
       const spaces = result.targets || [{
@@ -4697,47 +4700,41 @@ ${message.stack}`;
         seenSpaces.add(String(candidate.tenant_id));
         const option = document.createElement("option");
         option.value = String(candidate.tenant_id);
-        option.textContent = `\u5DE5\u4F5C\u7A7A\u95F4 ${candidate.tenant_id}`;
+        option.textContent = candidate.space_name || `\u7A7A\u95F4 ${candidate.tenant_id}`;
         space.append(option);
       }
       this.field(form, "\u5DE5\u4F5C\u7A7A\u95F4", space);
-      const template = document.createElement("select");
-      this.field(form, "\u5904\u7406\u6A21\u677F", template);
       const name = document.createElement("input");
       name.type = "text";
       name.maxLength = 255;
-      name.required = true;
+      name.required = creating;
       name.value = creating ? "" : this._node?.basename || this._node?.displayname || "\u76EE\u5F55\u77E5\u8BC6\u5E93";
-      this.field(form, creating ? "\u76EE\u5F55\u540D\u79F0" : "\u77E5\u8BC6\u5E93\u540D\u79F0", name);
+      this.field(form, creating ? "\u76EE\u5F55\u540D\u79F0\uFF08\u540C\u65F6\u4F5C\u4E3A\u77E5\u8BC6\u5E93\u540D\u79F0\uFF09" : "\u77E5\u8BC6\u5E93\u540D\u79F0", name);
+      if (!creating) name.hidden = true;
       const target = document.createElement("select");
       const automatic = document.createElement("option");
       automatic.value = "";
-      automatic.textContent = "\u81EA\u52A8\u521B\u5EFA\u4E13\u7528\u77E5\u8BC6\u5E93";
+      automatic.textContent = "\u65B0\u5EFA\u77E5\u8BC6\u5E93";
+      let selectedTemplate = "";
       const updateCandidates = () => {
         target.replaceChildren(automatic);
-        const selected = spaces.find((candidate) => String(candidate.tenant_id) === space.value && String(candidate.processing_template_id) === template.value);
+        const selected = spaces.find((candidate) => String(candidate.tenant_id) === space.value);
+        selectedTemplate = selected ? String(selected.processing_template_id) : "";
         for (const candidate of selected?.candidates || []) {
           const option = document.createElement("option");
           option.value = candidate.id;
-          option.textContent = `\u5DF2\u6709\u7A7A\u767D\u77E5\u8BC6\u5E93\uFF1A${candidate.name}`;
+          const contentCount = Number(candidate.content_count || 0);
+          option.textContent = `\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1A${candidate.name}${contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : ""}`;
           target.append(option);
         }
       };
-      const updateTemplates = () => {
-        template.replaceChildren();
-        for (const candidate of spaces.filter((candidate2) => String(candidate2.tenant_id) === space.value)) {
-          const option = document.createElement("option");
-          option.value = String(candidate.processing_template_id);
-          const graphMode = { optional: "\u6587\u6863\u53EF\u72EC\u7ACB\u53D1\u5E03", required: "\u56FE\u8C31\u5B8C\u6210\u540E\u53D1\u5E03", off: "\u672A\u542F\u7528\u56FE\u8C31" }[candidate.graph_mode];
-          option.textContent = `${candidate.template_name || `\u5904\u7406\u6A21\u677F ${candidate.processing_template_id}`}${graphMode ? `\uFF08${graphMode}\uFF09` : ""}`;
-          template.append(option);
-        }
-        updateCandidates();
-      };
-      space.addEventListener("change", updateTemplates);
-      template.addEventListener("change", updateCandidates);
-      updateTemplates();
+      space.addEventListener("change", updateCandidates);
+      updateCandidates();
       this.field(form, "\u76EE\u6807\u77E5\u8BC6\u5E93", target);
+      const existingNote = document.createElement("p");
+      existingNote.textContent = "\u9009\u62E9\u5DF2\u6709\u77E5\u8BC6\u5E93\u65F6\uFF0C\u539F\u6709\u5185\u5BB9\u4F1A\u4FDD\u7559\uFF1B\u7ED1\u5B9A\u540E\u8BE5\u77E5\u8BC6\u5E93\u7684\u65B0\u589E\u5185\u5BB9\u7531 Nextcloud \u76EE\u5F55\u7BA1\u7406\u3002";
+      existingNote.className = "weknora-sidebar__hint";
+      form.append(existingNote);
       const submit = document.createElement("button");
       submit.type = "submit";
       submit.textContent = creating ? "\u521B\u5EFA\u5E76\u5173\u8054" : migrating ? "\u5F00\u59CB\u8FC1\u79FB" : "\u5173\u8054";
@@ -4751,15 +4748,16 @@ ${message.stack}`;
         name.disabled = true;
         target.disabled = true;
         space.disabled = true;
-        template.disabled = true;
+        const selected = spaces.find((candidate) => String(candidate.tenant_id) === space.value);
+        const chosen = selected?.candidates?.find((candidate) => String(candidate.id) === target.value);
         submittedChoice ||= {
           operation_id: operationId,
           mode: target.value ? "existing" : "create",
-          name: name.value,
+          name: chosen?.name || name.value,
           knowledge_base_id: target.value,
           folder_name: creating ? name.value : void 0,
           tenant_id: space.value,
-          processing_template_id: template.value
+          processing_template_id: selectedTemplate
         };
         if (migrating && !this._targetMigrations.has(selectedId)) {
           this._targetMigrations.set(selectedId, { operationId, choice: submittedChoice, confirmed: false });
