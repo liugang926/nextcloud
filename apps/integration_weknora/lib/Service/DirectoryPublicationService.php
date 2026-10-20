@@ -94,13 +94,17 @@ final class DirectoryPublicationService {
             if (!is_array($rule['targets']) || !array_is_list($rule['targets']) || count($rule['targets']) < 1 || count($rule['targets']) > 32) { throw new \InvalidArgumentException('Invalid target spaces'); }
             $seenTargets = [];
             foreach ($rule['targets'] as &$target) {
-                if (!is_array($target) || !SourcePairingRegistryService::validTenantId($target['tenant_id'] ?? null) ||
+                if (!is_array($target)) { throw new \InvalidArgumentException('Invalid target space'); }
+                $spaceName = $target['space_name'] ?? '';
+                if (!SourcePairingRegistryService::validTenantId($target['tenant_id'] ?? null) ||
                     !SourcePairingRegistryService::validRemoteId($target['processing_template_id'] ?? null) ||
-                    !is_string($target['credential_id'] ?? null) || !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $target['credential_id']) || isset($seenTargets[$target['tenant_id']."\0".$target['processing_template_id']])) {
+                    !is_string($target['credential_id'] ?? null) || !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $target['credential_id']) ||
+                    !is_string($spaceName) || strlen($spaceName) > 255 ||
+                    isset($seenTargets[$target['tenant_id']."\0".$target['processing_template_id']])) {
                     throw new \InvalidArgumentException('Invalid or duplicate target space');
                 }
                 $seenTargets[$target['tenant_id']."\0".$target['processing_template_id']] = true;
-                $target = array_intersect_key($target, array_flip(['tenant_id','processing_template_id','credential_id']));
+                $target = array_intersect_key($target, array_flip(['tenant_id','processing_template_id','credential_id','space_name']));
             }
             unset($target);
             if (!isset($seenTargets[$rule['tenant_id']."\0".$rule['processing_template_id']])) { throw new \InvalidArgumentException('The automatic default target must be explicitly allowed'); }
@@ -166,12 +170,23 @@ final class DirectoryPublicationService {
             $intent = $this->find('binding_id', $binding['id']);
             $rule = $intent === null ? null : $this->rule((string)$intent['rule_id']);
             $pair = $this->pairs->status($binding['id']);
+            $spaceName = null;
+            if ($rule !== null && $pair !== null) {
+                foreach ($rule['targets'] ?? [] as $target) {
+                    if (is_array($target) && (string)($target['tenant_id'] ?? '') === (string)($pair['tenant_id'] ?? '') &&
+                        is_string($target['space_name'] ?? null)) {
+                        $spaceName = $target['space_name'];
+                        break;
+                    }
+                }
+            }
             return ['folder_id' => $folderId, 'source_state' => 'bound', 'binding_id' => $binding['id'],
                 'binding_name' => $binding['name'], 'inherited' => $folderId !== $binding['root_file_id'],
                 'manageable' => $folderId === $binding['root_file_id'] && $rule !== null && $this->delegated($uid, $rule),
                 'publication_state' => $binding['publication_state'], 'sync_enabled' => $binding['sync_enabled'],
                 'sync_revision' => $binding['sync_revision'], 'pairing_state' => $pair['state'] ?? 'pending',
                 'tenant_id' => $pair['tenant_id'] ?? null, 'knowledge_base_id' => $pair['knowledge_base_id'] ?? null,
+                'space_name' => $spaceName,
                 'operation' => $intent === null ? null : $this->publicIntent($intent)];
         }
         $intent = $this->find('root_key', self::physicalKey($folder));
@@ -197,6 +212,7 @@ final class DirectoryPublicationService {
                     'actor_object_guid' => $identity['object_guid']]);
                 if((string)($response['tenant_id']??'')!==$effective['tenant_id']||($response['processing_template_id']??null)!==$effective['processing_template_id']){throw new \DomainException('Scoped candidate template identity mismatch');}
                 $targets[] = ['tenant_id' => $effective['tenant_id'], 'processing_template_id' => $effective['processing_template_id'],
+                    'space_name' => is_string($effective['space_name'] ?? null) ? $effective['space_name'] : null,
                     'template_name'=>is_string($response['processing_template_name']??null)?$response['processing_template_name']:$effective['processing_template_id'],
                     'graph_mode'=>in_array($response['graph_mode']??null,['off','optional','required'],true)?$response['graph_mode']:null,
                     'candidates' => $response['candidates'] ?? []];
@@ -549,6 +565,10 @@ final class DirectoryPublicationService {
     private function requireManagement(string $uid, Folder $folder): array {
         $rule = $this->matchingRule($folder);
         if ($rule === null || !$this->delegated($uid, $rule)) { throw new \DomainException('Publication management is forbidden'); }
+        if (!$folder->isCreatable() &&
+            (($folder->getPermissions() & \OCP\Constants::PERMISSION_UPDATE) === 0)) {
+            throw new \DomainException('Publication management is forbidden');
+        }
         $this->acl->assertTreeSupported($this->folder($rule['owner_uid'], $folder->getId()));
         return $rule;
     }

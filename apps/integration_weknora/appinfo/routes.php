@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 return [
     'routes' => [
+        ['name' => 'connection_admin#status', 'url' => '/api/v1/admin/connection', 'verb' => 'GET'],
+        ['name' => 'connection_admin#discover', 'url' => '/api/v1/admin/connection/discover', 'verb' => 'POST'],
+        ['name' => 'connection_admin#connect', 'url' => '/api/v1/admin/connection', 'verb' => 'POST'],
+        ['name' => 'connection_admin#disconnect', 'url' => '/api/v1/admin/connection', 'verb' => 'DELETE'],
         ['name' => 'target_migration#status', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'GET'],
         ['name' => 'target_migration#retry', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'POST'],
         ['name' => 'target_migration#begin', 'url' => '/api/v1/folders/{folderId}/target-migration', 'verb' => 'POST'],
