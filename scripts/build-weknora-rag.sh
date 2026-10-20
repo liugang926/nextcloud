@@ -6,7 +6,7 @@ workspace_dir="$(cd "$project_dir/.." && pwd)"
 source_dir="${WEKNORA_RAG_SOURCE_DIR:-$workspace_dir/WeKnora-ldap-ad}"
 patch_file="$project_dir/integration/weknora-rag-b6ea8b56.patch"
 base_commit="b6ea8b560b886cef77fb32fb2e092123cdce4ed3"
-expected_patch_sha="8bbffc98f1fbdc03f08be0e7f6d959da61536b17b1b75b8b3a4258b914e612ae"
+expected_patch_sha="5a0deec5b323337fa06ef65b93169e3d3c033f89fc29d00b9f36dbce829381ff"
 
 # Explicit candidate builds use the separately verified manifest and a distinct
 # default image tag. They never replace the default source patch selection.
