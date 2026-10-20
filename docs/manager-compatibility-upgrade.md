@@ -1,10 +1,10 @@
-# Nextcloud 0.6.0 → 0.6.1 兼容升级与控制初始化
+# Nextcloud 0.6.0 → 0.8.0 兼容升级与控制初始化
 
 本候选补齐 WeKnora 对接所需的最小前置链：永久目标删除控制及当前管理者授权。它不是已经完成的生产升级或双端联动验收。实际 PostgreSQL 升级、恢复及完整配对授权仍须以当前候选的独立测试证据为准；不得把旧版本的成功记录作为本候选的验收。
 
 ## 兼容范围
 
-- 插件版本从 0.6.0 增至 0.6.1，Nextcloud 主版本仍为 34。
+- 插件版本从 0.6.0 增至 0.8.0，合并 0.7.0 的连接管理界面与 0.8.0 的 current-manager 授权/永久删除控制；Nextcloud 主版本仍为 34。
 - Migration `Version0029Date20261014000000` 增加 `weknora_target_close`、`weknora_tenant_close`、`weknora_deletion_probe`，并为 `weknora_recovery_log` 增加 `tenant_namespace`。数据库表名前缀由 Nextcloud 决定。
 - 保留目标和 Tenant 的永久删除事实；已关闭目标不会由旧 worker、迟到成功或恢复旧数据库重新打开。恢复 journal 必须携带这些事实。
 - 新增 `POST /apps/integration_weknora/api/v1/bindings/{binding}/authorize-manager`，使用现有配对服务令牌认证精确的请求体，并重新核对实例、operation、Tenant、KB、datasource、模板、当前 AD 身份、管理授权和根目录 READ。该决定不代替逐文件 source READ。
@@ -22,7 +22,7 @@
 4. 使用完整的既有 journal 和原密钥，从 sequence 0 连续覆盖所需历史到当前 head。不得为绕过缺页、旧 stream、错误 HMAC 或已知永久删除事实而新建 journal/密钥。刚启用 journal 不会补造此前的历史覆盖；未知历史需要另外核对双方权威现状。
 5. 部署时让真实 Nextcloud 升级流程运行 Migration 29；不得手工改 `installed_version` 跳过迁移。数据库升级失败时保持维护和入口关闭。
 
-升级后至少核对：安装版本为 0.6.1、Migration 29 已记录、上述表/列实际存在，旧配置及配对元数据保留，永久删除事实未丢失，manager 元数据查询在实际 PostgreSQL 上执行成功。插件升级不代表 gate 已初始化。
+升级后至少核对：安装版本为 0.8.0、Migration 29 已记录、上述表/列实际存在，旧配置及配对元数据保留，永久删除事实未丢失，manager 元数据查询在实际 PostgreSQL 上执行成功。插件升级不代表 gate 已初始化。
 
 ## gate 的语义
 
@@ -140,7 +140,7 @@ docker exec -u www-data "$NC_CONTAINER" php \
 
 ## 验收状态与最低回归
 
-候选尚未完成真实双端验收，未因此批准升级生产。发布前至少验证：实际 PostgreSQL 的 0.6.0→0.6.1 迁移和恢复、manager 元数据 SQL、缺 gate 拒绝、签名关闭创建 closed gate、坏 HMAC/旧 tail/错 pin/缺控制表/无当前 LDAP admin 均拒绝、正确可信对账只打开全局 gate，以及永久删除事实跨恢复仍有效。
+候选尚未完成真实双端验收，未因此批准升级生产。发布前至少验证：实际 PostgreSQL 的 0.6.0→0.8.0 迁移和恢复、manager 元数据 SQL、缺 gate 拒绝、签名关闭创建 closed gate、坏 HMAC/旧 tail/错 pin/缺控制表/无当前 LDAP admin 均拒绝、正确可信对账只打开全局 gate，以及永久删除事实跨恢复仍有效。
 
 纯协议测试、事务回滚 fixture、使用 identity bypass 的测试或受控替身不能证明真实 LDAP、完整配对、WK/NC 双端授权和生产 HTTPS 已验收。每项结果应标明实际数据库、身份/网络边界、候选提交及未覆盖范围。
 
