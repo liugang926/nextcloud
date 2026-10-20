@@ -45,6 +45,24 @@ def runtime_file(path):
     return parts[0] in {'apps', 'scripts', 'deploy'}
 
 
+def verify_tag(tag, commit, allow_missing, cwd=None):
+    """Resolve a local tag when present and require it to identify the release commit."""
+    resolved = subprocess.run(
+        ['git', 'rev-parse', tag + '^{commit}'],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if resolved.returncode != 0:
+        if allow_missing:
+            return None
+        raise ValueError('Tag is not the checked-out commit')
+    target = resolved.stdout.strip()
+    if target != commit:
+        raise ValueError('Tag is not the checked-out commit')
+    return target
+
+
 def verify_office_image(image, helper_image):
     """Check the exact Office runtime contract before publishing its image."""
     # Both CI and production use these helpers; the Office image itself is
@@ -95,8 +113,7 @@ def build(args):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repo):
         raise ValueError('Invalid repository')
     commit = command('git', 'rev-parse', 'HEAD')
-    if command('git', 'rev-parse', args.tag + '^{commit}') != commit:
-        raise ValueError('Tag is not the checked-out commit')
+    verify_tag(args.tag, commit, args.allow_missing_tag)
     subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'origin/main'], check=True)
     root = Path(command('git', 'rev-parse', '--show-toplevel'))
     output = Path(args.output).resolve()
@@ -183,4 +200,9 @@ if __name__ == '__main__':
     parser.add_argument('--repo', required=True)
     parser.add_argument('--tag', required=True)
     parser.add_argument('--output', default='dist/production')
+    parser.add_argument(
+        '--allow-missing-tag',
+        action='store_true',
+        help='Allow the release tag to be created atomically by the automatic publication step',
+    )
     build(parser.parse_args())
