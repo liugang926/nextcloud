@@ -131,6 +131,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
             : data.knowledge_base_id && connected ? '已关联知识库'
                 : data.operation || data.knowledge_base_id ? '待连接' : '未关联')
         if (data.binding_name) this.addRow(section, '发布目录', data.binding_name)
+        if (data.space_name) this.addRow(section, '空间', data.space_name)
         if (data.knowledge_base_id) this.addRow(section, '知识库', data.knowledge_base_id)
         if (data.publication_state) this.addRow(section, '发布', data.publication_state === 'active'
             ? connected ? '发布有效' : '待连接，发布待验证' : '已停止发布')
@@ -177,10 +178,12 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     this.load()
                 })
             }
-        } else if (data.manageable) {
+        } else if (data.manageable || (data.can_bind && !data.binding_id)) {
             this.button(section, '关联知识库', () => this.renderAssociation(false))
         }
-        if (data.can_create) this.button(section, '新建关联目录', () => this.renderAssociation(true))
+        if (data.can_create) {
+            this.button(section, '新建关联目录', () => this.renderAssociation(true))
+        }
         this.button(section, '刷新状态', () => this.load())
         this.replaceChildren(section)
     }
@@ -243,7 +246,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
         form.append(heading)
         if (migrating) {
             const explanation = document.createElement('p')
-            explanation.textContent = '迁移会先暂停旧目标读取，再核验新的专用知识库与处理模板。原文件与工作空间保留，完成前显示待连接。'
+            explanation.textContent = '迁移会先暂停旧目标读取，再核验新的知识库。原文件与工作空间保留，完成前显示待连接。'
             form.append(explanation)
         }
         const spaces = result.targets || [{ tenant_id: result.tenant_id,
@@ -259,44 +262,38 @@ class WeknoraFileSidebarTab extends HTMLElement {
             seenSpaces.add(String(candidate.tenant_id))
             const option = document.createElement('option')
             option.value = String(candidate.tenant_id)
-            option.textContent = `工作空间 ${candidate.tenant_id}`
+            option.textContent = candidate.space_name || `空间 ${candidate.tenant_id}`
             space.append(option)
         }
         this.field(form, '工作空间', space)
-        const template = document.createElement('select')
-        this.field(form, '处理模板', template)
         const name = document.createElement('input')
-        name.type = 'text'; name.maxLength = 255; name.required = true
+        name.type = 'text'; name.maxLength = 255; name.required = creating
         name.value = creating ? '' : this._node?.basename || this._node?.displayname || '目录知识库'
-        this.field(form, creating ? '目录名称' : '知识库名称', name)
+        this.field(form, creating ? '目录名称（同时作为知识库名称）' : '知识库名称', name)
+        if (!creating) name.hidden = true
         const target = document.createElement('select')
         const automatic = document.createElement('option')
-        automatic.value = ''; automatic.textContent = '自动创建专用知识库'
+        automatic.value = ''; automatic.textContent = '新建知识库'
+        let selectedTemplate = ''
         const updateCandidates = () => {
             target.replaceChildren(automatic)
-            const selected = spaces.find(candidate => String(candidate.tenant_id) === space.value
-                && String(candidate.processing_template_id) === template.value)
+            const selected = spaces.find(candidate => String(candidate.tenant_id) === space.value)
+            selectedTemplate = selected ? String(selected.processing_template_id) : ''
             for (const candidate of selected?.candidates || []) {
                 const option = document.createElement('option')
-                option.value = candidate.id; option.textContent = `已有空白知识库：${candidate.name}`
+                option.value = candidate.id
+                const contentCount = Number(candidate.content_count || 0)
+                option.textContent = `已有知识库：${candidate.name}${contentCount > 0 ? `（已有 ${contentCount} 条内容）` : ''}`
                 target.append(option)
             }
         }
-        const updateTemplates = () => {
-            template.replaceChildren()
-            for (const candidate of spaces.filter(candidate => String(candidate.tenant_id) === space.value)) {
-                const option = document.createElement('option')
-                option.value = String(candidate.processing_template_id)
-                const graphMode = { optional: '文档可独立发布', required: '图谱完成后发布', off: '未启用图谱' }[candidate.graph_mode]
-                option.textContent = `${candidate.template_name || `处理模板 ${candidate.processing_template_id}`}${graphMode ? `（${graphMode}）` : ''}`
-                template.append(option)
-            }
-            updateCandidates()
-        }
-        space.addEventListener('change', updateTemplates)
-        template.addEventListener('change', updateCandidates)
-        updateTemplates()
+        space.addEventListener('change', updateCandidates)
+        updateCandidates()
         this.field(form, '目标知识库', target)
+        const existingNote = document.createElement('p')
+        existingNote.textContent = '选择已有知识库时，原有内容会保留；绑定后该知识库的新增内容由 Nextcloud 目录管理。'
+        existingNote.className = 'weknora-sidebar__hint'
+        form.append(existingNote)
         const submit = document.createElement('button')
         submit.type = 'submit'; submit.textContent = creating ? '创建并关联' : migrating ? '开始迁移' : '关联'
         form.append(submit)
@@ -308,10 +305,13 @@ class WeknoraFileSidebarTab extends HTMLElement {
         form.addEventListener('submit', async (event) => {
             event.preventDefault()
             submit.disabled = true
-            name.disabled = true; target.disabled = true; space.disabled = true; template.disabled = true
+            name.disabled = true; target.disabled = true; space.disabled = true
+            const selected = spaces.find(candidate => String(candidate.tenant_id) === space.value)
+            const chosen = selected?.candidates?.find(candidate => String(candidate.id) === target.value)
             submittedChoice ||= { operation_id: operationId, mode: target.value ? 'existing' : 'create',
-                name: name.value, knowledge_base_id: target.value, folder_name: creating ? name.value : undefined,
-                tenant_id: space.value, processing_template_id: template.value }
+                name: chosen?.name || name.value, knowledge_base_id: target.value,
+                folder_name: creating ? name.value : undefined,
+                tenant_id: space.value, processing_template_id: selectedTemplate }
             if (migrating && !this._targetMigrations.has(selectedId)) {
                 this._targetMigrations.set(selectedId, { operationId, choice: submittedChoice, confirmed: false })
             }

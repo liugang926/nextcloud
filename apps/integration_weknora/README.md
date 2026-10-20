@@ -1,5 +1,32 @@
 # WeKnora Integration for Nextcloud 34
 
+## Administrator connection and directory binding
+
+The ordinary setup flow is intentionally short:
+
+1. In Nextcloud administration, open **WeKnora Integration** and enter the
+   WeKnora origin plus an administrator connection key.
+   The key may be a WeKnora platform API key with system-tenant read/manage
+   capability, or a WeKnora administrator login token. It is used only for
+   workspace discovery and authorization.
+2. Discover workspaces, select any number of workspaces that this Nextcloud
+   instance may use, and save the connection. Nextcloud stores only the scoped
+   onboarding credentials returned by WeKnora; the administrator key is not
+   retained.
+3. In Files, open a folder's WeKnora tab. Choose a workspace by name, then
+   choose an existing eligible knowledge base or create a new one. Nextcloud
+   generates the internal rule, binding, pairing and event connection.
+
+The raw rule ID, owner UID, container file ID, tenant ID, processing template
+ID, pairing JSON and event secret remain available only under **Advanced** for
+migration and diagnostics.
+
+Existing knowledge bases are selectable even when they already contain
+documents. One knowledge base may be attached to only one Nextcloud folder;
+the existing content remains, while new content for that knowledge base is
+managed by the bound Nextcloud source. An existing knowledge base without
+verified configuration provenance is not selectable.
+
 This app exposes service read APIs and administrator publication operations under `/index.php/apps/integration_weknora/api/v1`. Every machine API request requires `Authorization: Bearer <service token>` plus the versioned HMAC headers described in [the request-signing contract](../../docs/machine-request-signing.md). A nonce is consumed once in the Nextcloud database; a Bearer-only request is rejected. Administrator operations require a logged-in Nextcloud system administrator and a valid CSRF request token; the service token cannot call them.
 
 Only the SHA-256 hash of each machine token is stored in the database; the
@@ -87,7 +114,9 @@ Source pairing is separate from the event-delivery connection below.
 
 The Nextcloud side records the expected tenant and knowledge-base IDs; the
 WeKnora administrator pairing API must validate their actual ownership and
-dedicated, empty state before committing. This source-side protocol does not
+verified configuration provenance before committing. Existing content is
+preserved, and a knowledge base already owned by another Nextcloud source is
+rejected. This source-side protocol does not
 establish employee AD identity or prove access to indexed knowledge. Run
 `python3 apps/integration_weknora/tests/source_pairing_http_smoke.py` after
 installing/upgrading the app to exercise the Nextcloud half with a temporary

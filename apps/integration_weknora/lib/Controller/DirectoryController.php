@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace OCA\IntegrationWeknora\Controller;
 
 use OCA\IntegrationWeknora\Service\DirectoryPublicationService;
+use OCA\IntegrationWeknora\Service\ConnectionService;
 use OCA\IntegrationWeknora\Service\FolderSummaryService;
 use OCA\IntegrationWeknora\Service\UnsupportedPublicationAclException;
 use OCA\IntegrationWeknora\Service\StaleFolderSummaryException;
@@ -15,29 +16,54 @@ use OCP\IUserSession;
 /** All writes retain Nextcloud's session and CSRF middleware. */
 final class DirectoryController extends Controller {
     public function __construct(IRequest $request, private IUserSession $session,
-        private DirectoryPublicationService $directories, private FolderSummaryService $summaries) {
+        private DirectoryPublicationService $directories, private FolderSummaryService $summaries,
+        private ConnectionService $connection) {
         parent::__construct('integration_weknora', $request);
     }
     #[NoAdminRequired]
     public function show(int $folderId): JSONResponse {
-        return $this->run(fn (string $uid): array => $this->directories->show($uid, $folderId) +
-            ($this->summaries->forUser($uid, $folderId, is_string($this->request->getParam('cursor'))
-                ? $this->request->getParam('cursor') : null) ?? []));
+        return $this->run(function (string $uid) use ($folderId): array {
+            $connected = $this->connection->hasConnection();
+            $canBind = $connected && $this->connection->canManage($uid, $folderId, false);
+            $canCreate = $connected && $this->connection->canManage($uid, $folderId, true);
+            $status = $this->directories->show($uid, $folderId);
+            if ($canBind || $canCreate) {
+                $status['connection_available'] = true;
+                $status['can_bind'] = $canBind;
+                $status['can_create'] = $canCreate;
+            }
+            return $status + ($this->summaries->forUser($uid, $folderId,
+                is_string($this->request->getParam('cursor'))
+                    ? $this->request->getParam('cursor') : null) ?? []);
+        });
     }
     #[NoAdminRequired]
     public function candidates(int $folderId): JSONResponse {
-        return $this->run(fn (string $uid): array => $this->directories->candidates($uid, $folderId,
-            $this->request->getParam('for_creation') === '1'));
+        return $this->run(function (string $uid) use ($folderId): array {
+            $forCreation = $this->request->getParam('for_creation') === '1';
+            if ($this->connection->hasConnection()) {
+                $this->connection->ensureRule($uid, $folderId, $forCreation);
+            }
+            return $this->directories->candidates($uid, $folderId, $forCreation);
+        });
     }
     #[NoAdminRequired]
     public function associate(int $folderId): JSONResponse {
-        return $this->run(fn (string $uid): array => ['operation' => $this->directories->associate($uid, $folderId, $this->choice())], 202);
+        return $this->run(function (string $uid) use ($folderId): array {
+            if ($this->connection->hasConnection()) {
+                $this->connection->ensureRule($uid, $folderId, false);
+            }
+            return ['operation' => $this->directories->associate($uid, $folderId, $this->choice())];
+        }, 202);
     }
     #[NoAdminRequired]
     public function create(int $folderId): JSONResponse {
         return $this->run(function (string $uid) use ($folderId): array {
             $name = $this->request->getParam('folder_name');
             if (!is_string($name)) { throw new \InvalidArgumentException('Invalid folder name'); }
+            if ($this->connection->hasConnection()) {
+                $this->connection->ensureRule($uid, $folderId, true);
+            }
             return ['operation' => $this->directories->create($uid, $folderId, $name, $this->choice())];
         }, 202);
     }
