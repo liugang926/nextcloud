@@ -29,6 +29,8 @@ final class DirectoryOnboardingClient {
         if (strlen($token) < 32 || strlen($token) > 512 || preg_match('/[\x00-\x20\x7f]/', $token)) {
             throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
         }
+        $suffix = self::operationGetSuffix($method, $suffix);
+        $observeOperation = $method === 'GET' && str_ends_with($suffix, '/observe');
         $url = $approved['origin'] . self::PATH . $suffix;
         $options = ['headers' => [
             'Accept' => 'application/json',
@@ -64,7 +66,7 @@ final class DirectoryOnboardingClient {
             throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::INVALID_RESPONSE);
         }
         $status = $response->getStatusCode();
-        if ($method === 'GET' && preg_match('~\A/operations/[a-f0-9-]{36}\z~D', $suffix) && $status !== 200) {
+        if ($observeOperation && $status !== 200) {
             if (in_array($status, [400, 401, 403, 404, 409, 422], true)) {
                 throw new DirectoryOnboardingRemoteRejectedException($status, $this->safeRemoteCode($raw));
             }
@@ -107,6 +109,17 @@ final class DirectoryOnboardingClient {
     private static function cacheBustedGetUrl(string $url, array $body): string {
         $body['_nc_cache_bust'] = bin2hex(random_bytes(12));
         return $url . '?' . http_build_query($body, '', '&', PHP_QUERY_RFC3986);
+    }
+
+    /**
+     * Use a dedicated path for live operation observations. A path-only cache
+     * in front of WeKnora must not replay an earlier unavailable response.
+     */
+    private static function operationGetSuffix(string $method, string $suffix): string {
+        if ($method === 'GET' && preg_match('~\A/operations/[a-f0-9-]{36}\z~D', $suffix) === 1) {
+            return $suffix . '/observe';
+        }
+        return $suffix;
     }
 
     /**

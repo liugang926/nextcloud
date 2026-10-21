@@ -37,4 +37,15 @@ cacheBustCheck(is_string($firstQuery['_nc_cache_bust'] ?? null) &&
 cacheBustCheck($firstQuery['_nc_cache_bust'] !== $secondQuery['_nc_cache_bust'],
     'Each GET must use a distinct cache key');
 
+$operationPath = new ReflectionMethod(DirectoryOnboardingClient::class, 'operationGetSuffix');
+$operationId = '7a2c7e65-b58f-4b18-a774-75e1b7405681';
+cacheBustCheck($operationPath->invoke(null, 'GET', '/operations/' . $operationId) ===
+    '/operations/' . $operationId . '/observe',
+    'GET operation observations must use the uncached observe path');
+cacheBustCheck($operationPath->invoke(null, 'POST', '/operations/' . $operationId) ===
+    '/operations/' . $operationId,
+    'Non-GET operation methods must retain their endpoint');
+cacheBustCheck($operationPath->invoke(null, 'GET', '/candidates') === '/candidates',
+    'Non-operation GET endpoints must retain their path');
+
 fwrite(STDOUT, "onboarding cache-bust contract: PASS\n");
