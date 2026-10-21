@@ -739,6 +739,9 @@ final class DirectoryPublicationService {
                 $remoteCode === 'onboarding_unavailable' => '_onboarding',
                 default => '',
             };
+            if ($remoteCode === 'onboarding_unavailable' && $error->remoteStatus() !== null) {
+                $suffix .= '_http_' . $error->remoteStatus();
+            }
             return 'target_status_' . $error->reason() . $suffix;
         }
         if ($stage === 'pairing_remote' && $error instanceof DirectoryOnboardingRemoteRejectedException) {

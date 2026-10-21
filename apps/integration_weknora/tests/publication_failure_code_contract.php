@@ -18,6 +18,7 @@ $method = new ReflectionMethod(DirectoryPublicationService::class, 'failureCode'
 $checks = [
     ['target_status', new RuntimeException('remote'), 'target_status_unverified'],
     ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'onboarding_unavailable'), 'target_status_server_error_onboarding'],
+    ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'onboarding_unavailable', 503), 'target_status_server_error_onboarding_http_503'],
     ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'onboarding_unavailable_target_observation'), 'target_status_server_error_onboarding_target_observation'],
     ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::RATE_LIMITED), 'target_status_rate_limited'],
     ['target_status', new DirectoryOnboardingRemoteRejectedException(409, 'nextcloud_target_closed'), 'target_status_rejected_target_closed'],
@@ -53,6 +54,9 @@ foreach ($checks as [$stage, $error, $expected]) {
     $actual = $method->invoke(null, $stage, $error);
     if ($actual !== $expected) {
         throw new RuntimeException("$stage mapped to $actual instead of $expected");
+    }
+    if (strlen($actual) > 64) {
+        throw new RuntimeException("$stage produced an overlong operation error code");
     }
 }
 
