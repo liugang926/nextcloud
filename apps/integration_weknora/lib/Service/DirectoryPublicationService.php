@@ -569,6 +569,7 @@ final class DirectoryPublicationService {
             ->andWhere($q->expr()->in('state', $q->createNamedParameter(['pending', 'active'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
             ->andWhere($q->expr()->lte('lease_until', $q->createNamedParameter(time())))->executeStatement() !== 1) { return; }
         $intent = $this->find('operation_id', $operationId);
+        $stage = 'intent';
         try {
             DirectoryTargetClosureService::requireOpen($this->db, $intent['binding_id']);
             $rule = $this->rule($intent['rule_id']);
@@ -604,7 +605,8 @@ final class DirectoryPublicationService {
             foreach ($this->bindings->listBindings() as $binding) {
                 if ($binding['id'] === $intent['binding_id']) { $floor = $binding['sync_revision']; break; }
             }
-            $readStatus = function() use ($rule, $operationId, $currentActor, $intent, $request): array {
+            $readStatus = function() use ($rule, $operationId, $currentActor, $intent, $request, &$stage): array {
+                $stage = 'target_status';
                 $response = $this->remote->request($rule, 'GET', '/operations/' . $operationId, $currentActor);
                 $this->retainTenantDeletionObservation($response, $intent, $request, $rule);
                 return $response;
@@ -613,6 +615,7 @@ final class DirectoryPublicationService {
                 ($managerUid !== null && ($request['actor_directory_id'] !== $identity['directory_id'] || $request['actor_object_guid'] !== $identity['object_guid']))) {
                 $remote = $readStatus();
             } else {
+                $stage = 'target_reservation';
                 try {
                     $remote = $this->remote->request($rule, 'POST', '/operations', $request);
                 } catch (\Throwable $reservationFailure) {
@@ -641,24 +644,29 @@ final class DirectoryPublicationService {
                 $this->closeTarget($intent, $target);
                 return;
             }
+            $stage = 'binding';
             $this->bindings->save($intent['binding_id'], $root->getName(), $rule['owner_uid'], $root->getId());
             if ($allowResume && ($oldPair=$this->pairs->status($intent['binding_id']))!==null && $oldPair['state']==='active') {
                 // Current ACL/tree, identity, rule and target delegation above
                 // are fresh. Resume preserves the source and KB identities.
                 $this->bindings->setPublicationState($intent['binding_id'], 'active', $uid);
             }
+            $stage = 'pairing_prepare';
             $prepared = $this->pairs->prepare($intent['binding_id'], $operationId, $rule['tenant_id'], $operation['knowledge_base_id'], $uid);
             $pair = $prepared['pairing'];
+            $stage = 'pairing_remote';
             $received = $this->remote->request($rule, 'POST', '/operations/' . $operationId . '/pair', [
                 'base_url' => $rule['base_url'], 'binding_id' => $intent['binding_id'], 'operation_id' => $operationId,
                 'knowledge_base_id' => $operation['knowledge_base_id'],
                 'instance_id' => $request['instance_id'], 'publication_epoch' => $pair['publication_epoch'],
                 'key_id' => $pair['key_id'], 'token' => $this->pairs->handoffToken($intent['binding_id'], $operationId),
                 'actor_directory_id' => $identity['directory_id'], 'actor_object_guid' => $identity['object_guid']]);
+            $stage = 'pairing_ack';
             $pairNow = $this->pairs->status($intent['binding_id']);
             if ($pairNow === null || $pairNow['state'] !== 'active' || $pairNow['operation_id'] !== $operationId) {
                 throw new \RuntimeException('Signed pairing acknowledgement is pending');
             }
+            $stage = 'event_connection';
             $event = $received['event_connection'] ?? $received['operation']['event_connection'] ?? null;
             if (!is_array($event)) { throw new \RuntimeException('Independent event connection is pending'); }
             if (($event['receiver_url'] ?? null) === EventReceiverPolicy::PATH) {
@@ -672,10 +680,13 @@ final class DirectoryPublicationService {
                 throw new \DomainException('Event connection changed');
             }
             $permissionVersion = (int)$intent['permission_version'] + 1;
+            $stage = 'grant_snapshot';
             $snapshot = $this->grants->snapshot($root, $rule['owner_uid'], $uid);
+            $stage = 'grant_remote';
             $this->remote->request($rule, 'PUT', '/operations/' . $operationId . '/grants', [
                 'permission_version' => $permissionVersion, 'publication_epoch' => $this->bindings->requirePublicationActive($intent['binding_id']),
                 'complete' => true, 'subjects' => $snapshot]);
+            $stage = 'reconcile';
             $this->changes->append($intent['binding_id'], null, 'reconcile');
             $remoteRevision = $received['operation']['revision'] ?? null;
             if (is_int($remoteRevision) && $remoteRevision >= 1) {
@@ -684,6 +695,7 @@ final class DirectoryPublicationService {
                     ->where($q->expr()->eq('binding_id', $q->createNamedParameter($intent['binding_id'])))
                     ->andWhere($q->expr()->lte('sync_revision', $q->createNamedParameter($remoteRevision)))->executeStatement();
             }
+            $stage = 'finalize';
             $this->update($operationId, ['state' => 'active', 'error_code' => '', 'permission_version' => $permissionVersion,
                 'next_attempt_at' => time() + 60, 'lease_until' => 0]);
         } catch (\Throwable $e) {
@@ -692,11 +704,32 @@ final class DirectoryPublicationService {
             if ($intent['state'] === 'active') {
                 try { $this->bindings->setPublicationState($intent['binding_id'], 'stopped', 'directory-policy'); } catch (\Throwable $ignored) {}
             }
-            $this->update($operationId, ['state' => 'pending', 'error_code' => $e instanceof UnsupportedPublicationAclException
-                ? 'unsupported_source_acl' : ($e instanceof \DomainException ? 'permission_or_target_conflict' : 'connection_unverified'),
+            $this->update($operationId, ['state' => 'pending', 'error_code' => self::failureCode($stage, $e),
                 'attempt_count' => (int)$intent['attempt_count'] + 1, 'lease_until' => 0,
                 'next_attempt_at' => time() + min(300, 15 * (1 << min(4, (int)$intent['attempt_count'])))]);
         }
+    }
+
+    /**
+     * Keep the queue status actionable without persisting remote error text or
+     * credentials. Domain responses retain their existing conflict projection.
+     */
+    private static function failureCode(string $stage, \Throwable $error): string {
+        if ($error instanceof UnsupportedPublicationAclException) {
+            return 'unsupported_source_acl';
+        }
+        if ($error instanceof \DomainException) {
+            return 'permission_or_target_conflict';
+        }
+        return match ($stage) {
+            'target_reservation', 'target_status' => 'target_reservation_unverified',
+            'pairing_prepare', 'pairing_remote', 'pairing_ack' => 'pairing_unverified',
+            'event_connection' => 'event_connection_pending',
+            'grant_snapshot' => 'grant_snapshot_unavailable',
+            'grant_remote' => 'grant_sync_unverified',
+            'reconcile' => 'reconcile_pending',
+            default => 'connection_unverified',
+        };
     }
 
     /** Fresh metadata only; an immutable old root fact is never reopened. */

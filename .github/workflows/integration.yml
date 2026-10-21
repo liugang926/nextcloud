@@ -98,7 +98,7 @@ jobs:
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
             --cpus=.5 --memory=256m -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
-            sh -ec 'for test in target_deletion tenant_deletion manager_authorization manager_authorization_transport; do php "apps/integration_weknora/tests/${test}_contract.php"; done'
+            sh -ec 'for test in target_deletion tenant_deletion manager_authorization manager_authorization_transport publication_failure_code; do php "apps/integration_weknora/tests/${test}_contract.php"; done'
           docker run --rm --network none -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             php -d memory_limit=512M apps/integration_weknora/tests/manifest_10k_synthetic_contract.php
