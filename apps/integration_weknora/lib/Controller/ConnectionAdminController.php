@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace OCA\IntegrationWeknora\Controller;
 
 use OCA\IntegrationWeknora\Service\ConnectionService;
+use OCA\IntegrationWeknora\Service\PrincipalSearchService;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\IGroupManager;
 use OCP\IRequest;
-use OCP\IUserManager;
 use OCP\IUserSession;
 
 /** Administrator session and CSRF protected WeKnora connection setup. */
@@ -18,7 +18,7 @@ final class ConnectionAdminController extends Controller {
         IRequest $request,
         private IUserSession $session,
         private IGroupManager $groups,
-        private IUserManager $users,
+        private PrincipalSearchService $principals,
         private ConnectionService $connection,
     ) {
         parent::__construct('integration_weknora', $request);
@@ -59,16 +59,7 @@ final class ConnectionAdminController extends Controller {
         if (!is_string($query) || strlen($query) > 64) {
             return $this->json(['error' => 'invalid_query'], 400);
         }
-        $query = trim($query);
-        $groups = [];
-        foreach ($this->groups->search($query, 50, 0) as $group) {
-            $groups[] = ['id' => $group->getGID(), 'name' => $group->getDisplayName()];
-        }
-        $users = [];
-        foreach ($this->users->searchDisplayName($query, 50, 0) as $user) {
-            $users[] = ['id' => $user->getUID(), 'name' => (string)$user->getDisplayName()];
-        }
-        return $this->json(['groups' => $groups, 'users' => $users]);
+        return $this->json($this->principals->search(trim($query)));
     }
 
     public function connect(): JSONResponse {
