@@ -1,0 +1,34 @@
+<?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/../lib/Service/UnsupportedPublicationAclException.php';
+require_once __DIR__ . '/../lib/Service/DirectoryPublicationService.php';
+
+use OCA\IntegrationWeknora\Service\DirectoryPublicationService;
+use OCA\IntegrationWeknora\Service\UnsupportedPublicationAclException;
+
+$method = new ReflectionMethod(DirectoryPublicationService::class, 'failureCode');
+
+$checks = [
+    ['target_status', new RuntimeException('remote'), 'target_reservation_unverified'],
+    ['target_reservation', new RuntimeException('remote'), 'target_reservation_unverified'],
+    ['pairing_prepare', new RuntimeException('local'), 'pairing_unverified'],
+    ['pairing_remote', new RuntimeException('remote'), 'pairing_unverified'],
+    ['pairing_ack', new RuntimeException('ack'), 'pairing_unverified'],
+    ['event_connection', new RuntimeException('event'), 'event_connection_pending'],
+    ['grant_snapshot', new RuntimeException('snapshot'), 'grant_snapshot_unavailable'],
+    ['grant_remote', new RuntimeException('remote'), 'grant_sync_unverified'],
+    ['reconcile', new RuntimeException('queue'), 'reconcile_pending'],
+    ['intent', new RuntimeException('unknown'), 'connection_unverified'],
+    ['event_connection', new DomainException('conflict'), 'permission_or_target_conflict'],
+    ['grant_snapshot', new UnsupportedPublicationAclException('acl'), 'unsupported_source_acl'],
+];
+
+foreach ($checks as [$stage, $error, $expected]) {
+    $actual = $method->invoke(null, $stage, $error);
+    if ($actual !== $expected) {
+        throw new RuntimeException("$stage mapped to $actual instead of $expected");
+    }
+}
+
+echo "Directory publication failure stages remain actionable without exposing remote error text\n";

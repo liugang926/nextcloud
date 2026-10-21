@@ -163,6 +163,12 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 this.addRow(section, '连接原因', {
                     unsupported_source_acl: '当前挂载或分享权限模式不受支持',
                     permission_or_target_conflict: '管理委派、目录范围或目标知识库冲突',
+                    target_reservation_unverified: 'WeKnora 目标空间或知识库预留尚未验证',
+                    pairing_unverified: 'WeKnora 知识库来源配对尚未验证',
+                    event_connection_pending: '知识库已创建，但 WeKnora 事件连接尚未建立',
+                    grant_snapshot_unavailable: 'Nextcloud 目录权限快照无法生成',
+                    grant_sync_unverified: 'WeKnora 目录权限同步尚未验证',
+                    reconcile_pending: '完整目录清单尚未加入同步队列',
                     connection_unverified: '连接结果尚未验证，原文件已保留',
                 }[data.operation.error_code] || '等待关联完成')
                 this.button(section, '重试同一关联', async () => {

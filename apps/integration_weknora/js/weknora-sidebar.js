@@ -4598,6 +4598,12 @@ ${message.stack}`;
           this.addRow(section, "\u8FDE\u63A5\u539F\u56E0", {
             unsupported_source_acl: "\u5F53\u524D\u6302\u8F7D\u6216\u5206\u4EAB\u6743\u9650\u6A21\u5F0F\u4E0D\u53D7\u652F\u6301",
             permission_or_target_conflict: "\u7BA1\u7406\u59D4\u6D3E\u3001\u76EE\u5F55\u8303\u56F4\u6216\u76EE\u6807\u77E5\u8BC6\u5E93\u51B2\u7A81",
+            target_reservation_unverified: "WeKnora \u76EE\u6807\u7A7A\u95F4\u6216\u77E5\u8BC6\u5E93\u9884\u7559\u5C1A\u672A\u9A8C\u8BC1",
+            pairing_unverified: "WeKnora \u77E5\u8BC6\u5E93\u6765\u6E90\u914D\u5BF9\u5C1A\u672A\u9A8C\u8BC1",
+            event_connection_pending: "\u77E5\u8BC6\u5E93\u5DF2\u521B\u5EFA\uFF0C\u4F46 WeKnora \u4E8B\u4EF6\u8FDE\u63A5\u5C1A\u672A\u5EFA\u7ACB",
+            grant_snapshot_unavailable: "Nextcloud \u76EE\u5F55\u6743\u9650\u5FEB\u7167\u65E0\u6CD5\u751F\u6210",
+            grant_sync_unverified: "WeKnora \u76EE\u5F55\u6743\u9650\u540C\u6B65\u5C1A\u672A\u9A8C\u8BC1",
+            reconcile_pending: "\u5B8C\u6574\u76EE\u5F55\u6E05\u5355\u5C1A\u672A\u52A0\u5165\u540C\u6B65\u961F\u5217",
             connection_unverified: "\u8FDE\u63A5\u7ED3\u679C\u5C1A\u672A\u9A8C\u8BC1\uFF0C\u539F\u6587\u4EF6\u5DF2\u4FDD\u7559"
           }[data.operation.error_code] || "\u7B49\u5F85\u5173\u8054\u5B8C\u6210");
           this.button(section, "\u91CD\u8BD5\u540C\u4E00\u5173\u8054", async () => {
