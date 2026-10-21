@@ -723,13 +723,22 @@ final class DirectoryPublicationService {
         }
         return match ($stage) {
             'target_reservation', 'target_status' => 'target_reservation_unverified',
-            'pairing_prepare', 'pairing_remote', 'pairing_ack' => 'pairing_unverified',
+            'pairing_prepare' => 'pairing_prepare_unverified',
+            'pairing_remote' => self::pairingRemoteFailureCode($error),
+            'pairing_ack' => 'pairing_ack_unverified',
             'event_connection' => 'event_connection_pending',
             'grant_snapshot' => 'grant_snapshot_unavailable',
             'grant_remote' => 'grant_sync_unverified',
             'reconcile' => 'reconcile_pending',
             default => 'connection_unverified',
         };
+    }
+
+    private static function pairingRemoteFailureCode(\Throwable $error): string {
+        if (!$error instanceof DirectoryOnboardingRequestException) {
+            return 'pairing_remote_unverified';
+        }
+        return 'pairing_remote_' . $error->reason();
     }
 
     /** Fresh metadata only; an immutable old root fact is never reopened. */

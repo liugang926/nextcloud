@@ -20,14 +20,14 @@ final class DirectoryOnboardingClient {
             $credential = is_string($credentialId) && is_array($credentials) ? ($credentials[$credentialId] ?? null) : null;
             if (!is_array($credential) || ($credential['tenant_id'] ?? null) !== (string)$rule['tenant_id'] ||
                 ($credential['weknora_origin'] ?? null) !== $rule['weknora_origin'] || !is_string($credential['token'] ?? null)) {
-                throw new \RuntimeException('Scoped onboarding credential is unavailable');
+                throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
             }
             $token = $credential['token'];
         } else {
             $token = $this->config->getSystemValueString('weknora_onboarding_token', '');
         }
         if (strlen($token) < 32 || strlen($token) > 512 || preg_match('/[\x00-\x20\x7f]/', $token)) {
-            throw new \RuntimeException('Onboarding server credential is unavailable');
+            throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
         }
         $url = $approved['origin'] . self::PATH . $suffix;
         $options = ['headers' => ['Accept' => 'application/json', 'Authorization' => 'Bearer ' . $token],
@@ -40,29 +40,49 @@ final class DirectoryOnboardingClient {
             $options['body'] = json_encode($body, JSON_THROW_ON_ERROR);
         }
         $client = $this->clients->newClient();
-        $response = match ($method) {
-            'GET' => $client->get($url, $options), 'POST' => $client->post($url, $options),
-            'PUT' => $client->put($url, $options), default => throw new \InvalidArgumentException('Unsupported onboarding method'),
-        };
-        $raw = $response->getBody();
-        if (is_resource($raw)) {
-            $stream = $raw;
-            try { $raw = stream_get_contents($stream, 65537); } finally { fclose($stream); }
+        try {
+            $response = match ($method) {
+                'GET' => $client->get($url, $options), 'POST' => $client->post($url, $options),
+                'PUT' => $client->put($url, $options), default => throw new \InvalidArgumentException('Unsupported onboarding method'),
+            };
+            $raw = $response->getBody();
+            if (is_resource($raw)) {
+                $stream = $raw;
+                try { $raw = stream_get_contents($stream, 65537); } finally { fclose($stream); }
+            }
+        } catch (DirectoryOnboardingRequestException $exception) {
+            throw $exception;
+        } catch (\Throwable $exception) {
+            throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::TRANSPORT);
         }
         if (!is_string($raw) || strlen($raw) > 65536) {
-            throw new \RuntimeException('Onboarding response is unavailable');
+            throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::INVALID_RESPONSE);
         }
-        if ($method === 'GET' && preg_match('~\A/operations/[a-f0-9-]{36}\z~D', $suffix) && $response->getStatusCode() !== 200) {
-            if (in_array($response->getStatusCode(), [400, 401, 403, 404, 409, 422], true)) { throw new \DomainException('Target status could not be verified', $response->getStatusCode()); }
+        $status = $response->getStatusCode();
+        if ($method === 'GET' && preg_match('~\A/operations/[a-f0-9-]{36}\z~D', $suffix) && $status !== 200) {
+            if (in_array($status, [400, 401, 403, 404, 409, 422], true)) { throw new \DomainException('Target status could not be verified', $status); }
             throw new \RuntimeException('Target status requires authenticated HTTP 200');
         }
-        $data = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
-        if (!is_array($data) || $response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
-            // Never forward remote errors (which may contain addresses or credentials).
-            if (in_array($response->getStatusCode(), [400, 401, 403, 404, 409, 422], true)) {
-                throw new \DomainException('Target authorization or reservation was rejected', $response->getStatusCode());
+        if ($status < 200 || $status >= 300) {
+            // Never parse or forward remote errors: their body may contain
+            // addresses, implementation details, or credentials.
+            if (in_array($status, [400, 401, 403, 404, 409, 422], true)) {
+                throw new \DomainException('Target authorization or reservation was rejected', $status);
             }
-            throw new \RuntimeException('Onboarding remote operation is unverified');
+            $reason = $status === 429
+                ? DirectoryOnboardingRequestException::RATE_LIMITED
+                : ($status >= 500
+                    ? DirectoryOnboardingRequestException::SERVER_ERROR
+                    : DirectoryOnboardingRequestException::HTTP_ERROR);
+            throw new DirectoryOnboardingRequestException($reason);
+        }
+        try {
+            $data = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+        } catch (\Throwable $exception) {
+            throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::INVALID_RESPONSE);
+        }
+        if (!is_array($data)) {
+            throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::INVALID_RESPONSE);
         }
         return $data;
     }
