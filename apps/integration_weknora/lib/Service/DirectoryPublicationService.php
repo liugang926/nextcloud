@@ -728,8 +728,17 @@ final class DirectoryPublicationService {
         if ($error instanceof UnsupportedPublicationAclException) {
             return 'unsupported_source_acl';
         }
+        if ($stage === 'pairing_remote' && $error instanceof DirectoryOnboardingRemoteRejectedException) {
+            return self::pairingRemoteRejectionCode($error);
+        }
         if ($error instanceof \DomainException) {
-            return 'permission_or_target_conflict';
+            return match ($stage) {
+                'pairing_prepare' => 'pairing_prepare_conflict',
+                'pairing_remote' => 'pairing_remote_rejected',
+                'pairing_ack' => 'pairing_ack_conflict',
+                'event_connection' => 'event_connection_conflict',
+                default => 'permission_or_target_conflict',
+            };
         }
         return match ($stage) {
             'target_reservation', 'target_status' => 'target_reservation_unverified',
@@ -742,6 +751,20 @@ final class DirectoryPublicationService {
             'reconcile' => 'reconcile_pending',
             default => 'connection_unverified',
         };
+    }
+
+    private static function pairingRemoteRejectionCode(DirectoryOnboardingRemoteRejectedException $error): string {
+        $suffix = match ($error->remoteCode()) {
+            'nextcloud_prepared_binding_unavailable' => 'binding_unavailable',
+            'source_pairing_conflict' => 'source_conflict',
+            'source_pairing_not_found' => 'source_missing',
+            'nextcloud_onboarding_conflict' => 'onboarding_conflict',
+            'nextcloud_target_closed' => 'target_closed',
+            'nextcloud_onboarding_denied' => 'authorization_denied',
+            'nextcloud_onboarding_not_found' => 'operation_missing',
+            default => 'http_' . $error->getCode(),
+        };
+        return 'pairing_remote_rejected_' . $suffix;
     }
 
     private static function pairingRemoteFailureCode(\Throwable $error, ?array $remoteObservation = null): string {

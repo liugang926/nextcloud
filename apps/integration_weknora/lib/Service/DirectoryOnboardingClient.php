@@ -67,7 +67,7 @@ final class DirectoryOnboardingClient {
             // Never parse or forward remote errors: their body may contain
             // addresses, implementation details, or credentials.
             if (in_array($status, [400, 401, 403, 404, 409, 422], true)) {
-                throw new \DomainException('Target authorization or reservation was rejected', $status);
+                throw new DirectoryOnboardingRemoteRejectedException($status, $this->safeRemoteCode($raw));
             }
             $reason = $status === 429
                 ? DirectoryOnboardingRequestException::RATE_LIMITED
