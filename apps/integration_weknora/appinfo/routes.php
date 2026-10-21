@@ -8,6 +8,7 @@ return [
         ['name' => 'connection_admin#principals', 'url' => '/api/v1/admin/connection/principals', 'verb' => 'GET'],
         ['name' => 'connection_admin#discover', 'url' => '/api/v1/admin/connection/discover', 'verb' => 'POST'],
         ['name' => 'connection_admin#connect', 'url' => '/api/v1/admin/connection', 'verb' => 'POST'],
+        ['name' => 'connection_admin#visibility', 'url' => '/api/v1/admin/connection/visibility', 'verb' => 'POST'],
         ['name' => 'connection_admin#disconnect', 'url' => '/api/v1/admin/connection', 'verb' => 'DELETE'],
         ['name' => 'target_migration#status', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'GET'],
         ['name' => 'target_migration#retry', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'POST'],

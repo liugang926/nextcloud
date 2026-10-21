@@ -94,6 +94,25 @@ final class ConnectionAdminController extends Controller {
         }
     }
 
+    public function visibility(): JSONResponse {
+        if (!$this->isAdmin()) {
+            return $this->json(['error' => 'forbidden'], 403);
+        }
+        $spaces = $this->request->getParam('spaces');
+        if (!is_array($spaces) || $spaces === []) {
+            return $this->json(['error' => 'invalid_visibility'], 400);
+        }
+        try {
+            return $this->json($this->connection->updateVisibility($spaces));
+        } catch (\InvalidArgumentException $exception) {
+            return $this->json(['error' => 'invalid_visibility'], 400);
+        } catch (\DomainException $exception) {
+            return $this->json(['error' => 'visibility_conflict'], 409);
+        } catch (\Throwable $exception) {
+            return $this->json(['error' => 'visibility_unavailable'], 503);
+        }
+    }
+
     public function disconnect(): JSONResponse {
         if (!$this->isAdmin()) {
             return $this->json(['error' => 'forbidden'], 403);

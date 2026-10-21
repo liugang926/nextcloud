@@ -24,6 +24,11 @@ every request. Tightening it prevents new target selection immediately, while
 existing bindings remain managed until an administrator explicitly stops or
 migrates them.
 
+After a connection exists, **Manage workspace visibility** updates only the
+per-workspace user/group policy. It reuses the existing scoped credentials and
+does not require the administrator connection key or rotate processing
+templates.
+
 The raw rule ID, owner UID, container file ID, tenant ID, processing template
 ID, pairing JSON and event secret remain available only under **Advanced** for
 migration and diagnostics.
