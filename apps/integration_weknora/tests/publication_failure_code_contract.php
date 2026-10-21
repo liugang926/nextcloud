@@ -41,6 +41,25 @@ foreach ($checks as [$stage, $error, $expected]) {
     }
 }
 
+$serverError = new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR);
+$observed = $method->invoke(null, 'pairing_remote', $serverError, [
+    'operation' => ['state' => 'active'],
+    'pairing' => ['state' => 'active'],
+]);
+$reserved = $method->invoke(null, 'pairing_remote', $serverError, [
+    'operation' => ['state' => 'reserved'],
+    'pairing' => null,
+]);
+$unknown = $method->invoke(null, 'pairing_remote', $serverError, [
+    'operation' => ['state' => 'untrusted remote value'],
+    'pairing' => ['state' => 'active'],
+]);
+if ($observed !== 'pairing_remote_server_error_op_active_pair_active' ||
+    $reserved !== 'pairing_remote_server_error_op_reserved_pair_missing' ||
+    $unknown !== 'pairing_remote_server_error') {
+    throw new RuntimeException('Remote pairing observations did not remain bounded and actionable');
+}
+
 $client = (new ReflectionClass(DirectoryOnboardingClient::class))->newInstanceWithoutConstructor();
 $safeCode = new ReflectionMethod(DirectoryOnboardingClient::class, 'safeRemoteCode');
 $known = $safeCode->invoke($client, '{"error":"source_pairing_unavailable","detail":"never-retained"}');

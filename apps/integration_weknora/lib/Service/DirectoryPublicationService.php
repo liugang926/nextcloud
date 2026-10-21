@@ -605,6 +605,7 @@ final class DirectoryPublicationService {
             foreach ($this->bindings->listBindings() as $binding) {
                 if ($binding['id'] === $intent['binding_id']) { $floor = $binding['sync_revision']; break; }
             }
+            $readStatus = null;
             $readStatus = function() use ($rule, $operationId, $currentActor, $intent, $request, &$stage): array {
                 $stage = 'target_status';
                 $response = $this->remote->request($rule, 'GET', '/operations/' . $operationId, $currentActor);
@@ -704,7 +705,16 @@ final class DirectoryPublicationService {
             if ($intent['state'] === 'active') {
                 try { $this->bindings->setPublicationState($intent['binding_id'], 'stopped', 'directory-policy'); } catch (\Throwable $ignored) {}
             }
-            $this->update($operationId, ['state' => 'pending', 'error_code' => self::failureCode($stage, $e),
+            $remoteObservation = null;
+            if ($stage === 'pairing_remote' && is_callable($readStatus)) {
+                try {
+                    $remoteObservation = $readStatus();
+                } catch (\Throwable $ignored) {
+                    // Keep the original failure and never persist remote error text.
+                }
+            }
+            $this->update($operationId, ['state' => 'pending',
+                'error_code' => self::failureCode($stage, $e, $remoteObservation),
                 'attempt_count' => (int)$intent['attempt_count'] + 1, 'lease_until' => 0,
                 'next_attempt_at' => time() + min(300, 15 * (1 << min(4, (int)$intent['attempt_count'])))]);
         }
@@ -714,7 +724,7 @@ final class DirectoryPublicationService {
      * Keep the queue status actionable without persisting remote error text or
      * credentials. Domain responses retain their existing conflict projection.
      */
-    private static function failureCode(string $stage, \Throwable $error): string {
+    private static function failureCode(string $stage, \Throwable $error, ?array $remoteObservation = null): string {
         if ($error instanceof UnsupportedPublicationAclException) {
             return 'unsupported_source_acl';
         }
@@ -724,7 +734,7 @@ final class DirectoryPublicationService {
         return match ($stage) {
             'target_reservation', 'target_status' => 'target_reservation_unverified',
             'pairing_prepare' => 'pairing_prepare_unverified',
-            'pairing_remote' => self::pairingRemoteFailureCode($error),
+            'pairing_remote' => self::pairingRemoteFailureCode($error, $remoteObservation),
             'pairing_ack' => 'pairing_ack_unverified',
             'event_connection' => 'event_connection_pending',
             'grant_snapshot' => 'grant_snapshot_unavailable',
@@ -734,7 +744,7 @@ final class DirectoryPublicationService {
         };
     }
 
-    private static function pairingRemoteFailureCode(\Throwable $error): string {
+    private static function pairingRemoteFailureCode(\Throwable $error, ?array $remoteObservation = null): string {
         if (!$error instanceof DirectoryOnboardingRequestException) {
             return 'pairing_remote_unverified';
         }
@@ -743,7 +753,33 @@ final class DirectoryPublicationService {
             'onboarding_unavailable' => '_onboarding',
             default => '',
         };
-        return 'pairing_remote_' . $error->reason() . $suffix;
+        $code = 'pairing_remote_' . $error->reason() . $suffix;
+        if (!in_array($error->reason(), [
+            DirectoryOnboardingRequestException::SERVER_ERROR,
+            DirectoryOnboardingRequestException::INVALID_RESPONSE,
+        ], true)) {
+            return $code;
+        }
+        if ($remoteObservation === null) {
+            return $code;
+        }
+        $operation = is_array($remoteObservation['operation'] ?? null) ? $remoteObservation['operation'] : [];
+        $pair = is_array($remoteObservation['pairing'] ?? null) ? $remoteObservation['pairing'] : [];
+        $operationState = self::safeRemoteState($operation['state'] ?? null);
+        $pairState = self::safeRemoteState($pair['state'] ?? null);
+        if ($operationState === null || $pairState === null) {
+            return $code;
+        }
+        return $code . '_op_' . $operationState . '_pair_' . $pairState;
+    }
+
+    private static function safeRemoteState(mixed $value): ?string {
+        if ($value === null) {
+            return 'missing';
+        }
+        return is_string($value) && in_array($value, [
+            'reserved', 'pending', 'active', 'aborted', 'retired', 'target_deleted',
+        ], true) ? $value : null;
     }
 
     /** Fresh metadata only; an immutable old root fact is never reopened. */
