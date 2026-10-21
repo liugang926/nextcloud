@@ -50,7 +50,11 @@ for ($index = 0; $index < 60; $index++) {
     $largeGroups[] = ['id' => 'group-' . str_pad((string)$index, 2, '0', STR_PAD_LEFT), 'name' => 'Group ' . $index];
     $largeUsers[] = ['id' => 'user-' . str_pad((string)$index, 2, '0', STR_PAD_LEFT), 'name' => 'User ' . $index];
 }
-principalCheck(count(PrincipalSearchService::merge($largeGroups, $largeUsers, '')) === 50,
-    'Unified autocomplete must stay within its bounded result limit');
+$bounded = PrincipalSearchService::merge($largeGroups, $largeUsers, '');
+principalCheck(count($bounded) === 50, 'Unified autocomplete must stay within its bounded result limit');
+principalCheck(count(array_filter($bounded, static fn (array $item): bool => $item['type'] === 'group')) === 25,
+    'An empty search must reserve half of the bounded list for groups');
+principalCheck(count(array_filter($bounded, static fn ($item): bool => $item['type'] === 'user')) === 25,
+    'An empty search must reserve half of the bounded list for users');
 
 fwrite(STDOUT, "principal search contract: PASS\n");

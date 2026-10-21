@@ -1157,6 +1157,7 @@
                 active = Math.max(0, Math.min(options.length - 1, next));
                 for (let index = 0; index < options.length; index++) {
                     options[index].dataset.active = index === active ? 'true' : 'false';
+                    options[index].setAttribute('aria-selected', index === active ? 'true' : 'false');
                 }
                 input.setAttribute('aria-activedescendant', options[active].id);
                 options[active].scrollIntoView({ block: 'nearest' });
@@ -1182,6 +1183,7 @@
                 renderChips();
                 results.hidden = true;
                 input.setAttribute('aria-expanded', 'false');
+                input.removeAttribute('aria-activedescendant');
                 input.focus();
             };
 
@@ -1203,6 +1205,7 @@
                         option.id = `${results.id}-option-${index}`;
                         option.setAttribute('role', 'option');
                         option.dataset.active = 'false';
+                        option.setAttribute('aria-selected', 'false');
                         option.dataset.type = principal.type;
                         option.append(
                             textNode('span', 'weknora-admin__principal-type',
@@ -1267,6 +1270,7 @@
                 setTimeout(() => {
                     results.hidden = true;
                     input.setAttribute('aria-expanded', 'false');
+                    input.removeAttribute('aria-activedescendant');
                 }, 140);
             });
             input.addEventListener('keydown', (event) => {
@@ -1283,6 +1287,7 @@
                 } else if (event.key === 'Escape') {
                     results.hidden = true;
                     input.setAttribute('aria-expanded', 'false');
+                    input.removeAttribute('aria-activedescendant');
                 } else if (event.key === 'Backspace' && input.value === '' && selected.length) {
                     selected.pop();
                     renderChips();
@@ -1303,6 +1308,11 @@
             };
 
             setValues(initial || []);
+            control.addEventListener('click', (event) => {
+                if (!event.target.closest('button, input')) {
+                    input.focus();
+                }
+            });
             return {
                 root,
                 input,
