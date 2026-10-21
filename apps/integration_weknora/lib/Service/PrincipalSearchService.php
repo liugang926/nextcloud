@@ -94,8 +94,35 @@ final class PrincipalSearchService {
                 <=> [$right['_rank'], $right['type'], self::fold($right['name']), self::fold($right['id'])];
         });
 
+        // Reserve half of the bounded list for each principal type, then fill
+        // any unused capacity from the globally ranked remainder. Otherwise a
+        // large group directory can hide every user on an empty search.
+        $quota = intdiv(self::MAX_CHOICES, 2);
+        $selected = [];
+        $counts = ['group' => 0, 'user' => 0];
+        foreach ($choices as $index => $choice) {
+            if ($counts[$choice['type']] >= $quota) {
+                continue;
+            }
+            $selected[$index] = true;
+            $counts[$choice['type']]++;
+        }
+        if (count($selected) < self::MAX_CHOICES) {
+            foreach ($choices as $index => $choice) {
+                if (count($selected) >= self::MAX_CHOICES) {
+                    break;
+                }
+                if (!isset($selected[$index])) {
+                    $selected[$index] = true;
+                }
+            }
+        }
+
         $out = [];
-        foreach (array_slice($choices, 0, self::MAX_CHOICES) as $choice) {
+        foreach ($choices as $index => $choice) {
+            if (!isset($selected[$index])) {
+                continue;
+            }
             unset($choice['_rank']);
             $out[] = $choice;
         }
