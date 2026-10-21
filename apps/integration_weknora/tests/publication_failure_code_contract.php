@@ -18,6 +18,7 @@ $method = new ReflectionMethod(DirectoryPublicationService::class, 'failureCode'
 $checks = [
     ['target_status', new RuntimeException('remote'), 'target_status_unverified'],
     ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'onboarding_unavailable'), 'target_status_server_error_onboarding'],
+    ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'onboarding_unavailable_target_observation'), 'target_status_server_error_onboarding_target_observation'],
     ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::RATE_LIMITED), 'target_status_rate_limited'],
     ['target_status', new DirectoryOnboardingRemoteRejectedException(409, 'nextcloud_target_closed'), 'target_status_rejected_target_closed'],
     ['target_reservation', new RuntimeException('remote'), 'target_reservation_unverified'],
@@ -74,7 +75,8 @@ $client = (new ReflectionClass(DirectoryOnboardingClient::class))->newInstanceWi
 $safeCode = new ReflectionMethod(DirectoryOnboardingClient::class, 'safeRemoteCode');
 $known = $safeCode->invoke($client, '{"error":"source_pairing_unavailable","detail":"never-retained"}');
 $unknown = $safeCode->invoke($client, '{"error":"arbitrary remote text"}');
-if ($known !== 'source_pairing_unavailable' || $unknown !== null) {
+$staged = $safeCode->invoke($client, '{"error":"onboarding_unavailable","failure_stage":"target_observation"}');
+if ($known !== 'source_pairing_unavailable' || $staged !== 'onboarding_unavailable_target_observation' || $unknown !== null) {
     throw new RuntimeException('Remote onboarding diagnostics did not enforce the safe code allow-list');
 }
 

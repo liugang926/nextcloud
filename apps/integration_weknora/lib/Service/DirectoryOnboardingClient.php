@@ -122,6 +122,15 @@ final class DirectoryOnboardingClient {
         ], true)) {
             return null;
         }
+        $stage = is_array($data) ? ($data['failure_stage'] ?? null) : null;
+        if (is_string($stage) && in_array($stage, [
+            'operation_read',
+            'tenant_deletion',
+            'target_observation',
+            'operation_refresh',
+        ], true)) {
+            return $code . '_' . $stage;
+        }
         return $code;
     }
 }

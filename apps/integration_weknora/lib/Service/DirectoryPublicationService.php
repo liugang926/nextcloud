@@ -732,7 +732,13 @@ final class DirectoryPublicationService {
             return self::targetStatusRejectionCode($error);
         }
         if ($stage === 'target_status' && $error instanceof DirectoryOnboardingRequestException) {
-            $suffix = $error->remoteCode() === 'onboarding_unavailable' ? '_onboarding' : '';
+            $remoteCode = $error->remoteCode() ?? '';
+            $suffix = match (true) {
+                str_starts_with($remoteCode, 'onboarding_unavailable_') =>
+                    '_onboarding_' . substr($remoteCode, strlen('onboarding_unavailable_')),
+                $remoteCode === 'onboarding_unavailable' => '_onboarding',
+                default => '',
+            };
             return 'target_status_' . $error->reason() . $suffix;
         }
         if ($stage === 'pairing_remote' && $error instanceof DirectoryOnboardingRemoteRejectedException) {
