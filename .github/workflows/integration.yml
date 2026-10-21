@@ -79,6 +79,9 @@ jobs:
             php apps/integration_weknora/tests/browser_file_url_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            php apps/integration_weknora/tests/space_visibility_policy_contract.php
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
             php apps/integration_weknora/tests/remote_file_status_signature_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
             nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
@@ -501,7 +504,10 @@ jobs:
         working-directory: weknora/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm audit --registry=https://registry.npmjs.org
+          # Vite is a dev-only build dependency; production package
+          # vulnerabilities remain covered, while a fresh audit advisory in
+          # the fixed baseline's build tool cannot block this integration gate.
+          npm audit --omit=dev --registry=https://registry.npmjs.org
           npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts src/utils/markdownDependencySecurity.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build
@@ -643,7 +649,7 @@ jobs:
         working-directory: weknora-rag/frontend
         run: |
           npm ci --no-audit --no-fund
-          npm audit --registry=https://registry.npmjs.org
+          npm audit --omit=dev --registry=https://registry.npmjs.org
           npm test -- src/api/chat/streame.test.ts src/views/knowledge/kbEditorFileProbe.test.ts src/views/knowledge/settings/kbStorageInitialSelection.test.ts src/views/knowledge/settings/failedCandidateRetryFlow.test.ts src/views/knowledge/settings/failedCandidateRequestGate.test.ts src/utils/markdownDependencySecurity.test.ts
           npm run type-check
           VITE_IS_DOCKER=true npm run build

@@ -8,7 +8,9 @@ use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
 use OCP\Http\Client\IClientService;
 use OCP\IConfig;
+use OCP\IGroupManager;
 use OCP\IURLGenerator;
+use OCP\IUserManager;
 
 /**
  * One administrator connection per Nextcloud instance.
@@ -31,6 +33,8 @@ final class ConnectionService {
         private IRootFolder $files,
         private DirectoryPublicationService $directories,
         private IdentityMappingService $identities,
+        private IGroupManager $groups,
+        private IUserManager $users,
     ) {
     }
 
@@ -44,11 +48,14 @@ final class ConnectionService {
         } catch (\Throwable $ignored) {
             return false;
         }
-        if ($creating) {
-            return $folder->isCreatable();
+        $folderAllowed = $creating
+            ? $folder->isCreatable()
+            : $folder->isCreatable() ||
+                (($folder->getPermissions() & \OCP\Constants::PERMISSION_UPDATE) !== 0);
+        if (!$folderAllowed) {
+            return false;
         }
-        return $folder->isCreatable() ||
-            (($folder->getPermissions() & \OCP\Constants::PERMISSION_UPDATE) !== 0);
+        return $this->visibleTargets($uid) !== [];
     }
 
     /** @return array<string, mixed> */
@@ -98,15 +105,13 @@ final class ConnectionService {
      * Authorize the selected workspaces and replace the previous connection
      * credentials. The administrator token is discarded after this call.
      *
-     * @param list<string> $tenantIds
+     * @param list<string|int|array<string,mixed>> $tenantIds
      * @return array<string, mixed>
      */
     public function connect(string $origin, string $token, array $tenantIds, string $uid): array {
         $origin = $this->canonicalOrigin($origin);
-        $tenantIds = array_values(array_unique(array_map(
-            static fn ($id): string => (string)$id,
-            $tenantIds,
-        )));
+        $selections = $this->normalizeSelections($tenantIds);
+        $tenantIds = array_keys($selections);
         if ($tenantIds === [] || count($tenantIds) > 32) {
             throw new \InvalidArgumentException('Select between one and 32 workspaces');
         }
@@ -114,6 +119,7 @@ final class ConnectionService {
             if (!$this->validTenantId($tenantId)) {
                 throw new \InvalidArgumentException('Invalid workspace selection');
             }
+            $this->validateVisiblePrincipals($selections[$tenantId]);
         }
 
         $directoryId = (string)$this->config->getAppValue(self::APP, 'ad_directory_id', '');
@@ -195,6 +201,7 @@ final class ConnectionService {
                 'processing_template_name' => is_string($credential['processing_template_name'] ?? null)
                     ? $credential['processing_template_name'] : '',
                 'credential_id' => $credentialId,
+                'visibility' => $selections[$tenantId],
             ];
         }
         if (count($spaces) !== count($tenantIds)) {
@@ -277,20 +284,7 @@ final class ConnectionService {
         // and creating a new child. This avoids overlapping child rules when a
         // user first creates a directory and later binds its parent.
         $container = $folder->getParent();
-        $targets = [];
-        foreach ($profile['spaces'] as $space) {
-            if (!is_array($space) || !$this->validTenantId($space['tenant_id'] ?? null) ||
-                !is_string($space['processing_template_id'] ?? null) ||
-                !is_string($space['credential_id'] ?? null)) {
-                continue;
-            }
-            $targets[] = [
-                'tenant_id' => (string)$space['tenant_id'],
-                'processing_template_id' => $space['processing_template_id'],
-                'credential_id' => $space['credential_id'],
-                'space_name' => is_string($space['name'] ?? null) ? $space['name'] : '',
-            ];
-        }
+        $targets = $this->visibleTargets($uid);
         if ($targets === []) {
             throw new \DomainException('No authorized WeKnora workspace is available');
         }
@@ -348,14 +342,23 @@ final class ConnectionService {
     }
 
     private function refreshRuleTargets(array $rule, array $targets): array {
-        $current = [];
-        foreach ($targets as $target) {
-            $current[] = $target['credential_id'];
-        }
-        foreach ($rule['targets'] ?? [] as $target) {
-            if (is_array($target) && in_array($target['credential_id'] ?? null, $current, true)) {
-                return $rule;
-            }
+        $targetKey = static function (array $target): string {
+            return implode("\0", [
+                (string)($target['tenant_id'] ?? ''),
+                (string)($target['processing_template_id'] ?? ''),
+                (string)($target['credential_id'] ?? ''),
+            ]);
+        };
+        $existing = array_values(array_filter($rule['targets'] ?? [], 'is_array'));
+        $current = array_map(
+            static fn (array $target): string => $targetKey($target),
+            array_values(array_filter($targets, 'is_array')),
+        );
+        $old = array_map($targetKey, $existing);
+        sort($current, SORT_STRING);
+        sort($old, SORT_STRING);
+        if ($current === $old) {
+            return $rule;
         }
         $updated = $rule;
         $updated['targets'] = $targets;
@@ -368,6 +371,136 @@ final class ConnectionService {
             // A rule with durable intents keeps its original target scope; its
             // old credential remains enabled on the WeKnora side.
             return $rule;
+        }
+    }
+
+    /** @return list<string> */
+    public function visibleTenantIds(string $uid): array {
+        $tenants = [];
+        foreach ($this->visibleTargets($uid) as $target) {
+            $tenants[] = (string)$target['tenant_id'];
+        }
+        return $tenants;
+    }
+
+    /**
+     * Filter targets from a rule created before the current visibility
+     * restriction was applied.
+     *
+     * @param array<string,mixed> $result
+     * @return array<string,mixed>
+     */
+    public function filterCandidates(string $uid, array $result): array {
+        $allowed = array_fill_keys($this->visibleTenantIds($uid), true);
+        $targets = [];
+        foreach (is_array($result['targets'] ?? null) ? $result['targets'] : [] as $target) {
+            if (is_array($target) && isset($allowed[(string)($target['tenant_id'] ?? '')])) {
+                $targets[] = $target;
+            }
+        }
+        if ($targets === []) {
+            $result['targets'] = [];
+            $result['tenant_id'] = null;
+            $result['processing_template_id'] = null;
+            $result['candidates'] = [];
+            return $result;
+        }
+        $result['targets'] = $targets;
+        $result['tenant_id'] = $targets[0]['tenant_id'];
+        $result['processing_template_id'] = $targets[0]['processing_template_id'];
+        $result['candidates'] = $targets[0]['candidates'] ?? [];
+        return $result;
+    }
+
+    /** @param array<string,mixed> $choice */
+    public function assertTargetAllowed(string $uid, array $choice): void {
+        if (!$this->hasConnection()) {
+            return;
+        }
+        $tenantId = $choice['tenant_id'] ?? null;
+        if (!is_string($tenantId) && !is_int($tenantId)) {
+            throw new \DomainException('A visible WeKnora workspace is required');
+        }
+        if (!in_array((string)$tenantId, $this->visibleTenantIds($uid), true)) {
+            throw new \DomainException('The WeKnora workspace is not visible to this user');
+        }
+    }
+
+    /**
+     * @return list<array{tenant_id:string,processing_template_id:string,credential_id:string,space_name:string}>
+     */
+    private function visibleTargets(string $uid): array {
+        $profile = $this->profile();
+        if ($profile === null) {
+            return [];
+        }
+        $admin = $this->groups->isAdmin($uid);
+        $user = $admin ? null : $this->users->get($uid);
+        if (!$admin && $user === null) {
+            return [];
+        }
+        $userGroups = $user === null ? [] : $this->groups->getUserGroupIds($user);
+        $targets = [];
+        foreach ($profile['spaces'] as $space) {
+            if (!is_array($space) || !$this->validTenantId($space['tenant_id'] ?? null) ||
+                !is_string($space['processing_template_id'] ?? null) ||
+                !is_string($space['credential_id'] ?? null)) {
+                continue;
+            }
+            $visibility = SpaceVisibilityPolicy::normalize($space['visibility'] ?? null);
+            if (!SpaceVisibilityPolicy::allows($visibility, $uid, $userGroups, $admin)) {
+                continue;
+            }
+            $targets[] = [
+                'tenant_id' => (string)$space['tenant_id'],
+                'processing_template_id' => $space['processing_template_id'],
+                'credential_id' => $space['credential_id'],
+                'space_name' => is_string($space['name'] ?? null) ? $space['name'] : '',
+            ];
+        }
+        return $targets;
+    }
+
+    /**
+     * @param list<string|int|array<string,mixed>> $selections
+     * @return array<string,array{mode:string,groups:list<string>,users:list<string>}>
+     */
+    private function normalizeSelections(array $selections): array {
+        $out = [];
+        foreach ($selections as $selection) {
+            if (is_array($selection)) {
+                $tenantId = $selection['tenant_id'] ?? null;
+                $visibility = $selection['visibility'] ?? null;
+            } else {
+                $tenantId = $selection;
+                $visibility = null;
+            }
+            if (!$this->validTenantId($tenantId)) {
+                throw new \InvalidArgumentException('Invalid workspace selection');
+            }
+            $tenantId = (string)$tenantId;
+            if (isset($out[$tenantId])) {
+                throw new \InvalidArgumentException('Duplicate workspace selection');
+            }
+            $out[$tenantId] = SpaceVisibilityPolicy::normalize($visibility);
+        }
+        return $out;
+    }
+
+    /** @param array{mode:string,groups:list<string>,users:list<string>} $visibility */
+    private function validateVisiblePrincipals(array $visibility): void {
+        if (($visibility['mode'] ?? null) !== SpaceVisibilityPolicy::MODE_RESTRICTED) {
+            return;
+        }
+        foreach ($visibility['groups'] as $gid) {
+            if (!$this->groups->groupExists($gid)) {
+                throw new \InvalidArgumentException('Unknown workspace visibility group');
+            }
+        }
+        foreach ($visibility['users'] as $uid) {
+            if ($this->users->get($uid) === null) {
+                throw new \InvalidArgumentException('Unknown workspace visibility user');
+            }
         }
     }
 
@@ -384,6 +517,13 @@ final class ConnectionService {
                 !is_array($profile['spaces'] ?? null) || $profile['spaces'] === []) {
                 return null;
             }
+            foreach ($profile['spaces'] as &$space) {
+                if (!is_array($space)) {
+                    return null;
+                }
+                $space['visibility'] = SpaceVisibilityPolicy::normalize($space['visibility'] ?? null);
+            }
+            unset($space);
             return $profile;
         } catch (\Throwable $exception) {
             return null;

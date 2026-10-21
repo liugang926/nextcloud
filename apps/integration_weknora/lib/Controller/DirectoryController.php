@@ -41,10 +41,15 @@ final class DirectoryController extends Controller {
     public function candidates(int $folderId): JSONResponse {
         return $this->run(function (string $uid) use ($folderId): array {
             $forCreation = $this->request->getParam('for_creation') === '1';
+            $allowed = null;
             if ($this->connection->hasConnection()) {
                 $this->connection->ensureRule($uid, $folderId, $forCreation);
+                $allowed = $this->connection->visibleTenantIds($uid);
             }
-            return $this->directories->candidates($uid, $folderId, $forCreation);
+            $result = $this->directories->candidates($uid, $folderId, $forCreation, $allowed);
+            return $this->connection->hasConnection()
+                ? $this->connection->filterCandidates($uid, $result)
+                : $result;
         });
     }
     #[NoAdminRequired]
@@ -53,7 +58,9 @@ final class DirectoryController extends Controller {
             if ($this->connection->hasConnection()) {
                 $this->connection->ensureRule($uid, $folderId, false);
             }
-            return ['operation' => $this->directories->associate($uid, $folderId, $this->choice())];
+            $choice = $this->choice();
+            $this->connection->assertTargetAllowed($uid, $choice);
+            return ['operation' => $this->directories->associate($uid, $folderId, $choice)];
         }, 202);
     }
     #[NoAdminRequired]
@@ -64,7 +71,9 @@ final class DirectoryController extends Controller {
             if ($this->connection->hasConnection()) {
                 $this->connection->ensureRule($uid, $folderId, true);
             }
-            return ['operation' => $this->directories->create($uid, $folderId, $name, $this->choice())];
+            $choice = $this->choice();
+            $this->connection->assertTargetAllowed($uid, $choice);
+            return ['operation' => $this->directories->create($uid, $folderId, $name, $choice)];
         }, 202);
     }
     #[NoAdminRequired]

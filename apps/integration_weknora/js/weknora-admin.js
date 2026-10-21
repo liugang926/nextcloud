@@ -982,11 +982,95 @@
             const list = document.createElement('ul');
             for (const space of data.spaces || []) {
                 const item = document.createElement('li');
+                const visibility = space.visibility || {};
+                const principals = [
+                    ...(visibility.groups || []).map((id) => `组 ${id}`),
+                    ...(visibility.users || []).map((id) => `用户 ${id}`),
+                ];
+                const access = visibility.mode === 'admin'
+                    ? ' · 仅 Nextcloud 管理员'
+                    : visibility.mode === 'restricted'
+                        ? ` · 指定可见：${principals.join('、')}`
+                        : ' · 全部目录管理者';
                 item.textContent = (space.name || `空间 ${space.tenant_id}`) +
-                    (space.processing_template_name ? ` · 默认处理方案：${space.processing_template_name}` : '');
+                    (space.processing_template_name ? ` · 默认处理方案：${space.processing_template_name}` : '') +
+                    access;
                 list.append(item);
             }
             current.append(list);
+        }
+
+        function splitPrincipals(value) {
+            return [...new Set(String(value)
+                .split(',')
+                .map((item) => item.trim())
+                .filter(Boolean))];
+        }
+
+        function principalPicker(kind, className, placeholder) {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = className;
+            input.placeholder = placeholder;
+            input.autocomplete = 'off';
+            const suggestions = document.createElement('div');
+            suggestions.className = 'weknora-admin__principal-results';
+            suggestions.hidden = true;
+            let sequence = 0;
+            let timer = null;
+
+            const load = async () => {
+                const current = ++sequence;
+                const query = input.value.split(',').pop().trim();
+                try {
+                    const data = await request(
+                        'GET',
+                        `${baseUrl}/principals?query=${encodeURIComponent(query)}`,
+                    );
+                    if (current !== sequence) return;
+                    suggestions.replaceChildren();
+                    const items = Array.isArray(data[kind]) ? data[kind] : [];
+                    for (const principal of items) {
+                        const choice = document.createElement('button');
+                        choice.type = 'button';
+                        choice.className = 'weknora-admin__principal-result';
+                        choice.textContent = principal.name && principal.name !== principal.id
+                            ? `${principal.name} (${principal.id})`
+                            : principal.id;
+                        choice.addEventListener('mousedown', (event) => event.preventDefault());
+                        choice.addEventListener('click', () => {
+                            const values = splitPrincipals(input.value);
+                            values.push(String(principal.id));
+                            input.value = [...new Set(values)].join(', ');
+                            suggestions.hidden = true;
+                            input.focus();
+                        });
+                        suggestions.append(choice);
+                    }
+                    if (!items.length) {
+                        const empty = document.createElement('span');
+                        empty.textContent = query
+                            ? '没有匹配项，也可以直接输入 ID。'
+                            : '没有可选择的项目，可以直接输入 ID。';
+                        suggestions.append(empty);
+                    }
+                    suggestions.hidden = false;
+                } catch (_) {
+                    suggestions.hidden = true;
+                }
+            };
+            input.addEventListener('input', () => {
+                clearTimeout(timer);
+                timer = setTimeout(load, 180);
+            });
+            input.addEventListener('focus', () => {
+                clearTimeout(timer);
+                timer = setTimeout(load, 80);
+            });
+            input.addEventListener('blur', () => {
+                setTimeout(() => { suggestions.hidden = true; }, 140);
+            });
+            return { input, suggestions };
         }
 
         async function loadStatus() {
@@ -1005,8 +1089,10 @@
             spacesPanel.hidden = false;
             save.hidden = false;
             for (const space of spaces) {
+                const row = document.createElement('div');
+                row.className = 'weknora-admin__space-choice';
                 const label = document.createElement('label');
-                label.className = 'weknora-admin__space-choice';
+                label.className = 'weknora-admin__space-select';
                 const checkbox = document.createElement('input');
                 checkbox.type = 'checkbox';
                 checkbox.value = String(space.tenant_id);
@@ -1019,7 +1105,52 @@
                     text.textContent += `（不可用：${space.reason === 'no_processing_template' ? '缺少可用处理方案' : '未授权'}）`;
                 }
                 label.append(checkbox, text);
-                spaceList.append(label);
+                row.append(label);
+
+                const access = document.createElement('div');
+                access.className = 'weknora-admin__space-access';
+                const modeLabel = document.createElement('label');
+                modeLabel.textContent = '可见范围';
+                const mode = document.createElement('select');
+                mode.className = 'weknora-admin__visibility-mode';
+                for (const [value, textContent] of [
+                    ['all', '全部目录管理者'],
+                    ['restricted', '指定用户或组'],
+                    ['admin', '仅 Nextcloud 管理员'],
+                ]) {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = textContent;
+                    mode.append(option);
+                }
+                modeLabel.append(mode);
+
+                const principals = document.createElement('div');
+                principals.className = 'weknora-admin__visibility-principals';
+                principals.hidden = true;
+                const groupsLabel = document.createElement('label');
+                groupsLabel.textContent = 'Nextcloud 组';
+                const groupPicker = principalPicker(
+                    'groups',
+                    'weknora-admin__visibility-groups',
+                    '搜索组名称，或输入组 ID',
+                );
+                groupsLabel.append(groupPicker.input, groupPicker.suggestions);
+                const usersLabel = document.createElement('label');
+                usersLabel.textContent = 'Nextcloud 用户';
+                const userPicker = principalPicker(
+                    'users',
+                    'weknora-admin__visibility-users',
+                    '搜索用户姓名，或输入 UID',
+                );
+                usersLabel.append(userPicker.input, userPicker.suggestions);
+                principals.append(groupsLabel, usersLabel);
+                mode.addEventListener('change', () => {
+                    principals.hidden = mode.value !== 'restricted';
+                });
+                access.append(modeLabel, principals);
+                row.append(access);
+                spaceList.append(row);
             }
             if (!spaces.length) {
                 const empty = document.createElement('p');
@@ -1051,8 +1182,25 @@
         });
 
         save.addEventListener('click', async () => {
-            const spaces = [...spaceList.querySelectorAll('input[type=checkbox]:checked')]
-                .map((input) => input.value);
+            const spaces = [];
+            for (const checkbox of spaceList.querySelectorAll('input[type=checkbox]:checked')) {
+                const row = checkbox.closest('.weknora-admin__space-choice');
+                const mode = row.querySelector('.weknora-admin__visibility-mode').value;
+                const groups = mode === 'restricted'
+                    ? splitPrincipals(row.querySelector('.weknora-admin__visibility-groups').value)
+                    : [];
+                const users = mode === 'restricted'
+                    ? splitPrincipals(row.querySelector('.weknora-admin__visibility-users').value)
+                    : [];
+                if (mode === 'restricted' && !groups.length && !users.length) {
+                    setMessage('指定可见范围时，至少填写一个 Nextcloud 组或用户。', 'error');
+                    return;
+                }
+                spaces.push({
+                    tenant_id: checkbox.value,
+                    visibility: { mode, groups, users },
+                });
+            }
             if (!spaces.length) {
                 setMessage('至少选择一个空间。', 'error');
                 return;
@@ -1071,9 +1219,11 @@
                 spacesPanel.hidden = true;
                 setMessage('连接已保存。现在可以在 Nextcloud 目录的 WeKnora 标签中选择空间和知识库。');
             } catch (error) {
-                setMessage(error.status === 409
-                    ? '空间授权未完成，请检查该空间是否有可用的处理方案。'
-                    : '连接未保存，请检查密钥和管理员权限。', 'error');
+                setMessage(error.status === 400
+                    ? '连接配置无效，请确认指定的 Nextcloud 用户和组 ID 存在。'
+                    : error.status === 409
+                        ? '空间授权未完成，请检查该空间是否有可用的处理方案。'
+                        : '连接未保存，请检查密钥和管理员权限。', 'error');
             } finally {
                 save.disabled = false;
                 save.textContent = original;

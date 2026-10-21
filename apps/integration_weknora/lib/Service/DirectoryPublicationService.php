@@ -312,13 +312,22 @@ final class DirectoryPublicationService {
             'operation' => $intent === null ? null : $this->publicIntent($intent)];
     }
 
-    public function candidates(string $uid, int $folderId, bool $forCreation = false): array {
+    public function candidates(
+        string $uid,
+        int $folderId,
+        bool $forCreation = false,
+        ?array $allowedTenantIds = null,
+    ): array {
         $folder = $this->folder($uid, $folderId);
         $rule = $forCreation ? $this->matchingRule($folder, true) : $this->requireManagement($uid, $folder);
         if ($rule === null || !$this->delegated($uid, $rule)) { throw new \DomainException('Publication management is forbidden'); }
+        $allowed = $allowedTenantIds === null ? null : array_fill_keys($allowedTenantIds, true);
         $identity = $this->identities->forUser($uid);
         $targets = [];
         foreach ($this->targetChoices($rule) as $target) {
+            if ($allowed !== null && !isset($allowed[(string)$target['tenant_id']])) {
+                continue;
+            }
             try {
                 $effective = $this->selectTarget($rule, $target['tenant_id'],$target['processing_template_id']);
                 $response = $this->remote->request($effective, 'GET', '/candidates', [

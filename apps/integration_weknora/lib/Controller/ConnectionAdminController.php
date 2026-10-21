@@ -9,6 +9,7 @@ use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\IGroupManager;
 use OCP\IRequest;
+use OCP\IUserManager;
 use OCP\IUserSession;
 
 /** Administrator session and CSRF protected WeKnora connection setup. */
@@ -17,6 +18,7 @@ final class ConnectionAdminController extends Controller {
         IRequest $request,
         private IUserSession $session,
         private IGroupManager $groups,
+        private IUserManager $users,
         private ConnectionService $connection,
     ) {
         parent::__construct('integration_weknora', $request);
@@ -47,6 +49,26 @@ final class ConnectionAdminController extends Controller {
         } catch (\Throwable $exception) {
             return $this->json(['error' => 'connection_unavailable'], 503);
         }
+    }
+
+    public function principals(): JSONResponse {
+        if (!$this->isAdmin()) {
+            return $this->json(['error' => 'forbidden'], 403);
+        }
+        $query = $this->request->getParam('query', '');
+        if (!is_string($query) || strlen($query) > 64) {
+            return $this->json(['error' => 'invalid_query'], 400);
+        }
+        $query = trim($query);
+        $groups = [];
+        foreach ($this->groups->search($query, 50, 0) as $group) {
+            $groups[] = ['id' => $group->getGID(), 'name' => $group->getDisplayName()];
+        }
+        $users = [];
+        foreach ($this->users->searchDisplayName($query, 50, 0) as $user) {
+            $users[] = ['id' => $user->getUID(), 'name' => (string)$user->getDisplayName()];
+        }
+        return $this->json(['groups' => $groups, 'users' => $users]);
     }
 
     public function connect(): JSONResponse {
