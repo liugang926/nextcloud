@@ -1080,10 +1080,10 @@
         function initialPrincipals(visibility) {
             const out = [];
             for (const id of visibility && Array.isArray(visibility.groups) ? visibility.groups : []) {
-                out.push({ type: 'group', id: String(id), name: '', label: principalName('group', id) });
+                out.push({ type: 'group', id: String(id), name: '', label: String(id) });
             }
             for (const id of visibility && Array.isArray(visibility.users) ? visibility.users : []) {
-                out.push({ type: 'user', id: String(id), name: '', label: principalName('user', id) });
+                out.push({ type: 'user', id: String(id), name: '', label: String(id) });
             }
             return out;
         }
