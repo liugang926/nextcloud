@@ -16,7 +16,10 @@ use OCA\IntegrationWeknora\Service\UnsupportedPublicationAclException;
 $method = new ReflectionMethod(DirectoryPublicationService::class, 'failureCode');
 
 $checks = [
-    ['target_status', new RuntimeException('remote'), 'target_reservation_unverified'],
+    ['target_status', new RuntimeException('remote'), 'target_status_unverified'],
+    ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'onboarding_unavailable'), 'target_status_server_error_onboarding'],
+    ['target_status', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::RATE_LIMITED), 'target_status_rate_limited'],
+    ['target_status', new DirectoryOnboardingRemoteRejectedException(409, 'nextcloud_target_closed'), 'target_status_rejected_target_closed'],
     ['target_reservation', new RuntimeException('remote'), 'target_reservation_unverified'],
     ['pairing_prepare', new RuntimeException('local'), 'pairing_prepare_unverified'],
     ['pairing_remote', new RuntimeException('remote'), 'pairing_remote_unverified'],
