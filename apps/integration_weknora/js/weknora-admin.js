@@ -933,16 +933,86 @@
         const message = document.getElementById('weknora-setup-message');
         const spacesPanel = document.getElementById('weknora-setup-spaces');
         const spaceList = document.getElementById('weknora-setup-space-list');
+        const spaceCount = document.getElementById('weknora-setup-space-count');
         const current = document.getElementById('weknora-setup-current');
         const baseUrl = window.OC.generateUrl('/apps/integration_weknora/api/v1/admin/connection');
         let discovered = [];
         let connectedSpaces = [];
         let editingVisibility = false;
+        let pickerSequence = 0;
+        const spacePickers = new WeakMap();
 
         function setMessage(value, kind) {
             message.textContent = value;
             if (kind) message.dataset.kind = kind;
             else delete message.dataset.kind;
+        }
+
+        function textNode(tag, className, value) {
+            const element = document.createElement(tag);
+            element.className = className;
+            element.textContent = value;
+            return element;
+        }
+
+        function principalName(type, id) {
+            return `${type === 'group' ? '组' : '用户'} ${id}`;
+        }
+
+        function visibilityText(visibility) {
+            const mode = visibility && visibility.mode;
+            if (mode === 'admin') {
+                return '仅 Nextcloud 管理员';
+            }
+            if (mode === 'restricted') {
+                const groups = Array.isArray(visibility.groups) ? visibility.groups.length : 0;
+                const users = Array.isArray(visibility.users) ? visibility.users.length : 0;
+                return `${groups} 个组 · ${users} 个用户`;
+            }
+            return '所有 Nextcloud 用户';
+        }
+
+        function spaceCardHeader(space, enabled) {
+            const header = document.createElement('div');
+            header.className = 'weknora-admin__space-card-header';
+            const heading = document.createElement('div');
+            heading.className = 'weknora-admin__space-card-heading';
+            heading.append(
+                textNode('h4', 'weknora-admin__space-card-title',
+                    space.tenant_name || space.name || `空间 ${space.tenant_id}`),
+                textNode('span', 'weknora-admin__space-card-tenant',
+                    `Tenant ${space.tenant_id}`),
+            );
+            const badge = textNode('span', 'weknora-admin__space-badge',
+                enabled ? '已允许' : '未允许');
+            badge.dataset.state = enabled ? 'enabled' : 'disabled';
+            header.append(heading, badge);
+            return header;
+        }
+
+        function spaceTemplate(space) {
+            return space.processing_template_name
+                || space.processing_template_id
+                || '由 WeKnora 自动选择';
+        }
+
+        function summarySpaceCard(space) {
+            const card = document.createElement('article');
+            card.className = 'weknora-admin__space-card weknora-admin__space-card--summary';
+            card.append(spaceCardHeader(space, true));
+
+            const details = document.createElement('dl');
+            details.className = 'weknora-admin__space-details';
+            const detail = (label, value) => {
+                details.append(
+                    textNode('dt', '', label),
+                    textNode('dd', '', value),
+                );
+            };
+            detail('默认处理方案', spaceTemplate(space));
+            detail('可见范围', visibilityText(space.visibility));
+            card.append(details);
+            return card;
         }
 
         async function request(method, url, payload) {
@@ -973,6 +1043,7 @@
         }
 
         function renderCurrent(data) {
+            current.hidden = false;
             current.replaceChildren();
             disconnect.hidden = !data.connected;
             if (!data.connected) {
@@ -981,25 +1052,13 @@
             }
             connectedSpaces = Array.isArray(data.spaces) ? data.spaces : [];
             const title = document.createElement('p');
+            title.className = 'weknora-admin__connected-title';
             title.textContent = `已连接：${data.origin}`;
             current.append(title);
-            const list = document.createElement('ul');
+            const list = document.createElement('div');
+            list.className = 'weknora-admin__space-list';
             for (const space of data.spaces || []) {
-                const item = document.createElement('li');
-                const visibility = space.visibility || {};
-                const principals = [
-                    ...(visibility.groups || []).map((id) => `组 ${id}`),
-                    ...(visibility.users || []).map((id) => `用户 ${id}`),
-                ];
-                const access = visibility.mode === 'admin'
-                    ? ' · 仅 Nextcloud 管理员'
-                    : visibility.mode === 'restricted'
-                        ? ` · 指定可见：${principals.join('、')}`
-                        : ' · 全部目录管理者';
-                item.textContent = (space.name || `空间 ${space.tenant_id}`) +
-                    (space.processing_template_name ? ` · 默认处理方案：${space.processing_template_name}` : '') +
-                    access;
-                list.append(item);
+                list.append(summarySpaceCard(space));
             }
             current.append(list);
             const editVisibility = document.createElement('button');
@@ -1018,65 +1077,184 @@
             current.append(editVisibility);
         }
 
-        function splitPrincipals(value) {
-            return [...new Set(String(value)
-                .split(',')
-                .map((item) => item.trim())
-                .filter(Boolean))];
+        function initialPrincipals(visibility) {
+            const out = [];
+            for (const id of visibility && Array.isArray(visibility.groups) ? visibility.groups : []) {
+                out.push({ type: 'group', id: String(id), name: '', label: principalName('group', id) });
+            }
+            for (const id of visibility && Array.isArray(visibility.users) ? visibility.users : []) {
+                out.push({ type: 'user', id: String(id), name: '', label: principalName('user', id) });
+            }
+            return out;
         }
 
-        function principalPicker(kind, className, placeholder) {
+        function principalPicker(initial) {
+            const root = document.createElement('div');
+            root.className = 'weknora-admin__principal-picker';
+            const control = document.createElement('div');
+            control.className = 'weknora-admin__principal-control';
+            const chips = document.createElement('div');
+            chips.className = 'weknora-admin__principal-chips';
             const input = document.createElement('input');
             input.type = 'text';
-            input.className = className;
-            input.placeholder = placeholder;
+            input.className = 'weknora-admin__principal-input';
+            input.placeholder = '搜索用户或组名称、UID、组名…';
             input.autocomplete = 'off';
-            const suggestions = document.createElement('div');
-            suggestions.className = 'weknora-admin__principal-results';
-            suggestions.hidden = true;
-            let sequence = 0;
+            input.spellcheck = false;
+            input.setAttribute('role', 'combobox');
+            input.setAttribute('aria-autocomplete', 'list');
+            const results = document.createElement('div');
+            results.className = 'weknora-admin__principal-results';
+            results.id = `weknora-principal-results-${++pickerSequence}`;
+            results.setAttribute('role', 'listbox');
+            results.hidden = true;
+            input.setAttribute('aria-controls', results.id);
+            input.setAttribute('aria-expanded', 'false');
+            control.append(chips, input);
+            root.append(control, results);
+
+            let selected = [];
+            let items = [];
+            let active = -1;
+            let requestId = 0;
             let timer = null;
 
+            const keyFor = (principal) => `${principal.type}\u0000${principal.id}`;
+
+            const renderChips = () => {
+                chips.replaceChildren();
+                for (const principal of selected) {
+                    const chip = document.createElement('span');
+                    chip.className = 'weknora-admin__principal-chip';
+                    chip.dataset.type = principal.type;
+                    chip.append(
+                        textNode('span', 'weknora-admin__principal-type',
+                            principal.type === 'group' ? '组' : '用户'),
+                        textNode('span', 'weknora-admin__principal-label',
+                            principal.name || principal.label || principalName(principal.type, principal.id)),
+                    );
+                    const remove = textNode('button', 'weknora-admin__principal-remove', '×');
+                    remove.type = 'button';
+                    remove.setAttribute('aria-label',
+                        `移除${principal.type === 'group' ? '组' : '用户'} ${principal.name || principal.id}`);
+                    remove.addEventListener('click', () => {
+                        selected = selected.filter((entry) => keyFor(entry) !== keyFor(principal));
+                        renderChips();
+                        input.focus();
+                    });
+                    chip.append(remove);
+                    chips.append(chip);
+                }
+            };
+
+            const setActive = (next) => {
+                const options = [...results.querySelectorAll('[role="option"]')];
+                if (!options.length) {
+                    active = -1;
+                    input.removeAttribute('aria-activedescendant');
+                    return;
+                }
+                active = Math.max(0, Math.min(options.length - 1, next));
+                for (let index = 0; index < options.length; index++) {
+                    options[index].dataset.active = index === active ? 'true' : 'false';
+                }
+                input.setAttribute('aria-activedescendant', options[active].id);
+                options[active].scrollIntoView({ block: 'nearest' });
+            };
+
+            const choose = (principal) => {
+                if (!principal || !['group', 'user'].includes(principal.type) ||
+                    typeof principal.id !== 'string' || principal.id === '') {
+                    return;
+                }
+                const candidate = {
+                    type: principal.type,
+                    id: principal.id,
+                    name: String(principal.name || ''),
+                    label: String(principal.label || principalName(principal.type, principal.id)),
+                };
+                if (selected.some((entry) => keyFor(entry) === keyFor(candidate))) {
+                    return;
+                }
+                selected.push(candidate);
+                input.value = '';
+                active = -1;
+                renderChips();
+                results.hidden = true;
+                input.setAttribute('aria-expanded', 'false');
+                input.focus();
+            };
+
+            const renderResults = (choices, query) => {
+                results.replaceChildren();
+                items = choices.filter((choice) => choice && ['group', 'user'].includes(choice.type) &&
+                    typeof choice.id === 'string' && choice.id !== '' &&
+                    !selected.some((entry) => keyFor(entry) === keyFor(choice)));
+                active = -1;
+                if (!items.length) {
+                    const empty = textNode('span', 'weknora-admin__principal-empty',
+                        query ? '没有匹配的用户或组' : '输入姓名、UID、组名或显示名开始搜索');
+                    results.append(empty);
+                } else {
+                    items.forEach((principal, index) => {
+                        const option = document.createElement('button');
+                        option.type = 'button';
+                        option.className = 'weknora-admin__principal-result';
+                        option.id = `${results.id}-option-${index}`;
+                        option.setAttribute('role', 'option');
+                        option.dataset.active = 'false';
+                        option.dataset.type = principal.type;
+                        option.append(
+                            textNode('span', 'weknora-admin__principal-type',
+                                principal.type === 'group' ? '组' : '用户'),
+                            textNode('span', 'weknora-admin__principal-result-label',
+                                principal.label || principalName(principal.type, principal.id)),
+                        );
+                        option.addEventListener('mousedown', (event) => event.preventDefault());
+                        option.addEventListener('click', () => choose(principal));
+                        results.append(option);
+                    });
+                }
+                results.hidden = false;
+                input.setAttribute('aria-expanded', 'true');
+            };
+
+            const fallbackChoices = (data) => {
+                if (Array.isArray(data.principals)) {
+                    return data.principals;
+                }
+                return [
+                    ...(Array.isArray(data.groups) ? data.groups.map((entry) =>
+                        ({ ...entry, type: 'group' })) : []),
+                    ...(Array.isArray(data.users) ? data.users.map((entry) =>
+                        ({ ...entry, type: 'user' })) : []),
+                ];
+            };
+
             const load = async () => {
-                const current = ++sequence;
-                const query = input.value.split(',').pop().trim();
+                const currentRequest = ++requestId;
+                const query = input.value.trim();
+                items = [];
+                active = -1;
+                results.replaceChildren(textNode('span', 'weknora-admin__principal-empty', '搜索中…'));
+                results.hidden = false;
+                input.setAttribute('aria-expanded', 'true');
                 try {
                     const data = await request(
                         'GET',
                         `${baseUrl}/principals?query=${encodeURIComponent(query)}`,
                     );
-                    if (current !== sequence) return;
-                    suggestions.replaceChildren();
-                    const items = Array.isArray(data[kind]) ? data[kind] : [];
-                    for (const principal of items) {
-                        const choice = document.createElement('button');
-                        choice.type = 'button';
-                        choice.className = 'weknora-admin__principal-result';
-                        choice.textContent = principal.name && principal.name !== principal.id
-                            ? `${principal.name} (${principal.id})`
-                            : principal.id;
-                        choice.addEventListener('mousedown', (event) => event.preventDefault());
-                        choice.addEventListener('click', () => {
-                            const values = splitPrincipals(input.value);
-                            values.push(String(principal.id));
-                            input.value = [...new Set(values)].join(', ');
-                            suggestions.hidden = true;
-                            input.focus();
-                        });
-                        suggestions.append(choice);
-                    }
-                    if (!items.length) {
-                        const empty = document.createElement('span');
-                        empty.textContent = query
-                            ? '没有匹配项，也可以直接输入 ID。'
-                            : '没有可选择的项目，可以直接输入 ID。';
-                        suggestions.append(empty);
-                    }
-                    suggestions.hidden = false;
+                    if (currentRequest !== requestId) return;
+                    renderResults(fallbackChoices(data), query);
                 } catch (_) {
-                    suggestions.hidden = true;
+                    if (currentRequest !== requestId) return;
+                    results.replaceChildren(textNode('span', 'weknora-admin__principal-empty',
+                        '用户和组搜索暂不可用，请稍后重试'));
+                    results.hidden = false;
+                    input.setAttribute('aria-expanded', 'true');
                 }
             };
+
             input.addEventListener('input', () => {
                 clearTimeout(timer);
                 timer = setTimeout(load, 180);
@@ -1086,9 +1264,52 @@
                 timer = setTimeout(load, 80);
             });
             input.addEventListener('blur', () => {
-                setTimeout(() => { suggestions.hidden = true; }, 140);
+                setTimeout(() => {
+                    results.hidden = true;
+                    input.setAttribute('aria-expanded', 'false');
+                }, 140);
             });
-            return { input, suggestions };
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    if (results.hidden) void load();
+                    else setActive(active + 1);
+                } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setActive(active <= 0 ? items.length - 1 : active - 1);
+                } else if (event.key === 'Enter' && !results.hidden) {
+                    event.preventDefault();
+                    choose(items[active >= 0 ? active : 0]);
+                } else if (event.key === 'Escape') {
+                    results.hidden = true;
+                    input.setAttribute('aria-expanded', 'false');
+                } else if (event.key === 'Backspace' && input.value === '' && selected.length) {
+                    selected.pop();
+                    renderChips();
+                }
+            });
+
+            const setValues = (values) => {
+                selected = [];
+                for (const principal of values) {
+                    if (!principal || !['group', 'user'].includes(principal.type) ||
+                        typeof principal.id !== 'string' || principal.id === '' ||
+                        selected.some((entry) => keyFor(entry) === keyFor(principal))) {
+                        continue;
+                    }
+                    selected.push(principal);
+                }
+                renderChips();
+            };
+
+            setValues(initial || []);
+            return {
+                root,
+                input,
+                setValues,
+                values: () => selected.slice(),
+                isEmpty: () => selected.length === 0,
+            };
         }
 
         async function loadStatus() {
@@ -1106,40 +1327,69 @@
             editingVisibility = visibilityOnly;
             spaceList.replaceChildren();
             spacesPanel.hidden = false;
-            save.hidden = false;
+            current.hidden = spaces.length > 0;
+            save.hidden = spaces.length === 0;
             save.textContent = visibilityOnly ? '保存可见范围' : '保存连接';
+            const updateCount = () => {
+                const cards = [...spaceList.querySelectorAll('.weknora-admin__space-card')];
+                const enabled = cards.filter((candidate) => candidate.classList.contains('is-selected')).length;
+                spaceCount.textContent = visibilityOnly
+                    ? `${cards.length} 个空间`
+                    : `${enabled} / ${cards.length} 个空间已允许`;
+            };
             for (const space of spaces) {
-                const row = document.createElement('div');
-                row.className = 'weknora-admin__space-choice';
-                row.dataset.tenantId = String(space.tenant_id);
-                const label = document.createElement('label');
-                label.className = 'weknora-admin__space-select';
+                const available = visibilityOnly || space.eligible === true;
+                let allowed = available;
+                const card = document.createElement('article');
+                card.className = 'weknora-admin__space-card';
+                card.dataset.tenantId = String(space.tenant_id);
+                card.classList.toggle('is-unavailable', !available);
+                card.classList.toggle('is-selected', allowed);
+
+                const header = spaceCardHeader(space, allowed);
+                const badge = header.querySelector('.weknora-admin__space-badge');
+                const actions = document.createElement('div');
+                actions.className = 'weknora-admin__space-card-actions';
+                let checkbox = null;
                 if (!visibilityOnly) {
-                    const checkbox = document.createElement('input');
+                    const allow = document.createElement('label');
+                    allow.className = 'weknora-admin__space-allow';
+                    checkbox = document.createElement('input');
                     checkbox.type = 'checkbox';
                     checkbox.value = String(space.tenant_id);
-                    checkbox.checked = space.eligible === true;
-                    checkbox.disabled = space.eligible !== true;
-                    label.append(checkbox);
+                    checkbox.checked = allowed;
+                    checkbox.disabled = !available;
+                    allow.append(checkbox, textNode('span', '', '允许目录使用'));
+                    actions.append(allow);
                 }
-                const text = document.createElement('span');
-                text.textContent = (space.tenant_name || `空间 ${space.tenant_id}`) +
-                    (space.processing_template_name ? ` · 默认处理方案：${space.processing_template_name}` : '');
-                if (space.eligible !== true) {
-                    text.textContent += `（不可用：${space.reason === 'no_processing_template' ? '缺少可用处理方案' : '未授权'}）`;
+                badge.remove();
+                actions.append(badge);
+                header.append(actions);
+                card.append(header);
+
+                const details = document.createElement('dl');
+                details.className = 'weknora-admin__space-details';
+                details.append(
+                    textNode('dt', '', '默认处理方案'),
+                    textNode('dd', '', spaceTemplate(space)),
+                );
+                card.append(details);
+
+                if (!available) {
+                    const reason = space.reason === 'no_processing_template'
+                        ? 'WeKnora 未返回可用的默认处理方案'
+                        : '当前连接密钥无权管理此空间';
+                    card.append(textNode('p', 'weknora-admin__space-reason', reason));
                 }
-                label.append(text);
-                row.append(label);
 
                 const access = document.createElement('div');
                 access.className = 'weknora-admin__space-access';
-                const modeLabel = document.createElement('label');
-                modeLabel.textContent = '可见范围';
+                const modeLabel = textNode('label', 'weknora-admin__space-field', '可见范围');
                 const mode = document.createElement('select');
                 mode.className = 'weknora-admin__visibility-mode';
                 for (const [value, textContent] of [
-                    ['all', '全部目录管理者'],
-                    ['restricted', '指定用户或组'],
+                    ['all', '所有 Nextcloud 用户'],
+                    ['restricted', '指定用户和组'],
                     ['admin', '仅 Nextcloud 管理员'],
                 ]) {
                     const option = document.createElement('option');
@@ -1153,41 +1403,43 @@
                     mode.value = initialVisibility.mode;
                 }
 
-                const principals = document.createElement('div');
-                principals.className = 'weknora-admin__visibility-principals';
-                principals.hidden = true;
-                const groupsLabel = document.createElement('label');
-                groupsLabel.textContent = 'Nextcloud 组';
-                const groupPicker = principalPicker(
-                    'groups',
-                    'weknora-admin__visibility-groups',
-                    '搜索组名称，或输入组 ID',
-                );
-                groupsLabel.append(groupPicker.input, groupPicker.suggestions);
-                const usersLabel = document.createElement('label');
-                usersLabel.textContent = 'Nextcloud 用户';
-                const userPicker = principalPicker(
-                    'users',
-                    'weknora-admin__visibility-users',
-                    '搜索用户姓名，或输入 UID',
-                );
-                usersLabel.append(userPicker.input, userPicker.suggestions);
-                principals.append(groupsLabel, usersLabel);
-                groupPicker.input.value = (initialVisibility.groups || []).join(', ');
-                userPicker.input.value = (initialVisibility.users || []).join(', ');
-                principals.hidden = mode.value !== 'restricted';
+                const principalsLabel = textNode('label', 'weknora-admin__space-field',
+                    '可访问此空间的 Nextcloud 用户或组');
+                const picker = principalPicker(initialPrincipals(initialVisibility));
+                principalsLabel.append(picker.root);
+                principalsLabel.hidden = mode.value !== 'restricted';
                 mode.addEventListener('change', () => {
-                    principals.hidden = mode.value !== 'restricted';
+                    principalsLabel.hidden = mode.value !== 'restricted';
+                    if (mode.value === 'restricted') {
+                        picker.input.focus();
+                    }
                 });
-                access.append(modeLabel, principals);
-                row.append(access);
-                spaceList.append(row);
+                modeLabel.append(mode);
+                access.append(modeLabel, principalsLabel);
+                card.append(access);
+                spacePickers.set(card, picker);
+
+                const updateAvailability = () => {
+                    allowed = visibilityOnly || checkbox === null || checkbox.checked;
+                    card.classList.toggle('is-selected', allowed);
+                    badge.dataset.state = allowed ? 'enabled' : 'disabled';
+                    badge.textContent = allowed ? '已允许' : '未允许';
+                    access.hidden = !allowed;
+                };
+                if (checkbox !== null) {
+                    checkbox.addEventListener('change', updateAvailability);
+                }
+                checkbox?.addEventListener('change', updateCount);
+                updateAvailability();
+                spaceList.append(card);
             }
+            updateCount();
             if (!spaces.length) {
                 const empty = document.createElement('p');
+                empty.className = 'weknora-admin__space-list-empty';
                 empty.textContent = '没有发现可授权的空间。请确认连接密钥属于平台管理员或空间 Owner/Admin。';
                 spaceList.append(empty);
-                save.hidden = true;
+                spaceCount.textContent = '0 个空间';
             }
         }
 
@@ -1204,6 +1456,7 @@
                 setMessage('已读取空间。勾选需要允许 Nextcloud 使用的空间后保存。');
             } catch (error) {
                 spacesPanel.hidden = true;
+                current.hidden = false;
                 setMessage(error.status === 403
                     ? '连接被拒绝。请确认密钥有效且具有空间管理权限。'
                     : '无法读取 WeKnora 空间，请检查地址、证书和网络。', 'error');
@@ -1214,24 +1467,25 @@
 
         save.addEventListener('click', async () => {
             const spaces = [];
-            for (const row of spaceList.querySelectorAll('.weknora-admin__space-choice')) {
-                const checkbox = row.querySelector('input[type=checkbox]');
+            for (const card of spaceList.querySelectorAll('.weknora-admin__space-card')) {
+                const checkbox = card.querySelector('.weknora-admin__space-allow input[type=checkbox]');
                 if (checkbox !== null && !checkbox.checked) {
                     continue;
                 }
-                const mode = row.querySelector('.weknora-admin__visibility-mode').value;
-                const groups = mode === 'restricted'
-                    ? splitPrincipals(row.querySelector('.weknora-admin__visibility-groups').value)
-                    : [];
-                const users = mode === 'restricted'
-                    ? splitPrincipals(row.querySelector('.weknora-admin__visibility-users').value)
-                    : [];
+                const mode = card.querySelector('.weknora-admin__visibility-mode').value;
+                const picker = spacePickers.get(card);
+                const values = mode === 'restricted' && picker ? picker.values() : [];
+                const groups = values.filter((principal) => principal.type === 'group')
+                    .map((principal) => principal.id);
+                const users = values.filter((principal) => principal.type === 'user')
+                    .map((principal) => principal.id);
                 if (mode === 'restricted' && !groups.length && !users.length) {
-                    setMessage('指定可见范围时，至少填写一个 Nextcloud 组或用户。', 'error');
+                    setMessage('指定可见范围时，至少选择一个 Nextcloud 用户或组。', 'error');
+                    if (picker) picker.input.focus();
                     return;
                 }
                 spaces.push({
-                    tenant_id: row.dataset.tenantId,
+                    tenant_id: card.dataset.tenantId,
                     visibility: { mode, groups, users },
                 });
             }

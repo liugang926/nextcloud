@@ -31,9 +31,14 @@ style('integration_weknora', 'weknora-admin');
         <p>连接密钥支持 WeKnora 平台 API Key（需要空间读取/管理能力）或已登录管理员令牌。空间默认处理方案由 WeKnora 选择，目录用户不需要填写模板 ID。</p>
         <p id="weknora-setup-message" class="weknora-admin__message" role="status" aria-live="polite"></p>
         <div id="weknora-setup-spaces" hidden>
-            <p>选择允许 Nextcloud 目录使用的空间：</p>
-            <p>每个空间可以限制为指定 Nextcloud 用户或组。只有可见空间的目录管理者才能选择该空间，并在目录中绑定已有知识库或新建知识库；已有绑定不会因之后收紧可见范围而自动删除。</p>
-            <div id="weknora-setup-space-list"></div>
+            <div class="weknora-admin__space-section-heading">
+                <div>
+                    <h4>允许 Nextcloud 目录使用的空间</h4>
+                    <p>按空间逐项设置。一个搜索框可同时查找 Nextcloud 用户和组；可访问该空间的目录管理者可在目录中绑定已有知识库或新建知识库。</p>
+                </div>
+                <span class="weknora-admin__space-count" id="weknora-setup-space-count"></span>
+            </div>
+            <div id="weknora-setup-space-list" class="weknora-admin__space-list"></div>
             <button type="button" class="button primary" id="weknora-setup-save">保存连接</button>
         </div>
         <div id="weknora-setup-current"></div>
