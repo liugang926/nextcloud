@@ -9,13 +9,20 @@ The ordinary setup flow is intentionally short:
    The key may be a WeKnora platform API key with system-tenant read/manage
    capability, or a WeKnora administrator login token. It is used only for
    workspace discovery and authorization.
-2. Discover workspaces, select any number of workspaces that this Nextcloud
-   instance may use, and save the connection. Nextcloud stores only the scoped
-   onboarding credentials returned by WeKnora; the administrator key is not
-   retained.
-3. In Files, open a folder's WeKnora tab. Choose a workspace by name, then
-   choose an existing eligible knowledge base or create a new one. Nextcloud
-   generates the internal rule, binding, pairing and event connection.
+2. Discover workspaces and select any number that this Nextcloud instance may
+   use. Each workspace can be visible to all directory managers, named
+   Nextcloud users or groups, or Nextcloud administrators only. Nextcloud
+   stores only the scoped onboarding credentials returned by WeKnora; the
+   administrator key is not retained.
+3. In Files, open a folder's WeKnora tab. A directory manager only sees the
+   workspaces allowed by the current connection policy. Choose one, then choose
+   an existing eligible knowledge base or create a new one. Nextcloud generates
+   the internal rule, binding, pairing and event connection.
+
+Workspace visibility is evaluated against current Nextcloud membership on
+every request. Tightening it prevents new target selection immediately, while
+existing bindings remain managed until an administrator explicitly stops or
+migrates them.
 
 The raw rule ID, owner UID, container file ID, tenant ID, processing template
 ID, pairing JSON and event secret remain available only under **Advanced** for

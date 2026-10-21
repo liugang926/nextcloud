@@ -5,6 +5,7 @@ declare(strict_types=1);
 return [
     'routes' => [
         ['name' => 'connection_admin#status', 'url' => '/api/v1/admin/connection', 'verb' => 'GET'],
+        ['name' => 'connection_admin#principals', 'url' => '/api/v1/admin/connection/principals', 'verb' => 'GET'],
         ['name' => 'connection_admin#discover', 'url' => '/api/v1/admin/connection/discover', 'verb' => 'POST'],
         ['name' => 'connection_admin#connect', 'url' => '/api/v1/admin/connection', 'verb' => 'POST'],
         ['name' => 'connection_admin#disconnect', 'url' => '/api/v1/admin/connection', 'verb' => 'DELETE'],
