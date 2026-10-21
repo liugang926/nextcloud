@@ -4604,6 +4604,8 @@ ${message.stack}`;
             pairing_remote_transport: "\u65E0\u6CD5\u8FDE\u63A5 WeKnora \u914D\u5BF9\u670D\u52A1",
             pairing_remote_invalid_response: "WeKnora \u914D\u5BF9\u670D\u52A1\u8FD4\u56DE\u4E86\u65E0\u6CD5\u8BC6\u522B\u7684\u54CD\u5E94",
             pairing_remote_server_error: "WeKnora \u914D\u5BF9\u670D\u52A1\u5185\u90E8\u9519\u8BEF",
+            pairing_remote_server_error_source_prepare: "WeKnora \u521B\u5EFA\u77E5\u8BC6\u5E93\u6765\u6E90\u5931\u8D25",
+            pairing_remote_server_error_onboarding: "WeKnora \u914D\u5BF9\u72B6\u6001\u6216\u7BA1\u7406\u5458\u7528\u9014\u4FDD\u5B58\u5931\u8D25",
             pairing_remote_rate_limited: "WeKnora \u914D\u5BF9\u670D\u52A1\u8BF7\u6C42\u8FC7\u591A",
             pairing_remote_http_error: "WeKnora \u914D\u5BF9\u670D\u52A1\u62D2\u7EDD\u4E86\u8BF7\u6C42",
             pairing_remote_credential_unavailable: "Nextcloud \u4E2D\u4FDD\u5B58\u7684 WeKnora \u8FDE\u63A5\u51ED\u636E\u4E0D\u53EF\u7528",

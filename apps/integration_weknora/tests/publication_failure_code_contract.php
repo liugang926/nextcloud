@@ -3,8 +3,10 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../lib/Service/UnsupportedPublicationAclException.php';
 require_once __DIR__ . '/../lib/Service/DirectoryOnboardingRequestException.php';
+require_once __DIR__ . '/../lib/Service/DirectoryOnboardingClient.php';
 require_once __DIR__ . '/../lib/Service/DirectoryPublicationService.php';
 
+use OCA\IntegrationWeknora\Service\DirectoryOnboardingClient;
 use OCA\IntegrationWeknora\Service\DirectoryPublicationService;
 use OCA\IntegrationWeknora\Service\DirectoryOnboardingRequestException;
 use OCA\IntegrationWeknora\Service\UnsupportedPublicationAclException;
@@ -18,6 +20,8 @@ $checks = [
     ['pairing_remote', new RuntimeException('remote'), 'pairing_remote_unverified'],
     ['pairing_remote', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::TRANSPORT), 'pairing_remote_transport'],
     ['pairing_remote', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR), 'pairing_remote_server_error'],
+    ['pairing_remote', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'source_pairing_unavailable'), 'pairing_remote_server_error_source_prepare'],
+    ['pairing_remote', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::SERVER_ERROR, 'onboarding_unavailable'), 'pairing_remote_server_error_onboarding'],
     ['pairing_remote', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::RATE_LIMITED), 'pairing_remote_rate_limited'],
     ['pairing_remote', new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::INVALID_RESPONSE), 'pairing_remote_invalid_response'],
     ['pairing_ack', new RuntimeException('ack'), 'pairing_ack_unverified'],
@@ -35,6 +39,14 @@ foreach ($checks as [$stage, $error, $expected]) {
     if ($actual !== $expected) {
         throw new RuntimeException("$stage mapped to $actual instead of $expected");
     }
+}
+
+$client = (new ReflectionClass(DirectoryOnboardingClient::class))->newInstanceWithoutConstructor();
+$safeCode = new ReflectionMethod(DirectoryOnboardingClient::class, 'safeRemoteCode');
+$known = $safeCode->invoke($client, '{"error":"source_pairing_unavailable","detail":"never-retained"}');
+$unknown = $safeCode->invoke($client, '{"error":"arbitrary remote text"}');
+if ($known !== 'source_pairing_unavailable' || $unknown !== null) {
+    throw new RuntimeException('Remote onboarding diagnostics did not enforce the safe code allow-list');
 }
 
 echo "Directory publication failure stages remain actionable without exposing remote error text\n";

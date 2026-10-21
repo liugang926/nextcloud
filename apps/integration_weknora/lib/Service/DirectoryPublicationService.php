@@ -738,7 +738,12 @@ final class DirectoryPublicationService {
         if (!$error instanceof DirectoryOnboardingRequestException) {
             return 'pairing_remote_unverified';
         }
-        return 'pairing_remote_' . $error->reason();
+        $suffix = match ($error->remoteCode()) {
+            'source_pairing_unavailable' => '_source_prepare',
+            'onboarding_unavailable' => '_onboarding',
+            default => '',
+        };
+        return 'pairing_remote_' . $error->reason() . $suffix;
     }
 
     /** Fresh metadata only; an immutable old root fact is never reopened. */

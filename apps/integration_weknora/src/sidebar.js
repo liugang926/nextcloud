@@ -169,6 +169,8 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     pairing_remote_transport: '无法连接 WeKnora 配对服务',
                     pairing_remote_invalid_response: 'WeKnora 配对服务返回了无法识别的响应',
                     pairing_remote_server_error: 'WeKnora 配对服务内部错误',
+                    pairing_remote_server_error_source_prepare: 'WeKnora 创建知识库来源失败',
+                    pairing_remote_server_error_onboarding: 'WeKnora 配对状态或管理员用途保存失败',
                     pairing_remote_rate_limited: 'WeKnora 配对服务请求过多',
                     pairing_remote_http_error: 'WeKnora 配对服务拒绝了请求',
                     pairing_remote_credential_unavailable: 'Nextcloud 中保存的 WeKnora 连接凭据不可用',

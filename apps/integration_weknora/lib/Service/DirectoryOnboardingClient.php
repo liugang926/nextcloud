@@ -74,7 +74,7 @@ final class DirectoryOnboardingClient {
                 : ($status >= 500
                     ? DirectoryOnboardingRequestException::SERVER_ERROR
                     : DirectoryOnboardingRequestException::HTTP_ERROR);
-            throw new DirectoryOnboardingRequestException($reason);
+            throw new DirectoryOnboardingRequestException($reason, $this->safeRemoteCode($raw));
         }
         try {
             $data = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
@@ -85,5 +85,36 @@ final class DirectoryOnboardingClient {
             throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::INVALID_RESPONSE);
         }
         return $data;
+    }
+
+    /**
+     * Extract only a known machine code. Error text and every other response
+     * field remain discarded because they are not trusted diagnostics.
+     */
+    private function safeRemoteCode(string $raw): ?string {
+        try {
+            $data = json_decode($raw, true, 4, JSON_THROW_ON_ERROR);
+        } catch (\Throwable $exception) {
+            return null;
+        }
+        $code = is_array($data) ? ($data['error'] ?? null) : null;
+        if (!is_string($code) || !in_array($code, [
+            'onboarding_unavailable',
+            'nextcloud_onboarding_denied',
+            'nextcloud_onboarding_not_found',
+            'nextcloud_onboarding_conflict',
+            'nextcloud_kb_blank_unverified',
+            'nextcloud_kb_unavailable',
+            'nextcloud_target_closed',
+            'nextcloud_prepared_binding_unavailable',
+            'source_pairing_not_found',
+            'source_pairing_conflict',
+            'source_pairing_unavailable',
+            'event_connection_pending',
+            'remote_outcome_uncertain',
+        ], true)) {
+            return null;
+        }
+        return $code;
     }
 }
