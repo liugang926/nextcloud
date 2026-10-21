@@ -227,6 +227,40 @@ final class ConnectionService {
         return $this->status();
     }
 
+    /**
+     * Update only workspace visibility. This keeps the existing scoped
+     * credentials and their processing templates unchanged.
+     *
+     * @param list<array<string,mixed>> $selections
+     * @return array<string,mixed>
+     */
+    public function updateVisibility(array $selections): array {
+        $profile = $this->profile();
+        if ($profile === null) {
+            throw new \DomainException('WeKnora is not connected');
+        }
+        $normalized = $this->normalizeSelections($selections);
+        $existing = [];
+        foreach ($profile['spaces'] as $space) {
+            $existing[(string)$space['tenant_id']] = true;
+        }
+        if (count($normalized) !== count($existing) ||
+            array_diff_key($existing, $normalized) !== [] ||
+            array_diff_key($normalized, $existing) !== []) {
+            throw new \InvalidArgumentException('Visibility must include every connected workspace');
+        }
+        foreach ($normalized as $visibility) {
+            $this->validateVisiblePrincipals($visibility);
+        }
+        foreach ($profile['spaces'] as &$space) {
+            $space['visibility'] = $normalized[(string)$space['tenant_id']];
+        }
+        unset($space);
+        $this->config->setAppValue(self::APP, self::PROFILE_KEY,
+            json_encode($profile, JSON_THROW_ON_ERROR));
+        return $this->status();
+    }
+
     /** @return array<string, mixed> */
     public function disconnect(): array {
         $profile = $this->profile();

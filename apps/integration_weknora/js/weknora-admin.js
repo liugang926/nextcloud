@@ -936,6 +936,8 @@
         const current = document.getElementById('weknora-setup-current');
         const baseUrl = window.OC.generateUrl('/apps/integration_weknora/api/v1/admin/connection');
         let discovered = [];
+        let connectedSpaces = [];
+        let editingVisibility = false;
 
         function setMessage(value, kind) {
             message.textContent = value;
@@ -974,8 +976,10 @@
             current.replaceChildren();
             disconnect.hidden = !data.connected;
             if (!data.connected) {
+                connectedSpaces = [];
                 return;
             }
+            connectedSpaces = Array.isArray(data.spaces) ? data.spaces : [];
             const title = document.createElement('p');
             title.textContent = `已连接：${data.origin}`;
             current.append(title);
@@ -998,6 +1002,20 @@
                 list.append(item);
             }
             current.append(list);
+            const editVisibility = document.createElement('button');
+            editVisibility.type = 'button';
+            editVisibility.className = 'button';
+            editVisibility.textContent = '管理空间可见范围';
+            editVisibility.addEventListener('click', () => {
+                renderSpaces(connectedSpaces.map((space) => ({
+                    ...space,
+                    tenant_name: space.name || '',
+                    eligible: true,
+                })), true);
+                setMessage('可调整每个空间的可见用户或组，不会重新授权或更换处理方案。');
+                spacesPanel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            });
+            current.append(editVisibility);
         }
 
         function splitPrincipals(value) {
@@ -1083,28 +1101,34 @@
             }
         }
 
-        function renderSpaces(spaces) {
+        function renderSpaces(spaces, visibilityOnly = false) {
             discovered = spaces;
+            editingVisibility = visibilityOnly;
             spaceList.replaceChildren();
             spacesPanel.hidden = false;
             save.hidden = false;
+            save.textContent = visibilityOnly ? '保存可见范围' : '保存连接';
             for (const space of spaces) {
                 const row = document.createElement('div');
                 row.className = 'weknora-admin__space-choice';
+                row.dataset.tenantId = String(space.tenant_id);
                 const label = document.createElement('label');
                 label.className = 'weknora-admin__space-select';
-                const checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.value = String(space.tenant_id);
-                checkbox.checked = space.eligible === true;
-                checkbox.disabled = space.eligible !== true;
+                if (!visibilityOnly) {
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.value = String(space.tenant_id);
+                    checkbox.checked = space.eligible === true;
+                    checkbox.disabled = space.eligible !== true;
+                    label.append(checkbox);
+                }
                 const text = document.createElement('span');
                 text.textContent = (space.tenant_name || `空间 ${space.tenant_id}`) +
                     (space.processing_template_name ? ` · 默认处理方案：${space.processing_template_name}` : '');
                 if (space.eligible !== true) {
                     text.textContent += `（不可用：${space.reason === 'no_processing_template' ? '缺少可用处理方案' : '未授权'}）`;
                 }
-                label.append(checkbox, text);
+                label.append(text);
                 row.append(label);
 
                 const access = document.createElement('div');
@@ -1124,6 +1148,10 @@
                     mode.append(option);
                 }
                 modeLabel.append(mode);
+                const initialVisibility = space.visibility || {};
+                if (['all', 'restricted', 'admin'].includes(initialVisibility.mode)) {
+                    mode.value = initialVisibility.mode;
+                }
 
                 const principals = document.createElement('div');
                 principals.className = 'weknora-admin__visibility-principals';
@@ -1145,6 +1173,9 @@
                 );
                 usersLabel.append(userPicker.input, userPicker.suggestions);
                 principals.append(groupsLabel, usersLabel);
+                groupPicker.input.value = (initialVisibility.groups || []).join(', ');
+                userPicker.input.value = (initialVisibility.users || []).join(', ');
+                principals.hidden = mode.value !== 'restricted';
                 mode.addEventListener('change', () => {
                     principals.hidden = mode.value !== 'restricted';
                 });
@@ -1183,8 +1214,11 @@
 
         save.addEventListener('click', async () => {
             const spaces = [];
-            for (const checkbox of spaceList.querySelectorAll('input[type=checkbox]:checked')) {
-                const row = checkbox.closest('.weknora-admin__space-choice');
+            for (const row of spaceList.querySelectorAll('.weknora-admin__space-choice')) {
+                const checkbox = row.querySelector('input[type=checkbox]');
+                if (checkbox !== null && !checkbox.checked) {
+                    continue;
+                }
                 const mode = row.querySelector('.weknora-admin__visibility-mode').value;
                 const groups = mode === 'restricted'
                     ? splitPrincipals(row.querySelector('.weknora-admin__visibility-groups').value)
@@ -1197,7 +1231,7 @@
                     return;
                 }
                 spaces.push({
-                    tenant_id: checkbox.value,
+                    tenant_id: row.dataset.tenantId,
                     visibility: { mode, groups, users },
                 });
             }
@@ -1209,15 +1243,21 @@
             const original = save.textContent;
             save.textContent = '正在保存…';
             try {
-                const data = await request('POST', baseUrl, {
-                    origin: origin.value.trim(),
-                    token: token.value,
-                    spaces,
-                });
-                token.value = '';
+                const data = await request(
+                    'POST',
+                    editingVisibility ? `${baseUrl}/visibility` : baseUrl,
+                    editingVisibility ? { spaces } : {
+                        origin: origin.value.trim(),
+                        token: token.value,
+                        spaces,
+                    },
+                );
+                if (!editingVisibility) token.value = '';
                 renderCurrent(data);
                 spacesPanel.hidden = true;
-                setMessage('连接已保存。现在可以在 Nextcloud 目录的 WeKnora 标签中选择空间和知识库。');
+                setMessage(editingVisibility
+                    ? '空间可见范围已保存，现有目录绑定保持不变。'
+                    : '连接已保存。现在可以在 Nextcloud 目录的 WeKnora 标签中选择空间和知识库。');
             } catch (error) {
                 setMessage(error.status === 400
                     ? '连接配置无效，请确认指定的 Nextcloud 用户和组 ID 存在。'
