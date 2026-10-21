@@ -728,6 +728,13 @@ final class DirectoryPublicationService {
         if ($error instanceof UnsupportedPublicationAclException) {
             return 'unsupported_source_acl';
         }
+        if ($stage === 'target_status' && $error instanceof DirectoryOnboardingRemoteRejectedException) {
+            return self::targetStatusRejectionCode($error);
+        }
+        if ($stage === 'target_status' && $error instanceof DirectoryOnboardingRequestException) {
+            $suffix = $error->remoteCode() === 'onboarding_unavailable' ? '_onboarding' : '';
+            return 'target_status_' . $error->reason() . $suffix;
+        }
         if ($stage === 'pairing_remote' && $error instanceof DirectoryOnboardingRemoteRejectedException) {
             return self::pairingRemoteRejectionCode($error);
         }
@@ -741,7 +748,8 @@ final class DirectoryPublicationService {
             };
         }
         return match ($stage) {
-            'target_reservation', 'target_status' => 'target_reservation_unverified',
+            'target_reservation' => 'target_reservation_unverified',
+            'target_status' => 'target_status_unverified',
             'pairing_prepare' => 'pairing_prepare_unverified',
             'pairing_remote' => self::pairingRemoteFailureCode($error, $remoteObservation),
             'pairing_ack' => 'pairing_ack_unverified',
@@ -765,6 +773,17 @@ final class DirectoryPublicationService {
             default => 'http_' . $error->getCode(),
         };
         return 'pairing_remote_rejected_' . $suffix;
+    }
+
+    private static function targetStatusRejectionCode(DirectoryOnboardingRemoteRejectedException $error): string {
+        $suffix = match ($error->remoteCode()) {
+            'nextcloud_onboarding_conflict' => 'onboarding_conflict',
+            'nextcloud_onboarding_denied' => 'authorization_denied',
+            'nextcloud_onboarding_not_found' => 'operation_missing',
+            'nextcloud_target_closed' => 'target_closed',
+            default => 'http_' . $error->getCode(),
+        };
+        return 'target_status_rejected_' . $suffix;
     }
 
     private static function pairingRemoteFailureCode(\Throwable $error, ?array $remoteObservation = null): string {

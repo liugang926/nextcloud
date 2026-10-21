@@ -30,7 +30,7 @@ if ($mode === 'baseline') {
     $row = $db->executeQuery('SELECT sequence,binding_id,file_id,kind,source_revision,created_at,chain_sha256 FROM *PREFIX*weknora_recovery_log ORDER BY sequence')->fetchAllAssociative();
     $config->setAppValue('integration_weknora', 'manager_upgrade_witness', json_encode(['file_id' => $file->getId(), 'content_sha256' => hash('sha256', $file->getContent()), 'log_sha256' => hash('sha256', json_encode($row, JSON_THROW_ON_ERROR))], JSON_THROW_ON_ERROR));
 } elseif ($mode === 'candidate') {
-    if ($config->getAppValue('integration_weknora', 'installed_version') !== '0.8.7') { throw new RuntimeException('Candidate version mismatch'); }
+    if ($config->getAppValue('integration_weknora', 'installed_version') !== '0.8.8') { throw new RuntimeException('Candidate version mismatch'); }
     if ($log->getColumn('tenant_namespace')->getNotnull()) { throw new RuntimeException('Legacy rows require nullable tenant selector'); }
     $witness = json_decode($config->getAppValue('integration_weknora', 'manager_upgrade_witness'), true, 512, JSON_THROW_ON_ERROR);
     $row = $db->executeQuery('SELECT sequence,binding_id,file_id,kind,source_revision,created_at,chain_sha256 FROM *PREFIX*weknora_recovery_log ORDER BY sequence')->fetchAllAssociative();

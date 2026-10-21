@@ -60,8 +60,15 @@ final class DirectoryOnboardingClient {
         }
         $status = $response->getStatusCode();
         if ($method === 'GET' && preg_match('~\A/operations/[a-f0-9-]{36}\z~D', $suffix) && $status !== 200) {
-            if (in_array($status, [400, 401, 403, 404, 409, 422], true)) { throw new \DomainException('Target status could not be verified', $status); }
-            throw new \RuntimeException('Target status requires authenticated HTTP 200');
+            if (in_array($status, [400, 401, 403, 404, 409, 422], true)) {
+                throw new DirectoryOnboardingRemoteRejectedException($status, $this->safeRemoteCode($raw));
+            }
+            $reason = $status === 429
+                ? DirectoryOnboardingRequestException::RATE_LIMITED
+                : ($status >= 500
+                    ? DirectoryOnboardingRequestException::SERVER_ERROR
+                    : DirectoryOnboardingRequestException::HTTP_ERROR);
+            throw new DirectoryOnboardingRequestException($reason, $this->safeRemoteCode($raw));
         }
         if ($status < 200 || $status >= 300) {
             // Never parse or forward remote errors: their body may contain
