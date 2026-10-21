@@ -160,7 +160,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
             this.button(section, '重试同一迁移', () => this.retryTargetMigration(this.nodeId()))
         } else if (data.manageable && data.operation) {
             if (data.operation.state !== 'active') {
-                this.addRow(section, '连接原因', {
+                const failure = {
                     unsupported_source_acl: '当前挂载或分享权限模式不受支持',
                     permission_or_target_conflict: '管理委派、目录范围或目标知识库冲突',
                     target_reservation_unverified: 'WeKnora 目标空间或知识库预留尚未验证',
@@ -214,7 +214,11 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     grant_sync_unverified: 'WeKnora 目录权限同步尚未验证',
                     reconcile_pending: '完整目录清单尚未加入同步队列',
                     connection_unverified: '连接结果尚未验证，原文件已保留',
-                }[data.operation.error_code] || '等待关联完成')
+                }[data.operation.error_code]
+                const statusMatch = /^target_status_server_error_onboarding_http_(5[0-9]{2})$/
+                    .exec(String(data.operation.error_code || ''))
+                this.addRow(section, '连接原因', failure ||
+                    (statusMatch ? `WeKnora 目录接入状态不可用（HTTP ${statusMatch[1]}）` : '等待关联完成'))
                 this.button(section, '重试同一关联', async () => {
                     await this.api(`/directory-operations/${encodeURIComponent(data.operation.operation_id)}/retry`, 'POST', {})
                     this.load()

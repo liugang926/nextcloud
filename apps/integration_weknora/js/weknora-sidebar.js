@@ -4595,7 +4595,7 @@ ${message.stack}`;
         this.button(section, "\u91CD\u8BD5\u540C\u4E00\u8FC1\u79FB", () => this.retryTargetMigration(this.nodeId()));
       } else if (data.manageable && data.operation) {
         if (data.operation.state !== "active") {
-          this.addRow(section, "\u8FDE\u63A5\u539F\u56E0", {
+          const failure = {
             unsupported_source_acl: "\u5F53\u524D\u6302\u8F7D\u6216\u5206\u4EAB\u6743\u9650\u6A21\u5F0F\u4E0D\u53D7\u652F\u6301",
             permission_or_target_conflict: "\u7BA1\u7406\u59D4\u6D3E\u3001\u76EE\u5F55\u8303\u56F4\u6216\u76EE\u6807\u77E5\u8BC6\u5E93\u51B2\u7A81",
             target_reservation_unverified: "WeKnora \u76EE\u6807\u7A7A\u95F4\u6216\u77E5\u8BC6\u5E93\u9884\u7559\u5C1A\u672A\u9A8C\u8BC1",
@@ -4649,7 +4649,9 @@ ${message.stack}`;
             grant_sync_unverified: "WeKnora \u76EE\u5F55\u6743\u9650\u540C\u6B65\u5C1A\u672A\u9A8C\u8BC1",
             reconcile_pending: "\u5B8C\u6574\u76EE\u5F55\u6E05\u5355\u5C1A\u672A\u52A0\u5165\u540C\u6B65\u961F\u5217",
             connection_unverified: "\u8FDE\u63A5\u7ED3\u679C\u5C1A\u672A\u9A8C\u8BC1\uFF0C\u539F\u6587\u4EF6\u5DF2\u4FDD\u7559"
-          }[data.operation.error_code] || "\u7B49\u5F85\u5173\u8054\u5B8C\u6210");
+          }[data.operation.error_code];
+          const statusMatch = /^target_status_server_error_onboarding_http_(5[0-9]{2})$/.exec(String(data.operation.error_code || ""));
+          this.addRow(section, "\u8FDE\u63A5\u539F\u56E0", failure || (statusMatch ? `WeKnora \u76EE\u5F55\u63A5\u5165\u72B6\u6001\u4E0D\u53EF\u7528\uFF08HTTP ${statusMatch[1]}\uFF09` : "\u7B49\u5F85\u5173\u8054\u5B8C\u6210"));
           this.button(section, "\u91CD\u8BD5\u540C\u4E00\u5173\u8054", async () => {
             await this.api(`/directory-operations/${encodeURIComponent(data.operation.operation_id)}/retry`, "POST", {});
             this.load();

@@ -75,7 +75,7 @@ final class DirectoryOnboardingClient {
                 : ($status >= 500
                     ? DirectoryOnboardingRequestException::SERVER_ERROR
                     : DirectoryOnboardingRequestException::HTTP_ERROR);
-            throw new DirectoryOnboardingRequestException($reason, $this->safeRemoteCode($raw));
+            throw new DirectoryOnboardingRequestException($reason, $this->safeRemoteCode($raw), $status);
         }
         if ($status < 200 || $status >= 300) {
             // Never parse or forward remote errors: their body may contain
@@ -88,7 +88,7 @@ final class DirectoryOnboardingClient {
                 : ($status >= 500
                     ? DirectoryOnboardingRequestException::SERVER_ERROR
                     : DirectoryOnboardingRequestException::HTTP_ERROR);
-            throw new DirectoryOnboardingRequestException($reason, $this->safeRemoteCode($raw));
+            throw new DirectoryOnboardingRequestException($reason, $this->safeRemoteCode($raw), $status);
         }
         try {
             $data = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
