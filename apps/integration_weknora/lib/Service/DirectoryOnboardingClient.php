@@ -30,11 +30,16 @@ final class DirectoryOnboardingClient {
             throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
         }
         $url = $approved['origin'] . self::PATH . $suffix;
-        $options = ['headers' => ['Accept' => 'application/json', 'Authorization' => 'Bearer ' . $token],
+        $options = ['headers' => [
+            'Accept' => 'application/json',
+            'Authorization' => 'Bearer ' . $token,
+            'Cache-Control' => 'no-cache, no-store',
+            'Pragma' => 'no-cache',
+        ],
             'allow_redirects' => false, 'http_errors' => false, 'verify' => true, 'stream' => true,
             'timeout' => 15, 'connect_timeout' => 3, 'nextcloud' => ['allow_local_address' => $approved['allow_local']]];
-        if ($method === 'GET' && $body !== []) {
-            $url .= '?' . http_build_query($body, '', '&', PHP_QUERY_RFC3986);
+        if ($method === 'GET') {
+            $url = self::cacheBustedGetUrl($url, $body);
         } elseif ($method !== 'GET') {
             $options['headers']['Content-Type'] = 'application/json';
             $options['body'] = json_encode($body, JSON_THROW_ON_ERROR);
@@ -92,6 +97,16 @@ final class DirectoryOnboardingClient {
             throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::INVALID_RESPONSE);
         }
         return $data;
+    }
+
+    /**
+     * Existing cached failures must not mask a newer bounded stage or a
+     * recovered live target. Every scoped GET therefore receives a unique,
+     * non-sensitive query value in addition to the request no-cache headers.
+     */
+    private static function cacheBustedGetUrl(string $url, array $body): string {
+        $body['_nc_cache_bust'] = bin2hex(random_bytes(12));
+        return $url . '?' . http_build_query($body, '', '&', PHP_QUERY_RFC3986);
     }
 
     /**
