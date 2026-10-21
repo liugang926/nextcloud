@@ -3,10 +3,12 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../lib/Service/UnsupportedPublicationAclException.php';
 require_once __DIR__ . '/../lib/Service/DirectoryOnboardingRequestException.php';
+require_once __DIR__ . '/../lib/Service/DirectoryOnboardingRemoteRejectedException.php';
 require_once __DIR__ . '/../lib/Service/DirectoryOnboardingClient.php';
 require_once __DIR__ . '/../lib/Service/DirectoryPublicationService.php';
 
 use OCA\IntegrationWeknora\Service\DirectoryOnboardingClient;
+use OCA\IntegrationWeknora\Service\DirectoryOnboardingRemoteRejectedException;
 use OCA\IntegrationWeknora\Service\DirectoryPublicationService;
 use OCA\IntegrationWeknora\Service\DirectoryOnboardingRequestException;
 use OCA\IntegrationWeknora\Service\UnsupportedPublicationAclException;
@@ -30,7 +32,12 @@ $checks = [
     ['grant_remote', new RuntimeException('remote'), 'grant_sync_unverified'],
     ['reconcile', new RuntimeException('queue'), 'reconcile_pending'],
     ['intent', new RuntimeException('unknown'), 'connection_unverified'],
-    ['event_connection', new DomainException('conflict'), 'permission_or_target_conflict'],
+    ['event_connection', new DomainException('conflict'), 'event_connection_conflict'],
+    ['pairing_prepare', new DomainException('conflict'), 'pairing_prepare_conflict'],
+    ['pairing_remote', new DomainException('conflict'), 'pairing_remote_rejected'],
+    ['pairing_remote', new DirectoryOnboardingRemoteRejectedException(409, 'source_pairing_conflict'), 'pairing_remote_rejected_source_conflict'],
+    ['pairing_remote', new DirectoryOnboardingRemoteRejectedException(409, 'nextcloud_prepared_binding_unavailable'), 'pairing_remote_rejected_binding_unavailable'],
+    ['pairing_remote', new DirectoryOnboardingRemoteRejectedException(409), 'pairing_remote_rejected_http_409'],
     ['grant_snapshot', new UnsupportedPublicationAclException('acl'), 'unsupported_source_acl'],
 ];
 
