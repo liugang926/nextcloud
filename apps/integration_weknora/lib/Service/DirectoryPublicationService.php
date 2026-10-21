@@ -782,14 +782,24 @@ final class DirectoryPublicationService {
     }
 
     private static function targetStatusRejectionCode(DirectoryOnboardingRemoteRejectedException $error): string {
-        $suffix = match ($error->remoteCode()) {
+        $remoteCode = $error->remoteCode();
+        $failureStage = '';
+        foreach (['operation_read', 'tenant_deletion', 'target_observation', 'operation_refresh'] as $stage) {
+            $stageSuffix = '_' . $stage;
+            if (is_string($remoteCode) && str_ends_with($remoteCode, $stageSuffix)) {
+                $remoteCode = substr($remoteCode, 0, -strlen($stageSuffix));
+                $failureStage = '_' . $stage;
+                break;
+            }
+        }
+        $suffix = match ($remoteCode) {
             'nextcloud_onboarding_conflict' => 'onboarding_conflict',
             'nextcloud_onboarding_denied' => 'authorization_denied',
             'nextcloud_onboarding_not_found' => 'operation_missing',
             'nextcloud_target_closed' => 'target_closed',
             default => 'http_' . $error->getCode(),
         };
-        return 'target_status_rejected_' . $suffix;
+        return 'target_status_rejected_' . $suffix . $failureStage;
     }
 
     private static function pairingRemoteFailureCode(\Throwable $error, ?array $remoteObservation = null): string {
