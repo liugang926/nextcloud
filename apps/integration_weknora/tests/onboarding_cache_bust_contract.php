@@ -39,9 +39,14 @@ cacheBustCheck($firstQuery['_nc_cache_bust'] !== $secondQuery['_nc_cache_bust'],
 
 $operationPath = new ReflectionMethod(DirectoryOnboardingClient::class, 'operationGetSuffix');
 $operationId = '7a2c7e65-b58f-4b18-a774-75e1b7405681';
-cacheBustCheck($operationPath->invoke(null, 'GET', '/operations/' . $operationId) ===
-    '/operations/' . $operationId . '/observe',
-    'GET operation observations must use the uncached observe path');
+$operationFirst = $operationPath->invoke(null, 'GET', '/operations/' . $operationId);
+$operationSecond = $operationPath->invoke(null, 'GET', '/operations/' . $operationId);
+cacheBustCheck(preg_match(
+    '~\A/operations/' . preg_quote($operationId, '~') . '/observe/[a-f0-9]{24}\z~D',
+    $operationFirst,
+) === 1, 'GET operation observations must use a bounded nonce path');
+cacheBustCheck($operationFirst !== $operationSecond,
+    'Each GET operation observation must use a distinct path');
 cacheBustCheck($operationPath->invoke(null, 'POST', '/operations/' . $operationId) ===
     '/operations/' . $operationId,
     'Non-GET operation methods must retain their endpoint');

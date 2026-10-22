@@ -30,7 +30,8 @@ final class DirectoryOnboardingClient {
             throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
         }
         $suffix = self::operationGetSuffix($method, $suffix);
-        $observeOperation = $method === 'GET' && str_ends_with($suffix, '/observe');
+        $observeOperation = $method === 'GET' &&
+            preg_match('~\A/operations/[a-f0-9-]{36}/observe/[a-f0-9]{24}\z~D', $suffix) === 1;
         $url = $approved['origin'] . self::PATH . $suffix;
         $options = ['headers' => [
             'Accept' => 'application/json',
@@ -117,7 +118,7 @@ final class DirectoryOnboardingClient {
      */
     private static function operationGetSuffix(string $method, string $suffix): string {
         if ($method === 'GET' && preg_match('~\A/operations/[a-f0-9-]{36}\z~D', $suffix) === 1) {
-            return $suffix . '/observe';
+            return $suffix . '/observe/' . bin2hex(random_bytes(12));
         }
         return $suffix;
     }
