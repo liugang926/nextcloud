@@ -26,6 +26,14 @@ DB_ROLE = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,62}\Z')
 ASSET = re.compile(r'(?:deployment\.tar\.gz|manifest\.json|images\.tar\.gz(?:\.part-[0-9]{3})?)\Z')
 IMAGE_KEYS = {'nextcloud': 'NEXTCLOUD_IMAGE', 'postgres': 'POSTGRES_IMAGE',
               'redis': 'REDIS_IMAGE', 'office': 'OFFICE_IMAGE', 'proxy': 'PROXY_IMAGE'}
+NEXTCLOUD_CORE_UPDATE = {
+    'from_source': 'nextcloud:34.0.4-apache',
+    'to_source': 'ghcr.io/liugang926/nextcloud-production-core:34.0.4-php8.5.12-r1',
+    'from_php': '8.5.11',
+    'to_php': '8.5.12',
+    'nextcloud_version': '34.0.4',
+    'dockerfile_commit': 'a1206d2467689ecb8597b7e5b753b49dda29b773',
+}
 WORKERS = ['cron', 'event-worker', 'event-status-worker',
            'directory-discovery-worker', 'stage-status-worker']
 MAX_ASSET = 1800 * 1024 * 1024
@@ -40,6 +48,18 @@ class ReleaseError(Exception):
 def require(condition, message):
     if not condition:
         raise ReleaseError(message)
+
+
+def approved_core_transition(previous, new, manifest):
+    """Allow exactly the reviewed PHP 8.5.12 runtime transition once."""
+    return bool(
+        previous
+        and new
+        and previous.get('id') != new.get('id')
+        and previous.get('source') == NEXTCLOUD_CORE_UPDATE['from_source']
+        and new.get('source') == NEXTCLOUD_CORE_UPDATE['to_source']
+        and manifest.get('core_update') == NEXTCLOUD_CORE_UPDATE
+    )
 
 
 def timestamp(value):
@@ -142,16 +162,22 @@ def validate_manifest(manifest, repo, release, commit, state):
                 'Invalid image content ID/platform: ' + name)
         require(re.fullmatch(r'[a-z0-9./:_-]+@sha256:[0-9a-f]{64}', image.get('registry_digest', '')),
                 'Image registry digest is missing: ' + name)
-    require(images['nextcloud'].get('source') == 'nextcloud:34.0.4-apache', 'Nextcloud core release changed')
+    require(images['nextcloud'].get('source') == NEXTCLOUD_CORE_UPDATE['to_source'],
+            'Nextcloud security image reference changed')
+    require(manifest.get('core_update') == NEXTCLOUD_CORE_UPDATE,
+            'Missing or altered Nextcloud core security transition')
     require(images['postgres'].get('source') == 'postgres:16-alpine', 'PostgreSQL major changed')
     require(images['redis'].get('source') == 'redis:7-alpine', 'Redis major changed')
     require(images['office'].get('source') == 'collabora/code:26.04.2.4.1', 'Office release changed')
     require(images['proxy'].get('source') == 'nginx:1.30.3-alpine', 'Proxy release changed')
-    # Automatic releases deploy this repository's plugin. A core-image change
-    # requires a separately planned core upgrade; its filesystem cannot safely
-    # be downgraded after a failed database migration.
-    require(not success or success['images']['nextcloud']['id'] == images['nextcloud']['id'],
-            'Nextcloud core image changed: manual core upgrade required')
+    if success:
+        previous = success['images']['nextcloud']
+        current = images['nextcloud']
+        require(
+            previous['id'] == current['id']
+            or approved_core_transition(previous, current, manifest),
+            'Nextcloud core image changed outside the approved PHP 8.5.12 transition',
+        )
     assets = manifest.get('image_assets', [])
     require(isinstance(assets, list) and 0 < len(assets) <= 20, 'Invalid image asset list')
     require(assets == ['images.tar.gz'] or assets == [f'images.tar.gz.part-{i:03d}' for i in range(len(assets))],
@@ -569,8 +595,12 @@ ROLLBACK;
             manifest = json.loads((cache / 'manifest.json').read_text())
             validate_manifest(manifest, self.repo, release, commit, self.state)
             if baseline:
-                require(baseline.get('images', {}).get('nextcloud', {}).get('id') == manifest['images']['nextcloud']['id'],
-                        'Existing manual deployment core differs; manual core upgrade required')
+                baseline_core = baseline.get('images', {}).get('nextcloud', {})
+                require(
+                    baseline_core.get('id') == manifest['images']['nextcloud']['id']
+                    or approved_core_transition(baseline_core, manifest['images']['nextcloud'], manifest),
+                    'Existing manual deployment core differs outside the approved security transition',
+                )
             expected = {'deployment.tar.gz', 'manifest.json', *manifest['image_assets']}
             require(set(sums) == expected, 'Checksum inventory differs from manifest')
             for name in expected:
@@ -628,7 +658,13 @@ ROLLBACK;
                         try:
                             self.verify_local_image(manifest['images']['nextcloud'], current_core)
                         except (ConfigMismatch, ReleaseError):
-                            raise ReleaseError('Running Nextcloud core image differs; manual core upgrade required') from None
+                            previous_core = (
+                                self.state.get('success', {}).get('images', {}).get('nextcloud')
+                                or (baseline or {}).get('images', {}).get('nextcloud')
+                            )
+                            if not approved_core_transition(previous_core, manifest['images']['nextcloud'], manifest):
+                                raise ReleaseError('Running Nextcloud core image differs; manual core upgrade required') from None
+                            self.verify_local_image(previous_core, current_core)
                     self.compose('exec', '-T', '--user', 'www-data', 'nextcloud', 'php', 'occ', 'maintenance:mode', '--on')
                     # Fence the ingress, then drain Office/web requests and jobs
                     # before the DB/config checkpoint. No application writes

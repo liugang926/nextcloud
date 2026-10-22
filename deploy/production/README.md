@@ -47,7 +47,7 @@ Release 发布后无需登录服务器。开机后约 90 秒的首检及之后�
 流程的必要步骤。发布后不要移动 tag、替换 Release 资产或复用失败 tag；修复
 后应产生新的 main 提交和新的自动版本。
 
-Actions 在 Linux amd64 拉取固定版本的 Nextcloud 34.0.4、PostgreSQL 16、Redis 7、Collabora CODE 26.04.2.4.1 和 nginx 1.30.3，记录真实 registry digest、image config ID 和架构；实际启动 Office，核对运行工具、HTTP discovery 和公开 HTTPS 地址后，打包运行源码、Nextcloud 34 兼容的 richdocuments 11.1.2、镜像及 SHA256 清单。镜像 gzip 超过约 1.7 GiB 时分片。所有资产上传至 draft 后才发布，避免服务器读到不完整版本。
+Actions 在 Linux amd64 拉取固定版本的 PostgreSQL 16、Redis 7、Collabora CODE 26.04.2.4.1 和 nginx 1.30.3；Nextcloud 34.0.4 使用固定官方 Dockerfile 提交 `a1206d2467689ecb8597b7e5b753b49dda29b773` 在当前 `php:8.5-apache-trixie` 安全运行时上重建，并要求镜像内 PHP 恰为 8.5.12。发布器记录 registry digest、image config ID 和架构，实际启动 Office，核对运行工具、HTTP discovery 和公开 HTTPS 地址后，打包运行源码、Nextcloud 34 兼容的 richdocuments 11.1.2、镜像及 SHA256 清单。镜像 gzip 超过约 1.7 GiB 时分片。所有资产上传至 draft 后才发布，避免服务器读到不完整版本。
 
 当前构建要求 CI 使用 classic Docker 镜像存储来取得 config ID；若 inspect 显式返回 OCI Descriptor，构建立即停止，避免把运行 manifest/index 摘要误写为 config digest。生产服务器可使用下述已验证的 Docker 29 containerd 兼容层。
 
@@ -69,7 +69,7 @@ Office 应用命令需要退出维护模式才能注册。bootstrap 在数据库
 
 内部检查成功前失败，会恢复旧源码、升级前 DB 和 config/custom_apps，再验证旧服务。内部检查通过后先记录不可回退边界，再启动任务与生产入口；此后若失败，保留新 DB/文件并要求人工修复，避免覆盖已经接受的用户写入或 WeKnora 事件。只有完整健康检查通过才记录 `success`。检查点、失败版本与事务证据不会自动删除。
 
-自动发布只更新本仓库插件，Nextcloud 核心固定为 34.0.4，且已部署核心 image ID 不允许自动改变。核心/大版本升级需要另行规划，脚本不会自行降级 Nextcloud 核心、删除用户数据或运行 `docker compose down -v`。DB/config 检查点用于部署恢复，灾备还需要另外备份用户 `data`、持久卷及秘密。
+自动发布的常规版本保持 Nextcloud 34.0.4 核心 image ID 不变。当前仅允许一次经过审计的安全运行时迁移：从官方 `nextcloud:34.0.4-apache`（PHP 8.5.11）切换到固定 GHCR 镜像 `nextcloud-production-core:34.0.4-php8.5.12-r1`。清单必须包含完全匹配的 34.0.4/PHP 8.5.12/Dockerfile 提交元数据，任何其他核心变更仍会停止部署。脚本不会降级 Nextcloud 核心、删除用户数据或运行 `docker compose down -v`。DB/config 检查点用于部署恢复，灾备还需要另外备份用户 `data`、持久卷及秘密。
 
 大于 32 MiB 的附件最多使用 8 路、4 MiB 分块下载，严格核对 HTTP 206、Content-Range、HTTPS 来源和最终 SHA256。完整分块留在受保护的 `state/asset-cache`，网络中断后可恢复；成功部署后清理该版本的下载缓存。下载网络错误最多尝试 3 次；验证失败或部署失败不会对同 tag 无限重试。人工手工建立的 `current` 必须包含有效 `manifest.json`，否则拒绝自动接管。事务进入 `manual-recovery` 后会阻止后续自动部署；先根据受保护的 `state/transaction.json`、`release-state.json` 与对应备份调查，确认实际源码、DB 和配置一致后再由管理员解除阻断，避免直接删日志盲目重跑。
 

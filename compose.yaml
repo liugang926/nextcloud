@@ -31,7 +31,7 @@ services:
     restart: unless-stopped
 
   nextcloud:
-    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    image: ${NEXTCLOUD_IMAGE:-nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c}
     ports:
       - "${NEXTCLOUD_HTTP_BIND_IP:-127.0.0.1}:${NEXTCLOUD_HTTP_PORT:-18082}:80"
     environment:
@@ -71,7 +71,7 @@ services:
     restart: unless-stopped
 
   cron:
-    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    image: ${NEXTCLOUD_IMAGE:-nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c}
     entrypoint: /cron.sh
     environment:
       POSTGRES_HOST: db
@@ -92,7 +92,7 @@ services:
     restart: unless-stopped
 
   event-worker:
-    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    image: ${NEXTCLOUD_IMAGE:-nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c}
     user: www-data
     entrypoint: ["/bin/sh", "/srv/weknora-event-worker.sh"]
     environment:
@@ -115,7 +115,7 @@ services:
     restart: unless-stopped
 
   event-status-worker:
-    image: nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c
+    image: ${NEXTCLOUD_IMAGE:-nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c}
     user: www-data
     entrypoint: ["/bin/sh", "/srv/weknora-event-status-worker.sh"]
     environment:

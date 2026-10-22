@@ -14,11 +14,18 @@ import time
 import xml.etree.ElementTree as ET
 
 IMAGES = {
-    'nextcloud': 'nextcloud:34.0.4-apache',
     'postgres': 'postgres:16-alpine',
     'redis': 'redis:7-alpine',
     'office': 'collabora/code:26.04.2.4.1',
     'proxy': 'nginx:1.30.3-alpine',
+}
+NEXTCLOUD_CORE_UPDATE = {
+    'from_source': 'nextcloud:34.0.4-apache',
+    'to_source': 'ghcr.io/liugang926/nextcloud-production-core:34.0.4-php8.5.12-r1',
+    'from_php': '8.5.11',
+    'to_php': '8.5.12',
+    'nextcloud_version': '34.0.4',
+    'dockerfile_commit': 'a1206d2467689ecb8597b7e5b753b49dda29b773',
 }
 RICHDOCUMENTS_SHA256 = '96766a94cf417a716e47ed89c6ff2411c54954caa916afcdddc4d9668dffb557'
 PART_BYTES = 1700 * 1024 * 1024  # Below GitHub's per-asset size limit.
@@ -107,6 +114,20 @@ def verify_office_image(image, helper_image):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def verify_nextcloud_image(image):
+    php = command('docker', 'run', '--rm', '--entrypoint', 'php', image, '-r',
+                  'echo PHP_VERSION;')
+    if php != NEXTCLOUD_CORE_UPDATE['to_php']:
+        raise ValueError('Nextcloud image PHP version is not 8.5.12: ' + php)
+    nextcloud = command(
+        'docker', 'run', '--rm', '--entrypoint', 'php', image, '-r',
+        '$OC_Version=array();$OC_VersionString="";'
+        'require "/usr/src/nextcloud/version.php";echo $OC_VersionString;',
+    )
+    if nextcloud != NEXTCLOUD_CORE_UPDATE['nextcloud_version']:
+        raise ValueError('Nextcloud core version changed: ' + nextcloud)
+
+
 def build(args):
     if not re.fullmatch(r'prod-[A-Za-z0-9][A-Za-z0-9._-]{0,100}', args.tag):
         raise ValueError('Invalid production tag')
@@ -120,8 +141,11 @@ def build(args):
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError('Output must be empty')
+    if args.nextcloud_image != NEXTCLOUD_CORE_UPDATE['to_source']:
+        raise ValueError('Unexpected hardened Nextcloud image reference')
     images = {}
-    for key, source in IMAGES.items():
+    sources = {'nextcloud': args.nextcloud_image, **IMAGES}
+    for key, source in sources.items():
         subprocess.run(['docker', 'pull', '--platform', 'linux/amd64', source], check=True)
         data = json.loads(command('docker', 'image', 'inspect', source))[0]
         if data.get('Descriptor') is not None:
@@ -135,6 +159,7 @@ def build(args):
             raise ValueError('Invalid config digest')
         images[key] = {'source': source, 'registry_digest': digests[0],
                        'id': data['Id'], 'platform': 'linux/amd64'}
+    verify_nextcloud_image(images['nextcloud']['id'])
     verify_office_image(images['office']['id'], images['nextcloud']['id'])
     office_app = root / 'deploy/production/richdocuments-11.1.2.tar.gz'
     if not office_app.is_file() or sha256(office_app) != RICHDOCUMENTS_SHA256:
@@ -187,6 +212,7 @@ def build(args):
         'platform': 'linux/amd64', 'nextcloud_major': 34,
         'built_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         'images': images, 'image_assets': image_assets,
+        'core_update': NEXTCLOUD_CORE_UPDATE,
         'office_app': {'version': '11.1.2', 'sha256': RICHDOCUMENTS_SHA256},
     }
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
@@ -199,6 +225,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', required=True)
     parser.add_argument('--tag', required=True)
+    parser.add_argument('--nextcloud-image', required=True)
     parser.add_argument('--output', default='dist/production')
     parser.add_argument(
         '--allow-missing-tag',
