@@ -40,7 +40,7 @@ base_php="$(
 )"
 test "$base_php" = "$EXPECTED_PHP"
 
-docker build \
+DOCKER_BUILDKIT=0 docker build \
   --platform linux/amd64 \
   --tag "$IMAGE" \
   "$DOCKERFILE_CONTEXT"
