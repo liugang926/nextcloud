@@ -996,13 +996,29 @@
                 || '由 WeKnora 自动选择';
         }
 
+        function spaceListHeader() {
+            const header = document.createElement('div');
+            header.className = 'weknora-admin__space-list-header';
+            header.setAttribute('role', 'row');
+            for (const label of ['空间', '默认处理方案', '可见范围 / 用户和组']) {
+                const cell = textNode('span', '', label);
+                cell.setAttribute('role', 'columnheader');
+                header.append(cell);
+            }
+            return header;
+        }
+
         function summarySpaceCard(space) {
             const card = document.createElement('article');
             card.className = 'weknora-admin__space-card weknora-admin__space-card--summary';
-            card.append(spaceCardHeader(space, true));
+            card.setAttribute('role', 'row');
+            const header = spaceCardHeader(space, true);
+            header.setAttribute('role', 'rowheader');
+            card.append(header);
 
             const details = document.createElement('dl');
             details.className = 'weknora-admin__space-details';
+            details.setAttribute('role', 'cell');
             const detail = (label, value) => {
                 details.append(
                     textNode('dt', '', label),
@@ -1057,6 +1073,9 @@
             current.append(title);
             const list = document.createElement('div');
             list.className = 'weknora-admin__space-list';
+            list.setAttribute('role', 'table');
+            list.setAttribute('aria-label', 'WeKnora 空间列表');
+            list.append(spaceListHeader());
             for (const space of data.spaces || []) {
                 list.append(summarySpaceCard(space));
             }
@@ -1340,6 +1359,9 @@
             current.hidden = spaces.length > 0;
             save.hidden = spaces.length === 0;
             save.textContent = visibilityOnly ? '保存可见范围' : '保存连接';
+            spaceList.setAttribute('role', 'table');
+            spaceList.setAttribute('aria-label', 'WeKnora 空间列表');
+            spaceList.append(spaceListHeader());
             const updateCount = () => {
                 const cards = [...spaceList.querySelectorAll('.weknora-admin__space-card')];
                 const enabled = cards.filter((candidate) => candidate.classList.contains('is-selected')).length;
@@ -1352,11 +1374,13 @@
                 let allowed = available;
                 const card = document.createElement('article');
                 card.className = 'weknora-admin__space-card';
+                card.setAttribute('role', 'row');
                 card.dataset.tenantId = String(space.tenant_id);
                 card.classList.toggle('is-unavailable', !available);
                 card.classList.toggle('is-selected', allowed);
 
                 const header = spaceCardHeader(space, allowed);
+                header.setAttribute('role', 'rowheader');
                 const badge = header.querySelector('.weknora-admin__space-badge');
                 const actions = document.createElement('div');
                 actions.className = 'weknora-admin__space-card-actions';
@@ -1379,6 +1403,7 @@
 
                 const details = document.createElement('dl');
                 details.className = 'weknora-admin__space-details';
+                details.setAttribute('role', 'cell');
                 details.append(
                     textNode('dt', '', '默认处理方案'),
                     textNode('dd', '', spaceTemplate(space)),
@@ -1394,6 +1419,7 @@
 
                 const access = document.createElement('div');
                 access.className = 'weknora-admin__space-access';
+                access.setAttribute('role', 'cell');
                 const modeLabel = textNode('label', 'weknora-admin__space-field', '可见范围');
                 const mode = document.createElement('select');
                 mode.className = 'weknora-admin__visibility-mode';
