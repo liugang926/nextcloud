@@ -7,18 +7,39 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   local-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       # This job intentionally uses local Nextcloud accounts and fake GUIDs.
       WEKNORA_DEV_ALLOW_UNVERIFIED_IDENTITY: '1'
+      NEXTCLOUD_SOURCE_IMAGE: ghcr.io/liugang926/nextcloud-production-core:34.0.4-php8.5.12-r1
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Check out the pinned Nextcloud 34.0.4 image recipe
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: nextcloud/docker
+          ref: a1206d2467689ecb8597b7e5b753b49dda29b773
+          path: nextcloud-docker
+          persist-credentials: false
+
+      - name: Build PHP 8.5.12-hardened Nextcloud core
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "${{ github.token }}" |
+            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          bash deploy/production/build-security-nextcloud-image.sh \
+            "$NEXTCLOUD_SOURCE_IMAGE" \
+            "$GITHUB_WORKSPACE/nextcloud-docker/34/apache" \
+            "8.5.12" "34.0.4" false
 
       - uses: actions/setup-node@v4
         with:
@@ -66,44 +87,44 @@ jobs:
           python3 scripts/ops/test_shared_application_restore_drill.py
           python3 scripts/package-nextcloud-app.py
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             sh -c 'find apps/integration_weknora -name "*.php" -exec php -l "{}" ";"'
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/ldap_guid_identity_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/event_health_evaluator_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/browser_file_url_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/space_visibility_policy_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/principal_search_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/remote_file_status_signature_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/employee_file_status_observation_contract.php
           docker run --rm -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/publication_reconcile_hint_contract.php
           docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/publication_decision_audit_contract.php
           docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php apps/integration_weknora/tests/publication_recovery_ledger_contract.php
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
             --cpus=.5 --memory=256m -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             sh -ec 'for test in target_deletion tenant_deletion manager_authorization manager_authorization_transport publication_failure_code onboarding_cache_bust; do php "apps/integration_weknora/tests/${test}_contract.php"; done'
           docker run --rm --network none -v "$PWD:/src:ro" -w /src \
-            nextcloud:34.0.4-apache@sha256:a5ace30c695afe48c2c406e940ee7886a81e13fa382e57cd68b2416d1a66914c \
+            $NEXTCLOUD_SOURCE_IMAGE \
             php -d memory_limit=512M apps/integration_weknora/tests/manifest_10k_synthetic_contract.php
 
       - name: Install packaged app on an empty isolated stack

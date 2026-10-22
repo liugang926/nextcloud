@@ -21,14 +21,15 @@ spec.loader.exec_module(release)
 
 
 def sample_manifest():
-    sources = {'nextcloud': 'nextcloud:34.0.4-apache', 'postgres': 'postgres:16-alpine',
+    sources = {'nextcloud': 'ghcr.io/liugang926/nextcloud-production-core:34.0.4-php8.5.12-r1',
+               'postgres': 'postgres:16-alpine',
                'redis': 'redis:7-alpine', 'office': 'collabora/code:26.04.2.4.1',
                'proxy': 'nginx:1.30.3-alpine'}
     return {'schema': 1, 'repo': 'owner/repo', 'tag': 'prod-new', 'commit': 'a' * 40,
             'platform': 'linux/amd64', 'nextcloud_major': 34,
             'images': {key: {'source': source, 'registry_digest': source.split(':')[0] + '@sha256:' + 'b' * 64,
                              'id': 'sha256:' + 'c' * 64, 'platform': 'linux/amd64'} for key, source in sources.items()},
-            'image_assets': ['images.tar.gz']}
+            'image_assets': ['images.tar.gz'], 'core_update': release.NEXTCLOUD_CORE_UPDATE}
 
 
 def sample_release(tag='prod-new', published='2026-10-18T10:00:00Z'):
@@ -74,6 +75,24 @@ class ManifestTests(unittest.TestCase):
         success['images']['nextcloud']['id'] = 'sha256:' + 'd' * 64
         with self.assertRaises(release.ReleaseError):
             self.validate(state={'success': success})
+
+    def test_accept_reviewed_php_security_core_transition(self):
+        success = {'published_at': '2026-10-17T10:00:00Z', 'images': copy.deepcopy(sample_manifest()['images'])}
+        success['images']['nextcloud']['source'] = 'nextcloud:34.0.4-apache'
+        success['images']['nextcloud']['id'] = 'sha256:' + 'd' * 64
+        self.validate(state={'success': success})
+
+    def test_reject_altered_security_transition_metadata(self):
+        for field, value in (
+            ('to_php', '8.5.11'),
+            ('nextcloud_version', '34.0.5'),
+            ('dockerfile_commit', 'f' * 40),
+        ):
+            value_manifest = sample_manifest()
+            value_manifest['core_update'] = copy.deepcopy(value_manifest['core_update'])
+            value_manifest['core_update'][field] = value
+            with self.subTest(field=field), self.assertRaises(release.ReleaseError):
+                self.validate(value_manifest)
 
     def test_reject_old_or_equal_publication(self):
         success = {'published_at': sample_release()['published_at'], 'images': sample_manifest()['images']}
