@@ -1000,9 +1000,11 @@
             const identity = document.createElement('div');
             identity.className = 'weknora-admin__space-identity';
             identity.setAttribute('role', 'rowheader');
+            const name = space.tenant_name || space.name || `空间 ${space.tenant_id}`;
+            identity.title = name;
             identity.append(
                 textNode('strong', 'weknora-admin__space-name',
-                    space.tenant_name || space.name || `空间 ${space.tenant_id}`),
+                    name),
                 textNode('span', 'weknora-admin__space-tenant',
                     `Tenant ${space.tenant_id}`),
             );
@@ -1019,8 +1021,9 @@
             row.setAttribute('role', 'row');
             row.append(spaceIdentityCell(space, true));
 
-            const template = textNode('span', 'weknora-admin__space-cell-value',
-                spaceTemplate(space));
+            const templateName = spaceTemplate(space);
+            const template = textNode('span', 'weknora-admin__space-cell-value', templateName);
+            template.title = templateName;
             template.setAttribute('role', 'cell');
             row.append(template);
 
@@ -1418,7 +1421,9 @@
                     checkbox.value = String(space.tenant_id);
                     checkbox.checked = allowed;
                     checkbox.disabled = !available;
-                    allow.append(checkbox, textNode('span', '', '允许目录使用'));
+                    checkbox.setAttribute('aria-label',
+                        `允许 ${space.tenant_name || space.name || space.tenant_id} 供 Nextcloud 目录使用`);
+                    allow.append(checkbox, textNode('span', '', '允许'));
                     allowCell.append(allow);
                 } else {
                     allowCell.append(textNode('span', 'weknora-admin__space-connected', '已连接'));
@@ -1434,8 +1439,10 @@
                 const templateCell = document.createElement('div');
                 templateCell.className = 'weknora-admin__space-template-cell';
                 templateCell.setAttribute('role', 'cell');
+                const templateName = spaceTemplate(space);
+                templateCell.title = templateName;
                 templateCell.append(
-                    textNode('span', 'weknora-admin__space-cell-value', spaceTemplate(space)),
+                    textNode('span', 'weknora-admin__space-cell-value', templateName),
                 );
                 row.append(templateCell);
 
