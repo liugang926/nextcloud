@@ -1,5 +1,27 @@
 # WeKnora Integration for Nextcloud 34
 
+## Versioned, explainable onboarding (0.9.0)
+
+The app and the WeKnora onboarding service use contract v2. Connection setup
+reports the Nextcloud app version, the deployed sidebar bundle digest, the
+WeKnora contract version and a non-secret worker/dispatcher/cron health
+projection. An incompatible contract or unverified background component keeps
+existing sources readable but blocks new directory bindings.
+
+The candidates response adds `contract_version`, `request_id`,
+`candidate_revision`, grouped `spaces`, eligible `candidates`, redacted
+`ineligible` entries, `next_cursor`, and stable reason/next-action fields.
+Search and keyset pagination use `q`, `cursor`, and `limit`. The frontend
+requires an explicit “associate existing” or “create new” choice; an empty
+candidate page never falls back to creation.
+
+Directory status separates `binding_state`, `content_sync_state`, and
+`overview_state`. The first post-pairing reconciliation is inserted
+idempotently, and “sync now” reuses a retained reconciliation request. Folder
+summaries include imported, parse-failed, index-completed, skipped, failed and
+unverified counts. Automatic rules are keyed by connection and physical
+filecache root; a second directory manager joins the same rule's delegates.
+
 ## Administrator connection and directory binding
 
 The ordinary setup flow is intentionally short:

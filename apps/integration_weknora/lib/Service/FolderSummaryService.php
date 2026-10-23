@@ -36,16 +36,31 @@ final class FolderSummaryService {
         $rows = $this->bulkRows('weknora_file_status', ['file_id', 'binding_id', 'body_json', 'last_verified_at'], array_keys($slice));
         $statusRows = [];
         foreach ($rows as $row) { $statusRows[$row['binding_id'] . ':' . $row['file_id']] = $row; }
-        $counts = ['ready' => 0, 'updating' => 0, 'failed' => 0, 'unverified' => 0];
+        $counts = ['ready' => 0, 'updating' => 0, 'failed' => 0, 'unverified' => 0, 'skipped' => 0];
+        $pipeline = ['imported' => 0, 'skipped' => 0, 'parse_failed' => 0, 'index_completed' => 0];
         $graphs = array_fill_keys(array_merge(StatusProtocol::GRAPH_STATES, ['not_provided']), 0);
         $failures = []; $total = 0; $verifiedAt = null;
         foreach ($slice as $id => $node) {
             $source = $sources[$id] ?? null;
             if ($source === null || $source['publication_state'] !== 'eligible') { continue; }
             $total++;
+            if (!isset($statusRows[$source['binding']['id'] . ':' . $id]) &&
+                !$this->supportedName($node->getName())) {
+                $counts['skipped']++;
+                $pipeline['skipped']++;
+                continue;
+            }
             $status = $this->project($statusRows[$source['binding']['id'] . ':' . $id] ?? null, $node, $source);
             $state = $status['knowledge_state']; $graph = $status['graph']['state'];
             $counts[$state]++; $graphs[$graph]++;
+            if (($status['sync_state'] ?? null) === 'ingested') { $pipeline['imported']++; }
+            $stages = is_array($status['stages'] ?? null) ? $status['stages'] : [];
+            if (in_array($stages['parse']['state'] ?? null, ['failed'], true) ||
+                ($status['failure_code'] ?? null) === 'parse_failed') { $pipeline['parse_failed']++; }
+            if (($stages['index']['state'] ?? null) === 'succeeded') { $pipeline['index_completed']++; }
+            foreach ($stages as $stage) {
+                if (($stage['state'] ?? null) === 'skipped') { $pipeline['skipped']++; break; }
+            }
             if (isset($status['last_verified_at'])) {
                 $verifiedAt = $verifiedAt === null ? $status['last_verified_at'] : min($verifiedAt, $status['last_verified_at']);
             }
@@ -62,6 +77,7 @@ final class FolderSummaryService {
         $next = $offset + count($slice); $partial = $next < count($visible);
         return ['summary' => ['generation' => $generation, 'page_offset' => $offset, 'next_offset' => $next,
             'total_visible' => $total, 'current_completed' => $counts['ready'], 'knowledge_counts' => $counts,
+            'pipeline_counts' => $pipeline,
             'graph_counts' => $graphs, 'failures' => $failures, 'last_verified_at' => $verifiedAt,
             'status_stale' => $counts['unverified'] > 0, 'partial' => $partial, 'page_limit' => self::PAGE_SIZE,
             'next_cursor' => $partial ? $this->encodeCursor($uid, $folderId, $generation, $next) : null]];
@@ -162,6 +178,16 @@ final class FolderSummaryService {
                 $s['source_etag'] !== $node->getEtag() || (int)$s['publication_epoch'] !== $source['binding']['publication_epoch']) { return $unknown; }
             return StatusProtocol::projection($s, $row['last_verified_at'] === null ? null : (int)$row['last_verified_at'], time());
         } catch (\Throwable $e) { return $unknown; }
+    }
+
+    private function supportedName(string $name): bool {
+        $extension = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+        return in_array($extension, [
+            'pdf', 'txt', 'docx', 'doc', 'epub', 'html', 'htm', 'mhtml',
+            'md', 'markdown', 'xmind', 'png', 'jpg', 'jpeg', 'gif', 'csv',
+            'xlsx', 'xls', 'pptx', 'ppt', 'json', 'mp3', 'wav', 'm4a',
+            'flac', 'ogg',
+        ], true);
     }
 
     private function bulkRows(string $table, array $columns, array $ids, string $key = 'file_id'): array {

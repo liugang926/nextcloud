@@ -113,7 +113,14 @@ class WeknoraFileSidebarTab extends HTMLElement {
             body: body === undefined ? undefined : JSON.stringify(body),
         })
         const data = await response.json()
-        if (!response.ok) throw new Error(data.error || 'directory_unavailable')
+        if (!response.ok) {
+            const error = new Error(data.reason || data.error || 'directory_unavailable')
+            error.code = data.error
+            error.reasonCode = data.reason_code || data.error
+            error.nextAction = data.next_action
+            error.status = response.status
+            throw error
+        }
         return data
     }
 
@@ -127,18 +134,46 @@ class WeknoraFileSidebarTab extends HTMLElement {
         const connected = data.pairing_state === 'active'
             && (!data.operation || data.operation.state === 'active')
         const targetDeleted = data.operation?.state === 'target_deleted' || data.source_state === 'target_deleted'
+        const overview = {
+            unbound: '未绑定', binding: '绑定中', binding_failed: '绑定失败', synchronizing: '同步中',
+            processing: '内容处理中', ready: '已索引，可验证问答权限', partial: '部分可用',
+            failed: '处理失败', sync_paused: '内容同步暂停', publication_stopped: '发布已停止',
+            unverified: '待验证', event_delivery_error: '事件投递失败',
+        }[data.overview_state] || '待验证'
+        this.addRow(section, '目录状态', targetDeleted ? '目标已删除' : overview)
+        if (data.directory_role) this.addRow(section, '目录类型', {
+            associated_root: '已关联根目录', inherited_child: '继承子目录',
+            unassociated_root: '可关联目录', new_directory_parent: '可新建关联目录',
+            unmanageable: '不可管理',
+        }[data.directory_role] || '不可管理')
         this.addRow(section, '关联状态', targetDeleted ? '目标知识库或工作空间已删除' : data.inherited ? '继承发布根的知识库'
             : data.knowledge_base_id && connected ? '已关联知识库'
                 : data.operation || data.knowledge_base_id ? '待连接' : '未关联')
         if (data.binding_name) this.addRow(section, '发布目录', data.binding_name)
         if (data.space_name) this.addRow(section, '空间', data.space_name)
-        if (data.knowledge_base_id) this.addRow(section, '知识库', data.knowledge_base_id)
+        if (data.knowledge_base_name || data.knowledge_base_id) {
+            this.addRow(section, '知识库', data.knowledge_base_name || '已关联知识库')
+        }
         if (data.publication_state) this.addRow(section, '发布', data.publication_state === 'active'
             ? connected ? '发布有效' : '待连接，发布待验证' : '已停止发布')
         if (typeof data.sync_enabled === 'boolean') this.addRow(section, '同步', data.sync_enabled ? '自动同步' : '已暂停同步')
+        if (data.content_sync_state) this.addRow(section, '内容同步', {
+            not_started: '尚未开始', queued: '已入队', delivering: '事件投递中',
+            received: '已接收，等待执行', manifest_fetching: '正在核对完整清单',
+            processing: '解析/索引处理中', ready: '当前版本已索引', partial: '部分文件可用',
+            failed: '处理失败', paused: '内容同步暂停', unverified: '待重新验证',
+            publication_stopped: '发布已停止', event_receiver_unauthorized: '事件接收凭据失效',
+            waiting_manifest: '等待完整清单验证',
+        }[data.content_sync_state] || '待验证')
         if (data.summary) {
             this.addRow(section, '当前可见文件', String(data.summary.total_visible ?? 0))
             this.addRow(section, '当前版本已完成', String(data.summary.current_completed ?? 0))
+            const counts = data.summary.knowledge_counts || {}
+            this.addRow(section, '处理统计', `处理中 ${counts.updating || 0}；失败 ${counts.failed || 0}；待验证 ${counts.unverified || 0}`)
+            if (data.summary.pipeline_counts) {
+                const pipeline = data.summary.pipeline_counts
+                this.addRow(section, '同步统计', `已导入 ${pipeline.imported || 0}；解析失败 ${pipeline.parse_failed || 0}；索引完成 ${pipeline.index_completed || 0}；跳过 ${pipeline.skipped || 0}`)
+            }
             this.addRow(section, '图谱结果', Object.entries(data.summary.graph_counts || {})
                 .filter(([, count]) => count > 0)
                 .map(([state, count]) => `${this.graphLabel(state)} ${count}`).join('；') || '暂无文件')
@@ -147,6 +182,13 @@ class WeknoraFileSidebarTab extends HTMLElement {
             if (data.summary.partial) this.addRow(section, '统计范围', '当前页可见文件，更多文件待加载')
             if (data.summary.next_cursor) this.button(section, '加载更多汇总', () => this.loadMoreSummary(data))
         }
+        if (data.content_sync) {
+            this.addRow(section, '事件水位', `已接收 ${data.content_sync.received_through || 0}；已执行 ${data.content_sync.applied_through || 0}`)
+            if (data.content_sync.last_updated_at) this.addRow(section, '链路更新时间', this.formatTime(data.content_sync.last_updated_at))
+            if (data.content_sync.next_retry_at) this.addRow(section, '下次重试', this.formatTime(data.content_sync.next_retry_at))
+            if (data.content_sync.error_code) this.addRow(section, '同步原因', data.content_sync.error_code)
+        }
+        if (data.operation?.operation_id) this.addRow(section, '操作标识', String(data.operation.operation_id).slice(0, 8))
         if (targetDeleted) {
             this.addRow(section, '处理状态', '发布与自动同步已停止，来源记录和原文件已保留')
             this.addRow(section, '清理状态', '来源退出与索引清理仍需独立核验')
@@ -224,7 +266,15 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     this.load()
                 })
             } else {
-                this.button(section, '更换知识库', () => this.renderAssociation(false, true))
+                if (data.permissions?.can_take_over_kb !== false) {
+                    this.button(section, '更换知识库', () => this.renderAssociation(false, true))
+                }
+                if (data.sync_enabled) {
+                    this.button(section, '立即同步', async () => {
+                        await this.api(`/folders/${this.nodeId()}/sync-now`, 'POST', {})
+                        this.load()
+                    })
+                }
                 this.button(section, data.sync_enabled ? '暂停同步' : '恢复同步', async () => {
                     await this.api(`/folders/${this.nodeId()}/sync`, 'POST', {
                         sync_enabled: !data.sync_enabled, expected_revision: data.sync_revision,
@@ -237,6 +287,15 @@ class WeknoraFileSidebarTab extends HTMLElement {
         }
         if (data.can_create) {
             this.button(section, '新建关联目录', () => this.renderAssociation(true))
+        }
+        if (data.knowledge_base_url) {
+            const link = document.createElement('a')
+            link.className = 'weknora-sidebar__link'
+            link.href = data.knowledge_base_url
+            link.target = '_blank'
+            link.rel = 'noopener noreferrer'
+            link.textContent = '打开知识库'
+            section.append(link)
         }
         this.button(section, '刷新状态', () => this.load())
         this.replaceChildren(section)
@@ -259,12 +318,21 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 last_verified_at: previous.last_verified_at && page.last_verified_at
                     ? Math.min(previous.last_verified_at, page.last_verified_at) : previous.last_verified_at || page.last_verified_at,
                 failures: [...previous.failures, ...page.failures].slice(0, 20) }
-            for (const field of ['knowledge_counts', 'graph_counts']) {
-                merged[field] = { ...previous[field] }
+            for (const field of ['knowledge_counts', 'graph_counts', 'pipeline_counts']) {
+                if (!page[field]) continue
+                merged[field] = { ...(previous[field] || {}) }
                 for (const [state, count] of Object.entries(page[field])) merged[field][state] = (merged[field][state] || 0) + count
             }
             this._folderSummary = merged
-            this.renderFolder({ ...data, ...next, summary: merged })
+            const updated = { ...data, ...next, summary: merged }
+            updated.content_sync_state = this.contentStateFromSummary(updated)
+            updated.overview_state = updated.publication_state === 'stopped'
+                ? 'publication_stopped'
+                : ({
+                    ready: 'ready', partial: 'partial', failed: 'failed', processing: 'processing',
+                    paused: 'sync_paused', unverified: 'unverified',
+                }[updated.content_sync_state] || 'unverified')
+            this.renderFolder(updated)
         } catch (error) {
             // Old page totals are immediately discarded on scope changes.
             this._folderSummary = null
@@ -281,17 +349,42 @@ class WeknoraFileSidebarTab extends HTMLElement {
         button.textContent = label
         button.addEventListener('click', async () => {
             button.disabled = true
-            try { await action() } catch (_) { this.renderMessage('操作未完成。请检查管理资格与配置后刷新重试。') }
+            try {
+                await action()
+            } catch (error) {
+                this.renderMessage(error.nextAction
+                    ? `${error.message} ${error.nextAction}`
+                    : '操作未完成。请检查管理资格与配置后刷新重试。')
+            }
             finally { button.disabled = false }
         })
         parent.append(button)
         return button
     }
 
-    async renderAssociation(creating, migrating = false) {
+    contentStateFromSummary(data) {
+        if (data.sync_enabled === false) return 'paused'
+        const summary = data.summary || {}
+        if (summary.partial) return 'unverified'
+        const counts = summary.knowledge_counts || {}
+        const ready = Number(counts.ready || 0)
+        const failed = Number(counts.failed || 0)
+        const updating = Number(counts.updating || 0)
+        const unverified = Number(counts.unverified || 0)
+        const skipped = Number(counts.skipped || 0)
+        const total = Number(summary.total_visible || 0)
+        if (failed > 0) return ready > 0 ? 'partial' : 'failed'
+        if (updating > 0) return 'processing'
+        if (ready + skipped === total && unverified === 0) return skipped > 0 ? 'partial' : 'ready'
+        return 'unverified'
+    }
+
+    async renderAssociation(creating, migrating = false, query = '') {
         const selectedId = this.nodeId()
         const request = ++this._request
-        const result = await this.api(`/folders/${selectedId}/candidates${creating ? '?for_creation=1' : ''}`)
+        const params = new URLSearchParams({ for_creation: creating ? '1' : '0', limit: '50' })
+        if (query) params.set('q', query)
+        const result = await this.api(`/folders/${selectedId}/candidates?${params}`)
         if (request !== this._request || selectedId !== this.nodeId() || !this.isConnected) return
         const form = document.createElement('form')
         form.className = 'weknora-sidebar weknora-sidebar__form'
@@ -304,11 +397,21 @@ class WeknoraFileSidebarTab extends HTMLElement {
             form.append(explanation)
         }
         const spaces = result.targets || [{ tenant_id: result.tenant_id,
-            processing_template_id: result.processing_template_id, candidates: result.candidates || [] }]
-        if (!spaces.length) {
-            this.renderMessage('目前没有本人获准创建或绑定的工作空间。请联系目录发布管理者。')
-            return
-        }
+            processing_template_id: result.processing_template_id, candidates: result.candidates || [],
+            ineligible: result.ineligible || [], available: true, can_bind: true }]
+        const search = document.createElement('div')
+        search.className = 'weknora-sidebar__search'
+        const searchInput = document.createElement('input')
+        searchInput.type = 'search'
+        searchInput.placeholder = '按知识库名称搜索'
+        searchInput.value = query
+        searchInput.setAttribute('aria-label', '按知识库名称搜索')
+        const searchButton = document.createElement('button')
+        searchButton.type = 'button'
+        searchButton.textContent = '刷新候选'
+        searchButton.addEventListener('click', () => this.renderAssociation(creating, migrating, searchInput.value.trim()))
+        search.append(searchInput, searchButton)
+        form.append(search)
         const space = document.createElement('select')
         const seenSpaces = new Set()
         for (const candidate of spaces) {
@@ -316,56 +419,153 @@ class WeknoraFileSidebarTab extends HTMLElement {
             seenSpaces.add(String(candidate.tenant_id))
             const option = document.createElement('option')
             option.value = String(candidate.tenant_id)
-            option.textContent = candidate.space_name || `空间 ${candidate.tenant_id}`
+            const unavailable = candidate.available === false || candidate.can_bind === false
+            option.disabled = unavailable
+            option.textContent = `${candidate.space_name || `空间 ${candidate.tenant_id}`}${unavailable
+                ? `（不可用：${candidate.reason_code || '配置未验证'}）` : ''}`
             space.append(option)
         }
         this.field(form, '工作空间', space)
-        const name = document.createElement('input')
-        name.type = 'text'; name.maxLength = 255; name.required = creating
-        name.value = creating ? '' : this._node?.basename || this._node?.displayname || '目录知识库'
-        this.field(form, creating ? '目录名称（同时作为知识库名称）' : '知识库名称', name)
-        if (!creating) name.hidden = true
+        const firstUsable = spaces.find(candidate => candidate.available !== false && candidate.can_bind !== false)
+        if (firstUsable) space.value = String(firstUsable.tenant_id)
+        const folderName = document.createElement('input')
+        folderName.type = 'text'; folderName.maxLength = 255; folderName.required = creating
+        const folderField = this.field(form, '目录名称', folderName)
+        folderField.hidden = !creating
+        const mode = document.createElement('select')
+        mode.append(new Option('请选择关联方式', ''), new Option('关联已有知识库', 'existing'),
+            new Option('创建新知识库', 'create'))
+        this.field(form, '关联方式', mode)
         const target = document.createElement('select')
-        const automatic = document.createElement('option')
-        automatic.value = ''; automatic.textContent = '新建知识库'
+        const targetField = this.field(form, '已有知识库', target)
+        const name = document.createElement('input')
+        name.type = 'text'; name.maxLength = 255
+        name.value = this._node?.basename || this._node?.displayname || '目录知识库'
+        let nameTouched = false
+        const nameField = this.field(form, '知识库名称', name)
+        const reasons = document.createElement('div')
+        reasons.className = 'weknora-sidebar__reasons'
+        reasons.setAttribute('aria-live', 'polite')
+        form.append(reasons)
+        const loadMore = document.createElement('button')
+        loadMore.type = 'button'; loadMore.textContent = '加载更多知识库'; loadMore.hidden = true
+        form.append(loadMore)
+        const selectedTarget = () => spaces.find(candidate => String(candidate.tenant_id) === space.value)
         let selectedTemplate = ''
         const updateCandidates = () => {
-            target.replaceChildren(automatic)
-            const selected = spaces.find(candidate => String(candidate.tenant_id) === space.value)
+            target.replaceChildren()
+            const selected = selectedTarget()
             selectedTemplate = selected ? String(selected.processing_template_id) : ''
+            const existingMode = mode.options[1]
+            const createMode = mode.options[2]
+            existingMode.disabled = !selected || !(selected.candidates || []).length
+            createMode.disabled = !selected || selected.available === false || selected.can_bind === false
+            if (mode.value === 'existing' && existingMode.disabled) mode.value = ''
+            if (mode.value === 'create' && createMode.disabled) mode.value = ''
             for (const candidate of selected?.candidates || []) {
                 const option = document.createElement('option')
                 option.value = candidate.id
                 const contentCount = Number(candidate.content_count || 0)
-                option.textContent = `已有知识库：${candidate.name}${contentCount > 0 ? `（已有 ${contentCount} 条内容）` : ''}`
+                option.textContent = `已有知识库：${candidate.name}` +
+                    (contentCount > 0 ? `（已有 ${contentCount} 条内容）` : '') +
+                    (candidate.configuration_summary ? ` · ${candidate.configuration_summary}` : '')
                 target.append(option)
             }
+            reasons.replaceChildren()
+            for (const candidate of selected?.ineligible || []) {
+                const note = document.createElement('p')
+                note.className = 'weknora-sidebar__hint'
+                note.textContent = `${candidate.name || '知识库'}：${candidate.reason || candidate.reason_code || '配置未通过核验'}`
+                if (candidate.next_action) note.textContent += ` ${candidate.next_action}`
+                reasons.append(note)
+            }
+            if (!selected || selected.available === false) {
+                const note = document.createElement('p')
+                note.className = 'weknora-sidebar__hint'
+                note.textContent = `当前空间不可用：${selected?.reason_code || result.reason_code || 'space_candidate_unavailable'}。请联系目录发布管理者。`
+                reasons.append(note)
+            } else if (!(selected.candidates || []).length) {
+                const note = document.createElement('p')
+                note.className = 'weknora-sidebar__hint'
+                note.textContent = selected?.next_cursor
+                    ? '本页没有符合条件的已有知识库，可加载更多；系统不会自动转为新建。'
+                    : '当前搜索没有符合条件的已有知识库。可明确选择“创建新知识库”，不会因空候选自动创建。'
+                reasons.append(note)
+            }
+            loadMore.hidden = !selected?.next_cursor
+            updateMode()
         }
-        space.addEventListener('change', updateCandidates)
-        updateCandidates()
-        this.field(form, '目标知识库', target)
         const existingNote = document.createElement('p')
-        existingNote.textContent = '选择已有知识库时，原有内容会保留；绑定后该知识库的新增内容由 Nextcloud 目录管理。'
         existingNote.className = 'weknora-sidebar__hint'
         form.append(existingNote)
         const submit = document.createElement('button')
         submit.type = 'submit'; submit.textContent = creating ? '创建并关联' : migrating ? '开始迁移' : '关联'
         form.append(submit)
+        const updateMode = () => {
+            targetField.hidden = mode.value !== 'existing'
+            nameField.hidden = mode.value !== 'create'
+            folderField.hidden = !creating
+            folderName.required = creating
+            target.required = mode.value === 'existing'
+            name.required = mode.value === 'create'
+            submit.disabled = mode.value === '' ||
+                (mode.value === 'existing' && !target.value) ||
+                (creating && folderName.value.trim() === '')
+            existingNote.textContent = mode.value === 'create'
+                ? '将创建新的知识库；目录和新知识库使用当前输入的名称。'
+                : '选择已有知识库时，原有内容会保留；绑定后该知识库的新增内容由 Nextcloud 目录管理。'
+        }
+        space.addEventListener('change', updateCandidates)
+        mode.addEventListener('change', updateMode)
+        folderName.addEventListener('input', () => {
+            if (creating && !nameTouched) name.value = folderName.value
+            updateMode()
+        })
+        name.addEventListener('input', () => { nameTouched = true; updateMode() })
+        target.addEventListener('change', updateMode)
+        updateCandidates()
+        loadMore.addEventListener('click', async () => {
+            const selected = selectedTarget()
+            if (!selected?.next_cursor) return
+            loadMore.disabled = true
+            try {
+                const moreParams = new URLSearchParams({ for_creation: creating ? '1' : '0', limit: '50',
+                    q: query, cursor: selected.next_cursor })
+                const page = await this.api(`/folders/${selectedId}/candidates?${moreParams}`)
+                if (page.candidate_revision !== result.candidate_revision) throw new Error('candidate_page_changed')
+                const nextTarget = (page.targets || []).find(candidate =>
+                    String(candidate.tenant_id) === String(selected.tenant_id) &&
+                    String(candidate.processing_template_id) === String(selected.processing_template_id))
+                if (!nextTarget) throw new Error('candidate_page_changed')
+                const ids = new Set((selected.candidates || []).map(candidate => candidate.id))
+                selected.candidates = [...(selected.candidates || []),
+                    ...(nextTarget.candidates || []).filter(candidate => !ids.has(candidate.id))]
+                selected.ineligible = [...(selected.ineligible || []), ...(nextTarget.ineligible || [])]
+                selected.next_cursor = nextTarget.next_cursor
+                selected.candidate_revision = nextTarget.candidate_revision
+                updateCandidates()
+            } catch (_) {
+                this.renderMessage('候选已变化或无法加载更多，请取消后刷新候选。')
+            } finally { loadMore.disabled = false }
+        })
         this.button(form, '取消', () => this.load())
-        // Retain this operation and choice after transport failure. A retry
-        // cannot create a second KB or silently replace the selected target.
         const operationId = crypto.randomUUID()
         let submittedChoice
         form.addEventListener('submit', async (event) => {
             event.preventDefault()
+            if (!form.reportValidity()) return
             submit.disabled = true
             name.disabled = true; target.disabled = true; space.disabled = true
-            const selected = spaces.find(candidate => String(candidate.tenant_id) === space.value)
+            mode.disabled = true; folderName.disabled = true
+            const selected = selectedTarget()
             const chosen = selected?.candidates?.find(candidate => String(candidate.id) === target.value)
-            submittedChoice ||= { operation_id: operationId, mode: target.value ? 'existing' : 'create',
-                name: chosen?.name || name.value, knowledge_base_id: target.value,
-                folder_name: creating ? name.value : undefined,
-                tenant_id: space.value, processing_template_id: selectedTemplate }
+            submittedChoice ||= { operation_id: operationId, mode: mode.value,
+                name: mode.value === 'existing' ? chosen?.name : name.value,
+                knowledge_base_id: mode.value === 'existing' ? target.value : '',
+                folder_name: creating ? folderName.value : undefined,
+                tenant_id: space.value, processing_template_id: selectedTemplate,
+                target_candidate_revision: selected?.candidate_revision || null,
+                candidate_revision: result.candidate_revision || null }
             if (migrating && !this._targetMigrations.has(selectedId)) {
                 this._targetMigrations.set(selectedId, { operationId, choice: submittedChoice, confirmed: false })
             }
@@ -375,6 +575,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     : `/folders/${selectedId}/${creating ? 'create' : migrating ? 'target-migration' : 'associate'}`
                 const reply = await this.api(path, 'POST', pending?.confirmed ? {} : submittedChoice)
                 if (selectedId !== this.nodeId()) return
+                const shortId = String(reply.operation?.operation_id || reply.migration?.operation_id || operationId).slice(0, 8)
                 if (migrating) {
                     const current = this._targetMigrations.get(selectedId)
                     if (current) current.confirmed = true
@@ -382,15 +583,30 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     this.load()
                 } else if (creating) {
                     this.renderMessage(reply.operation.state === 'active'
-                        ? '目录已创建并关联。打开新目录的详情查看状态。'
-                        : '目录已保留，关联正在重试。打开新目录的详情查看连接状态。')
+                        ? `目录已创建并关联（操作 ${shortId}）。打开新目录的详情查看状态。`
+                        : `目录已保留，关联正在重试（操作 ${shortId}）。`)
                     this.button(this.firstElementChild, '刷新文件列表', () => window.location.reload())
-                } else this.load()
-            } catch (_) {
+                } else {
+                    this.renderMessage(reply.operation?.state === 'active'
+                        ? `关联已完成（操作 ${shortId}）。正在刷新目录同步状态。`
+                        : `关联已保存，后台正在处理（操作 ${shortId}）。`)
+                    this.button(this.firstElementChild, '刷新状态', () => this.load())
+                }
+            } catch (error) {
                 const message = document.createElement('p')
-                message.textContent = '未能确认关联结果。重试将继续同一操作。'
+                const changed = error.reasonCode === 'candidate_revision_changed'
+                message.textContent = changed
+                    ? `${error.message} ${error.nextAction}`
+                    : (error.nextAction
+                        ? `${error.message} ${error.nextAction} 重试将继续同一操作。`
+                        : '未能确认关联结果。重试将继续同一操作。')
                 form.append(message)
-                submit.textContent = '重试同一操作'; submit.disabled = false
+                if (changed) {
+                    submit.textContent = '候选已变化'; submit.disabled = true
+                    this.button(form, '刷新候选', () => this.renderAssociation(creating, migrating, query))
+                } else {
+                    submit.textContent = '重试同一操作'; submit.disabled = false
+                }
             }
         })
         this.replaceChildren(form)
@@ -412,6 +628,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
         const label = document.createElement('label')
         label.append(document.createTextNode(title), input)
         parent.append(label)
+        return label
     }
 
     graphLabel(state) {

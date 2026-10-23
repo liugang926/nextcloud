@@ -4553,7 +4553,14 @@ ${message.stack}`;
         body: body === void 0 ? void 0 : JSON.stringify(body)
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "directory_unavailable");
+      if (!response.ok) {
+        const error = new Error(data.reason || data.error || "directory_unavailable");
+        error.code = data.error;
+        error.reasonCode = data.reason_code || data.error;
+        error.nextAction = data.next_action;
+        error.status = response.status;
+        throw error;
+      }
       return data;
     }
     renderFolder(data) {
@@ -4565,21 +4572,74 @@ ${message.stack}`;
       section.append(heading);
       const connected = data.pairing_state === "active" && (!data.operation || data.operation.state === "active");
       const targetDeleted = data.operation?.state === "target_deleted" || data.source_state === "target_deleted";
+      const overview = {
+        unbound: "\u672A\u7ED1\u5B9A",
+        binding: "\u7ED1\u5B9A\u4E2D",
+        binding_failed: "\u7ED1\u5B9A\u5931\u8D25",
+        synchronizing: "\u540C\u6B65\u4E2D",
+        processing: "\u5185\u5BB9\u5904\u7406\u4E2D",
+        ready: "\u5DF2\u7D22\u5F15\uFF0C\u53EF\u9A8C\u8BC1\u95EE\u7B54\u6743\u9650",
+        partial: "\u90E8\u5206\u53EF\u7528",
+        failed: "\u5904\u7406\u5931\u8D25",
+        sync_paused: "\u5185\u5BB9\u540C\u6B65\u6682\u505C",
+        publication_stopped: "\u53D1\u5E03\u5DF2\u505C\u6B62",
+        unverified: "\u5F85\u9A8C\u8BC1",
+        event_delivery_error: "\u4E8B\u4EF6\u6295\u9012\u5931\u8D25"
+      }[data.overview_state] || "\u5F85\u9A8C\u8BC1";
+      this.addRow(section, "\u76EE\u5F55\u72B6\u6001", targetDeleted ? "\u76EE\u6807\u5DF2\u5220\u9664" : overview);
+      if (data.directory_role) this.addRow(section, "\u76EE\u5F55\u7C7B\u578B", {
+        associated_root: "\u5DF2\u5173\u8054\u6839\u76EE\u5F55",
+        inherited_child: "\u7EE7\u627F\u5B50\u76EE\u5F55",
+        unassociated_root: "\u53EF\u5173\u8054\u76EE\u5F55",
+        new_directory_parent: "\u53EF\u65B0\u5EFA\u5173\u8054\u76EE\u5F55",
+        unmanageable: "\u4E0D\u53EF\u7BA1\u7406"
+      }[data.directory_role] || "\u4E0D\u53EF\u7BA1\u7406");
       this.addRow(section, "\u5173\u8054\u72B6\u6001", targetDeleted ? "\u76EE\u6807\u77E5\u8BC6\u5E93\u6216\u5DE5\u4F5C\u7A7A\u95F4\u5DF2\u5220\u9664" : data.inherited ? "\u7EE7\u627F\u53D1\u5E03\u6839\u7684\u77E5\u8BC6\u5E93" : data.knowledge_base_id && connected ? "\u5DF2\u5173\u8054\u77E5\u8BC6\u5E93" : data.operation || data.knowledge_base_id ? "\u5F85\u8FDE\u63A5" : "\u672A\u5173\u8054");
       if (data.binding_name) this.addRow(section, "\u53D1\u5E03\u76EE\u5F55", data.binding_name);
       if (data.space_name) this.addRow(section, "\u7A7A\u95F4", data.space_name);
-      if (data.knowledge_base_id) this.addRow(section, "\u77E5\u8BC6\u5E93", data.knowledge_base_id);
+      if (data.knowledge_base_name || data.knowledge_base_id) {
+        this.addRow(section, "\u77E5\u8BC6\u5E93", data.knowledge_base_name || "\u5DF2\u5173\u8054\u77E5\u8BC6\u5E93");
+      }
       if (data.publication_state) this.addRow(section, "\u53D1\u5E03", data.publication_state === "active" ? connected ? "\u53D1\u5E03\u6709\u6548" : "\u5F85\u8FDE\u63A5\uFF0C\u53D1\u5E03\u5F85\u9A8C\u8BC1" : "\u5DF2\u505C\u6B62\u53D1\u5E03");
       if (typeof data.sync_enabled === "boolean") this.addRow(section, "\u540C\u6B65", data.sync_enabled ? "\u81EA\u52A8\u540C\u6B65" : "\u5DF2\u6682\u505C\u540C\u6B65");
+      if (data.content_sync_state) this.addRow(section, "\u5185\u5BB9\u540C\u6B65", {
+        not_started: "\u5C1A\u672A\u5F00\u59CB",
+        queued: "\u5DF2\u5165\u961F",
+        delivering: "\u4E8B\u4EF6\u6295\u9012\u4E2D",
+        received: "\u5DF2\u63A5\u6536\uFF0C\u7B49\u5F85\u6267\u884C",
+        manifest_fetching: "\u6B63\u5728\u6838\u5BF9\u5B8C\u6574\u6E05\u5355",
+        processing: "\u89E3\u6790/\u7D22\u5F15\u5904\u7406\u4E2D",
+        ready: "\u5F53\u524D\u7248\u672C\u5DF2\u7D22\u5F15",
+        partial: "\u90E8\u5206\u6587\u4EF6\u53EF\u7528",
+        failed: "\u5904\u7406\u5931\u8D25",
+        paused: "\u5185\u5BB9\u540C\u6B65\u6682\u505C",
+        unverified: "\u5F85\u91CD\u65B0\u9A8C\u8BC1",
+        publication_stopped: "\u53D1\u5E03\u5DF2\u505C\u6B62",
+        event_receiver_unauthorized: "\u4E8B\u4EF6\u63A5\u6536\u51ED\u636E\u5931\u6548",
+        waiting_manifest: "\u7B49\u5F85\u5B8C\u6574\u6E05\u5355\u9A8C\u8BC1"
+      }[data.content_sync_state] || "\u5F85\u9A8C\u8BC1");
       if (data.summary) {
         this.addRow(section, "\u5F53\u524D\u53EF\u89C1\u6587\u4EF6", String(data.summary.total_visible ?? 0));
         this.addRow(section, "\u5F53\u524D\u7248\u672C\u5DF2\u5B8C\u6210", String(data.summary.current_completed ?? 0));
+        const counts = data.summary.knowledge_counts || {};
+        this.addRow(section, "\u5904\u7406\u7EDF\u8BA1", `\u5904\u7406\u4E2D ${counts.updating || 0}\uFF1B\u5931\u8D25 ${counts.failed || 0}\uFF1B\u5F85\u9A8C\u8BC1 ${counts.unverified || 0}`);
+        if (data.summary.pipeline_counts) {
+          const pipeline = data.summary.pipeline_counts;
+          this.addRow(section, "\u540C\u6B65\u7EDF\u8BA1", `\u5DF2\u5BFC\u5165 ${pipeline.imported || 0}\uFF1B\u89E3\u6790\u5931\u8D25 ${pipeline.parse_failed || 0}\uFF1B\u7D22\u5F15\u5B8C\u6210 ${pipeline.index_completed || 0}\uFF1B\u8DF3\u8FC7 ${pipeline.skipped || 0}`);
+        }
         this.addRow(section, "\u56FE\u8C31\u7ED3\u679C", Object.entries(data.summary.graph_counts || {}).filter(([, count]) => count > 0).map(([state, count]) => `${this.graphLabel(state)} ${count}`).join("\uFF1B") || "\u6682\u65E0\u6587\u4EF6");
         this.addRow(section, "\u6700\u540E\u9A8C\u8BC1\u65F6\u95F4", this.formatTime(data.summary.last_verified_at));
         if (data.summary.status_stale) this.addRow(section, "\u72B6\u6001\u9A8C\u8BC1", "\u9700\u8981\u5237\u65B0\u9A8C\u8BC1");
         if (data.summary.partial) this.addRow(section, "\u7EDF\u8BA1\u8303\u56F4", "\u5F53\u524D\u9875\u53EF\u89C1\u6587\u4EF6\uFF0C\u66F4\u591A\u6587\u4EF6\u5F85\u52A0\u8F7D");
         if (data.summary.next_cursor) this.button(section, "\u52A0\u8F7D\u66F4\u591A\u6C47\u603B", () => this.loadMoreSummary(data));
       }
+      if (data.content_sync) {
+        this.addRow(section, "\u4E8B\u4EF6\u6C34\u4F4D", `\u5DF2\u63A5\u6536 ${data.content_sync.received_through || 0}\uFF1B\u5DF2\u6267\u884C ${data.content_sync.applied_through || 0}`);
+        if (data.content_sync.last_updated_at) this.addRow(section, "\u94FE\u8DEF\u66F4\u65B0\u65F6\u95F4", this.formatTime(data.content_sync.last_updated_at));
+        if (data.content_sync.next_retry_at) this.addRow(section, "\u4E0B\u6B21\u91CD\u8BD5", this.formatTime(data.content_sync.next_retry_at));
+        if (data.content_sync.error_code) this.addRow(section, "\u540C\u6B65\u539F\u56E0", data.content_sync.error_code);
+      }
+      if (data.operation?.operation_id) this.addRow(section, "\u64CD\u4F5C\u6807\u8BC6", String(data.operation.operation_id).slice(0, 8));
       if (targetDeleted) {
         this.addRow(section, "\u5904\u7406\u72B6\u6001", "\u53D1\u5E03\u4E0E\u81EA\u52A8\u540C\u6B65\u5DF2\u505C\u6B62\uFF0C\u6765\u6E90\u8BB0\u5F55\u548C\u539F\u6587\u4EF6\u5DF2\u4FDD\u7559");
         this.addRow(section, "\u6E05\u7406\u72B6\u6001", "\u6765\u6E90\u9000\u51FA\u4E0E\u7D22\u5F15\u6E05\u7406\u4ECD\u9700\u72EC\u7ACB\u6838\u9A8C");
@@ -4657,7 +4717,15 @@ ${message.stack}`;
             this.load();
           });
         } else {
-          this.button(section, "\u66F4\u6362\u77E5\u8BC6\u5E93", () => this.renderAssociation(false, true));
+          if (data.permissions?.can_take_over_kb !== false) {
+            this.button(section, "\u66F4\u6362\u77E5\u8BC6\u5E93", () => this.renderAssociation(false, true));
+          }
+          if (data.sync_enabled) {
+            this.button(section, "\u7ACB\u5373\u540C\u6B65", async () => {
+              await this.api(`/folders/${this.nodeId()}/sync-now`, "POST", {});
+              this.load();
+            });
+          }
           this.button(section, data.sync_enabled ? "\u6682\u505C\u540C\u6B65" : "\u6062\u590D\u540C\u6B65", async () => {
             await this.api(`/folders/${this.nodeId()}/sync`, "POST", {
               sync_enabled: !data.sync_enabled,
@@ -4671,6 +4739,15 @@ ${message.stack}`;
       }
       if (data.can_create) {
         this.button(section, "\u65B0\u5EFA\u5173\u8054\u76EE\u5F55", () => this.renderAssociation(true));
+      }
+      if (data.knowledge_base_url) {
+        const link = document.createElement("a");
+        link.className = "weknora-sidebar__link";
+        link.href = data.knowledge_base_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "\u6253\u5F00\u77E5\u8BC6\u5E93";
+        section.append(link);
       }
       this.button(section, "\u5237\u65B0\u72B6\u6001", () => this.load());
       this.replaceChildren(section);
@@ -4694,12 +4771,23 @@ ${message.stack}`;
           last_verified_at: previous.last_verified_at && page.last_verified_at ? Math.min(previous.last_verified_at, page.last_verified_at) : previous.last_verified_at || page.last_verified_at,
           failures: [...previous.failures, ...page.failures].slice(0, 20)
         };
-        for (const field of ["knowledge_counts", "graph_counts"]) {
-          merged[field] = { ...previous[field] };
+        for (const field of ["knowledge_counts", "graph_counts", "pipeline_counts"]) {
+          if (!page[field]) continue;
+          merged[field] = { ...previous[field] || {} };
           for (const [state, count] of Object.entries(page[field])) merged[field][state] = (merged[field][state] || 0) + count;
         }
         this._folderSummary = merged;
-        this.renderFolder({ ...data, ...next, summary: merged });
+        const updated = { ...data, ...next, summary: merged };
+        updated.content_sync_state = this.contentStateFromSummary(updated);
+        updated.overview_state = updated.publication_state === "stopped" ? "publication_stopped" : {
+          ready: "ready",
+          partial: "partial",
+          failed: "failed",
+          processing: "processing",
+          paused: "sync_paused",
+          unverified: "unverified"
+        }[updated.content_sync_state] || "unverified";
+        this.renderFolder(updated);
       } catch (error) {
         this._folderSummary = null;
         if (request === this._request && fileId === this.nodeId()) {
@@ -4716,8 +4804,8 @@ ${message.stack}`;
         button.disabled = true;
         try {
           await action();
-        } catch (_) {
-          this.renderMessage("\u64CD\u4F5C\u672A\u5B8C\u6210\u3002\u8BF7\u68C0\u67E5\u7BA1\u7406\u8D44\u683C\u4E0E\u914D\u7F6E\u540E\u5237\u65B0\u91CD\u8BD5\u3002");
+        } catch (error) {
+          this.renderMessage(error.nextAction ? `${error.message} ${error.nextAction}` : "\u64CD\u4F5C\u672A\u5B8C\u6210\u3002\u8BF7\u68C0\u67E5\u7BA1\u7406\u8D44\u683C\u4E0E\u914D\u7F6E\u540E\u5237\u65B0\u91CD\u8BD5\u3002");
         } finally {
           button.disabled = false;
         }
@@ -4725,10 +4813,28 @@ ${message.stack}`;
       parent.append(button);
       return button;
     }
-    async renderAssociation(creating, migrating = false) {
+    contentStateFromSummary(data) {
+      if (data.sync_enabled === false) return "paused";
+      const summary = data.summary || {};
+      if (summary.partial) return "unverified";
+      const counts = summary.knowledge_counts || {};
+      const ready = Number(counts.ready || 0);
+      const failed = Number(counts.failed || 0);
+      const updating = Number(counts.updating || 0);
+      const unverified = Number(counts.unverified || 0);
+      const skipped = Number(counts.skipped || 0);
+      const total = Number(summary.total_visible || 0);
+      if (failed > 0) return ready > 0 ? "partial" : "failed";
+      if (updating > 0) return "processing";
+      if (ready + skipped === total && unverified === 0) return skipped > 0 ? "partial" : "ready";
+      return "unverified";
+    }
+    async renderAssociation(creating, migrating = false, query = "") {
       const selectedId = this.nodeId();
       const request = ++this._request;
-      const result = await this.api(`/folders/${selectedId}/candidates${creating ? "?for_creation=1" : ""}`);
+      const params = new URLSearchParams({ for_creation: creating ? "1" : "0", limit: "50" });
+      if (query) params.set("q", query);
+      const result = await this.api(`/folders/${selectedId}/candidates?${params}`);
       if (request !== this._request || selectedId !== this.nodeId() || !this.isConnected) return;
       const form = document.createElement("form");
       form.className = "weknora-sidebar weknora-sidebar__form";
@@ -4743,12 +4849,24 @@ ${message.stack}`;
       const spaces = result.targets || [{
         tenant_id: result.tenant_id,
         processing_template_id: result.processing_template_id,
-        candidates: result.candidates || []
+        candidates: result.candidates || [],
+        ineligible: result.ineligible || [],
+        available: true,
+        can_bind: true
       }];
-      if (!spaces.length) {
-        this.renderMessage("\u76EE\u524D\u6CA1\u6709\u672C\u4EBA\u83B7\u51C6\u521B\u5EFA\u6216\u7ED1\u5B9A\u7684\u5DE5\u4F5C\u7A7A\u95F4\u3002\u8BF7\u8054\u7CFB\u76EE\u5F55\u53D1\u5E03\u7BA1\u7406\u8005\u3002");
-        return;
-      }
+      const search = document.createElement("div");
+      search.className = "weknora-sidebar__search";
+      const searchInput = document.createElement("input");
+      searchInput.type = "search";
+      searchInput.placeholder = "\u6309\u77E5\u8BC6\u5E93\u540D\u79F0\u641C\u7D22";
+      searchInput.value = query;
+      searchInput.setAttribute("aria-label", "\u6309\u77E5\u8BC6\u5E93\u540D\u79F0\u641C\u7D22");
+      const searchButton = document.createElement("button");
+      searchButton.type = "button";
+      searchButton.textContent = "\u5237\u65B0\u5019\u9009";
+      searchButton.addEventListener("click", () => this.renderAssociation(creating, migrating, searchInput.value.trim()));
+      search.append(searchInput, searchButton);
+      form.append(search);
       const space = document.createElement("select");
       const seenSpaces = /* @__PURE__ */ new Set();
       for (const candidate of spaces) {
@@ -4756,64 +4874,168 @@ ${message.stack}`;
         seenSpaces.add(String(candidate.tenant_id));
         const option = document.createElement("option");
         option.value = String(candidate.tenant_id);
-        option.textContent = candidate.space_name || `\u7A7A\u95F4 ${candidate.tenant_id}`;
+        const unavailable = candidate.available === false || candidate.can_bind === false;
+        option.disabled = unavailable;
+        option.textContent = `${candidate.space_name || `\u7A7A\u95F4 ${candidate.tenant_id}`}${unavailable ? `\uFF08\u4E0D\u53EF\u7528\uFF1A${candidate.reason_code || "\u914D\u7F6E\u672A\u9A8C\u8BC1"}\uFF09` : ""}`;
         space.append(option);
       }
       this.field(form, "\u5DE5\u4F5C\u7A7A\u95F4", space);
+      const firstUsable = spaces.find((candidate) => candidate.available !== false && candidate.can_bind !== false);
+      if (firstUsable) space.value = String(firstUsable.tenant_id);
+      const folderName = document.createElement("input");
+      folderName.type = "text";
+      folderName.maxLength = 255;
+      folderName.required = creating;
+      const folderField = this.field(form, "\u76EE\u5F55\u540D\u79F0", folderName);
+      folderField.hidden = !creating;
+      const mode = document.createElement("select");
+      mode.append(
+        new Option("\u8BF7\u9009\u62E9\u5173\u8054\u65B9\u5F0F", ""),
+        new Option("\u5173\u8054\u5DF2\u6709\u77E5\u8BC6\u5E93", "existing"),
+        new Option("\u521B\u5EFA\u65B0\u77E5\u8BC6\u5E93", "create")
+      );
+      this.field(form, "\u5173\u8054\u65B9\u5F0F", mode);
+      const target = document.createElement("select");
+      const targetField = this.field(form, "\u5DF2\u6709\u77E5\u8BC6\u5E93", target);
       const name = document.createElement("input");
       name.type = "text";
       name.maxLength = 255;
-      name.required = creating;
-      name.value = creating ? "" : this._node?.basename || this._node?.displayname || "\u76EE\u5F55\u77E5\u8BC6\u5E93";
-      this.field(form, creating ? "\u76EE\u5F55\u540D\u79F0\uFF08\u540C\u65F6\u4F5C\u4E3A\u77E5\u8BC6\u5E93\u540D\u79F0\uFF09" : "\u77E5\u8BC6\u5E93\u540D\u79F0", name);
-      if (!creating) name.hidden = true;
-      const target = document.createElement("select");
-      const automatic = document.createElement("option");
-      automatic.value = "";
-      automatic.textContent = "\u65B0\u5EFA\u77E5\u8BC6\u5E93";
+      name.value = this._node?.basename || this._node?.displayname || "\u76EE\u5F55\u77E5\u8BC6\u5E93";
+      let nameTouched = false;
+      const nameField = this.field(form, "\u77E5\u8BC6\u5E93\u540D\u79F0", name);
+      const reasons = document.createElement("div");
+      reasons.className = "weknora-sidebar__reasons";
+      reasons.setAttribute("aria-live", "polite");
+      form.append(reasons);
+      const loadMore = document.createElement("button");
+      loadMore.type = "button";
+      loadMore.textContent = "\u52A0\u8F7D\u66F4\u591A\u77E5\u8BC6\u5E93";
+      loadMore.hidden = true;
+      form.append(loadMore);
+      const selectedTarget = () => spaces.find((candidate) => String(candidate.tenant_id) === space.value);
       let selectedTemplate = "";
       const updateCandidates = () => {
-        target.replaceChildren(automatic);
-        const selected = spaces.find((candidate) => String(candidate.tenant_id) === space.value);
+        target.replaceChildren();
+        const selected = selectedTarget();
         selectedTemplate = selected ? String(selected.processing_template_id) : "";
+        const existingMode = mode.options[1];
+        const createMode = mode.options[2];
+        existingMode.disabled = !selected || !(selected.candidates || []).length;
+        createMode.disabled = !selected || selected.available === false || selected.can_bind === false;
+        if (mode.value === "existing" && existingMode.disabled) mode.value = "";
+        if (mode.value === "create" && createMode.disabled) mode.value = "";
         for (const candidate of selected?.candidates || []) {
           const option = document.createElement("option");
           option.value = candidate.id;
           const contentCount = Number(candidate.content_count || 0);
-          option.textContent = `\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1A${candidate.name}${contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : ""}`;
+          option.textContent = `\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1A${candidate.name}` + (contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : "") + (candidate.configuration_summary ? ` \xB7 ${candidate.configuration_summary}` : "");
           target.append(option);
         }
+        reasons.replaceChildren();
+        for (const candidate of selected?.ineligible || []) {
+          const note = document.createElement("p");
+          note.className = "weknora-sidebar__hint";
+          note.textContent = `${candidate.name || "\u77E5\u8BC6\u5E93"}\uFF1A${candidate.reason || candidate.reason_code || "\u914D\u7F6E\u672A\u901A\u8FC7\u6838\u9A8C"}`;
+          if (candidate.next_action) note.textContent += ` ${candidate.next_action}`;
+          reasons.append(note);
+        }
+        if (!selected || selected.available === false) {
+          const note = document.createElement("p");
+          note.className = "weknora-sidebar__hint";
+          note.textContent = `\u5F53\u524D\u7A7A\u95F4\u4E0D\u53EF\u7528\uFF1A${selected?.reason_code || result.reason_code || "space_candidate_unavailable"}\u3002\u8BF7\u8054\u7CFB\u76EE\u5F55\u53D1\u5E03\u7BA1\u7406\u8005\u3002`;
+          reasons.append(note);
+        } else if (!(selected.candidates || []).length) {
+          const note = document.createElement("p");
+          note.className = "weknora-sidebar__hint";
+          note.textContent = selected?.next_cursor ? "\u672C\u9875\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF0C\u53EF\u52A0\u8F7D\u66F4\u591A\uFF1B\u7CFB\u7EDF\u4E0D\u4F1A\u81EA\u52A8\u8F6C\u4E3A\u65B0\u5EFA\u3002" : "\u5F53\u524D\u641C\u7D22\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\u3002\u53EF\u660E\u786E\u9009\u62E9\u201C\u521B\u5EFA\u65B0\u77E5\u8BC6\u5E93\u201D\uFF0C\u4E0D\u4F1A\u56E0\u7A7A\u5019\u9009\u81EA\u52A8\u521B\u5EFA\u3002";
+          reasons.append(note);
+        }
+        loadMore.hidden = !selected?.next_cursor;
+        updateMode();
       };
-      space.addEventListener("change", updateCandidates);
-      updateCandidates();
-      this.field(form, "\u76EE\u6807\u77E5\u8BC6\u5E93", target);
       const existingNote = document.createElement("p");
-      existingNote.textContent = "\u9009\u62E9\u5DF2\u6709\u77E5\u8BC6\u5E93\u65F6\uFF0C\u539F\u6709\u5185\u5BB9\u4F1A\u4FDD\u7559\uFF1B\u7ED1\u5B9A\u540E\u8BE5\u77E5\u8BC6\u5E93\u7684\u65B0\u589E\u5185\u5BB9\u7531 Nextcloud \u76EE\u5F55\u7BA1\u7406\u3002";
       existingNote.className = "weknora-sidebar__hint";
       form.append(existingNote);
       const submit = document.createElement("button");
       submit.type = "submit";
       submit.textContent = creating ? "\u521B\u5EFA\u5E76\u5173\u8054" : migrating ? "\u5F00\u59CB\u8FC1\u79FB" : "\u5173\u8054";
       form.append(submit);
+      const updateMode = () => {
+        targetField.hidden = mode.value !== "existing";
+        nameField.hidden = mode.value !== "create";
+        folderField.hidden = !creating;
+        folderName.required = creating;
+        target.required = mode.value === "existing";
+        name.required = mode.value === "create";
+        submit.disabled = mode.value === "" || mode.value === "existing" && !target.value || creating && folderName.value.trim() === "";
+        existingNote.textContent = mode.value === "create" ? "\u5C06\u521B\u5EFA\u65B0\u7684\u77E5\u8BC6\u5E93\uFF1B\u76EE\u5F55\u548C\u65B0\u77E5\u8BC6\u5E93\u4F7F\u7528\u5F53\u524D\u8F93\u5165\u7684\u540D\u79F0\u3002" : "\u9009\u62E9\u5DF2\u6709\u77E5\u8BC6\u5E93\u65F6\uFF0C\u539F\u6709\u5185\u5BB9\u4F1A\u4FDD\u7559\uFF1B\u7ED1\u5B9A\u540E\u8BE5\u77E5\u8BC6\u5E93\u7684\u65B0\u589E\u5185\u5BB9\u7531 Nextcloud \u76EE\u5F55\u7BA1\u7406\u3002";
+      };
+      space.addEventListener("change", updateCandidates);
+      mode.addEventListener("change", updateMode);
+      folderName.addEventListener("input", () => {
+        if (creating && !nameTouched) name.value = folderName.value;
+        updateMode();
+      });
+      name.addEventListener("input", () => {
+        nameTouched = true;
+        updateMode();
+      });
+      target.addEventListener("change", updateMode);
+      updateCandidates();
+      loadMore.addEventListener("click", async () => {
+        const selected = selectedTarget();
+        if (!selected?.next_cursor) return;
+        loadMore.disabled = true;
+        try {
+          const moreParams = new URLSearchParams({
+            for_creation: creating ? "1" : "0",
+            limit: "50",
+            q: query,
+            cursor: selected.next_cursor
+          });
+          const page = await this.api(`/folders/${selectedId}/candidates?${moreParams}`);
+          if (page.candidate_revision !== result.candidate_revision) throw new Error("candidate_page_changed");
+          const nextTarget = (page.targets || []).find((candidate) => String(candidate.tenant_id) === String(selected.tenant_id) && String(candidate.processing_template_id) === String(selected.processing_template_id));
+          if (!nextTarget) throw new Error("candidate_page_changed");
+          const ids = new Set((selected.candidates || []).map((candidate) => candidate.id));
+          selected.candidates = [
+            ...selected.candidates || [],
+            ...(nextTarget.candidates || []).filter((candidate) => !ids.has(candidate.id))
+          ];
+          selected.ineligible = [...selected.ineligible || [], ...nextTarget.ineligible || []];
+          selected.next_cursor = nextTarget.next_cursor;
+          selected.candidate_revision = nextTarget.candidate_revision;
+          updateCandidates();
+        } catch (_) {
+          this.renderMessage("\u5019\u9009\u5DF2\u53D8\u5316\u6216\u65E0\u6CD5\u52A0\u8F7D\u66F4\u591A\uFF0C\u8BF7\u53D6\u6D88\u540E\u5237\u65B0\u5019\u9009\u3002");
+        } finally {
+          loadMore.disabled = false;
+        }
+      });
       this.button(form, "\u53D6\u6D88", () => this.load());
       const operationId = crypto.randomUUID();
       let submittedChoice;
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
+        if (!form.reportValidity()) return;
         submit.disabled = true;
         name.disabled = true;
         target.disabled = true;
         space.disabled = true;
-        const selected = spaces.find((candidate) => String(candidate.tenant_id) === space.value);
+        mode.disabled = true;
+        folderName.disabled = true;
+        const selected = selectedTarget();
         const chosen = selected?.candidates?.find((candidate) => String(candidate.id) === target.value);
         submittedChoice ||= {
           operation_id: operationId,
-          mode: target.value ? "existing" : "create",
-          name: chosen?.name || name.value,
-          knowledge_base_id: target.value,
-          folder_name: creating ? name.value : void 0,
+          mode: mode.value,
+          name: mode.value === "existing" ? chosen?.name : name.value,
+          knowledge_base_id: mode.value === "existing" ? target.value : "",
+          folder_name: creating ? folderName.value : void 0,
           tenant_id: space.value,
-          processing_template_id: selectedTemplate
+          processing_template_id: selectedTemplate,
+          target_candidate_revision: selected?.candidate_revision || null,
+          candidate_revision: result.candidate_revision || null
         };
         if (migrating && !this._targetMigrations.has(selectedId)) {
           this._targetMigrations.set(selectedId, { operationId, choice: submittedChoice, confirmed: false });
@@ -4823,21 +5045,32 @@ ${message.stack}`;
           const path = pending?.confirmed ? `/folders/${selectedId}/target-migrations/${operationId}` : `/folders/${selectedId}/${creating ? "create" : migrating ? "target-migration" : "associate"}`;
           const reply = await this.api(path, "POST", pending?.confirmed ? {} : submittedChoice);
           if (selectedId !== this.nodeId()) return;
+          const shortId = String(reply.operation?.operation_id || reply.migration?.operation_id || operationId).slice(0, 8);
           if (migrating) {
             const current = this._targetMigrations.get(selectedId);
             if (current) current.confirmed = true;
             if (reply.migration?.state === "active") this._targetMigrations.delete(selectedId);
             this.load();
           } else if (creating) {
-            this.renderMessage(reply.operation.state === "active" ? "\u76EE\u5F55\u5DF2\u521B\u5EFA\u5E76\u5173\u8054\u3002\u6253\u5F00\u65B0\u76EE\u5F55\u7684\u8BE6\u60C5\u67E5\u770B\u72B6\u6001\u3002" : "\u76EE\u5F55\u5DF2\u4FDD\u7559\uFF0C\u5173\u8054\u6B63\u5728\u91CD\u8BD5\u3002\u6253\u5F00\u65B0\u76EE\u5F55\u7684\u8BE6\u60C5\u67E5\u770B\u8FDE\u63A5\u72B6\u6001\u3002");
+            this.renderMessage(reply.operation.state === "active" ? `\u76EE\u5F55\u5DF2\u521B\u5EFA\u5E76\u5173\u8054\uFF08\u64CD\u4F5C ${shortId}\uFF09\u3002\u6253\u5F00\u65B0\u76EE\u5F55\u7684\u8BE6\u60C5\u67E5\u770B\u72B6\u6001\u3002` : `\u76EE\u5F55\u5DF2\u4FDD\u7559\uFF0C\u5173\u8054\u6B63\u5728\u91CD\u8BD5\uFF08\u64CD\u4F5C ${shortId}\uFF09\u3002`);
             this.button(this.firstElementChild, "\u5237\u65B0\u6587\u4EF6\u5217\u8868", () => window.location.reload());
-          } else this.load();
-        } catch (_) {
+          } else {
+            this.renderMessage(reply.operation?.state === "active" ? `\u5173\u8054\u5DF2\u5B8C\u6210\uFF08\u64CD\u4F5C ${shortId}\uFF09\u3002\u6B63\u5728\u5237\u65B0\u76EE\u5F55\u540C\u6B65\u72B6\u6001\u3002` : `\u5173\u8054\u5DF2\u4FDD\u5B58\uFF0C\u540E\u53F0\u6B63\u5728\u5904\u7406\uFF08\u64CD\u4F5C ${shortId}\uFF09\u3002`);
+            this.button(this.firstElementChild, "\u5237\u65B0\u72B6\u6001", () => this.load());
+          }
+        } catch (error) {
           const message = document.createElement("p");
-          message.textContent = "\u672A\u80FD\u786E\u8BA4\u5173\u8054\u7ED3\u679C\u3002\u91CD\u8BD5\u5C06\u7EE7\u7EED\u540C\u4E00\u64CD\u4F5C\u3002";
+          const changed = error.reasonCode === "candidate_revision_changed";
+          message.textContent = changed ? `${error.message} ${error.nextAction}` : error.nextAction ? `${error.message} ${error.nextAction} \u91CD\u8BD5\u5C06\u7EE7\u7EED\u540C\u4E00\u64CD\u4F5C\u3002` : "\u672A\u80FD\u786E\u8BA4\u5173\u8054\u7ED3\u679C\u3002\u91CD\u8BD5\u5C06\u7EE7\u7EED\u540C\u4E00\u64CD\u4F5C\u3002";
           form.append(message);
-          submit.textContent = "\u91CD\u8BD5\u540C\u4E00\u64CD\u4F5C";
-          submit.disabled = false;
+          if (changed) {
+            submit.textContent = "\u5019\u9009\u5DF2\u53D8\u5316";
+            submit.disabled = true;
+            this.button(form, "\u5237\u65B0\u5019\u9009", () => this.renderAssociation(creating, migrating, query));
+          } else {
+            submit.textContent = "\u91CD\u8BD5\u540C\u4E00\u64CD\u4F5C";
+            submit.disabled = false;
+          }
         }
       });
       this.replaceChildren(form);
@@ -4858,6 +5091,7 @@ ${message.stack}`;
       const label = document.createElement("label");
       label.append(document.createTextNode(title), input);
       parent.append(label);
+      return label;
     }
     graphLabel(state) {
       return {

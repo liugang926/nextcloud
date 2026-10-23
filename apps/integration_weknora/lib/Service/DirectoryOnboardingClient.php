@@ -81,6 +81,9 @@ final class DirectoryOnboardingClient {
         if ($status < 200 || $status >= 300) {
             // Never parse or forward remote errors: their body may contain
             // addresses, implementation details, or credentials.
+            if ($this->safeRemoteCode($raw) === 'nextcloud_candidate_revision_changed') {
+                throw new CandidateRevisionChangedException('Candidate observation changed', $status);
+            }
             if (in_array($status, [400, 401, 403, 404, 409, 422], true)) {
                 throw new DirectoryOnboardingRemoteRejectedException($status, $this->safeRemoteCode($raw));
             }
@@ -142,6 +145,7 @@ final class DirectoryOnboardingClient {
             'nextcloud_kb_blank_unverified',
             'nextcloud_kb_unavailable',
             'nextcloud_target_closed',
+            'nextcloud_candidate_revision_changed',
             'nextcloud_prepared_binding_unavailable',
             'source_pairing_not_found',
             'source_pairing_conflict',

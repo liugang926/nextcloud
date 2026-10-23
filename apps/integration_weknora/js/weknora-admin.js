@@ -607,6 +607,15 @@
                 document.getElementById('weknora-diagnostics-roots').textContent =
                     data.binding_roots_available ? `${data.binding_count} configured, available` :
                         `${data.binding_count} configured, one or more unavailable`;
+                if (data.connection) {
+                    document.getElementById('weknora-diagnostics-versions').textContent =
+                        `${data.connection.app_version || 'unknown'} / ${String(data.connection.bundle_version || '').slice(0, 12) || 'unknown'}`;
+                    document.getElementById('weknora-diagnostics-contract').textContent =
+                        `${data.connection.compatible ? 'compatible' : 'incompatible'} (v${data.connection.contract_version ?? 'unknown'})`;
+                    document.getElementById('weknora-diagnostics-health').textContent =
+                        data.connection.binding_allowed ? 'binding allowed' :
+                            `binding blocked${data.connection.health?.reason_code ? ` (${data.connection.health.reason_code})` : ''}`;
+                }
                 document.getElementById('weknora-diagnostics-hints').textContent =
                     String(data.retained_change_hints);
                 document.getElementById('weknora-diagnostics-oldest').textContent =
@@ -1071,6 +1080,18 @@
             title.className = 'weknora-admin__connected-title';
             title.textContent = `已连接：${data.origin}`;
             current.append(title);
+            const versions = document.createElement('p');
+            versions.textContent = `应用 ${data.app_version || '未知'} · 前端 ${String(data.bundle_version || '').slice(0, 12) || '未知'} · 契约 v${data.contract_version ?? '未知'}`;
+            current.append(versions);
+            const health = document.createElement('p');
+            health.textContent = data.compatible !== true
+                ? '兼容状态：不兼容。新目录绑定已关闭，已有目录保留只读状态。'
+                : data.health && data.health.binding_allowed === true
+                    ? '预检正常：目录绑定和后台同步可用。'
+                    : `预检降级：暂不能开始新的目录绑定。原因码：${data.health && data.health.reason_code || 'unknown'}`;
+            health.dataset.kind = data.compatible === true &&
+                data.health && data.health.binding_allowed === true ? 'success' : 'warning';
+            current.append(health);
             const list = document.createElement('div');
             list.className = 'weknora-admin__space-list';
             list.setAttribute('role', 'table');
@@ -1411,10 +1432,14 @@
                 card.append(details);
 
                 if (!available) {
-                    const reason = space.reason === 'no_processing_template'
-                        ? 'WeKnora 未返回可用的默认处理方案'
-                        : '当前连接密钥无权管理此空间';
+                    const reason = space.reason ||
+                        (space.reason_code === 'space_no_processing_template'
+                            ? 'WeKnora 未返回可用的默认处理方案'
+                            : '当前连接密钥无权管理此空间');
                     card.append(textNode('p', 'weknora-admin__space-reason', reason));
+                    if (space.next_action) {
+                        card.append(textNode('p', 'weknora-admin__space-reason', space.next_action));
+                    }
                 }
 
                 const access = document.createElement('div');
@@ -1489,7 +1514,10 @@
                     token: token.value,
                 });
                 renderSpaces(Array.isArray(data.spaces) ? data.spaces : []);
-                setMessage('已读取空间。勾选需要允许 Nextcloud 使用的空间后保存。');
+                setMessage(data.health && data.health.binding_allowed !== true
+                    ? `已读取空间，但后台组件预检降级。连接可保存，新目录绑定暂不可用。原因码：${data.health.reason_code || 'unknown'}。`
+                    : '已读取空间。勾选需要允许 Nextcloud 使用的空间后保存。',
+                    data.health && data.health.binding_allowed !== true ? 'warning' : '');
             } catch (error) {
                 spacesPanel.hidden = true;
                 current.hidden = false;
@@ -1547,7 +1575,10 @@
                 spacesPanel.hidden = true;
                 setMessage(editingVisibility
                     ? '空间可见范围已保存，现有目录绑定保持不变。'
-                    : '连接已保存。现在可以在 Nextcloud 目录的 WeKnora 标签中选择空间和知识库。');
+                    : (data.binding_allowed === true
+                        ? '连接已保存。现在可以在 Nextcloud 目录的 WeKnora 标签中选择空间和知识库。'
+                        : `连接已保存，但后台组件尚未验证，新的目录绑定暂时关闭。原因码：${data.health && data.health.reason_code || 'unknown'}。`),
+                    editingVisibility ? '' : (data.binding_allowed === true ? 'success' : 'warning'));
             } catch (error) {
                 setMessage(error.status === 400
                     ? '连接配置无效，请确认指定的 Nextcloud 用户和组 ID 存在。'

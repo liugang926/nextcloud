@@ -89,6 +89,9 @@ style('integration_weknora', 'weknora-admin');
         </div>
         <p id="weknora-diagnostics-message" class="weknora-admin__message" role="status" aria-live="polite">Loading source diagnostics…</p>
         <div id="weknora-diagnostics-values" hidden>
+            <p>Nextcloud app / frontend bundle: <strong id="weknora-diagnostics-versions"></strong></p>
+            <p>WeKnora contract compatibility: <strong id="weknora-diagnostics-contract"></strong></p>
+            <p>Binding gate and background health: <strong id="weknora-diagnostics-health"></strong></p>
             <p>Binding roots: <strong id="weknora-diagnostics-roots"></strong></p>
             <p>Retained change hints: <strong id="weknora-diagnostics-hints"></strong></p>
             <p>Oldest retained hint age: <strong id="weknora-diagnostics-oldest"></strong></p>
