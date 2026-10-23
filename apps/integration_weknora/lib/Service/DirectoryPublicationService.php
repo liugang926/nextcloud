@@ -215,9 +215,18 @@ final class DirectoryPublicationService {
         // Validate egress without making a request or exposing the credential.
         (new EventReceiverPolicy())->requireApproved($rule['weknora_origin'] . EventReceiverPolicy::PATH);
         $container = $this->folder($rule['owner_uid'], $rule['container_file_id']);
+        $physicalRootKey = self::physicalKey($container);
+        if (isset($rule['physical_root_key']) &&
+            (!is_string($rule['physical_root_key']) ||
+             !preg_match('/\A[a-f0-9]{64}\z/D', $rule['physical_root_key']) ||
+             !hash_equals($physicalRootKey, $rule['physical_root_key']))) {
+            throw new \InvalidArgumentException('Directory rule physical identity changed');
+        }
+        $rule['physical_root_key'] = $physicalRootKey;
         $this->acl->assertSupported($container);
         $allowed = ['id', 'owner_uid', 'container_file_id', 'tenant_id', 'weknora_origin', 'base_url',
-            'processing_template_id', 'discovery', 'delegates', 'auto_enabled', 'automation_uid', 'targets'];
+            'processing_template_id', 'discovery', 'delegates', 'auto_enabled', 'automation_uid', 'targets',
+            'physical_root_key'];
         $rule = array_intersect_key($rule, array_flip($allowed));
         $this->db->beginTransaction();
         try {
@@ -287,13 +296,40 @@ final class DirectoryPublicationService {
                     }
                 }
             }
+            $knowledgeBaseName = null;
+            if ($intent !== null) {
+                try {
+                    $request = json_decode((string)$intent['request_json'], true, 16, JSON_THROW_ON_ERROR);
+                    if (is_string($request['name'] ?? null)) {
+                        $knowledgeBaseName = $request['name'];
+                    }
+                } catch (\Throwable $ignored) {}
+            }
+            $manageable = $folderId === $binding['root_file_id'] && $rule !== null && $this->delegated($uid, $rule);
+            $projection = $this->bindingProjection($binding, $pair, $intent);
             return ['folder_id' => $folderId, 'source_state' => $closed === null ? 'bound' : 'target_deleted', 'binding_id' => $binding['id'],
                 'binding_name' => $binding['name'], 'inherited' => $folderId !== $binding['root_file_id'],
-                'manageable' => $folderId === $binding['root_file_id'] && $rule !== null && $this->delegated($uid, $rule),
+                'directory_role' => $folderId === $binding['root_file_id'] ? 'associated_root' : 'inherited_child',
+                'manageable' => $manageable,
                 'publication_state' => $binding['publication_state'], 'sync_enabled' => $binding['sync_enabled'],
                 'sync_revision' => $binding['sync_revision'], 'pairing_state' => $pair['state'] ?? 'pending',
                 'tenant_id' => $closed['target']['tenant_id'] ?? $pair['tenant_id'] ?? null, 'knowledge_base_id' => $closed['target']['knowledge_base_id'] ?? $pair['knowledge_base_id'] ?? null,
+                'knowledge_base_name' => $knowledgeBaseName,
+                'knowledge_base_url' => $pair === null ? null
+                    : $this->knowledgeBaseUrl((string)$pair['knowledge_base_id']),
                 'space_name' => $spaceName,
+                'binding_state' => $projection['binding_state'],
+                'content_sync_state' => $projection['content_sync_state'],
+                'overview_state' => $this->overviewState($projection['binding_state'],
+                    $projection['content_sync_state'], $binding['publication_state']),
+                'content_sync' => $projection['content_sync'],
+                'permissions' => [
+                    'can_view_space' => true,
+                    'can_bind_directory' => $manageable,
+                    'can_take_over_kb' => $manageable,
+                    'can_query_kb' => false,
+                    'can_admin_connection' => $this->groups->isAdmin($uid),
+                ],
                 'operation' => $operation];
         }
         $intent = $this->find('root_key', self::physicalKey($folder));
@@ -301,15 +337,89 @@ final class DirectoryPublicationService {
         if ($closed !== null) {
             return ['folder_id' => $folderId, 'source_state' => 'target_deleted', 'inherited' => false, 'manageable' => false, 'can_create' => false,
                 'binding_id' => $closed['target']['binding_id'], 'tenant_id' => $closed['target']['tenant_id'], 'knowledge_base_id' => $closed['target']['knowledge_base_id'],
+                'directory_role' => 'associated_root', 'binding_state' => 'stopped',
+                'content_sync_state' => 'publication_stopped', 'overview_state' => 'publication_stopped',
+                'content_sync' => ['state' => 'publication_stopped', 'error_code' => 'target_deleted'],
+                'permissions' => ['can_view_space' => false, 'can_bind_directory' => false,
+                    'can_take_over_kb' => false, 'can_query_kb' => false,
+                    'can_admin_connection' => $this->groups->isAdmin($uid)],
                 'publication_state' => 'stopped', 'sync_enabled' => false, 'operation' => ['operation_id' => $closed['target']['operation_id'],
                     'state' => 'target_deleted', 'error_code' => 'target_deleted', 'revision' => (int)($intent['revision'] ?? 0)]];
         }
         $rule = $this->matchingRule($folder);
         $creationRule = $this->matchingRule($folder, true);
         return ['folder_id' => $folderId, 'source_state' => $intent === null ? 'unbound' : 'pending',
-            'inherited' => false, 'manageable' => $rule !== null && $this->delegated($uid, $rule),
+            'inherited' => false,
+            'directory_role' => $rule !== null ? 'unassociated_root' :
+                ($creationRule !== null ? 'new_directory_parent' : 'unmanageable'),
+            'manageable' => $rule !== null && $this->delegated($uid, $rule),
             'can_create' => $creationRule !== null && $this->delegated($uid, $creationRule),
+            'binding_state' => $intent === null ? 'unbound' : 'reserved',
+            'content_sync_state' => 'not_started',
+            'overview_state' => $intent === null ? 'unbound' : 'binding',
+            'content_sync' => ['state' => 'not_started'],
+            'permissions' => [
+                'can_view_space' => $rule !== null,
+                'can_bind_directory' => $rule !== null && $this->delegated($uid, $rule),
+                'can_take_over_kb' => $rule !== null && $this->delegated($uid, $rule),
+                'can_query_kb' => false,
+                'can_admin_connection' => $this->groups->isAdmin($uid),
+            ],
             'operation' => $intent === null ? null : $this->publicIntent($intent)];
+    }
+
+    /** Apply a fresh, user-scoped folder summary without promoting unknown to ready. */
+    public function applySummary(array $status, ?array $summary): array {
+        $value = $summary['summary'] ?? null;
+        if (!is_array($value)) {
+            return $status;
+        }
+        $counts = is_array($value['knowledge_counts'] ?? null) ? $value['knowledge_counts'] : [];
+        $ready = max(0, (int)($counts['ready'] ?? 0));
+        $failed = max(0, (int)($counts['failed'] ?? 0));
+        $updating = max(0, (int)($counts['updating'] ?? 0));
+        $unverified = max(0, (int)($counts['unverified'] ?? 0));
+        $skipped = max(0, (int)($counts['skipped'] ?? 0));
+        $total = max(0, (int)($value['total_visible'] ?? 0));
+        $status['summary'] = $value;
+        $status['content_sync']['last_success_at'] = $value['last_verified_at'] ?? null;
+        if (($status['sync_enabled'] ?? true) === false) {
+            $status['content_sync_state'] = 'paused';
+        } elseif ($total === 0) {
+            $status['content_sync_state'] = $status['binding_state'] === 'active' ? 'waiting_manifest' : 'not_started';
+        } elseif ($failed > 0) {
+            $status['content_sync_state'] = $ready > 0 ? 'partial' : 'failed';
+        } elseif ($updating > 0) {
+            $status['content_sync_state'] = 'processing';
+        } elseif (($value['partial'] ?? false) === true) {
+            $status['content_sync_state'] = 'unverified';
+        } elseif ($ready + $skipped === $total && $unverified === 0) {
+            $status['content_sync_state'] = $skipped > 0 ? 'partial' : 'ready';
+        } elseif ($unverified > 0 && in_array($status['content_sync_state'],
+            ['queued', 'delivering', 'received', 'manifest_fetching'], true)) {
+            // Queue progress remains visible without becoming ready proof.
+        } else {
+            $status['content_sync_state'] = 'unverified';
+        }
+        $status['content_sync']['counts'] = ['ready' => $ready, 'processing' => $updating,
+            'failed' => $failed, 'unverified' => $unverified, 'skipped' => $skipped, 'total' => $total];
+        if ($failed > 0 && is_array($value['failures'] ?? null) && $value['failures'] !== []) {
+            $failure = (string)($value['failures'][0]['error_code'] ?? 'source_processing_failed');
+            $status['content_sync']['error_code'] = match ($failure) {
+                'parse_failed' => 'source_parse_failed',
+                'unsupported_backend' => 'kb_storage_unavailable',
+                'embedding_failed' => 'kb_embedding_model_missing',
+                'graph_extract_failed', 'graph_persist_failed', 'graph_write_unverified',
+                'graph_configuration_changed', 'required_graph_failed' => 'kb_graph_model_missing',
+                default => $failure,
+            };
+        }
+        $status['overview_state'] = $this->overviewState(
+            (string)($status['binding_state'] ?? 'unbound'),
+            (string)$status['content_sync_state'],
+            (string)($status['publication_state'] ?? 'stopped'));
+        $status['permissions']['can_query_kb'] = false;
+        return $status;
     }
 
     public function candidates(
@@ -317,13 +427,24 @@ final class DirectoryPublicationService {
         int $folderId,
         bool $forCreation = false,
         ?array $allowedTenantIds = null,
+        string $query = '',
+        string $cursor = '',
+        int $limit = 50,
     ): array {
         $folder = $this->folder($uid, $folderId);
         $rule = $forCreation ? $this->matchingRule($folder, true) : $this->requireManagement($uid, $folder);
         if ($rule === null || !$this->delegated($uid, $rule)) { throw new \DomainException('Publication management is forbidden'); }
         $allowed = $allowedTenantIds === null ? null : array_fill_keys($allowedTenantIds, true);
+        $query = trim($query);
+        if (strlen($query) > 128 || strlen($cursor) > 2048) {
+            throw new \InvalidArgumentException('Invalid candidate query');
+        }
+        $limit = max(1, min(100, $limit));
         $identity = $this->identities->forUser($uid);
         $targets = [];
+        $spaces = [];
+        $ineligible = [];
+        $revisions = [];
         foreach ($this->targetChoices($rule) as $target) {
             if ($allowed !== null && !isset($allowed[(string)$target['tenant_id']])) {
                 continue;
@@ -332,17 +453,180 @@ final class DirectoryPublicationService {
                 $effective = $this->selectTarget($rule, $target['tenant_id'],$target['processing_template_id']);
                 $response = $this->remote->request($effective, 'GET', '/candidates', [
                     'tenant_id' => $effective['tenant_id'],'processing_template_id'=>$effective['processing_template_id'], 'actor_directory_id' => $identity['directory_id'],
-                    'actor_object_guid' => $identity['object_guid']]);
+                    'actor_object_guid' => $identity['object_guid'], 'q' => $query,
+                    'cursor' => $cursor, 'limit' => $limit]);
                 if((string)($response['tenant_id']??'')!==$effective['tenant_id']||($response['processing_template_id']??null)!==$effective['processing_template_id']){throw new \DomainException('Scoped candidate template identity mismatch');}
-                $targets[] = ['tenant_id' => $effective['tenant_id'], 'processing_template_id' => $effective['processing_template_id'],
-                    'space_name' => is_string($effective['space_name'] ?? null) ? $effective['space_name'] : null,
+                $contract = is_int($response['contract_version'] ?? null) ? $response['contract_version'] : 1;
+                $eligible = $this->normalizeCandidates($response['candidates'] ?? []);
+                $rejected = $this->normalizeCandidates($response['ineligible'] ?? [], false);
+                foreach ($rejected as &$candidate) {
+                    if (!in_array($candidate['reason_code'] ?? null, $this->knownReasons(), true)) {
+                        $candidate['reason_code'] = 'kb_configuration_unverified';
+                    }
+                    $candidate['eligible'] = false;
+                }
+                unset($candidate);
+                foreach ($eligible as &$candidate) {
+                    if ($candidate['reason_code'] !== null && $candidate['reason_code'] !== '') {
+                        $candidate['eligible'] = false;
+                        $rejected[] = $candidate;
+                        $candidate = null;
+                    }
+                }
+                $eligible = array_values(array_filter($eligible));
+                unset($candidate);
+                $spaceName = is_string($effective['space_name'] ?? null) && $effective['space_name'] !== ''
+                    ? $effective['space_name'] : (is_string($response['space_name'] ?? null) ? $response['space_name'] : null);
+                $target = ['tenant_id' => $effective['tenant_id'], 'processing_template_id' => $effective['processing_template_id'],
+                    'space_name' => $spaceName,
                     'template_name'=>is_string($response['processing_template_name']??null)?$response['processing_template_name']:$effective['processing_template_id'],
                     'graph_mode'=>in_array($response['graph_mode']??null,['off','optional','required'],true)?$response['graph_mode']:null,
-                    'candidates' => $response['candidates'] ?? []];
-            } catch (\DomainException $e) { /* Do not expose an unauthorized space or KB. */ }
+                    'contract_version' => $contract, 'available' => true, 'can_bind' => true,
+                    'can_view_space' => true, 'candidates' => $eligible, 'ineligible' => $rejected,
+                    'next_cursor' => is_string($response['next_cursor'] ?? null) ? $response['next_cursor'] : null,
+                    'candidate_revision' => is_string($response['candidate_revision'] ?? null)
+                        ? $response['candidate_revision'] : null,
+                    'reason_code' => null];
+                $targets[] = $target;
+                $spaces[] = ['tenant_id' => $effective['tenant_id'], 'name' => $spaceName,
+                    'can_bind' => true, 'can_view_space' => true, 'available' => true,
+                    'reason_code' => null, 'processing_template_id' => $effective['processing_template_id']];
+                foreach ($rejected as $candidate) {
+                    if (is_array($candidate) && isset($candidate['id'], $candidate['name'])) {
+                        $ineligible[] = $candidate + ['space_id' => $effective['tenant_id'], 'space_name' => $spaceName];
+                    }
+                }
+                $revisions[] = ['target' => [$effective['tenant_id'], $effective['processing_template_id']],
+                    'revision' => $target['candidate_revision']];
+            } catch (\Throwable $e) {
+                $code = $this->candidateErrorCode($e);
+                $targets[] = ['tenant_id' => $target['tenant_id'],
+                    'processing_template_id' => $target['processing_template_id'],
+                    'space_name' => is_string($target['space_name'] ?? null) ? $target['space_name'] : null,
+                    'template_name' => null, 'graph_mode' => null, 'contract_version' => null,
+                    'available' => false, 'can_bind' => false, 'can_view_space' => false,
+                    'candidates' => [], 'ineligible' => [], 'next_cursor' => null,
+                    'candidate_revision' => null, 'reason_code' => $code];
+                $spaces[] = ['tenant_id' => $target['tenant_id'],
+                    'name' => is_string($target['space_name'] ?? null) ? $target['space_name'] : null,
+                    'can_bind' => false, 'can_view_space' => false, 'available' => false,
+                    'reason_code' => $code, 'processing_template_id' => $target['processing_template_id']];
+                $ineligible[] = ['space_id' => $target['tenant_id'],
+                    'space_name' => is_string($target['space_name'] ?? null) ? $target['space_name'] : null,
+                    'name' => is_string($target['space_name'] ?? null) ? $target['space_name'] : null,
+                    'reason_code' => $code];
+                $revisions[] = ['target' => [$target['tenant_id'], $target['processing_template_id']],
+                    'reason_code' => $code];
+            }
         }
         $first = $targets[0] ?? ['tenant_id' => null, 'processing_template_id' => null, 'candidates' => []];
-        return ['rule_id' => $rule['id'], 'targets' => $targets] + $first;
+        $hasCandidates = false;
+        $hasAvailable = false;
+        $hasMore = false;
+        foreach ($targets as $target) {
+            $hasCandidates = $hasCandidates || ($target['candidates'] ?? []) !== [];
+            $hasAvailable = $hasAvailable || ($target['available'] ?? false) === true;
+            $hasMore = $hasMore || is_string($target['next_cursor'] ?? null);
+        }
+        $result = [
+            'contract_version' => 2,
+            'request_id' => 'req_' . bin2hex(random_bytes(12)),
+            'candidate_revision' => 'sha256:' . hash('sha256', json_encode([
+                'rule' => $rule['id'], 'query' => $query, 'targets' => $revisions,
+            ], JSON_THROW_ON_ERROR)),
+            'state' => $hasCandidates ? 'available' : ($hasAvailable ? ($hasMore ? 'empty_page' : 'empty') : 'unavailable'),
+            'reason_code' => !$hasAvailable ? ($targets[0]['reason_code'] ?? 'space_candidate_unavailable')
+                : ($hasCandidates ? null : 'no_eligible_knowledge_base'),
+            'spaces' => $spaces,
+            'ineligible' => $ineligible,
+            'permissions' => [
+                'can_view_space' => true, 'can_bind_directory' => true,
+                'can_take_over_kb' => true, 'can_query_kb' => false,
+                'can_admin_connection' => $this->groups->isAdmin($uid),
+            ],
+            'rule_id' => $rule['id'], 'targets' => $targets,
+        ] + $first;
+        $this->audit($uid, $folderId, null, null, 'candidates_viewed', $result['reason_code']);
+        return $result;
+    }
+
+    public function audit(string $uid, int $folderId, ?string $bindingId,
+        ?string $operationId, string $action, ?string $reasonCode = null): void {
+        if ($uid === '' || strlen($uid) > 64 || $folderId < 1 ||
+            !preg_match('/\A[a-z_]{1,32}\z/D', $action) ||
+            ($bindingId !== null && !preg_match('/\A[A-Za-z0-9_-]{1,128}\z/D', $bindingId)) ||
+            ($operationId !== null && !SourcePairingRegistryService::validOperationId($operationId)) ||
+            ($reasonCode !== null && ($reasonCode === '' || strlen($reasonCode) > 64))) {
+            throw new \InvalidArgumentException('Invalid directory audit entry');
+        }
+        $q = $this->db->getQueryBuilder();
+        $q->insert('weknora_directory_audit')->values([
+            'actor_uid' => $q->createNamedParameter($uid),
+            'folder_id' => $q->createNamedParameter($folderId),
+            'binding_id' => $q->createNamedParameter($bindingId),
+            'operation_id' => $q->createNamedParameter($operationId),
+            'action' => $q->createNamedParameter($action),
+            'reason_code' => $q->createNamedParameter($reasonCode),
+            'created_at' => $q->createNamedParameter(time()),
+        ])->executeStatement();
+    }
+
+    private function normalizeCandidates(mixed $items, bool $eligibleByDefault = true): array {
+        if (!is_array($items) || !array_is_list($items)) {
+            return [];
+        }
+        $out = [];
+        foreach ($items as $item) {
+            if (!is_array($item) || !is_string($item['id'] ?? null) ||
+                !SourcePairingRegistryService::validRemoteId($item['id']) ||
+                !is_string($item['name'] ?? null) || $item['name'] === '' || strlen($item['name']) > 255) {
+                continue;
+            }
+            $count = $item['content_count'] ?? 0;
+            $count = is_int($count) || (is_string($count) && ctype_digit($count))
+                ? filter_var($count, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0, 'max_range' => 1000000000]])
+                : false;
+            $count = $count === false ? 0 : $count;
+            $reason = is_string($item['reason_code'] ?? null) && strlen($item['reason_code']) <= 64
+                ? $item['reason_code'] : null;
+            $candidate = [
+                'id' => $item['id'], 'name' => $item['name'],
+                'content_count' => max(0, (int)$count),
+                'eligible' => ($item['eligible'] ?? $eligibleByDefault) === true,
+                'reason_code' => $reason,
+                'reason' => is_string($item['reason'] ?? null) ? substr($item['reason'], 0, 512) : null,
+                'next_action' => is_string($item['next_action'] ?? null) ? substr($item['next_action'], 0, 512) : null,
+                'can_take_over' => ($item['can_take_over'] ?? ($item['eligible'] ?? $eligibleByDefault)) === true,
+                'processing_template_id' => SourcePairingRegistryService::validRemoteId($item['processing_template_id'] ?? null)
+                    ? $item['processing_template_id'] : null,
+                'processing_template_name' => is_string($item['processing_template_name'] ?? null)
+                    ? substr($item['processing_template_name'], 0, 255) : null,
+                'configuration_summary' => is_string($item['configuration_summary'] ?? null)
+                    ? substr($item['configuration_summary'], 0, 255) : null,
+            ];
+            if ($reason === null && isset($item['eligible']) && $item['eligible'] === false) {
+                $candidate['reason_code'] = 'kb_configuration_unverified';
+            }
+            $out[] = $candidate;
+        }
+        return $out;
+    }
+
+    private function candidateErrorCode(\Throwable $error): string {
+        if ((int)$error->getCode() === 403) {
+            return 'space_not_visible';
+        }
+        return 'space_candidate_unavailable';
+    }
+
+    /** @return list<string> */
+    private function knownReasons(): array {
+        return ['space_not_visible', 'directory_identity_missing', 'directory_permission_denied',
+            'space_no_processing_template', 'kb_configuration_unverified', 'kb_wiki_not_supported',
+            'kb_storage_unavailable', 'kb_embedding_model_missing', 'kb_graph_model_missing',
+            'kb_already_bound', 'binding_root_conflict', 'event_receiver_unauthorized',
+            'sync_paused', 'source_parse_failed', 'space_candidate_unavailable',
+            'no_eligible_knowledge_base'];
     }
 
     /** The intent commits before newFolder(), including the exact user's target choice. */
@@ -366,7 +650,11 @@ final class DirectoryPublicationService {
             if (!$folder instanceof Folder) { throw new \DomainException('Created path is not a directory'); }
             $this->attachRoot($intent, $folder);
         }
-        return $this->retry($uid, (string)$intent['operation_id']);
+        $result = $this->retry($uid, (string)$intent['operation_id']);
+        $this->audit($uid, (int)($result['folder_id'] ?? $intent['root_file_id']),
+            (string)$intent['binding_id'], (string)$intent['operation_id'], 'directory_created',
+            $result['error_code'] ?: null);
+        return $result;
     }
 
     public function associate(string $uid, int $folderId, array $choice, bool $process = true): array {
@@ -376,7 +664,10 @@ final class DirectoryPublicationService {
         $identity = $this->identities->forUser($uid);
         $intent = $this->reserve($rule, $uid, $identity, $choice, $folderId, 0, $folder->getName(), self::physicalKey($folder));
         if (!$process) { return $this->publicIntent($intent); }
-        return $this->retry($uid, (string)$intent['operation_id']);
+        $result = $this->retry($uid, (string)$intent['operation_id']);
+        $this->audit($uid, $folderId, (string)$intent['binding_id'],
+            (string)$intent['operation_id'], 'association_requested', $result['error_code'] ?: null);
+        return $result;
     }
 
     public function retry(string $uid, string $operationId): array {
@@ -390,7 +681,10 @@ final class DirectoryPublicationService {
 
         $this->rootMoves->retryUnchanged((string)$intent['binding_id'], $this->identities->forUser($uid));
         $this->process($operationId, true, $uid);
-        return $this->publicIntent($this->find('operation_id', $operationId) ?? $intent);
+        $result = $this->publicIntent($this->find('operation_id', $operationId) ?? $intent);
+        $this->audit($uid, (int)$result['folder_id'], (string)$intent['binding_id'],
+            $operationId, 'operation_retry', $result['error_code'] ?: null);
+        return $result;
     }
 
 
@@ -447,7 +741,28 @@ final class DirectoryPublicationService {
             ->set('sync_revision', $q->createNamedParameter($next))
             ->where($q->expr()->eq('binding_id', $q->createNamedParameter($intent['binding_id'])))
             ->andWhere($q->expr()->lte('sync_revision', $q->createNamedParameter($next)))->executeStatement();
-        return $this->show($uid, $folderId);
+        $result = $this->show($uid, $folderId);
+        $this->audit($uid, $folderId, (string)$intent['binding_id'],
+            (string)$intent['operation_id'], $enabled ? 'sync_resumed' : 'sync_paused');
+        return $result;
+    }
+
+    public function syncNow(string $uid, int $folderId): array {
+        $this->recovery->requireAutomationOpen($this->config);
+        $status = $this->show($uid, $folderId);
+        if (($status['binding_state'] ?? '') !== 'active' ||
+            ($status['sync_enabled'] ?? false) !== true ||
+            ($status['permissions']['can_bind_directory'] ?? false) !== true) {
+            throw new \DomainException('Content sync is not available');
+        }
+        $bindingId = $status['binding_id'] ?? null;
+        if (!is_string($bindingId)) {
+            throw new \DomainException('Binding is unavailable');
+        }
+        DirectoryTargetClosureService::requireOpen($this->db, $bindingId);
+        $id = $this->changes->requestReconcile($bindingId);
+        $this->audit($uid, $folderId, $bindingId, null, 'sync_now_requested');
+        return $status + ['reconcile' => ['queued' => $id > 0, 'event_id' => (string)$id]];
     }
 
     /** Bounded cron compensation; uploads never perform remote HTTP in node events. */
@@ -508,7 +823,10 @@ final class DirectoryPublicationService {
         int $parentId, string $name, string $rootKey): array {
         if (!SourcePairingRegistryService::validOperationId($choice['operation_id'] ?? null) ||
             !in_array($choice['mode'] ?? null, ['create', 'existing'], true) ||
-            ($choice['mode'] === 'existing' && !SourcePairingRegistryService::validRemoteId($choice['knowledge_base_id'] ?? null))) {
+            ($choice['mode'] === 'existing' && !SourcePairingRegistryService::validRemoteId($choice['knowledge_base_id'] ?? null)) ||
+            (isset($choice['candidate_revision']) && $choice['candidate_revision'] !== '' &&
+                (!is_string($choice['candidate_revision']) ||
+                 !preg_match('/\Asha256:[a-f0-9]{64}\z/D', $choice['candidate_revision'])))) {
             throw new \InvalidArgumentException('Invalid target choice');
         }
 
@@ -522,6 +840,9 @@ final class DirectoryPublicationService {
             'mode' => $choice['mode'], 'name' => $choice['name'] ?? $name,
             'knowledge_base_id' => $choice['mode'] === 'existing' ? $choice['knowledge_base_id'] : '',
             'processing_template_id' => $rule['processing_template_id']];
+        if (is_string($choice['candidate_revision'] ?? null) && $choice['candidate_revision'] !== '') {
+            $request['candidate_revision'] = $choice['candidate_revision'];
+        }
         if (!is_string($request['name']) || $request['name'] === '' || strlen($request['name']) > 255) {
             throw new \InvalidArgumentException('Invalid knowledge base name');
         }
@@ -688,7 +1009,7 @@ final class DirectoryPublicationService {
                 'permission_version' => $permissionVersion, 'publication_epoch' => $this->bindings->requirePublicationActive($intent['binding_id']),
                 'complete' => true, 'subjects' => $snapshot]);
             $stage = 'reconcile';
-            $this->changes->append($intent['binding_id'], null, 'reconcile');
+            $this->changes->ensureInitialReconcile($intent['binding_id']);
             $remoteRevision = $received['operation']['revision'] ?? null;
             if (is_int($remoteRevision) && $remoteRevision >= 1) {
                 $q = $this->db->getQueryBuilder();
@@ -967,6 +1288,141 @@ final class DirectoryPublicationService {
             $other = $this->folder($row['owner_uid'], (int)$row['root_file_id']);
             if (self::contains($root, $other) || self::contains($other, $root)) { throw new \DomainException('Publication intents overlap'); }
         }
+    }
+
+    private function bindingProjection(array $binding, ?array $pair, ?array $intent): array {
+        $bindingState = 'bound';
+        $operationState = is_array($intent) ? (string)$intent['state'] : '';
+        $pairState = is_array($pair) ? (string)$pair['state'] : 'pending';
+        if ($binding['publication_state'] === 'stopped' || $operationState === 'retired') {
+            $bindingState = 'stopped';
+        } elseif ($operationState === 'pending' && is_array($intent) &&
+            (string)($intent['error_code'] ?? '') !== '') {
+            $bindingState = 'failed';
+        } elseif ($pairState === 'active' && $operationState === 'active') {
+            $bindingState = 'active';
+        } elseif ($pairState === 'active') {
+            $bindingState = is_array($intent) && (int)$intent['permission_version'] > 0
+                ? 'grants_synced' : 'paired';
+        }
+        $content = $this->contentSyncObservation((string)$binding['id'],
+            (bool)$binding['sync_enabled'], $bindingState);
+        return ['binding_state' => $bindingState, 'content_sync_state' => $content['state'],
+            'content_sync' => $content];
+    }
+
+    private function contentSyncObservation(string $bindingId, bool $syncEnabled,
+        string $bindingState): array {
+        $out = ['state' => 'not_started', 'connection_status' => 'unconfigured',
+            'received_through' => '0', 'applied_through' => '0',
+            'pending_delivery' => 0, 'pending_application' => 0,
+            'last_updated_at' => null, 'next_retry_at' => null,
+            'error_code' => null, 'last_success_at' => null, 'counts' => null];
+        if (!$syncEnabled) {
+            $out['state'] = 'paused';
+            return $out;
+        }
+        if ($bindingState === 'stopped') {
+            $out['state'] = 'publication_stopped';
+            return $out;
+        }
+        $q = $this->db->getQueryBuilder();
+        $r = $q->select('status', 'received_id', 'applied_id', 'applied_checked_at',
+            'applied_error_code', 'next_attempt_at', 'last_error_code', 'updated_at')
+            ->from('weknora_event_conn')
+            ->where($q->expr()->eq('binding_id', $q->createNamedParameter($bindingId)))
+            ->setMaxResults(1)->executeQuery();
+        try {
+            $row = $r->fetchAssociative();
+        } finally {
+            $r->closeCursor();
+        }
+        if ($row === false) {
+            $out['state'] = $bindingState === 'active' ? 'queued' : 'not_started';
+            return $out;
+        }
+        $out['connection_status'] = (string)$row['status'];
+        $out['received_through'] = (string)(int)$row['received_id'];
+        $out['applied_through'] = (string)(int)$row['applied_id'];
+        $out['last_updated_at'] = (int)$row['updated_at'] ?: null;
+        $out['next_retry_at'] = (int)$row['next_attempt_at'] ?: null;
+        $out['last_success_at'] = (int)$row['applied_checked_at'] ?: null;
+        $out['error_code'] = (string)($row['last_error_code'] ?: $row['applied_error_code']) ?: null;
+        $pending = $this->db->getQueryBuilder();
+        $pr = $pending->select($pending->func()->count('id'))->from('weknora_outbox')
+            ->where($pending->expr()->eq('binding_id', $pending->createNamedParameter($bindingId)))
+            ->andWhere($pending->expr()->gt('id', $pending->createNamedParameter((int)$row['received_id'])));
+        $pendingResult = $pr->executeQuery();
+        try { $out['pending_delivery'] = (int)$pendingResult->fetchOne(); } finally { $pendingResult->closeCursor(); }
+        $application = $this->db->getQueryBuilder();
+        $ar = $application->select($application->func()->count('id'))->from('weknora_outbox')
+            ->where($application->expr()->eq('binding_id', $application->createNamedParameter($bindingId)))
+            ->andWhere($application->expr()->gt('id', $application->createNamedParameter((int)$row['applied_id'])))
+            ->andWhere($application->expr()->lte('id', $application->createNamedParameter((int)$row['received_id'])));
+        $applicationResult = $ar->executeQuery();
+        try { $out['pending_application'] = (int)$applicationResult->fetchOne(); } finally { $applicationResult->closeCursor(); }
+        if ($out['connection_status'] !== 'active') {
+            $out['state'] = 'event_receiver_unauthorized';
+        } elseif ($out['pending_delivery'] > 0) {
+            $out['state'] = 'delivering';
+        } elseif ($out['pending_application'] > 0) {
+            $out['state'] = 'received';
+        } elseif ((int)$out['received_through'] > 0) {
+            $out['state'] = 'manifest_fetching';
+        } elseif ($bindingState === 'active') {
+            $out['state'] = 'queued';
+        }
+        return $out;
+    }
+
+    private function overviewState(string $bindingState, string $contentState,
+        string $publicationState): string {
+        if ($publicationState === 'stopped' || $bindingState === 'stopped') {
+            return 'publication_stopped';
+        }
+        if ($contentState === 'paused') {
+            return 'sync_paused';
+        }
+        if ($contentState === 'event_receiver_unauthorized') {
+            return 'event_delivery_error';
+        }
+        if (in_array($contentState, ['ready', 'partial', 'failed', 'processing', 'unverified'], true)) {
+            return $contentState;
+        }
+        if ($bindingState === 'unbound') {
+            return 'unbound';
+        }
+        if ($bindingState === 'failed') {
+            return 'binding_failed';
+        }
+        if (in_array($bindingState, ['reserved', 'bound', 'paired', 'grants_synced'], true)) {
+            return 'binding';
+        }
+        return match ($contentState) {
+            'delivering', 'received', 'manifest_fetching', 'queued' => 'synchronizing',
+            default => 'unverified',
+        };
+    }
+
+    private function knowledgeBaseUrl(string $knowledgeBaseId): ?string {
+        if (!SourcePairingRegistryService::validRemoteId($knowledgeBaseId)) {
+            return null;
+        }
+        $raw = trim($this->config->getAppValue(self::APP, 'weknora_web_url', ''));
+        $parts = parse_url($raw);
+        if (!is_array($parts) || !isset($parts['scheme'], $parts['host']) ||
+            !in_array(strtolower($parts['scheme']), ['http', 'https'], true)) {
+            return null;
+        }
+        $loopback = in_array(strtolower($parts['host']), ['localhost', '127.0.0.1', '::1'], true);
+        if (strtolower($parts['scheme']) !== 'https' && !$loopback) {
+            return null;
+        }
+        $origin = strtolower($parts['scheme']) . '://' . strtolower($parts['host']);
+        if (isset($parts['port'])) {
+            $origin .= ':' . (int)$parts['port'];
+        }
+        return $origin . '/platform/knowledge-bases/' . rawurlencode($knowledgeBaseId);
     }
 
     private function requireManagement(string $uid, Folder $folder): array {

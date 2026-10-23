@@ -7,6 +7,7 @@ namespace OCA\IntegrationWeknora\Service;
 use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
 use OCP\Http\Client\IClientService;
+use OCP\App\IAppManager;
 use OCP\IConfig;
 use OCP\IGroupManager;
 use OCP\IURLGenerator;
@@ -23,6 +24,7 @@ use OCP\IUserManager;
 final class ConnectionService {
     private const APP = 'integration_weknora';
     private const PROFILE_KEY = 'connection';
+    private const HEALTH_KEY = 'connection_health';
     private const ORIGINS_KEY = 'connection_origins';
     private const CREDENTIALS_KEY = 'weknora_onboarding_credentials';
 
@@ -30,6 +32,8 @@ final class ConnectionService {
         private IConfig $config,
         private IClientService $clients,
         private IURLGenerator $urls,
+        private IAppManager $apps,
+        private DirectoryOnboardingClient $onboardingClient,
         private IRootFolder $files,
         private DirectoryPublicationService $directories,
         private IdentityMappingService $identities,
@@ -62,13 +66,50 @@ final class ConnectionService {
     public function status(): array {
         $profile = $this->profile();
         if ($profile === null) {
-            return ['connected' => false, 'spaces' => []];
+            return [
+                'connected' => false,
+                'spaces' => [],
+                'app_version' => $this->appVersion(),
+                'bundle_version' => $this->bundleVersion(),
+                'contract_version' => null,
+                'compatible' => false,
+                'binding_allowed' => false,
+                'health' => ['status' => 'unconfigured', 'binding_allowed' => false],
+            ];
+        }
+        $profile = $this->refreshHealth($profile);
+        $contract = is_int($profile['contract_version'] ?? null) ? $profile['contract_version'] : 0;
+        $compatible = $contract >= 2;
+        $cron = $this->cronHealth();
+        $remoteHealth = is_array($profile['health'] ?? null) ? $profile['health'] : [];
+        $healthObservedAt = is_int($remoteHealth['checked_at'] ?? null)
+            ? $remoteHealth['checked_at'] : 0;
+        $remoteAllowed = ($remoteHealth['binding_allowed'] ?? false) === true &&
+            $healthObservedAt >= time() - 300 && $healthObservedAt <= time() + 5;
+        $health = array_replace([
+            'status' => $compatible && $remoteAllowed ? 'healthy' : 'degraded',
+            'binding_allowed' => $compatible && $remoteAllowed,
+            'reason_code' => $compatible ? '' : 'onboarding_contract_incompatible',
+        ], $remoteHealth, ['nextcloud_cron' => $cron]);
+        $health['binding_allowed'] = $compatible && $remoteAllowed && $cron['healthy'] === true;
+        if (!$remoteAllowed && ($health['reason_code'] ?? '') === '') {
+            $health['reason_code'] = 'remote_health_unverified';
+        }
+        if ($cron['healthy'] !== true && $health['binding_allowed'] !== true) {
+            $health['status'] = 'degraded';
+            $health['reason_code'] = $health['reason_code'] ?: 'nextcloud_cron_unverified';
         }
         $profile['spaces'] = array_map(
             fn (mixed $space): mixed => is_array($space) ? $this->spaceWithPrincipalNames($space) : $space,
             is_array($profile['spaces'] ?? null) ? $profile['spaces'] : [],
         );
-        return ['connected' => true] + $profile;
+        return ['connected' => true, 'app_version' => $this->appVersion(),
+            'bundle_version' => $this->bundleVersion(), 'compatible' => $compatible,
+            'binding_allowed' => $health['binding_allowed'], 'health' => $health] + $profile;
+    }
+
+    public function bindingAllowed(): bool {
+        return ($this->status()['binding_allowed'] ?? false) === true;
     }
 
     /**
@@ -110,12 +151,21 @@ final class ConnectionService {
      * Discover workspaces visible to the administrator token. The token is
      * used once for this request and is never written to Nextcloud storage.
      *
-     * @return list<array<string, mixed>>
+     * @return array<string, mixed>
      */
-    public function discover(string $origin, string $token): array {
+    public function discover(string $origin, string $token, string $query = '',
+        string $cursor = '', int $limit = 50): array {
+        $query = trim($query);
+        if (strlen($query) > 128 || strlen($cursor) > 1024 || $limit < 1 || $limit > 100) {
+            throw new \InvalidArgumentException('Invalid workspace query');
+        }
         $origin = $this->canonicalOrigin($origin);
         $response = $this->request($origin, $token, 'GET',
-            '/api/v1/integrations/nextcloud/connection/workspaces');
+            '/api/v1/integrations/nextcloud/connection/workspaces',
+            ['q' => $query, 'cursor' => $cursor, 'limit' => $limit]);
+        if (($response['contract_version'] ?? null) !== 2) {
+            throw new \DomainException('WeKnora onboarding contract is incompatible');
+        }
         $spaces = $response['spaces'] ?? null;
         if (!is_array($spaces) || !array_is_list($spaces)) {
             throw new \UnexpectedValueException('WeKnora returned an invalid workspace list');
@@ -134,10 +184,17 @@ final class ConnectionService {
                 'processing_template_name' => is_string($space['processing_template_name'] ?? null)
                     ? $space['processing_template_name'] : '',
                 'eligible' => ($space['eligible'] ?? false) === true,
+                'available' => ($space['available'] ?? ($space['eligible'] ?? false)) === true,
+                'reason_code' => is_string($space['reason_code'] ?? null) ? $space['reason_code'] : '',
                 'reason' => is_string($space['reason'] ?? null) ? $space['reason'] : '',
+                'next_action' => is_string($space['next_action'] ?? null) ? $space['next_action'] : '',
+                'visibility' => is_string($space['visibility'] ?? null) ? $space['visibility'] : '',
             ];
         }
-        return $out;
+        return ['contract_version' => 2, 'spaces' => $out,
+            'next_cursor' => is_string($response['next_cursor'] ?? null)
+                ? substr($response['next_cursor'], 0, 1024) : '',
+            'health' => $this->normalizeHealth($response['health'] ?? null)];
     }
 
     /**
@@ -198,6 +255,9 @@ final class ConnectionService {
                 'actor_object_guid' => $actorGuid,
                 'tenant_ids' => array_map('intval', $tenantIds),
             ]);
+        if (($response['contract_version'] ?? null) !== 2) {
+            throw new \DomainException('WeKnora onboarding contract is incompatible');
+        }
         $credentials = $response['credentials'] ?? null;
         if (!is_array($credentials) || !array_is_list($credentials) || $credentials === []) {
             throw new \UnexpectedValueException('WeKnora returned no connection credentials');
@@ -259,7 +319,10 @@ final class ConnectionService {
                 ? $response['connection_id'] : '',
             'spaces' => $spaces,
             'connected_at' => time(),
+            'contract_version' => 2,
         ];
+        $this->config->setAppValue(self::APP, self::HEALTH_KEY,
+            json_encode($this->normalizeHealth($response['health'] ?? null), JSON_THROW_ON_ERROR));
         $this->config->setAppValue(self::APP, self::PROFILE_KEY,
             json_encode($profile, JSON_THROW_ON_ERROR));
         $this->rememberOrigin($origin);
@@ -334,6 +397,7 @@ final class ConnectionService {
             }
         }
         $this->config->deleteAppValue(self::APP, self::PROFILE_KEY);
+        $this->config->deleteAppValue(self::APP, self::HEALTH_KEY);
         return $this->status();
     }
 
@@ -344,10 +408,14 @@ final class ConnectionService {
      *
      * @return array<string, mixed>
      */
-    public function ensureRule(string $uid, int $folderId, bool $creating): array {
+    public function ensureRule(string $uid, int $folderId, bool $creating,
+        bool $requireHealthy = true): array {
         $profile = $this->profile();
         if ($profile === null) {
             throw new \DomainException('WeKnora is not connected');
+        }
+        if ($requireHealthy && !$this->bindingAllowed()) {
+            throw new \DomainException('Worker, dispatcher or Nextcloud cron is not verified');
         }
         if (!$this->canManage($uid, $folderId, $creating)) {
             throw new \DomainException('Directory management is forbidden');
@@ -362,32 +430,35 @@ final class ConnectionService {
             throw new \DomainException('No authorized WeKnora workspace is available');
         }
         $rules = $this->directories->rules();
+        $containerKey = DirectoryPublicationService::physicalKey($container);
         foreach ($rules as $rule) {
-            if (($rule['owner_uid'] ?? null) !== $uid ||
-                ($rule['weknora_origin'] ?? null) !== $profile['origin']) {
+            if (($rule['weknora_origin'] ?? null) !== $profile['origin']) {
                 continue;
             }
             try {
-                $candidate = $this->folder($uid, (int)($rule['container_file_id'] ?? 0));
+                $candidate = $this->ruleContainer($rule, $uid);
             } catch (\Throwable $ignored) {
                 continue;
             }
             if ($creating && $candidate->getId() === $folder->getId() &&
                 ($rule['discovery'] ?? null) === 'direct_children') {
-                return $this->refreshRuleTargets($rule, $targets);
+                return $this->refreshRuleSafely($rule, $targets, $uid);
             }
-            if ($candidate->getId() !== $folder->getId() &&
-                DirectoryPublicationService::contains($candidate, $folder)) {
-                return $this->refreshRuleTargets($rule, $targets);
+            $samePhysicalRoot = hash_equals($containerKey,
+                (string)($rule['physical_root_key'] ?? DirectoryPublicationService::physicalKey($candidate)));
+            if ($samePhysicalRoot && ($candidate->getId() !== $folder->getId() ||
+                DirectoryPublicationService::contains($candidate, $folder))) {
+                return $this->refreshRuleSafely($rule, $targets, $uid);
             }
         }
 
         $rule = [
             'id' => 'auto_' . substr(hash('sha256',
-                'nc-connection-rule-v1' . "\0" . $uid . "\0" . $container->getId() . "\0" .
-                'scope'), 0, 40),
+                'nc-connection-rule-v2' . "\0" . $profile['origin'] . "\0" .
+                (string)($profile['connection_id'] ?? '') . "\0" . $containerKey), 0, 40),
             'owner_uid' => $uid,
             'container_file_id' => $container->getId(),
+            'physical_root_key' => $containerKey,
             'tenant_id' => $targets[0]['tenant_id'],
             'processing_template_id' => $targets[0]['processing_template_id'],
             'weknora_origin' => $profile['origin'],
@@ -399,7 +470,7 @@ final class ConnectionService {
         ];
         foreach ($rules as $existing) {
             if (($existing['id'] ?? null) === $rule['id']) {
-                return $this->refreshRuleTargets($existing, $targets);
+                return $this->refreshRuleTargets($existing, $targets, $uid);
             }
         }
         try {
@@ -407,14 +478,14 @@ final class ConnectionService {
         } catch (\DomainException $exception) {
             foreach ($this->directories->rules() as $existing) {
                 if (($existing['id'] ?? null) === $rule['id']) {
-                    return $this->refreshRuleTargets($existing, $targets);
+                    return $this->refreshRuleTargets($existing, $targets, $uid);
                 }
             }
             throw $exception;
         }
     }
 
-    private function refreshRuleTargets(array $rule, array $targets): array {
+    private function refreshRuleTargets(array $rule, array $targets, string $uid): array {
         $targetKey = static function (array $target): string {
             return implode("\0", [
                 (string)($target['tenant_id'] ?? ''),
@@ -430,20 +501,57 @@ final class ConnectionService {
         $old = array_map($targetKey, $existing);
         sort($current, SORT_STRING);
         sort($old, SORT_STRING);
-        if ($current === $old) {
+        $delegates = is_array($rule['delegates'] ?? null) ? $rule['delegates'] : [];
+        if (!in_array($uid, $delegates, true)) {
+            $delegates[] = $uid;
+        }
+        if ($current === $old && $delegates === ($rule['delegates'] ?? [])) {
             return $rule;
         }
         $updated = $rule;
-        $updated['targets'] = $targets;
-        $updated['tenant_id'] = $targets[0]['tenant_id'];
-        $updated['processing_template_id'] = $targets[0]['processing_template_id'];
+        $updated['delegates'] = $delegates;
+        if ($current !== $old) {
+            $updated['targets'] = $targets;
+            $updated['tenant_id'] = $targets[0]['tenant_id'];
+            $updated['processing_template_id'] = $targets[0]['processing_template_id'];
+        }
         unset($updated['revision'], $updated['discovery_after_id']);
         try {
             return $this->directories->saveRule($updated, (int)($rule['revision'] ?? 0));
         } catch (\DomainException $exception) {
+            if ($current !== $old) {
+                $delegateOnly = $rule;
+                $delegateOnly['delegates'] = $delegates;
+                unset($delegateOnly['revision'], $delegateOnly['discovery_after_id']);
+                try {
+                    return $this->directories->saveRule($delegateOnly,
+                        (int)($rule['revision'] ?? 0));
+                } catch (\DomainException $ignored) {}
+            }
             // A rule with durable intents keeps its original target scope; its
             // old credential remains enabled on the WeKnora side.
             return $rule;
+        }
+    }
+
+    private function refreshRuleSafely(array $rule, array $targets, string $uid): array {
+        try {
+            return $this->refreshRuleTargets($rule, $targets, $uid);
+        } catch (\DomainException $exception) {
+            foreach ($this->directories->rules() as $current) {
+                if (($current['id'] ?? null) === ($rule['id'] ?? null)) {
+                    return $this->refreshRuleTargets($current, $targets, $uid);
+                }
+            }
+            throw $exception;
+        }
+    }
+
+    private function ruleContainer(array $rule, string $uid): Folder {
+        try {
+            return $this->folder($uid, (int)($rule['container_file_id'] ?? 0));
+        } catch (\Throwable $ignored) {
+            return $this->folder((string)$rule['owner_uid'], (int)($rule['container_file_id'] ?? 0));
         }
     }
 
@@ -575,6 +683,103 @@ final class ConnectionService {
                 throw new \InvalidArgumentException('Unknown workspace visibility user');
             }
         }
+    }
+
+    private function normalizeHealth(mixed $health): array {
+        if (!is_array($health)) {
+            return ['status' => 'unverified', 'binding_allowed' => false,
+                'reason_code' => 'worker_and_dispatcher_unverified'];
+        }
+        $out = [
+            'status' => in_array($health['status'] ?? null, ['healthy', 'degraded', 'unverified'], true)
+                ? $health['status'] : 'unverified',
+            'binding_allowed' => ($health['binding_allowed'] ?? false) === true,
+            'reason_code' => is_string($health['reason_code'] ?? null) ? $health['reason_code'] : '',
+        ];
+        foreach (['worker_status', 'dispatcher_status'] as $field) {
+            if (is_string($health[$field] ?? null)) {
+                $out[$field] = substr($health[$field], 0, 64);
+            }
+        }
+        foreach (['worker_last_success_at', 'dispatcher_last_success_at', 'checked_at'] as $field) {
+            if (is_int($health[$field] ?? null) && $health[$field] > 0) {
+                $out[$field] = $health[$field];
+            }
+        }
+        return $out;
+    }
+
+    private function refreshHealth(array $profile): array {
+        $knownContract = $profile['contract_version'] ?? 0;
+        if (!in_array($knownContract, [0, 2], true)) {
+            return $profile;
+        }
+        $storedHealth = $this->config->getAppValue(self::APP, self::HEALTH_KEY, '');
+        $health = $storedHealth === '' ? null : json_decode($storedHealth, true);
+        if (!is_array($health)) {
+            $health = is_array($profile['health'] ?? null) ? $profile['health'] : [];
+        }
+        $profile['health'] = $health;
+        $checkedAt = is_int($health['checked_at'] ?? null) ? $health['checked_at'] : 0;
+        if ($checkedAt >= time() - 60 && $checkedAt <= time() + 5) {
+            return $profile;
+        }
+        $space = null;
+        foreach ($profile['spaces'] ?? [] as $candidate) {
+            if (is_array($candidate) && is_string($candidate['credential_id'] ?? null) &&
+                is_string($candidate['tenant_id'] ?? null) &&
+                is_string($candidate['processing_template_id'] ?? null)) {
+                $space = $candidate;
+                break;
+            }
+        }
+        if ($space === null) {
+            return $profile;
+        }
+        $rule = [
+            'tenant_id' => $space['tenant_id'],
+            'processing_template_id' => $space['processing_template_id'],
+            'credential_id' => $space['credential_id'],
+            'weknora_origin' => (string)$profile['origin'],
+        ];
+        try {
+            $response = $this->onboardingClient->request($rule, 'GET', '/health');
+            if (($response['contract_version'] ?? null) !== 2 || !is_array($response['health'] ?? null)) {
+                return $profile;
+            }
+            $health = $this->normalizeHealth($response['health']);
+            $profile['contract_version'] = 2;
+            $this->config->setAppValue(self::APP, self::PROFILE_KEY,
+                json_encode($profile, JSON_THROW_ON_ERROR));
+            $this->config->setAppValue(self::APP, self::HEALTH_KEY,
+                json_encode($health, JSON_THROW_ON_ERROR));
+        } catch (\Throwable $ignored) {
+            $health['binding_allowed'] = false;
+            $health['status'] = 'degraded';
+            $health['reason_code'] = 'remote_health_unverified';
+        }
+        $profile['health'] = $health;
+        return $profile;
+    }
+
+    private function cronHealth(): array {
+        $last = (int)$this->config->getAppValue('core', 'lastcron', '0');
+        $healthy = $last > 0 && $last >= time() - 900 && $last <= time() + 5;
+        return ['last_success_at' => $last > 0 ? $last : null,
+            'healthy' => $healthy, 'status' => $healthy ? 'active' : 'unverified'];
+    }
+
+    private function appVersion(): string {
+        try {
+            return $this->apps->getAppVersion(self::APP);
+        } catch (\Throwable $exception) {
+            return '';
+        }
+    }
+
+    private function bundleVersion(): string {
+        $path = dirname(__DIR__, 2) . '/js/weknora-sidebar.js';
+        return is_file($path) ? hash_file('sha256', $path) : '';
     }
 
     /** @return array<string, mixed>|null */

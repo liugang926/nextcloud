@@ -22,6 +22,8 @@ return [
         ['name' => 'directory#associate', 'url' => '/api/v1/folders/{folderId}/associate', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
         ['name' => 'directory#create', 'url' => '/api/v1/folders/{folderId}/create', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
         ['name' => 'directory#sync', 'url' => '/api/v1/folders/{folderId}/sync', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'directory#syncNow', 'url' => '/api/v1/folders/{folderId}/sync-now', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'directory#bindingDiagnostics', 'url' => '/api/v1/folders/{folderId}/binding-diagnostics', 'verb' => 'GET', 'requirements' => ['folderId' => '[1-9][0-9]*']],
         ['name' => 'directory#retry', 'url' => '/api/v1/directory-operations/{operationId}/retry', 'verb' => 'POST', 'requirements' => ['operationId' => '[A-Fa-f0-9-]+']],
         ['name' => 'status_inbox#receive', 'url' => '/api/v1/status', 'verb' => 'POST'],
         ['name' => 'api#capabilities', 'url' => '/api/v1/capabilities', 'verb' => 'GET'],
@@ -71,6 +73,8 @@ return [
         ],
         ['name' => 'identity_admin#index', 'url' => '/api/v1/admin/identities', 'verb' => 'GET'],
         ['name' => 'diagnostics#index', 'url' => '/api/v1/admin/diagnostics', 'verb' => 'GET'],
+        ['name' => 'diagnostics#connection', 'url' => '/api/v1/admin/connection/diagnostics', 'verb' => 'GET'],
+        ['name' => 'diagnostics#syncHealth', 'url' => '/api/v1/admin/sync-health', 'verb' => 'GET'],
         ['name' => 'identity_admin#create', 'url' => '/api/v1/admin/identities', 'verb' => 'POST'],
         ['name' => 'identity_admin#revoke', 'url' => '/api/v1/admin/identities/revoke', 'verb' => 'POST'],
         [

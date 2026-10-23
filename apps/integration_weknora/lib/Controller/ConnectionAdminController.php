@@ -41,7 +41,15 @@ final class ConnectionAdminController extends Controller {
             return $this->json(['error' => 'invalid_connection'], 400);
         }
         try {
-            return $this->json(['spaces' => $this->connection->discover($origin, $token)]);
+            $query = $this->request->getParam('q', '');
+            $cursor = $this->request->getParam('cursor', '');
+            $limit = $this->request->getParam('limit', 50);
+            if (!is_string($query) || !is_string($cursor) ||
+                (!is_int($limit) && !(is_string($limit) && ctype_digit($limit)))) {
+                throw new \InvalidArgumentException('Invalid workspace query');
+            }
+            return $this->json($this->connection->discover($origin, $token,
+                $query, $cursor, (int)$limit));
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'invalid_connection'], 400);
         } catch (\DomainException $exception) {

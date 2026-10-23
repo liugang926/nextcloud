@@ -105,6 +105,142 @@ final class ChangeOutboxService {
     }
 
     /**
+     * Queue one initial complete reconciliation without creating duplicates.
+     * Existing file hints or a retained floor prove that initial admission
+     * already happened; retries then retain the same work instead of appending.
+     */
+    public function ensureInitialReconcile(string $bindingId): int {
+        self::assertBindingId($bindingId);
+        $this->db->beginTransaction();
+        try {
+            $this->lockOutbox();
+            $existing = $this->db->getQueryBuilder();
+            $existing->select('id')->from('weknora_outbox')
+                ->where($existing->expr()->eq('binding_id',
+                    $existing->createNamedParameter($bindingId)))
+                ->andWhere($existing->expr()->eq('event_type',
+                    $existing->createNamedParameter('reconcile')))
+                ->setMaxResults(1);
+            $result = $existing->executeQuery();
+            try {
+                if ($result->fetchOne() !== false) {
+                    $this->db->commit();
+                    return 0;
+                }
+            } finally {
+                $result->closeCursor();
+            }
+            $history = $this->db->getQueryBuilder();
+            $history->select('id')->from('weknora_outbox')
+                ->where($history->expr()->eq('binding_id',
+                    $history->createNamedParameter($bindingId)))
+                ->setMaxResults(1);
+            $result = $history->executeQuery();
+            try {
+                if ($result->fetchOne() !== false) {
+                    $this->db->commit();
+                    return 0;
+                }
+            } finally {
+                $result->closeCursor();
+            }
+            $floor = $this->db->getQueryBuilder();
+            $floor->select('floor_id')->from('weknora_change_floor')
+                ->where($floor->expr()->eq('binding_id',
+                    $floor->createNamedParameter($bindingId)))
+                ->setMaxResults(1);
+            $result = $floor->executeQuery();
+            try {
+                if ((int)($result->fetchOne() ?: 0) > 0) {
+                    $this->db->commit();
+                    return 0;
+                }
+            } finally {
+                $result->closeCursor();
+            }
+            $insert = $this->db->getQueryBuilder();
+            $insert->insert('weknora_outbox')->values([
+                'binding_id' => $insert->createNamedParameter($bindingId),
+                'file_id' => $insert->createNamedParameter(null),
+                'event_type' => $insert->createNamedParameter('reconcile'),
+                'old_path' => $insert->createNamedParameter(null),
+                'path' => $insert->createNamedParameter(null),
+                'etag' => $insert->createNamedParameter(null),
+                'relative_path' => $insert->createNamedParameter(null),
+                'created_at' => $insert->createNamedParameter(time()),
+            ])->executeStatement();
+            $id = (int)$this->db->lastInsertId('weknora_outbox');
+            PublicationRecoveryLedger::appendInTransaction($this->db, $bindingId, null, 'reconcile', $id);
+            $this->db->commit();
+            try {
+                $wake = $this->db->getQueryBuilder();
+                $wake->update('weknora_event_conn')
+                    ->set('next_attempt_at', $wake->createNamedParameter(0))
+                    ->where($wake->expr()->eq('binding_id', $wake->createNamedParameter($bindingId)))
+                    ->andWhere($wake->expr()->eq('status', $wake->createNamedParameter('active')))
+                    ->andWhere($wake->expr()->eq('last_error_code', $wake->createNamedParameter('')))
+                    ->executeStatement();
+            } catch (\Throwable $ignored) {}
+            return $id;
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    /** Request a full reconciliation and reuse any retained reconciliation. */
+    public function requestReconcile(string $bindingId): int {
+        self::assertBindingId($bindingId);
+        $this->db->beginTransaction();
+        try {
+            $this->lockOutbox();
+            $existing = $this->db->getQueryBuilder();
+            $existing->select('id')->from('weknora_outbox')
+                ->where($existing->expr()->eq('binding_id',
+                    $existing->createNamedParameter($bindingId)))
+                ->andWhere($existing->expr()->eq('event_type',
+                    $existing->createNamedParameter('reconcile')))
+                ->setMaxResults(1);
+            $result = $existing->executeQuery();
+            try {
+                if ($result->fetchOne() !== false) {
+                    $this->db->commit();
+                    return 0;
+                }
+            } finally {
+                $result->closeCursor();
+            }
+            $insert = $this->db->getQueryBuilder();
+            $insert->insert('weknora_outbox')->values([
+                'binding_id' => $insert->createNamedParameter($bindingId),
+                'file_id' => $insert->createNamedParameter(null),
+                'event_type' => $insert->createNamedParameter('reconcile'),
+                'old_path' => $insert->createNamedParameter(null),
+                'path' => $insert->createNamedParameter(null),
+                'etag' => $insert->createNamedParameter(null),
+                'relative_path' => $insert->createNamedParameter(null),
+                'created_at' => $insert->createNamedParameter(time()),
+            ])->executeStatement();
+            $id = (int)$this->db->lastInsertId('weknora_outbox');
+            PublicationRecoveryLedger::appendInTransaction($this->db, $bindingId, null, 'reconcile', $id);
+            $this->db->commit();
+            try {
+                $wake = $this->db->getQueryBuilder();
+                $wake->update('weknora_event_conn')
+                    ->set('next_attempt_at', $wake->createNamedParameter(0))
+                    ->where($wake->expr()->eq('binding_id', $wake->createNamedParameter($bindingId)))
+                    ->andWhere($wake->expr()->eq('status', $wake->createNamedParameter('active')))
+                    ->andWhere($wake->expr()->eq('last_error_code', $wake->createNamedParameter('')))
+                    ->executeStatement();
+            } catch (\Throwable $ignored) {}
+            return $id;
+        } catch (\Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
+        }
+    }
+
+    /**
      * @return array{expired: bool, items: list<array<string, mixed>>, next_id: int, has_more: bool}
      */
     public function page(string $bindingId, int $afterId): array {

@@ -13,8 +13,12 @@ final class TargetMigrationController extends Controller {
  #[NoAdminRequired]
  public function begin(int $folderId): JSONResponse {
   $user=$this->session->getUser();if($user===null){return $this->json(['error'=>'unauthorized'],401);}
-  $choice=[];foreach(['operation_id','mode','name','knowledge_base_id','tenant_id','processing_template_id'] as $field){$choice[$field]=$this->request->getParam($field);}
-  try{$this->connection->assertTargetAllowed($user->getUID(),$choice);return $this->json(['migration'=>$this->directories->switchTarget($user->getUID(),$folderId,$choice)],202);}
+  $choice=[];foreach(['operation_id','mode','name','knowledge_base_id','tenant_id','processing_template_id','candidate_revision'] as $field){$choice[$field]=$this->request->getParam($field);}
+  try{
+   if($this->connection->hasConnection()){$this->connection->ensureRule($user->getUID(),$folderId,false);}
+   $this->connection->assertTargetAllowed($user->getUID(),$choice);
+   return $this->json(['migration'=>$this->directories->switchTarget($user->getUID(),$folderId,$choice)],202);
+  }
   catch(\InvalidArgumentException $e){return $this->json(['error'=>'invalid_target_migration'],400);}
   catch(\DomainException $e){return $this->json(['error'=>'target_migration_conflict'],409);}
   catch(\Throwable $e){return $this->json(['error'=>'target_migration_unverified'],503);}
