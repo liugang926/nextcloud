@@ -34,7 +34,7 @@ APP = ROOT / "apps/integration_weknora"
 OLD_APP_COMMIT = "5b97db539155be61541836ba3d67074e78705340"
 OLD_VERSION = "0.4.6"
 FAULT_MARKER = "WEKNORA_UPGRADE_FAILURE_PROBE"
-FAULT_MIGRATION = "Version0029Date20261014000000.php"
+FAULT_MIGRATION = "Version0030Date20261023000000.php"
 MIGRATION29_COLUMNS = {
     "oc_weknora_target_close": {
         "operation_id": "character varying:NO", "binding_id": "character varying:NO",
@@ -277,13 +277,24 @@ def inject_failure(app_dir: Path) -> None:
     require(latest == migration,
             "the final app migration changed; update the failure injection")
     content = migration.read_text()
-    require(content.endswith("}\n") and "postSchemaChange" not in content,
-            "expected final upgrade migration changed; update the probe")
-    method = ("    public function postSchemaChange(\\OCP\\Migration\\IOutput $output, "
-              "\\Closure $schemaClosure, array $options): void {\n"
-              f"        throw new \\RuntimeException('{FAULT_MARKER}');\n"
-              "    }\n")
-    migration.write_text(content[:-2] + method + "}\n")
+    signature = ("    public function postSchemaChange(IOutput $output, "
+                 "Closure $schemaClosure, array $options): void {\n")
+    if signature in content:
+        require(content.count(signature) == 1,
+                "expected one final post-schema hook; update the probe")
+        content = content.replace(
+            signature,
+            signature + f"        throw new \\RuntimeException('{FAULT_MARKER}');\n",
+        )
+    else:
+        require(content.endswith("}\n"),
+                "expected a closed final migration; update the probe")
+        method = ("    public function postSchemaChange(\\OCP\\Migration\\IOutput $output, "
+                  "\\Closure $schemaClosure, array $options): void {\n"
+                  f"        throw new \\RuntimeException('{FAULT_MARKER}');\n"
+                  "    }\n")
+        content = content[:-2] + method + "}\n"
+    migration.write_text(content)
 
 
 def archive_volume(project: str, role: str, destination: Path, cwd: Path) -> None:
