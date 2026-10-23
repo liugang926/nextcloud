@@ -64,7 +64,46 @@ final class ConnectionService {
         if ($profile === null) {
             return ['connected' => false, 'spaces' => []];
         }
+        $profile['spaces'] = array_map(
+            fn (mixed $space): mixed => is_array($space) ? $this->spaceWithPrincipalNames($space) : $space,
+            is_array($profile['spaces'] ?? null) ? $profile['spaces'] : [],
+        );
         return ['connected' => true] + $profile;
+    }
+
+    /**
+     * Keep visibility IDs as the stored authority while returning the current
+     * display names needed by the compact administrator summary.
+     *
+     * @param array<string,mixed> $space
+     * @return array<string,mixed>
+     */
+    private function spaceWithPrincipalNames(array $space): array {
+        try {
+            $visibility = SpaceVisibilityPolicy::normalize($space['visibility'] ?? null);
+        } catch (\Throwable) {
+            return $space;
+        }
+        $groups = [];
+        foreach ($visibility['groups'] as $id) {
+            $group = $this->groups->get($id);
+            $groups[] = [
+                'id' => $id,
+                'name' => $group === null ? $id : (string)$group->getDisplayName(),
+            ];
+        }
+        $users = [];
+        foreach ($visibility['users'] as $id) {
+            $user = $this->users->get($id);
+            $users[] = [
+                'id' => $id,
+                'name' => $user === null ? $id : (string)$user->getDisplayName(),
+            ];
+        }
+        $space['visibility'] = $visibility + [
+            'principal_names' => ['groups' => $groups, 'users' => $users],
+        ];
+        return $space;
     }
 
     /**

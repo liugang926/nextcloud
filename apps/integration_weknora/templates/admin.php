@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+script('integration_weknora', 'weknora-admin-summary');
 script('integration_weknora', 'weknora-admin');
 style('integration_weknora', 'weknora-admin');
 ?>
