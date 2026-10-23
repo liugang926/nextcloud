@@ -1,8 +1,8 @@
 # WeKnora Integration for Nextcloud 34
 
-## Versioned, explainable onboarding (0.9.0)
+## Versioned, explainable multi-source onboarding (0.9.2)
 
-The app and the WeKnora onboarding service use contract v2. Connection setup
+The app and the WeKnora onboarding service use contract v3. Connection setup
 reports the Nextcloud app version, the deployed sidebar bundle digest, the
 WeKnora contract version and a non-secret worker/dispatcher/cron health
 projection. An incompatible contract or unverified background component keeps
@@ -10,7 +10,8 @@ existing sources readable but blocks new directory bindings.
 
 The candidates response adds `contract_version`, `request_id`,
 `candidate_revision`, grouped `spaces`, eligible `candidates`, redacted
-`ineligible` entries, `next_cursor`, and stable reason/next-action fields.
+`ineligible` entries, `next_cursor`, `nextcloud_source_count`, and stable
+reason/next-action fields.
 Search and keyset pagination use `q`, `cursor`, and `limit`. The frontend
 requires an explicit “associate existing” or “create new” choice; an empty
 candidate page never falls back to creation.
@@ -56,10 +57,12 @@ ID, pairing JSON and event secret remain available only under **Advanced** for
 migration and diagnostics.
 
 Existing knowledge bases are selectable even when they already contain
-documents. One knowledge base may be attached to only one Nextcloud folder;
-the existing content remains, while new content for that knowledge base is
-managed by the bound Nextcloud source. An existing knowledge base without
-verified configuration provenance is not selectable.
+documents or are shared by other Nextcloud folders. Contract v3 creates an
+independent operation, data source, event connection, document identity and
+sync status for every folder binding, while allowing those bindings to publish
+into the same dedicated knowledge base. The UI shows the current
+`nextcloud_source_count`. A knowledge base with a non-Nextcloud data source or
+without verified configuration provenance is not selectable.
 
 This app exposes service read APIs and administrator publication operations under `/index.php/apps/integration_weknora/api/v1`. Every machine API request requires `Authorization: Bearer <service token>` plus the versioned HMAC headers described in [the request-signing contract](../../docs/machine-request-signing.md). A nonce is consumed once in the Nextcloud database; a Bearer-only request is rejected. Administrator operations require a logged-in Nextcloud system administrator and a valid CSRF request token; the service token cannot call them.
 
@@ -149,8 +152,9 @@ Source pairing is separate from the event-delivery connection below.
 The Nextcloud side records the expected tenant and knowledge-base IDs; the
 WeKnora administrator pairing API must validate their actual ownership and
 verified configuration provenance before committing. Existing content is
-preserved, and a knowledge base already owned by another Nextcloud source is
-rejected. This source-side protocol does not
+preserved. Under contract v3, several independent directory bindings may target
+the same eligible knowledge base, but each retains its own operation, source,
+event connection and sync state. This source-side protocol does not
 establish employee AD identity or prove access to indexed knowledge. Run
 `python3 apps/integration_weknora/tests/source_pairing_http_smoke.py` after
 installing/upgrading the app to exercise the Nextcloud half with a temporary

@@ -529,7 +529,7 @@ final class DirectoryPublicationService {
             $hasMore = $hasMore || is_string($target['next_cursor'] ?? null);
         }
         $result = [
-            'contract_version' => 2,
+            'contract_version' => 3,
             'request_id' => 'req_' . bin2hex(random_bytes(12)),
             'candidate_revision' => 'sha256:' . hash('sha256', json_encode([
                 'rule' => $rule['id'], 'query' => $query, 'targets' => $revisions,
@@ -592,6 +592,7 @@ final class DirectoryPublicationService {
             $candidate = [
                 'id' => $item['id'], 'name' => $item['name'],
                 'content_count' => max(0, (int)$count),
+                'nextcloud_source_count' => max(0, min(1000, (int)($item['nextcloud_source_count'] ?? 0))),
                 'eligible' => ($item['eligible'] ?? $eligibleByDefault) === true,
                 'reason_code' => $reason,
                 'reason' => is_string($item['reason'] ?? null) ? substr($item['reason'], 0, 512) : null,
@@ -623,6 +624,7 @@ final class DirectoryPublicationService {
     private function knownReasons(): array {
         return ['space_not_visible', 'directory_identity_missing', 'directory_permission_denied',
             'space_no_processing_template', 'kb_configuration_unverified', 'kb_wiki_not_supported',
+            'kb_mixed_sources', 'kb_unpaired_sources',
             'kb_storage_unavailable', 'kb_embedding_model_missing', 'kb_graph_model_missing',
             'kb_already_bound', 'binding_root_conflict', 'event_receiver_unauthorized',
             'sync_paused', 'source_parse_failed', 'space_candidate_unavailable',

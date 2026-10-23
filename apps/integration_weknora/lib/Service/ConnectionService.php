@@ -79,7 +79,7 @@ final class ConnectionService {
         }
         $profile = $this->refreshHealth($profile);
         $contract = is_int($profile['contract_version'] ?? null) ? $profile['contract_version'] : 0;
-        $compatible = $contract >= 2;
+        $compatible = $contract >= 3;
         $cron = $this->cronHealth();
         $remoteHealth = is_array($profile['health'] ?? null) ? $profile['health'] : [];
         $healthObservedAt = is_int($remoteHealth['checked_at'] ?? null)
@@ -163,7 +163,7 @@ final class ConnectionService {
         $response = $this->request($origin, $token, 'GET',
             '/api/v1/integrations/nextcloud/connection/workspaces',
             ['q' => $query, 'cursor' => $cursor, 'limit' => $limit]);
-        if (($response['contract_version'] ?? null) !== 2) {
+        if (($response['contract_version'] ?? null) !== 3) {
             throw new \DomainException('WeKnora onboarding contract is incompatible');
         }
         $spaces = $response['spaces'] ?? null;
@@ -191,7 +191,7 @@ final class ConnectionService {
                 'visibility' => is_string($space['visibility'] ?? null) ? $space['visibility'] : '',
             ];
         }
-        return ['contract_version' => 2, 'spaces' => $out,
+        return ['contract_version' => 3, 'spaces' => $out,
             'next_cursor' => is_string($response['next_cursor'] ?? null)
                 ? substr($response['next_cursor'], 0, 1024) : '',
             'health' => $this->normalizeHealth($response['health'] ?? null)];
@@ -255,7 +255,7 @@ final class ConnectionService {
                 'actor_object_guid' => $actorGuid,
                 'tenant_ids' => array_map('intval', $tenantIds),
             ]);
-        if (($response['contract_version'] ?? null) !== 2) {
+        if (($response['contract_version'] ?? null) !== 3) {
             throw new \DomainException('WeKnora onboarding contract is incompatible');
         }
         $credentials = $response['credentials'] ?? null;
@@ -319,7 +319,7 @@ final class ConnectionService {
                 ? $response['connection_id'] : '',
             'spaces' => $spaces,
             'connected_at' => time(),
-            'contract_version' => 2,
+            'contract_version' => 3,
         ];
         $this->config->setAppValue(self::APP, self::HEALTH_KEY,
             json_encode($this->normalizeHealth($response['health'] ?? null), JSON_THROW_ON_ERROR));
@@ -711,7 +711,7 @@ final class ConnectionService {
 
     private function refreshHealth(array $profile): array {
         $knownContract = $profile['contract_version'] ?? 0;
-        if (!in_array($knownContract, [0, 2], true)) {
+        if (!in_array($knownContract, [0, 2, 3], true)) {
             return $profile;
         }
         $storedHealth = $this->config->getAppValue(self::APP, self::HEALTH_KEY, '');
@@ -744,11 +744,11 @@ final class ConnectionService {
         ];
         try {
             $response = $this->onboardingClient->request($rule, 'GET', '/health');
-            if (($response['contract_version'] ?? null) !== 2 || !is_array($response['health'] ?? null)) {
+            if (($response['contract_version'] ?? null) !== 3 || !is_array($response['health'] ?? null)) {
                 return $profile;
             }
             $health = $this->normalizeHealth($response['health']);
-            $profile['contract_version'] = 2;
+            $profile['contract_version'] = 3;
             $this->config->setAppValue(self::APP, self::PROFILE_KEY,
                 json_encode($profile, JSON_THROW_ON_ERROR));
             $this->config->setAppValue(self::APP, self::HEALTH_KEY,
