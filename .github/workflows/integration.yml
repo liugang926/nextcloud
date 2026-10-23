@@ -58,6 +58,8 @@ jobs:
           npm ci --prefix apps/integration_weknora
           npm run build --prefix apps/integration_weknora
           git diff --exit-code -- apps/integration_weknora/js/weknora-sidebar.js
+          node apps/integration_weknora/tests/admin_space_summary_contract.js
+          node --check apps/integration_weknora/js/weknora-admin-summary.js
           node --check apps/integration_weknora/js/weknora-admin.js
           node --check apps/integration_weknora/js/weknora-sidebar.js
           python3 -m compileall -q apps/integration_weknora/tests scripts
@@ -469,7 +471,7 @@ jobs:
 
       - name: Apply connector and authorization patch
         run: |
-          echo 'c5d916c10488da29f1ac71bca436567d984bc58bee3fb4ee07b6b24a4ceab817  nextcloud/integration/weknora.patch' | sha256sum --check --
+          echo '5b3cb9f650612bb90d9f2a7e8838f1504b2c35268ca6292b11d2280ec913361f  nextcloud/integration/weknora.patch' | sha256sum --check --
           git -C weknora apply --check ../nextcloud/integration/weknora.patch
           git -C weknora apply ../nextcloud/integration/weknora.patch
 
@@ -598,7 +600,7 @@ jobs:
 
       - name: Apply and check RAG adaptation
         run: |
-          echo '5a0deec5b323337fa06ef65b93169e3d3c033f89fc29d00b9f36dbce829381ff  nextcloud/integration/weknora-rag-b6ea8b56.patch' | sha256sum --check --
+          echo '5a41828968bde618b646ffb4c95c3eed476af217af9baeaebfc31993c0707fd6  nextcloud/integration/weknora-rag-b6ea8b56.patch' | sha256sum --check --
           git -C weknora-rag apply --check ../nextcloud/integration/weknora-rag-b6ea8b56.patch
           git -C weknora-rag apply ../nextcloud/integration/weknora-rag-b6ea8b56.patch
           git -C weknora-rag diff --check

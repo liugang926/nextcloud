@@ -99,6 +99,10 @@ final class ConnectionService {
             $health['status'] = 'degraded';
             $health['reason_code'] = $health['reason_code'] ?: 'nextcloud_cron_unverified';
         }
+        $profile['spaces'] = array_map(
+            fn (mixed $space): mixed => is_array($space) ? $this->spaceWithPrincipalNames($space) : $space,
+            is_array($profile['spaces'] ?? null) ? $profile['spaces'] : [],
+        );
         return ['connected' => true, 'app_version' => $this->appVersion(),
             'bundle_version' => $this->bundleVersion(), 'compatible' => $compatible,
             'binding_allowed' => $health['binding_allowed'], 'health' => $health] + $profile;
@@ -106,6 +110,41 @@ final class ConnectionService {
 
     public function bindingAllowed(): bool {
         return ($this->status()['binding_allowed'] ?? false) === true;
+    }
+
+    /**
+     * Keep visibility IDs as the stored authority while returning the current
+     * display names needed by the compact administrator summary.
+     *
+     * @param array<string,mixed> $space
+     * @return array<string,mixed>
+     */
+    private function spaceWithPrincipalNames(array $space): array {
+        try {
+            $visibility = SpaceVisibilityPolicy::normalize($space['visibility'] ?? null);
+        } catch (\Throwable) {
+            return $space;
+        }
+        $groups = [];
+        foreach ($visibility['groups'] as $id) {
+            $group = $this->groups->get($id);
+            $groups[] = [
+                'id' => $id,
+                'name' => $group === null ? $id : (string)$group->getDisplayName(),
+            ];
+        }
+        $users = [];
+        foreach ($visibility['users'] as $id) {
+            $user = $this->users->get($id);
+            $users[] = [
+                'id' => $id,
+                'name' => $user === null ? $id : (string)$user->getDisplayName(),
+            ];
+        }
+        $space['visibility'] = $visibility + [
+            'principal_names' => ['groups' => $groups, 'users' => $users],
+        ];
+        return $space;
     }
 
     /**
