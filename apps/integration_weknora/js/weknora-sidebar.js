@@ -4928,7 +4928,8 @@ ${message.stack}`;
           const option = document.createElement("option");
           option.value = candidate.id;
           const contentCount = Number(candidate.content_count || 0);
-          option.textContent = `\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1A${candidate.name}` + (contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : "") + (candidate.configuration_summary ? ` \xB7 ${candidate.configuration_summary}` : "");
+          const sourceCount = Number(candidate.nextcloud_source_count || 0);
+          option.textContent = `\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1A${candidate.name}` + (contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : "") + (sourceCount > 0 ? ` \xB7 \u5DF2\u5173\u8054 ${sourceCount} \u4E2A Nextcloud \u76EE\u5F55` : "") + (candidate.configuration_summary ? ` \xB7 ${candidate.configuration_summary}` : "");
           target.append(option);
         }
         reasons.replaceChildren();

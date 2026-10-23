@@ -466,8 +466,10 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 const option = document.createElement('option')
                 option.value = candidate.id
                 const contentCount = Number(candidate.content_count || 0)
+                const sourceCount = Number(candidate.nextcloud_source_count || 0)
                 option.textContent = `已有知识库：${candidate.name}` +
                     (contentCount > 0 ? `（已有 ${contentCount} 条内容）` : '') +
+                    (sourceCount > 0 ? ` · 已关联 ${sourceCount} 个 Nextcloud 目录` : '') +
                     (candidate.configuration_summary ? ` · ${candidate.configuration_summary}` : '')
                 target.append(option)
             }
