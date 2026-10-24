@@ -4708,6 +4708,7 @@ ${message.stack}`;
             target_status_rejected_operation_missing: "WeKnora \u4E2D\u627E\u4E0D\u5230\u539F\u76EE\u5F55\u63A5\u5165\u64CD\u4F5C",
             target_status_rejected_target_closed: "WeKnora \u76EE\u6807\u77E5\u8BC6\u5E93\u5DF2\u5173\u95ED",
             pairing_prepare_unverified: "Nextcloud \u5C1A\u672A\u51C6\u5907\u597D\u77E5\u8BC6\u5E93\u914D\u5BF9\u51ED\u636E",
+            publication_stopped: "\u53D1\u5E03\u5DF2\u505C\u6B62\uFF0C\u5F53\u524D\u7248\u672C\u4E0D\u53EF\u8BFB\u53D6\uFF1B\u70B9\u51FB\u201C\u91CD\u8BD5\u540C\u4E00\u5173\u8054\u201D\u8FDB\u884C\u5B89\u5168\u6062\u590D",
             pairing_prepare_conflict: "Nextcloud \u4E2D\u7684\u914D\u5BF9\u51ED\u636E\u6216\u76EE\u5F55\u72B6\u6001\u53D1\u751F\u51B2\u7A81",
             pairing_remote_unverified: "WeKnora \u77E5\u8BC6\u5E93\u6765\u6E90\u914D\u5BF9\u5C1A\u672A\u9A8C\u8BC1",
             pairing_remote_transport: "\u65E0\u6CD5\u8FDE\u63A5 WeKnora \u914D\u5BF9\u670D\u52A1",

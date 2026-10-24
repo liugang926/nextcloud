@@ -848,7 +848,10 @@ final class DirectoryPublicationService {
             ->where($q->expr()->isNull('closed.operation_id'))
             ->andWhere($q->expr()->lte('i.next_attempt_at', $q->createNamedParameter(time())))
             ->andWhere($q->expr()->lte('i.lease_until', $q->createNamedParameter(time())))
-            ->andWhere($q->expr()->in('i.state', $q->createNamedParameter(['pending', 'active'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
+            // Active intents are a completed state. Re-running full onboarding
+            // here made one transient remote failure stop an otherwise healthy
+            // binding every minute. Only explicit retry may reopen it.
+            ->andWhere($q->expr()->eq('i.state', $q->createNamedParameter('pending')))
             ->orderBy('i.updated_at')->setMaxResults(max(1, min(100, $limit)))->executeQuery();
         try { $rows = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
         // Independent control metadata gets a bounded opportunity on every
@@ -927,9 +930,10 @@ final class DirectoryPublicationService {
         $this->recovery->requireAutomationOpen($this->config);
         if (DirectoryTargetClosureService::lookup($this->db, 'operation_id', $operationId) !== null) { return; }
         $q = $this->db->getQueryBuilder();
+        $claimStates = $allowResume ? ['pending', 'active', 'blocked'] : ['pending'];
         if ($q->update('weknora_dir_intent')->set('lease_until', $q->createNamedParameter(time() + 600))
             ->where($q->expr()->eq('operation_id', $q->createNamedParameter($operationId)))
-            ->andWhere($q->expr()->in('state', $q->createNamedParameter(['pending', 'active'], \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
+            ->andWhere($q->expr()->in('state', $q->createNamedParameter($claimStates, \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_STR_ARRAY)))
             ->andWhere($q->expr()->lte('lease_until', $q->createNamedParameter(time())))->executeStatement() !== 1) { return; }
         $intent = $this->find('operation_id', $operationId);
         $stage = 'intent';
@@ -1079,10 +1083,13 @@ final class DirectoryPublicationService {
                     // Keep the original failure and never persist remote error text.
                 }
             }
-            $this->update($operationId, ['state' => 'pending',
-                'error_code' => self::failureCode($stage, $e, $remoteObservation),
+            $blocked = $e instanceof BindingPublicationStoppedException;
+            $this->update($operationId, ['state' => $blocked ? 'blocked' : 'pending',
+                'error_code' => $blocked ? 'publication_stopped'
+                    : self::failureCode($stage, $e, $remoteObservation),
                 'attempt_count' => (int)$intent['attempt_count'] + 1, 'lease_until' => 0,
-                'next_attempt_at' => time() + min(300, 15 * (1 << min(4, (int)$intent['attempt_count'])))]);
+                'next_attempt_at' => $blocked ? 0
+                    : time() + min(300, 15 * (1 << min(4, (int)$intent['attempt_count'])))]);
         }
     }
 

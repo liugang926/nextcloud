@@ -32,7 +32,7 @@ try {
         $db->getQueryBuilder()->delete($table)->executeStatement();
     }
     $ids = [];
-    foreach (['retired', 'target_deleted', 'pending', 'active'] as $state) {
+    foreach (['retired', 'target_deleted', 'pending', 'active', 'blocked'] as $state) {
         $id = DirectoryPublicationService::uuid(); $ids[$state] = $id;
         $db->insertIgnoreConflict('weknora_dir_intent', [
             'operation_id'=>$id, 'binding_id'=>'test_'.$state, 'root_key'=>hash('sha256', $id),
@@ -61,10 +61,18 @@ try {
     $command=$c->get(DiscoverDirectories::class);
     $exit=$command->run(new \Symfony\Component\Console\Input\ArrayInput([]), new \Symfony\Component\Console\Output\NullOutput());
     workerCheck($exit === 0, 'Fast worker failed');
-    foreach (['pending','active'] as $state) {
-        $row=$read($ids[$state]);
-        workerCheck((int)$row['attempt_count'] === 1 && (int)$row['next_attempt_at'] > time(), 'Fast worker did not process a due intent');
-    }
+    $pendingRow=$read($ids['pending']);
+    workerCheck((int)$pendingRow['attempt_count'] === 1 && (int)$pendingRow['next_attempt_at'] > time(), 'Fast worker did not process a due pending intent');
+    $activeRow=$read($ids['active']);
+    workerCheck((int)$activeRow['attempt_count'] === 0 && (int)$activeRow['next_attempt_at'] === 0,
+        'Fast worker reprocessed a completed active intent');
+    $blockedRow=$read($ids['blocked']);
+    workerCheck((int)$blockedRow['attempt_count'] === 0,
+        'Fast worker retried blocked work without an explicit user request');
+    $process->invoke($directories, $ids['blocked'], true);
+    $blockedRow=$read($ids['blocked']);
+    workerCheck((int)$blockedRow['attempt_count'] === 1,
+        'Explicit retry could not claim blocked work');
     foreach ($terminal as $state => $before) {
         workerCheck($read($ids[$state]) === $before, 'Queue selection retried a terminal intent');
     }
