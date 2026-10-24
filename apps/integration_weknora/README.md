@@ -29,7 +29,7 @@ advance cleanup state to pending, blocked, running, partial or verified
 without reopening access; a newer completed source revision is evaluated as a
 new upload or restore.
 
-## Versioned, explainable multi-source onboarding (0.9.2 baseline)
+## Versioned, explainable multi-source onboarding (0.9.3 baseline)
 
 The app and the WeKnora onboarding service use contract v3. Connection setup
 reports the Nextcloud app version, the deployed sidebar bundle digest, the

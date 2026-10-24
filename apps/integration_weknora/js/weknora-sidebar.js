@@ -4867,13 +4867,63 @@ ${message.stack}`;
       if (ready + skipped === total && unverified === 0) return skipped > 0 ? "partial" : "ready";
       return "unverified";
     }
-    async renderAssociation(creating, migrating = false, query = "") {
+    renderAssociationSpaceChooser(creating, migrating, result) {
+      const form = document.createElement("form");
+      form.className = "weknora-sidebar weknora-sidebar__form";
+      const heading = document.createElement("h3");
+      heading.textContent = creating ? "\u65B0\u5EFA\u76EE\u5F55\u5E76\u5173\u8054\u77E5\u8BC6\u5E93" : migrating ? "\u8FC1\u79FB\u5230\u65B0\u7684\u77E5\u8BC6\u5E93" : "\u5173\u8054\u77E5\u8BC6\u5E93";
+      form.append(heading);
+      const explanation = document.createElement("p");
+      explanation.textContent = "\u8BF7\u5148\u9009\u62E9 WeKnora \u7A7A\u95F4\u3002\u4E0B\u4E00\u6B65\u53EA\u663E\u793A\u8BE5\u7A7A\u95F4\u4E0B\u53EF\u7528\u7684\u77E5\u8BC6\u5E93\u3002";
+      form.append(explanation);
+      const spaces = (result.spaces || []).filter((space2) => space2.available !== false && space2.can_bind !== false);
+      const space = document.createElement("select");
+      space.append(new Option("\u8BF7\u9009\u62E9\u7A7A\u95F4", ""));
+      for (const candidate of spaces) {
+        const option = document.createElement("option");
+        option.value = String(candidate.tenant_id);
+        option.textContent = candidate.space_name || candidate.name || `\u7A7A\u95F4 ${candidate.tenant_id}`;
+        space.append(option);
+      }
+      this.field(form, "WeKnora \u7A7A\u95F4", space);
+      const next = document.createElement("button");
+      next.type = "submit";
+      next.textContent = "\u4E0B\u4E00\u6B65\uFF1A\u9009\u62E9\u77E5\u8BC6\u5E93";
+      next.disabled = true;
+      form.append(next);
+      const reasons = document.createElement("div");
+      reasons.className = "weknora-sidebar__reasons";
+      if (!spaces.length) {
+        const note = document.createElement("p");
+        note.className = "weknora-sidebar__hint";
+        note.textContent = result.reason_code === "space_not_visible" ? "\u5F53\u524D\u7528\u6237\u6CA1\u6709\u53EF\u89C1\u7684 WeKnora \u7A7A\u95F4\uFF0C\u8BF7\u8054\u7CFB\u7BA1\u7406\u5458\u8C03\u6574\u7A7A\u95F4\u53EF\u89C1\u8303\u56F4\u3002" : "\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u7684 WeKnora \u7A7A\u95F4\u3002";
+        reasons.append(note);
+      }
+      form.append(reasons);
+      this.button(form, "\u53D6\u6D88", () => this.load());
+      space.addEventListener("change", () => {
+        next.disabled = space.value === "";
+      });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (space.value === "") return;
+        this.renderAssociation(creating, migrating, "", space.value);
+      });
+      this.replaceChildren(form);
+    }
+    async renderAssociation(creating, migrating = false, query = "", spaceId = "") {
       const selectedId = this.nodeId();
       const request = ++this._request;
       const params = new URLSearchParams({ for_creation: creating ? "1" : "0", limit: "50" });
       if (query) params.set("q", query);
+      if (spaceId) params.set("tenant_id", spaceId);
+      else params.set("catalog", "1");
       const result = await this.api(`/folders/${selectedId}/candidates?${params}`);
       if (request !== this._request || selectedId !== this.nodeId() || !this.isConnected) return;
+      if (!spaceId) {
+        this.renderAssociationSpaceChooser(creating, migrating, result);
+        return;
+      }
       const form = document.createElement("form");
       form.className = "weknora-sidebar weknora-sidebar__form";
       const heading = document.createElement("h3");
@@ -4902,24 +4952,17 @@ ${message.stack}`;
       const searchButton = document.createElement("button");
       searchButton.type = "button";
       searchButton.textContent = "\u5237\u65B0\u5019\u9009";
-      searchButton.addEventListener("click", () => this.renderAssociation(creating, migrating, searchInput.value.trim()));
+      searchButton.addEventListener("click", () => this.renderAssociation(creating, migrating, searchInput.value.trim(), spaceId));
       search.append(searchInput, searchButton);
       form.append(search);
-      const space = document.createElement("select");
-      const seenSpaces = /* @__PURE__ */ new Set();
-      for (const candidate of spaces) {
-        if (seenSpaces.has(String(candidate.tenant_id))) continue;
-        seenSpaces.add(String(candidate.tenant_id));
-        const option = document.createElement("option");
-        option.value = String(candidate.tenant_id);
-        const unavailable = candidate.available === false || candidate.can_bind === false;
-        option.disabled = unavailable;
-        option.textContent = `${candidate.space_name || `\u7A7A\u95F4 ${candidate.tenant_id}`}${unavailable ? `\uFF08\u4E0D\u53EF\u7528\uFF1A${candidate.reason_code || "\u914D\u7F6E\u672A\u9A8C\u8BC1"}\uFF09` : ""}`;
-        space.append(option);
-      }
-      this.field(form, "\u5DE5\u4F5C\u7A7A\u95F4", space);
       const firstUsable = spaces.find((candidate) => candidate.available !== false && candidate.can_bind !== false);
-      if (firstUsable) space.value = String(firstUsable.tenant_id);
+      const selectedSpace = firstUsable || spaces[0];
+      const selectedSpaceName = selectedSpace?.space_name || selectedSpace?.name || `\u7A7A\u95F4 ${spaceId}`;
+      const selectedSpaceRow = document.createElement("div");
+      selectedSpaceRow.className = "weknora-sidebar__selected-space";
+      selectedSpaceRow.append(document.createTextNode(`\u5DF2\u9009\u7A7A\u95F4\uFF1A${selectedSpaceName} `));
+      this.button(selectedSpaceRow, "\u91CD\u65B0\u9009\u62E9\u7A7A\u95F4", () => this.renderAssociation(creating, migrating));
+      form.append(selectedSpaceRow);
       const folderName = document.createElement("input");
       folderName.type = "text";
       folderName.maxLength = 255;
@@ -4950,7 +4993,7 @@ ${message.stack}`;
       loadMore.textContent = "\u52A0\u8F7D\u66F4\u591A\u77E5\u8BC6\u5E93";
       loadMore.hidden = true;
       form.append(loadMore);
-      const selectedTarget = () => spaces.find((candidate) => String(candidate.tenant_id) === space.value);
+      const selectedTarget = () => selectedSpace;
       let selectedTemplate = "";
       const updateCandidates = () => {
         target.replaceChildren();
@@ -5009,7 +5052,6 @@ ${message.stack}`;
         submit.disabled = mode.value === "" || mode.value === "existing" && !target.value || creating && folderName.value.trim() === "";
         existingNote.textContent = mode.value === "create" ? "\u5C06\u521B\u5EFA\u65B0\u7684\u77E5\u8BC6\u5E93\uFF1B\u76EE\u5F55\u548C\u65B0\u77E5\u8BC6\u5E93\u4F7F\u7528\u5F53\u524D\u8F93\u5165\u7684\u540D\u79F0\u3002" : "\u9009\u62E9\u5DF2\u6709\u77E5\u8BC6\u5E93\u65F6\uFF0C\u539F\u6709\u5185\u5BB9\u4F1A\u4FDD\u7559\uFF1B\u7ED1\u5B9A\u540E\u8BE5\u77E5\u8BC6\u5E93\u7684\u65B0\u589E\u5185\u5BB9\u7531 Nextcloud \u76EE\u5F55\u7BA1\u7406\u3002";
       };
-      space.addEventListener("change", updateCandidates);
       mode.addEventListener("change", updateMode);
       folderName.addEventListener("input", () => {
         if (creating && !nameTouched) name.value = folderName.value;
@@ -5029,6 +5071,7 @@ ${message.stack}`;
           const moreParams = new URLSearchParams({
             for_creation: creating ? "1" : "0",
             limit: "50",
+            tenant_id: String(selected.tenant_id),
             q: query,
             cursor: selected.next_cursor
           });
@@ -5060,7 +5103,6 @@ ${message.stack}`;
         submit.disabled = true;
         name.disabled = true;
         target.disabled = true;
-        space.disabled = true;
         mode.disabled = true;
         folderName.disabled = true;
         const selected = selectedTarget();
@@ -5071,7 +5113,7 @@ ${message.stack}`;
           name: mode.value === "existing" ? chosen?.name : name.value,
           knowledge_base_id: mode.value === "existing" ? target.value : "",
           folder_name: creating ? folderName.value : void 0,
-          tenant_id: space.value,
+          tenant_id: String(selected?.tenant_id || spaceId),
           processing_template_id: selectedTemplate,
           target_candidate_revision: selected?.candidate_revision || null,
           candidate_revision: result.candidate_revision || null
@@ -5105,7 +5147,7 @@ ${message.stack}`;
           if (changed) {
             submit.textContent = "\u5019\u9009\u5DF2\u53D8\u5316";
             submit.disabled = true;
-            this.button(form, "\u5237\u65B0\u5019\u9009", () => this.renderAssociation(creating, migrating, query));
+            this.button(form, "\u5237\u65B0\u5019\u9009", () => this.renderAssociation(creating, migrating, query, spaceId));
           } else {
             submit.textContent = "\u91CD\u8BD5\u540C\u4E00\u64CD\u4F5C";
             submit.disabled = false;

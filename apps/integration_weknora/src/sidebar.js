@@ -415,13 +415,64 @@ class WeknoraFileSidebarTab extends HTMLElement {
         return 'unverified'
     }
 
-    async renderAssociation(creating, migrating = false, query = '') {
+    renderAssociationSpaceChooser(creating, migrating, result) {
+        const form = document.createElement('form')
+        form.className = 'weknora-sidebar weknora-sidebar__form'
+        const heading = document.createElement('h3')
+        heading.textContent = creating ? '新建目录并关联知识库' : migrating ? '迁移到新的知识库' : '关联知识库'
+        form.append(heading)
+        const explanation = document.createElement('p')
+        explanation.textContent = '请先选择 WeKnora 空间。下一步只显示该空间下可用的知识库。'
+        form.append(explanation)
+        const spaces = (result.spaces || []).filter(space => space.available !== false && space.can_bind !== false)
+        const space = document.createElement('select')
+        space.append(new Option('请选择空间', ''))
+        for (const candidate of spaces) {
+            const option = document.createElement('option')
+            option.value = String(candidate.tenant_id)
+            option.textContent = candidate.space_name || candidate.name || `空间 ${candidate.tenant_id}`
+            space.append(option)
+        }
+        this.field(form, 'WeKnora 空间', space)
+        const next = document.createElement('button')
+        next.type = 'submit'
+        next.textContent = '下一步：选择知识库'
+        next.disabled = true
+        form.append(next)
+        const reasons = document.createElement('div')
+        reasons.className = 'weknora-sidebar__reasons'
+        if (!spaces.length) {
+            const note = document.createElement('p')
+            note.className = 'weknora-sidebar__hint'
+            note.textContent = result.reason_code === 'space_not_visible'
+                ? '当前用户没有可见的 WeKnora 空间，请联系管理员调整空间可见范围。'
+                : '当前没有可用的 WeKnora 空间。'
+            reasons.append(note)
+        }
+        form.append(reasons)
+        this.button(form, '取消', () => this.load())
+        space.addEventListener('change', () => { next.disabled = space.value === '' })
+        form.addEventListener('submit', (event) => {
+            event.preventDefault()
+            if (space.value === '') return
+            this.renderAssociation(creating, migrating, '', space.value)
+        })
+        this.replaceChildren(form)
+    }
+
+    async renderAssociation(creating, migrating = false, query = '', spaceId = '') {
         const selectedId = this.nodeId()
         const request = ++this._request
         const params = new URLSearchParams({ for_creation: creating ? '1' : '0', limit: '50' })
         if (query) params.set('q', query)
+        if (spaceId) params.set('tenant_id', spaceId)
+        else params.set('catalog', '1')
         const result = await this.api(`/folders/${selectedId}/candidates?${params}`)
         if (request !== this._request || selectedId !== this.nodeId() || !this.isConnected) return
+        if (!spaceId) {
+            this.renderAssociationSpaceChooser(creating, migrating, result)
+            return
+        }
         const form = document.createElement('form')
         form.className = 'weknora-sidebar weknora-sidebar__form'
         const heading = document.createElement('h3')
@@ -445,25 +496,18 @@ class WeknoraFileSidebarTab extends HTMLElement {
         const searchButton = document.createElement('button')
         searchButton.type = 'button'
         searchButton.textContent = '刷新候选'
-        searchButton.addEventListener('click', () => this.renderAssociation(creating, migrating, searchInput.value.trim()))
+        searchButton.addEventListener('click', () =>
+            this.renderAssociation(creating, migrating, searchInput.value.trim(), spaceId))
         search.append(searchInput, searchButton)
         form.append(search)
-        const space = document.createElement('select')
-        const seenSpaces = new Set()
-        for (const candidate of spaces) {
-            if (seenSpaces.has(String(candidate.tenant_id))) continue
-            seenSpaces.add(String(candidate.tenant_id))
-            const option = document.createElement('option')
-            option.value = String(candidate.tenant_id)
-            const unavailable = candidate.available === false || candidate.can_bind === false
-            option.disabled = unavailable
-            option.textContent = `${candidate.space_name || `空间 ${candidate.tenant_id}`}${unavailable
-                ? `（不可用：${candidate.reason_code || '配置未验证'}）` : ''}`
-            space.append(option)
-        }
-        this.field(form, '工作空间', space)
         const firstUsable = spaces.find(candidate => candidate.available !== false && candidate.can_bind !== false)
-        if (firstUsable) space.value = String(firstUsable.tenant_id)
+        const selectedSpace = firstUsable || spaces[0]
+        const selectedSpaceName = selectedSpace?.space_name || selectedSpace?.name || `空间 ${spaceId}`
+        const selectedSpaceRow = document.createElement('div')
+        selectedSpaceRow.className = 'weknora-sidebar__selected-space'
+        selectedSpaceRow.append(document.createTextNode(`已选空间：${selectedSpaceName} `))
+        this.button(selectedSpaceRow, '重新选择空间', () => this.renderAssociation(creating, migrating))
+        form.append(selectedSpaceRow)
         const folderName = document.createElement('input')
         folderName.type = 'text'; folderName.maxLength = 255; folderName.required = creating
         const folderField = this.field(form, '目录名称', folderName)
@@ -486,7 +530,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
         const loadMore = document.createElement('button')
         loadMore.type = 'button'; loadMore.textContent = '加载更多知识库'; loadMore.hidden = true
         form.append(loadMore)
-        const selectedTarget = () => spaces.find(candidate => String(candidate.tenant_id) === space.value)
+        const selectedTarget = () => selectedSpace
         let selectedTemplate = ''
         const updateCandidates = () => {
             target.replaceChildren()
@@ -553,7 +597,6 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 ? '将创建新的知识库；目录和新知识库使用当前输入的名称。'
                 : '选择已有知识库时，原有内容会保留；绑定后该知识库的新增内容由 Nextcloud 目录管理。'
         }
-        space.addEventListener('change', updateCandidates)
         mode.addEventListener('change', updateMode)
         folderName.addEventListener('input', () => {
             if (creating && !nameTouched) name.value = folderName.value
@@ -568,7 +611,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
             loadMore.disabled = true
             try {
                 const moreParams = new URLSearchParams({ for_creation: creating ? '1' : '0', limit: '50',
-                    q: query, cursor: selected.next_cursor })
+                    tenant_id: String(selected.tenant_id), q: query, cursor: selected.next_cursor })
                 const page = await this.api(`/folders/${selectedId}/candidates?${moreParams}`)
                 if (page.candidate_revision !== result.candidate_revision) throw new Error('candidate_page_changed')
                 const nextTarget = (page.targets || []).find(candidate =>
@@ -593,7 +636,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
             event.preventDefault()
             if (!form.reportValidity()) return
             submit.disabled = true
-            name.disabled = true; target.disabled = true; space.disabled = true
+            name.disabled = true; target.disabled = true
             mode.disabled = true; folderName.disabled = true
             const selected = selectedTarget()
             const chosen = selected?.candidates?.find(candidate => String(candidate.id) === target.value)
@@ -601,7 +644,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 name: mode.value === 'existing' ? chosen?.name : name.value,
                 knowledge_base_id: mode.value === 'existing' ? target.value : '',
                 folder_name: creating ? folderName.value : undefined,
-                tenant_id: space.value, processing_template_id: selectedTemplate,
+                tenant_id: String(selected?.tenant_id || spaceId), processing_template_id: selectedTemplate,
                 target_candidate_revision: selected?.candidate_revision || null,
                 candidate_revision: result.candidate_revision || null }
             if (migrating && !this._targetMigrations.has(selectedId)) {
@@ -641,7 +684,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 form.append(message)
                 if (changed) {
                     submit.textContent = '候选已变化'; submit.disabled = true
-                    this.button(form, '刷新候选', () => this.renderAssociation(creating, migrating, query))
+                    this.button(form, '刷新候选', () => this.renderAssociation(creating, migrating, query, spaceId))
                 } else {
                     submit.textContent = '重试同一操作'; submit.disabled = false
                 }

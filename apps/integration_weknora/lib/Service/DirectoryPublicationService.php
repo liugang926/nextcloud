@@ -430,11 +430,51 @@ final class DirectoryPublicationService {
         string $query = '',
         string $cursor = '',
         int $limit = 50,
+        bool $spaceCatalog = false,
     ): array {
         $folder = $this->folder($uid, $folderId);
         $rule = $forCreation ? $this->matchingRule($folder, true) : $this->requireManagement($uid, $folder);
         if ($rule === null || !$this->delegated($uid, $rule)) { throw new \DomainException('Publication management is forbidden'); }
         $allowed = $allowedTenantIds === null ? null : array_fill_keys($allowedTenantIds, true);
+        if ($spaceCatalog) {
+            $spaces = [];
+            $seen = [];
+            foreach ($this->targetChoices($rule) as $target) {
+                $tenantId = (string)($target['tenant_id'] ?? '');
+                if (($allowed !== null && !isset($allowed[$tenantId])) || isset($seen[$tenantId])) {
+                    continue;
+                }
+                $seen[$tenantId] = true;
+                $spaceName = is_string($target['space_name'] ?? null) ? $target['space_name'] : null;
+                $spaces[] = [
+                    'tenant_id' => $tenantId,
+                    'name' => $spaceName,
+                    'space_name' => $spaceName,
+                    'processing_template_id' => $target['processing_template_id'] ?? null,
+                    'available' => true,
+                    'can_bind' => true,
+                    'can_view_space' => true,
+                ];
+            }
+            $result = [
+                'contract_version' => 3,
+                'request_id' => 'req_' . bin2hex(random_bytes(12)),
+                'candidate_revision' => null,
+                'state' => $spaces === [] ? 'spaces_empty' : 'spaces',
+                'reason_code' => $spaces === [] ? 'space_not_visible' : null,
+                'spaces' => $spaces,
+                'targets' => [],
+                'ineligible' => [],
+                'permissions' => [
+                    'can_view_space' => true, 'can_bind_directory' => true,
+                    'can_take_over_kb' => true, 'can_query_kb' => false,
+                    'can_admin_connection' => $this->groups->isAdmin($uid),
+                ],
+                'rule_id' => $rule['id'],
+            ];
+            $this->audit($uid, $folderId, null, null, 'space_catalog_viewed', $result['reason_code']);
+            return $result;
+        }
         $query = trim($query);
         if (strlen($query) > 128 || strlen($cursor) > 2048) {
             throw new \InvalidArgumentException('Invalid candidate query');
