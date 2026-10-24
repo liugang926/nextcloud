@@ -13,6 +13,8 @@ const directories = fs.readFileSync(
     path.join(root, 'lib/Service/DirectoryPublicationService.php'), 'utf8');
 const sidebar = fs.readFileSync(path.join(root, 'src/sidebar.js'), 'utf8');
 const bundle = fs.readFileSync(path.join(root, 'js/weknora-sidebar.js'), 'utf8');
+const sidebarCss = fs.readFileSync(
+    path.join(root, 'css/weknora-sidebar.css'), 'utf8');
 const publication = fs.readFileSync(
     path.join(root, 'lib/Service/DirectoryPublicationService.php'), 'utf8');
 const info = fs.readFileSync(path.join(root, 'appinfo/info.xml'), 'utf8');
@@ -34,9 +36,10 @@ assert.match(sidebar, /重新选择空间/);
 assert.match(publication, /space_catalog_viewed/);
 assert.match(bundle, /candidate\.nextcloud_source_count/);
 assert.match(bundle, /sourceCount > 0/);
-assert.match(info, /<version>0\.10\.0<\/version>/);
 assert.match(bundle, /renderAssociationSpaceChooser/);
 assert.match(bundle, /params\.set\("catalog", "1"\)/);
 assert.match(bundle, /weknora-sidebar__selected-space/);
+assert.match(sidebarCss, /\.weknora-sidebar__form \[hidden\] \{ display: none !important; \}/);
+assert.match(info, /<version>0\.10\.1<\/version>/);
 
 process.stdout.write('multisource UI contract: PASS\n');
