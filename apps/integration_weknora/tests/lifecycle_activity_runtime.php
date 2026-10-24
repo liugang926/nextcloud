@@ -45,12 +45,21 @@ $crypto = $services->get(ICrypto::class);
 $db = $services->get(IDBConnection::class);
 $uid = (string)(getenv('WEKNORA_TEST_USER') ?: '');
 if ($uid === '') {
-    $candidates = $services->get(IUserManager::class)->search('', 1);
+    $users = $services->get(IUserManager::class);
+    foreach (['devadmin', 'auto-prd-admin', 'admin'] as $candidate) {
+        if ($users->get($candidate) !== null) {
+            $uid = $candidate;
+            break;
+        }
+    }
+    $candidates = $users->search('', 1);
     $candidate = $candidates[0] ?? null;
-    if ($candidate === null) {
+    if ($uid === '' && $candidate !== null) {
+        $uid = $candidate->getUID();
+    }
+    if ($uid === '') {
         throw new RuntimeException('Runtime test requires an enabled local account');
     }
-    $uid = $candidate->getUID();
 }
 $home = \OCP\Server::get(\OCP\Files\IRootFolder::class)->getUserFolder($uid);
 $root = $home->newFolder('lifecycle-test-' . bin2hex(random_bytes(4)));
