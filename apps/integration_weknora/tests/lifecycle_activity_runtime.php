@@ -95,9 +95,24 @@ putenv('WEKNORA_EVENT_ALLOWED_ORIGINS=http://test-weknora');
 $connectionId = 'lifecycle_connection_' . bin2hex(random_bytes(8));
 $keyId = 'lifecycle_key_' . bin2hex(random_bytes(4));
 $secret = bin2hex(random_bytes(32));
-$services->get(EventConnectionService::class)->configure(
+$connections = $services->get(EventConnectionService::class);
+$connections->configure(
     $bindingId, $bindingId, $instanceId, $connectionId, $keyId, $secret,
     'http://test-weknora/api/v1/integrations/nextcloud/events');
+$paused = $connections->row($bindingId);
+$pausedUpdate = $db->getQueryBuilder();
+$pausedUpdate->update('weknora_event_conn')
+    ->set('status', $pausedUpdate->createNamedParameter('paused'))
+    ->set('attempt_count', $pausedUpdate->createNamedParameter(1))
+    ->set('last_error_code', $pausedUpdate->createNamedParameter('receiver_unauthorized'))
+    ->where($pausedUpdate->expr()->eq('binding_id',
+        $pausedUpdate->createNamedParameter($bindingId)))
+    ->executeStatement();
+$resumed = $connections->retryPaused($bindingId, $connectionId, $keyId,
+    (string)$paused['received_id']);
+checkLifecycle($resumed['status'] === 'active' &&
+    (string)$resumed['received_through_event_id'] === (string)$paused['received_id'],
+    'Exact association retry did not resume a paused sender without losing its cursor');
 
 $tombstones = $services->get(DeletionTombstoneService::class);
 $tombstones->record($bindingId, $file->getId(), $file->getEtag(), $revision, 'source_deleted');

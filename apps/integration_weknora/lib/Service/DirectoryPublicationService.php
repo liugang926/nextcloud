@@ -1142,6 +1142,13 @@ final class DirectoryPublicationService {
                     $event['connection_id'], $event['key_id'], $event['secret'], $event['receiver_url']);
             } elseif ($existing['connection_id'] !== $event['connection_id'] || $existing['key_id'] !== $event['key_id']) {
                 throw new \DomainException('Event connection changed');
+            } elseif ($existing['status'] === 'paused') {
+                // A transient receiver failure pauses the sender. An exact,
+                // freshly authorized retry of the same association is the
+                // controlled recovery path; the cursor remains unchanged.
+                $this->connections->retryPaused($intent['binding_id'],
+                    (string)$existing['connection_id'], (string)$existing['key_id'],
+                    (string)$existing['received_id']);
             }
             $permissionVersion = (int)$intent['permission_version'] + 1;
             $stage = 'grant_snapshot';
