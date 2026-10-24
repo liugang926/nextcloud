@@ -39,6 +39,7 @@ try {
             'rule_id'=>'absent-rule', 'owner_uid'=>'fixture', 'actor_uid'=>'fixture',
             'folder_name'=>'fixture', 'state'=>$state, 'error_code'=>'', 'request_json'=>'{}',
             'updated_at'=>1, 'created_at'=>1,
+            'next_attempt_at'=>$state === 'active' ? time() + 300 : 0,
         ]);
     }
     $read = static function (string $id) use ($db): array {
@@ -64,7 +65,7 @@ try {
     $pendingRow=$read($ids['pending']);
     workerCheck((int)$pendingRow['attempt_count'] === 1 && (int)$pendingRow['next_attempt_at'] > time(), 'Fast worker did not process a due pending intent');
     $activeRow=$read($ids['active']);
-    workerCheck((int)$activeRow['attempt_count'] === 0 && (int)$activeRow['next_attempt_at'] === 0,
+    workerCheck((int)$activeRow['attempt_count'] === 0 && (int)$activeRow['next_attempt_at'] > time(),
         'Fast worker reprocessed a completed active intent');
     $blockedRow=$read($ids['blocked']);
     workerCheck((int)$blockedRow['attempt_count'] === 0,

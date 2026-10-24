@@ -854,6 +854,19 @@ final class DirectoryPublicationService {
             ->andWhere($q->expr()->eq('i.state', $q->createNamedParameter('pending')))
             ->orderBy('i.updated_at')->setMaxResults(max(1, min(100, $limit)))->executeQuery();
         try { $rows = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
+        $activeQuery = $this->db->getQueryBuilder();
+        $activeResult = $activeQuery->select('i.operation_id')->from('weknora_dir_intent', 'i')
+            ->leftJoin('i', 'weknora_target_close', 'closed',
+                $activeQuery->expr()->eq('closed.operation_id', 'i.operation_id'))
+            ->where($activeQuery->expr()->isNull('closed.operation_id'))
+            ->andWhere($activeQuery->expr()->lte('i.next_attempt_at',
+                $activeQuery->createNamedParameter(time())))
+            ->andWhere($activeQuery->expr()->lte('i.lease_until',
+                $activeQuery->createNamedParameter(time())))
+            ->andWhere($activeQuery->expr()->eq('i.state',
+                $activeQuery->createNamedParameter('active')))
+            ->orderBy('i.updated_at')->setMaxResults(max(1, min(100, $limit)))->executeQuery();
+        try { $activeRows = $activeResult->fetchAllAssociative(); } finally { $activeResult->closeCursor(); }
         // Independent control metadata gets a bounded opportunity on every
         // pass, including after the original root has permanently closed.
         // It never calls process(), pairing, grants, mkdir, sync or resume.
@@ -861,6 +874,86 @@ final class DirectoryPublicationService {
         foreach ($rows as $row) {
             if (microtime(true) >= $deadline) { break; }
             $this->process($row['operation_id']);
+        }
+        // Active bindings still need fresh directory grants. Keep that update
+        // small and independent from the idempotent but expensive onboarding
+        // sequence (pairing, receiver validation and initial reconcile).
+        foreach ($activeRows as $row) {
+            if (microtime(true) >= $deadline) { break; }
+            $this->refreshActivePermissions($row['operation_id']);
+        }
+    }
+
+    private function refreshActivePermissions(string $operationId): void {
+        $this->recovery->requireAutomationOpen($this->config);
+        if (DirectoryTargetClosureService::lookup($this->db, 'operation_id', $operationId) !== null) { return; }
+        $claim = $this->db->getQueryBuilder();
+        if ($claim->update('weknora_dir_intent')
+            ->set('lease_until', $claim->createNamedParameter(time() + 240))
+            ->where($claim->expr()->eq('operation_id', $claim->createNamedParameter($operationId)))
+            ->andWhere($claim->expr()->eq('state', $claim->createNamedParameter('active')))
+            ->andWhere($claim->expr()->lte('lease_until', $claim->createNamedParameter(time())))
+            ->executeStatement() !== 1) {
+            return;
+        }
+        $intent = $this->find('operation_id', $operationId);
+        if ($intent === null || $intent['state'] !== 'active') { return; }
+        try {
+            $rule = $this->rule((string)$intent['rule_id']);
+            $uid = $this->targetMoves->managerForOperation($operationId) ?? (string)$intent['actor_uid'];
+            if (!$this->delegated($uid, $rule)) {
+                throw new \DomainException('Publication delegate was revoked');
+            }
+            $identity = $this->identities->forUser($uid);
+            $request = json_decode((string)$intent['request_json'], true, 16, JSON_THROW_ON_ERROR);
+            $rule = $this->selectTarget($rule, (string)$request['tenant_id'],
+                (string)$request['processing_template_id']);
+            if ($rule['processing_template_id'] !== $request['processing_template_id']) {
+                throw new \DomainException('Target processing template changed');
+            }
+            if ((int)$intent['root_file_id'] === 0) {
+                throw new \DomainException('Publication root is unavailable');
+            }
+            $root = $this->folder((string)$rule['owner_uid'], (int)$intent['root_file_id']);
+            $matching = $this->matchingRule($root);
+            if ($matching === null || $matching['id'] !== $rule['id']) {
+                throw new \DomainException('Root left its publication rule');
+            }
+            $this->folder($uid, $root->getId());
+            $this->acl->assertTreeSupported($root);
+            $pair = $this->pairs->status((string)$intent['binding_id']);
+            if ($pair === null || $pair['state'] !== 'active' ||
+                $pair['operation_id'] !== $operationId) {
+                throw new \DomainException('Publication pair is unavailable');
+            }
+            $permissionVersion = (int)$intent['permission_version'] + 1;
+            $snapshot = $this->grants->snapshot($root, (string)$rule['owner_uid'], $uid);
+            $this->remote->request($rule, 'PUT', '/operations/' . $operationId . '/grants', [
+                'permission_version' => $permissionVersion,
+                'publication_epoch' => $this->bindings->requirePublicationActive((string)$intent['binding_id']),
+                'complete' => true,
+                'subjects' => $snapshot,
+            ]);
+            $this->update($operationId, [
+                'state' => 'active',
+                'error_code' => '',
+                'permission_version' => $permissionVersion,
+                'next_attempt_at' => time() + 240,
+                'lease_until' => 0,
+            ]);
+        } catch (\Throwable $e) {
+            try {
+                $this->bindings->setPublicationState((string)$intent['binding_id'], 'stopped', 'directory-policy');
+            } catch (\Throwable $ignored) {
+                // Preserve the original failure and never reopen publication.
+            }
+            $this->update($operationId, [
+                'state' => 'blocked',
+                'error_code' => 'publication_stopped',
+                'attempt_count' => (int)$intent['attempt_count'] + 1,
+                'next_attempt_at' => 0,
+                'lease_until' => 0,
+            ]);
         }
     }
 
