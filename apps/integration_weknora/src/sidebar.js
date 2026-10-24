@@ -251,6 +251,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     target_status_rejected_operation_missing: 'WeKnora 中找不到原目录接入操作',
                     target_status_rejected_target_closed: 'WeKnora 目标知识库已关闭',
                     pairing_prepare_unverified: 'Nextcloud 尚未准备好知识库配对凭据',
+                    publication_stopped: '发布已停止，当前版本不可读取；点击“重试同一关联”进行安全恢复',
                     pairing_prepare_conflict: 'Nextcloud 中的配对凭据或目录状态发生冲突',
                     pairing_remote_unverified: 'WeKnora 知识库来源配对尚未验证',
                     pairing_remote_transport: '无法连接 WeKnora 配对服务',
