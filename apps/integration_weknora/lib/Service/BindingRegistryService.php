@@ -229,7 +229,12 @@ final class BindingRegistryService {
         $resolved = [];
         foreach ($this->listBindings() as $binding) {
             if ($binding['id'] === $bindingId) {
-                $selected = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+                try {
+                    $selected = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+                } catch (\InvalidArgumentException $exception) {
+                    throw new \UnexpectedValueException(
+                        'A binding root is no longer available', 0, $exception);
+                }
                 continue;
             }
             try {
