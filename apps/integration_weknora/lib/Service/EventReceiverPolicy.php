@@ -25,7 +25,11 @@ final class EventReceiverPolicy {
         }
         $origin = $parts['scheme'] . '://' . $parts['host'] .
             (isset($parts['port']) ? ':' . $parts['port'] : '');
-        $origin = (new ApprovedOriginPolicy())->canonical(strtolower($origin), true);
+        try {
+            $origin = (new ApprovedOriginPolicy())->canonical(strtolower($origin), true);
+        } catch (\DomainException $exception) {
+            throw new \InvalidArgumentException('Receiver origin is not operator approved', 0, $exception);
+        }
         if ($url !== $origin . self::PATH) {
             throw new \InvalidArgumentException('Receiver URL must be canonical');
         }
