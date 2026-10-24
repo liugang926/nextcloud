@@ -111,7 +111,7 @@ $pausedUpdate->update('weknora_event_conn')
 $resumed = $connections->retryPaused($bindingId, $connectionId, $keyId,
     (string)$paused['received_id']);
 checkLifecycle($resumed['status'] === 'active' &&
-    (string)$resumed['received_id'] === (string)$paused['received_id'],
+    (string)$resumed['received_through_event_id'] === (string)$paused['received_id'],
     'Exact association retry did not resume a paused sender without losing its cursor');
 
 $tombstones = $services->get(DeletionTombstoneService::class);
