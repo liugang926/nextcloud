@@ -194,12 +194,30 @@ final class ChangeOutboxService {
         $this->db->beginTransaction();
         try {
             $this->lockOutbox();
+            // A retained reconcile is reusable only while it is still pending
+            // delivery. Once the receiver has acknowledged it, another manual
+            // sync must create a new event or ETag drift can remain unverified
+            // until the entire outbox retention window expires.
+            $senderQuery = $this->db->getQueryBuilder();
+            $senderQuery->select('received_id')->from('weknora_event_conn')
+                ->where($senderQuery->expr()->eq('binding_id',
+                    $senderQuery->createNamedParameter($bindingId)))
+                ->setMaxResults(1);
+            $senderResult = $senderQuery->executeQuery();
+            try {
+                $receivedId = (int)($senderResult->fetchOne() ?: 0);
+            } finally {
+                $senderResult->closeCursor();
+            }
             $existing = $this->db->getQueryBuilder();
             $existing->select('id')->from('weknora_outbox')
                 ->where($existing->expr()->eq('binding_id',
                     $existing->createNamedParameter($bindingId)))
                 ->andWhere($existing->expr()->eq('event_type',
                     $existing->createNamedParameter('reconcile')))
+                ->andWhere($existing->expr()->gt('id',
+                    $existing->createNamedParameter(max(0, $receivedId),
+                        \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_INT)))
                 ->setMaxResults(1);
             $result = $existing->executeQuery();
             try {

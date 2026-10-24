@@ -166,6 +166,20 @@ checkLifecycle($cleanup['cleanup_state'] === 'verified' &&
     'Verified cleanup proof was not monotonic');
 
 $outbox = $services->get(ChangeOutboxService::class);
+$firstReconcile = $outbox->requestReconcile($bindingId);
+checkLifecycle($firstReconcile > 0,
+    'Manual sync did not queue its first reconciliation');
+checkLifecycle($outbox->requestReconcile($bindingId) === 0,
+    'Manual sync duplicated a reconciliation that was not yet delivered');
+$deliveredUpdate = $db->getQueryBuilder();
+$deliveredUpdate->update('weknora_event_conn')
+    ->set('received_id', $deliveredUpdate->createNamedParameter($firstReconcile))
+    ->where($deliveredUpdate->expr()->eq('binding_id',
+        $deliveredUpdate->createNamedParameter($bindingId)))
+    ->executeStatement();
+$secondReconcile = $outbox->requestReconcile($bindingId);
+checkLifecycle($secondReconcile > $firstReconcile,
+    'Manual sync reused a reconciliation already acknowledged by the receiver');
 $outbox->append($bindingId, $file->getId(), 'upsert', null, $file->getPath(),
     $file->getEtag(), $file->getName());
 $services->get(FilePublicationStateService::class)->withdraw($bindingId, $file->getId(), $uid);
