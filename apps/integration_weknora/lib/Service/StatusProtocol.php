@@ -191,7 +191,7 @@ final class StatusProtocol {
         }
         foreach (['withdrawal_state', 'permission_reclaim_state', 'gc_state'] as $name) {
             $value = $s[$name] ?? 'unverified';
-            if (!is_string($value) || !in_array($value, ['none', 'pending', 'blocked', 'partial', 'verified',
+            if (!is_string($value) || !in_array($value, ['none', 'not_required', 'pending', 'blocked', 'running', 'partial', 'verified',
                 'withdrawn', 'closed', 'access_closed', 'completed', 'unverified', 'cleanup_pending', 'cleanup_blocked',
                 'cleanup_partial', 'cleanup_verified'], true)) {
                 throw new \InvalidArgumentException('Invalid cleanup metadata');

@@ -34,9 +34,9 @@ assert.match(sidebar, /重新选择空间/);
 assert.match(publication, /space_catalog_viewed/);
 assert.match(bundle, /candidate\.nextcloud_source_count/);
 assert.match(bundle, /sourceCount > 0/);
+assert.match(info, /<version>0\.10\.0<\/version>/);
 assert.match(bundle, /renderAssociationSpaceChooser/);
 assert.match(bundle, /params\.set\("catalog", "1"\)/);
 assert.match(bundle, /weknora-sidebar__selected-space/);
-assert.match(info, /<version>0\.9\.3<\/version>/);
 
 process.stdout.write('multisource UI contract: PASS\n');

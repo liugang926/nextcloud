@@ -13,22 +13,39 @@ final class StatusProjectionService {
     public function __construct(private IDBConnection $db, private IConfig $config,
         private BindingRegistryService $bindings, private SourcePairingRegistryService $pairings,
         private EventConnectionService $connections, private FilePublicationStateService $publication,
-        private SourceContentRevisionService $contentRevisions) {
+        private SourceContentRevisionService $contentRevisions,
+        private DeletionTombstoneService $tombstones) {
     }
 
     /** Caller verifies purpose-specific signature first. Snapshot time is authenticated round-trip time. */
     public function accept(string $raw, ?int $snapshotVerifiedAt = null, ?array $authenticatedConnection = null): array {
         $now = time();
         $s = StatusProtocol::decode($raw, $now);
+        $rawHash = hash('sha256', $raw);
         if ($snapshotVerifiedAt !== null && ($snapshotVerifiedAt > $now + 5 || $snapshotVerifiedAt < $now - 10)) {
             throw new \InvalidArgumentException('Snapshot verification expired');
         }
         $this->db->beginTransaction();
         try {
             $this->lock();
-            $this->requireScope($s, $authenticatedConnection);
+            $cleanupOnly = false;
+            $allowWithdrawn = $s['sync_state'] === 'withdrawn' ||
+                in_array($s['publication_state'], ['withdrawn', 'retired', 'blocked'], true);
+            try {
+                $this->requireScope($s, $authenticatedConnection, $allowWithdrawn);
+            } catch (\DomainException $scopeError) {
+                if (!$this->acceptTombstoneCleanup($s, $authenticatedConnection, $rawHash)) {
+                    throw $scopeError;
+                }
+                $cleanupOnly = true;
+            }
+            if ($cleanupOnly) {
+                $this->db->commit();
+                return ['event_id' => $s['event_id'], 'status' => 'accepted',
+                    'persisted' => true, 'applied' => false, 'duplicate' => false,
+                    'cleanup_state' => $s['gc_state']];
+            }
             $existingEvent = $this->event($s['connection_id'], $s['event_id']);
-            $rawHash = hash('sha256', $raw);
             if ($existingEvent !== null && !hash_equals($existingEvent['body_sha256'], $rawHash)) {
                 throw new \DomainException('Status event identity reused');
             }
@@ -72,7 +89,7 @@ final class StatusProjectionService {
                         ->executeStatement();
                 }
             }
-            $this->requireScope($s, $authenticatedConnection);
+            $this->requireScope($s, $authenticatedConnection, $allowWithdrawn);
             $this->db->commit();
             return ['event_id' => $s['event_id'], 'status' => 'accepted', 'persisted' => true,
                 'applied' => $decision === 'new', 'duplicate' => $existingEvent !== null,
@@ -80,6 +97,67 @@ final class StatusProjectionService {
         } catch (\Throwable $e) {
             $this->db->rollBack();
             throw $e;
+        }
+    }
+
+    /**
+     * A signed status for an already-tombstoned source may update cleanup
+     * proof only. It can never recreate a current row or reopen access.
+     */
+    private function acceptTombstoneCleanup(array $s, ?array $authenticatedConnection,
+        string $rawHash): bool {
+        if ($this->config->getSystemValueBool('maintenance', false)) {
+            return false;
+        }
+        $pair = $this->pairings->status($s['binding_id']);
+        $connection = $this->connections->row($s['binding_id']);
+        if ($pair === null || $pair['state'] !== 'active' || $connection === null ||
+            $connection['status'] !== 'active' || $connection['connection_id'] !== $s['connection_id'] ||
+            $s['instance_id'] !== $this->config->getSystemValueString('instanceid') ||
+            $pair['operation_id'] !== $s['pair_operation_id'] ||
+            (string)$pair['tenant_id'] !== $s['tenant_id'] ||
+            $pair['knowledge_base_id'] !== $s['knowledge_base_id'] ||
+            $pair['data_source_id'] !== $s['data_source_id']) {
+            return false;
+        }
+        if ($authenticatedConnection !== null) {
+            foreach (['connection_id', 'key_id', 'secret_ciphertext'] as $field) {
+                if (!is_string($authenticatedConnection[$field] ?? null) ||
+                    !hash_equals((string)$connection[$field], (string)$authenticatedConnection[$field])) {
+                    return false;
+                }
+            }
+        }
+        $tombstone = $this->tombstones->find($s['binding_id'], (int)$s['file_id']);
+        if ($tombstone === null ||
+            (!in_array($s['publication_state'], ['withdrawn', 'retired', 'blocked'], true) &&
+                $s['sync_state'] !== 'withdrawn')) {
+            return false;
+        }
+        if (is_string($tombstone['source_etag']) &&
+            !hash_equals($tombstone['source_etag'], $s['source_etag'])) {
+            return false;
+        }
+        if ($tombstone['source_content_revision'] !== null &&
+            (string)$tombstone['source_content_revision'] !== $s['source_content_revision']) {
+            return false;
+        }
+        $existing = $this->event($s['connection_id'], $s['event_id']);
+        if ($existing !== null) {
+            return hash_equals($existing['body_sha256'], $rawHash);
+        }
+        $cleanup = in_array($s['gc_state'], ['none', 'unverified'], true)
+            ? 'pending' : $s['gc_state'];
+        try {
+            $this->db->insertIgnoreConflict('weknora_status_inbox', [
+                'connection_id' => $s['connection_id'], 'event_id' => $s['event_id'],
+                'body_sha256' => $rawHash, 'received_at' => time(),
+            ]);
+            $this->tombstones->updateCleanup($s['binding_id'], (int)$s['file_id'],
+                $cleanup, (int)$s['status_revision']);
+            return true;
+        } catch (\Throwable) {
+            return false;
         }
     }
 
@@ -135,14 +213,15 @@ final class StatusProjectionService {
     }
 
     /** Caller must check the actual user's source READ both before and after this lookup. */
-    public function forFile(string $bindingId, int $fileId, string $sourceEtag, int $publicationEpoch): ?array {
+    public function forFile(string $bindingId, int $fileId, string $sourceEtag,
+        int $publicationEpoch, bool $allowWithdrawn = false): ?array {
         $row = $this->row($bindingId, $fileId);
         if ($row === null || $row['source_etag'] !== $sourceEtag ||
             (int)$row['publication_epoch'] !== $publicationEpoch) {
             return null;
         }
         $s = StatusProtocol::decode((string)$row['body_json'], time());
-        $this->requireScope($s);
+        $this->requireScope($s, null, $allowWithdrawn);
         $result = StatusProtocol::projection($s,
             $row['last_verified_at'] === null ? null : (int)$row['last_verified_at'], time());
         $result['received_at'] = (int)$row['received_at'];
@@ -185,7 +264,8 @@ final class StatusProjectionService {
         return null;
     }
 
-    private function requireScope(array $s, ?array $authenticatedConnection = null): void {
+    private function requireScope(array $s, ?array $authenticatedConnection = null,
+        bool $allowWithdrawn = false): void {
         if ($this->config->getSystemValueBool('maintenance', false)) {
             throw new \DomainException('Recovery maintenance is closed');
         }
@@ -201,6 +281,7 @@ final class StatusProjectionService {
                 }
             }
         }
+        $publicationState = $this->publication->getState($s['binding_id'], (int)$s['file_id']);
         if ($pair === null || $pair['state'] !== 'active' || $connection === null ||
             $connection['status'] !== 'active' || $connection['connection_id'] !== $s['connection_id'] ||
             $s['instance_id'] !== $this->config->getSystemValueString('instanceid') ||
@@ -209,11 +290,15 @@ final class StatusProjectionService {
             $pair['knowledge_base_id'] !== $s['knowledge_base_id'] ||
             $pair['data_source_id'] !== $s['data_source_id'] ||
             $this->bindings->requirePublicationActive($s['binding_id']) !== (int)$s['publication_epoch'] ||
-            $this->publication->getState($s['binding_id'], (int)$s['file_id']) !== 'eligible') {
+            ($publicationState !== 'eligible' && !($allowWithdrawn && $publicationState === 'withdrawn'))) {
             throw new \DomainException('Status source unavailable');
         }
         if ($this->contentRevisions->current((int)$s['file_id']) !== $s['source_content_revision']) {
             throw new \DomainException('Status source content revision unavailable');
+        }
+        if ($this->tombstones->blocks($s['binding_id'], (int)$s['file_id'],
+            $s['source_content_revision'], $s['source_etag'])) {
+            throw new \DomainException('Status source was deleted');
         }
         $root = $this->bindings->requireActiveRoot($s['binding_id']);
         foreach ($root->getById((int)$s['file_id']) as $file) {

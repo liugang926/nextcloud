@@ -26,6 +26,7 @@ final class EmployeeFileStatusService {
         private IdentityMappingService $identities,
         private SourceAudienceVerifier $audience,
         private SourceContentRevisionService $contentRevisions,
+        private SourcePairingRegistryService $pairings,
     ) {
     }
 
@@ -39,9 +40,22 @@ final class EmployeeFileStatusService {
             return null;
         }
         if ($before['source_state'] !== 'in_scope') {
+            $cleanup = [];
+            if (in_array($before['source_state'], ['withdrawn', 'publication_stopped'], true)) {
+                try {
+                    $row = $this->projection->forFile((string)$before['_binding_id'], $fileId,
+                        (string)$before['source_etag'], (int)$before['_publication_epoch'], true);
+                    if ($row !== null) {
+                        $cleanup = array_intersect_key($row, array_flip([
+                            'withdrawal_state', 'permission_reclaim_state', 'gc_state',
+                        ]));
+                    }
+                } catch (\Throwable) {
+                }
+            }
             unset($before['_binding_id'], $before['_publication_epoch'],
                 $before['_publication_revision']);
-            return $before;
+            return $before + $cleanup;
         }
         if ($before['source_content_revision'] === null) {
             // A write fence blocks old knowledge, not visibility of the
@@ -88,6 +102,19 @@ final class EmployeeFileStatusService {
         unset($after['_binding_id'], $after['_publication_epoch'],
             $after['_publication_revision']);
         return $after;
+    }
+
+    /** Current session authority for the file activity endpoint. */
+    public function activityBinding(string $uid, int $fileId): ?string {
+        if (!$this->verifyUser($uid)) {
+            return null;
+        }
+        $source = $this->sourceForUser($uid, $fileId);
+        if ($source === null || ($source['source_state'] ?? '') === 'outside_scope' ||
+            !is_string($source['_binding_id'] ?? null)) {
+            return null;
+        }
+        return $source['_binding_id'];
     }
 
     /** A page verifies at its two boundaries; reuse inside one bounded request only. */
@@ -242,6 +269,7 @@ final class EmployeeFileStatusService {
                     }
                     try { $contentRevision = $this->contentRevisions->current($fileId); }
                     catch (\DomainException $writeFence) { $contentRevision = null; }
+                    $pair = $this->pairings->status($binding['id']);
                     return array_merge($base, [
                         'source_state' => $stopped ? 'publication_stopped' :
                             ($state === 'withdrawn' ? 'withdrawn' : 'in_scope'),
@@ -251,6 +279,11 @@ final class EmployeeFileStatusService {
                         'source_content_revision' => $contentRevision,
                         'file_withdrawn' => $state === 'withdrawn',
                         'binding_name' => $binding['name'],
+                        'space_name' => is_array($pair) && is_string($pair['tenant_name'] ?? null)
+                            ? $pair['tenant_name'] : null,
+                        'knowledge_base_name' => is_array($pair) &&
+                            is_string($pair['knowledge_base_name'] ?? null)
+                            ? $pair['knowledge_base_name'] : null,
                         'weknora_login_url' => $stopped || $state === 'withdrawn' ? null : $this->loginUrl(),
                     ]);
                 }
@@ -299,7 +332,18 @@ final class EmployeeFileStatusService {
     }
 
     private function loginUrl(): ?string {
-        $raw = trim($this->config->getAppValue('integration_weknora', 'weknora_web_url', ''));
+        $raw = '';
+        try {
+            $profile = json_decode($this->config->getAppValue(
+                'integration_weknora', 'connection', ''), true, 32, JSON_THROW_ON_ERROR);
+            if (is_array($profile) && is_string($profile['web_url'] ?? null)) {
+                $raw = trim($profile['web_url']);
+            }
+        } catch (\Throwable) {
+        }
+        if ($raw === '') {
+            $raw = trim($this->config->getAppValue('integration_weknora', 'weknora_web_url', ''));
+        }
         if ($raw === '' || filter_var($raw, FILTER_VALIDATE_URL) === false) {
             return null;
         }

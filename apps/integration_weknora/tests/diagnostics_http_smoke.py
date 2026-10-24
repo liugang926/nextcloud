@@ -24,8 +24,10 @@ def main():
     admin, csrf = login(base, values["NEXTCLOUD_ADMIN_USER"], values["NEXTCLOUD_ADMIN_PASSWORD"])
     with admin.open(f"{base}/index.php/settings/admin/integration_weknora") as page:
         html = page.read().decode("utf-8")
-        assert page.status == 200 and "Source diagnostics" in html
-        assert "data-diagnostics-url" in html
+        assert page.status == 200 and "WeKnora 连接" in html
+        assert "Source diagnostics" not in html
+        assert "data-diagnostics-url" not in html
+        assert "data-bindings-url" not in html
     status, body = request(admin, url, headers={"requesttoken": csrf})
     check(status, 200, "administrator diagnostics")
     data = json.loads(body)

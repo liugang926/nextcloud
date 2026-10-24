@@ -102,7 +102,9 @@ final class ConnectionAdminController extends Controller {
             return $this->json(['error' => 'invalid_visibility'], 400);
         }
         try {
-            return $this->json($this->connection->updateVisibility($spaces));
+            $user = $this->session->getUser();
+            return $this->json($this->connection->updateVisibility(
+                $spaces, $user?->getUID() ?? 'system'));
         } catch (\InvalidArgumentException $exception) {
             return $this->json(['error' => 'invalid_visibility'], 400);
         } catch (\DomainException $exception) {
@@ -112,12 +114,26 @@ final class ConnectionAdminController extends Controller {
         }
     }
 
+    public function cleanupCredentials(): JSONResponse {
+        if (!$this->isAdmin()) {
+            return $this->json(['error' => 'forbidden'], 403);
+        }
+        try {
+            $user = $this->session->getUser();
+            return $this->json($this->connection->cleanupStaleCredentials(
+                $user?->getUID() ?? 'system'));
+        } catch (\Throwable) {
+            return $this->json(['error' => 'connection_unavailable'], 503);
+        }
+    }
+
     public function disconnect(): JSONResponse {
         if (!$this->isAdmin()) {
             return $this->json(['error' => 'forbidden'], 403);
         }
         try {
-            return $this->json($this->connection->disconnect());
+            $user = $this->session->getUser();
+            return $this->json($this->connection->disconnect($user?->getUID() ?? 'system'));
         } catch (\DomainException $exception) {
             return $this->json(['error' => 'connection_denied'], 409);
         } catch (\Throwable $exception) {

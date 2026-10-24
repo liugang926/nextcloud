@@ -9,6 +9,7 @@ return [
         ['name' => 'connection_admin#discover', 'url' => '/api/v1/admin/connection/discover', 'verb' => 'POST'],
         ['name' => 'connection_admin#connect', 'url' => '/api/v1/admin/connection', 'verb' => 'POST'],
         ['name' => 'connection_admin#visibility', 'url' => '/api/v1/admin/connection/visibility', 'verb' => 'POST'],
+        ['name' => 'connection_admin#cleanupCredentials', 'url' => '/api/v1/admin/connection/credentials/cleanup', 'verb' => 'POST'],
         ['name' => 'connection_admin#disconnect', 'url' => '/api/v1/admin/connection', 'verb' => 'DELETE'],
         ['name' => 'target_migration#status', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'GET'],
         ['name' => 'target_migration#retry', 'url' => '/api/v1/folders/{folderId}/target-migrations/{operationId}', 'verb' => 'POST'],
@@ -24,6 +25,7 @@ return [
         ['name' => 'directory#sync', 'url' => '/api/v1/folders/{folderId}/sync', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
         ['name' => 'directory#syncNow', 'url' => '/api/v1/folders/{folderId}/sync-now', 'verb' => 'POST', 'requirements' => ['folderId' => '[1-9][0-9]*']],
         ['name' => 'directory#bindingDiagnostics', 'url' => '/api/v1/folders/{folderId}/binding-diagnostics', 'verb' => 'GET', 'requirements' => ['folderId' => '[1-9][0-9]*']],
+        ['name' => 'activity#folder', 'url' => '/api/v1/folders/{folderId}/activity', 'verb' => 'GET', 'requirements' => ['folderId' => '[1-9][0-9]*']],
         ['name' => 'directory#retry', 'url' => '/api/v1/directory-operations/{operationId}/retry', 'verb' => 'POST', 'requirements' => ['operationId' => '[A-Fa-f0-9-]+']],
         ['name' => 'status_inbox#receive', 'url' => '/api/v1/status', 'verb' => 'POST'],
         ['name' => 'api#capabilities', 'url' => '/api/v1/capabilities', 'verb' => 'GET'],
@@ -80,6 +82,12 @@ return [
         [
             'name' => 'employee_file_status#show',
             'url' => '/api/v1/files/{fileId}/status',
+            'verb' => 'GET',
+            'requirements' => ['fileId' => '[1-9][0-9]*'],
+        ],
+        [
+            'name' => 'activity#file',
+            'url' => '/api/v1/files/{fileId}/activity',
             'verb' => 'GET',
             'requirements' => ['fileId' => '[1-9][0-9]*'],
         ],

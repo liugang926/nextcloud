@@ -1016,7 +1016,10 @@ final class DirectoryPublicationService {
                 $this->bindings->setPublicationState($intent['binding_id'], 'active', $uid);
             }
             $stage = 'pairing_prepare';
-            $prepared = $this->pairs->prepare($intent['binding_id'], $operationId, $rule['tenant_id'], $operation['knowledge_base_id'], $uid);
+            $prepared = $this->pairs->prepare($intent['binding_id'], $operationId, $rule['tenant_id'],
+                $operation['knowledge_base_id'], $uid,
+                is_string($rule['space_name'] ?? null) ? (string)$rule['space_name'] : '',
+                is_string($operation['name'] ?? null) ? (string)$operation['name'] : '');
             $pair = $prepared['pairing'];
             $stage = 'pairing_remote';
             $received = $this->remote->request($rule, 'POST', '/operations/' . $operationId . '/pair', [
@@ -1450,7 +1453,18 @@ final class DirectoryPublicationService {
         if (!SourcePairingRegistryService::validRemoteId($knowledgeBaseId)) {
             return null;
         }
-        $raw = trim($this->config->getAppValue(self::APP, 'weknora_web_url', ''));
+        $raw = '';
+        try {
+            $profile = json_decode($this->config->getAppValue(self::APP, 'connection', ''),
+                true, 32, JSON_THROW_ON_ERROR);
+            if (is_array($profile) && is_string($profile['web_url'] ?? null)) {
+                $raw = trim($profile['web_url']);
+            }
+        } catch (\Throwable) {
+        }
+        if ($raw === '') {
+            $raw = trim($this->config->getAppValue(self::APP, 'weknora_web_url', ''));
+        }
         $parts = parse_url($raw);
         if (!is_array($parts) || !isset($parts['scheme'], $parts['host']) ||
             !in_array(strtolower($parts['scheme']), ['http', 'https'], true)) {
