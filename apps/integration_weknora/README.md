@@ -1,6 +1,35 @@
 # WeKnora Integration for Nextcloud 34
 
-## Versioned, explainable multi-source onboarding (0.9.2)
+## Connection-only administration and lifecycle views (0.10.0)
+
+The ordinary administrator page is now connection-only. It exposes the
+WeKnora address, a one-time administrator key, workspace discovery, workspace
+visibility and connection health. Legacy directory-rule, binding, pairing,
+event-credential, file-withdrawal and diagnostic forms are no longer in the
+template or fetched by the settings script. Those operations remain available
+to existing backend automation; administrators can use the read-only
+`integration_weknora:diagnostics` OCC command for support.
+
+Workspace-scoped credentials are encrypted with Nextcloud `ICrypto`. A
+background job and the connection-status path migrate legacy plaintext
+credentials. Reauthorization replaces stale credentials, while disconnect
+removes only the management connection and does not stop existing directory
+sources. New connections additionally require an exact origin from
+`WEKNORA_CONNECTION_ALLOWED_ORIGINS` (falling back to the existing event-origin
+allow-list).
+
+Folder and file responses include inherited workspace and knowledge-base
+names, current and published source versions, processing-stage times and
+privacy-safe activity. `GET /api/v1/folders/{folderId}/activity` and
+`GET /api/v1/files/{fileId}/activity` return signed pagination cursors.
+
+Confirmed deletions create an exact source-version tombstone. Delayed status
+for that generation fails closed. An authenticated deletion-only status may
+advance cleanup state to pending, blocked, running, partial or verified
+without reopening access; a newer completed source revision is evaluated as a
+new upload or restore.
+
+## Versioned, explainable multi-source onboarding (0.9.2 baseline)
 
 The app and the WeKnora onboarding service use contract v3. Connection setup
 reports the Nextcloud app version, the deployed sidebar bundle digest, the

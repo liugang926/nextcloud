@@ -11,6 +11,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
         this._request = 0
         this._folderSummary = null
         this._targetMigrations = new Map()
+        this._activityCursor = null
     }
 
     connectedCallback() {
@@ -71,6 +72,15 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 return
             }
             const data = await response.json()
+            const activityKind = this.isFolder() ? 'folders' : 'files'
+            try {
+                data.activity = await this.api(
+                    `/${activityKind}/${encodeURIComponent(fileId)}/activity?limit=5`)
+                this._activityCursor = data.activity.next_cursor || null
+            } catch (_) {
+                data.activity = { items: [], next_cursor: null, unavailable: true }
+                this._activityCursor = null
+            }
             const pendingMigration = this._targetMigrations.get(fileId)
             if (this.isFolder() && data.manageable && pendingMigration) {
                 try {
@@ -169,7 +179,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
             this.addRow(section, '当前可见文件', String(data.summary.total_visible ?? 0))
             this.addRow(section, '当前版本已完成', String(data.summary.current_completed ?? 0))
             const counts = data.summary.knowledge_counts || {}
-            this.addRow(section, '处理统计', `处理中 ${counts.updating || 0}；失败 ${counts.failed || 0}；待验证 ${counts.unverified || 0}`)
+            this.addRow(section, '处理统计', `已解析 ${counts.ready || 0}；处理中 ${counts.updating || 0}；失败 ${counts.failed || 0}；跳过 ${counts.skipped || 0}；待验证 ${counts.unverified || 0}`)
             if (data.summary.pipeline_counts) {
                 const pipeline = data.summary.pipeline_counts
                 this.addRow(section, '同步统计', `已导入 ${pipeline.imported || 0}；解析失败 ${pipeline.parse_failed || 0}；索引完成 ${pipeline.index_completed || 0}；跳过 ${pipeline.skipped || 0}`)
@@ -178,15 +188,32 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 .filter(([, count]) => count > 0)
                 .map(([state, count]) => `${this.graphLabel(state)} ${count}`).join('；') || '暂无文件')
             this.addRow(section, '最后验证时间', this.formatTime(data.summary.last_verified_at))
+            this.addRow(section, '最近同步活动', this.formatTime(data.summary.last_sync_at))
+            this.addRow(section, '最近解析成功', this.formatTime(data.summary.last_parse_success_at))
+            this.addRow(section, '最近索引成功', this.formatTime(data.summary.last_index_success_at))
             if (data.summary.status_stale) this.addRow(section, '状态验证', '需要刷新验证')
             if (data.summary.partial) this.addRow(section, '统计范围', '当前页可见文件，更多文件待加载')
+            if (Array.isArray(data.summary.failures) && data.summary.failures.length) {
+                const details = document.createElement('details')
+                details.className = 'weknora-sidebar__processing-details'
+                const summary = document.createElement('summary')
+                summary.textContent = `失败文件（${data.summary.failures.length}）`
+                details.append(summary)
+                for (const failure of data.summary.failures) {
+                    this.addRow(details, failure.name || '一个文件',
+                        this.failureText(failure.error_code || failure.knowledge_state))
+                }
+                section.append(details)
+            }
             if (data.summary.next_cursor) this.button(section, '加载更多汇总', () => this.loadMoreSummary(data))
         }
         if (data.content_sync) {
             this.addRow(section, '事件水位', `已接收 ${data.content_sync.received_through || 0}；已执行 ${data.content_sync.applied_through || 0}`)
             if (data.content_sync.last_updated_at) this.addRow(section, '链路更新时间', this.formatTime(data.content_sync.last_updated_at))
             if (data.content_sync.next_retry_at) this.addRow(section, '下次重试', this.formatTime(data.content_sync.next_retry_at))
-            if (data.content_sync.error_code) this.addRow(section, '同步原因', data.content_sync.error_code)
+            if (data.content_sync.error_code) {
+                this.addRow(section, '同步原因', this.failureText(data.content_sync.error_code))
+            }
         }
         if (data.operation?.operation_id) this.addRow(section, '操作标识', String(data.operation.operation_id).slice(0, 8))
         if (targetDeleted) {
@@ -297,6 +324,10 @@ class WeknoraFileSidebarTab extends HTMLElement {
             link.textContent = '打开知识库'
             section.append(link)
         }
+        this.renderActivity(section, data.activity)
+        if (data.activity?.unavailable) {
+            this.addRow(section, '最近活动', '暂时无法读取，保留当前状态结果')
+        }
         this.button(section, '刷新状态', () => this.load())
         this.replaceChildren(section)
     }
@@ -318,6 +349,11 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 last_verified_at: previous.last_verified_at && page.last_verified_at
                     ? Math.min(previous.last_verified_at, page.last_verified_at) : previous.last_verified_at || page.last_verified_at,
                 failures: [...previous.failures, ...page.failures].slice(0, 20) }
+            for (const field of ['last_sync_at', 'last_parse_success_at', 'last_index_success_at']) {
+                merged[field] = Number.isSafeInteger(previous[field]) && Number.isSafeInteger(page[field])
+                    ? Math.max(previous[field], page[field])
+                    : (previous[field] || page[field] || null)
+            }
             for (const field of ['knowledge_counts', 'graph_counts', 'pipeline_counts']) {
                 if (!page[field]) continue
                 merged[field] = { ...(previous[field] || {}) }
@@ -640,6 +676,109 @@ class WeknoraFileSidebarTab extends HTMLElement {
             unverified: '待验证' }[state] || '待验证'
     }
 
+    failureText(code) {
+        if (!code) return '原因待验证'
+        return {
+            parse_failed: '文件解析失败，请检查文件格式或处理方案',
+            chunk_failed: '分块失败，请联系管理员检查处理配置',
+            embedding_failed: '嵌入生成失败，需要重试当前版本',
+            index_failed: '索引构建失败，当前版本暂不可问答',
+            no_retrievable_content: '当前版本没有可检索内容，请补充内容后重新保存',
+            source_changed: '处理期间文件再次变化，已放弃旧版本',
+            source_unavailable: '暂时无法读取源文件，未确认删除',
+            publication_stopped: '发布已停止，来源内容不可读取',
+            permission_unverified: '暂时无法确认当前访问权限，已按不可用处理',
+            identity_unmapped: '当前用户没有有效的目录身份映射',
+            template_unavailable: '知识库处理方案不可用',
+            graph_extract_failed: '图谱抽取失败，处理详情中可查看影响',
+            graph_persist_failed: '图谱保存失败，当前版本未开放',
+            superseded: '任务已被更新的文件版本替代',
+            unverified: '当前状态尚无法确认',
+        }[code] || '处理未完成，请刷新状态或联系管理员查看记录'
+    }
+
+    cleanupLabel(state) {
+        return {
+            none: '无需回收',
+            not_required: '无需回收',
+            pending: '回收待开始',
+            blocked: '回收受引用或租约阻断',
+            running: '回收中',
+            partial: '部分完成，等待重试',
+            verified: '回收已验证',
+            withdrawn: '知识已撤回',
+            closed: '访问已关闭',
+            access_closed: '访问已关闭',
+            completed: '回收完成',
+            cleanup_pending: '回收待开始',
+            cleanup_blocked: '回收受引用或租约阻断',
+            cleanup_partial: '部分完成，等待重试',
+            cleanup_verified: '回收已验证',
+            unverified: '回收状态待验证',
+        }[state] || '待验证'
+    }
+
+    renderActivity(section, activity) {
+        if (!activity || activity.unavailable || !Array.isArray(activity.items)) return
+        const details = document.createElement('details')
+        details.className = 'weknora-sidebar__activity'
+        const summary = document.createElement('summary')
+        summary.textContent = `最近活动（${activity.items.length}）`
+        details.append(summary)
+        const list = document.createElement('ol')
+        list.className = 'weknora-sidebar__timeline'
+        for (const item of activity.items) list.append(this.activityItem(item))
+        details.append(list)
+        if (activity.next_cursor) {
+            const more = document.createElement('button')
+            more.type = 'button'
+            more.className = 'button'
+            more.textContent = '加载更多活动'
+            more.addEventListener('click', () => this.loadMoreActivity(list, more))
+            details.append(more)
+        } else if (!activity.items.length) {
+            details.append(this.hint('暂无可用活动记录。'))
+        }
+        section.append(details)
+    }
+
+    activityItem(item) {
+        const row = document.createElement('li')
+        const time = document.createElement('time')
+        time.dateTime = Number.isSafeInteger(item.occurred_at)
+            ? new Date(item.occurred_at * 1000).toISOString() : ''
+        time.textContent = this.formatTime(item.occurred_at)
+        const title = document.createElement('strong')
+        title.textContent = String(item.title || '状态更新')
+        const body = document.createElement('p')
+        body.textContent = [item.label, item.result].filter(Boolean).join('：')
+        row.append(time, title, body)
+        return row
+    }
+
+    async loadMoreActivity(list, button) {
+        if (!this._activityCursor) return
+        button.disabled = true
+        try {
+            const kind = this.isFolder() ? 'folders' : 'files'
+            const page = await this.api(`/${kind}/${this.nodeId()}/activity?limit=10&cursor=${encodeURIComponent(this._activityCursor)}`)
+            for (const item of page.items || []) list.append(this.activityItem(item))
+            this._activityCursor = page.next_cursor || null
+            button.hidden = !this._activityCursor
+        } catch (_) {
+            list.append(this.hint('活动分页暂时不可用，请刷新状态。'))
+        } finally {
+            button.disabled = false
+        }
+    }
+
+    hint(value) {
+        const note = document.createElement('p')
+        note.className = 'weknora-sidebar__hint'
+        note.textContent = value
+        return note
+    }
+
     renderMessage(message) {
         const section = document.createElement('section')
         section.className = 'weknora-sidebar'
@@ -677,6 +816,10 @@ class WeknoraFileSidebarTab extends HTMLElement {
             || data.source_state === 'publication_stopped') {
             this.addRow(section, '发布目录', data.binding_name || '未提供')
         }
+        if (data.space_name) this.addRow(section, '空间', data.space_name)
+        else if (data.source_state !== 'outside_scope') this.addRow(section, '空间', '名称待验证')
+        if (data.knowledge_base_name) this.addRow(section, '知识库', data.knowledge_base_name)
+        else if (data.source_state !== 'outside_scope') this.addRow(section, '知识库', '名称待验证')
         this.addRow(section, '源文件更新时间', this.formatTime(data.source_modified_at))
         if (data.source_state === 'in_scope') {
             const knowledgeState = {
@@ -690,6 +833,11 @@ class WeknoraFileSidebarTab extends HTMLElement {
         }
         this.addRow(section, '当前源版本', data.source_etag || '未知')
         this.addRow(section, '已发布源版本', data.published_source_etag || '尚未验证')
+        if (data.source_etag && data.published_source_etag) {
+            this.addRow(section, '版本一致性', data.source_etag === data.published_source_etag
+                ? '当前版本已发布'
+                : '当前文件已更新；旧版本已退出当前问答，等待新版本发布')
+        }
         this.addRow(section, '知识就绪时间', this.formatTime(data.knowledge_ready_at))
         if (data.stages && typeof data.stages === 'object') {
             const labels = { parse: '解析', chunk: '分块', embedding: '嵌入', index: '索引' }
@@ -704,19 +852,46 @@ class WeknoraFileSidebarTab extends HTMLElement {
             ingested: '已接收', failed: '失败', withdrawn: '已撤回' }[data.sync_state] || '待验证')
         if (data.publication_state) this.addRow(section, '发布阶段', { published: '已发布', blocked: '已阻断',
             pending: '待发布', failed: '失败', withdrawn: '已撤回' }[data.publication_state] || '待验证')
+        if (data.withdrawal_state && data.withdrawal_state !== 'none') {
+            this.addRow(section, '知识撤回', this.cleanupLabel(data.withdrawal_state))
+        }
+        if (data.gc_state && data.gc_state !== 'none') {
+            this.addRow(section, '知识副本回收', this.cleanupLabel(data.gc_state))
+        }
         if (data.graph) {
             this.addRow(section, '文件图谱', this.graphLabel(data.graph.state))
             if (typeof data.graph.enabled === 'boolean') this.addRow(section, '图谱要求', !data.graph.enabled ? '未启用'
                 : data.graph.required ? '图谱完成后发布' : '文档可独立发布')
+            const graphDetails = document.createElement('details')
+            graphDetails.className = 'weknora-sidebar__processing-details'
+            const graphSummary = document.createElement('summary')
+            graphSummary.textContent = '处理详情'
+            graphDetails.append(graphSummary)
             for (const [field, label] of Object.entries({ expected: '预期', succeeded: '成功', failed: '失败',
                 skipped: '跳过', cancelled: '取消', pending: '待处理' })) {
-                if (Number.isSafeInteger(data.graph[field])) this.addRow(section, `图谱任务${label}`, String(data.graph[field]))
+                if (Number.isSafeInteger(data.graph[field])) {
+                    this.addRow(graphDetails, `图谱任务${label}`, String(data.graph[field]))
+                }
             }
-            if (data.graph.completed_at) this.addRow(section, '图谱完成时间', this.formatTime(data.graph.completed_at))
+            if (data.graph.completed_at) {
+                this.addRow(graphDetails, '图谱完成时间', this.formatTime(data.graph.completed_at))
+            }
+            if (graphDetails.querySelector('.weknora-sidebar__row')) section.append(graphDetails)
         }
         if (data.occurred_at) this.addRow(section, '状态更新时间', this.formatTime(data.occurred_at))
         if (data.last_verified_at) this.addRow(section, '最后验证时间', this.formatTime(data.last_verified_at))
-        if (data.status_stale) this.addRow(section, '状态验证', '状态需要刷新验证')
+        if (data.status_stale) {
+            this.addRow(section, '状态验证', '待验证')
+            if (data.last_verified_knowledge_state) {
+                this.addRow(section, '上次验证结果', {
+                    ready: '已解析并发布',
+                    updating: '正在更新',
+                    failed: '处理失败',
+                    unverified: '待验证',
+                }[data.last_verified_knowledge_state] || '待验证')
+            }
+        }
+        if (data.failure_code) this.addRow(section, '失败原因', this.failureText(data.failure_code))
 
         const explanation = document.createElement('p')
         explanation.className = 'weknora-sidebar__explanation'
@@ -739,6 +914,8 @@ class WeknoraFileSidebarTab extends HTMLElement {
             explanation.textContent = '此文件没有通过当前可访问的发布目录进入知识库。'
         }
         section.append(explanation)
+
+        this.renderActivity(section, data.activity)
 
         if (data.source_state === 'in_scope' && data.knowledge_state === 'ready'
             && data.weknora_ask_url) {

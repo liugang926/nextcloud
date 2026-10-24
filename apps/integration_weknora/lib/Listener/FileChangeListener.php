@@ -6,7 +6,9 @@ namespace OCA\IntegrationWeknora\Listener;
 
 use OCA\IntegrationWeknora\Service\BindingRegistryService;
 use OCA\IntegrationWeknora\Service\ChangeOutboxService;
+use OCA\IntegrationWeknora\Service\DeletionTombstoneService;
 use OCA\IntegrationWeknora\Service\RootMigrationService;
+use OCA\IntegrationWeknora\Service\SourceContentRevisionService;
 use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
 use OCP\Files\Events\Node\BeforeNodeRenamedEvent;
@@ -40,6 +42,8 @@ final class FileChangeListener implements IEventListener {
         private LoggerInterface $logger,
         private ?RootMigrationService $rootMoves = null,
         private ?IDBConnection $db = null,
+        private ?DeletionTombstoneService $tombstones = null,
+        private ?SourceContentRevisionService $revisions = null,
     ) {
     }
 
@@ -113,7 +117,9 @@ final class FileChangeListener implements IEventListener {
             if ($canonical === null) { continue; }
             $facts[$binding['id']] = ['file_id' => $canonical->getId(), 'path' => $canonical->getPath(),
                 'folder' => $canonical instanceof Folder, 'internal_path' => trim($canonical->getInternalPath(), '/'),
-                'storage_id' => $canonical->getMountPoint()?->getNumericStorageId()];
+                'storage_id' => $canonical->getMountPoint()?->getNumericStorageId(),
+                'etag' => $canonical instanceof File ? $canonical->getEtag() : null,
+                'content_revision' => $this->contentRevision($canonical->getId())];
         }
         $this->pendingDeletes[$key] = $facts;
     }
@@ -152,6 +158,9 @@ final class FileChangeListener implements IEventListener {
             trim((string)$stored['path'], '/') === $captured['internal_path']) {
             $this->outbox->append($binding['id'], null, 'reconcile'); return;
         }
+        $this->recordTombstone($binding['id'], $captured['file_id'],
+            $captured['etag'] ?? null, $captured['content_revision'] ?? null,
+            $captured['folder'] ? 'subtree_deleted' : 'source_deleted');
         $this->outbox->append($binding['id'], $captured['file_id'], $captured['folder'] ? 'subtree_deleted' : 'delete', $captured['path']);
     }
 
@@ -243,6 +252,11 @@ final class FileChangeListener implements IEventListener {
             // A file-ID tombstone is emitted only when the post-delete event
             // retained a reliable source ID. 404 and pre-delete never qualify.
             $type = $fileId === null ? 'reconcile' : 'delete';
+        }
+        if ($fileId !== null) {
+            $this->recordTombstone($bindingId, $fileId, $this->nodeEtag($node),
+                $this->contentRevision($fileId),
+                $this->isFolder($node) ? 'subtree_deleted' : 'source_deleted');
         }
         $this->outbox->append($bindingId, $fileId, $type, $oldPath);
     }
@@ -348,6 +362,30 @@ final class FileChangeListener implements IEventListener {
             return $node->getType() === FileInfo::TYPE_FOLDER;
         } catch (\Throwable $exception) {
             return false;
+        }
+    }
+
+    private function contentRevision(int $fileId): ?string {
+        try {
+            return $this->revisions?->current($fileId);
+        } catch (\Throwable) {
+            // A missing write-fence proof is represented as unknown, never guessed.
+            return null;
+        }
+    }
+
+    private function recordTombstone(string $bindingId, int $fileId, ?string $etag,
+        ?string $contentRevision, string $reason): void {
+        if ($this->tombstones === null) {
+            return;
+        }
+        try {
+            $this->tombstones->record($bindingId, $fileId, $etag, $contentRevision, $reason);
+        } catch (\Throwable $exception) {
+            // The outbox hint remains durable; reconciliation can retry later.
+            $this->logger->error('WeKnora deletion tombstone could not be recorded', [
+                'error_type' => get_class($exception),
+            ]);
         }
     }
 }

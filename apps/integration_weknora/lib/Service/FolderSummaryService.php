@@ -7,6 +7,8 @@ use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\Files\File;
 use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
+use OCP\ICache;
+use OCP\ICacheFactory;
 use OCP\IConfig;
 use OCP\IDBConnection;
 
@@ -14,16 +16,24 @@ use OCP\IDBConnection;
 final class FolderSummaryService {
     private const PAGE_SIZE = 200;
     private const CURSOR_AGE = 300;
+    private const CACHE_AGE = 20;
+    private ICache $cache;
     public function __construct(private IRootFolder $rootFolder, private EmployeeFileStatusService $files,
         private IDBConnection $db, private IConfig $config, private BindingRegistryService $bindings,
         private SourcePairingRegistryService $pairs, private EventConnectionService $connections,
-        private SourceContentRevisionService $contentRevisions) {}
+        private SourceContentRevisionService $contentRevisions, ICacheFactory $cacheFactory) {
+        $this->cache = $cacheFactory->createDistributed('integration_weknora');
+    }
 
     public function forUser(string $uid, int $folderId, ?string $cursor = null): ?array {
         if ($this->config->getSystemValueBool('maintenance', false)) { return null; }
         if (!$this->files->verifyUser($uid, true)) { return null; }
         $root = $this->folder($uid, $folderId);
         if ($root === null) { return null; }
+        if ($cursor === null || $cursor === '') {
+            $cached = $this->cachedFirstPage($uid, $folderId, $root);
+            if ($cached !== null) { return $cached; }
+        }
         [$visible, $generation, $sources] = $this->observation($uid, $root);
         $offset = 0;
         if ($cursor !== null && $cursor !== '') {
@@ -40,6 +50,7 @@ final class FolderSummaryService {
         $pipeline = ['imported' => 0, 'skipped' => 0, 'parse_failed' => 0, 'index_completed' => 0];
         $graphs = array_fill_keys(array_merge(StatusProtocol::GRAPH_STATES, ['not_provided']), 0);
         $failures = []; $total = 0; $verifiedAt = null;
+        $lastParseAt = null; $lastIndexAt = null; $lastSyncAt = null;
         foreach ($slice as $id => $node) {
             $source = $sources[$id] ?? null;
             if ($source === null || $source['publication_state'] !== 'eligible') { continue; }
@@ -64,6 +75,19 @@ final class FolderSummaryService {
             if (isset($status['last_verified_at'])) {
                 $verifiedAt = $verifiedAt === null ? $status['last_verified_at'] : min($verifiedAt, $status['last_verified_at']);
             }
+            if (is_int($status['occurred_at'] ?? null)) {
+                $lastSyncAt = $lastSyncAt === null ? $status['occurred_at'] : max($lastSyncAt, $status['occurred_at']);
+            }
+            if (is_int($stages['parse']['completed_at'] ?? null) &&
+                ($stages['parse']['state'] ?? null) === 'succeeded') {
+                $lastParseAt = $lastParseAt === null
+                    ? $stages['parse']['completed_at'] : max($lastParseAt, $stages['parse']['completed_at']);
+            }
+            if (is_int($stages['index']['completed_at'] ?? null) &&
+                ($stages['index']['state'] ?? null) === 'succeeded') {
+                $lastIndexAt = $lastIndexAt === null
+                    ? $stages['index']['completed_at'] : max($lastIndexAt, $stages['index']['completed_at']);
+            }
             if (($state === 'failed' || in_array($graph, ['failed', 'partial_failed'], true)) && count($failures) < 20) {
                 $failures[] = ['file_id' => $id, 'name' => $node->getName(), 'knowledge_state' => $state,
                     'graph_state' => $graph, 'error_code' => $status['failure_code'] ?? $status['graph']['error_code'] ?? null];
@@ -75,12 +99,18 @@ final class FolderSummaryService {
         [, $after] = $this->observation($uid, $fresh);
         if (!hash_equals($generation, $after)) { throw new StaleFolderSummaryException('Summary view changed'); }
         $next = $offset + count($slice); $partial = $next < count($visible);
-        return ['summary' => ['generation' => $generation, 'page_offset' => $offset, 'next_offset' => $next,
+        $result = ['summary' => ['generation' => $generation, 'page_offset' => $offset, 'next_offset' => $next,
             'total_visible' => $total, 'current_completed' => $counts['ready'], 'knowledge_counts' => $counts,
             'pipeline_counts' => $pipeline,
             'graph_counts' => $graphs, 'failures' => $failures, 'last_verified_at' => $verifiedAt,
+            'last_sync_at' => $lastSyncAt, 'last_parse_success_at' => $lastParseAt,
+            'last_index_success_at' => $lastIndexAt,
             'status_stale' => $counts['unverified'] > 0, 'partial' => $partial, 'page_limit' => self::PAGE_SIZE,
             'next_cursor' => $partial ? $this->encodeCursor($uid, $folderId, $generation, $next) : null]];
+        if ($offset === 0 && getenv('WEKNORA_LOCAL_COMPOSE') !== '1') {
+            $this->cacheFirstPage($uid, $folderId, $root, $sources, $result);
+        }
+        return $result;
     }
 
     private function observation(string $uid, Folder $root): array {
@@ -227,5 +257,61 @@ final class FolderSummaryService {
         $secret = $this->config->getSystemValueString('secret');
         if (strlen($secret) < 16) { throw new \RuntimeException('Summary cursor key is unavailable'); }
         return hash_hmac('sha256', 'nextcloud-weknora-folder-summary-v1', $secret);
+    }
+
+    private function cachedFirstPage(string $uid, int $folderId, Folder $root): ?array {
+        try {
+            $entry = $this->cache->get($this->cacheKey($uid, $folderId, $root));
+            if (!is_array($entry) || !is_array($entry['summary'] ?? null) ||
+                !is_int($entry['checked_at'] ?? null) ||
+                $entry['checked_at'] < time() - self::CACHE_AGE ||
+                $entry['checked_at'] > time() + 5 ||
+                !is_array($entry['bindings'] ?? null) ||
+                !$this->files->verifyUser($uid, true)) {
+                return null;
+            }
+            $current = [];
+            foreach ($this->bindings->listBindings() as $binding) {
+                $current[$binding['id']] = (int)$binding['publication_epoch'];
+            }
+            foreach ($entry['bindings'] as $bindingId => $epoch) {
+                if (!is_string($bindingId) || !is_int($epoch) ||
+                    ($current[$bindingId] ?? null) !== $epoch ||
+                    !$this->files->summaryAuthority($uid, $bindingId)) {
+                    return null;
+                }
+            }
+            return ['summary' => $entry['summary']];
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function cacheFirstPage(string $uid, int $folderId, Folder $root,
+        array $sources, array $result): void {
+        try {
+            $bindingEpochs = [];
+            foreach ($sources as $source) {
+                if (is_array($source['binding'] ?? null) &&
+                    is_string($source['binding']['id'] ?? null)) {
+                    $bindingEpochs[$source['binding']['id']] =
+                        (int)$source['binding']['publication_epoch'];
+                }
+            }
+            $this->cache->set($this->cacheKey($uid, $folderId, $root), [
+                'summary' => $result['summary'],
+                'bindings' => $bindingEpochs,
+                'checked_at' => time(),
+            ], self::CACHE_AGE);
+        } catch (\Throwable) {
+            // Cache failure never changes an already verified response.
+        }
+    }
+
+    private function cacheKey(string $uid, int $folderId, Folder $root): string {
+        return 'summary-v1-' . hash('sha256', json_encode([
+            'uid' => $uid, 'folder' => $folderId, 'etag' => $root->getEtag(),
+            'permissions' => $root->getPermissions(), 'mtime' => $root->getMTime(),
+        ], JSON_THROW_ON_ERROR));
     }
 }

@@ -5,19 +5,13 @@ declare(strict_types=1);
 namespace OCA\IntegrationWeknora\Settings;
 
 use OCP\AppFramework\Http\TemplateResponse;
-use OCP\IURLGenerator;
 use OCP\Settings\ISettings;
 
 /** Rendered only in Nextcloud's administrator settings. */
 final class Admin implements ISettings {
-    public function __construct(private IURLGenerator $urlGenerator) {
-    }
-
     public function getForm(): TemplateResponse {
-        return new TemplateResponse('integration_weknora', 'admin', [
-            'bindingsUrl' => $this->urlGenerator->linkToRoute('integration_weknora.binding_admin.index'),
-            'diagnosticsUrl' => $this->urlGenerator->linkToRoute('integration_weknora.diagnostics.index'),
-        ], '');
+        // Ordinary settings must not even prepare legacy operation URLs.
+        return new TemplateResponse('integration_weknora', 'admin', [], '');
     }
 
     public function getSection(): string {

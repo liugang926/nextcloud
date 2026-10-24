@@ -9,21 +9,30 @@ use OCP\IConfig;
 final class DirectoryOnboardingClient {
     public const PATH = '/api/v1/integrations/nextcloud/onboarding';
     public function __construct(private IClientService $clients, private EventReceiverPolicy $policy,
-        private IConfig $config, private ControlRecoveryService $recovery) {}
+        private IConfig $config, private ControlRecoveryService $recovery,
+        private ScopedCredentialStore $credentials) {}
 
     public function request(array $rule, string $method, string $suffix, array $body = []): array {
         $this->recovery->requireAutomationOpen($this->config);
         $approved = $this->policy->requireApproved($rule['weknora_origin'] . EventReceiverPolicy::PATH);
         $credentialId = $rule['credential_id'] ?? null;
         if ($credentialId !== null) {
-            $credentials = $this->config->getSystemValue('weknora_onboarding_credentials', []);
-            $credential = is_string($credentialId) && is_array($credentials) ? ($credentials[$credentialId] ?? null) : null;
+            $credentials = $this->credentials->all();
+            $credential = is_string($credentialId) ? ($credentials[$credentialId] ?? null) : null;
             if (!is_array($credential) || ($credential['tenant_id'] ?? null) !== (string)$rule['tenant_id'] ||
                 ($credential['weknora_origin'] ?? null) !== $rule['weknora_origin'] || !is_string($credential['token'] ?? null)) {
                 throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
             }
-            $token = $credential['token'];
+            try {
+                $token = $this->credentials->token((string)$credentialId);
+            } catch (\Throwable) {
+                throw new DirectoryOnboardingRequestException(DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
+            }
         } else {
+            if (getenv('WEKNORA_LOCAL_COMPOSE') !== '1') {
+                throw new DirectoryOnboardingRequestException(
+                    DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE);
+            }
             $token = $this->config->getSystemValueString('weknora_onboarding_token', '');
         }
         if (strlen($token) < 32 || strlen($token) > 512 || preg_match('/[\x00-\x20\x7f]/', $token)) {

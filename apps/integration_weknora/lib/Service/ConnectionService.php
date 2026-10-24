@@ -10,6 +10,7 @@ use OCP\Http\Client\IClientService;
 use OCP\App\IAppManager;
 use OCP\IConfig;
 use OCP\IGroupManager;
+use OCP\IDBConnection;
 use OCP\IURLGenerator;
 use OCP\IUserManager;
 
@@ -25,8 +26,6 @@ final class ConnectionService {
     private const APP = 'integration_weknora';
     private const PROFILE_KEY = 'connection';
     private const HEALTH_KEY = 'connection_health';
-    private const ORIGINS_KEY = 'connection_origins';
-    private const CREDENTIALS_KEY = 'weknora_onboarding_credentials';
 
     public function __construct(
         private IConfig $config,
@@ -39,6 +38,9 @@ final class ConnectionService {
         private IdentityMappingService $identities,
         private IGroupManager $groups,
         private IUserManager $users,
+        private ScopedCredentialStore $credentials,
+        private ApprovedOriginPolicy $origins,
+        private IDBConnection $db,
     ) {
     }
 
@@ -64,6 +66,11 @@ final class ConnectionService {
 
     /** @return array<string, mixed> */
     public function status(): array {
+        try {
+            $this->credentials->migrateLegacy();
+        } catch (\Throwable) {
+            // A failed migration must not silently change connection state.
+        }
         $profile = $this->profile();
         if ($profile === null) {
             return [
@@ -75,6 +82,10 @@ final class ConnectionService {
                 'compatible' => false,
                 'binding_allowed' => false,
                 'health' => ['status' => 'unconfigured', 'binding_allowed' => false],
+                'credentials_encrypted' => !$this->credentials->encryptionMigrationPending(),
+                'stale_credential_count' => $this->credentials->staleCount(),
+                'origin_approved' => false,
+                'web_url' => null,
             ];
         }
         $profile = $this->refreshHealth($profile);
@@ -103,9 +114,17 @@ final class ConnectionService {
             fn (mixed $space): mixed => is_array($space) ? $this->spaceWithPrincipalNames($space) : $space,
             is_array($profile['spaces'] ?? null) ? $profile['spaces'] : [],
         );
+        $impact = $this->reconnectImpact($profile);
         return ['connected' => true, 'app_version' => $this->appVersion(),
             'bundle_version' => $this->bundleVersion(), 'compatible' => $compatible,
-            'binding_allowed' => $health['binding_allowed'], 'health' => $health] + $profile;
+            'binding_allowed' => $health['binding_allowed'], 'health' => $health,
+            'credentials_encrypted' => !$this->credentials->encryptionMigrationPending(),
+            'stale_credential_count' => $this->credentials->staleCount(),
+            'origin_approved' => $this->origins->isApproved((string)$profile['origin']),
+            'web_url' => $this->webUrl($profile),
+            'web_url_source' => $this->webUrlSource($profile),
+            'reconnect_impact' => $impact,
+            'existing_sources_continue' => true] + $profile;
     }
 
     public function bindingAllowed(): bool {
@@ -159,7 +178,7 @@ final class ConnectionService {
         if (strlen($query) > 128 || strlen($cursor) > 1024 || $limit < 1 || $limit > 100) {
             throw new \InvalidArgumentException('Invalid workspace query');
         }
-        $origin = $this->canonicalOrigin($origin);
+        $origin = $this->canonicalOrigin($origin, true);
         $response = $this->request($origin, $token, 'GET',
             '/api/v1/integrations/nextcloud/connection/workspaces',
             ['q' => $query, 'cursor' => $cursor, 'limit' => $limit]);
@@ -205,7 +224,18 @@ final class ConnectionService {
      * @return array<string, mixed>
      */
     public function connect(string $origin, string $token, array $tenantIds, string $uid): array {
-        $origin = $this->canonicalOrigin($origin);
+        $origin = $this->canonicalOrigin($origin, true);
+        $previous = $this->profile();
+        $previousCredentialSnapshot = $this->credentials->all();
+        $oldTokens = [];
+        foreach ($previous['spaces'] ?? [] as $oldSpace) {
+            if (is_array($oldSpace) && is_string($oldSpace['credential_id'] ?? null)) {
+                try {
+                    $oldTokens[$oldSpace['credential_id']] = $this->credentials->token($oldSpace['credential_id']);
+                } catch (\Throwable) {
+                }
+            }
+        }
         $selections = $this->normalizeSelections($tenantIds);
         $tenantIds = array_keys($selections);
         if ($tenantIds === [] || count($tenantIds) > 32) {
@@ -263,10 +293,7 @@ final class ConnectionService {
             throw new \UnexpectedValueException('WeKnora returned no connection credentials');
         }
 
-        $stored = $this->config->getSystemValue(self::CREDENTIALS_KEY, []);
-        if (!is_array($stored)) {
-            $stored = [];
-        }
+        $stored = [];
         $spaces = [];
         $returnedTenants = [];
         $returnedCredentials = [];
@@ -311,7 +338,8 @@ final class ConnectionService {
                 throw new \UnexpectedValueException('WeKnora did not authorize every selected workspace');
             }
         }
-        $this->config->setSystemValue(self::CREDENTIALS_KEY, $stored);
+        $webUrl = $this->origins->safeWebUrl(
+            $response['web_url'] ?? $response['weknora_web_url'] ?? null, $origin);
         $profile = [
             'origin' => $origin,
             'base_url' => $baseUrl,
@@ -320,12 +348,81 @@ final class ConnectionService {
             'spaces' => $spaces,
             'connected_at' => time(),
             'contract_version' => 3,
+            'web_url' => $webUrl,
+            'web_url_source' => $webUrl === null ? null : 'connection_contract',
         ];
-        $this->config->setAppValue(self::APP, self::HEALTH_KEY,
-            json_encode($this->normalizeHealth($response['health'] ?? null), JSON_THROW_ON_ERROR));
-        $this->config->setAppValue(self::APP, self::PROFILE_KEY,
-            json_encode($profile, JSON_THROW_ON_ERROR));
-        $this->rememberOrigin($origin);
+        foreach ($oldTokens as $credentialId => $oldToken) {
+            if (!array_key_exists($credentialId, $stored)) {
+                $stored[$credentialId] = [
+                    'tenant_id' => (string)($previous['spaces'][0]['tenant_id'] ?? ''),
+                    'weknora_origin' => (string)($previous['origin'] ?? $origin),
+                    'token' => $oldToken,
+                    'stale' => true,
+                ];
+            }
+        }
+        $this->credentials->replace($stored);
+        try {
+            $this->config->setAppValue(self::APP, self::HEALTH_KEY,
+                json_encode($this->normalizeHealth($response['health'] ?? null), JSON_THROW_ON_ERROR));
+            $this->config->setAppValue(self::APP, self::PROFILE_KEY,
+                json_encode($profile, JSON_THROW_ON_ERROR));
+        } catch (\Throwable $exception) {
+            $this->credentials->restoreSnapshot($previousCredentialSnapshot);
+            throw $exception;
+        }
+        foreach ($oldTokens as $credentialId => $oldToken) {
+            if (array_key_exists($credentialId, $stored)) {
+                if (($stored[$credentialId]['stale'] ?? false) !== true) {
+                    continue;
+                }
+            }
+            try {
+                $this->request((string)($previous['origin'] ?? $origin), $oldToken, 'POST',
+                    '/api/v1/integrations/nextcloud/onboarding/connection/revoke',
+                    ['credential_ids' => [$credentialId]]);
+                $this->credentials->removeIds([$credentialId]);
+            } catch (\Throwable) {
+                // The new grant is already authoritative. Stale credentials
+                // remain visible as a rotation diagnostic and expire remotely.
+            }
+        }
+        $impact = $this->reconnectImpact($profile);
+        $this->auditConnection($previous === null ? 'connect' : 'reconnect', $uid, $origin,
+            count($spaces), (int)$impact['directory_count'],
+            $this->credentials->staleCount() === 0 ? null : 'stale_credential_cleanup_pending');
+        return $this->status();
+    }
+
+    /** Retry remote revocation of encrypted credentials retained after reconnect. */
+    public function cleanupStaleCredentials(string $actorUid): array {
+        $all = $this->credentials->all();
+        $removed = [];
+        $failed = 0;
+        foreach ($all as $credentialId => $entry) {
+            if (($entry['stale'] ?? false) !== true) {
+                continue;
+            }
+            $origin = $entry['weknora_origin'] ?? '';
+            try {
+                if (!is_string($origin) || $origin === '') {
+                    throw new \UnexpectedValueException('Stale credential origin is unavailable');
+                }
+                $this->request($this->canonicalOrigin($origin, true),
+                    $this->credentials->token($credentialId), 'POST',
+                    '/api/v1/integrations/nextcloud/onboarding/connection/revoke',
+                    ['credential_ids' => [$credentialId]]);
+                $removed[] = $credentialId;
+            } catch (\Throwable) {
+                $failed++;
+            }
+        }
+        if ($removed !== []) {
+            $this->credentials->removeIds($removed);
+        }
+        $this->auditConnection('cleanup_credentials', $actorUid,
+            (string)($this->profile()['origin'] ?? ''), 0, 0,
+            $failed === 0 ? null : 'stale_credential_cleanup_pending');
         return $this->status();
     }
 
@@ -336,7 +433,7 @@ final class ConnectionService {
      * @param list<array<string,mixed>> $selections
      * @return array<string,mixed>
      */
-    public function updateVisibility(array $selections): array {
+    public function updateVisibility(array $selections, string $actorUid = 'system'): array {
         $profile = $this->profile();
         if ($profile === null) {
             throw new \DomainException('WeKnora is not connected');
@@ -360,11 +457,13 @@ final class ConnectionService {
         unset($space);
         $this->config->setAppValue(self::APP, self::PROFILE_KEY,
             json_encode($profile, JSON_THROW_ON_ERROR));
+        $this->auditConnection('visibility', $actorUid, (string)$profile['origin'],
+            count($profile['spaces']), $this->bindingCountForSpaces($profile), null);
         return $this->status();
     }
 
     /** @return array<string, mixed> */
-    public function disconnect(): array {
+    public function disconnect(string $actorUid = 'system'): array {
         $profile = $this->profile();
         if ($profile === null) {
             return $this->status();
@@ -398,6 +497,9 @@ final class ConnectionService {
         }
         $this->config->deleteAppValue(self::APP, self::PROFILE_KEY);
         $this->config->deleteAppValue(self::APP, self::HEALTH_KEY);
+        $this->credentials->replace([]);
+        $this->auditConnection('disconnect', $actorUid, (string)$profile['origin'],
+            count($profile['spaces']), $this->bindingCountForSpaces($profile), null);
         return $this->status();
     }
 
@@ -778,8 +880,15 @@ final class ConnectionService {
     }
 
     private function bundleVersion(): string {
-        $path = dirname(__DIR__, 2) . '/js/weknora-sidebar.js';
-        return is_file($path) ? hash_file('sha256', $path) : '';
+        $bundles = [];
+        foreach (['weknora-sidebar.js', 'weknora-admin.js'] as $name) {
+            $path = dirname(__DIR__, 2) . '/js/' . $name;
+            if (!is_file($path)) {
+                return '';
+            }
+            $bundles[] = hash_file('sha256', $path);
+        }
+        return hash('sha256', implode("\n", $bundles));
     }
 
     /** @return array<string, mixed>|null */
@@ -808,25 +917,8 @@ final class ConnectionService {
         }
     }
 
-    private function rememberOrigin(string $origin): void {
-        $raw = $this->config->getAppValue(self::APP, self::ORIGINS_KEY, '[]');
-        $origins = json_decode($raw, true);
-        if (!is_array($origins)) {
-            $origins = [];
-        }
-        $origins[] = $origin;
-        $origins = array_values(array_unique(array_filter($origins, 'is_string')));
-        $this->config->setAppValue(self::APP, self::ORIGINS_KEY,
-            json_encode($origins, JSON_THROW_ON_ERROR));
-    }
-
     private function connectionToken(string $credentialId): string {
-        $stored = $this->config->getSystemValue(self::CREDENTIALS_KEY, []);
-        $credential = is_array($stored) ? ($stored[$credentialId] ?? null) : null;
-        if (!is_array($credential) || !is_string($credential['token'] ?? null)) {
-            throw new \UnexpectedValueException('Connection credential is unavailable');
-        }
-        return $credential['token'];
+        return $this->credentials->token($credentialId);
     }
 
     /** @return array<string, mixed> */
@@ -894,33 +986,106 @@ final class ConnectionService {
         return $data;
     }
 
-    private function canonicalOrigin(string $raw): string {
-        $raw = trim($raw);
-        if ($raw === '' || strlen($raw) > 512 || preg_match('/[\x00-\x20\x7f]/', $raw)) {
-            throw new \InvalidArgumentException('Invalid WeKnora origin');
+    private function canonicalOrigin(string $raw, bool $forConnection = false): string {
+        return $this->origins->canonical($raw, $forConnection);
+    }
+
+    private function webUrl(array $profile): ?string {
+        $fromContract = $this->origins->safeWebUrl($profile['web_url'] ?? null, (string)$profile['origin']);
+        if ($fromContract !== null) {
+            return $fromContract;
         }
-        $parts = parse_url($raw);
-        if (!is_array($parts) || isset($parts['user']) || isset($parts['pass']) ||
-            isset($parts['query']) || isset($parts['fragment']) ||
-            !isset($parts['scheme'], $parts['host']) ||
-            (isset($parts['path']) && $parts['path'] !== '' && $parts['path'] !== '/')) {
-            throw new \InvalidArgumentException('Invalid WeKnora origin');
+        $configured = trim($this->config->getAppValue(self::APP, 'weknora_web_url', ''));
+        return $this->origins->safeWebUrl($configured, (string)$profile['origin']);
+    }
+
+    private function webUrlSource(array $profile): ?string {
+        if ($this->origins->safeWebUrl($profile['web_url'] ?? null, (string)$profile['origin']) !== null) {
+            return 'connection_contract';
         }
-        $devHttp = getenv('WEKNORA_EVENT_DEV_HTTP') === '1';
-        if (($parts['scheme'] !== 'https' && !($devHttp && $parts['scheme'] === 'http')) ||
-            !is_string($parts['host']) || strlen($parts['host']) > 253 ||
-            !preg_match('/\A[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\z/D', strtolower($parts['host'])) ||
-            str_contains($parts['host'], '..')) {
-            throw new \InvalidArgumentException('Invalid WeKnora origin');
-        }
-        $origin = strtolower($parts['scheme']) . '://' . strtolower($parts['host']);
-        if (isset($parts['port'])) {
-            if ($parts['port'] < 1 || $parts['port'] > 65535) {
-                throw new \InvalidArgumentException('Invalid WeKnora origin');
+        $configured = trim($this->config->getAppValue(self::APP, 'weknora_web_url', ''));
+        return $this->origins->safeWebUrl($configured, (string)$profile['origin']) === null
+            ? null : 'operator_config';
+    }
+
+    /** Display-only reconnect impact: names and counts, never internal IDs. */
+    private function reconnectImpact(array $profile): array {
+        $targets = [];
+        foreach ($profile['spaces'] ?? [] as $space) {
+            if (is_array($space)) {
+                $targets[(string)($space['tenant_id'] ?? '') . "\0" .
+                    (string)($space['processing_template_id'] ?? '')] = [
+                        'space_name' => (string)($space['name'] ?? '空间'),
+                        'directories' => [],
+                    ];
             }
-            $origin .= ':' . $parts['port'];
         }
-        return $origin;
+        try {
+            foreach ($this->directories->rules() as $rule) {
+                foreach ($rule['targets'] ?? [] as $target) {
+                    if (!is_array($target)) {
+                        continue;
+                    }
+                    $key = (string)($target['tenant_id'] ?? '') . "\0" .
+                        (string)($target['processing_template_id'] ?? '');
+                    if (!isset($targets[$key])) {
+                        continue;
+                    }
+                    $name = $this->folderName((string)$rule['owner_uid'],
+                        (int)$rule['container_file_id']);
+                    if ($name !== null) {
+                        $targets[$key]['directories'][$name] = true;
+                    }
+                }
+            }
+        } catch (\Throwable) {
+        }
+        $directories = [];
+        $spaces = [];
+        foreach ($targets as $target) {
+            $names = array_keys($target['directories']);
+            sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+            $spaces[] = ['space_name' => $target['space_name'], 'directory_count' => count($names)];
+            foreach ($names as $name) {
+                $directories[$name] = true;
+            }
+        }
+        return ['spaces' => $spaces, 'directories' => array_keys($directories),
+            'directory_count' => count($directories)];
+    }
+
+    private function bindingCountForSpaces(array $profile): int {
+        return $this->reconnectImpact($profile)['directory_count'];
+    }
+
+    private function folderName(string $uid, int $id): ?string {
+        try {
+            foreach ($this->files->getUserFolder($uid)->getById($id) as $node) {
+                if ($node instanceof Folder && $node->getId() === $id) {
+                    return $node->getName();
+                }
+            }
+        } catch (\Throwable) {
+        }
+        return null;
+    }
+
+    private function auditConnection(string $action, string $actor, string $origin,
+        int $spaceCount, int $affected, ?string $reason): void {
+        try {
+            $query = $this->db->getQueryBuilder();
+            $query->insert('weknora_connection_audit')->values([
+                'actor_uid' => $query->createNamedParameter($actor),
+                'action' => $query->createNamedParameter($action),
+                'origin_sha256' => $query->createNamedParameter(hash('sha256', $origin)),
+                'space_count' => $query->createNamedParameter($spaceCount),
+                'affected_binding_count' => $query->createNamedParameter($affected),
+                'reason_code' => $query->createNamedParameter($reason),
+                'created_at' => $query->createNamedParameter(time()),
+            ])->executeStatement();
+        } catch (\Throwable) {
+            // Audit failure must be visible to operations, not leak secrets.
+        }
     }
 
     private function originFromUrl(string $url): string {

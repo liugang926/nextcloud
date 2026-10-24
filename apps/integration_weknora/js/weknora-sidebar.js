@@ -4458,6 +4458,7 @@ ${message.stack}`;
       this._request = 0;
       this._folderSummary = null;
       this._targetMigrations = /* @__PURE__ */ new Map();
+      this._activityCursor = null;
     }
     connectedCallback() {
       this.renderMessage("\u6B63\u5728\u8BFB\u53D6\u6587\u4EF6\u53D1\u5E03\u72B6\u6001\u2026");
@@ -4509,6 +4510,16 @@ ${message.stack}`;
           return;
         }
         const data = await response.json();
+        const activityKind = this.isFolder() ? "folders" : "files";
+        try {
+          data.activity = await this.api(
+            `/${activityKind}/${encodeURIComponent(fileId)}/activity?limit=5`
+          );
+          this._activityCursor = data.activity.next_cursor || null;
+        } catch (_) {
+          data.activity = { items: [], next_cursor: null, unavailable: true };
+          this._activityCursor = null;
+        }
         const pendingMigration = this._targetMigrations.get(fileId);
         if (this.isFolder() && data.manageable && pendingMigration) {
           try {
@@ -4622,22 +4633,42 @@ ${message.stack}`;
         this.addRow(section, "\u5F53\u524D\u53EF\u89C1\u6587\u4EF6", String(data.summary.total_visible ?? 0));
         this.addRow(section, "\u5F53\u524D\u7248\u672C\u5DF2\u5B8C\u6210", String(data.summary.current_completed ?? 0));
         const counts = data.summary.knowledge_counts || {};
-        this.addRow(section, "\u5904\u7406\u7EDF\u8BA1", `\u5904\u7406\u4E2D ${counts.updating || 0}\uFF1B\u5931\u8D25 ${counts.failed || 0}\uFF1B\u5F85\u9A8C\u8BC1 ${counts.unverified || 0}`);
+        this.addRow(section, "\u5904\u7406\u7EDF\u8BA1", `\u5DF2\u89E3\u6790 ${counts.ready || 0}\uFF1B\u5904\u7406\u4E2D ${counts.updating || 0}\uFF1B\u5931\u8D25 ${counts.failed || 0}\uFF1B\u8DF3\u8FC7 ${counts.skipped || 0}\uFF1B\u5F85\u9A8C\u8BC1 ${counts.unverified || 0}`);
         if (data.summary.pipeline_counts) {
           const pipeline = data.summary.pipeline_counts;
           this.addRow(section, "\u540C\u6B65\u7EDF\u8BA1", `\u5DF2\u5BFC\u5165 ${pipeline.imported || 0}\uFF1B\u89E3\u6790\u5931\u8D25 ${pipeline.parse_failed || 0}\uFF1B\u7D22\u5F15\u5B8C\u6210 ${pipeline.index_completed || 0}\uFF1B\u8DF3\u8FC7 ${pipeline.skipped || 0}`);
         }
         this.addRow(section, "\u56FE\u8C31\u7ED3\u679C", Object.entries(data.summary.graph_counts || {}).filter(([, count]) => count > 0).map(([state, count]) => `${this.graphLabel(state)} ${count}`).join("\uFF1B") || "\u6682\u65E0\u6587\u4EF6");
         this.addRow(section, "\u6700\u540E\u9A8C\u8BC1\u65F6\u95F4", this.formatTime(data.summary.last_verified_at));
+        this.addRow(section, "\u6700\u8FD1\u540C\u6B65\u6D3B\u52A8", this.formatTime(data.summary.last_sync_at));
+        this.addRow(section, "\u6700\u8FD1\u89E3\u6790\u6210\u529F", this.formatTime(data.summary.last_parse_success_at));
+        this.addRow(section, "\u6700\u8FD1\u7D22\u5F15\u6210\u529F", this.formatTime(data.summary.last_index_success_at));
         if (data.summary.status_stale) this.addRow(section, "\u72B6\u6001\u9A8C\u8BC1", "\u9700\u8981\u5237\u65B0\u9A8C\u8BC1");
         if (data.summary.partial) this.addRow(section, "\u7EDF\u8BA1\u8303\u56F4", "\u5F53\u524D\u9875\u53EF\u89C1\u6587\u4EF6\uFF0C\u66F4\u591A\u6587\u4EF6\u5F85\u52A0\u8F7D");
+        if (Array.isArray(data.summary.failures) && data.summary.failures.length) {
+          const details = document.createElement("details");
+          details.className = "weknora-sidebar__processing-details";
+          const summary = document.createElement("summary");
+          summary.textContent = `\u5931\u8D25\u6587\u4EF6\uFF08${data.summary.failures.length}\uFF09`;
+          details.append(summary);
+          for (const failure of data.summary.failures) {
+            this.addRow(
+              details,
+              failure.name || "\u4E00\u4E2A\u6587\u4EF6",
+              this.failureText(failure.error_code || failure.knowledge_state)
+            );
+          }
+          section.append(details);
+        }
         if (data.summary.next_cursor) this.button(section, "\u52A0\u8F7D\u66F4\u591A\u6C47\u603B", () => this.loadMoreSummary(data));
       }
       if (data.content_sync) {
         this.addRow(section, "\u4E8B\u4EF6\u6C34\u4F4D", `\u5DF2\u63A5\u6536 ${data.content_sync.received_through || 0}\uFF1B\u5DF2\u6267\u884C ${data.content_sync.applied_through || 0}`);
         if (data.content_sync.last_updated_at) this.addRow(section, "\u94FE\u8DEF\u66F4\u65B0\u65F6\u95F4", this.formatTime(data.content_sync.last_updated_at));
         if (data.content_sync.next_retry_at) this.addRow(section, "\u4E0B\u6B21\u91CD\u8BD5", this.formatTime(data.content_sync.next_retry_at));
-        if (data.content_sync.error_code) this.addRow(section, "\u540C\u6B65\u539F\u56E0", data.content_sync.error_code);
+        if (data.content_sync.error_code) {
+          this.addRow(section, "\u540C\u6B65\u539F\u56E0", this.failureText(data.content_sync.error_code));
+        }
       }
       if (data.operation?.operation_id) this.addRow(section, "\u64CD\u4F5C\u6807\u8BC6", String(data.operation.operation_id).slice(0, 8));
       if (targetDeleted) {
@@ -4749,6 +4780,10 @@ ${message.stack}`;
         link.textContent = "\u6253\u5F00\u77E5\u8BC6\u5E93";
         section.append(link);
       }
+      this.renderActivity(section, data.activity);
+      if (data.activity?.unavailable) {
+        this.addRow(section, "\u6700\u8FD1\u6D3B\u52A8", "\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6\uFF0C\u4FDD\u7559\u5F53\u524D\u72B6\u6001\u7ED3\u679C");
+      }
       this.button(section, "\u5237\u65B0\u72B6\u6001", () => this.load());
       this.replaceChildren(section);
     }
@@ -4771,6 +4806,9 @@ ${message.stack}`;
           last_verified_at: previous.last_verified_at && page.last_verified_at ? Math.min(previous.last_verified_at, page.last_verified_at) : previous.last_verified_at || page.last_verified_at,
           failures: [...previous.failures, ...page.failures].slice(0, 20)
         };
+        for (const field of ["last_sync_at", "last_parse_success_at", "last_index_success_at"]) {
+          merged[field] = Number.isSafeInteger(previous[field]) && Number.isSafeInteger(page[field]) ? Math.max(previous[field], page[field]) : previous[field] || page[field] || null;
+        }
         for (const field of ["knowledge_counts", "graph_counts", "pipeline_counts"]) {
           if (!page[field]) continue;
           merged[field] = { ...previous[field] || {} };
@@ -5112,6 +5150,102 @@ ${message.stack}`;
         unverified: "\u5F85\u9A8C\u8BC1"
       }[state] || "\u5F85\u9A8C\u8BC1";
     }
+    failureText(code) {
+      if (!code) return "\u539F\u56E0\u5F85\u9A8C\u8BC1";
+      return {
+        parse_failed: "\u6587\u4EF6\u89E3\u6790\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u6587\u4EF6\u683C\u5F0F\u6216\u5904\u7406\u65B9\u6848",
+        chunk_failed: "\u5206\u5757\u5931\u8D25\uFF0C\u8BF7\u8054\u7CFB\u7BA1\u7406\u5458\u68C0\u67E5\u5904\u7406\u914D\u7F6E",
+        embedding_failed: "\u5D4C\u5165\u751F\u6210\u5931\u8D25\uFF0C\u9700\u8981\u91CD\u8BD5\u5F53\u524D\u7248\u672C",
+        index_failed: "\u7D22\u5F15\u6784\u5EFA\u5931\u8D25\uFF0C\u5F53\u524D\u7248\u672C\u6682\u4E0D\u53EF\u95EE\u7B54",
+        no_retrievable_content: "\u5F53\u524D\u7248\u672C\u6CA1\u6709\u53EF\u68C0\u7D22\u5185\u5BB9\uFF0C\u8BF7\u8865\u5145\u5185\u5BB9\u540E\u91CD\u65B0\u4FDD\u5B58",
+        source_changed: "\u5904\u7406\u671F\u95F4\u6587\u4EF6\u518D\u6B21\u53D8\u5316\uFF0C\u5DF2\u653E\u5F03\u65E7\u7248\u672C",
+        source_unavailable: "\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6\u6E90\u6587\u4EF6\uFF0C\u672A\u786E\u8BA4\u5220\u9664",
+        publication_stopped: "\u53D1\u5E03\u5DF2\u505C\u6B62\uFF0C\u6765\u6E90\u5185\u5BB9\u4E0D\u53EF\u8BFB\u53D6",
+        permission_unverified: "\u6682\u65F6\u65E0\u6CD5\u786E\u8BA4\u5F53\u524D\u8BBF\u95EE\u6743\u9650\uFF0C\u5DF2\u6309\u4E0D\u53EF\u7528\u5904\u7406",
+        identity_unmapped: "\u5F53\u524D\u7528\u6237\u6CA1\u6709\u6709\u6548\u7684\u76EE\u5F55\u8EAB\u4EFD\u6620\u5C04",
+        template_unavailable: "\u77E5\u8BC6\u5E93\u5904\u7406\u65B9\u6848\u4E0D\u53EF\u7528",
+        graph_extract_failed: "\u56FE\u8C31\u62BD\u53D6\u5931\u8D25\uFF0C\u5904\u7406\u8BE6\u60C5\u4E2D\u53EF\u67E5\u770B\u5F71\u54CD",
+        graph_persist_failed: "\u56FE\u8C31\u4FDD\u5B58\u5931\u8D25\uFF0C\u5F53\u524D\u7248\u672C\u672A\u5F00\u653E",
+        superseded: "\u4EFB\u52A1\u5DF2\u88AB\u66F4\u65B0\u7684\u6587\u4EF6\u7248\u672C\u66FF\u4EE3",
+        unverified: "\u5F53\u524D\u72B6\u6001\u5C1A\u65E0\u6CD5\u786E\u8BA4"
+      }[code] || "\u5904\u7406\u672A\u5B8C\u6210\uFF0C\u8BF7\u5237\u65B0\u72B6\u6001\u6216\u8054\u7CFB\u7BA1\u7406\u5458\u67E5\u770B\u8BB0\u5F55";
+    }
+    cleanupLabel(state) {
+      return {
+        none: "\u65E0\u9700\u56DE\u6536",
+        not_required: "\u65E0\u9700\u56DE\u6536",
+        pending: "\u56DE\u6536\u5F85\u5F00\u59CB",
+        blocked: "\u56DE\u6536\u53D7\u5F15\u7528\u6216\u79DF\u7EA6\u963B\u65AD",
+        running: "\u56DE\u6536\u4E2D",
+        partial: "\u90E8\u5206\u5B8C\u6210\uFF0C\u7B49\u5F85\u91CD\u8BD5",
+        verified: "\u56DE\u6536\u5DF2\u9A8C\u8BC1",
+        withdrawn: "\u77E5\u8BC6\u5DF2\u64A4\u56DE",
+        closed: "\u8BBF\u95EE\u5DF2\u5173\u95ED",
+        access_closed: "\u8BBF\u95EE\u5DF2\u5173\u95ED",
+        completed: "\u56DE\u6536\u5B8C\u6210",
+        cleanup_pending: "\u56DE\u6536\u5F85\u5F00\u59CB",
+        cleanup_blocked: "\u56DE\u6536\u53D7\u5F15\u7528\u6216\u79DF\u7EA6\u963B\u65AD",
+        cleanup_partial: "\u90E8\u5206\u5B8C\u6210\uFF0C\u7B49\u5F85\u91CD\u8BD5",
+        cleanup_verified: "\u56DE\u6536\u5DF2\u9A8C\u8BC1",
+        unverified: "\u56DE\u6536\u72B6\u6001\u5F85\u9A8C\u8BC1"
+      }[state] || "\u5F85\u9A8C\u8BC1";
+    }
+    renderActivity(section, activity) {
+      if (!activity || activity.unavailable || !Array.isArray(activity.items)) return;
+      const details = document.createElement("details");
+      details.className = "weknora-sidebar__activity";
+      const summary = document.createElement("summary");
+      summary.textContent = `\u6700\u8FD1\u6D3B\u52A8\uFF08${activity.items.length}\uFF09`;
+      details.append(summary);
+      const list = document.createElement("ol");
+      list.className = "weknora-sidebar__timeline";
+      for (const item of activity.items) list.append(this.activityItem(item));
+      details.append(list);
+      if (activity.next_cursor) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "button";
+        more.textContent = "\u52A0\u8F7D\u66F4\u591A\u6D3B\u52A8";
+        more.addEventListener("click", () => this.loadMoreActivity(list, more));
+        details.append(more);
+      } else if (!activity.items.length) {
+        details.append(this.hint("\u6682\u65E0\u53EF\u7528\u6D3B\u52A8\u8BB0\u5F55\u3002"));
+      }
+      section.append(details);
+    }
+    activityItem(item) {
+      const row = document.createElement("li");
+      const time = document.createElement("time");
+      time.dateTime = Number.isSafeInteger(item.occurred_at) ? new Date(item.occurred_at * 1e3).toISOString() : "";
+      time.textContent = this.formatTime(item.occurred_at);
+      const title = document.createElement("strong");
+      title.textContent = String(item.title || "\u72B6\u6001\u66F4\u65B0");
+      const body = document.createElement("p");
+      body.textContent = [item.label, item.result].filter(Boolean).join("\uFF1A");
+      row.append(time, title, body);
+      return row;
+    }
+    async loadMoreActivity(list, button) {
+      if (!this._activityCursor) return;
+      button.disabled = true;
+      try {
+        const kind = this.isFolder() ? "folders" : "files";
+        const page = await this.api(`/${kind}/${this.nodeId()}/activity?limit=10&cursor=${encodeURIComponent(this._activityCursor)}`);
+        for (const item of page.items || []) list.append(this.activityItem(item));
+        this._activityCursor = page.next_cursor || null;
+        button.hidden = !this._activityCursor;
+      } catch (_) {
+        list.append(this.hint("\u6D3B\u52A8\u5206\u9875\u6682\u65F6\u4E0D\u53EF\u7528\uFF0C\u8BF7\u5237\u65B0\u72B6\u6001\u3002"));
+      } finally {
+        button.disabled = false;
+      }
+    }
+    hint(value) {
+      const note = document.createElement("p");
+      note.className = "weknora-sidebar__hint";
+      note.textContent = value;
+      return note;
+    }
     renderMessage(message) {
       const section = document.createElement("section");
       section.className = "weknora-sidebar";
@@ -5144,6 +5278,10 @@ ${message.stack}`;
       if (data.source_state === "in_scope" || data.source_state === "withdrawn" || data.source_state === "publication_stopped") {
         this.addRow(section, "\u53D1\u5E03\u76EE\u5F55", data.binding_name || "\u672A\u63D0\u4F9B");
       }
+      if (data.space_name) this.addRow(section, "\u7A7A\u95F4", data.space_name);
+      else if (data.source_state !== "outside_scope") this.addRow(section, "\u7A7A\u95F4", "\u540D\u79F0\u5F85\u9A8C\u8BC1");
+      if (data.knowledge_base_name) this.addRow(section, "\u77E5\u8BC6\u5E93", data.knowledge_base_name);
+      else if (data.source_state !== "outside_scope") this.addRow(section, "\u77E5\u8BC6\u5E93", "\u540D\u79F0\u5F85\u9A8C\u8BC1");
       this.addRow(section, "\u6E90\u6587\u4EF6\u66F4\u65B0\u65F6\u95F4", this.formatTime(data.source_modified_at));
       if (data.source_state === "in_scope") {
         const knowledgeState = {
@@ -5156,6 +5294,9 @@ ${message.stack}`;
       }
       this.addRow(section, "\u5F53\u524D\u6E90\u7248\u672C", data.source_etag || "\u672A\u77E5");
       this.addRow(section, "\u5DF2\u53D1\u5E03\u6E90\u7248\u672C", data.published_source_etag || "\u5C1A\u672A\u9A8C\u8BC1");
+      if (data.source_etag && data.published_source_etag) {
+        this.addRow(section, "\u7248\u672C\u4E00\u81F4\u6027", data.source_etag === data.published_source_etag ? "\u5F53\u524D\u7248\u672C\u5DF2\u53D1\u5E03" : "\u5F53\u524D\u6587\u4EF6\u5DF2\u66F4\u65B0\uFF1B\u65E7\u7248\u672C\u5DF2\u9000\u51FA\u5F53\u524D\u95EE\u7B54\uFF0C\u7B49\u5F85\u65B0\u7248\u672C\u53D1\u5E03");
+      }
       this.addRow(section, "\u77E5\u8BC6\u5C31\u7EEA\u65F6\u95F4", this.formatTime(data.knowledge_ready_at));
       if (data.stages && typeof data.stages === "object") {
         const labels = { parse: "\u89E3\u6790", chunk: "\u5206\u5757", embedding: "\u5D4C\u5165", index: "\u7D22\u5F15" };
@@ -5180,9 +5321,20 @@ ${message.stack}`;
         failed: "\u5931\u8D25",
         withdrawn: "\u5DF2\u64A4\u56DE"
       }[data.publication_state] || "\u5F85\u9A8C\u8BC1");
+      if (data.withdrawal_state && data.withdrawal_state !== "none") {
+        this.addRow(section, "\u77E5\u8BC6\u64A4\u56DE", this.cleanupLabel(data.withdrawal_state));
+      }
+      if (data.gc_state && data.gc_state !== "none") {
+        this.addRow(section, "\u77E5\u8BC6\u526F\u672C\u56DE\u6536", this.cleanupLabel(data.gc_state));
+      }
       if (data.graph) {
         this.addRow(section, "\u6587\u4EF6\u56FE\u8C31", this.graphLabel(data.graph.state));
         if (typeof data.graph.enabled === "boolean") this.addRow(section, "\u56FE\u8C31\u8981\u6C42", !data.graph.enabled ? "\u672A\u542F\u7528" : data.graph.required ? "\u56FE\u8C31\u5B8C\u6210\u540E\u53D1\u5E03" : "\u6587\u6863\u53EF\u72EC\u7ACB\u53D1\u5E03");
+        const graphDetails = document.createElement("details");
+        graphDetails.className = "weknora-sidebar__processing-details";
+        const graphSummary = document.createElement("summary");
+        graphSummary.textContent = "\u5904\u7406\u8BE6\u60C5";
+        graphDetails.append(graphSummary);
         for (const [field, label] of Object.entries({
           expected: "\u9884\u671F",
           succeeded: "\u6210\u529F",
@@ -5191,13 +5343,29 @@ ${message.stack}`;
           cancelled: "\u53D6\u6D88",
           pending: "\u5F85\u5904\u7406"
         })) {
-          if (Number.isSafeInteger(data.graph[field])) this.addRow(section, `\u56FE\u8C31\u4EFB\u52A1${label}`, String(data.graph[field]));
+          if (Number.isSafeInteger(data.graph[field])) {
+            this.addRow(graphDetails, `\u56FE\u8C31\u4EFB\u52A1${label}`, String(data.graph[field]));
+          }
         }
-        if (data.graph.completed_at) this.addRow(section, "\u56FE\u8C31\u5B8C\u6210\u65F6\u95F4", this.formatTime(data.graph.completed_at));
+        if (data.graph.completed_at) {
+          this.addRow(graphDetails, "\u56FE\u8C31\u5B8C\u6210\u65F6\u95F4", this.formatTime(data.graph.completed_at));
+        }
+        if (graphDetails.querySelector(".weknora-sidebar__row")) section.append(graphDetails);
       }
       if (data.occurred_at) this.addRow(section, "\u72B6\u6001\u66F4\u65B0\u65F6\u95F4", this.formatTime(data.occurred_at));
       if (data.last_verified_at) this.addRow(section, "\u6700\u540E\u9A8C\u8BC1\u65F6\u95F4", this.formatTime(data.last_verified_at));
-      if (data.status_stale) this.addRow(section, "\u72B6\u6001\u9A8C\u8BC1", "\u72B6\u6001\u9700\u8981\u5237\u65B0\u9A8C\u8BC1");
+      if (data.status_stale) {
+        this.addRow(section, "\u72B6\u6001\u9A8C\u8BC1", "\u5F85\u9A8C\u8BC1");
+        if (data.last_verified_knowledge_state) {
+          this.addRow(section, "\u4E0A\u6B21\u9A8C\u8BC1\u7ED3\u679C", {
+            ready: "\u5DF2\u89E3\u6790\u5E76\u53D1\u5E03",
+            updating: "\u6B63\u5728\u66F4\u65B0",
+            failed: "\u5904\u7406\u5931\u8D25",
+            unverified: "\u5F85\u9A8C\u8BC1"
+          }[data.last_verified_knowledge_state] || "\u5F85\u9A8C\u8BC1");
+        }
+      }
+      if (data.failure_code) this.addRow(section, "\u5931\u8D25\u539F\u56E0", this.failureText(data.failure_code));
       const explanation = document.createElement("p");
       explanation.className = "weknora-sidebar__explanation";
       if (data.source_state === "in_scope") {
@@ -5215,6 +5383,7 @@ ${message.stack}`;
         explanation.textContent = "\u6B64\u6587\u4EF6\u6CA1\u6709\u901A\u8FC7\u5F53\u524D\u53EF\u8BBF\u95EE\u7684\u53D1\u5E03\u76EE\u5F55\u8FDB\u5165\u77E5\u8BC6\u5E93\u3002";
       }
       section.append(explanation);
+      this.renderActivity(section, data.activity);
       if (data.source_state === "in_scope" && data.knowledge_state === "ready" && data.weknora_ask_url) {
         const link = document.createElement("a");
         link.className = "weknora-sidebar__link";

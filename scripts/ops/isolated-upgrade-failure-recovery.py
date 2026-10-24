@@ -34,7 +34,7 @@ APP = ROOT / "apps/integration_weknora"
 OLD_APP_COMMIT = "5b97db539155be61541836ba3d67074e78705340"
 OLD_VERSION = "0.4.6"
 FAULT_MARKER = "WEKNORA_UPGRADE_FAILURE_PROBE"
-FAULT_MIGRATION = "Version0030Date20261023000000.php"
+FAULT_MIGRATION = "Version0032Date20261024001000.php"
 MIGRATION29_COLUMNS = {
     "oc_weknora_target_close": {
         "operation_id": "character varying:NO", "binding_id": "character varying:NO",

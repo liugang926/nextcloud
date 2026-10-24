@@ -22,6 +22,6 @@ assert.match(directories, /kb_unpaired_sources/);
 assert.match(sidebar, /已关联 \$\{sourceCount\} 个 Nextcloud 目录/);
 assert.match(bundle, /candidate\.nextcloud_source_count/);
 assert.match(bundle, /sourceCount > 0/);
-assert.match(info, /<version>0\.9\.2<\/version>/);
+assert.match(info, /<version>0\.10\.0<\/version>/);
 
 process.stdout.write('multisource UI contract: PASS\n');

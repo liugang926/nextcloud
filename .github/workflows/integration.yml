@@ -159,6 +159,9 @@ jobs:
           python3 apps/integration_weknora/tests/outbox_retention_http_smoke.py
           python3 apps/integration_weknora/tests/event_delivery_http_smoke.py
           python3 apps/integration_weknora/tests/employee_file_status_http_smoke.py --file-id 77
+          python3 apps/integration_weknora/tests/activity_http_smoke.py
+          docker compose exec -T -u www-data -e WEKNORA_PRD_TEST_RUNTIME=1 nextcloud \
+            php /var/www/html/custom_apps/integration_weknora/tests/lifecycle_activity_runtime.php
           python3 apps/integration_weknora/tests/diagnostics_http_smoke.py
           ./scripts/ops/isolated-restore-drill.sh
 

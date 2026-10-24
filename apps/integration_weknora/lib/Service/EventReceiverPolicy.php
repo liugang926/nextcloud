@@ -21,47 +21,11 @@ final class EventReceiverPolicy {
             $parts['path'] !== self::PATH) {
             throw new \InvalidArgumentException('Invalid receiver URL');
         }
-        $scheme = $parts['scheme'];
-        $host = $parts['host'];
-        if (($scheme !== 'https' && $scheme !== 'http') ||
-            !is_string($host) || strlen($host) > 253 ||
-            !preg_match('/\A[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\z/D', $host) ||
-            filter_var($host, FILTER_VALIDATE_IP) !== false ||
-            str_contains($host, '..') ||
-            (isset($parts['port']) && ($parts['port'] < 1 || $parts['port'] > 65535))) {
-            throw new \InvalidArgumentException('Invalid receiver URL');
-        }
-        $origin = $scheme . '://' . $host . (isset($parts['port']) ? ':' . $parts['port'] : '');
+        $origin = $parts['scheme'] . '://' . $parts['host'] .
+            (isset($parts['port']) ? ':' . $parts['port'] : '');
+        $origin = (new ApprovedOriginPolicy())->canonical(strtolower($origin), true);
         if ($url !== $origin . self::PATH) {
             throw new \InvalidArgumentException('Receiver URL must be canonical');
-        }
-        $devHttp = getenv('WEKNORA_EVENT_DEV_HTTP') === '1';
-        if ($scheme === 'http' && !$devHttp) {
-            throw new \InvalidArgumentException('HTTP receiver requires explicit development switch');
-        }
-        $approved = getenv('WEKNORA_EVENT_ALLOWED_ORIGINS');
-        $origins = is_string($approved) ? explode(',', $approved) : [];
-        try {
-            $config = \OCP\Server::get(\OCP\IConfig::class);
-            $stored = json_decode((string)$config->getAppValue(
-                'integration_weknora',
-                'connection_origins',
-                '[]',
-            ), true);
-            if (is_array($stored)) {
-                foreach ($stored as $storedOrigin) {
-                    if (is_string($storedOrigin)) {
-                        $origins[] = $storedOrigin;
-                    }
-                }
-            }
-        } catch (\Throwable $ignored) {
-            // The environment allow-list remains authoritative if app config
-            // cannot be read during a partially initialized request.
-        }
-        $origins = array_values(array_unique($origins));
-        if (!in_array($origin, $origins, true)) {
-            throw new \InvalidArgumentException('Receiver origin is not operator approved');
         }
         // A fixed, operator-approved enterprise HTTPS host may resolve to a
         // private address. The exact-origin check and TLS verification still

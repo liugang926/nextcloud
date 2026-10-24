@@ -24,7 +24,7 @@ final class AdminSection implements IIconSection {
     }
 
     public function getName(): string {
-        return $this->l10n->t('WeKnora publication');
+        return $this->l10n->t('WeKnora Connection');
     }
 
     public function getPriority(): int {

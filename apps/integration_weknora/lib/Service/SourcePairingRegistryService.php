@@ -38,7 +38,8 @@ final class SourcePairingRegistryService {
 
     /** @return array{pairing: array, token?: string, created: bool} */
     public function prepare(string $bindingId, string $operationId, string $tenantId,
-        string $knowledgeBaseId, string $actorUid): array {
+        string $knowledgeBaseId, string $actorUid, string $tenantName = '',
+        string $knowledgeBaseName = ''): array {
         $this->validateInput($bindingId, $operationId, $tenantId, $knowledgeBaseId);
         if ($actorUid === '' || strlen($actorUid) > 64) {
             throw new \InvalidArgumentException('Invalid administrator');
@@ -95,6 +96,8 @@ final class SourcePairingRegistryService {
                 'instance_id' => $instanceId,
                 'tenant_id' => $tenantId,
                 'knowledge_base_id' => $knowledgeBaseId,
+                'tenant_name' => $tenantName === '' ? null : substr($tenantName, 0, 255),
+                'knowledge_base_name' => $knowledgeBaseName === '' ? null : substr($knowledgeBaseName, 0, 255),
                 'data_source_id' => '',
                 'key_id' => $keyId,
                 'state' => 'pending',
@@ -820,6 +823,9 @@ final class SourcePairingRegistryService {
             'instance_id' => (string)$row['instance_id'],
             'tenant_id' => (string)$row['tenant_id'],
             'knowledge_base_id' => (string)$row['knowledge_base_id'],
+            'tenant_name' => is_string($row['tenant_name'] ?? null) ? (string)$row['tenant_name'] : null,
+            'knowledge_base_name' => is_string($row['knowledge_base_name'] ?? null)
+                ? (string)$row['knowledge_base_name'] : null,
             'data_source_id' => $row['data_source_id'] === '' ? null : (string)$row['data_source_id'],
             'state' => (string)$row['state'],
             'key_id' => (string)$row['key_id'],
