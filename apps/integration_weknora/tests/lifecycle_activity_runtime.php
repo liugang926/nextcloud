@@ -30,6 +30,7 @@ use OCA\IntegrationWeknora\Service\SourcePairingRegistryService;
 use OCA\IntegrationWeknora\Service\StatusProjectionService;
 use OCP\IConfig;
 use OCP\IDBConnection;
+use OCP\IUserManager;
 use OCP\Security\ICrypto;
 
 function checkLifecycle(bool $condition, string $message): void {
@@ -42,7 +43,15 @@ $services = (new Application())->getContainer();
 $config = $services->get(IConfig::class);
 $crypto = $services->get(ICrypto::class);
 $db = $services->get(IDBConnection::class);
-$uid = 'admin';
+$uid = (string)(getenv('WEKNORA_TEST_USER') ?: '');
+if ($uid === '') {
+    $candidates = $services->get(IUserManager::class)->search('', 1);
+    $candidate = $candidates[0] ?? null;
+    if ($candidate === null) {
+        throw new RuntimeException('Runtime test requires an enabled local account');
+    }
+    $uid = $candidate->getUID();
+}
 $home = \OCP\Server::get(\OCP\Files\IRootFolder::class)->getUserFolder($uid);
 $root = $home->newFolder('lifecycle-test-' . bin2hex(random_bytes(4)));
 $file = $root->newFile('activity.txt', 'current source bytes');
