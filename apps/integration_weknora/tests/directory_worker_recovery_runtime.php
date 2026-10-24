@@ -67,6 +67,13 @@ try {
     $activeRow=$read($ids['active']);
     workerCheck((int)$activeRow['attempt_count'] === 0 && (int)$activeRow['next_attempt_at'] > time(),
         'Fast worker reprocessed a completed active intent');
+    $q = $db->getQueryBuilder();
+    $q->update('weknora_dir_intent')->set('next_attempt_at', $q->createNamedParameter(0))
+        ->where($q->expr()->eq('operation_id', $q->createNamedParameter($ids['active'])))->executeStatement();
+    $directories->processDue();
+    $activeRow=$read($ids['active']);
+    workerCheck($activeRow['state'] === 'blocked' && $activeRow['error_code'] === 'publication_stopped',
+        'Due active grant refresh did not fail closed without reopening onboarding');
     $blockedRow=$read($ids['blocked']);
     workerCheck((int)$blockedRow['attempt_count'] === 0,
         'Fast worker retried blocked work without an explicit user request');
