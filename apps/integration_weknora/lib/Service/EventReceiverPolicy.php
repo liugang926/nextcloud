@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace OCA\IntegrationWeknora\Service;
 
+require_once __DIR__ . '/ApprovedOriginPolicy.php';
+
 /** Egress is disabled until an operator approves exact origins in the runtime. */
 final class EventReceiverPolicy {
     public const PATH = '/api/v1/integrations/nextcloud/events';
