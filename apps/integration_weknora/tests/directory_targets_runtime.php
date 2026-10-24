@@ -39,6 +39,12 @@ targetsCheck(array_column($candidates['targets'], 'processing_template_id') === 
     array_column($candidates['targets'], 'graph_mode') === ['optional', 'required', 'optional'], 'Same-Tenant templates or safe graph modes were conflated');
 targetsCheck(!str_contains(json_encode($candidates, JSON_THROW_ON_ERROR), 'scoped-secret') &&
     !str_contains(json_encode($candidates, JSON_THROW_ON_ERROR), 'credential_id'), 'Candidate response leaked a server credential');
+$catalog = $directory->candidates($uid, $folder->getId(), false, null, '', '', 50, true);
+targetsCheck(array_column($catalog['spaces'], 'tenant_id') === ['7', '9'] && $catalog['targets'] === [],
+    'Space catalog disclosed unauthorized Spaces or preloaded knowledge bases');
+$oneSpace = $directory->candidates($uid, $folder->getId(), false, ['9']);
+targetsCheck(array_column($oneSpace['targets'], 'tenant_id') === ['9'] && count($oneSpace['targets']) === 1,
+    'Selected Space did not restrict candidate lookup to that Space');
 $choice = ['operation_id' => 'dddddddd-2222-4333-8444-' . bin2hex(random_bytes(6)), 'mode' => 'existing',
     'tenant_id' => '9', 'processing_template_id' => 'template-9', 'name' => 'Explicit target nine', 'knowledge_base_id' => $candidates['targets'][2]['candidates'][0]['id']];
 $operation = $directory->associate($uid, $folder->getId(), $choice);

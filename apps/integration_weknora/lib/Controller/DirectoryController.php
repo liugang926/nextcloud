@@ -53,6 +53,11 @@ final class DirectoryController extends Controller {
             if ($this->connection->hasConnection()) {
                 $this->connection->ensureRule($uid, $folderId, $forCreation);
                 $allowed = $this->connection->visibleTenantIds($uid);
+                $tenantId = $this->request->getParam('tenant_id');
+                if ($tenantId !== null) {
+                    $this->connection->assertTargetAllowed($uid, ['tenant_id' => $tenantId]);
+                    $allowed = [(string)$tenantId];
+                }
             }
             $limit = $this->request->getParam('limit', 50);
             if (!is_int($limit) && !(is_string($limit) && ctype_digit($limit))) {
@@ -61,7 +66,8 @@ final class DirectoryController extends Controller {
             return $this->directories->candidates($uid, $folderId, $forCreation, $allowed,
                 is_string($this->request->getParam('q')) ? $this->request->getParam('q') : '',
                 is_string($this->request->getParam('cursor')) ? $this->request->getParam('cursor') : '',
-                (int)$limit);
+                (int)$limit,
+                $this->request->getParam('catalog') === '1');
         });
     }
     #[NoAdminRequired]
