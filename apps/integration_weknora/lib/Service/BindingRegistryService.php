@@ -228,23 +228,26 @@ final class BindingRegistryService {
         $selected = null;
         $resolved = [];
         foreach ($this->listBindings() as $binding) {
-            try {
-                $root = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
-            } catch (\InvalidArgumentException $exception) {
-                throw new \UnexpectedValueException('A binding root is no longer available', 0, $exception);
-            }
-            foreach ($resolved as $other) {
-                if ($this->overlaps($root, $other)) {
-                    throw new \UnexpectedValueException('Binding roots now overlap');
-                }
-            }
-            $resolved[] = $root;
             if ($binding['id'] === $bindingId) {
-                $selected = $root;
+                $selected = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+                continue;
+            }
+            try {
+                $resolved[] = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+            } catch (\InvalidArgumentException $exception) {
+                // An unavailable unrelated binding must not make every other
+                // sealed source unreadable. Its own operations still fail when
+                // selected, while overlap checks remain limited to roots that
+                // can currently be resolved.
             }
         }
         if ($selected === null) {
             throw new \UnexpectedValueException('Binding is no longer configured');
+        }
+        foreach ($resolved as $other) {
+            if ($this->overlaps($selected, $other)) {
+                throw new \UnexpectedValueException('Binding roots now overlap');
+            }
         }
         // Once paired, a moved folder must not silently change the source
         // boundary behind the same stable binding and knowledge-base IDs.
