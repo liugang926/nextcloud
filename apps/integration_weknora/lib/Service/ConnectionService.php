@@ -701,7 +701,7 @@ final class ConnectionService {
                 $out[$field] = substr($health[$field], 0, 64);
             }
         }
-        foreach (['worker_last_success_at', 'dispatcher_last_success_at', 'checked_at'] as $field) {
+        foreach (['worker_heartbeat_at', 'worker_last_success_at', 'dispatcher_last_success_at', 'checked_at'] as $field) {
             if (is_int($health[$field] ?? null) && $health[$field] > 0) {
                 $out[$field] = $health[$field];
             }

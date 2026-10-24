@@ -1,6 +1,6 @@
 # WeKnora Integration for Nextcloud 34
 
-## Versioned, explainable multi-source onboarding (0.9.2)
+## Versioned, explainable multi-source onboarding (0.9.3)
 
 The app and the WeKnora onboarding service use contract v3. Connection setup
 reports the Nextcloud app version, the deployed sidebar bundle digest, the
