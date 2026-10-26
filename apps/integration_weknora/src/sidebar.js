@@ -509,21 +509,31 @@ class WeknoraFileSidebarTab extends HTMLElement {
         selectedSpaceRow.append(document.createTextNode(`已选空间：${selectedSpaceName} `))
         this.button(selectedSpaceRow, '重新选择空间', () => this.renderAssociation(creating, migrating))
         form.append(selectedSpaceRow)
+        const candidateProvenance = document.createElement('p')
+        candidateProvenance.className = 'weknora-sidebar__hint'
+        candidateProvenance.id = `weknora-kb-candidates-${selectedId}`
+        candidateProvenance.textContent =
+            `以下候选来自 WeKnora 空间“${selectedSpaceName}”。这里是 WeKnora 知识库，不是 Nextcloud 目录；` +
+            '知识库名称可能与目录名称相同。'
+        form.append(candidateProvenance)
         const folderName = document.createElement('input')
         folderName.type = 'text'; folderName.maxLength = 255; folderName.required = creating
-        const folderField = this.field(form, '目录名称', folderName)
+        const folderField = this.field(form, 'Nextcloud 目录名称', folderName)
         folderField.hidden = !creating
         const mode = document.createElement('select')
-        mode.append(new Option('请选择关联方式', ''), new Option('关联已有知识库', 'existing'),
-            new Option('创建新知识库', 'create'))
+        const existingMode = new Option('关联已有知识库', 'existing')
+        const createMode = new Option('创建新知识库', 'create')
+        mode.append(new Option('请选择关联方式', ''), existingMode)
+        if (!migrating) mode.append(createMode)
         this.field(form, '关联方式', mode)
         const target = document.createElement('select')
-        const targetField = this.field(form, '已有知识库', target)
+        target.setAttribute('aria-describedby', candidateProvenance.id)
+        const targetField = this.field(form, 'WeKnora 知识库', target)
         const name = document.createElement('input')
         name.type = 'text'; name.maxLength = 255
         name.value = this._node?.basename || this._node?.displayname || '目录知识库'
         let nameTouched = false
-        const nameField = this.field(form, '知识库名称', name)
+        const nameField = this.field(form, 'WeKnora 知识库名称', name)
         const reasons = document.createElement('div')
         reasons.className = 'weknora-sidebar__reasons'
         reasons.setAttribute('aria-live', 'polite')
@@ -537,8 +547,6 @@ class WeknoraFileSidebarTab extends HTMLElement {
             target.replaceChildren()
             const selected = selectedTarget()
             selectedTemplate = selected ? String(selected.processing_template_id) : ''
-            const existingMode = mode.options[1]
-            const createMode = mode.options[2]
             existingMode.disabled = !selected || !(selected.candidates || []).length
             createMode.disabled = !selected || selected.available === false || selected.can_bind === false
             if (mode.value === 'existing' && existingMode.disabled) mode.value = ''
@@ -546,9 +554,12 @@ class WeknoraFileSidebarTab extends HTMLElement {
             for (const candidate of selected?.candidates || []) {
                 const option = document.createElement('option')
                 option.value = candidate.id
+                option.dataset.source = 'weknora'
+                option.dataset.knowledgeBaseId = candidate.id
+                option.title = `WeKnora 知识库 ID：${candidate.id}`
                 const contentCount = Number(candidate.content_count || 0)
                 const sourceCount = Number(candidate.nextcloud_source_count || 0)
-                option.textContent = `已有知识库：${candidate.name}` +
+                option.textContent = `WeKnora 知识库：${candidate.name}` +
                     (contentCount > 0 ? `（已有 ${contentCount} 条内容）` : '') +
                     (sourceCount > 0 ? ` · 已关联 ${sourceCount} 个 Nextcloud 目录` : '') +
                     (candidate.configuration_summary ? ` · ${candidate.configuration_summary}` : '')
@@ -595,8 +606,10 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 (mode.value === 'existing' && !target.value) ||
                 (creating && folderName.value.trim() === '')
             existingNote.textContent = mode.value === 'create'
-                ? '将创建新的知识库；目录和新知识库使用当前输入的名称。'
-                : '选择已有知识库时，原有内容会保留；绑定后该知识库的新增内容由 Nextcloud 目录管理。'
+                ? creating
+                    ? '将在 WeKnora 当前空间创建知识库，并同时创建对应的 Nextcloud 目录。'
+                    : '将在 WeKnora 当前空间创建知识库；Nextcloud 目录保持原名称和位置。'
+                : '只选择 WeKnora 当前空间中的已有知识库；不会选择或改名 Nextcloud 目录。'
         }
         mode.addEventListener('change', updateMode)
         folderName.addEventListener('input', () => {

@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Keep the selected-Space knowledge-base chooser unambiguous."""
+
+from pathlib import Path
+
+
+APP = Path(__file__).resolve().parents[1]
+SOURCE = (APP / "src" / "sidebar.js").read_text(encoding="utf-8")
+BUILT = (APP / "js" / "weknora-sidebar.js").read_text(encoding="utf-8")
+CSS = (APP / "css" / "weknora-sidebar.css").read_text(encoding="utf-8")
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SystemExit(message)
+
+
+require(
+    "params.set('tenant_id', spaceId)" in SOURCE,
+    "selected Space must be sent as an explicit tenant filter",
+)
+require(
+    "option.value = candidate.id" in SOURCE
+    and "option.dataset.source = 'weknora'" in SOURCE
+    and "option.dataset.knowledgeBaseId = candidate.id" in SOURCE,
+    "knowledge-base options must carry the WeKnora candidate identity",
+)
+require(
+    "WeKnora 知识库：${candidate.name}" in SOURCE,
+    "knowledge-base options must identify themselves as WeKnora knowledge bases",
+)
+require(
+    "这里是 WeKnora 知识库，不是 Nextcloud 目录" in SOURCE,
+    "the chooser must explicitly distinguish knowledge bases from directories",
+)
+require(
+    "if (!migrating) mode.append(createMode)" in SOURCE,
+    "migration must only allow an existing knowledge base",
+)
+require(
+    ".weknora-sidebar__form [hidden] { display: none !important; }" in CSS,
+    "the form stylesheet must not override the hidden attribute",
+)
+require(
+    'option.dataset.source = "weknora"' in BUILT
+    and "\\u4E0D\\u662F Nextcloud \\u76EE\\u5F55" in BUILT,
+    "the committed sidebar bundle must include the clarified labels",
+)
+
+print("Selected-Space knowledge-base chooser labels and identity contract passed")

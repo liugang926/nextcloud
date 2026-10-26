@@ -4964,27 +4964,32 @@ ${message.stack}`;
       selectedSpaceRow.append(document.createTextNode(`\u5DF2\u9009\u7A7A\u95F4\uFF1A${selectedSpaceName} `));
       this.button(selectedSpaceRow, "\u91CD\u65B0\u9009\u62E9\u7A7A\u95F4", () => this.renderAssociation(creating, migrating));
       form.append(selectedSpaceRow);
+      const candidateProvenance = document.createElement("p");
+      candidateProvenance.className = "weknora-sidebar__hint";
+      candidateProvenance.id = `weknora-kb-candidates-${selectedId}`;
+      candidateProvenance.textContent = `\u4EE5\u4E0B\u5019\u9009\u6765\u81EA WeKnora \u7A7A\u95F4\u201C${selectedSpaceName}\u201D\u3002\u8FD9\u91CC\u662F WeKnora \u77E5\u8BC6\u5E93\uFF0C\u4E0D\u662F Nextcloud \u76EE\u5F55\uFF1B\u77E5\u8BC6\u5E93\u540D\u79F0\u53EF\u80FD\u4E0E\u76EE\u5F55\u540D\u79F0\u76F8\u540C\u3002`;
+      form.append(candidateProvenance);
       const folderName = document.createElement("input");
       folderName.type = "text";
       folderName.maxLength = 255;
       folderName.required = creating;
-      const folderField = this.field(form, "\u76EE\u5F55\u540D\u79F0", folderName);
+      const folderField = this.field(form, "Nextcloud \u76EE\u5F55\u540D\u79F0", folderName);
       folderField.hidden = !creating;
       const mode = document.createElement("select");
-      mode.append(
-        new Option("\u8BF7\u9009\u62E9\u5173\u8054\u65B9\u5F0F", ""),
-        new Option("\u5173\u8054\u5DF2\u6709\u77E5\u8BC6\u5E93", "existing"),
-        new Option("\u521B\u5EFA\u65B0\u77E5\u8BC6\u5E93", "create")
-      );
+      const existingMode = new Option("\u5173\u8054\u5DF2\u6709\u77E5\u8BC6\u5E93", "existing");
+      const createMode = new Option("\u521B\u5EFA\u65B0\u77E5\u8BC6\u5E93", "create");
+      mode.append(new Option("\u8BF7\u9009\u62E9\u5173\u8054\u65B9\u5F0F", ""), existingMode);
+      if (!migrating) mode.append(createMode);
       this.field(form, "\u5173\u8054\u65B9\u5F0F", mode);
       const target = document.createElement("select");
-      const targetField = this.field(form, "\u5DF2\u6709\u77E5\u8BC6\u5E93", target);
+      target.setAttribute("aria-describedby", candidateProvenance.id);
+      const targetField = this.field(form, "WeKnora \u77E5\u8BC6\u5E93", target);
       const name = document.createElement("input");
       name.type = "text";
       name.maxLength = 255;
       name.value = this._node?.basename || this._node?.displayname || "\u76EE\u5F55\u77E5\u8BC6\u5E93";
       let nameTouched = false;
-      const nameField = this.field(form, "\u77E5\u8BC6\u5E93\u540D\u79F0", name);
+      const nameField = this.field(form, "WeKnora \u77E5\u8BC6\u5E93\u540D\u79F0", name);
       const reasons = document.createElement("div");
       reasons.className = "weknora-sidebar__reasons";
       reasons.setAttribute("aria-live", "polite");
@@ -5000,8 +5005,6 @@ ${message.stack}`;
         target.replaceChildren();
         const selected = selectedTarget();
         selectedTemplate = selected ? String(selected.processing_template_id) : "";
-        const existingMode = mode.options[1];
-        const createMode = mode.options[2];
         existingMode.disabled = !selected || !(selected.candidates || []).length;
         createMode.disabled = !selected || selected.available === false || selected.can_bind === false;
         if (mode.value === "existing" && existingMode.disabled) mode.value = "";
@@ -5009,9 +5012,12 @@ ${message.stack}`;
         for (const candidate of selected?.candidates || []) {
           const option = document.createElement("option");
           option.value = candidate.id;
+          option.dataset.source = "weknora";
+          option.dataset.knowledgeBaseId = candidate.id;
+          option.title = `WeKnora \u77E5\u8BC6\u5E93 ID\uFF1A${candidate.id}`;
           const contentCount = Number(candidate.content_count || 0);
           const sourceCount = Number(candidate.nextcloud_source_count || 0);
-          option.textContent = `\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1A${candidate.name}` + (contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : "") + (sourceCount > 0 ? ` \xB7 \u5DF2\u5173\u8054 ${sourceCount} \u4E2A Nextcloud \u76EE\u5F55` : "") + (candidate.configuration_summary ? ` \xB7 ${candidate.configuration_summary}` : "");
+          option.textContent = `WeKnora \u77E5\u8BC6\u5E93\uFF1A${candidate.name}` + (contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : "") + (sourceCount > 0 ? ` \xB7 \u5DF2\u5173\u8054 ${sourceCount} \u4E2A Nextcloud \u76EE\u5F55` : "") + (candidate.configuration_summary ? ` \xB7 ${candidate.configuration_summary}` : "");
           target.append(option);
         }
         reasons.replaceChildren();
@@ -5051,7 +5057,7 @@ ${message.stack}`;
         target.required = mode.value === "existing";
         name.required = mode.value === "create";
         submit.disabled = mode.value === "" || mode.value === "existing" && !target.value || creating && folderName.value.trim() === "";
-        existingNote.textContent = mode.value === "create" ? "\u5C06\u521B\u5EFA\u65B0\u7684\u77E5\u8BC6\u5E93\uFF1B\u76EE\u5F55\u548C\u65B0\u77E5\u8BC6\u5E93\u4F7F\u7528\u5F53\u524D\u8F93\u5165\u7684\u540D\u79F0\u3002" : "\u9009\u62E9\u5DF2\u6709\u77E5\u8BC6\u5E93\u65F6\uFF0C\u539F\u6709\u5185\u5BB9\u4F1A\u4FDD\u7559\uFF1B\u7ED1\u5B9A\u540E\u8BE5\u77E5\u8BC6\u5E93\u7684\u65B0\u589E\u5185\u5BB9\u7531 Nextcloud \u76EE\u5F55\u7BA1\u7406\u3002";
+        existingNote.textContent = mode.value === "create" ? creating ? "\u5C06\u5728 WeKnora \u5F53\u524D\u7A7A\u95F4\u521B\u5EFA\u77E5\u8BC6\u5E93\uFF0C\u5E76\u540C\u65F6\u521B\u5EFA\u5BF9\u5E94\u7684 Nextcloud \u76EE\u5F55\u3002" : "\u5C06\u5728 WeKnora \u5F53\u524D\u7A7A\u95F4\u521B\u5EFA\u77E5\u8BC6\u5E93\uFF1BNextcloud \u76EE\u5F55\u4FDD\u6301\u539F\u540D\u79F0\u548C\u4F4D\u7F6E\u3002" : "\u53EA\u9009\u62E9 WeKnora \u5F53\u524D\u7A7A\u95F4\u4E2D\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1B\u4E0D\u4F1A\u9009\u62E9\u6216\u6539\u540D Nextcloud \u76EE\u5F55\u3002";
       };
       mode.addEventListener("change", updateMode);
       folderName.addEventListener("input", () => {
