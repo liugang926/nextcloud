@@ -546,12 +546,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 option.dataset.source = 'weknora'
                 option.dataset.knowledgeBaseId = candidate.id
                 option.title = `WeKnora 知识库 ID：${candidate.id}`
-                const contentCount = Number(candidate.content_count || 0)
-                const sourceCount = Number(candidate.nextcloud_source_count || 0)
-                option.textContent = `WeKnora 知识库：${candidate.name}` +
-                    (contentCount > 0 ? `（已有 ${contentCount} 条内容）` : '') +
-                    (sourceCount > 0 ? ` · 已关联 ${sourceCount} 个 Nextcloud 目录` : '') +
-                    (candidate.configuration_summary ? ` · ${candidate.configuration_summary}` : '')
+                option.textContent = candidate.name
                 target.append(option)
             }
             target.disabled = !selected || selected.available === false || !(selected.candidates || []).length
