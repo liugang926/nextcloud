@@ -69,9 +69,8 @@ final class SourcePairingRegistryService {
                 $this->db->commit();
                 return ['pairing' => $this->publicRow($existingOperation), 'created' => false];
             }
-            if ($this->liveForBinding($bindingId) !== null ||
-                $this->liveForTarget($tenantId, $knowledgeBaseId) !== null) {
-                throw new \DomainException('Binding or knowledge base is already paired');
+            if ($this->liveForBinding($bindingId) !== null) {
+                throw new \DomainException('Binding is already paired');
             }
             $keyId = 'pair_' . str_replace('-', '', $operationId);
             $token = rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '=');
@@ -760,23 +759,6 @@ final class SourcePairingRegistryService {
 
     private function liveForBinding(string $bindingId): ?array {
         return $this->live('binding_id', $bindingId);
-    }
-
-    private function liveForTarget(string $tenantId, string $knowledgeBaseId): ?array {
-        $query = $this->db->getQueryBuilder();
-        $result = $query->select('*')->from('weknora_src_pair')
-            ->where($query->expr()->eq('tenant_id', $query->createNamedParameter($tenantId)))
-            ->andWhere($query->expr()->eq('knowledge_base_id', $query->createNamedParameter($knowledgeBaseId)))
-            ->andWhere($query->expr()->orX(
-                $query->expr()->eq('state', $query->createNamedParameter('pending')),
-                $query->expr()->eq('state', $query->createNamedParameter('active')),
-            ))->setMaxResults(1)->executeQuery();
-        try {
-            $row = $result->fetchAssociative();
-            return $row === false ? null : $row;
-        } finally {
-            $result->closeCursor();
-        }
     }
 
     private function liveForDataSource(string $dataSourceId): ?array {

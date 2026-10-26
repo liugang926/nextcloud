@@ -499,11 +499,6 @@ final class DirectoryPublicationService {
                 $contract = is_int($response['contract_version'] ?? null) ? $response['contract_version'] : 1;
                 $eligible = $this->normalizeCandidates($response['candidates'] ?? []);
                 $rejected = $this->normalizeCandidates($response['ineligible'] ?? [], false);
-                $rejected = array_values(array_filter(
-                    $rejected,
-                    static fn(array $candidate): bool =>
-                        ($candidate['nextcloud_source_count'] ?? 0) === 0,
-                ));
                 foreach ($rejected as &$candidate) {
                     if (!in_array($candidate['reason_code'] ?? null, $this->knownReasons(), true)) {
                         $candidate['reason_code'] = 'kb_configuration_unverified';
@@ -512,15 +507,6 @@ final class DirectoryPublicationService {
                 }
                 unset($candidate);
                 foreach ($eligible as &$candidate) {
-                    if (($candidate['nextcloud_source_count'] ?? 0) > 0) {
-                        // A knowledge base already owned by a Nextcloud source
-                        // cannot be selected as another source target. Keep the
-                        // invalid/test artifact out of both the chooser and its
-                        // explanatory list so stale WeKnora responses cannot
-                        // leak names the current actor must not choose.
-                        $candidate = null;
-                        continue;
-                    }
                     if ($candidate['reason_code'] !== null && $candidate['reason_code'] !== '') {
                         $candidate['eligible'] = false;
                         $rejected[] = $candidate;

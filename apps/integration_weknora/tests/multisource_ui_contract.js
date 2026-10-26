@@ -15,6 +15,8 @@ const sidebar = fs.readFileSync(path.join(root, 'src/sidebar.js'), 'utf8');
 const bundle = fs.readFileSync(path.join(root, 'js/weknora-sidebar.js'), 'utf8');
 const publication = fs.readFileSync(
     path.join(root, 'lib/Service/DirectoryPublicationService.php'), 'utf8');
+const pairingRegistry = fs.readFileSync(
+    path.join(root, 'lib/Service/SourcePairingRegistryService.php'), 'utf8');
 const info = fs.readFileSync(path.join(root, 'appinfo/info.xml'), 'utf8');
 
 assert.match(connection, /contract_version' => 3/);
@@ -33,6 +35,9 @@ assert.match(sidebar, /params\.set\('catalog', '1'\)/);
 assert.match(sidebar, /params\.set\('tenant_id', spaceId\)/);
 assert.match(sidebar, /重新选择空间/);
 assert.match(publication, /space_catalog_viewed/);
+assert.doesNotMatch(pairingRegistry, /liveForTarget/);
+assert.match(pairingRegistry, /liveForBinding/);
+assert.doesNotMatch(publication, /candidate\['nextcloud_source_count'\]/);
 assert.match(bundle, /option\.textContent = candidate\.name/);
 assert.match(info, /<version>0\.10\.\d+<\/version>/);
 assert.match(bundle, /renderAssociationSpaceChooser/);

@@ -43,14 +43,6 @@ require(
     "the chooser must explicitly distinguish knowledge bases from directories",
 )
 require(
-    "($candidate['nextcloud_source_count'] ?? 0) > 0" in SERVICE,
-    "a knowledge base already owned by a Nextcloud source must not be selectable",
-)
-require(
-    "($candidate['nextcloud_source_count'] ?? 0) === 0" in SERVICE,
-    "already-bound knowledge bases must also stay out of the explanatory candidate list",
-)
-require(
     "mode.value = 'existing'" in SOURCE
     and "new Option('创建新知识库', 'create')" not in SOURCE,
     "the directory chooser must only associate existing WeKnora knowledge bases",

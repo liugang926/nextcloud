@@ -64,6 +64,7 @@ def main():
     created_binding = False
     created_second_folder = False
     created_second_binding = False
+    second_pair_prepared = False
     target = {"tenant_id": "18446744073709551615",
               "knowledge_base_id": str(uuid.uuid4())}
 
@@ -162,10 +163,14 @@ def main():
         status, _ = admin_json("POST", pairing_url,
                                {"operation_id": str(uuid.uuid4()), **target})
         check(status, 409, "another operation cannot take the binding")
-        status, _ = admin_json("POST",
-                               f"{api}/admin/bindings/{second_id}/source-pairing",
-                               {"operation_id": str(uuid.uuid4()), **target})
-        check(status, 409, "another binding cannot take the same KB")
+        status, body = admin_json("POST",
+                                  f"{api}/admin/bindings/{second_id}/source-pairing",
+                                  {"operation_id": str(uuid.uuid4()), **target})
+        check(status, 201, "another binding can share the same KB")
+        second_pair = decoded(body)["pairing"]
+        assert second_pair["knowledge_base_id"] == target["knowledge_base_id"]
+        assert second_pair["binding_id"] == second_id
+        second_pair_prepared = True
 
         data_source = str(uuid.uuid4())
         other_key, other_key_id = issue_machine_key(admin, api, binding_id, csrf)
@@ -369,6 +374,9 @@ def main():
         print("source pairing HTTP smoke passed")
     finally:
         if created_second_binding:
+            if second_pair_prepared:
+                purge_synthetic_test_pair(second_id, target["tenant_id"],
+                                          target["knowledge_base_id"])
             remove_binding(admin, api, second_id, csrf)
         if created_second_folder:
             request(machine, second_folder_url, "DELETE", dav_headers)
