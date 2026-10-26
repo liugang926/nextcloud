@@ -4975,21 +4975,13 @@ ${message.stack}`;
       folderName.required = creating;
       const folderField = this.field(form, "Nextcloud \u76EE\u5F55\u540D\u79F0", folderName);
       folderField.hidden = !creating;
-      const mode = document.createElement("select");
-      const existingMode = new Option("\u5173\u8054\u5DF2\u6709\u77E5\u8BC6\u5E93", "existing");
-      const createMode = new Option("\u521B\u5EFA\u65B0\u77E5\u8BC6\u5E93", "create");
-      mode.append(new Option("\u8BF7\u9009\u62E9\u5173\u8054\u65B9\u5F0F", ""), existingMode);
-      if (!migrating) mode.append(createMode);
-      this.field(form, "\u5173\u8054\u65B9\u5F0F", mode);
+      const mode = document.createElement("input");
+      mode.type = "hidden";
+      mode.value = "existing";
+      form.append(mode);
       const target = document.createElement("select");
       target.setAttribute("aria-describedby", candidateProvenance.id);
-      const targetField = this.field(form, "WeKnora \u77E5\u8BC6\u5E93", target);
-      const name = document.createElement("input");
-      name.type = "text";
-      name.maxLength = 255;
-      name.value = this._node?.basename || this._node?.displayname || "\u76EE\u5F55\u77E5\u8BC6\u5E93";
-      let nameTouched = false;
-      const nameField = this.field(form, "WeKnora \u77E5\u8BC6\u5E93\u540D\u79F0", name);
+      this.field(form, "WeKnora \u77E5\u8BC6\u5E93", target);
       const reasons = document.createElement("div");
       reasons.className = "weknora-sidebar__reasons";
       reasons.setAttribute("aria-live", "polite");
@@ -5005,10 +4997,6 @@ ${message.stack}`;
         target.replaceChildren();
         const selected = selectedTarget();
         selectedTemplate = selected ? String(selected.processing_template_id) : "";
-        existingMode.disabled = !selected || !(selected.candidates || []).length;
-        createMode.disabled = !selected || selected.available === false || selected.can_bind === false;
-        if (mode.value === "existing" && existingMode.disabled) mode.value = "";
-        if (mode.value === "create" && createMode.disabled) mode.value = "";
         for (const candidate of selected?.candidates || []) {
           const option = document.createElement("option");
           option.value = candidate.id;
@@ -5020,6 +5008,7 @@ ${message.stack}`;
           option.textContent = `WeKnora \u77E5\u8BC6\u5E93\uFF1A${candidate.name}` + (contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : "") + (sourceCount > 0 ? ` \xB7 \u5DF2\u5173\u8054 ${sourceCount} \u4E2A Nextcloud \u76EE\u5F55` : "") + (candidate.configuration_summary ? ` \xB7 ${candidate.configuration_summary}` : "");
           target.append(option);
         }
+        target.disabled = !selected || selected.available === false || !(selected.candidates || []).length;
         reasons.replaceChildren();
         for (const candidate of selected?.ineligible || []) {
           const note = document.createElement("p");
@@ -5036,7 +5025,7 @@ ${message.stack}`;
         } else if (!(selected.candidates || []).length) {
           const note = document.createElement("p");
           note.className = "weknora-sidebar__hint";
-          note.textContent = selected?.next_cursor ? "\u672C\u9875\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF0C\u53EF\u52A0\u8F7D\u66F4\u591A\uFF1B\u7CFB\u7EDF\u4E0D\u4F1A\u81EA\u52A8\u8F6C\u4E3A\u65B0\u5EFA\u3002" : "\u5F53\u524D\u641C\u7D22\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\u3002\u53EF\u660E\u786E\u9009\u62E9\u201C\u521B\u5EFA\u65B0\u77E5\u8BC6\u5E93\u201D\uFF0C\u4E0D\u4F1A\u56E0\u7A7A\u5019\u9009\u81EA\u52A8\u521B\u5EFA\u3002";
+          note.textContent = selected?.next_cursor ? "\u672C\u9875\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF0C\u53EF\u52A0\u8F7D\u66F4\u591A\uFF1B\u7CFB\u7EDF\u4E0D\u4F1A\u81EA\u52A8\u8F6C\u4E3A\u65B0\u5EFA\u3002" : "\u5F53\u524D WeKnora \u7A7A\u95F4\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u3001\u53EF\u4F9B\u5173\u8054\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\u3002\u8BF7\u5148\u5728 WeKnora \u4E2D\u5B8C\u6210\u77E5\u8BC6\u5E93\u521B\u5EFA\u548C\u914D\u7F6E\u3002";
           reasons.append(note);
         }
         loadMore.hidden = !selected?.next_cursor;
@@ -5050,24 +5039,13 @@ ${message.stack}`;
       submit.textContent = creating ? "\u521B\u5EFA\u5E76\u5173\u8054" : migrating ? "\u5F00\u59CB\u8FC1\u79FB" : "\u5173\u8054";
       form.append(submit);
       const updateMode = () => {
-        targetField.hidden = mode.value !== "existing";
-        nameField.hidden = mode.value !== "create";
         folderField.hidden = !creating;
         folderName.required = creating;
-        target.required = mode.value === "existing";
-        name.required = mode.value === "create";
-        submit.disabled = mode.value === "" || mode.value === "existing" && !target.value || creating && folderName.value.trim() === "";
-        existingNote.textContent = mode.value === "create" ? creating ? "\u5C06\u5728 WeKnora \u5F53\u524D\u7A7A\u95F4\u521B\u5EFA\u77E5\u8BC6\u5E93\uFF0C\u5E76\u540C\u65F6\u521B\u5EFA\u5BF9\u5E94\u7684 Nextcloud \u76EE\u5F55\u3002" : "\u5C06\u5728 WeKnora \u5F53\u524D\u7A7A\u95F4\u521B\u5EFA\u77E5\u8BC6\u5E93\uFF1BNextcloud \u76EE\u5F55\u4FDD\u6301\u539F\u540D\u79F0\u548C\u4F4D\u7F6E\u3002" : "\u53EA\u9009\u62E9 WeKnora \u5F53\u524D\u7A7A\u95F4\u4E2D\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1B\u4E0D\u4F1A\u9009\u62E9\u6216\u6539\u540D Nextcloud \u76EE\u5F55\u3002";
+        target.required = true;
+        submit.disabled = !target.value || creating && folderName.value.trim() === "";
+        existingNote.textContent = "\u53EA\u9009\u62E9 WeKnora \u5F53\u524D\u7A7A\u95F4\u4E2D\u7684\u5DF2\u6709\u77E5\u8BC6\u5E93\uFF1B\u4E0D\u4F1A\u9009\u62E9\u6216\u6539\u540D Nextcloud \u76EE\u5F55\u3002";
       };
-      mode.addEventListener("change", updateMode);
-      folderName.addEventListener("input", () => {
-        if (creating && !nameTouched) name.value = folderName.value;
-        updateMode();
-      });
-      name.addEventListener("input", () => {
-        nameTouched = true;
-        updateMode();
-      });
+      folderName.addEventListener("input", updateMode);
       target.addEventListener("change", updateMode);
       updateCandidates();
       loadMore.addEventListener("click", async () => {
@@ -5108,17 +5086,15 @@ ${message.stack}`;
         event.preventDefault();
         if (!form.reportValidity()) return;
         submit.disabled = true;
-        name.disabled = true;
         target.disabled = true;
-        mode.disabled = true;
         folderName.disabled = true;
         const selected = selectedTarget();
         const chosen = selected?.candidates?.find((candidate) => String(candidate.id) === target.value);
         submittedChoice ||= {
           operation_id: operationId,
-          mode: mode.value,
-          name: mode.value === "existing" ? chosen?.name : name.value,
-          knowledge_base_id: mode.value === "existing" ? target.value : "",
+          mode: "existing",
+          name: chosen?.name,
+          knowledge_base_id: target.value,
           folder_name: creating ? folderName.value : void 0,
           tenant_id: String(selected?.tenant_id || spaceId),
           processing_template_id: selectedTemplate,

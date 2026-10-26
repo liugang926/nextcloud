@@ -34,8 +34,9 @@ require(
     "the chooser must explicitly distinguish knowledge bases from directories",
 )
 require(
-    "if (!migrating) mode.append(createMode)" in SOURCE,
-    "migration must only allow an existing knowledge base",
+    "mode.value = 'existing'" in SOURCE
+    and "new Option('创建新知识库', 'create')" not in SOURCE,
+    "the directory chooser must only associate existing WeKnora knowledge bases",
 )
 require(
     ".weknora-sidebar__form [hidden] { display: none !important; }" in CSS,
