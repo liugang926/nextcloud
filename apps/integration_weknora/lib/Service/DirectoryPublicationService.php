@@ -507,6 +507,15 @@ final class DirectoryPublicationService {
                 }
                 unset($candidate);
                 foreach ($eligible as &$candidate) {
+                    if (($candidate['nextcloud_source_count'] ?? 0) > 0) {
+                        // A knowledge base already owned by a Nextcloud source
+                        // cannot be selected as another source target. Keep the
+                        // invalid/test artifact out of both the chooser and its
+                        // explanatory list so stale WeKnora responses cannot
+                        // leak names the current actor must not choose.
+                        $candidate = null;
+                        continue;
+                    }
                     if ($candidate['reason_code'] !== null && $candidate['reason_code'] !== '') {
                         $candidate['eligible'] = false;
                         $rejected[] = $candidate;

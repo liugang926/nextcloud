@@ -5003,9 +5003,7 @@ ${message.stack}`;
           option.dataset.source = "weknora";
           option.dataset.knowledgeBaseId = candidate.id;
           option.title = `WeKnora \u77E5\u8BC6\u5E93 ID\uFF1A${candidate.id}`;
-          const contentCount = Number(candidate.content_count || 0);
-          const sourceCount = Number(candidate.nextcloud_source_count || 0);
-          option.textContent = `WeKnora \u77E5\u8BC6\u5E93\uFF1A${candidate.name}` + (contentCount > 0 ? `\uFF08\u5DF2\u6709 ${contentCount} \u6761\u5185\u5BB9\uFF09` : "") + (sourceCount > 0 ? ` \xB7 \u5DF2\u5173\u8054 ${sourceCount} \u4E2A Nextcloud \u76EE\u5F55` : "") + (candidate.configuration_summary ? ` \xB7 ${candidate.configuration_summary}` : "");
+          option.textContent = candidate.name;
           target.append(option);
         }
         target.disabled = !selected || selected.available === false || !(selected.candidates || []).length;

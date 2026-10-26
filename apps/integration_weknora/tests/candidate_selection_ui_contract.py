@@ -8,6 +8,9 @@ APP = Path(__file__).resolve().parents[1]
 SOURCE = (APP / "src" / "sidebar.js").read_text(encoding="utf-8")
 BUILT = (APP / "js" / "weknora-sidebar.js").read_text(encoding="utf-8")
 CSS = (APP / "css" / "weknora-sidebar.css").read_text(encoding="utf-8")
+SERVICE = (APP / "lib" / "Service" / "DirectoryPublicationService.php").read_text(
+    encoding="utf-8"
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -26,12 +29,22 @@ require(
     "knowledge-base options must carry the WeKnora candidate identity",
 )
 require(
-    "WeKnora 知识库：${candidate.name}" in SOURCE,
-    "knowledge-base options must identify themselves as WeKnora knowledge bases",
+    "option.textContent = candidate.name" in SOURCE
+    and "option.title = `WeKnora 知识库 ID：${candidate.id}`" in SOURCE,
+    "knowledge-base options must show only the name and expose the ID on hover",
+)
+require(
+    "已有 ${contentCount} 条内容" not in SOURCE
+    and "candidate.configuration_summary" not in SOURCE,
+    "knowledge-base option labels must not mix counts or configuration details into the name",
 )
 require(
     "这里是 WeKnora 知识库，不是 Nextcloud 目录" in SOURCE,
     "the chooser must explicitly distinguish knowledge bases from directories",
+)
+require(
+    "($candidate['nextcloud_source_count'] ?? 0) > 0" in SERVICE,
+    "a knowledge base already owned by a Nextcloud source must not be selectable",
 )
 require(
     "mode.value = 'existing'" in SOURCE
