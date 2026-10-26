@@ -23,6 +23,10 @@ require(
     "selected Space must be sent as an explicit tenant filter",
 )
 require(
+    "String(candidate.tenant_id || '') === String(spaceId)" in SOURCE,
+    "the chooser must discard candidate targets from a different Space",
+)
+require(
     "option.value = candidate.id" in SOURCE
     and "option.dataset.source = 'weknora'" in SOURCE
     and "option.dataset.knowledgeBaseId = candidate.id" in SOURCE,

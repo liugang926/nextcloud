@@ -4935,14 +4935,16 @@ ${message.stack}`;
         explanation.textContent = "\u8FC1\u79FB\u4F1A\u5148\u6682\u505C\u65E7\u76EE\u6807\u8BFB\u53D6\uFF0C\u518D\u6838\u9A8C\u65B0\u7684\u77E5\u8BC6\u5E93\u3002\u539F\u6587\u4EF6\u4E0E\u5DE5\u4F5C\u7A7A\u95F4\u4FDD\u7559\uFF0C\u5B8C\u6210\u524D\u663E\u793A\u5F85\u8FDE\u63A5\u3002";
         form.append(explanation);
       }
-      const spaces = result.targets || [{
+      const fallbackTarget = {
         tenant_id: result.tenant_id,
         processing_template_id: result.processing_template_id,
         candidates: result.candidates || [],
         ineligible: result.ineligible || [],
         available: true,
         can_bind: true
-      }];
+      };
+      const targets = Array.isArray(result.targets) && result.targets.length ? result.targets : [fallbackTarget];
+      const spaces = targets.filter((candidate) => candidate && String(candidate.tenant_id || "") === String(spaceId));
       const search = document.createElement("div");
       search.className = "weknora-sidebar__search";
       const searchInput = document.createElement("input");
