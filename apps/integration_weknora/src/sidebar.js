@@ -484,9 +484,15 @@ class WeknoraFileSidebarTab extends HTMLElement {
             explanation.textContent = '迁移会先暂停旧目标读取，再核验新的知识库。原文件与工作空间保留，完成前显示待连接。'
             form.append(explanation)
         }
-        const spaces = result.targets || [{ tenant_id: result.tenant_id,
+        const fallbackTarget = { tenant_id: result.tenant_id,
             processing_template_id: result.processing_template_id, candidates: result.candidates || [],
-            ineligible: result.ineligible || [], available: true, can_bind: true }]
+            ineligible: result.ineligible || [], available: true, can_bind: true }
+        const targets = Array.isArray(result.targets) && result.targets.length
+            ? result.targets : [fallbackTarget]
+        // A selected space is an isolation boundary. Never fall back to the
+        // first target if an upstream response carries a different tenant.
+        const spaces = targets.filter(candidate =>
+            candidate && String(candidate.tenant_id || '') === String(spaceId))
         const search = document.createElement('div')
         search.className = 'weknora-sidebar__search'
         const searchInput = document.createElement('input')
