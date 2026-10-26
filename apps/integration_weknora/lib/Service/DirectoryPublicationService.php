@@ -499,6 +499,11 @@ final class DirectoryPublicationService {
                 $contract = is_int($response['contract_version'] ?? null) ? $response['contract_version'] : 1;
                 $eligible = $this->normalizeCandidates($response['candidates'] ?? []);
                 $rejected = $this->normalizeCandidates($response['ineligible'] ?? [], false);
+                $rejected = array_values(array_filter(
+                    $rejected,
+                    static fn(array $candidate): bool =>
+                        ($candidate['nextcloud_source_count'] ?? 0) === 0,
+                ));
                 foreach ($rejected as &$candidate) {
                     if (!in_array($candidate['reason_code'] ?? null, $this->knownReasons(), true)) {
                         $candidate['reason_code'] = 'kb_configuration_unverified';
