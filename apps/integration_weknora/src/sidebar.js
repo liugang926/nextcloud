@@ -509,21 +509,24 @@ class WeknoraFileSidebarTab extends HTMLElement {
         selectedSpaceRow.append(document.createTextNode(`已选空间：${selectedSpaceName} `))
         this.button(selectedSpaceRow, '重新选择空间', () => this.renderAssociation(creating, migrating))
         form.append(selectedSpaceRow)
+        const candidateProvenance = document.createElement('p')
+        candidateProvenance.className = 'weknora-sidebar__hint'
+        candidateProvenance.id = `weknora-kb-candidates-${selectedId}`
+        candidateProvenance.textContent =
+            `以下候选来自 WeKnora 空间“${selectedSpaceName}”。这里是 WeKnora 知识库，不是 Nextcloud 目录；` +
+            '知识库名称可能与目录名称相同。'
+        form.append(candidateProvenance)
         const folderName = document.createElement('input')
         folderName.type = 'text'; folderName.maxLength = 255; folderName.required = creating
-        const folderField = this.field(form, '目录名称', folderName)
+        const folderField = this.field(form, 'Nextcloud 目录名称', folderName)
         folderField.hidden = !creating
-        const mode = document.createElement('select')
-        mode.append(new Option('请选择关联方式', ''), new Option('关联已有知识库', 'existing'),
-            new Option('创建新知识库', 'create'))
-        this.field(form, '关联方式', mode)
+        const mode = document.createElement('input')
+        mode.type = 'hidden'
+        mode.value = 'existing'
+        form.append(mode)
         const target = document.createElement('select')
-        const targetField = this.field(form, '已有知识库', target)
-        const name = document.createElement('input')
-        name.type = 'text'; name.maxLength = 255
-        name.value = this._node?.basename || this._node?.displayname || '目录知识库'
-        let nameTouched = false
-        const nameField = this.field(form, '知识库名称', name)
+        target.setAttribute('aria-describedby', candidateProvenance.id)
+        this.field(form, 'WeKnora 知识库', target)
         const reasons = document.createElement('div')
         reasons.className = 'weknora-sidebar__reasons'
         reasons.setAttribute('aria-live', 'polite')
@@ -537,23 +540,21 @@ class WeknoraFileSidebarTab extends HTMLElement {
             target.replaceChildren()
             const selected = selectedTarget()
             selectedTemplate = selected ? String(selected.processing_template_id) : ''
-            const existingMode = mode.options[1]
-            const createMode = mode.options[2]
-            existingMode.disabled = !selected || !(selected.candidates || []).length
-            createMode.disabled = !selected || selected.available === false || selected.can_bind === false
-            if (mode.value === 'existing' && existingMode.disabled) mode.value = ''
-            if (mode.value === 'create' && createMode.disabled) mode.value = ''
             for (const candidate of selected?.candidates || []) {
                 const option = document.createElement('option')
                 option.value = candidate.id
+                option.dataset.source = 'weknora'
+                option.dataset.knowledgeBaseId = candidate.id
+                option.title = `WeKnora 知识库 ID：${candidate.id}`
                 const contentCount = Number(candidate.content_count || 0)
                 const sourceCount = Number(candidate.nextcloud_source_count || 0)
-                option.textContent = `已有知识库：${candidate.name}` +
+                option.textContent = `WeKnora 知识库：${candidate.name}` +
                     (contentCount > 0 ? `（已有 ${contentCount} 条内容）` : '') +
                     (sourceCount > 0 ? ` · 已关联 ${sourceCount} 个 Nextcloud 目录` : '') +
                     (candidate.configuration_summary ? ` · ${candidate.configuration_summary}` : '')
                 target.append(option)
             }
+            target.disabled = !selected || selected.available === false || !(selected.candidates || []).length
             reasons.replaceChildren()
             for (const candidate of selected?.ineligible || []) {
                 const note = document.createElement('p')
@@ -572,7 +573,7 @@ class WeknoraFileSidebarTab extends HTMLElement {
                 note.className = 'weknora-sidebar__hint'
                 note.textContent = selected?.next_cursor
                     ? '本页没有符合条件的已有知识库，可加载更多；系统不会自动转为新建。'
-                    : '当前搜索没有符合条件的已有知识库。可明确选择“创建新知识库”，不会因空候选自动创建。'
+                    : '当前 WeKnora 空间没有符合条件、可供关联的已有知识库。请先在 WeKnora 中完成知识库创建和配置。'
                 reasons.append(note)
             }
             loadMore.hidden = !selected?.next_cursor
@@ -585,25 +586,13 @@ class WeknoraFileSidebarTab extends HTMLElement {
         submit.type = 'submit'; submit.textContent = creating ? '创建并关联' : migrating ? '开始迁移' : '关联'
         form.append(submit)
         const updateMode = () => {
-            targetField.hidden = mode.value !== 'existing'
-            nameField.hidden = mode.value !== 'create'
             folderField.hidden = !creating
             folderName.required = creating
-            target.required = mode.value === 'existing'
-            name.required = mode.value === 'create'
-            submit.disabled = mode.value === '' ||
-                (mode.value === 'existing' && !target.value) ||
-                (creating && folderName.value.trim() === '')
-            existingNote.textContent = mode.value === 'create'
-                ? '将创建新的知识库；目录和新知识库使用当前输入的名称。'
-                : '选择已有知识库时，原有内容会保留；绑定后该知识库的新增内容由 Nextcloud 目录管理。'
+            target.required = true
+            submit.disabled = !target.value || (creating && folderName.value.trim() === '')
+            existingNote.textContent = '只选择 WeKnora 当前空间中的已有知识库；不会选择或改名 Nextcloud 目录。'
         }
-        mode.addEventListener('change', updateMode)
-        folderName.addEventListener('input', () => {
-            if (creating && !nameTouched) name.value = folderName.value
-            updateMode()
-        })
-        name.addEventListener('input', () => { nameTouched = true; updateMode() })
+        folderName.addEventListener('input', updateMode)
         target.addEventListener('change', updateMode)
         updateCandidates()
         loadMore.addEventListener('click', async () => {
@@ -637,13 +626,12 @@ class WeknoraFileSidebarTab extends HTMLElement {
             event.preventDefault()
             if (!form.reportValidity()) return
             submit.disabled = true
-            name.disabled = true; target.disabled = true
-            mode.disabled = true; folderName.disabled = true
+            target.disabled = true; folderName.disabled = true
             const selected = selectedTarget()
             const chosen = selected?.candidates?.find(candidate => String(candidate.id) === target.value)
-            submittedChoice ||= { operation_id: operationId, mode: mode.value,
-                name: mode.value === 'existing' ? chosen?.name : name.value,
-                knowledge_base_id: mode.value === 'existing' ? target.value : '',
+            submittedChoice ||= { operation_id: operationId, mode: 'existing',
+                name: chosen?.name,
+                knowledge_base_id: target.value,
                 folder_name: creating ? folderName.value : undefined,
                 tenant_id: String(selected?.tenant_id || spaceId), processing_template_id: selectedTemplate,
                 target_candidate_revision: selected?.candidate_revision || null,

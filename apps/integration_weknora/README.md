@@ -1,6 +1,6 @@
 # WeKnora Integration for Nextcloud 34
 
-## Connection-only administration and lifecycle views (0.10.0)
+## Connection-only administration and lifecycle views (0.10.x)
 
 The ordinary administrator page is now connection-only. It exposes the
 WeKnora address, a one-time administrator key, workspace discovery, workspace
