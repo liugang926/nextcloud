@@ -3,6 +3,7 @@
 import copy
 import gzip
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -186,6 +187,40 @@ class SelectionTests(unittest.TestCase):
 
     def test_no_release_is_normal_noop(self):
         self.assertIsNone(release.select_release([], {}))
+
+
+class ApiTests(unittest.TestCase):
+    class Response:
+        def __init__(self, payload, declared=None):
+            self.payload = payload
+            self.headers = {'Content-Length': str(len(payload) if declared is None else declared)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _limit):
+            return self.payload
+
+    def test_incomplete_release_api_reply_is_retried(self):
+        with tempfile.TemporaryDirectory() as folder:
+            updater = release.Updater(folder, Path(folder) / 'data', 'owner/repo')
+        with mock.patch.object(release.urllib.request, 'urlopen',
+                               side_effect=[http.client.IncompleteRead(b'', 2),
+                                            self.Response(b'[]')]), \
+             mock.patch.object(release.time, 'sleep'):
+            self.assertEqual(updater.api('releases?per_page=30'), [])
+
+    def test_truncated_release_api_payload_is_retried(self):
+        with tempfile.TemporaryDirectory() as folder:
+            updater = release.Updater(folder, Path(folder) / 'data', 'owner/repo')
+        with mock.patch.object(release.urllib.request, 'urlopen',
+                               side_effect=[self.Response(b'[]', declared=4),
+                                            self.Response(b'[]')]), \
+             mock.patch.object(release.time, 'sleep'):
+            self.assertEqual(updater.api('releases?per_page=30'), [])
 
 
 class JournalTests(unittest.TestCase):
