@@ -194,6 +194,7 @@ class ApiTests(unittest.TestCase):
     class Response:
         def __init__(self, payload, declared=None):
             self.payload = payload
+            self.read_once = False
             self.url = "https://github.com/owner/repo/releases/download/prod-new/manifest.json"
             self.headers = {'Content-Length': str(len(payload) if declared is None else declared)}
 
@@ -204,6 +205,9 @@ class ApiTests(unittest.TestCase):
             return False
 
         def read(self, _limit):
+            if self.read_once:
+                return b""
+            self.read_once = True
             return self.payload
 
     def test_incomplete_release_api_reply_is_retried(self):
