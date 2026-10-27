@@ -301,6 +301,7 @@ class Updater:
             size = 0
             try:
                 temporary.unlink(missing_ok=True)
+                temporary.parent.mkdir(parents=True, exist_ok=True)
                 with urllib.request.urlopen(request, timeout=120) as response, temporary.open('wb') as dest:
                     require(urllib.parse.urlsplit(response.url).hostname in {
                         'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'}, 'Untrusted asset redirect')
