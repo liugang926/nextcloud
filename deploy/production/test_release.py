@@ -226,16 +226,18 @@ class ApiTests(unittest.TestCase):
 
     def test_small_asset_transport_failure_is_retried(self):
         with tempfile.TemporaryDirectory() as folder:
-            updater = release.Updater(folder, Path(folder) / "data", "owner/repo")
-            target = Path(folder) / "manifest.json"
-        asset = {"state": "uploaded", "size": 2,
-                 "browser_download_url": "https://github.com/owner/repo/releases/download/prod-new/manifest.json"}
-        with mock.patch.object(updater, "validate_asset", return_value=asset), \
-             mock.patch.object(release.urllib.request, "urlopen",
-                               side_effect=[ConnectionResetError(), self.Response(b"[]")]), \
-             mock.patch.object(release.time, "sleep"):
-            updater.download({}, "prod-new", "manifest.json", target)
-        self.assertEqual(target.read_bytes(), b"[]")
+            updater = release.Updater(folder, Path(folder) / 'data', 'owner/repo')
+            target = Path(folder) / 'manifest.json'
+            asset = {'state': 'uploaded', 'size': 2,
+                     'browser_download_url': 'https://github.com/owner/repo/releases/download/prod-new/manifest.json'}
+            with mock.patch.object(updater, 'validate_asset', return_value=asset), \
+                 mock.patch.object(release.urllib.request, 'urlopen',
+                                   side_effect=[ConnectionResetError(), self.Response(b'[]')]), \
+                 mock.patch.object(release.time, 'sleep'):
+                updater.download({}, 'prod-new', 'manifest.json', target)
+            self.assertEqual(target.read_bytes(), b'[]')
+
+
 
 
 class JournalTests(unittest.TestCase):
