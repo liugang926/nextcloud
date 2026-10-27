@@ -193,6 +193,7 @@ class ApiTests(unittest.TestCase):
     class Response:
         def __init__(self, payload, declared=None):
             self.payload = payload
+            self.url = "https://github.com/owner/repo/releases/download/prod-new/manifest.json"
             self.headers = {'Content-Length': str(len(payload) if declared is None else declared)}
 
         def __enter__(self):
@@ -221,6 +222,20 @@ class ApiTests(unittest.TestCase):
                                             self.Response(b'[]')]), \
              mock.patch.object(release.time, 'sleep'):
             self.assertEqual(updater.api('releases?per_page=30'), [])
+
+
+    def test_small_asset_transport_failure_is_retried(self):
+        with tempfile.TemporaryDirectory() as folder:
+            updater = release.Updater(folder, Path(folder) / "data", "owner/repo")
+            target = Path(folder) / "manifest.json"
+        asset = {"state": "uploaded", "size": 2,
+                 "browser_download_url": "https://github.com/owner/repo/releases/download/prod-new/manifest.json"}
+        with mock.patch.object(updater, "validate_asset", return_value=asset), \
+             mock.patch.object(release.urllib.request, "urlopen",
+                               side_effect=[ConnectionResetError(), self.Response(b"[]")]), \
+             mock.patch.object(release.time, "sleep"):
+            updater.download({}, "prod-new", "manifest.json", target)
+        self.assertEqual(target.read_bytes(), b"[]")
 
 
 class JournalTests(unittest.TestCase):
