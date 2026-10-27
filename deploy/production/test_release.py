@@ -230,6 +230,7 @@ class ApiTests(unittest.TestCase):
             target = Path(folder) / 'manifest.json'
             asset = {'state': 'uploaded', 'size': 2,
                      'browser_download_url': 'https://github.com/owner/repo/releases/download/prod-new/manifest.json'}
+            target.parent.mkdir(parents=True, exist_ok=True)
             with mock.patch.object(updater, 'validate_asset', return_value=asset), \
                  mock.patch.object(release.urllib.request, 'urlopen',
                                    side_effect=[ConnectionResetError(), self.Response(b'[]')]), \
