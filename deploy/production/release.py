@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -216,11 +218,23 @@ class Updater:
                                          headers={'Accept': 'application/vnd.github+json',
                                                   'X-GitHub-Api-Version': '2022-11-28',
                                                   'User-Agent': 'nextcloud-production-release/1'})
-        with urllib.request.urlopen(request, timeout=60) as response:
-            require(int(response.headers.get('Content-Length', '0')) < 8 * 1024 * 1024, 'API reply too large')
-            payload = response.read(8 * 1024 * 1024 + 1)
-        require(len(payload) <= 8 * 1024 * 1024, 'API reply too large')
-        return json.loads(payload)
+        limit = 8 * 1024 * 1024
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    raw_length = response.headers.get('Content-Length')
+                    declared = int(raw_length) if raw_length is not None else None
+                    require(declared is None or declared <= limit, 'API reply too large')
+                    payload = response.read(limit + 1)
+                if declared is not None and len(payload) != declared:
+                    raise ConnectionError('GitHub API reply was truncated')
+                require(len(payload) <= limit, 'API reply too large')
+                return json.loads(payload)
+            except (http.client.IncompleteRead, urllib.error.URLError,
+                    TimeoutError, ConnectionError):
+                if attempt == 2:
+                    raise ReleaseError('GitHub API read failed after 3 attempts') from None
+                time.sleep(attempt + 1)
 
     def tag_commit(self, tag):
         obj = self.api('git/ref/tags/' + urllib.parse.quote(tag, safe=''))['object']
@@ -735,7 +749,7 @@ ROLLBACK;
 
     def check(self):
         self.interrupted()
-        release = select_release(self.api('releases?per_page=100'), self.state)
+        release = select_release(self.api('releases?per_page=30'), self.state)
         if not release:
             return
         try:
