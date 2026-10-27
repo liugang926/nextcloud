@@ -296,18 +296,34 @@ class Updater:
             require(target.stat().st_size == asset['size'], 'Incomplete cached asset copy')
             return
         request = urllib.request.Request(asset['browser_download_url'], headers={'User-Agent': 'nextcloud-production-release/1'})
-        with urllib.request.urlopen(request, timeout=120) as response, target.open('wb') as dest:
-            require(urllib.parse.urlsplit(response.url).hostname in {
-                'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'}, 'Untrusted asset redirect')
+        for attempt in range(3):
+            temporary = target.with_name(target.name + '.download')
             size = 0
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                require(size <= max_bytes, 'Asset exceeds download limit')
-                dest.write(chunk)
-        require(size == asset['size'], 'Incomplete asset download')
+            try:
+                temporary.unlink(missing_ok=True)
+                temporary.parent.mkdir(parents=True, exist_ok=True)
+                with urllib.request.urlopen(request, timeout=120) as response, temporary.open('wb') as dest:
+                    require(urllib.parse.urlsplit(response.url).hostname in {
+                        'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'}, 'Untrusted asset redirect')
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        require(size <= max_bytes, 'Asset exceeds download limit')
+                        dest.write(chunk)
+                    dest.flush()
+                    os.fsync(dest.fileno())
+                if size != asset['size']:
+                    raise ConnectionError('Incomplete asset download')
+                os.replace(temporary, target)
+                break
+            except (http.client.IncompleteRead, urllib.error.URLError,
+                    TimeoutError, ConnectionError):
+                temporary.unlink(missing_ok=True)
+                if attempt == 2:
+                    raise
+                time.sleep(attempt + 1)
         if asset.get('digest'):
             require(asset['digest'] == 'sha256:' + digest(target), 'GitHub asset digest mismatch')
 
