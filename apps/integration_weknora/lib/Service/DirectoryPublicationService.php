@@ -250,10 +250,14 @@ final class DirectoryPublicationService {
             }
 
             if ($old !== null && $this->hasRuleIntents($rule['id'])) {
-                foreach ($old['targets'] ?? [] as $oldTarget) {
-                    $preserved = false;
-                    foreach ($rule['targets'] ?? [] as $target) { if ($target === $oldTarget) { $preserved = true; break; } }
-                    if (!$preserved) { throw new \DomainException('Existing target scopes require a durable migration'); }
+                $scope = static fn (array $target): string => (string)($target['tenant_id'] ?? '') . "\0" .
+                    (string)($target['processing_template_id'] ?? '');
+                $oldScopes = array_map($scope, $old['targets'] ?? []);
+                $newScopes = array_map($scope, $rule['targets'] ?? []);
+                sort($oldScopes, SORT_STRING);
+                sort($newScopes, SORT_STRING);
+                if ($oldScopes !== $newScopes) {
+                    throw new \DomainException('Existing target scopes require a durable migration');
                 }
             }
             $revision = $expectedRevision + 1;
@@ -276,7 +280,13 @@ final class DirectoryPublicationService {
     public function show(string $uid, int $folderId): array {
         $folder = $this->folder($uid, $folderId);
         foreach ($this->bindings->listBindings() as $binding) {
-            $root = $this->folder($binding['owner_uid'], $binding['root_file_id']);
+            try {
+                $root = $this->folder($binding['owner_uid'], $binding['root_file_id']);
+            } catch (\OutOfBoundsException $ignored) {
+                // A stale test or removed source belongs to its own binding.
+                // It must not make every unrelated directory unreadable.
+                continue;
+            }
             if (!self::contains($root, $folder)) { continue; }
             if (!$this->statuses->summaryAuthority($uid, $binding['id'], false)) { continue; }
             $intent = $this->find('binding_id', $binding['id']);
@@ -1428,7 +1438,11 @@ final class DirectoryPublicationService {
     private function assertNoOverlap(Folder $root, ?string $bindingId = null, ?string $operationId = null): void {
         foreach ($this->bindings->listBindings() as $binding) {
             if ($binding['id'] === $bindingId) { continue; }
-            $other = $this->folder($binding['owner_uid'], $binding['root_file_id']);
+            try {
+                $other = $this->folder($binding['owner_uid'], $binding['root_file_id']);
+            } catch (\OutOfBoundsException $ignored) {
+                continue;
+            }
             if (self::contains($root, $other) || self::contains($other, $root)) { throw new \DomainException('Publication roots overlap'); }
         }
         $q = $this->db->getQueryBuilder();
@@ -1437,7 +1451,11 @@ final class DirectoryPublicationService {
         try { $rows = $r->fetchAllAssociative(); } finally { $r->closeCursor(); }
         foreach ($rows as $row) {
             if ($row['operation_id'] === $operationId || (int)$row['root_file_id'] === 0) { continue; }
-            $other = $this->folder($row['owner_uid'], (int)$row['root_file_id']);
+            try {
+                $other = $this->folder($row['owner_uid'], (int)$row['root_file_id']);
+            } catch (\OutOfBoundsException $ignored) {
+                continue;
+            }
             if (self::contains($root, $other) || self::contains($other, $root)) { throw new \DomainException('Publication intents overlap'); }
         }
     }

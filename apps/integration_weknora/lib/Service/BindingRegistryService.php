@@ -406,7 +406,11 @@ final class BindingRegistryService {
                     $found = true;
                     continue;
                 }
-                $otherRoot = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+                try {
+                    $otherRoot = $this->resolveRoot($binding['owner_uid'], $binding['root_file_id']);
+                } catch (\InvalidArgumentException $ignored) {
+                    continue;
+                }
                 // Only the frozen local/Team Folder adapters may establish
                 // physical ancestry across owner views. Shared/external
                 // wrappers fail closed before comparison.
