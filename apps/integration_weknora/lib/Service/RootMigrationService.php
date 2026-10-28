@@ -88,6 +88,7 @@ final class RootMigrationService {
 
  public function retryUnchanged(string $binding,array $actor=[]): void {
   $row=$this->pending($binding);
+  if($row!==null&&$row['state']==='prepared'&&$this->supersedeStalePrepared($row)){$row=null;}
   if($row===null){
    $pair=$this->pair($binding);$intent=$this->intent($binding);
    if($pair===null||$intent===null||$pair['state']!=='active'){return;}
@@ -100,6 +101,55 @@ final class RootMigrationService {
   $rule=$this->sameRule($row,$this->root($row['owner_uid'],(int)$row['root_file_id']));
   $this->remote->request($rule,'POST','/operations/'.$row['pair_operation_id'].'/root-migrations',
    ['operation_id'=>$row['operation_id']]+($actor===[]?[]:['actor_directory_id'=>$actor['directory_id'],'actor_object_guid'=>$actor['object_guid']]));
+ }
+ private function supersedeStalePrepared(array $row): bool {
+  if(($row['state']??null)!=='prepared'){return false;}
+  $binding=$this->binding((string)$row['binding_id']);$pair=$this->pair((string)$row['binding_id']);$intent=$this->intent((string)$row['binding_id']);
+  if($binding===null||$pair===null||$intent===null){return false;}
+  $root=$this->root((string)$row['owner_uid'],(int)$row['root_file_id']);
+  $rootHash=SourcePairingRegistryService::rootHash($root);
+  if(!self::exactStalePrepared($row,$binding,$pair,$intent,$rootHash)){return false;}
+  $this->db->beginTransaction();
+  try {
+   $this->lock();$current=$this->one((string)$row['operation_id']);
+   $binding=$this->binding((string)$row['binding_id']);$pair=$this->pair((string)$row['binding_id']);$intent=$this->intent((string)$row['binding_id']);
+   if($current===null||$binding===null||$pair===null||$intent===null){throw new \DomainException('Stale root migration disappeared');}
+   $root=$this->root((string)$current['owner_uid'],(int)$current['root_file_id']);
+   $rootHash=SourcePairingRegistryService::rootHash($root);
+   if(!self::exactStalePrepared($current,$binding,$pair,$intent,$rootHash)){throw new \DomainException('Stale root migration scope changed');}
+   $this->assertPhysical($current,$root);
+   $this->update((string)$current['operation_id'],['state'=>'superseded','updated_at'=>time()]);
+   $this->db->commit();return true;
+  }catch(\Throwable $e){if($this->db->inTransaction()){$this->db->rollBack();}throw $e;}
+ }
+ private static function exactStalePrepared(array $row,array $binding,array $pair,array $intent,string $rootHash): bool {
+  if(($row['state']??null)!=='prepared'||($binding['publication_state']??null)!=='active'||
+   ($pair['state']??null)!=='active'||($intent['state']??null)!=='blocked'||
+   ($intent['error_code']??null)!=='publication_stopped'||
+   (int)($binding['publication_epoch']??0)<=(int)($row['prepared_epoch']??0)||
+   (string)($row['new_root_hash']??'')!==''){return false;}
+  foreach([['binding_id','binding_id'],['pair_operation_id','operation_id'],['instance_id','instance_id'],
+   ['tenant_id','tenant_id'],['knowledge_base_id','knowledge_base_id'],['data_source_id','data_source_id']] as [$moveKey,$pairKey]){
+   if((string)($row[$moveKey]??'')!==(string)($pair[$pairKey]??'')){return false;}
+  }
+  if((string)($row['binding_id']??'')!==(string)($intent['binding_id']??'')||
+   (string)($row['pair_operation_id']??'')!==(string)($intent['operation_id']??'')||
+   (string)($row['physical_root_key']??'')!==(string)($intent['root_key']??'')||
+   (int)($row['root_file_id']??0)!==(int)($intent['root_file_id']??0)||
+   (int)($row['root_file_id']??0)!==(int)($binding['root_file_id']??0)||
+   (string)($row['rule_id']??'')!==(string)($intent['rule_id']??'')||
+   (string)($row['owner_uid']??'')!==(string)($intent['owner_uid']??'')||
+   !hash_equals((string)($pair['source_hash']??''),MachineKeyRegistryService::sourceHash($binding))||
+   !hash_equals((string)($row['old_root_hash']??''),(string)($pair['root_hash']??''))||
+   !hash_equals((string)($pair['root_hash']??''),$rootHash)){return false;}
+  try{$request=json_decode((string)($intent['request_json']??''),true,16,JSON_THROW_ON_ERROR);}catch(\Throwable $e){return false;}
+  return is_array($request)&&isset($request['operation_id'],$request['tenant_id'],$request['instance_id'],$request['binding_id'],
+   $request['knowledge_base_id'])&&
+   (string)$request['operation_id']===(string)$row['pair_operation_id']&&
+   (string)$request['tenant_id']===(string)$row['tenant_id']&&
+   (string)$request['instance_id']===(string)$row['instance_id']&&
+   (string)$request['binding_id']===(string)$row['binding_id']&&
+   (string)$request['knowledge_base_id']===(string)$row['knowledge_base_id'];
  }
  public function proof(string $binding,string $operation): array {
   $row=$this->one($operation);
@@ -158,6 +208,7 @@ final class RootMigrationService {
  }
  private function root(string $uid,int $id): Folder {foreach($this->files->getUserFolder($uid)->getById($id) as $node){if($node instanceof Folder&&$node->getId()===$id&&$node->isReadable()){return $node;}}throw new \DomainException('Root is unavailable');}
  private function one(string $op): ?array {return $this->lookup('weknora_root_move','operation_id',$op);}
+ private function binding(string $id): ?array {foreach($this->bindings->listBindings() as $binding){if($binding['id']===$id){return $binding;}}return null;}
  private function pair(string $binding): ?array {return $this->lookup('weknora_src_pair','binding_id',$binding);}
  private function intent(string $binding): ?array {return $this->lookup('weknora_dir_intent','binding_id',$binding);}
  private function lookup(string $table,string $field,string $value): ?array {$q=$this->db->getQueryBuilder();$r=$q->select('*')->from($table)->where($q->expr()->eq($field,$q->createNamedParameter($value)))->setMaxResults(1)->executeQuery();try{$row=$r->fetchAssociative();return $row===false?null:$row;}finally{$r->closeCursor();}}
