@@ -139,6 +139,8 @@ final class RootMigrationService {
    (int)($row['root_file_id']??0)!==(int)($binding['root_file_id']??0)||
    (string)($row['rule_id']??'')!==(string)($intent['rule_id']??'')||
    (string)($row['owner_uid']??'')!==(string)($intent['owner_uid']??'')||
+   (string)($row['actor_uid']??'')===''||
+   (string)($row['actor_uid']??'')!==(string)($intent['actor_uid']??'')||
    !hash_equals((string)($pair['source_hash']??''),MachineKeyRegistryService::sourceHash($binding))||
    !hash_equals((string)($row['old_root_hash']??''),(string)($pair['root_hash']??''))||
    !hash_equals((string)($pair['root_hash']??''),$rootHash)){return false;}

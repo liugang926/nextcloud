@@ -33,6 +33,7 @@ $intent = [
     'root_file_id' => 2429,
     'rule_id' => 'rule',
     'owner_uid' => 'owner',
+    'actor_uid' => 'actor',
     'state' => 'blocked',
     'error_code' => 'publication_stopped',
     'request_json' => json_encode([
@@ -55,6 +56,7 @@ $move = [
     'root_file_id' => 2429,
     'rule_id' => 'rule',
     'owner_uid' => 'owner',
+    'actor_uid' => 'actor',
     'old_root_hash' => $hash,
     'new_root_hash' => '',
     'prepared_epoch' => 5,
@@ -76,6 +78,9 @@ foreach ([
     ['move', 'root_file_id', 2430],
     ['move', 'pair_operation_id', '22222222-2222-3333-4444-555555555555'],
     ['move', 'new_root_hash', $hash],
+    ['move', 'actor_uid', 'different-actor'],
+    ['intent', 'actor_uid', 'different-actor'],
+    ['move', 'actor_uid', ''],
 ] as [$target, $field, $value]) {
     $changedMove = $move;
     $changedBinding = $binding;
