@@ -189,8 +189,16 @@ final class RootMigrationService {
  private function assertPhysical(array $row,Folder $root): void {
   if($root->getId()!==(int)$row['root_file_id']||!hash_equals($row['physical_root_key'],DirectoryPublicationService::physicalKey($root))||!hash_equals($row['storage_identity'],self::storageIdentity($root))){throw new \DomainException('Root physical identity changed');}
   $this->sameRule($row,$root);$this->acl->assertTreeSupported($root);
-  foreach($this->bindings->listBindings() as $binding){if($binding['id']===$row['binding_id']){continue;}$other=$this->root($binding['owner_uid'],$binding['root_file_id']);
+  foreach($this->bindings->listBindings() as $binding){if($binding['id']===$row['binding_id']){continue;}
+   try{$other=$this->root($binding['owner_uid'],$binding['root_file_id']);}
+   catch(\DomainException $e){
+    if(self::quarantineUnavailableStoppedRoot($binding)){continue;}
+    throw $e;
+   }
    if(DirectoryPublicationService::contains($root,$other)||DirectoryPublicationService::contains($other,$root)){throw new \DomainException('Moved root overlaps another source');}}
+ }
+ private static function quarantineUnavailableStoppedRoot(array $binding): bool {
+  return ($binding['publication_state']??null)==='stopped';
  }
  private function assertStopped(array $row): void {
   foreach($this->bindings->listBindings() as $b){if($b['id']===$row['binding_id']&&$b['publication_state']==='stopped'&&$b['publication_epoch']===(int)$row['prepared_epoch']){return;}}
