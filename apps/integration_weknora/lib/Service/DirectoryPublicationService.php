@@ -1122,23 +1122,45 @@ final class DirectoryPublicationService {
                 // are fresh. Resume preserves the source and KB identities.
                 $this->bindings->setPublicationState($intent['binding_id'], 'active', $uid);
             }
-            $stage = 'pairing_prepare';
-            $prepared = $this->pairs->prepare($intent['binding_id'], $operationId, $rule['tenant_id'],
-                $operation['knowledge_base_id'], $uid,
-                is_string($rule['space_name'] ?? null) ? (string)$rule['space_name'] : '',
-                is_string($operation['name'] ?? null) ? (string)$operation['name'] : '');
-            $pair = $prepared['pairing'];
-            $stage = 'pairing_remote';
-            $received = $this->remote->request($rule, 'POST', '/operations/' . $operationId . '/pair', [
-                'base_url' => $rule['base_url'], 'binding_id' => $intent['binding_id'], 'operation_id' => $operationId,
-                'knowledge_base_id' => $operation['knowledge_base_id'],
-                'instance_id' => $request['instance_id'], 'publication_epoch' => $pair['publication_epoch'],
-                'key_id' => $pair['key_id'], 'token' => $this->pairs->handoffToken($intent['binding_id'], $operationId),
-                'actor_directory_id' => $identity['directory_id'], 'actor_object_guid' => $identity['object_guid']]);
-            $stage = 'pairing_ack';
-            $pairNow = $this->pairs->status($intent['binding_id']);
-            if ($pairNow === null || $pairNow['state'] !== 'active' || $pairNow['operation_id'] !== $operationId) {
-                throw new \RuntimeException('Signed pairing acknowledgement is pending');
+            $activeResume = $allowResume
+                ? $this->pairs->activeForResume($intent['binding_id'], $operationId)
+                : null;
+            if ($activeResume !== null) {
+                if (!self::activePairMatchesResume($activeResume, $request, $operationId,
+                    $intent['binding_id'], (string)$operation['knowledge_base_id'],
+                    (string)$request['instance_id'], MachineKeyRegistryService::sourceHash(
+                        $this->bindingById($intent['binding_id'])),
+                    SourcePairingRegistryService::rootHash($root))) {
+                    throw new \DomainException('Active source pairing changed');
+                }
+                $pair = $activeResume;
+                $event = $this->connections->row($intent['binding_id']);
+                if ($event === null) {
+                    throw new \RuntimeException('Independent event connection is pending');
+                }
+                $received = [
+                    'operation' => ['revision' => $operation['revision'] ?? null],
+                    'event_connection' => $event,
+                ];
+            } else {
+                $stage = 'pairing_prepare';
+                $prepared = $this->pairs->prepare($intent['binding_id'], $operationId, $rule['tenant_id'],
+                    $operation['knowledge_base_id'], $uid,
+                    is_string($rule['space_name'] ?? null) ? (string)$rule['space_name'] : '',
+                    is_string($operation['name'] ?? null) ? (string)$operation['name'] : '');
+                $pair = $prepared['pairing'];
+                $stage = 'pairing_remote';
+                $received = $this->remote->request($rule, 'POST', '/operations/' . $operationId . '/pair', [
+                    'base_url' => $rule['base_url'], 'binding_id' => $intent['binding_id'], 'operation_id' => $operationId,
+                    'knowledge_base_id' => $operation['knowledge_base_id'],
+                    'instance_id' => $request['instance_id'], 'publication_epoch' => $pair['publication_epoch'],
+                    'key_id' => $pair['key_id'], 'token' => $this->pairs->handoffToken($intent['binding_id'], $operationId),
+                    'actor_directory_id' => $identity['directory_id'], 'actor_object_guid' => $identity['object_guid']]);
+                $stage = 'pairing_ack';
+                $pairNow = $this->pairs->status($intent['binding_id']);
+                if ($pairNow === null || $pairNow['state'] !== 'active' || $pairNow['operation_id'] !== $operationId) {
+                    throw new \RuntimeException('Signed pairing acknowledgement is pending');
+                }
             }
             $stage = 'event_connection';
             $event = $received['event_connection'] ?? $received['operation']['event_connection'] ?? null;
@@ -1201,6 +1223,34 @@ final class DirectoryPublicationService {
                 'next_attempt_at' => $blocked ? 0
                     : time() + min(300, 15 * (1 << min(4, (int)$intent['attempt_count'])))]);
         }
+    }
+
+    /**
+     * A resumed active pair may only be reused for the same immutable source
+     * and target. Current binding/root hashes are checked by the resolver.
+     */
+    private static function activePairMatchesResume(array $pair, array $request, string $operationId,
+        string $bindingId, string $knowledgeBaseId, string $instanceId, string $sourceHash,
+        string $rootHash): bool {
+        return $pair['state'] === 'active' &&
+            $pair['operation_id'] === strtolower($operationId) &&
+            $pair['binding_id'] === $bindingId &&
+            $pair['instance_id'] === $instanceId &&
+            (string)$pair['tenant_id'] === (string)$request['tenant_id'] &&
+            $pair['knowledge_base_id'] === $knowledgeBaseId &&
+            SourcePairingRegistryService::validRemoteId($pair['data_source_id'] ?? null) &&
+            is_string($pair['key_id'] ?? null) && $pair['key_id'] !== '' &&
+            hash_equals($pair['source_hash'], $sourceHash) &&
+            hash_equals($pair['root_hash'], $rootHash);
+    }
+
+    private function bindingById(string $bindingId): array {
+        foreach ($this->bindings->listBindings() as $binding) {
+            if ($binding['id'] === $bindingId) {
+                return $binding;
+            }
+        }
+        throw new \OutOfBoundsException('Binding was not found');
     }
 
     /**

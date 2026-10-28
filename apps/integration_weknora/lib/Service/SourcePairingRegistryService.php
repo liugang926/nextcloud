@@ -300,6 +300,26 @@ final class SourcePairingRegistryService {
         return $row === null ? null : $this->publicRow($row);
     }
 
+    /**
+     * Return only an exact active pair whose binding, source and machine key
+     * are still current. This is a local reuse fence, not a remote pairing.
+     */
+    public function activeForResume(string $bindingId, string $operationId): ?array {
+        if (!self::validOperationId($operationId)) {
+            throw new \InvalidArgumentException('Invalid pairing operation');
+        }
+        $operationId = strtolower($operationId);
+        $row = $this->byOperation($operationId);
+        if ($row === null || $row['binding_id'] !== $bindingId || $row['state'] !== 'active') {
+            return null;
+        }
+        $pair = $this->requireCurrentActivePair($bindingId);
+        if ($pair['operation_id'] !== $operationId) {
+            throw new \DomainException('A different active source pairing is present');
+        }
+        return $pair;
+    }
+
     /** Server-only delivery; never exposed by session configuration endpoints. */
     public function handoffToken(string $bindingId, string $operationId): string {
         $pair = $this->byOperation($operationId);
