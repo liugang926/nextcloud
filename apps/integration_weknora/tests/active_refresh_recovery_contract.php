@@ -39,6 +39,16 @@ foreach ($transient as $reason => $expectedCode) {
     activeRefreshCheck(strlen($code) <= 64, "$reason produced an overlong retry code");
 }
 
+foreach ([408, 425] as $status) {
+    $error = new DirectoryOnboardingRequestException(
+        DirectoryOnboardingRequestException::HTTP_ERROR,
+        null,
+        $status
+    );
+    activeRefreshCheck($permanent->invoke(null, $error) === false,
+        "HTTP $status must remain retryable");
+}
+
 $unknown = $retryCode->invoke(null, new RuntimeException('unexpected runtime failure'));
 activeRefreshCheck($unknown === 'permission_refresh_retry', 'Unknown transient failure lacked a stable retry code');
 activeRefreshCheck($permanent->invoke(null, new RuntimeException('unexpected runtime failure')) === false,

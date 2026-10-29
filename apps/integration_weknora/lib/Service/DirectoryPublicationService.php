@@ -987,7 +987,10 @@ final class DirectoryPublicationService {
      */
     private static function activeRefreshFailureIsPermanent(\Throwable $error): bool {
         if ($error instanceof DirectoryOnboardingRequestException) {
-            return $error->reason() === DirectoryOnboardingRequestException::HTTP_ERROR;
+            if ($error->reason() !== DirectoryOnboardingRequestException::HTTP_ERROR) {
+                return false;
+            }
+            return !in_array($error->remoteStatus(), [408, 425], true);
         }
         return $error instanceof BindingPublicationStoppedException ||
             $error instanceof UnsupportedPublicationAclException ||
