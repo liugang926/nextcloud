@@ -948,10 +948,22 @@ final class DirectoryPublicationService {
                 'state' => 'active',
                 'error_code' => '',
                 'permission_version' => $permissionVersion,
+                'attempt_count' => 0,
                 'next_attempt_at' => time() + 240,
                 'lease_until' => 0,
             ]);
         } catch (\Throwable $e) {
+            if (!self::activeRefreshFailureIsPermanent($e)) {
+                $attemptCount = (int)$intent['attempt_count'] + 1;
+                $this->update($operationId, [
+                    'state' => 'active',
+                    'error_code' => self::activeRefreshRetryCode($e),
+                    'attempt_count' => $attemptCount,
+                    'next_attempt_at' => time() + self::activeRefreshRetryDelay($attemptCount),
+                    'lease_until' => 0,
+                ]);
+                return;
+            }
             try {
                 $this->bindings->setPublicationState((string)$intent['binding_id'], 'stopped', 'directory-policy');
             } catch (\Throwable $ignored) {
@@ -965,6 +977,47 @@ final class DirectoryPublicationService {
                 'lease_until' => 0,
             ]);
         }
+    }
+
+    /**
+     * Only authoritative closure/config conflicts may stop an otherwise
+     * active publication. Transport, rate limits, server errors and temporarily
+     * unavailable credentials must remain retryable without reopening
+     * onboarding or changing source/target identity.
+     */
+    private static function activeRefreshFailureIsPermanent(\Throwable $error): bool {
+        if ($error instanceof DirectoryOnboardingRequestException) {
+            if ($error->reason() !== DirectoryOnboardingRequestException::HTTP_ERROR) {
+                return false;
+            }
+            return !in_array($error->remoteStatus(), [408, 425], true);
+        }
+        return $error instanceof BindingPublicationStoppedException ||
+            $error instanceof UnsupportedPublicationAclException ||
+            $error instanceof DirectoryOnboardingRemoteRejectedException ||
+            $error instanceof \DomainException ||
+            $error instanceof \JsonException ||
+            $error instanceof \OCP\Files\NotFoundException ||
+            $error instanceof \OCP\Files\NotPermittedException;
+    }
+
+    private static function activeRefreshRetryCode(\Throwable $error): string {
+        if (!$error instanceof DirectoryOnboardingRequestException) {
+            return 'permission_refresh_retry';
+        }
+        return match ($error->reason()) {
+            DirectoryOnboardingRequestException::TRANSPORT => 'permission_refresh_transport',
+            DirectoryOnboardingRequestException::INVALID_RESPONSE => 'permission_refresh_invalid_response',
+            DirectoryOnboardingRequestException::SERVER_ERROR => 'permission_refresh_server_error',
+            DirectoryOnboardingRequestException::RATE_LIMITED => 'permission_refresh_rate_limited',
+            DirectoryOnboardingRequestException::CREDENTIAL_UNAVAILABLE => 'permission_refresh_credential_unavailable',
+            default => 'permission_refresh_retry',
+        };
+    }
+
+    private static function activeRefreshRetryDelay(int $attemptCount): int {
+        $exponent = min(4, max(0, $attemptCount - 1));
+        return 15 * (1 << $exponent);
     }
 
     private function reserve(array $rule, string $uid, array $identity, array $choice, int $rootId,

@@ -282,6 +282,12 @@ class WeknoraFileSidebarTab extends HTMLElement {
                     event_connection_pending: '知识库已创建，但 WeKnora 事件连接尚未建立',
                     grant_snapshot_unavailable: 'Nextcloud 目录权限快照无法生成',
                     grant_sync_unverified: 'WeKnora 目录权限同步尚未验证',
+                    permission_refresh_transport: '暂时无法连接 WeKnora，目录权限同步将自动重试',
+                    permission_refresh_invalid_response: 'WeKnora 返回了无法验证的目录权限响应，将自动重试',
+                    permission_refresh_server_error: 'WeKnora 目录权限服务暂时不可用，将自动重试',
+                    permission_refresh_rate_limited: 'WeKnora 目录权限服务请求过多，将自动重试',
+                    permission_refresh_credential_unavailable: 'Nextcloud 保存的 WeKnora 连接凭据暂时不可用，将自动重试',
+                    permission_refresh_retry: '目录权限同步暂时失败，将自动重试',
                     reconcile_pending: '完整目录清单尚未加入同步队列',
                     connection_unverified: '连接结果尚未验证，原文件已保留',
                 }[data.operation.error_code]
